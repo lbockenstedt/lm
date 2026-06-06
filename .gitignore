@@ -1,0 +1,12 @@
+# Git ignore for Lab Manager
+.DS_Store
+hub_logs.txt
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.vscode/
+node_modules/
+dist/
+build/
+*.log

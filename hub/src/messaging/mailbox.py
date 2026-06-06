@@ -1,0 +1,113 @@
+import asyncio
+import time
+import logging
+from typing import Dict, List, Optional
+from .protocol import Message, Acknowledgement, MessagePriority
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("Mailbox")
+
+class Mailbox:
+    def __init__(self):
+        # Messages sent by the Hub that are awaiting an Ack
+        # { message_id: (message, first_sent_time, retry_count) }
+        self.pending_ack: Dict[str, tuple[Message, float, int]] = {}
+
+        # Mailboxes for spokes (messages queued while spoke is offline)
+        # { spoke_id: [Message, ...] }
+        self.spoke_queues: Dict[str, List[Message]] = {}
+
+        self.retry_intervals = [5, 15, 60, 300, 900]  # Exponential backoff intervals in seconds
+
+    async def push(self, message: Message, send_func):
+        """
+        Pushes a message via the provided send_func and adds it to the pending queue.
+        """
+        logger.info(f"Pushing message {message.header.message_id} to {message.header.destination_id}")
+
+        # Try to send immediately
+        try:
+            await send_func(message)
+        except Exception as e:
+            logger.warning(f"Immediate push failed for {message.header.message_id}: {e}")
+            # If it fails here, it's already in the queue for the retry loop to handle if we add it
+
+        self.pending_ack[message.header.message_id] = (message, time.time(), 0)
+
+    async def acknowledge(self, ack: Acknowledgement):
+        """
+        Processes an acknowledgement and removes the corresponding message from the pending queue.
+        """
+        if ack.correlation_id in self.pending_ack:
+            logger.info(f"Message {ack.correlation_id} acknowledged with status: {ack.status}")
+            del self.pending_ack[ack.correlation_id]
+        else:
+            logger.warning(f"Received acknowledgement for unknown message ID: {ack.correlation_id}")
+
+    def queue_for_spoke(self, spoke_id: str, message: Message):
+        """
+        Queues a message for a spoke that is currently offline.
+        """
+        if spoke_id not in self.spoke_queues:
+            self.spoke_queues[spoke_id] = []
+
+        # Filter out expired messages before adding
+        now = time.time()
+        self.spoke_queues[spoke_id] = [
+            m for m in self.spoke_queues[spoke_id]
+            if (now - m.header.timestamp) < m.header.ttl
+        ]
+
+        self.spoke_queues[spoke_id].append(message)
+        logger.info(f"Queued message {message.header.message_id} for offline spoke {spoke_id}")
+
+    async def flush_mailbox(self, spoke_id: str, send_func):
+        """
+        Sends all queued messages for a newly connected spoke.
+        """
+        if spoke_id in self.spoke_queues and self.spoke_queues[spoke_id]:
+            messages = self.spoke_queues[spoke_id][:]
+            logger.info(f"Flushing mailbox for spoke {spoke_id} ({len(messages)} messages)")
+
+            for msg in messages:
+                await self.push(msg, send_func)
+
+            self.spoke_queues[spoke_id] = []
+
+    async def retry_loop(self, send_func_map):
+        """
+        Periodically checks for messages that haven't been acknowledged and retries them.
+        send_func_map: { spoke_id: send_func }
+        """
+        while True:
+            now = time.time()
+            to_retry = []
+
+            for msg_id, (msg, last_sent, retries) in list(self.pending_ack.items()):
+                if retries >= len(self.retry_intervals):
+                    logger.error(f"Message {msg_id} failed after max retries. Giving up.")
+                    del self.pending_ack[msg_id]
+                    continue
+
+                wait_time = self.retry_intervals[retries]
+                if now - last_sent >= wait_time:
+                    to_retry.append((msg_id, msg, retries))
+
+            for msg_id, msg, retries in to_retry:
+                spoke_id = msg.header.destination_id
+                send_func = send_func_map.get(spoke_id)
+
+                if send_func:
+                    logger.info(f"Retrying message {msg_id} (Attempt {retries + 1})")
+                    try:
+                        await send_func(msg)
+                        self.pending_ack[msg_id] = (msg, now, retries + 1)
+                    except Exception as e:
+                        logger.warning(f"Retry failed for {msg_id}: {e}")
+                else:
+                    # Spoke is offline, move to offline queue if not already there
+                    logger.info(f"Spoke {spoke_id} offline. Moving message {msg_id} to offline queue.")
+                    self.queue_for_spoke(spoke_id, msg)
+                    del self.pending_ack[msg_id]
+
+            await asyncio.sleep(1)
