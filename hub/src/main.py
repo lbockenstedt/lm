@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from typing import Dict
 import websockets
 
@@ -15,6 +16,23 @@ from api import run_api_server
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Hub")
+
+class TokenBucket:
+    def __init__(self, capacity: float, fill_rate: float):
+        self.capacity = capacity
+        self.fill_rate = fill_rate
+        self.tokens = capacity
+        self.last_update = time.time()
+
+    def consume(self, amount: float = 1.0) -> bool:
+        now = time.time()
+        delta = now - self.last_update
+        self.tokens = min(self.capacity, self.tokens + delta * self.fill_rate)
+        self.last_update = now
+        if self.tokens >= amount:
+            self.tokens -= amount
+            return True
+        return False
 
 class LabManagerHub:
     def __init__(self, host="0.0.0.0", port=8765):
@@ -30,6 +48,8 @@ class LabManagerHub:
 
         # { spoke_id: websocket_connection }
         self.active_connections: Dict[str, websockets.WebSocketServerProtocol] = {}
+        # { spoke_id: TokenBucket } for rate limiting non-heartbeat messages
+        self.rate_limiters: Dict[str, TokenBucket] = {}
 
     async def send_to_spoke(self, message: Message):
         """
@@ -80,6 +100,8 @@ class LabManagerHub:
 
             logger.info(f"Spoke {spoke_id} authenticated successfully.")
             self.active_connections[spoke_id] = websocket
+            # Initialize rate limiter (e.g., 5 messages/sec burst of 10)
+            self.rate_limiters[spoke_id] = TokenBucket(capacity=10, fill_rate=5)
 
             # 2. Flush Mailbox
             await self.mailbox.flush_mailbox(spoke_id, self.send_to_spoke)
@@ -111,6 +133,12 @@ class LabManagerHub:
                 payload = msg_data.get("payload", {})
                 if payload.get("type") == "HEARTBEAT":
                     self.heartbeat.update_heartbeat(spoke_id)
+                    continue
+
+                # Rate Limiting for non-heartbeat messages
+                limiter = self.rate_limiters.get(spoke_id)
+                if limiter and not limiter.consume():
+                    logger.warning(f"Rate limit exceeded for spoke {spoke_id}. Dropping message.")
                     continue
 
                 # Handle other messages

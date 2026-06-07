@@ -1,5 +1,6 @@
 import React from 'react';
 import { useTheme } from '../styles/ThemeContext';
+import Tooltip from '../components/Tooltip';
 
 const Widget = ({ title, content }) => (
   <div style={{
@@ -9,7 +10,11 @@ const Widget = ({ title, content }) => (
     boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
     border: '1px solid #eee'
   }}>
-    <h3 style={{ margin: '0 0 15px 0', fontSize: '1rem' }}>{title}</h3>
+    <h3 style={{ margin: '0 0 15px 0', fontSize: '1rem' }}>
+      <Tooltip text={`Widget monitoring ${title}`}>
+        {title}
+      </Tooltip>
+    </h3>
     <div>{content}</div>
   </div>
 );

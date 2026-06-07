@@ -4,7 +4,7 @@ const ThemeContext = createContext();
 
 export const ThemeProvider = ({ children }) => {
   const [theme, setTheme] = useState({
-    primaryColor: '#004a99', // HPE Blue
+    primaryColor: '#01A982', // HPE Green
     secondaryColor: '#ffffff',
     logoUrl: '/logo-default.png',
     fontSize: '14px',
