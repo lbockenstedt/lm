@@ -1,100 +1,84 @@
 # 🌐 Lab Manager (LM)
 
-Lab Manager is a centralized orchestrator for remote node management, designed as a hub-and-spoke architecture. It allows for the centralized control of various "Spokes"—specialized plugins that manage different infrastructure components.
+Lab Manager is a centralized orchestrator for remote node management, designed as a hub-and-spoke architecture. It provides a "single pane of glass" interface for managing multitenant infrastructure across various specialized spokes.
 
-## 🚀 Quick Start
+## 🚀 Deployment Overview
 
-### Single Line Installation (Native/LXC)
-Launch the entire stack (Hub, WebUI, CS, PXMX, and OPNsense) as native processes:
+The system is optimized for **Proxmox LXC containers** and **Azure VMs** using a lean, native Python installation. It removes the need for Docker nesting and minimizes system overhead.
 
+### ⚡ Quick Start (Full Stack)
+To deploy the Hub, WebUI, and all default spokes on a single server:
 ```bash
 curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_all.sh | bash
 ```
 
-#### Modular Installation (Native)
-Prefer to install only specific components? These installers can be run on separate LXC containers:
+### 🧩 Modular Installation (Separate Containers)
+For high-availability or distributed deployments, install components on separate LXC instances:
 
-**Core Hub & UI** (Runs the API and serves the Dashboard)
-```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_hub.sh | bash
-```
-
-**Client Simulator**
-```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/cs/main/install_cs.sh | bash
-```
-
-**Proxmox Manager**
-```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/install_pxmx.sh | bash
-```
-
-**OPNsense Manager**
-```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/opnsense/main/install_opnsense.sh | bash
-```
-
-**Access Points:**
-- **Web Dashboard**: `http://localhost:5173`
-- **Hub WebSocket**: `ws://localhost:8765`
-- **Hub API**: `http://localhost:8000`
+| Component | Installation Command | Role |
+| :--- | :--- | :--- |
+| **Hub & UI** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_hub.sh \| bash` | Central API, State, & Dashboard |
+| **Client Sim** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/cs/main/install_cs.sh \| bash` | Traffic & DNS Simulation |
+| **Proxmox** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/install_pxmx.sh \| bash` | VM Lifecycle Management |
+| **OPNsense** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/opnsense/main/install_opnsense.sh \| bash` | Firewall & Interface Mgmt |
 
 ---
 
-## 📦 Architecture & Modules
+## 🖥️ The WebUI (Static Deployment)
 
-Lab Manager is composed of several independent modules, each runnable as a container or an LXC guest.
+To maintain a zero-dependency footprint on the server, the WebUI is served as a **static build**. 
 
-### Core Components
-- **Hub (`/hub`)**: The central logic queue and messaging center. Handles authentication (LDAP), message signing (HMAC), and global state management.
-- **WebUI (`/ui`)**: A React-based dashboard for real-time monitoring and command issuance. Features an intuitive UI with native tooltips for deep-dive metadata.
+**1. Build the UI (on a Dev machine with Node.js):**
+```bash
+cd lm/ui
+npm install
+npm run build
+```
 
-### Plugin Modules (Spokes)
-- **Client Simulator (`/cs`)**: Simulates network behaviors, DNS/DHCP failures, and traffic generation on client VMs.
-- **Proxmox Manager (`/pxmx`)**: Direct integration with Proxmox VE for VM lifecycle management (cloning, snapshots, start/stop).
-- **OPNsense Manager (`/opnsense`)**: Management of firewall rules and interface monitoring.
+**2. Deploy the Build:**
+Upload the resulting `dist` folder to the Hub server at: `/root/lab-manager/lm/ui/dist`
+
+**3. Access the Dashboard:**
+The Hub uses Nginx to serve the UI on port 80.
+- **Dashboard**: `http://<HUB_IP>/`
+- **REST API**: `http://<HUB_IP>:8000`
 
 ---
 
-## 🛠️ Deployment Options
+## 🛠️ Management & Maintenance
 
-### Native/LXC Installation (Recommended for LXC)
-The project is designed to run natively on Linux. The installation scripts automate the creation of Python virtual environments and Node.js setup.
-
-**To start the system:**
-Navigate to the `lm` directory and run:
+### Starting the System
+Navigate to the `lm` directory and launch the orchestrator:
 ```bash
+cd /root/lab-manager/lm
 ./start_all.sh
 ```
-This launches all components in the background.
 
-**Managing the System:**
-- **Monitoring**: Each module writes to a local log file (e.g., `hub.log`, `cs.log`). View them with:
-  ```bash
-  tail -f hub.log
-  ```
-- **Stopping Services**: To shut down the entire stack:
-  ```bash
-  pkill -f python && pkill -f node
-  ```
-- **Configuration**: To change Spoke secrets or Hub settings, edit the `keys.json` file in the `lm` directory and restart the services.
-
-### Docker Compose
-If you have a Docker environment with nesting enabled, you can still use Docker:
+### Health & Regression Audits
+Before pushing changes to GitHub, run the comprehensive static audit to ensure no broken imports or syntax errors:
 ```bash
-docker compose up -d
+/root/lab-manager/audit/audit_all.sh
+```
+This tool verifies:
+- ✅ **Import Integrity**: Checks for legacy `lm.spoke.src` paths.
+- ✅ **Dependency Alignment**: Ensures `requirements.txt` matches the code.
+- ✅ **Python Syntax**: Compiles all files to detect runtime crashes.
+
+### Stopping Services
+```bash
+pkill -f python && pkill -f node
 ```
 
 ---
 
-## 🛡️ Stability & Reliability
-To ensure enterprise-grade stability, Lab Manager implements:
-- **Exponential Backoff**: Spokes gracefully reconnect to avoid thundering herd issues.
-- **Rate Limiting**: The Hub uses a token bucket algorithm to prevent telemetry floods from malfunctioning spokes.
-- **Message Integrity**: Every command and status update is HMAC signed for security and authenticity.
+## 🛡️ Architecture Highlights
+- **LXC-Native**: No Docker nesting required; runs directly on the OS.
+- **Hub-and-Spoke**: Hub manages state; Spokes execute hardware-specific logic.
+- **HMAC Security**: Every message between Hub and Spoke is signed for authenticity.
+- **Multitenancy**: Native support for tenant-scoped resource mapping and quotas.
 
 ## 📖 Developer Guide
 To build a new plugin module:
 1. Inherit from `BaseSpoke` in `lm/hub/src/base_spoke.py`.
 2. Implement the `handle_command` and `get_status` methods.
-3. Use `ControlPlane` to enable both Standalone (API) and Connected (WebSocket) modes.
+3. Use `ControlPlane` to enable both Standalone and Connected modes.
