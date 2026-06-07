@@ -1,16 +1,17 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Starting Unified Lab Manager Installation..."
+echo "🚀 Starting Native Lab Manager Installation (Non-Docker)..."
 
-# 1. Check for Docker
-if ! command -v docker &> /dev/null; then
-    echo "🐳 Docker not found. Attempting to install via convenience script..."
-    curl -fsSL https://get.docker.com | sh
-    sudo usermod -aG docker $USER
-    echo "✅ Docker installed. Please log out and back in, or run 'newgrp docker' before continuing."
-    exit 0
+# 1. Install System Dependencies
+echo "📦 Installing system dependencies (Python, Node.js, venv)..."
+if [ "$(id -u)" -ne 0 ]; then
+    echo "⚠️  This step requires root privileges. Please run this script as root or with sudo."
+    exit 1
 fi
+
+apt-get update
+apt-get install -y python3-pip python3-venv nodejs npm git curl
 
 # 2. Setup Project Directory
 INSTALL_DIR="lab-manager"
@@ -25,13 +26,42 @@ git clone https://github.com/lbockenstedt/cs.git
 git clone https://github.com/lbockenstedt/pxmx.git
 git clone https://github.com/lbockenstedt/opnsense.git
 
-# 4. Build and Launch
-echo "📦 Building and launching containers..."
+# 4. Setup Virtual Environments & Dependencies
+echo "🛠️ Setting up Python environments and Node.js..."
+
+# Hub
+echo "Setting up Hub..."
 cd lm
-docker compose up --build -d
+python3 -m venv venv
+./venv/bin/pip install -r hub/requirements.txt
+# UI
+echo "Setting up UI..."
+cd ui
+npm install
+cd ..
+
+# CS
+echo "Setting up Client Simulator..."
+cd ../cs
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+cd ../lm
+
+# PXMX
+echo "Setting up Proxmox Manager..."
+cd ../pxmx
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+cd ../lm
+
+# OPNsense
+echo "Setting up OPNsense Manager..."
+cd ../opnsense
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+cd ..
 
 echo ""
-echo "🎉 System deployed successfully!"
-echo "Hub: ws://localhost:8765 | API: http://localhost:8000"
-echo "UI: http://localhost:5173"
-echo "Run 'docker compose logs -f' to see the system in action."
+echo "🎉 Native installation complete!"
+echo "📂 Project located in: $INSTALL_DIR"
+echo "🚀 To start the system, run: cd $INSTALL_DIR/lm && ./start_all.sh"

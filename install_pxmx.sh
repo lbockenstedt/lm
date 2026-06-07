@@ -1,15 +1,15 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Installing Proxmox Manager Module..."
+echo "🚀 Installing Proxmox Manager Module (Native)..."
 
-if ! command -v docker &> /dev/null; then
-    echo "🐳 Docker not found. Installing..."
-    curl -fsSL https://get.docker.com | sh
-    sudo usermod -aG docker $USER
-    echo "✅ Docker installed. Please restart your shell."
-    exit 0
+if [ "$(id -u)" -ne 0 ]; then
+    echo "⚠️  This step requires root privileges. Please run as root."
+    exit 1
 fi
+
+apt-get update
+apt-get install -y python3-pip python3-venv git
 
 INSTALL_DIR="lab-manager"
 mkdir -p "$INSTALL_DIR"
@@ -19,8 +19,9 @@ echo "🌐 Cloning required repositories..."
 git clone https://github.com/lbockenstedt/lm.git
 git clone https://github.com/lbockenstedt/pxmx.git
 
-echo "📦 Launching Proxmox Manager..."
-cd lm
-docker compose up --build -d pxmx
+echo "🛠️ Setting up Proxmox Manager..."
+cd pxmx
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
 
-echo "🎉 Proxmox Manager deployed successfully!"
+echo "🎉 Proxmox Manager native installation complete!"

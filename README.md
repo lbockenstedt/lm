@@ -4,14 +4,14 @@ Lab Manager is a centralized orchestrator for remote node management, designed a
 
 ## 🚀 Quick Start
 
-### Single Line Installation
-Launch the entire stack (Hub, WebUI, CS, PXMX, and OPNsense) using Docker:
+### Single Line Installation (Native/LXC)
+Launch the entire stack (Hub, WebUI, CS, PXMX, and OPNsense) as native processes:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_all.sh | bash
 ```
 
-#### Modular Installation
+#### Modular Installation (Native)
 Prefer to install only specific components? Use these targeted installers:
 
 **Core Hub & WebUI**
@@ -58,18 +58,31 @@ Lab Manager is composed of several independent modules, each runnable as a conta
 
 ## 🛠️ Deployment Options
 
-### Docker Compose (Recommended)
-If you have cloned the repositories manually, navigate to the `lm` directory and run:
+### Native/LXC Installation (Recommended for LXC)
+The project is designed to run natively on Linux. The installation scripts automate the creation of Python virtual environments and Node.js setup.
+
+**To start the system:**
+Navigate to the `lm` directory and run:
+```bash
+./start_all.sh
+```
+This launches all components in the background.
+
+**Managing the System:**
+- **Monitoring**: Each module writes to a local log file (e.g., `hub.log`, `cs.log`). View them with:
+  ```bash
+  tail -f hub.log
+  ```
+- **Stopping Services**: To shut down the entire stack:
+  ```bash
+  pkill -f python && pkill -f node
+  ```
+- **Configuration**: To change Spoke secrets or Hub settings, edit the `keys.json` file in the `lm` directory and restart the services.
+
+### Docker Compose
+If you have a Docker environment with nesting enabled, you can still use Docker:
 ```bash
 docker compose up -d
-```
-This will launch all modules defined in the compose file, provided the other repositories (`cs`, `pxmx`, `opnsense`) are located in the parent directory of `lm`.
-
-### Proxmox LXC
-For bare-metal performance, use the provided LXC bootstrap scripts:
-```bash
-# Example for Hub
-./scripts/setup-lxc-hub.sh
 ```
 
 ---

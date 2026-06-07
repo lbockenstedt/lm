@@ -1,15 +1,15 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Installing Lab Manager Hub & UI..."
+echo "🚀 Installing Lab Manager Hub & UI (Native)..."
 
-if ! command -v docker &> /dev/null; then
-    echo "🐳 Docker not found. Installing..."
-    curl -fsSL https://get.docker.com | sh
-    sudo usermod -aG docker $USER
-    echo "✅ Docker installed. Please restart your shell."
-    exit 0
+if [ "$(id -u)" -ne 0 ]; then
+    echo "⚠️  This step requires root privileges. Please run as root."
+    exit 1
 fi
+
+apt-get update
+apt-get install -y python3-pip python3-venv nodejs npm git
 
 INSTALL_DIR="lab-manager"
 mkdir -p "$INSTALL_DIR"
@@ -18,9 +18,12 @@ cd "$INSTALL_DIR"
 echo "🌐 Cloning Hub repository..."
 git clone https://github.com/lbockenstedt/lm.git
 
-echo "📦 Launching Hub and UI..."
+echo "🛠️ Setting up Hub and UI..."
 cd lm
-docker compose up --build -d hub ui
+python3 -m venv venv
+./venv/bin/pip install -r hub/requirements.txt
+cd ui
+npm install
 
-echo "🎉 Hub and UI deployed successfully!"
-echo "UI: http://localhost:5173 | API: http://localhost:8000"
+echo "🎉 Hub and UI native installation complete!"
+echo "🚀 Start with: cd $INSTALL_DIR/lm && ./start_all.sh"

@@ -1,15 +1,15 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Installing Client Simulator Module..."
+echo "🚀 Installing Client Simulator Module (Native)..."
 
-if ! command -v docker &> /dev/null; then
-    echo "🐳 Docker not found. Installing..."
-    curl -fsSL https://get.docker.com | sh
-    sudo usermod -aG docker $USER
-    echo "✅ Docker installed. Please restart your shell."
-    exit 0
+if [ "$(id -u)" -ne 0 ]; then
+    echo "⚠️  This step requires root privileges. Please run as root."
+    exit 1
 fi
+
+apt-get update
+apt-get install -y python3-pip python3-venv git
 
 INSTALL_DIR="lab-manager"
 mkdir -p "$INSTALL_DIR"
@@ -19,8 +19,9 @@ echo "🌐 Cloning required repositories..."
 git clone https://github.com/lbockenstedt/lm.git
 git clone https://github.com/lbockenstedt/cs.git
 
-echo "📦 Launching Client Simulator..."
-cd lm
-docker compose up --build -d cs
+echo "🛠️ Setting up Client Simulator..."
+cd cs
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
 
-echo "🎉 Client Simulator deployed successfully!"
+echo "🎉 Client Simulator native installation complete!"
