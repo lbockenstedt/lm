@@ -31,7 +31,7 @@ sleep 5 # Give hub time to initialize
 
 # --- 2. Launch Spokes ---
 # Note: These use a default secret. In production, update these to match Hub config.
-SECRET="la-manager-secret"
+SECRET="lab-manager-secret"
 
 # Client Simulator
 echo "Starting Client Simulator..."
