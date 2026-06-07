@@ -12,26 +12,26 @@ curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_all.sh 
 ```
 
 #### Modular Installation (Native)
-Prefer to install only specific components? Use these targeted installers:
+Prefer to install only specific components? These installers can be run on separate LXC containers:
 
-**Core Hub & WebUI**
+**Core Hub & UI** (Runs the API and serves the Dashboard)
 ```bash
 curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_hub.sh | bash
 ```
 
 **Client Simulator**
 ```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_cs.sh | bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/cs/main/install_cs.sh | bash
 ```
 
 **Proxmox Manager**
 ```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_pxmx.sh | bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/install_pxmx.sh | bash
 ```
 
 **OPNsense Manager**
 ```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_opnsense.sh | bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/opnsense/main/install_opnsense.sh | bash
 ```
 
 **Access Points:**
