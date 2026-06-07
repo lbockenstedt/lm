@@ -1,8 +1,4 @@
 #!/bin/bash
-
-# Lab Manager Unified Installer
-# Installs Docker and launches the full stack
-
 set -e
 
 echo "🚀 Starting Unified Lab Manager Installation..."
@@ -16,8 +12,22 @@ if ! command -v docker &> /dev/null; then
     exit 0
 fi
 
-# 2. Build and Launch the Stack
+# 2. Setup Project Directory
+INSTALL_DIR="lab-manager"
+echo "📂 Creating project directory: $INSTALL_DIR..."
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
+
+# 3. Clone Repositories
+echo "🌐 Cloning repositories..."
+git clone https://github.com/lbockenstedt/lm.git
+git clone https://github.com/lbockenstedt/cs.git
+git clone https://github.com/lbockenstedt/pxmx.git
+git clone https://github.com/lbockenstedt/opnsense.git
+
+# 4. Build and Launch
 echo "📦 Building and launching containers..."
+cd lm
 docker compose up --build -d
 
 echo ""

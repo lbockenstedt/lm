@@ -59,7 +59,11 @@ Lab Manager is composed of several independent modules, each runnable as a conta
 ## 🛠️ Deployment Options
 
 ### Docker Compose (Recommended)
-Run `docker compose up -d` from the root directory to deploy all services as interconnected containers.
+If you have cloned the repositories manually, navigate to the `lm` directory and run:
+```bash
+docker compose up -d
+```
+This will launch all modules defined in the compose file, provided the other repositories (`cs`, `pxmx`, `opnsense`) are located in the parent directory of `lm`.
 
 ### Proxmox LXC
 For bare-metal performance, use the provided LXC bootstrap scripts:
