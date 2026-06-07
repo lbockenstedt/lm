@@ -39,9 +39,9 @@ npm run build
 Upload the resulting `dist` folder to the Hub server at: `/root/lab-manager/lm/ui/dist`
 
 **3. Access the Dashboard:**
-The Hub uses Nginx to serve the UI on port 80.
-- **Dashboard**: `http://<HUB_IP>/`
-- **REST API**: `http://<HUB_IP>:8000`
+The Hub serves the UI natively on port 8000.
+- **Dashboard**: `http://<HUB_IP>:8000`
+- **REST API**: `http://<HUB_IP>:8000/status`
 
 ---
 
@@ -60,7 +60,7 @@ Before pushing changes to GitHub, run the comprehensive static audit to ensure n
 /root/lab-manager/audit/audit_all.sh
 ```
 This tool verifies:
-- ✅ **Import Integrity**: Checks for legacy `lm.spoke.src` paths.
+- ✅ **Import Integrity**: Checks for legacy paths (e.g., the old spoke source structure).
 - ✅ **Dependency Alignment**: Ensures `requirements.txt` matches the code.
 - ✅ **Python Syntax**: Compiles all files to detect runtime crashes.
 

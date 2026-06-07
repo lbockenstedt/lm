@@ -12,7 +12,7 @@ fi
 # 2. System Dependencies
 echo "📦 Installing system dependencies..."
 apt-get update
-apt-get install -y python3-pip python3-venv git curl nginx
+apt-get install -y python3-pip python3-venv git curl
 
 # 3. Path Configuration
 BASE_DIR="/root/lab-manager"
@@ -35,7 +35,7 @@ done
 # 5. Run Modular Installers
 echo "🛠️ Running modular installations..."
 
-# Hub (installed first as it is a dependency for others)
+# Hub
 echo "Setting up Hub..."
 cd "$BASE_DIR/lm"
 bash ./install_hub.sh
@@ -59,27 +59,8 @@ cd "$BASE_DIR/opnsense"
 bash ./install_opnsense.sh
 cd "$BASE_DIR"
 
-# 6. Optional: Configure UI (if dist folder exists)
-if [ -d "$BASE_DIR/lm/ui/dist" ]; then
-    echo "🎨 Found UI build assets. Configuring Nginx..."
-    cat <<EOF > /etc/nginx/sites-available/labmanager
-server {
-    listen 80;
-    root $BASE_DIR/lm/ui/dist;
-    index index.html;
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-}
-EOF
-    ln -sf /etc/nginx/sites-available/labmanager /etc/nginx/sites-enabled/
-    rm -f /etc/nginx/sites-enabled/default
-    systemctl restart nginx
-fi
-
 echo ""
 echo "🎉 Native installation complete!"
 echo "📂 All modules are located in: $BASE_DIR"
-echo "🚀 To start the Hub and Spokes, run: cd $BASE_DIR/lm && ./start_all.sh"
-echo "🌐 Hub API: http://$(hostname -I | awk '{print \$1}'):8000"
-echo "🌐 Dashboard: http://$(hostname -I | awk '{print \$1}')"
+echo "🚀 To launch the system, run: cd $BASE_DIR/lm && ./start_all.sh"
+echo "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print \$1}'):8000"
