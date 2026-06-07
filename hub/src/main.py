@@ -205,9 +205,6 @@ class LabManagerHub:
         except Exception:
             pass
 
-        # Store the event loop for the API server to use
-        self.loop = asyncio.get_running_loop()
-
         # Start the REST API server in a separate thread
         api_thread = threading.Thread(target=run_api_server, args=(self,), daemon=True)
         api_thread.start()
