@@ -14,11 +14,7 @@ apt-get install -y python3-pip python3-venv nodejs npm git curl
 
 # 2. Define Paths
 BASE_DIR="/root/lab-manager"
-# Fallback to current directory if not root or if specified otherwise
 if [ ! -d "$BASE_DIR" ] && [ "$(id -u)" -eq 0 ]; then
-    # If we are root but not in /root/lab-manager, we'll use the current directory
-    # to avoid forcing /root/lab-manager on users who want a different path.
-    # However, for the most consistent experience, we'll default to /root/lab-manager.
     mkdir -p "$BASE_DIR"
 fi
 cd "$BASE_DIR"
@@ -37,6 +33,10 @@ for repo in "${REPOS[@]}"; do
         git clone "https://github.com/lbockenstedt/$repo.git"
     fi
 done
+
+# Get version from the Hub repository
+VERSION=$(cat lm/VERSION 2>/dev/null || echo "unknown")
+echo "📦 Installing Lab Manager version $VERSION..."
 
 # 4. Setup Environments
 echo "🛠️ Setting up Python environments..."
@@ -76,5 +76,5 @@ if [ -f "requirements.txt" ]; then
 fi
 
 echo ""
-echo "🎉 Native installation/update complete!"
+echo "🎉 Native installation/update complete (v$VERSION)!"
 echo "🚀 To start the system, run: cd $BASE_DIR/lm && ./start_all.sh"

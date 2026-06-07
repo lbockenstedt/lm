@@ -156,6 +156,14 @@ class LabManagerHub:
         """
         Starts the WebSocket server and background tasks.
         """
+        # Load version
+        version = "unknown"
+        try:
+            with open("../VERSION", "r") as f:
+                version = f.read().strip()
+        except Exception:
+            pass
+
         # Start the REST API server in a separate thread
         api_thread = threading.Thread(target=run_api_server, args=(self,), daemon=True)
         api_thread.start()
@@ -165,7 +173,7 @@ class LabManagerHub:
         persistence_task = asyncio.create_task(self.state.persistence_loop())
 
         async with websockets.serve(self.handle_connection, self.host, self.port):
-            logger.info(f"Lab Manager Hub started on ws://{self.host}:{self.port}")
+            logger.info(f"Lab Manager Hub v{version} started on ws://{self.host}:{self.port}")
             logger.info(f"Hub API started on port 8000")
             await asyncio.Future()
 
