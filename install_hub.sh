@@ -11,16 +11,22 @@ fi
 apt-get update
 apt-get install -y python3-pip python3-venv git
 
-INSTALL_DIR="lab-manager"
+INSTALL_DIR="/root/lab-manager"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-echo "🌐 Cloning Hub repository..."
-git clone https://github.com/lbockenstedt/lm.git
+if [ -d "lm/.git" ]; then
+    echo "📂 Hub repository already exists. Updating..."
+    cd lm && git pull && cd ..
+else
+    echo "🌐 Cloning Hub repository..."
+    git clone https://github.com/lbockenstedt/lm.git
+fi
 
 echo "🛠️ Setting up Hub..."
 cd lm
 python3 -m venv venv
+./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r hub/requirements.txt
 
 echo "🎉 Hub native installation complete!"

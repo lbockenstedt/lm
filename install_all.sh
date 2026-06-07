@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Starting Native Lab Manager Installation (API-Only Mode)..."
+echo "🚀 Starting Native Lab Manager Installation (Reinstall-Safe)..."
 
 # 1. Install System Dependencies
 if [ "$(id -u)" -ne 0 ]; then
@@ -9,21 +9,32 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Removed Node.js and npm from requirements
 apt-get update
-apt-get install -y python3-pip python3-venv git curl
+apt-get install -y python3-pip python3-venv nodejs npm git curl
 
 # 2. Define Paths
-BASE_DIR="/Users/lbockenstedt/vscode"
+BASE_DIR="/root/lab-manager"
+# Fallback to current directory if not root or if specified otherwise
+if [ ! -d "$BASE_DIR" ] && [ "$(id -u)" -eq 0 ]; then
+    # If we are root but not in /root/lab-manager, we'll use the current directory
+    # to avoid forcing /root/lab-manager on users who want a different path.
+    # However, for the most consistent experience, we'll default to /root/lab-manager.
+    mkdir -p "$BASE_DIR"
+fi
+cd "$BASE_DIR"
+
 REPOS=("lm" "cs" "pxmx" "opnsense")
 
-# 3. Clone or Detect Repositories
+# 3. Clone or Update Repositories
 for repo in "${REPOS[@]}"; do
-    if [ ! -d "$BASE_DIR/$repo" ]; then
-        echo "🌐 Cloning $repo..."
-        git clone "https://github.com/lbockenstedt/$repo.git" "$BASE_DIR/$repo"
+    if [ -d "$repo/.git" ]; then
+        echo "📂 $repo already exists. Updating..."
+        cd "$repo"
+        git pull
+        cd ..
     else
-        echo "📂 $repo repository already exists. Using existing directory."
+        echo "🌐 Cloning $repo..."
+        git clone "https://github.com/lbockenstedt/$repo.git"
     fi
 done
 
@@ -34,12 +45,14 @@ echo "🛠️ Setting up Python environments..."
 echo "Setting up Hub..."
 cd "$BASE_DIR/lm"
 python3 -m venv venv
+./venv/bin/pip install --upgrade pip
 ./venv/bin/pip install -r hub/requirements.txt
 
 # CS
 echo "Setting up Client Simulator..."
 cd "$BASE_DIR/cs"
 python3 -m venv venv
+./venv/bin/pip install --upgrade pip
 if [ -f "requirements.txt" ]; then
     ./venv/bin/pip install -r requirements.txt
 fi
@@ -48,6 +61,7 @@ fi
 echo "Setting up Proxmox Manager..."
 cd "$BASE_DIR/pxmx"
 python3 -m venv venv
+./venv/bin/pip install --upgrade pip
 if [ -f "requirements.txt" ]; then
     ./venv/bin/pip install -r requirements.txt
 fi
@@ -56,10 +70,11 @@ fi
 echo "Setting up OPNsense Manager..."
 cd "$BASE_DIR/opnsense"
 python3 -m venv venv
+./venv/bin/pip install --upgrade pip
 if [ -f "requirements.txt" ]; then
     ./venv/bin/pip install -r requirements.txt
 fi
 
 echo ""
-echo "🎉 Native API-Only installation complete!"
+echo "🎉 Native installation/update complete!"
 echo "🚀 To start the system, run: cd $BASE_DIR/lm && ./start_all.sh"
