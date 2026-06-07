@@ -50,6 +50,8 @@ class LabManagerHub:
         self.active_connections: Dict[str, websockets.WebSocketServerProtocol] = {}
         # { spoke_id: TokenBucket } for rate limiting non-heartbeat messages
         self.rate_limiters: Dict[str, TokenBucket] = {}
+        # { correlation_id: response_data } for request-response bridging
+        self.response_cache: Dict[str, Any] = {}
 
     async def send_to_spoke(self, message: Message):
         """
@@ -75,6 +77,40 @@ class LabManagerHub:
             await ws.send(json.dumps(payload))
         else:
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
+
+    async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
+        """
+        Sends a command to a spoke and waits for its acknowledgement.
+        """
+        msg_id = str(uuid.uuid4())
+        msg = Message(
+            header=MessageHeader(
+                message_id=msg_id,
+                timestamp=time.time(),
+                sender_id="hub",
+                destination_id=spoke_id
+            ),
+            payload=MessagePayload(type=command_type, data=data)
+        )
+
+        await self.send_to_spoke(msg)
+
+        # Wait for the response in the mailbox
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            # Check for a message in the mailbox specifically for this correlation_id
+            # Since the mailbox currently doesn't have a 'wait for id' method,
+            # we check the internal store or a shared event.
+            # For simplicity in this demo, we'll poll the state or a response queue.
+            # In a real system, we'd use a Future.
+            await asyncio.sleep(0.1)
+            # Implementation detail: The Hub currently processes ACKs in the message loop.
+            # We would need a way to retrieve the result of a specific correlation_id.
+            # I will add a simple result cache to the Hub.
+            if msg_id in getattr(self, "response_cache", {}):
+                return self.response_cache.pop(msg_id)
+
+        return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
 
     async def handle_connection(self, websocket):
         """
@@ -121,12 +157,17 @@ class LabManagerHub:
 
                 # Process Acknowledgement
                 if "correlation_id" in msg_data:
+                    corr_id = msg_data["correlation_id"]
                     ack = Acknowledgement(
-                        correlation_id=msg_data["correlation_id"],
+                        correlation_id=corr_id,
                         status=msg_data.get("status", "FAILED"),
                         error=msg_data.get("error")
                     )
                     await self.mailbox.acknowledge(ack)
+
+                    # Store in response cache for API request bridging
+                    if hasattr(self, "response_cache"):
+                        self.response_cache[corr_id] = msg_data
                     continue
 
                 # Process Heartbeat
@@ -163,6 +204,9 @@ class LabManagerHub:
                 version = f.read().strip()
         except Exception:
             pass
+
+        # Store the event loop for the API server to use
+        self.loop = asyncio.get_running_loop()
 
         # Start the REST API server in a separate thread
         api_thread = threading.Thread(target=run_api_server, args=(self,), daemon=True)
