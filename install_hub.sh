@@ -25,9 +25,30 @@ fi
 
 echo "🛠️ Setting up Hub..."
 cd lm
-python3 -m venv venv
-./venv/bin/pip install --upgrade pip
-./venv/bin/pip install -r hub/requirements.txt
+
+# 1. Robust venv creation
+# Remove existing venv if it's broken or missing the binary
+if [ -d "venv" ] && [ ! -f "venv/bin/python3" ]; then
+    echo "⚠️  Detected broken virtual environment. Removing and recreating..."
+    rm -rf venv
+fi
+
+if [ ! -d "venv" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv venv
+fi
+
+# 2. Verification
+if [ ! -f "venv/bin/python3" ]; then
+    echo "❌ Critical Error: Virtual environment binary not found at $(pwd)/venv/bin/python3"
+    echo "Please ensure python3-venv is installed correctly."
+    exit 1
+fi
+
+# 3. Installation using the explicit venv path
+echo "Installing requirements..."
+./venv/bin/python3 -m pip install --upgrade pip
+./venv/bin/python3 -m pip install -r hub/requirements.txt
 
 echo "🎉 Hub native installation complete!"
 echo "🚀 Start with: cd $INSTALL_DIR/lm && ./start_all.sh"
