@@ -165,7 +165,7 @@ const VIEWS = {
     },
     setup: {
         name: 'Setup',
-        subMenus: ['General', 'Tenant Config', 'User Access'],
+        subMenus: ['General', 'Tenant Config', 'User Access', 'Spoke Approvals'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110-4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
         render: () => `
             <div class="space-y-6">
@@ -658,11 +658,16 @@ function applyAppearance(config) {
     const leftLogo = document.getElementById('logo-left');
     const rightLogo = document.getElementById('logo-right');
 
+    const hpeSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 180 504 144" class="w-full h-full object-contain">
+        <path fill="${config.primary_color}" d="M391.2 261.27v35.46H504V324H362.4v-90H504v27.27H391.2Z"/>
+        <path fill="${config.navy_color}" d="M276.67 180h-89.25v144h28.8v-36.6h60c37.92 0 59.7-21.6 59.7-53.4 0-32.01-21.78-54-59.25-54Zm-1.88 79.8h-58.57v-52.54h58.57c22.68 0 31.28 10.48 31.28 26.73 0 16.08-8.6 25.8-31.28 25.8Zm116.41-39.18h-28.8V180H504v27.27H391.2v13.36ZM151.2 180v144h-28.8v-59.02H28.8V324H0V180h28.8v57.38h93.6V180h28.8Z"/>
+    </svg>`;
+
     if (leftLogo) {
         leftLogo.style.display = config.show_logo_left ? 'flex' : 'none';
         if (config.logo_url === 'hpe-svg' || !config.logo_url) {
-            leftLogo.innerHTML = 'LM';
-            leftLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
+            leftLogo.innerHTML = hpeSvg;
+            leftLogo.className = 'w-8 h-8 flex items-center justify-center';
         } else {
             leftLogo.innerHTML = `<img src="${config.logo_url}" class="w-full h-full object-contain rounded">`;
             leftLogo.className = 'w-8 h-8 flex items-center justify-center';
@@ -673,8 +678,8 @@ function applyAppearance(config) {
         rightLogo.style.display = config.show_logo_right ? 'flex' : 'none';
         const rightUrl = config.logo_url_right || config.logo_url;
         if (rightUrl === 'hpe-svg' || !rightUrl) {
-            rightLogo.innerHTML = 'LM';
-            rightLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
+            rightLogo.innerHTML = hpeSvg;
+            rightLogo.className = 'h-8 w-auto flex items-center justify-center';
         } else {
             rightLogo.innerHTML = `<img src="${rightUrl}" class="h-full w-auto object-contain">`;
             rightLogo.className = 'h-8 w-auto flex items-center justify-center';

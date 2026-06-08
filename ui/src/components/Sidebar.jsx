@@ -4,11 +4,11 @@ import { useTheme } from '../styles/ThemeContext';
 const Sidebar = ({ activePage, onNavigate }) => {
   const { theme } = useTheme();
   const menuItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: '📊' },
-    { id: 'resources', label: 'Resources', icon: '💻' },
-    { id: 'tenants', label: 'Tenants', icon: '👥' },
-    { id: 'security', label: 'Security', icon: '🔒' },
-    { id: 'settings', label: 'Settings', icon: '⚙️' },
+    { id: 'dashboard', label: 'Dashboard' },
+    { id: 'resources', label: 'Resources' },
+    { id: 'tenants', label: 'Tenants' },
+    { id: 'security', label: 'Security' },
+    { id: 'settings', label: 'Settings' },
   ];
 
   return (
@@ -37,7 +37,6 @@ const Sidebar = ({ activePage, onNavigate }) => {
               transition: 'background 0.2s'
             }}
           >
-            <span style={{ marginRight: '10px' }}>{item.icon}</span>
             {item.label}
           </li>
         ))}
