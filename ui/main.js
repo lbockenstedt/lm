@@ -462,16 +462,23 @@ async function updateStatus() {
     if (!statusEl) return;
 
     try {
-        const response = await fetch('/status');
-        if (!response.ok) throw new Error('API Error');
-        const data = await response.json();
+        // Fetch both connection status and approval status
+        const [statusRes, approvalsRes] = await Promise.all([
+            fetch('/status'),
+            fetch('/setup/pending_spokes')
+        ]);
+
+        if (!statusRes.ok || !approvalsRes.ok) throw new Error('API Error');
+
+        const statusData = await statusRes.json();
+        const approvalsData = await approvalsRes.json();
 
         statusEl.innerHTML = `
             <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div>
             <span class="text-green-600">Hub Online</span>
         `;
 
-        const connections = data.active_connections || [];
+        const connections = statusData.active_connections || [];
         if (spokeCount) spokeCount.textContent = connections.length;
 
         const moduleMap = {
@@ -482,9 +489,21 @@ async function updateStatus() {
         };
 
         const activeModules = new Set();
+
+        // 1. Add modules that are currently online
         connections.forEach(id => {
             for (const [key, viewId] of Object.entries(moduleMap)) {
                 if (id.includes(key)) activeModules.add(viewId);
+            }
+        });
+
+        // 2. Add modules that are known and approved (even if offline)
+        const allSpokes = approvalsData.spokes || [];
+        allSpokes.forEach(spoke => {
+            if (spoke.approved) {
+                for (const [key, viewId] of Object.entries(moduleMap)) {
+                    if (spoke.spoke_id.includes(key)) activeModules.add(viewId);
+                }
             }
         });
 
@@ -691,14 +710,7 @@ function renderLogo(config, side) {
 
     let html = '';
     if (logoUrl === 'hpe-svg' || !logoUrl) {
-        html = `
-            <svg viewBox="0 0 504 144" class="${side === 'left' ? 'h-10' : 'h-8'} w-auto" xmlns="http://www.w3.org/2000/svg" fill="var(--hpe-green)">
-                <rect x="0" y="40" width="30" height="64" fill="currentColor"/>
-                <rect x="40" y="40" width="30" height="64" fill="currentColor"/>
-                <rect x="80" y="40" width="30" height="64" fill="currentColor"/>
-                <text x="125" y="95" font-family="Arial, sans-serif" font-weight="900" font-size="64" fill="currentColor">HPE</text>
-            </svg>
-        `;
+        html = `<img src="assets/hpe-logo.svg" class="${side === 'left' ? 'h-10' : 'h-8'} w-auto" alt="HPE Logo">`;
     } else {
         html = `<img src="${logoUrl}" class="${side === 'left' ? 'h-12' : 'h-8'} w-auto" alt="Logo" onerror="this.style.display='none'">`;
     }
