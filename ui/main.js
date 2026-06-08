@@ -584,12 +584,72 @@ async function loadSystemLogs() {
     }
 }
 
+async function updateAppearance() {
+    const config = {
+        primary_color: document.getElementById('app-primary-color').value,
+        navy_color: document.getElementById('app-navy-color').value,
+        logo_url: document.getElementById('app-logo-url').value,
+        show_logo_left: document.getElementById('app-show-logo-left').checked,
+        show_logo_right: document.getElementById('app-show-logo-right').checked,
+    };
+
+    document.getElementById('app-primary-hex').value = config.primary_color;
+    document.getElementById('app-navy-hex').value = config.navy_color;
+
+    try {
+        const response = await fetch('/setup/appearance', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config })
+        });
+        if (response.ok) {
+            applyAppearance(config);
+        }
+    } catch (err) {
+        console.error('Failed to update appearance', err);
+    }
+}
+
+function applyAppearance(config) {
+    document.documentElement.style.setProperty('--hpe-green', config.primary_color);
+    document.documentElement.style.setProperty('--hpe-navy', config.navy_color);
+
+    // Handle logo visibility
+    const leftLogo = document.querySelector('.hpe-sidebar .flex.items-center.gap-3 div');
+    if (leftLogo) leftLogo.style.display = config.show_logo_left ? 'flex' : 'none';
+
+    // Note: Right logo is not currently in index.html, but logic is here for when it is added
+}
+
+async function loadAppearance() {
+    try {
+        const response = await fetch('/setup/appearance');
+        if (!response.ok) return;
+        const data = await response.json();
+        const config = data.config;
+
+        if (document.getElementById('app-primary-color')) {
+            document.getElementById('app-primary-color').value = config.primary_color;
+            document.getElementById('app-primary-hex').value = config.primary_color;
+            document.getElementById('app-navy-color').value = config.navy_color;
+            document.getElementById('app-navy-hex').value = config.navy_color;
+            document.getElementById('app-logo-url').value = config.logo_url;
+            document.getElementById('app-show-logo-left').checked = config.show_logo_left;
+            document.getElementById('app-show-logo-right').checked = config.show_logo_right;
+        }
+        applyAppearance(config);
+    } catch (err) {
+        console.error('Failed to load appearance', err);
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     currentTenant = localStorage.getItem('lm_tenant') || 'default';
 
     const savedTheme = localStorage.getItem('lm_theme') || 'default';
     setTheme(savedTheme);
 
+    loadAppearance();
     setView('dashboard');
     setInterval(updateStatus, 10000);
 });
