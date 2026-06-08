@@ -196,9 +196,9 @@ class LabManagerHub:
             if not key_id:
                 logger.warning(f"Authentication failed for spoke {spoke_id}")
                 # Still track as known so it can be approved manually if it's a secret mismatch
-                if spoke_id not in self.known_spokes:
-                    self.known_spokes.append(spoke_id)
-                    self.state.save_state()
+                if spoke_id not in self.known_modules:
+                    self.state.register_module(spoke_id, approved=False)
+                    self.known_modules = self.state.system_state["known_modules"]
                 await websocket.close(1008, "Authentication failed")
                 return
 

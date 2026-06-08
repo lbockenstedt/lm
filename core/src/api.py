@@ -24,7 +24,7 @@ def create_app(hub):
         return {
             "active_connections": list(hub.active_connections.keys()),
             "heartbeats": {sid: str(s) for sid, s in hub.heartbeat.get_all_statuses().items()},
-            "state": hub.state.state,
+            "state": hub.state.system_state,
             "metrics": metrics
         }
 
@@ -33,7 +33,7 @@ def create_app(hub):
         hub = app.state.hub
 
         # 1. Find the IP for this VM from the state manager
-        res_info = hub.state.state.get("resources", {}).get(vm_id, {})
+        res_info = hub.state.system_state.get("resources", {}).get(vm_id, {})
         ip = res_info.get("metadata", {}).get("ip")
 
         if not ip:
@@ -55,13 +55,13 @@ def create_app(hub):
     @app.get("/setup/pending_spokes")
     async def get_all_spokes_status():
         hub = app.state.hub
-        known_spokes = hub.state.state.get("known_spokes", [])
+        known_spokes = hub.state.system_state.get("known_modules", [])
 
         spokes_status = []
         for sid in known_spokes:
             spokes_status.append({
                 "spoke_id": sid,
-                "approved": hub.approved_spokes.get(sid, False)
+                "approved": hub.approved_modules.get(sid, False)
             })
 
         return {"spokes": spokes_status}
@@ -79,10 +79,12 @@ def create_app(hub):
 
             if action == "unapprove":
                 # Remove approval status
-                hub.approved_spokes[spoke_id] = False
+                hub.state.register_module(spoke_id, approved=False)
+                hub.approved_modules[spoke_id] = False
             else:
                 # Update approval status
-                hub.approved_spokes[spoke_id] = True
+                hub.state.register_module(spoke_id, approved=True)
+                hub.approved_modules[spoke_id] = True
 
             hub.state.save_state() # Persist status immediately
 
@@ -108,7 +110,7 @@ def create_app(hub):
     @app.get("/setup/cppm-config")
     async def get_cppm_config():
         hub = app.state.hub
-        config = hub.state.state.get("global_config", {}).get("cppm", {})
+        config = hub.state.system_state.get("global_config", {}).get("cppm", {})
         return {"config": config}
 
     @app.post("/setup/cppm-config")
@@ -119,9 +121,9 @@ def create_app(hub):
             config = data.get("config", {})
 
             # Save to persistent state
-            global_config = hub.state.state.get("global_config", {})
+            global_config = hub.state.system_state.get("global_config", {})
             global_config["cppm"] = config
-            hub.state.state["global_config"] = global_config
+            hub.state.system_state["global_config"] = global_config
             hub.state.save_state()
 
             # Push to CPPM spoke if connected
@@ -147,7 +149,7 @@ def create_app(hub):
     @app.get("/setup/pxmx-config")
     async def get_pxmx_config():
         hub = app.state.hub
-        config = hub.state.state.get("global_config", {}).get("pxmx", {
+        config = hub.state.system_state.get("global_config", {}).get("pxmx", {
             "default_node": "pve",
             "cluster_id": "cluster-1"
         })
@@ -160,9 +162,9 @@ def create_app(hub):
             data = await request.json()
             config = data.get("config", {})
 
-            global_config = hub.state.state.get("global_config", {})
+            global_config = hub.state.system_state.get("global_config", {})
             global_config["pxmx"] = config
-            hub.state.state["global_config"] = global_config
+            hub.state.system_state["global_config"] = global_config
             hub.state.save_state()
 
             pxmx_spoke = next((sid for sid in hub.active_connections if "pxmx" in sid), None)
@@ -187,7 +189,7 @@ def create_app(hub):
     @app.get("/setup/opn-config")
     async def get_opn_config():
         hub = app.state.hub
-        config = hub.state.state.get("global_config", {}).get("opn", {
+        config = hub.state.system_state.get("global_config", {}).get("opn", {
             "opn_host": "localhost",
             "api_key": "",
             "api_secret": ""
@@ -201,9 +203,9 @@ def create_app(hub):
             data = await request.json()
             config = data.get("config", {})
 
-            global_config = hub.state.state.get("global_config", {})
+            global_config = hub.state.system_state.get("global_config", {})
             global_config["opn"] = config
-            hub.state.state["global_config"] = global_config
+            hub.state.system_state["global_config"] = global_config
             hub.state.save_state()
 
             opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
@@ -228,7 +230,7 @@ def create_app(hub):
     @app.get("/setup/appearance")
     async def get_appearance():
         hub = app.state.hub
-        config = hub.state.state.get("global_config", {}).get("appearance", {
+        config = hub.state.system_state.get("global_config", {}).get("appearance", {
             "primary_color": "#01A982",
             "navy_color": "#263040",
             "logo_url": "hpe-svg", # Special keyword for the built-in HPE logo
@@ -245,9 +247,9 @@ def create_app(hub):
             data = await request.json()
             config = data.get("config", {})
 
-            global_config = hub.state.state.get("global_config", {})
+            global_config = hub.state.system_state.get("global_config", {})
             global_config["appearance"] = config
-            hub.state.state["global_config"] = global_config
+            hub.state.system_state["global_config"] = global_config
             hub.state.save_state()
 
             return {"status": "success", "message": "Appearance settings updated."}
@@ -270,7 +272,7 @@ def create_app(hub):
             diagnostics.append({
                 "spoke_id": sid,
                 "authenticated": True,
-                "approved": hub.approved_spokes.get(sid, False),
+                "approved": hub.approved_modules.get(sid, False),
                 "heartbeat_status": hub.heartbeat.get_status(sid),
                 "connection_state": ws.state,
                 "version": hub.spoke_versions.get(sid, "unknown")
@@ -312,7 +314,7 @@ def create_app(hub):
     @app.get("/setup/modules")
     async def get_modules():
         hub = app.state.hub
-        global_config = hub.state.state.get("global_config", {})
+        global_config = hub.state.system_state.get("global_config", {})
         is_single_server = global_config.get("single_server_mode", False)
 
         modules = {
@@ -337,7 +339,7 @@ def create_app(hub):
     @app.post("/setup/install-module")
     async def install_module(request: Request):
         hub = app.state.hub
-        global_config = hub.state.state.get("global_config", {})
+        global_config = hub.state.system_state.get("global_config", {})
         if not global_config.get("single_server_mode", False):
             raise HTTPException(status_code=403, detail="On-demand installation is only supported in single-server mode.")
 
@@ -451,7 +453,7 @@ def create_app(hub):
     @app.get("/setup/config")
     async def get_global_config():
         hub = app.state.hub
-        return {"global_config": hub.state.state.get("global_config", {})}
+        return {"global_config": hub.state.system_state.get("global_config", {})}
 
     @app.post("/setup/config")
     async def update_global_config(request: Request):
@@ -460,7 +462,7 @@ def create_app(hub):
             data = await request.json()
             config = data.get("config", {})
 
-            hub.state.state["global_config"].update(config)
+            hub.state.system_state["global_config"].update(config)
             hub.state.save_state() # Immediate persist
 
             return {"status": "success", "message": "Global configuration updated."}
