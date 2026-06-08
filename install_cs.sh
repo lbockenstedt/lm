@@ -1,6 +1,18 @@
 #!/bin/bash
 set -e
 
+# Default Hub URL
+HUB_URL="ws://localhost:8765"
+
+# Parse arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --hub) HUB_URL="$2"; shift ;;
+        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
+
 echo "🚀 Installing Client Simulator Module (Native)..."
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -15,7 +27,6 @@ INSTALL_DIR="/root/lab-manager"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-# Ensure Hub is present for shared logic
 if [ ! -d "lm/.git" ]; then
     echo "🌐 Cloning required Hub repository..."
     git clone https://github.com/lbockenstedt/lm.git
@@ -34,12 +45,10 @@ cd cs
 
 # --- Robust Venv Setup ---
 if [ -d "venv" ] && [ ! -f "venv/bin/python3" ]; then
-    echo "⚠️  Broken venv detected. Recreating..."
     rm -rf venv
 fi
 
 if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
     python3 -m venv venv
 fi
 
@@ -54,5 +63,10 @@ if [ -f "requirements.txt" ]; then
     ./venv/bin/python3 -m pip install -r requirements.txt
 fi
 
+# --- Hub Configuration ---
+echo "⚙️ Configuring Hub connection..."
+echo "HUB_URL=$HUB_URL" > .env
+echo "Hub URL set to: $HUB_URL"
+
 echo "🎉 Client Simulator native installation complete!"
-echo "📦 Version: 0.04"
+echo "📦 Version: 0.07"
