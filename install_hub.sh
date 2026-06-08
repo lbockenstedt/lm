@@ -23,11 +23,27 @@ else
     git clone https://github.com/lbockenstedt/lm.git
 fi
 
-echo "🛠️ Setting up Hub..."
+echo "🛠️ Setting up Hub Backend..."
 cd lm
-python3 -m venv venv
-./venv/bin/python3 -m pip install --upgrade pip
-./venv/bin/python3 -m pip install -r hub/requirements.txt
 
-echo "🎉 Hub native installation complete!"
+# Robust Venv Setup
+if [ -d "venv" ] && [ ! -f "venv/bin/python3" ]; then
+    rm -rf venv
+fi
+
+if [ ! -d "venv" ]; then
+    python3 -m venv venv
+fi
+
+if [ ! -f "venv/bin/python3" ]; then
+    echo "❌ Critical Error: venv creation failed."
+    exit 1
+fi
+
+echo "Installing backend requirements..."
+./venv/bin/python3 -m pip install --upgrade pip
+./venv/bin/python3 -m pip install -r hub/requirementslerini.txt 2>/dev/null || ./venv/bin/python3 -m pip install -r hub/requirements.txt
+
+echo "🎉 Hub Backend installation complete!"
 echo "🚀 Start with: cd $INSTALL_DIR/lm && ./start_all.sh"
+echo "🌐 API Access: http://$(hostname -I | awk '{print \$1}'):8000"

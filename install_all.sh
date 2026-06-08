@@ -24,7 +24,7 @@ REPOS=("lm" "cs" "pxmx" "opnsense")
 # 4. Repository Sync
 for repo in "${REPOS[@]}"; do
     if [ -d "$repo/.git" ]; then
-        echo "📂 $repo already exists. Updating..."
+        echo "📂 $repo already exists. Updating via git pull..."
         cd "$repo" && git pull && cd ..
     else
         echo "🌐 Cloning $repo..."
@@ -36,9 +36,15 @@ done
 echo "🛠️ Running modular installations..."
 
 # Hub
-echo "Setting up Hub..."
+echo "Setting up Hub Backend..."
 cd "$BASE_DIR/lm"
 bash ./install_hub.sh
+cd "$BASE_DIR"
+
+# UI (Assets only)
+echo "Setting up WebUI assets..."
+cd "$BASE_DIR/lm"
+bash ./install_ui.sh
 cd "$BASE_DIR"
 
 # CS
