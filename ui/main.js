@@ -232,29 +232,48 @@ const VIEWS = {
         name: 'System',
         subMenus: ['General', 'Network', 'Auth', 'Logs'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-1.59 4.04-1.59 5.583 0a1.724 1.724 0 001.28 2.915c-1.344 1.35-3.77 1.35-5.114 0a1.724 1.724 0 00-1.28-2.915zM12 18a6 6 0 100-12 6 6 0 000 12z"></path></svg>',
-        render: () => `
-            <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Configuration</h2>
-                <div class="hpe-card rounded-lg p-6 space-y-4">
-                    <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
-                        <span class="text-slate-500">Hub Version</span>
-                        <span class="text-blue-600 font-mono font-bold">0.08</span>
+        render: (subMenu) => {
+            if (subMenu === 'Logs') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Logs</h2>
+                        <div class="hpe-card rounded-lg overflow-hidden shadow-sm border border-slate-200">
+                            <div class="bg-slate-100 px-4 py-2 border-b border-slate-200 flex justify-between items-center">
+                                <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Hub Console Output</span>
+                                <button onclick="loadSystemLogs()" class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium">Refresh</button>
+                            </div>
+                            <div id="system-logs-container" class="h-[600px] overflow-y-auto bg-white font-mono">
+                                <!-- Logs injected here -->
+                            </div>
+                        </div>
                     </div>
-                    <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
-                        <span class="text-slate-500">API Status</span>
-                        <span class="text-green-600 font-bold">Active</span>
-                    </div>
-                    <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
-                        <span class="text-slate-500">Deployment Mode</span>
-                        <span class="text-slate-700">LXC Native</span>
+                `;
+            }
+            return `
+                <div class="space-y-6">
+                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Configuration</h2>
+                    <div class="hpe-card rounded-lg p-6 space-y-4">
+                        <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
+                            <span class="text-slate-500">Hub Version</span>
+                            <span class="text-blue-600 font-mono font-bold">0.08</span>
+                        </div>
+                        <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
+                            <span class="text-slate-500">API Status</span>
+                            <span class="text-green-600 font-bold">Active</span>
+                        </div>
+                        <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
+                            <span class="text-slate-500">Deployment Mode</span>
+                            <span class="text-slate-700">LXC Native</span>
+                        </div>
                     </div>
                 </div>
-            </div>
-        `
+            `;
+        }
     }
 };
 
 let currentView = 'dashboard';
+let currentSubView = 'General';
 let currentTenant = 'default';
 
 function setTenant(tenant) {
@@ -307,6 +326,7 @@ async function loadSetupConfig() {
 
 function setView(viewId) {
     currentView = viewId;
+    currentSubView = 'General'; // Default sub-view
 
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const navItem = document.getElementById(`nav-${viewId}`);
@@ -316,7 +336,7 @@ function setView(viewId) {
     const view = VIEWS[viewId];
     if (view) {
         topNav.innerHTML = view.subMenus.map((menu, i) => `
-            <div class="sub-nav-item ${i === 0 ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest">
+            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
                 ${menu}
             </div>
         `).join('');
@@ -324,13 +344,35 @@ function setView(viewId) {
 
     const viewport = document.getElementById('viewport');
     if (viewport && view) {
-        viewport.innerHTML = view.render();
+        viewport.innerHTML = view.render(currentSubView);
         if (viewId === 'setup') {
             loadSetupConfig();
         }
     }
 
     if (viewId === 'dashboard') updateStatus();
+}
+
+function setSubView(subMenu) {
+    currentSubView = subMenu;
+    const view = VIEWS[currentView];
+    if (view) {
+        // Update sub-nav active state
+        const topNav = document.getElementById('top-nav');
+        topNav.innerHTML = view.subMenus.map(menu => `
+            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+                ${menu}
+            </div>
+        `).join('');
+
+        // Re-render content
+        const viewport = document.getElementById('viewport');
+        if (viewport) {
+            viewport.innerHTML = view.render(currentSubView);
+            if (currentView === 'setup') loadSetupConfig();
+            if (currentView === 'settings' && currentSubView === 'Logs') loadSystemLogs();
+        }
+    }
 }
 
 async function updateStatus() {
@@ -489,6 +531,33 @@ async function lookupFirewall() {
         }
     } catch (err) {
         tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-500 font-medium">${err.message}</td></tr>`;
+    }
+}
+
+async function loadSystemLogs() {
+    const logsContainer = document.getElementById('system-logs-container');
+    if (!logsContainer) return;
+
+    logsContainer.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching system logs...</div>`;
+
+    try {
+        const response = await fetch('/setup/logs');
+        if (!response.ok) throw new Error('Failed to fetch logs');
+        const data = await response.json();
+        const logs = data.logs || [];
+
+        if (logs.length === 0) {
+            logsContainer.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No system logs available.</div>`;
+            return;
+        }
+
+        logsContainer.innerHTML = logs.map(log => `
+            <div class="p-2 border-b border-slate-100 font-mono text-[11px] text-slate-600 hover:bg-slate-50 transition-colors">
+                ${log}
+            </div>
+        `).join('');
+    } catch (err) {
+        logsContainer.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading logs: ${err.message}</div>`;
     }
 }
 
