@@ -8,70 +8,97 @@
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
         :root {
-            --hpe-bg-deep: #000a12;
-            --hpe-bg-surface: #0a1420;
-            --hpe-bg-card: #111d2d;
-            --hpe-accent: #00b3ff;
-            --hpe-accent-dark: #0080cc;
-            --hpe-text-primary: #f8fafc;
-            --hpe-text-secondary: #94a3b8;
-            --hpe-border: #1e293b;
+            --hpe-green: #01A982;
+            --hpe-navy: #263040;
+            --hpe-navy-dark: #1F2531;
+            --hpe-bg-light: #F5F5F5;
+            --hpe-white: #FFFFFF;
+            --hpe-text-main: #444444;
+            --hpe-text-muted: #767676;
+            --hpe-border: #CCCCCC;
         }
         body {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--hpe-bg-deep);
-            color: var(--hpe-text-primary);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            background-color: var(--hpe-bg-light);
+            color: var(--hpe-text-main);
             margin: 0;
             overflow: hidden;
         }
-        .hpe-glass { background: var(--hpe-bg-surface); border-right: 1px solid var(--hpe-border); }
-        .hpe-card { background: var(--hpe-bg-card); border: 1px solid var(--hpe-border); }
-        .nav-item { transition: all 0.2s ease; cursor: pointer; }
-        .nav-item:hover { background: rgba(0, 179, 255, 0.1); color: var(--hpe-accent); }
-        .nav-item.active { background: rgba(0, 179, 255, 0.15); color: var(--hpe-accent); border-left: 4px solid var(--hpe-accent); }
-        .sub-nav-item { transition: all 0.2s ease; cursor: pointer; }
-        .sub-nav-item:hover { color: var(--hpe-accent); }
-        .sub-nav-item.active { color: var(--hpe-accent); font-weight: 600; border-bottom: 2px solid var(--hpe-accent); }
+        .hpe-sidebar {
+            background-color: var(--hpe-white);
+            border-right: 1px solid var(--hpe-border);
+        }
+        .hpe-topbar {
+            background-color: var(--hpe-navy);
+            border-bottom: 3px solid var(--hpe-green);
+        }
+        .hpe-card {
+            background: var(--hpe-white);
+            border: 1px solid var(--hpe-border);
+            border-radius: 6px;
+        }
+        .nav-item {
+            transition: all 0.2s ease;
+            cursor: pointer;
+            color: var(--hpe-text-main);
+        }
+        .nav-item:hover {
+            background: rgba(1, 169, 130, 0.1);
+            color: var(--hpe-green);
+        }
+        .nav-item.active {
+            background: rgba(1, 169, 130, 0.15);
+            color: var(--hpe-green);
+            font-weight: 600;
+            border-left: 4px solid var(--hpe-green);
+        }
+        .sub-nav-item {
+            transition: all 0.2s ease;
+            cursor: pointer;
+            color: #cbd5e1;
+        }
+        .sub-nav-item:hover { color: #fff; }
+        .sub-nav-item.active { color: #fff; font-weight: 600; }
         .status-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: var(--hpe-border); border-radius: 10px; }
+        ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 10px; }
     </style>
 </head>
 <body class="flex h-screen w-screen overflow-hidden">
 
     <!-- LEFT MAIN MENU -->
-    <aside class="h-full w-64 hpe-glass flex flex-col">
+    <aside class="h-full w-64 hpe-sidebar flex flex-col">
         <div class="p-6 mb-4">
             <div class="flex items-center gap-3">
-                <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20">LM</div>
-                <h1 class="text-xl font-bold tracking-tight text-white">Lab Manager</h1>
+                <div class="w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm">LM</div>
+                <h1 class="text-xl font-bold tracking-tight text-[#263040]">Lab Manager</h1>
             </div>
-            <div id="connection-status" class="mt-4 flex items-center gap-2 px-2 py-1 rounded-full bg-slate-900 text-[10px] font-medium w-fit">
-                <div class="w-1.5 h-1.5 rounded-full bg-slate-500 status-pulse"></div>
-                <span class="text-slate-400">Connecting...</span>
+            <div id="connection-status" class="mt-4 flex items-center gap-2 px-2 py-1 rounded-full bg-slate-100 text-[10px] font-medium w-fit border border-slate-200">
+                <div class="w-1.5 h-1.5 rounded-full bg-slate-400 status-pulse"></div>
+                <span class="text-slate-500">Connecting...</span>
             </div>
         </div>
 
         <nav id="main-nav" class="flex-1 px-3 space-y-1">
-            <div onclick="setView('dashboard')" id="nav-dashboard" class="nav-item active p-3 rounded-lg flex items-center gap-3 text-sm font-medium">
+            <div onclick="setView('dashboard')" id="nav-dashboard" class="nav-item active p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a8 8 0 018 8 8 8 0 018-8m-12 8a8 8 0 01-8-8 8 8 0 018-8m0 16v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>
                 Dashboard
             </div>
             <!-- Dynamic Module Navs Injected Here -->
-            <div class="pt-4 mt-4 border-t border-slate-800"></div>
-            <div onclick="setView('setup')" id="nav-setup" class="nav-item p-3 rounded-lg flex items-center gap-3 text-sm font-medium">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>
+            <div class="pt-4 mt-4 border-t border-slate-200"></div>
+            <div onclick="setView('setup')" id="nav-setup" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110-4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>
                 Setup
             </div>
-            <div onclick="setView('settings')" id="nav-settings" class="nav-item p-3 rounded-lg flex items-center gap-3 text-sm font-medium">
+            <div onclick="setView('settings')" id="nav-settings" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-1.59 4.04-1.59 5.583 0a1.724 1.724 0 001.28 2.915c-1.344 1.35-3.77 1.35-5.114 0a1.724 1.724 0 00-1.28-2.915zM12 18a6 6 0 100-12 6 6 0 000 12z"></path></svg>
                 System
             </div>
         </nav>
 
-        <div class="p-4 border-t border-slate-800 text-[10px] text-slate-500 text-center uppercase tracking-widest font-bold">
+        <div class="p-4 border-t border-slate-200 text-[10px] text-slate-400 text-center uppercase tracking-widest font-bold">
             v<span id="footer-version">0.07</span>
         </div>
     </aside>
@@ -80,8 +107,8 @@
     <main class="flex-1 flex flex-col min-w-0">
 
         <!-- TOP HEADER / SUB-MENU -->
-        <header class="h-16 hpe-glass flex items-center px-6 justify-between border-b border-slate-800">
-            <div id="top-nav" class="flex items-center gap-6 text-sm font-medium text-slate-400">
+        <header class="h-16 hpe-topbar flex items-center px-6 justify-between border-b border-slate-800">
+            <div id="top-nav" class="flex items-center gap-6 text-sm font-medium text-slate-300">
                 <!-- Dynamically injected sub-menu items -->
             </div>
 
@@ -89,24 +116,24 @@
                 <!-- GLOBAL SEARCH -->
                 <div class="relative group">
                     <span class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
-                        <svg class="w-4 h-4 text-slate-500 group-focus-within:text-blue-400 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                        <svg class="w-4 h-4 text-slate-400 group-focus-within:text-white transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                     </span>
                     <input id="global-search" type="text"
                            placeholder="Search spokes, VMs..."
-                           class="bg-slate-900 border border-slate-700 rounded-full pl-10 pr-4 py-1.5 text-xs focus:ring-2 focus:ring-blue-500 outline-none transition-all w-64 text-slate-200 placeholder-slate-500"
+                           class="bg-slate-800 border border-slate-700 rounded-full pl-10 pr-4 py-1.5 text-xs focus:ring-2 focus:ring-green-500 outline-none transition-all w-64 text-white placeholder-slate-400"
                            oninput="handleSearch(this.value)">
 
                     <!-- Search Results Dropdown -->
-                    <div id="search-results" class="hidden absolute top-full mt-2 w-full max-h-60 overflow-y-auto bg-slate-800 border border-slate-700 rounded-xl shadow-2xl z-50 p-2 space-y-1">
+                    <div id="search-results" class="hidden absolute top-full mt-2 w-full max-h-60 overflow-y-auto bg-white border border-slate-300 rounded-xl shadow-2xl z-50 p-2 space-y-1">
                         <!-- Results injected here -->
                     </div>
                 </div>
-                <div class="text-xs text-slate-500 font-mono hidden md:block" id="hub-ip">172.16.0.116:8000</div>
+                <div class="text-xs text-slate-300 font-mono hidden md:block" id="hub-ip">172.16.0.116:8000</div>
             </div>
         </header>
 
         <!-- CONTENT VIEWPORT -->
-        <div id="viewport" class="flex-1 p-8 overflow-y-auto bg-[#000a12]">
+        <div id="viewport" class="flex-1 p-8 overflow-y-auto bg-[#F5F5F5]">
             <!-- VIEWS INJECTED HERE -->
         </div>
     </main>
