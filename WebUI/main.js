@@ -510,7 +510,7 @@ async function loadSetupConfig() {
         if ((currentView === 'setup' && currentSubView === 'Proxmox') || (currentView === 'pxmx' && currentSubView === 'Configuration')) {
             loadProxmoxConfig(config.pxmx || {});
         } else if ((currentView === 'setup' && currentSubView === 'OPNsense') || (currentView === 'opnsense' && currentSubView === 'Configuration')) {
-            loadOpnsenseConfig(config.opnsense || {});
+            loadOpnsenseConfig(config.opn || {});
         } else if ((currentView === 'setup' && currentSubView === 'Client Sim') || (currentView === 'cs' && currentSubView === 'Configuration')) {
             loadCSConfig(config.cs || {});
         } else if ((currentView === 'setup' && currentSubView === 'CPPM') || (currentView === 'cppm' && currentSubView === 'Configuration')) {
