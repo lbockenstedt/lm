@@ -144,6 +144,39 @@ class LabManagerHub:
 
         return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
 
+    async def push_config_to_spoke(self, spoke_id: str):
+        """Pushes the module-specific configuration from global state to the spoke."""
+        try:
+            # Identify which module this spoke belongs to
+            module_key = None
+            module_map = {'pxmx': 'pxmx', 'opn': 'opnsense', 'cs': 'cs', 'cppm': 'cppm'}
+            for key in module_map:
+                if key in spoke_id:
+                    module_key = key
+                    break
+
+            if not module_key:
+                return
+
+            config = self.state.state.get("global_config", {}).get(module_key, {})
+            if not config:
+                return
+
+            msg_id = str(uuid.uuid4())
+            msg = Message(
+                header=MessageHeader(
+                    message_id=msg_id,
+                    timestamp=time.time(),
+                    sender_id="hub",
+                    destination_id=spoke_id
+                ),
+                payload=MessagePayload(type="UPDATE_CONFIG", data=config)
+            )
+            await self.send_to_spoke(msg)
+            logger.info(f"Pushed {module_key} config to spoke {spoke_id}")
+        except Exception as e:
+            logger.error(f"Failed to push config to {spoke_id}: {e}")
+
     async def handle_connection(self, websocket):
         """
         Handles the lifecycle of a Spoke connection with authentication.
@@ -214,29 +247,12 @@ class LabManagerHub:
 
                 await websocket.send(json.dumps(approval_msg))
                 # We don't return; we enter the loop but the loop will filter messages
+            else:
+                # SPOKE IS APPROVED: Push initial configuration
+                await self.push_config_to_spoke(spoke_id)
 
             # 2. Flush Mailbox
             await self.mailbox.flush_mailbox(spoke_id, self.send_to_spoke)
-
-            # Push CPPM config if this is a CPPM spoke and already approved
-            if "cppm" in spoke_id and self.approved_spokes.get(spoke_id, False):
-                try:
-                    cppm_config = self.state.state.get("global_config", {}).get("cppm", {})
-                    if cppm_config:
-                        msg_id = str(uuid.uuid4())
-                        msg = Message(
-                            header=MessageHeader(
-                                message_id=msg_id,
-                                timestamp=time.time(),
-                                sender_id="hub",
-                                destination_id=spoke_id
-                            ),
-                            payload=MessagePayload(type="update_config", data=cppm_config)
-                        )
-                        await self.send_to_spoke(msg)
-                        logger.info(f"Pushed saved CPPM config to spoke {spoke_id}")
-                except Exception as e:
-                    logger.error(f"Failed to push CPPM config to {spoke_id}: {e}")
 
             # 3. Message Loop
             async for message_json in websocket:

@@ -38,7 +38,7 @@ const VIEWS = {
     },
     pxmx: {
         name: 'Proxmox',
-        subMenus: ['VM Management', 'Cluster Status', 'Storage'],
+        subMenus: ['VM Management', 'Cluster Status', 'Storage', 'Configuration'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>',
         render: () => `
             <div class="space-y-6">
@@ -209,6 +209,84 @@ const VIEWS = {
                             </div>
                             <div class="pt-6 border-t border-slate-200 flex justify-end">
                                 <button onclick="saveProxmoxConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                    Save Configuration
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            if (subMenu === 'OPNsense') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Configuration</h2>
+                        <div class="hpe-card rounded-lg p-6 space-y-6">
+                            <div class="grid grid-cols-1 gap-6">
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">OPNsense Host / IP</label>
+                                    <input type="text" id="opn-host" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div class="space-y-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">API Key</label>
+                                        <input type="text" id="opn-api-key" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">API Secret</label>
+                                        <input type="password" id="opn-api-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                <button onclick="saveOpnsenseConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                    Save Configuration
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            if (subMenu === 'Client Sim') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Client Simulator Configuration</h2>
+                        <div class="hpe-card rounded-lg p-6 space-y-6">
+                            <div class="space-y-4">
+                                <label class="text-xs text-slate-500 uppercase font-bold block">Simulation Profiles (JSON)</label>
+                                <textarea id="cs-profiles" rows="8" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm font-mono text-slate-800 outline-none focus:ring-2 focus:ring-green-500" placeholder='{"profile1": {...}}'></textarea>
+                            </div>
+                            <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                <button onclick="saveCSConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                    Save Configuration
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            if (subMenu === 'CPPM') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">ClearPass (CPPM) Configuration</h2>
+                        <div class="hpe-card rounded-lg p-6 space-y-6">
+                            <div class="grid grid-cols-1 gap-6">
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">CPPM Host / IP</label>
+                                    <input type="text" id="cppm-host" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div class="space-y-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">API Username</label>
+                                        <input type="text" id="cppm-user" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">API Password</label>
+                                        <input type="password" id="cppm-pass" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                <button onclick="saveCPPMConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
                                     Save Configuration
                                 </button>
                             </div>
@@ -451,6 +529,12 @@ async function loadSetupConfig() {
         if (currentView === 'setup') {
             if (currentSubView === 'Proxmox') {
                 loadProxmoxConfig(config.pxmx || {});
+            } else if (currentSubView === 'OPNsense') {
+                loadOpnsenseConfig(config.opnsense || {});
+            } else if (currentSubView === 'Client Sim') {
+                loadCSConfig(config.cs || {});
+            } else if (currentSubView === 'CPPM') {
+                loadCPPMConfig(config.cppm || {});
             }
         }
     } catch (err) {
@@ -463,6 +547,31 @@ function loadProxmoxConfig(config) {
     const clusterEl = document.getElementById('pxmx-cluster-id');
     if (nodeEl) nodeEl.value = config.default_node || '';
     if (clusterEl) clusterEl.value = config.cluster_id || '';
+}
+
+function loadOpnsenseConfig(config) {
+    const hostEl = document.getElementById('opn-host');
+    const keyEl = document.getElementById('opn-api-key');
+    const secretEl = document.getElementById('opn-api-secret');
+    if (hostEl) hostEl.value = config.opn_host || '';
+    if (keyEl) keyEl.value = config.api_key || '';
+    if (secretEl) secretEl.value = config.api_secret || '';
+}
+
+function loadCSConfig(config) {
+    const profilesEl = document.getElementById('cs-profiles');
+    if (profilesEl) {
+        profilesEl.value = JSON.stringify(config.sim_profiles || {}, null, 2);
+    }
+}
+
+function loadCPPMConfig(config) {
+    const hostEl = document.getElementById('cppm-host');
+    const userEl = document.getElementById('cppm-user');
+    const passEl = document.getElementById('cppm-pass');
+    if (hostEl) hostEl.value = config.host || '';
+    if (userEl) userEl.value = config.user || '';
+    if (passEl) passEl.value = config.password || '';
 }
 
 async function saveProxmoxConfig() {
@@ -483,6 +592,75 @@ async function saveProxmoxConfig() {
         }
     } catch (err) {
         alert('Error saving Proxmox configuration: ' + err.message);
+    }
+}
+
+async function saveOpnsenseConfig() {
+    const config = {
+        opn_host: document.getElementById('opn-host').value,
+        api_key: document.getElementById('opn-api-key').value,
+        api_secret: document.getElementById('opn-api-secret').value,
+    };
+    try {
+        const response = await fetch('/setup/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { opnsense: config } })
+        });
+        if (response.ok) {
+            alert('OPNsense configuration saved successfully!');
+        } else {
+            alert('Failed to save OPNsense configuration.');
+        }
+    } catch (err) {
+        alert('Error saving OPNsense configuration: ' + err.message);
+    }
+}
+
+async function saveCSConfig() {
+    const profilesRaw = document.getElementById('cs-profiles').value;
+    let profiles = {};
+    try {
+        profiles = JSON.parse(profilesRaw);
+    } catch (e) {
+        alert('Invalid JSON in simulation profiles');
+        return;
+    }
+    try {
+        const response = await fetch('/setup/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { cs: { sim_profiles: profiles } } })
+        });
+        if (response.ok) {
+            alert('Client Sim configuration saved successfully!');
+        } else {
+            alert('Failed to save Client Sim configuration.');
+        }
+    } catch (err) {
+        alert('Error saving Client Sim configuration: ' + err.message);
+    }
+}
+
+async function saveCPPMConfig() {
+    const config = {
+        host: document.getElementById('cppm-host').value,
+        user: document.getElementById('cppm-user').value,
+        password: document.getElementById('cppm-pass').value,
+    };
+    try {
+        const response = await fetch('/setup/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { cppm: config } })
+        });
+        if (response.ok) {
+            alert('CPPM configuration saved successfully!');
+        } else {
+            alert('Failed to save CPPM configuration.');
+        }
+    } catch (err) {
+        alert('Error saving CPPM configuration: ' + err.message);
     }
 }
 
@@ -621,6 +799,15 @@ async function updateStatus() {
         const extendedSetupMenus = [...baseSetupMenus];
         if (activeModules.has('pxmx')) {
             extendedSetupMenus.push('Proxmox');
+        }
+        if (activeModules.has('opnsense')) {
+            extendedSetupMenus.push('OPNsense');
+        }
+        if (activeModules.has('cs')) {
+            extendedSetupMenus.push('Client Sim');
+        }
+        if (activeModules.has('cppm')) {
+            extendedSetupMenus.push('CPPM');
         }
         VIEWS.setup.subMenus = extendedSetupMenus;
 

@@ -144,6 +144,47 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/setup/opn-config")
+    async def get_opn_config():
+        hub = app.state.hub
+        config = hub.state.state.get("global_config", {}).get("opn", {
+            "opn_host": "localhost",
+            "api_key": "",
+            "api_secret": ""
+        })
+        return {"config": config}
+
+    @app.post("/setup/opn-config")
+    async def update_opn_config(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            config = data.get("config", {})
+
+            global_config = hub.state.state.get("global_config", {})
+            global_config["opn"] = config
+            hub.state.state["global_config"] = global_config
+            hub.state.save_state()
+
+            opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+            if opn_spoke:
+                msg_id = str(uuid.uuid4())
+                msg = Message(
+                    header=MessageHeader(
+                        message_id=msg_id,
+                        timestamp=time.time(),
+                        sender_id="hub",
+                        destination_id=opn_spoke
+                    ),
+                    payload=MessagePayload(type="update_config", data=config)
+                )
+                await hub.send_to_spoke(msg)
+                return {"status": "success", "message": "Configuration updated and pushed to spoke."}
+            else:
+                return {"status": "partial_success", "message": "Configuration saved, but OPNsense spoke is not connected."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/appearance")
     async def get_appearance():
         hub = app.state.hub
