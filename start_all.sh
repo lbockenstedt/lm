@@ -2,67 +2,75 @@
 # Lab Manager Native Orchestrator (API-Only)
 # Launches only Python components. Node.js is no longer required.
 
+# ------------------------------------------------------------------
+# DEBUGGING: Log every step of the start process to a separate file
+# ------------------------------------------------------------------
+LOG_FILE="/root/lab-manager/lm/start_all.log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "🕒 Start time: $(date)"
+echo "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
+
 # Get the absolute paths
 BASE_DIR="/root/lab-manager/lm"
 PARENT_DIR="/root/lab-manager"
 
-echo "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
+# Ensure we are in the correct directory
+cd "$BASE_DIR" || { echo "❌ Failed to cd to $BASE_DIR"; exit 1; }
 
-# Kill existing processes to avoid port conflicts
 echo "🧹 Cleaning up existing processes..."
-# Specifically target the Hub ports to avoid OSError 48
+# Use absolute paths for binaries to ensure systemd can find them
 for port in 8000 8765; do
-    # Use || true because lsof returns 1 if no process is found,
-    # which would trigger 'set -e' and kill the script.
-    PORT_PID=$(lsof -t -i :$port || true)
+    PORT_PID=$(/usr/bin/lsof -t -i :$port || true)
     if [ -n "$PORT_PID" ]; then
         echo "Found process $PORT_PID on port $port. Killing it..."
-        kill -9 $PORT_PID
+        /usr/bin/kill -9 $PORT_PID || true
     fi
 done
-pkill -f python || true
-pkill -f node || true
+/usr/bin/pkill -f python || true
+/usr/bin/pkill -f node || true
 sleep 2
 
 # --- 1. Launch Hub ---
 echo "Starting Hub..."
-cd "$BASE_DIR"
 # Set PYTHONPATH to include the hub source directory so imports work
 export PYTHONPATH="$BASE_DIR/hub/src:$PYTHONPATH"
-# Use absolute path for log to avoid any ambiguity
-nohup ./venv/bin/python hub/src/main.py > "$BASE_DIR/hub.log" 2>&1 &
+
+# Launch Hub in background
+/usr/bin/nohup "$BASE_DIR/venv/bin/python" "$BASE_DIR/hub/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
 echo "Hub started (logs: $BASE_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
 # --- 2. Launch Spokes ---
-# Note: These use a default secret. In production, update these to match Hub config.
 SECRET="lab-manager-secret"
 
-# Client Simulator
-echo "Starting Client Simulator..."
-cd "$PARENT_DIR/cs"
-# Run as module to fix relative import errors
-nohup ./venv/bin/python -m src.control_plane --id cs-spoke-1 --secret "$SECRET" --hub ws://localhost:8765 > "$BASE_DIR/cs.log" 2>&1 &
-echo "CS started (logs: $BASE_DIR/cs.log)"
+# Define spokes and their folders
+SPOKES=("cs" "pxmx" "opnsense")
 
-# Proxmox
-echo "Starting Proxmox Manager..."
-cd "$PARENT_DIR/pxmx"
-# Run as module to fix relative import errors
-nohup ./venv/bin/python -m src.control_plane --id pxmx-spoke-1 --secret "$SECRET" --hub ws://localhost:8765 > "$BASE_DIR/pxmx.log" 2>&1 &
-echo "PXMX started (logs: $BASE_DIR/pxmx.log)"
+for spoke in "${SPOKES[@]}"; do
+    SPOKE_DIR="$PARENT_DIR/$spoke"
+    if [ -d "$SPOKE_DIR" ]; then
+        echo "Starting $spoke..."
+        cd "$SPOKE_DIR" || continue
+        export PYTHONPATH="$SPOKE_DIR/src:$PYTHONPATH"
 
-# OPNsense
-echo "Starting OPNsense Manager..."
-cd "$PARENT_DIR/opnsense"
-# Run as module to fix relative import errors
-nohup ./venv/bin/python -m src.control_plane --id opn-spoke-1 --secret "$SECRET" --hub ws://localhost:8765 > "$BASE_DIR/opnsense.log" 2>&1 &
-echo "OPNsense started (logs: $BASE_DIR/opnsense.log)"
+        # Determine the correct spoke ID
+        case $spoke in
+            "cs") SPOKE_ID="cs-spoke-1" ;;
+            "pxmx") SPOKE_ID="pxmx-spoke-1" ;;
+            "opnsense") SPOKE_ID="opn-spoke-1" ;;
+        esac
+
+        /usr/bin/nohup "$SPOKE_DIR/venv/bin/python" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub ws://localhost:8765 > "$BASE_DIR/$spoke.log" 2>&1 &
+        echo "$spoke started (logs: $BASE_DIR/$spoke.log)"
+    else
+        echo "⚠️  Warning: Spoke directory $SPOKE_DIR not found. Skipping..."
+    fi
+done
 
 echo ""
 echo "🎉 All systems launched in the background!"
 echo "------------------------------------------------------------------"
 echo "Hub API:   http://localhost:8000"
 echo "------------------------------------------------------------------"
-echo "To stop all services, run: pkill -f python"
-echo "To view logs, use: tail -f <module>.log"
+echo "🕒 End time: $(date)"
