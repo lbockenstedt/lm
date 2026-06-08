@@ -1271,13 +1271,20 @@ async function unapproveSpoke(spokeId) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    currentTenant = localStorage.getItem('lm_tenant') || 'default';
-    setTenant(currentTenant);
+    console.log("Lab Manager UI: Initializing...");
+    try {
+        currentTenant = localStorage.getItem('lm_tenant') || 'default';
+        setTenant(currentTenant);
 
-    const savedTheme = localStorage.getItem('lm_theme') || 'default';
-    setTheme(savedTheme);
+        const savedTheme = localStorage.getItem('lm_theme') || 'default';
+        setTheme(savedTheme);
 
-    loadAppearance();
-    setView('dashboard');
-    setInterval(updateStatus, 10000);
+        loadAppearance();
+        setView('dashboard');
+        setInterval(updateStatus, 10000);
+        console.log("Lab Manager UI: Initialization complete.");
+    } catch (err) {
+        console.error("Lab Manager UI: Critical initialization error:", err);
+        alert("UI Initialization failed: " + err.message);
+    }
 });
