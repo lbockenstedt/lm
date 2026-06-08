@@ -4,9 +4,9 @@
 
 set -e
 
-# Get the absolute path of the current directory (the lm repo)
-BASE_DIR=$(pwd)
-PARENT_DIR=$(dirname "$BASE_DIR")
+# Get the absolute paths
+BASE_DIR="/root/lab-manager/lm"
+PARENT_DIR="/root/lab-manager"
 
 echo "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
 

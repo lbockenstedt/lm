@@ -65,8 +65,35 @@ cd "$BASE_DIR/opnsense"
 bash ./install_opnsense.sh
 cd "$BASE_DIR"
 
+# 6. Persistence & Auto-start
+echo "⚙️ Configuring systemd for auto-start on reboot..."
+
+# Create the systemd service unit
+cat <<EOF > /etc/systemd/system/lab-manager.service
+[Unit]
+Description=Lab Manager Orchestrator
+After=network.target
+
+[Service]
+Type=forking
+User=root
+WorkingDirectory=/root/lab-manager/lm
+ExecStart=/bin/bash /root/lab-manager/lm/start_all.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and start the service
+systemctl daemon-reload
+systemctl enable lab-manager
+systemctl restart lab-manager
+
 echo ""
 echo "🎉 Native installation complete!"
 echo "📂 All modules are located in: $BASE_DIR"
-echo "🚀 To launch the system, run: cd $BASE_DIR/lm && ./start_all.sh"
+echo "⚙️ Service 'lab-manager' is enabled and running."
+echo "🚀 To manage the system: systemctl start|stop|restart lab-manager"
 echo "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print $1}'):8000"
