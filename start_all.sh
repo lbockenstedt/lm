@@ -12,12 +12,14 @@ echo "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
 
 # Kill existing processes to avoid port conflicts
 echo "🧹 Cleaning up existing processes..."
-# Specifically target the Hub port to avoid OSError 48
-PORT_PID=$(lsof -t -i :8765)
-if [ -n "$PORT_PID" ]; then
-    echo "Found process $PORT_PID on port 8765. Killing it..."
-    kill -9 $PORT_PID
-fi
+# Specifically target the Hub ports to avoid OSError 48
+for port in 8000 8765; do
+    PORT_PID=$(lsof -t -i :$port)
+    if [ -n "$PORT_PID" ]; then
+        echo "Found process $PORT_PID on port $port. Killing it..."
+        kill -9 $PORT_PID
+    fi
+done
 pkill -f python || true
 pkill -f node || true
 sleep 2
