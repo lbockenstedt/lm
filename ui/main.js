@@ -395,17 +395,17 @@ function setView(viewId) {
     currentSubView = 'General'; // Default sub-view
 
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-    const navItem = document.getElementById(\`nav-\${viewId}\`);
+    const navItem = document.getElementById(`nav-${viewId}`);
     if (navItem) navItem.classList.add('active');
 
     const topNav = document.getElementById('top-nav');
     const view = VIEWS[viewId];
     if (view) {
-        topNav.innerHTML = view.subMenus.map((menu, i) => \`
-            <div onclick="setSubView('\${menu}')" class="sub-nav-item \${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
-                \${menu}
+        topNav.innerHTML = view.subMenus.map((menu, i) => `
+            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+                ${menu}
             </div>
-        \`).join('');
+        `).join('');
     }
 
     const viewport = document.getElementById('viewport');
@@ -426,17 +426,17 @@ function setSubView(subMenu) {
     if (view) {
         // Update sub-nav active state
         const topNav = document.getElementById('top-nav');
-        topNav.innerHTML = view.subMenus.map(menu => \`
-            <div onclick="setSubView('\${menu}')" class="sub-nav-item \${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
-                \${menu}
+        topNav.innerHTML = view.subMenus.map(menu => `
+            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+                ${menu}
             </div>
-        \`).join('');
+        `).join('');
 
-        topNav.innerHTML = view.subMenus.map(menu => \`
-            <div onclick="setSubView('\${menu}')" class="sub-nav-item \${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
-                \${menu}
+        topNav.innerHTML = view.subMenus.map(menu => `
+            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+                ${menu}
             </div>
-        \`).join('');
+        `).join('');
 
         // Re-render content
         const viewport = document.getElementById('viewport');
@@ -466,10 +466,10 @@ async function updateStatus() {
         if (!response.ok) throw new Error('API Error');
         const data = await response.json();
 
-        statusEl.innerHTML = \`
+        statusEl.innerHTML = `
             <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div>
             <span class="text-green-600">Hub Online</span>
-        \`;
+        `;
 
         const connections = data.active_connections || [];
         if (spokeCount) spokeCount.textContent = connections.length;
@@ -492,47 +492,47 @@ async function updateStatus() {
         const dynamicHtml = Array.from(activeModules).map(viewId => {
             const view = VIEWS[viewId];
             const isActive = currentView === viewId ? 'active' : '';
-            return \`
-                <div onclick="setView('\${viewId}')" id="nav-\${viewId}" class="nav-item \${isActive} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
-                    \${view.icon}
-                    \${view.name}
+            return `
+                <div onclick="setView('${viewId}')" id="nav-${viewId}" class="nav-item ${isActive} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
+                    ${view.icon}
+                    ${view.name}
                 </div>
-            \`;
+            `;
         }).join('');
 
         const dashboardNav = document.getElementById('nav-dashboard').outerHTML;
         const setupNav = document.getElementById('nav-setup').outerHTML;
         const settingsNav = document.getElementById('nav-settings').outerHTML;
 
-        mainNav.innerHTML = \`
-            \${dashboardNav}
-            \${dynamicHtml}
+        mainNav.innerHTML = `
+            ${dashboardNav}
+            ${dynamicHtml}
             <div class="pt-4 mt-4 border-t border-slate-200"></div>
-            \${setupNav}
-            \${settingsNav}
-        \`;
+            ${setupNav}
+            ${settingsNav}
+        `;
 
         if (spokeList) {
             if (connections.length === 0) {
-                spokeList.innerHTML = \`<p class="text-xs text-slate-400 italic">No spokes connected.</p>\`;
+                spokeList.innerHTML = `<p class="text-xs text-slate-400 italic">No spokes connected.</p>`;
             } else {
-                spokeList.innerHTML = connections.map(id => \`
+                spokeList.innerHTML = connections.map(id => `
                     <div class="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-200 hover:border-green-500 transition-all group">
                         <div class="flex items-center gap-3">
                             <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]"></div>
-                            <span class="text-sm font-medium text-slate-700 group-hover:text-green-600 transition-colors">\${id}</span>
+                            <span class="text-sm font-medium text-slate-700 group-hover:text-green-600 transition-colors">${id}</span>
                         </div>
                         <span class="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Online</span>
                     </div>
-                \`).join('');
+                `).join('');
             }
         }
     } catch (err) {
-        statusEl.innerHTML = \`
+        statusEl.innerHTML = `
             <div class="w-1.5 h-1.5 rounded-full bg-red-500"></div>
             <span class="text-red-600">Hub Offline</span>
-        \`;
-        if (spokeList) spokeList.innerHTML = \`<p class="text-xs text-red-500 italic">Error connecting to Hub API.</p>\`;
+        `;
+        if (spokeList) spokeList.innerHTML = `<p class="text-xs text-red-500 italic">Error connecting to Hub API.</p>`;
     }
 }
 
@@ -551,17 +551,17 @@ async function handleSearch(query) {
         const filtered = connections.filter(id => id.toLowerCase().includes(query.toLowerCase()));
 
         if (filtered.length === 0) {
-            resultsEl.innerHTML = \`<div class="p-3 text-xs text-slate-500 italic">No matches found</div>\`;
+            resultsEl.innerHTML = `<div class="p-3 text-xs text-slate-500 italic">No matches found</div>`;
         } else {
-            resultsEl.innerHTML = filtered.map(id => \`
+            resultsEl.innerHTML = filtered.map(id => `
                 <div onclick="setView('dashboard')" class="p-2 text-xs text-slate-700 hover:bg-slate-100 rounded cursor-pointer transition-colors">
-                    \${id}
+                    ${id}
                 </div>
-            \`).join('');
+            `).join('');
         }
         resultsEl.classList.remove('hidden');
     } catch (err) {
-        resultsEl.innerHTML = \`<div class="p-3 text-xs text-red-400">Search failed</div>\`;
+        resultsEl.innerHTML = `<div class="p-3 text-xs text-red-400">Search failed</div>`;
         resultsEl.classList.remove('hidden');
     }
 }
@@ -578,10 +578,10 @@ async function lookupFirewall() {
 
     emptyState.classList.add('hidden');
     details.classList.remove('hidden');
-    tableBody.innerHTML = \`<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 animate-pulse">Querying spoke...</td></tr>\`;
+    tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 animate-pulse">Querying spoke...</td></tr>`;
 
     try {
-        const response = await fetch(\`/vm/\${vmId}/firewall\`);
+        const response = await fetch(`/vm/${vmId}/firewall`);
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.detail || 'Failed to fetch firewall rules');
@@ -593,23 +593,23 @@ async function lookupFirewall() {
 
         const rules = data.rules || [];
         if (rules.length === 0) {
-            tableBody.innerHTML = \`<tr><td colspan="4" class="px-4 py-4 text-center text-slate-400 italic">No rules found for this IP.</td></tr>\`;
+            tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-slate-400 italic">No rules found for this IP.</td></tr>`;
         } else {
-            tableBody.innerHTML = rules.map(rule => \`
+            tableBody.innerHTML = rules.map(rule => `
                 <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-4 py-3 font-mono text-xs text-slate-400">\${rule.id || 'N/A'}</td>
+                    <td class="px-4 py-3 font-mono text-xs text-slate-400">${rule.id || 'N/A'}</td>
                     <td class="px-4 py-3">
-                        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase \${rule.action === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">
-                            \${rule.action}
+                        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${rule.action === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">
+                            ${rule.action}
                         </span>
                     </td>
-                    <td class="px-4 py-3 text-slate-600">\${rule.protocol || 'TCP'}</td>
-                    <td class="px-4 py-3 text-slate-600">\${rule.destination || '-'}</td>
+                    <td class="px-4 py-3 text-slate-600">${rule.protocol || 'TCP'}</td>
+                    <td class="px-4 py-3 text-slate-600">${rule.destination || '-'}</td>
                 </tr>
-            \`).join('');
+            `).join('');
         }
     } catch (err) {
-        tableBody.innerHTML = \`<tr><td colspan="4" class="px-4 py-8 text-center text-red-500 font-medium">\${err.message}</td></tr>\`;
+        tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-500 font-medium">${err.message}</td></tr>`;
     }
 }
 
@@ -627,7 +627,7 @@ async function loadSystemLogs() {
     const logsContainer = document.getElementById('system-logs-container');
     if (!logsContainer) return;
 
-    logsContainer.innerHTML = \`<div class="py-12 text-center text-slate-400 animate-pulse">Fetching system logs...</div>\`;
+    logsContainer.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching system logs...</div>`;
 
     try {
         const response = await fetch('/setup/logs');
@@ -636,17 +636,17 @@ async function loadSystemLogs() {
         const logs = data.logs || [];
 
         if (logs.length === 0) {
-            logsContainer.innerHTML = \`<div class="py-12 text-center text-slate-400 italic">No system logs available.</div>\`;
+            logsContainer.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No system logs available.</div>`;
             return;
         }
 
-        logsContainer.innerHTML = logs.map(log => \`
+        logsContainer.innerHTML = logs.map(log => `
             <div class="p-2 border-b border-slate-100 font-mono text-[11px] text-slate-600 hover:bg-slate-50 transition-colors">
-                \${log}
+                ${log}
             </div>
-        \`).join('');
+        `).join('');
     } catch (err) {
-        logsContainer.innerHTML = \`<div class="py-12 text-center text-red-500 font-medium">Error loading logs: \${err.message}</div>\`;
+        logsContainer.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading logs: ${err.message}</div>`;
     }
 }
 
@@ -746,31 +746,31 @@ async function loadPendingSpokes() {
 
     try {
         const response = await fetch('/setup/pending_spokes');
-        if (!response.ok) throw new Error(\`HTTP error! status: \${response.status}\`);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
         const pending = data.pending_spokes || [];
 
-        console.log(\`Found \${pending.length} pending spokes:\`, pending);
+        console.log(`Found ${pending.length} pending spokes:`, pending);
 
         if (pending.length === 0) {
-            listEl.innerHTML = \`<div class="py-12 text-center text-slate-400 italic">No spokes currently awaiting approval.</div>\`;
+            listEl.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No spokes currently awaiting approval.</div>`;
             return;
         }
 
-        listEl.innerHTML = pending.map(sid => \`
+        listEl.innerHTML = pending.map(sid => `
             <div class="flex items-center justify-between p-4 rounded-lg bg-slate-50 border border-slate-200 hover:border-blue-500 transition-all">
                 <div class="flex items-center gap-3">
                     <div class="w-2 h-2 rounded-full bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.6)]"></div>
-                    <span class="text-sm font-medium text-slate-700">\${sid}</span>
+                    <span class="text-sm font-medium text-slate-700">${sid}</span>
                 </div>
-                <button onclick="approveSpoke('\${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
+                <button onclick="approveSpoke('${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
                     Approve
                 </button>
             </div>
-        \`).join('');
+        `).join('');
     } catch (err) {
         console.error('Error in loadPendingSpokes:', err);
-        listEl.innerHTML = \`<div class="py-12 text-center text-red-500 font-medium">Error loading pending spokes: \${err.message}</div>\`;
+        listEl.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading pending spokes: ${err.message}</div>`;
     }
 }
 
