@@ -64,7 +64,7 @@ echo "Starting Hub..."
 export PYTHONPATH="$BASE_DIR/core/src:$PYTHONPATH"
 
 # Launch Hub in background
-/usr/bin/nohup "$BASE_DIR/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+/usr/bin/nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
 echo "Hub started (logs: $BASE_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
@@ -75,7 +75,7 @@ SECRET="lm-secret"
 SPOKES=("cs" "pxmx" "opnsense" "cppm")
 
 for spoke in "${SPOKES[@]}"; do
-    SPOKE_DIR="$PARENT_DIR/$spoke"
+    SPOKE_DIR="$BASE_DIR/$spoke"
     if [ -d "$SPOKE_DIR" ]; then
         echo "Starting $spoke..."
         cd "$SPOKE_DIR" || continue
