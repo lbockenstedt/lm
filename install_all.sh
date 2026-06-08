@@ -64,26 +64,40 @@ declare -A MODULES=(
     ["cppm"]="install.sh"
 )
 
+# Map module keys to their actual Spoke IDs (must match start_all.sh)
+declare -A SPOKE_IDS=(
+    ["cs"]="cs-spoke-1"
+    ["pxmx"]="pxmx-spoke-1"
+    ["opnsense"]="opn-spoke-1"
+    ["cppm"]="cppm-spoke-1"
+)
+
 for mod in "${!MODULES[@]}"; do
     installer=${MODULES[$mod]}
-    SPOKE_ID="${mod}-spoke-1"
+    SPOKE_ID=${SPOKE_IDS[$mod]}
     echo "Setting up $mod..."
 
-    # Fetch First Secret from Hub API
-    SECRET=$(curl -s -X POST "$HUB_API/setup/generate-secret" \
-        -H "Content-Type: application/json" \
-        -d "{\"spoke_id\": \"$SPOKE_ID\"}" | jq -r '.secret')
+    # Fetch First Secret from Hub API with retries
+    SPOKE_SECRET=""
+    for i in {1..5}; do
+        SPOKE_SECRET=$(curl -s -X POST "$HUB_API/setup/generate-secret" \
+            -H "Content-Type: application/json" \
+            -d "{\"spoke_id\": \"$SPOKE_ID\"}" | jq -r '.secret' 2>/dev/null)
+        if [ "$SPOKE_SECRET" != "null" ] && [ -n "$SPOKE_SECRET" ]; then
+            echo "✅ Generated first-secret for $SPOKE_ID"
+            break
+        fi
+        echo "⏳ Secret generation failed, retrying in 2s... ($i/5)"
+        sleep 2
+    done
 
-    if [ "$SECRET" == "null" ] || [ -z "$SECRET" ]; then
+    if [ -z "$SPOKE_SECRET" ] || [ "$SPOKE_SECRET" == "null" ]; then
         echo "❌ Failed to generate secret for $SPOKE_ID. Using default (will fail auth)."
         SPOKE_SECRET="lab-manager-secret"
-    else
-        SPOKE_SECRET=$SECRET
-        echo "✅ Generated first-secret for $SPOKE_ID"
     fi
 
     # Run the modular installer with the Hub-provided secret
-    bash "./$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET"
+    bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET"
 done
 
 
