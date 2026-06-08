@@ -54,6 +54,9 @@ class LabManagerHub:
         # { spoke_id: bool } tracking approval status
         self.approved_spokes: Dict[str, bool] = {}
 
+        # { spoke_id: str } tracking spoke versions
+        self.spoke_versions: Dict[str, str] = {}
+
         # --- System Diagnostics ---
         self.logs = deque(maxlen=500)
         self.message_count = 0
@@ -164,6 +167,21 @@ class LabManagerHub:
             # Initialize rate limiter (e.g., 5 messages/sec burst of 10)
             self.rate_limiters[spoke_id] = TokenBucket(capacity=10, fill_rate=5)
 
+            # Request Spoke Version immediately after auth
+            try:
+                version_msg = Message(
+                    header=MessageHeader(
+                        message_id=str(uuid.uuid4()),
+                        timestamp=time.time(),
+                        sender_id="hub",
+                        destination_id=spoke_id
+                    ),
+                    payload=MessagePayload(type="get_version", data={})
+                )
+                await self.send_to_spoke(version_msg)
+            except Exception as e:
+                logger.error(f"Failed to request version from {spoke_id}: {e}")
+
             # Check if the spoke is already approved
             if not self.approved_spokes.get(spoke_id, False):
                 logger.info(f"Spoke {spoke_id} is pending approval.")
@@ -219,6 +237,13 @@ class LabManagerHub:
                         error=msg_data.get("error")
                     )
                     await self.mailbox.acknowledge(ack)
+
+                    # Special case: if this was a version request, store the version
+                    payload = msg_data.get("payload", {})
+                    if payload.get("type") == "COMMAND_RESULT":
+                        data = payload.get("data", {})
+                        if isinstance(data, dict) and "version" in data:
+                            self.spoke_versions[spoke_id] = data["version"]
 
                     # Store in response cache for API request bridging
                     if hasattr(self, "response_cache"):

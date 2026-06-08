@@ -99,10 +99,28 @@ def create_app(hub):
                 "authenticated": True,
                 "approved": hub.approved_spokes.get(sid, False),
                 "heartbeat_status": hub.heartbeat.get_status(sid),
-                "connection_state": ws.state
+                "connection_state": ws.state,
+                "version": hub.spoke_versions.get(sid, "unknown")
             })
+
+        # Get Hub version
+        hub_version = await hub.get_local_version()
+
+        # Get WebUI version (read from file)
+        webui_version = "unknown"
+        try:
+            version_path = os.path.join(os.path.dirname(__file__), "../../ui/VERSION")
+            if not os.path.exists(version_path):
+                version_path = os.path.join(os.path.dirname(__file__), "../../../GitHub/webui/VERSION")
+            with open(version_path, "r") as f:
+                webui_version = f.read().strip()
+        except Exception:
+            pass
+
         return {
             "spokes": diagnostics,
+            "hub_version": hub_version,
+            "webui_version": webui_version,
             "system": metrics
         }
 
