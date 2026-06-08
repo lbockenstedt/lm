@@ -710,7 +710,6 @@ function applyAppearance(config) {
     document.documentElement.style.setProperty('--hpe-green', config.primary_color);
     document.documentElement.style.setProperty('--hpe-navy', config.navy_color);
     renderLogo(config, 'left');
-    renderLogo(config, 'right');
 }
 
 async function loadAppearance() {
