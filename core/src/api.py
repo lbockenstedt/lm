@@ -423,6 +423,11 @@ def create_app(hub):
             config = data.get("config", {})
 
             hub.state.update_tenant(tenant_id, config)
+
+            # If the config indicates this should be the active tenant, update system state
+            if config.get("active"):
+                hub.state.set_active_tenant(tenant_id)
+
             hub.state.save_state() # Immediate persist
 
             return {"status": "success", "message": f"Tenant {tenant_id} updated."}

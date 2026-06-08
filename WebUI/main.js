@@ -768,6 +768,7 @@ function setView(viewId) {
         viewport.innerHTML = view.render(currentSubView);
         if (viewId === 'setup') {
             loadSetupConfig();
+            loadTenants();
             if (currentSubView === 'Spoke Approvals') loadPendingSpokes();
         }
         if (viewId === 'pxmx') {
@@ -796,6 +797,7 @@ function setSubView(subMenu) {
             viewport.innerHTML = view.render(currentSubView);
             if (currentView === 'setup') {
                 loadSetupConfig();
+                loadTenants();
                 if (currentSubView === 'Spoke Approvals') {
                     loadPendingSpokes();
                 }
@@ -1270,8 +1272,9 @@ async function unapproveSpoke(spokeId) {
 
 document.addEventListener('DOMContentLoaded', () => {
     currentTenant = localStorage.getItem('lm_tenant') || 'default';
+    setTenant(currentTenant);
 
-    const savedTheme = localStorage能夠getItem('lm_theme') || 'default';
+    const savedTheme = localStorage.getItem('lm_theme') || 'default';
     setTheme(savedTheme);
 
     loadAppearance();

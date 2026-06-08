@@ -19,7 +19,8 @@ class StateManager:
             "resources": {},
             "approved_modules": {},
             "known_modules": [],
-            "active_sessions": {}
+            "active_sessions": {},
+            "active_tenant": "default"
         }
 
         # Tenant-level state: User settings, Quotas, Mappings
@@ -113,6 +114,10 @@ class StateManager:
         if tenant_id not in self.tenant_state["tenants"]:
             self.tenant_state["tenants"][tenant_id] = {}
         self.tenant_state["tenants"][tenant_id].update(data)
+
+    def set_active_tenant(self, tenant_id: str):
+        self.system_state["active_tenant"] = tenant_id
+        logger.info(f"Active tenant switched to: {tenant_id}")
 
     def map_tenant_resource(self, tenant_id: str, resource_id: str, metadata: Dict):
         """
