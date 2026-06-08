@@ -373,14 +373,15 @@ class LabManagerHub:
         """
         cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory()
-        disk = psutil.disk_io_counters()
+        disk = psutil.disk_usage('/')
 
         return {
             "cpu_util": cpu,
             "mem_util": mem.percent,
-            "disk_read": disk.read_bytes if disk else 0,
-            "disk_write": disk.write_bytes if disk else 0,
-            "queue_size": len(self.mailbox.get_all_pending()) if hasattr(self.mailbox, 'get_all_pending') else 0,
+            "disk_util": disk.percent,
+            "disk_free": disk.free // (1024 * 1024), # MB
+            "disk_total": disk.total // (1024 * 1024), # MB
+            "queue_size": len(self.mailbox.get_all_pending()),
             "mps": self.mps
         }
 

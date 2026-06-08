@@ -111,3 +111,15 @@ class Mailbox:
                     del self.pending_ack[msg_id]
 
             await asyncio.sleep(1)
+
+    def get_all_pending(self) -> list:
+        """
+        Returns a list of all messages currently awaiting acknowledgement
+        or queued for offline spokes.
+        """
+        all_pending = []
+        for msg, _, _ in self.pending_ack.values():
+            all_pending.append(msg)
+        for q in self.spoke_queues.values():
+            all_pending.extend(q)
+        return all_pending

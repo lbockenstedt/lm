@@ -285,7 +285,33 @@ const VIEWS = {
             }
             return `
                 <div class="space-y-6">
-                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Configuration</h2>
+                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Performance</h2>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="hpe-card rounded-lg p-6 shadow-sm">
+                            <label class="text-xs text-slate-500 uppercase font-bold">CPU Usage</label>
+                            <div id="sys-cpu" class="text-4xl font-bold mt-2 text-slate-800">0%</div>
+                        </div>
+                        <div class="hpe-card rounded-lg p-6 shadow-sm">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Memory Usage</label>
+                            <div id="sys-mem" class="text-4xl font-bold mt-2 text-slate-800">0%</div>
+                        </div>
+                        <div class="hpe-card rounded-lg p-6 shadow-sm">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Disk Usage</label>
+                            <div id="sys-disk" class="text-4xl font-bold mt-2 text-slate-800">0%</div>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="hpe-card rounded-lg p-6 shadow-sm">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Throughput (MPS)</label>
+                            <div id="sys-mps" class="text-4xl font-bold mt-2 text-[#01A982]">0.0 msg/s</div>
+                        </div>
+                        <div class="hpe-card rounded-lg p-6 shadow-sm">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Mailbox Backlog</label>
+                            <div id="sys-queue" class="text-4xl font-bold mt-2 text-slate-800">0</div>
+                        </div>
+                    </div>
+
+                    <h2 class="text-2xl font-bold mb-6 text-[#263040] pt-6">System Configuration</h2>
                     <div class="hpe-card rounded-lg p-6 space-y-4">
                         <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
                             <span class="text-slate-500">Hub Version</span>
@@ -475,7 +501,7 @@ function setView(viewId) {
         }
     }
 
-    if (viewId === 'dashboard') updateStatus();
+    if (viewId === 'dashboard' || viewId === 'settings') updateStatus();
 }
 
 function setSubView(subMenu) {
@@ -501,6 +527,7 @@ function setSubView(subMenu) {
                 }
             }
             if (currentView === 'settings' && currentSubView === 'Logs') loadSystemLogs();
+            if (currentView === 'settings' && currentSubView === 'General') updateStatus();
         }
     }
 }
@@ -524,6 +551,21 @@ async function updateStatus() {
 
         const statusData = await statusRes.json();
         const approvalsData = await approvalsRes.json();
+
+        // Update system metrics if elements exist
+        if (statusData.metrics) {
+            const m = statusData.metrics;
+            const cpuEl = document.getElementById('sys-cpu');
+            const memEl = document.getElementById('sys-mem');
+            const diskEl = document.getElementById('sys-disk');
+            const mpsEl = document.getElementById('sys-mps');
+            const qEl = document.getElementById('sys-queue');
+            if (cpuEl) cpuEl.textContent = `${m.cpu_util}%`;
+            if (memEl) memEl.textContent = `${m.mem_util}%`;
+            if (diskEl) diskEl.textContent = `${m.disk_util}%`;
+            if (mpsEl) mpsEl.textContent = `${m.mps.toFixed(1)} msg/s`;
+            if (qEl) qEl.textContent = m.queue_size;
+        }
 
         statusEl.innerHTML = `
             <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div>
