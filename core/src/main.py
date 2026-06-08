@@ -269,6 +269,7 @@ class LabManagerHub:
                 # Process Heartbeat (Always allowed for pending spokes to maintain connection)
                 payload = msg_data.get("payload", {})
                 if payload.get("type") == "HEARTBEAT":
+                    self.message_count += 1
                     self.heartbeat.update_heartbeat(spoke_id)
                     continue
 
