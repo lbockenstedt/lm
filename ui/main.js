@@ -686,7 +686,7 @@ function applyAppearance(config) {
             leftLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
         } else {
             leftLogo.innerHTML = `<img src="${config.logo_url}" class="w-full h-full object-contain rounded">`;
-            leftLogo.className = 'w-8 h-8 flex items-center justify-center';
+            leftLogo.className = 'w-12 h-12 flex items-center justify-center';
         }
     }
 

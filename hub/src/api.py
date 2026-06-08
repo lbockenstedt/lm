@@ -286,6 +286,11 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
 
+    @app.get("/setup/config")
+    async def get_global_config():
+        hub = app.state.hub
+        return {"global_config": hub.state.state.get("global_config", {})}
+
     @app.post("/setup/config")
     async def update_global_config(request: Request):
         hub = app.state.hub
