@@ -47,11 +47,12 @@ cd "$BASE_DIR/lm"
 bash ./install_ui.sh
 cd "$BASE_DIR"
 
-# Wait for Hub API to be ready
+# Give the Hub API a moment to fully start and stabilize
 echo "⏳ Waiting for Hub API to initialize..."
 until curl -s http://localhost:8000/status > /dev/null; do
     sleep 2
 done
+sleep 5
 
 HUB_API="http://localhost:8000"
 HUB_WS="ws://localhost:8765"
