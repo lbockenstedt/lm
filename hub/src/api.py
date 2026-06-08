@@ -16,10 +16,12 @@ def create_app(hub):
     @app.get("/status")
     async def get_status():
         hub = app.state.hub
+        metrics = await hub.get_system_metrics()
         return {
             "active_connections": list(hub.active_connections.keys()),
             "heartbeats": {sid: str(s) for sid, s in hub.heartbeat.get_all_statuses().items()},
-            "state": hub.state.state
+            "state": hub.state.state,
+            "metrics": metrics
         }
 
     @app.get("/vm/{vm_id}/firewall")
@@ -80,6 +82,29 @@ def create_app(hub):
             return {"status": "success", "message": f"Spoke {spoke_id} approved."}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/setup/logs")
+    async def get_system_logs():
+        hub = app.state.hub
+        return {"logs": list(hub.logs)}
+
+    @app.get("/setup/diagnostics")
+    async def get_diagnostics():
+        hub = app.state.hub
+        metrics = await hub.get_system_metrics()
+        diagnostics = []
+        for sid, ws in hub.active_connections.items():
+            diagnostics.append({
+                "spoke_id": sid,
+                "authenticated": True,
+                "approved": hub.approved_spokes.get(sid, False),
+                "heartbeat_status": hub.heartbeat.get_status(sid),
+                "connection_state": ws.state
+            })
+        return {
+            "spokes": diagnostics,
+            "system": metrics
+        }
 
     @app.post("/setup/update")
     async def trigger_update():

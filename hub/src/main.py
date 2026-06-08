@@ -4,6 +4,10 @@ import logging
 import threading
 import time
 import subprocess
+import httpx
+import psutil
+import os
+from collections import deque
 from typing import Dict, Any
 import websockets
 
@@ -49,6 +53,23 @@ class LabManagerHub:
 
         # { spoke_id: bool } tracking approval status
         self.approved_spokes: Dict[str, bool] = {}
+
+        # --- System Diagnostics ---
+        self.logs = deque(maxlen=500)
+        self.message_count = 0
+        self.mps = 0.0
+
+        class HubLogHandler(logging.Handler):
+            def __init__(self, hub):
+                super().__init__()
+                self.hub = hub
+            def emit(self, record):
+                msg = self.format(record)
+                self.hub.logs.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
+
+        log_handler = HubLogHandler(self)
+        log_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+        logger.addHandler(log_handler)
 
         # { spoke_id: websocket_connection }
         self.active_connections: Dict[str, websockets.WebSocketServerProtocol] = {}
@@ -211,6 +232,7 @@ class LabManagerHub:
                     continue
 
                 # Handle other messages
+                self.message_count += 1
                 logger.info(f"Received verified message from {spoke_id}: {payload.get('type')}")
 
         except websockets.ConnectionClosed:
@@ -221,12 +243,42 @@ class LabManagerHub:
             if spoke_id and spoke_id in self.active_connections:
                 del self.active_connections[spoke_id]
 
+    async def get_local_version(self) -> str:
+        try:
+            version_path = os.path.join(os.path.dirname(__file__), "../../VERSION")
+            if not os.path.exists(version_path):
+                version_path = os.path.join(os.path.dirname(__file__), "../VERSION")
+            with open(version_path, "r") as f:
+                return f.read().strip()
+        except Exception as e:
+            logger.error(f"Failed to read local version: {e}")
+            return "unknown"
+
+    async def get_remote_version(self) -> str:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get("https://raw.githubusercontent.com/lbockenstedt/lm/main/VERSION")
+                if resp.status_code == 200:
+                    return resp.text.strip()
+        except Exception as e:
+            logger.error(f"Failed to fetch remote version: {e}")
+        return "unknown"
+
     async def perform_update(self):
         """
-        Performs a git pull and triggers a systemd restart of the hub service.
+        Checks for updates and performs a git pull if a new version is available.
         """
+        local_v = await self.get_local_version()
+        remote_v = await self.get_remote_version()
+
+        if local_v == remote_v:
+            return {"status": "no_update", "message": f"System is already up to date (v{local_v})."}
+
+        if remote_v == "unknown":
+            return {"status": "error", "message": "Could not retrieve remote version from GitHub."}
+
         try:
-            logger.info("Checking for updates from GitHub...")
+            logger.info(f"Updating system from v{local_v} to v{remote_v}...")
             cmd = "cd /root/lab-manager/lm && git pull"
             process = await asyncio.create_subprocess_shell(
                 cmd,
@@ -238,13 +290,40 @@ class LabManagerHub:
             if process.returncode == 0:
                 logger.info("Update successful. Triggering service restart...")
                 subprocess.Popen(["systemctl", "restart", "lab-manager"])
-                return True
+                return {"status": "success", "message": f"Updated from v{local_v} to v{remote_v}. Server is restarting..."}
             else:
                 logger.error(f"Git pull failed: {stderr.decode()}")
-                return False
+                return {"status": "error", "message": f"Update failed: {stderr.decode()}"}
         except Exception as e:
             logger.error(f"Unexpected error during update: {e}")
-            return False
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    async def run_mps_loop(self):
+        """
+        Calculates messages per second by polling the counter every second.
+        """
+        logger.info("MPS monitoring loop started.")
+        while True:
+            await asyncio.sleep(1.0)
+            self.mps = float(self.message_count)
+            self.message_count = 0
+
+    async def get_system_metrics(self) -> Dict[str, Any]:
+        """
+        Collects CPU, Memory, and Disk metrics.
+        """
+        cpu = psutil.cpu_percent(interval=None)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_io_counters()
+
+        return {
+            "cpu_util": cpu,
+            "mem_util": mem.percent,
+            "disk_read": disk.read_bytes if disk else 0,
+            "disk_write": disk.write_bytes if disk else 0,
+            "queue_size": len(self.mailbox.get_all_pending()) if hasattr(self.mailbox, 'get_all_pending') else 0,
+            "mps": self.mps
+        }
 
     async def run_autoupdate_loop(self):
         """
@@ -296,6 +375,7 @@ class LabManagerHub:
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
         autoupdate_task = asyncio.create_task(self.run_autoupdate_loop())
+        mps_task = asyncio.create_task(self.run_mps_loop())
 
         async with websockets.serve(self.handle_connection, self.host, self.port):
             logger.info(f"Lab Manager Hub v{version} started on ws://{self.host}:{self.port}")
