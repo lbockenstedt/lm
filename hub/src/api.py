@@ -290,6 +290,20 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
 
+    @app.post("/setup/generate-secret")
+    async def generate_secret(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            spoke_id = data.get("spoke_id")
+            if not spoke_id:
+                raise HTTPException(status_code=400, detail="Missing spoke_id")
+
+            secret = hub.key_manager.generate_first_secret(spoke_id)
+            return {"spoke_id": spoke_id, "secret": secret}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/config")
     async def get_global_config():
         hub = app.state.hub

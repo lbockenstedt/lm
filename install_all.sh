@@ -47,23 +47,45 @@ cd "$BASE_DIR/lm"
 bash ./install_ui.sh
 cd "$BASE_DIR"
 
-# CS
-echo "Setting up Client Simulator..."
-cd "$BASE_DIR/cs"
-bash ./install_cs.sh
-cd "$BASE_DIR"
+# Wait for Hub API to be ready
+echo "⏳ Waiting for Hub API to initialize..."
+until curl -s http://localhost:8000/status > /dev/null; do
+    sleep 2
+done
 
-# PXMX
-echo "Setting up Proxmox Manager..."
-cd "$BASE_DIR/pxmx"
-bash ./install_pxmx.sh
-cd "$BASE_DIR"
+HUB_API="http://localhost:8000"
+HUB_WS="ws://localhost:8765"
 
-# CPPM
-echo "Setting up ClearPass Policy Manager..."
-cd "$BASE_DIR/cppm"
-bash ./install.sh
-cd "$BASE_DIR"
+# Define modules and their corresponding installers
+declare -A MODULES=(
+    ["cs"]="install_cs.sh"
+    ["pxmx"]="install_pxmx.sh"
+    ["opnsense"]="install_opnsense.sh"
+    ["cppm"]="install.sh"
+)
+
+for mod in "${!MODULES[@]}"; do
+    installer=${MODULES[$mod]}
+    SPOKE_ID="${mod}-spoke-1"
+    echo "Setting up $mod..."
+
+    # Fetch First Secret from Hub API
+    SECRET=$(curl -s -X POST "$HUB_API/setup/generate-secret" \
+        -H "Content-Type: application/json" \
+        -d "{\"spoke_id\": \"$SPOKE_ID\"}" | jq -r '.secret')
+
+    if [ "$SECRET" == "null" ] || [ -z "$SECRET" ]; then
+        echo "❌ Failed to generate secret for $SPOKE_ID. Using default (will fail auth)."
+        SPOKE_SECRET="lab-manager-secret"
+    else
+        SPOKE_SECRET=$SECRET
+        echo "✅ Generated first-secret for $SPOKE_ID"
+    fi
+
+    # Run the modular installer with the Hub-provided secret
+    bash "./$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET"
+done
+
 
 # 6. Persistence & Auto-start
 echo "⚙️ Configuring systemd for auto-start on reboot..."
