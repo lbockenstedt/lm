@@ -8,6 +8,34 @@
 LOG_FILE="/root/lab-manager/lm/start_all.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+# ------------------------------------------------------------------
+# CONFIGURATION: Hub Server URL
+# ------------------------------------------------------------------
+HUB_URL_FILE="/root/lab-manager/hub_url.conf"
+DEFAULT_HUB_URL="ws://localhost:8765"
+
+# Parse arguments for --server
+HUB_SERVER_OVERRIDE=""
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --server) HUB_SERVER_OVERRIDE="$2"; shift ;;
+    esac
+    shift
+done
+
+# Determine which URL to use
+if [ -n "$HUB_SERVER_OVERRIDE" ]; then
+    echo "🎯 Server override detected: $HUB_SERVER_OVERRIDE"
+    echo "$HUB_SERVER_OVERRIDE" > "$HUB_URL_FILE"
+    HUB_URL="$HUB_SERVER_OVERRIDE"
+elif [ -f "$HUB_URL_FILE" ]; then
+    HUB_URL=$(cat "$HUB_URL_FILE")
+    echo "📖 Using saved Hub URL: $HUB_URL"
+else
+    HUB_URL="$DEFAULT_HUB_URL"
+    echo "🌐 Using default Hub URL: $HUB_URL"
+fi
+
 echo "🕒 Start time: $(date)"
 echo "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
 
@@ -62,7 +90,7 @@ for spoke in "${SPOKES[@]}"; do
             "cppm") SPOKE_ID="cppm-spoke-1" ;;
         esac
 
-        /usr/bin/nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub ws://localhost:8765 > "$BASE_DIR/$spoke.log" 2>&1 &
+        /usr/bin/nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" > "$BASE_DIR/$spoke.log" 2>&1 &
         echo "$spoke started (logs: $BASE_DIR/$spoke.log)"
     else
         echo "⚠️  Warning: Spoke directory $SPOKE_DIR not found. Skipping..."
@@ -72,6 +100,6 @@ done
 echo ""
 echo "🎉 All systems launched in the background!"
 echo "------------------------------------------------------------------"
-echo "Hub API:   http://localhost:8000"
+echo "Hub API:   ${HUB_URL//ws\:\/\/http\:\/\/}"
 echo "------------------------------------------------------------------"
 echo "🕒 End time: $(date)"

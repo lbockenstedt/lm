@@ -176,13 +176,70 @@ def create_app(hub):
         else:
             raise HTTPException(status_code=500, detail="Update failed. Check Hub logs.")
 
-    @app.get("/setup/config")
-    async def get_setup_config():
+    @app.get("/setup/modules")
+    async def get_modules():
         hub = app.state.hub
-        return {
-            "tenants": hub.state.state["tenants"],
-            "global_config": hub.state.state["global_config"]
+        global_config = hub.state.state.get("global_config", {})
+        is_single_server = global_config.get("single_server_mode", False)
+
+        modules = {
+            "cppm": {"path": "cppm/install.sh", "installed": False},
+            "cs": {"path": "cs/install_cs.sh", "installed": False},
+            "ldap": {"path": "ldap/install_ldap.sh", "installed": False},
+            "netbox": {"path": "netbox/install.sh", "installed": False},
+            "opnsense": {"path": "opnsense/install_opnsense.sh", "installed": False},
+            "pxmx": {"path": "pxmx/install_pxmx.sh", "installed": False},
         }
+
+        # Check if module is 'installed' by seeing if it's connected as a spoke
+        for mod in modules:
+            if any(mod in sid for sid in hub.active_connections):
+                modules[mod]["installed"] = True
+
+        return {
+            "single_server_mode": is_single_server,
+            "modules": modules
+        }
+
+    @app.post("/setup/install-module")
+    async def install_module(request: Request):
+        hub = app.state.hub
+        global_config = hub.state.state.get("global_config", {})
+        if not global_config.get("single_server_mode", False):
+            raise HTTPException(status_code=403, detail="On-demand installation is only supported in single-server mode.")
+
+        try:
+            data = await request.json()
+            module_id = data.get("module_id")
+            if not module_id:
+                raise HTTPException(status_code=400, detail="Missing module_id")
+
+            modules = {
+                "cppm": "cppm/install.sh",
+                "cs": "cs/install_cs.sh",
+                "ldap": "ldap/install_ldap.sh",
+                "netbox": "netbox/install.sh",
+                "opnsense": "opnsense/install_opnsense.sh",
+                "pxmx": "pxmx/install_pxmx.sh",
+            }
+
+            script_path = modules.get(module_id)
+            if not script_path:
+                raise HTTPException(status_code=404, detail="Module not found")
+
+            # Hub API address for the module
+            hub_url = f"ws://{hub.host}:{hub.port}"
+
+            # Execute installation script as a background process
+            # We use a single-line command approach
+            full_cmd = f"bash {script_path} --hub {hub_url} --all-prereqs"
+
+            # Start the process without blocking the API
+            subprocess.Popen(full_cmd, shell=True, cwd=os.path.join(os.path.dirname(__file__), "../../.."))
+
+            return {"status": "success", "message": f"Installation of {module_id} triggered in background."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/setup/tenant")
     async def update_tenant(request: Request):
