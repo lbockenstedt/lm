@@ -7,6 +7,7 @@ import subprocess
 import httpx
 import psutil
 import os
+import uuid
 from collections import deque
 from typing import Dict, Any
 import websockets
