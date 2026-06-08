@@ -4,7 +4,7 @@ set -e
 # Default Configuration
 HUB_URL="ws://localhost:8765"
 SPOKE_ID="opn-spoke-1"
-SPOKE_SECRET="lab-manager-secret"
+SPOKE_SECRET="lm-manager-secret"
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
@@ -27,7 +27,7 @@ fi
 apt-get update
 apt-get install -y python3-pip python3-venv git curl
 
-INSTALL_DIR="/root/lab-manager"
+INSTALL_DIR="/root/lm-manager"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
@@ -74,7 +74,7 @@ EOF
 
 # --- Systemd Service (For Remote/Independent Deployment) ---
 echo "⚙️ Creating systemd service for auto-start..."
-cat <<EOF > /etc/systemd/system/lab-manager-opnsense.service
+cat <<EOF > /etc/systemd/system/lm-manager-opnsense.service
 [Unit]
 Description=Lab Manager Spoke - OPNsense Manager
 After=network.target
@@ -92,7 +92,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable lab-manager-opnsense
+systemctl enable lm-manager-opnsense
 
 echo "🎉 OPNsense Manager installation complete!"
 echo "🌐 Hub Target: $HUB_URL"

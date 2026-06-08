@@ -15,7 +15,7 @@ apt-get update
 apt-get install -y python3-pip python3-venv git curl lsof net-tools jq
 
 # 3. Path Configuration
-BASE_DIR="/root/lab-manager"
+BASE_DIR="/root/lm-manager"
 mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
 
@@ -94,7 +94,7 @@ for mod in "${!MODULES[@]}"; do
 
     if [ -z "$SPOKE_SECRET" ] || [ "$SPOKE_SECRET" == "null" ]; then
         echo "❌ Failed to generate secret for $SPOKE_ID. Using default (will fail auth)."
-        SPOKE_SECRET="lab-manager-secret"
+        SPOKE_SECRET="lm-manager-secret"
     fi
 
     # Run the modular installer with the Hub-provided secret
@@ -106,7 +106,7 @@ done
 echo "⚙️ Configuring systemd for auto-start on reboot..."
 
 # Create the systemd service unit
-cat <<EOF > /etc/systemd/system/lab-manager.service
+cat <<EOF > /etc/systemd/system/lm-manager.service
 [Unit]
 Description=Lab Manager Orchestrator
 After=network.target
@@ -115,8 +115,8 @@ After=network.target
 Type=oneshot
 RemainAfterExit=yes
 User=root
-WorkingDirectory=/root/lab-manager/lm
-ExecStart=/bin/bash /root/lab-manager/lm/start_all.sh
+WorkingDirectory=/root/lm-manager/lm
+ExecStart=/bin/bash /root/lm-manager/lm/start_all.sh
 ExecStop=/usr/bin/pkill -f python
 Restart=on-failure
 RestartSec=10
@@ -127,13 +127,13 @@ EOF
 
 # Enable and start the service
 systemctl daemon-reload
-systemctl enable lab-manager
-systemctl restart lab-manager
+systemctl enable lm-manager
+systemctl restart lm-manager
 
 echo ""
 echo "🎉 Native installation complete!"
 echo "📂 All modules are located in: $BASE_DIR"
-echo "⚙️ Service 'lab-manager' is enabled and running."
-echo "🚀 To manage the system: systemctl start|stop|restart lab-manager"
+echo "⚙️ Service 'lm-manager' is enabled and running."
+echo "🚀 To manage the system: systemctl start|stop|restart lm-manager"
 echo "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print $1}'):8000"
 echo "📦 Version: 0.08"

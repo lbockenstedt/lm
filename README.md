@@ -38,14 +38,14 @@ The Hub serves the WebUI natively. No separate build or installation is required
 ### Starting the System
 Navigate to the `lm` directory and launch the orchestrator:
 ```bash
-cd /root/lab-manager/lm
+cd /root/lm-manager/lm
 ./start_all.sh
 ```
 
 ### Health & Regression Audits
 Before pushing changes to GitHub, run the comprehensive static audit to ensure no broken imports or syntax errors:
 ```bash
-/root/lab-manager/audit/audit_all.sh
+/root/lm-manager/audit/audit_all.sh
 ```
 This tool verifies:
 - ✅ **Import Integrity**: Checks for legacy paths (e.g., the old spoke source structure).

@@ -15,7 +15,7 @@ apt-get update
 apt-get install -y python3-pip python3-venv git curl lsof net-tools
 
 # 3. Setup Paths
-BASE_DIR="/root/lab-manager"
+BASE_DIR="/root/lm-manager"
 mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
 
@@ -38,7 +38,7 @@ cd "$BASE_DIR"
 
 # 6. Configure Auto-start
 echo "⚙️ Configuring systemd for auto-start on reboot..."
-cat <<EOF > /etc/systemd/system/lab-manager.service
+cat <<EOF > /etc/systemd/system/lm-manager.service
 [Unit]
 Description=Lab Manager Orchestrator
 After=network.target
@@ -47,8 +47,8 @@ After=network.target
 Type=oneshot
 RemainAfterExit=yes
 User=root
-WorkingDirectory=/root/lab-manager/lm
-ExecStart=/bin/bash /root/lab-manager/lm/start_all.sh
+WorkingDirectory=/root/lm-manager/lm
+ExecStart=/bin/bash /root/lm-manager/lm/start_all.sh
 ExecStop=/usr/bin/pkill -f python
 Restart=on-failure
 RestartSec=10
@@ -58,11 +58,11 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable lab-manager
-systemctl restart lab-manager
+systemctl enable lm-manager
+systemctl restart lm-manager
 
 echo ""
 echo "🎉 Lab Manager Core installation complete!"
-echo "⚙️ Service 'lab-manager' is enabled and running."
+echo "⚙️ Service 'lm-manager' is enabled and running."
 echo "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print $1}'):8000"
 echo "📦 Version: 0.08"

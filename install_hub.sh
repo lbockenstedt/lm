@@ -11,7 +11,7 @@ fi
 apt-get update
 apt-get install -y python3-pip python3-venv git curl
 
-INSTALL_DIR="/root/lab-manager"
+INSTALL_DIR="/root/lm-manager"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
