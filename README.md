@@ -20,8 +20,14 @@ For high-availability or distributed deployments, install components on separate
 | **Hub Backend** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_hub.sh \| bash` | Central API, State, & Messaging |
 | **WebUI** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_ui.sh \| bash` | Static Dashboard (via Hub) |
 | **Client Sim** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/cs/main/install_cs.sh \| bash` | Traffic & DNS Simulation |
-| **Proxmox** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/install_pxmx.sh \| bash` | VM Lifecycle Management |
+| **Proxmox** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/install_pxmx.sh \| bash` | VM Lifecycle & Agent Server |
 | **OPNsense** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/opnsense/main/install_opnsense.sh \| bash` | Firewall & Interface Mgmt |
+
+#### 🤖 Proxmox Local Agent
+The Proxmox module utilizes a local agent to gather real-time telemetry and execute host-level commands.
+- **Installation**: `sudo bash /root/lm-manager/pxmx/agent/install_agent.sh --spoke-url ws://<SPOKE_IP>:8766`
+- **Purpose**: Pushes CPU/RAM/Disk metrics and VM lists to the Spoke every 60s.
+- **Connectivity**: Uses a persistent WebSocket session on port **8766**.
 
 ---
 
