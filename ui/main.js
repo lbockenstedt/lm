@@ -167,63 +167,80 @@ const VIEWS = {
         name: 'Setup',
         subMenus: ['General', 'Tenant Config', 'User Access', 'Spoke Approvals'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110-4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
-        render: () => `
-            <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Setup</h2>
-                <div class="hpe-card rounded-lg p-6 space-y-6">
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div class="space-y-2">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Active Tenant</label>
-                            <select id="tenant-selector" onchange="setTenant(this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                <option value="default">Default Tenant</option>
-                                <option value="tenant-a">Tenant A</option>
-                                <option value="tenant-b">Tenant B</option>
-                            </select>
-                        </div>
-                        <div class="space-y-2">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Authentication Mode</label>
-                            <select id="auth-mode" onchange="updateGlobalConfig('auth_mode', this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                <option value="local">Local Login</option>
-                                <option value="ldap">LDAP Integration</option>
-                            </select>
+        render: (subMenu) => {
+            if (subMenu === 'Spoke Approvals') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Spoke Approvals</h2>
+                        <div class="hpe-card rounded-lg p-6 shadow-sm">
+                            <div id="pending-spokes-list" class="space-y-3">
+                                <div class="py-12 text-center text-slate-400 italic">Loading pending spokes...</div>
+                            </div>
                         </div>
                     </div>
+                `;
+            }
+            return `
+                <div class="space-y-6">
+                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Setup</h2>
+                    <div class="hpe-card rounded-lg p-6 space-y-6">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div class="space-y-2">
+                                <label class="text-xs text-slate-500 uppercase font-bold">Active Tenant</label>
+                                <select id="tenant-selector" onchange="setTenant(this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    <option value="default">Default Tenant</option>
+                                    <option value="tenant-a">Tenant A</option>
+                                    <option value="tenant-b">Tenant B</option>
+                                </select>
+                            </div>
+                            <div class="space-y-2">
+                                <label class="text-xs text-slate-500 uppercase font-bold">Authentication Mode</label>
+                                <select id="auth-mode" onchange="updateGlobalConfig('auth_mode', this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    <option value="local">Local Login</option>
+                                    <option value="ldap">LDAP Integration</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="p-4 rounded-md bg-green-50 border border-green-200 text-sm text-green-700">
+                            Multi-tenancy is currently in <strong class="text-green-800">Prototype Mode</strong>. Tenant selection is simulated and local logins are enabled.
+                        </div>
 
-                    <div class="pt-6 border-t border-slate-200">
-                        <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Maintenance</h3>
-                        <div class="flex flex-col gap-4 p-4 rounded-md bg-slate-50 border border-slate-200">
-                            <div class="flex items-center justify-between">
-                                <div class="flex flex-col gap-2">
-                                    <div class="text-sm text-slate-600 font-medium">Automated System Updates</div>
-                                    <div class="flex items-center gap-4">
-                                        <label class="flex items-center gap-2 cursor-pointer group">
-                                            <input type="checkbox" id="auto-update-chk" onchange="updateAutoUpdate(this.checked)" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
-                                            <span class="text-xs font-medium text-slate-500 group-hover:text-slate-700 transition-colors">Enable Auto-Update</span>
-                                        </label>
-                                        <span class="text-slate-300">|</span>
-                                        <div class="flex items-center gap-2">
-                                            <span class="text-xs text-slate-500">Interval:</span>
-                                            <input type="number" id="auto-update-int" onchange="updateAutoUpdateInterval(this.value)"
-                                                   class="w-12 bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500">
-                                            <span class="text-xs text-slate-500">hours</span>
+                        <div class="pt-6 border-t border-slate-200">
+                            <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Maintenance</h3>
+                            <div class="flex flex-col gap-4 p-4 rounded-md bg-slate-50 border border-slate-200">
+                                <div class="flex items-center justify-between">
+                                    <div class="flex flex-col gap-2">
+                                        <div class="text-sm text-slate-600 font-medium">Automated System Updates</div>
+                                        <div class="flex items-center gap-4">
+                                            <label class="flex items-center gap-2 cursor-pointer group">
+                                                <input type="checkbox" id="auto-update-chk" onchange="updateAutoUpdate(this.checked)" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                                                <span class="text-xs font-medium text-slate-500 group-hover:text-slate-700 transition-colors">Enable Auto-Update</span>
+                                            </label>
+                                            <span class="text-slate-300">|</span>
+                                            <div class="flex items-center gap-2">
+                                                <span class="text-xs text-slate-500">Interval:</span>
+                                                <input type="number" id="auto-update-int" onchange="updateAutoUpdateInterval(this.value)"
+                                                       class="w-12 bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500">
+                                                <span class="text-xs text-slate-500">hours</span>
+                                            </div>
                                         </div>
                                     </div>
+                                    <div class="text-right">
+                                        <span id="last-update-ts" class="text-[10px] text-slate-400 block">Last check: Never</span>
+                                    </div>
                                 </div>
-                                <div class="text-right">
-                                    <span id="last-update-ts" class="text-[10px] text-slate-400 block">Last check: Never</span>
+                                <div class="pt-3 border-t border-slate-200 flex justify-between items-center">
+                                    <div class="text-xs text-slate-400 italic">Manually synchronize from GitHub repository.</div>
+                                    <button onclick="triggerUpdate()" id="update-btn" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-xs font-bold transition-all shadow-sm">
+                                        Update System Now
+                                    </button>
                                 </div>
-                            </div>
-                            <div class="pt-3 border-t border-slate-200 flex justify-between items-center">
-                                <div class="text-xs text-slate-400 italic">Manually synchronize from GitHub repository.</div>
-                                <button onclick="triggerUpdate()" id="update-btn" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-xs font-bold transition-all shadow-sm">
-                                    Update System Now
-                                </button>
                             </div>
                         </div>
                     </div>
                 </div>
-            </div>
-        `
+            `;
+        }
     },
     settings: {
         name: 'System',
@@ -399,6 +416,7 @@ function setView(viewId) {
         viewport.innerHTML = view.render(currentSubView);
         if (viewId === 'setup') {
             loadSetupConfig();
+            if (currentSubView === 'Spoke Approvals') loadPendingSpokes();
         }
     }
 
@@ -421,7 +439,10 @@ function setSubView(subMenu) {
         const viewport = document.getElementById('viewport');
         if (viewport) {
             viewport.innerHTML = view.render(currentSubView);
-            if (currentView === 'setup') loadSetupConfig();
+            if (currentView === 'setup') {
+                loadSetupConfig();
+                if (currentSubView === 'Spoke Approvals') loadPendingSpokes();
+            }
             if (currentView === 'settings' && currentSubView === 'Logs') loadSystemLogs();
         }
     }
@@ -658,16 +679,11 @@ function applyAppearance(config) {
     const leftLogo = document.getElementById('logo-left');
     const rightLogo = document.getElementById('logo-right');
 
-    const hpeSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 180 504 144" class="w-full h-full object-contain">
-        <path fill="${config.primary_color}" d="M391.2 261.27v35.46H504V324H362.4v-90H504v27.27H391.2Z"/>
-        <path fill="${config.navy_color}" d="M276.67 180h-89.25v144h28.8v-36.6h60c37.92 0 59.7-21.6 59.7-53.4 0-32.01-21.78-54-59.25-54Zm-1.88 79.8h-58.57v-52.54h58.57c22.68 0 31.28 10.48 31.28 26.73 0 16.08-8.6 25.8-31.28 25.8Zm116.41-39.18h-28.8V180H504v27.27H391.2v13.36ZM151.2 180v144h-28.8v-59.02H28.8V324H0V180h28.8v57.38h93.6V180h28.8Z"/>
-    </svg>`;
-
     if (leftLogo) {
         leftLogo.style.display = config.show_logo_left ? 'flex' : 'none';
         if (config.logo_url === 'hpe-svg' || !config.logo_url) {
-            leftLogo.innerHTML = hpeSvg;
-            leftLogo.className = 'w-8 h-8 flex items-center justify-center';
+            leftLogo.innerHTML = 'LM';
+            leftLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
         } else {
             leftLogo.innerHTML = `<img src="${config.logo_url}" class="w-full h-full object-contain rounded">`;
             leftLogo.className = 'w-8 h-8 flex items-center justify-center';
@@ -678,8 +694,8 @@ function applyAppearance(config) {
         rightLogo.style.display = config.show_logo_right ? 'flex' : 'none';
         const rightUrl = config.logo_url_right || config.logo_url;
         if (rightUrl === 'hpe-svg' || !rightUrl) {
-            rightLogo.innerHTML = hpeSvg;
-            rightLogo.className = 'h-8 w-auto flex items-center justify-center';
+            rightLogo.innerHTML = 'LM';
+            rightLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
         } else {
             rightLogo.innerHTML = `<img src="${rightUrl}" class="h-full w-auto object-contain">`;
             rightLogo.className = 'h-8 w-auto flex items-center justify-center';
@@ -707,6 +723,53 @@ async function loadAppearance() {
         applyAppearance(config);
     } catch (err) {
         console.error('Failed to load appearance', err);
+    }
+}
+
+async function loadPendingSpokes() {
+    const listEl = document.getElementById('pending-spokes-list');
+    if (!listEl) return;
+
+    try {
+        const response = await fetch('/setup/pending_spokes');
+        if (!response.ok) throw new Error('Failed to fetch pending spokes');
+        const data = await response.json();
+        const pending = data.pending_spokes || [];
+
+        if (pending.length === 0) {
+            listEl.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No spokes currently awaiting approval.</div>`;
+            return;
+        }
+
+        listEl.innerHTML = pending.map(sid => `
+            <div class="flex items-center justify-between p-4 rounded-lg bg-slate-50 border border-slate-200 hover:border-blue-500 transition-all">
+                <div class="flex items-center gap-3">
+                    <div class="w-2 h-2 rounded-full bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.6)]"></div>
+                    <span class="text-sm font-medium text-slate-700">${sid}</span>
+                </div>
+                <button onclick="approveSpoke('${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
+                    Approve
+                </button>
+            </div>
+        `).join('');
+    } catch (err) {
+        listEl.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading pending spokes: ${err.message}</div>`;
+    }
+}
+
+async function approveSpoke(spokeId) {
+    try {
+        const response = await fetch('/setup/approve_spoke', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId })
+        });
+        if (!response.ok) throw new Error('Approval failed');
+
+        await loadPendingSpokes();
+        updateStatus();
+    } catch (err) {
+        alert('Error approving spoke: ' + err.message);
     }
 }
 

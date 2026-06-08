@@ -14,7 +14,8 @@ class StateManager:
             "tenants": {},
             "resources": {},
             "global_config": {},
-            "active_sessions": {}
+            "active_sessions": {},
+            "approved_spokes": {}
         }
         self.load_state()
 

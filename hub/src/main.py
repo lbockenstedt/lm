@@ -52,8 +52,8 @@ class LabManagerHub:
         # Initialize Auth with LDAP
         self.auth = AuthManager(LDAPAuthProvider({"server": "ldap://localhost"}))
 
-        # { spoke_id: bool } tracking approval status
-        self.approved_spokes: Dict[str, bool] = {}
+        # Approval status stored in StateManager for persistence
+        self.approved_spokes = self.state.state.setdefault("approved_spokes", {})
 
         # { spoke_id: str } tracking spoke versions
         self.spoke_versions: Dict[str, str] = {}
