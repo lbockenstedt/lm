@@ -265,6 +265,14 @@ const VIEWS = {
                             <span class="text-slate-500">Deployment Mode</span>
                             <span class="text-slate-700">LXC Native</span>
                         </div>
+                        <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
+                            <span class="text-slate-500">UI Theme</span>
+                            <div class="flex items-center gap-2">
+                                <span class="text-xs font-medium text-slate-400 uppercase">LCARS Mode</span>
+                                <input type="checkbox" id="theme-toggle" onchange="toggleTheme(this.checked)"
+                                       class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500 cursor-pointer">
+                            </div>
+                        </div>
                     </div>
                 </div>
             `;
@@ -535,6 +543,15 @@ async function lookupFirewall() {
     }
 }
 
+function toggleTheme(enabled) {
+    if (enabled) {
+        document.body.classList.add('lcars-theme');
+    } else {
+        document.body.classList.remove('lcars-theme');
+    }
+    localStorage.setItem('lm_theme', enabled ? 'lcars' : 'default');
+}
+
 async function loadSystemLogs() {
     const logsContainer = document.getElementById('system-logs-container');
     if (!logsContainer) return;
@@ -564,6 +581,12 @@ async function loadSystemLogs() {
 
 document.addEventListener('DOMContentLoaded', () => {
     currentTenant = localStorage.getItem('lm_tenant') || 'default';
+
+    const savedTheme = localStorage.getItem('lm_theme');
+    if (savedTheme === 'lcars') {
+        toggleTheme(true);
+    }
+
     setView('dashboard');
     setInterval(updateStatus, 10000);
 });

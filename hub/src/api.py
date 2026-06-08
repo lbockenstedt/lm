@@ -122,7 +122,36 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/setup/appearance")
+    async def get_appearance():
+        hub = app.state.hub
+        config = hub.state.state.get("global_config", {}).get("appearance", {
+            "primary_color": "#01A982",
+            "navy_color": "#263040",
+            "logo_url": "hpe-svg", # Special keyword for the built-in HPE logo
+            "show_logo_left": True,
+            "show_logo_right": True
+        })
+        return {"config": config}
+
+    @app.post("/setup/appearance")
+    async def update_appearance(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            config = data.get("config", {})
+
+            global_config = hub.state.state.get("global_config", {})
+            global_config["appearance"] = config
+            hub.state.state["global_config"] = global_config
+            hub.state.save_state()
+
+            return {"status": "success", "message": "Appearance settings updated."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/logs")
+
 
     async def get_system_logs():
         hub = app.state.hub
