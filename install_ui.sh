@@ -1,16 +1,12 @@
 #!/bin/bash
 set -e
 
-echo "🚀 Installing Lab Manager WebUI (Native Static)..."
+echo "🚀 Deploying Lab Manager WebUI Assets (Native)..."
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "⚠️  This script must be run as root."
     exit 1
 fi
-
-# Install Nginx to serve the static frontend
-apt-get update
-apt-get install -y nginx git curl
 
 INSTALL_DIR="/root/lab-manager"
 mkdir -p "$INSTALL_DIR"
@@ -27,42 +23,20 @@ fi
 
 UI_DIST_DIR="$INSTALL_DIR/lm/ui/dist"
 
-# Check if the la-manager build exists
+# Check if the build exists
 if [ ! -d "$UI_DIST_DIR" ]; then
     echo "⚠️  Warning: UI build folder (dist) not found at $UI_DIST_DIR"
-    echo "The WebUI must be compiled (npm run build) and the 'dist' folder uploaded."
-    echo "The server will still start, but the dashboard will be empty."
+    echo "------------------------------------------------------------------------"
+    echo "The WebUI is a static build. It must be compiled on a development machine"
+    echo "using Node.js (npm run build) and the 'dist' folder must be uploaded to"
+    echo "the server at $UI_DIST_DIR."
+    echo "------------------------------------------------------------------------"
+    echo "The Hub will still start, but the dashboard will be empty."
+else
+    echo "✅ UI build assets found at $UI_DIST_DIR"
 fi
 
-echo "🛠️ Configuring Nginx to serve the Static UI..."
-cat <<EOF > /etc/nginx/sites-available/labmanager
-server {
-    listen 80;
-    server_name _;
-
-    root $UI_DIST_DIR;
-    index index.html;
-
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-
-    # Proxy API requests to the Hub Backend on port 8000
-    location /api/ {
-        proxy_pass http://localhost:8000/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-    }
-}
-EOF
-
-ln -sf /etc/nginx/sites-available/labmanager /etc/nginx/sites-enabled/
-rm -f /etc/nginx/sites-enabled/default
-systemctl restart nginx
-
-echo "🎉 WebUI installation complete!"
-echo "🌐 Dashboard Access: http://$(hostname -I | awk '{print \$1}')"
-echo "⚠️  Ensure the Hub Backend is running on port 8000 for the UI to function."
+echo ""
+echo "🎉 WebUI asset deployment complete!"
+echo "🌐 The Hub serves the dashboard natively on port 8000."
+echo "🚀 Ensure the Hub Backend is running: cd $INSTALL_DIR/lm && ./start_all.sh"

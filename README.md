@@ -18,7 +18,7 @@ For high-availability or distributed deployments, install components on separate
 | Component | Installation Command | Role |
 | :--- | :--- | :--- |
 | **Hub Backend** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_hub.sh \| bash` | Central API, State, & Messaging |
-| **WebUI** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_ui.sh \| bash` | Static Dashboard (via Nginx) |
+| **WebUI** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_ui.sh \| bash` | Static Dashboard (via Hub) |
 | **Client Sim** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/cs/main/install_cs.sh \| bash` | Traffic & DNS Simulation |
 | **Proxmox** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/install_pxmx.sh \| bash` | VM Lifecycle Management |
 | **OPNsense** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/opnsense/main/install_opnsense.sh \| bash` | Firewall & Interface Mgmt |
@@ -67,7 +67,7 @@ This tool verifies:
 
 ### Stopping Services
 ```bash
-pkill -f python && pkill -f node
+pkill -f python
 ```
 
 ---

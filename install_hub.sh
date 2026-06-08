@@ -46,4 +46,4 @@ echo "Installing backend requirements..."
 
 echo "🎉 Hub Backend installation complete!"
 echo "🚀 Start with: cd $INSTALL_DIR/lm && ./start_all.sh"
-echo "🌐 API Access: http://$(hostname -I | awk '{print \$1}'):8000"
+echo "🌐 API Access: http://$(hostname -I | awk '{print $1}'):8000"
