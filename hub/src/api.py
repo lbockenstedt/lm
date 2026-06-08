@@ -60,13 +60,21 @@ def create_app(hub):
             file_path = os.path.join(ui_dist_path, full_path)
             if os.path.exists(file_path) and os.path.isfile(file_path):
                 return FileResponse(file_path)
-            # Otherwise, serve index.html (standard for React SPAs)
-            return FileResponse(os.path.join(ui_dist_path, "index.html"))
+
+            # Fallback to index.html (standard for React SPAs)
+            index_html_path = os.path.join(ui_dist_path, "index.html")
+            if os.path.exists(index_html_path):
+                return FileResponse(index_html_path)
+
+            # If both are missing, return a 404 instead of crashing with a 500
+            raise HTTPException(status_code=404, detail="UI index.html not found in dist folder")
     else:
         # Fallback if dist folder is missing (e.g., during initial dev)
         @app.get("/")
         async def root():
             return {"message": "Hub API is running. UI build folder (dist) not found. Please run 'npm run build' in the ui directory."}
+
+    return app
 
 def run_api_server(hub, port=8000):
     app = create_app(hub)

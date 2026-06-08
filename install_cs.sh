@@ -55,4 +55,4 @@ if [ -f "requirements.txt" ]; then
 fi
 
 echo "🎉 Client Simulator native installation complete!"
-echo "📦 Version: 0.03"
+echo "📦 Version: 0.04"

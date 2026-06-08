@@ -75,10 +75,12 @@ Description=Lab Manager Orchestrator
 After=network.target
 
 [Service]
-Type=forking
+Type=oneshot
+RemainAfterExit=yes
 User=root
 WorkingDirectory=/root/lab-manager/lm
 ExecStart=/bin/bash /root/lab-manager/lm/start_all.sh
+ExecStop=/usr/bin/pkill -f python
 Restart=on-failure
 RestartSec=10
 
@@ -97,4 +99,4 @@ echo "📂 All modules are located in: $BASE_DIR"
 echo "⚙️ Service 'lab-manager' is enabled and running."
 echo "🚀 To manage the system: systemctl start|stop|restart lab-manager"
 echo "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print $1}'):8000"
-echo "📦 Version: 0.03"
+echo "📦 Version: 0.05"

@@ -2,8 +2,6 @@
 # Lab Manager Native Orchestrator (API-Only)
 # Launches only Python components. Node.js is no longer required.
 
-set -e
-
 # Get the absolute paths
 BASE_DIR="/root/lab-manager/lm"
 PARENT_DIR="/root/lab-manager"
@@ -31,8 +29,9 @@ echo "Starting Hub..."
 cd "$BASE_DIR"
 # Set PYTHONPATH to include the hub source directory so imports work
 export PYTHONPATH="$BASE_DIR/hub/src:$PYTHONPATH"
-nohup ./venv/bin/python hub/src/main.py > hub.log 2>&1 &
-echo "Hub started (logs: hub.log)"
+# Use absolute path for log to avoid any ambiguity
+nohup ./venv/bin/python hub/src/main.py > "$BASE_DIR/hub.log" 2>&1 &
+echo "Hub started (logs: $BASE_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
 # --- 2. Launch Spokes ---
