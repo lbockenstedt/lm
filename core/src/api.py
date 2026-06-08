@@ -427,8 +427,8 @@ def create_app(hub):
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
 
     # --- Static File Serving ---
-    # We serve the UI directly from the 'ui' directory (Vanilla JS version)
-    ui_path = os.path.join(os.path.dirname(__file__), "../../ui")
+    # We serve the UI directly from the 'WebUI' directory (Vanilla JS version)
+    ui_path = os.path.join(os.path.dirname(__file__), "../../WebUI")
 
     if os.path.exists(ui_path):
         # Serve the index.html for any route not matched by the API
@@ -444,7 +444,7 @@ def create_app(hub):
             if os.path.exists(index_html_path):
                 return FileResponse(index_html_path)
 
-            raise HTTPException(status_code=404, detail="UI index.html not found in ui folder")
+            raise HTTPException(status_code=404, detail="UI index.html not found in WebUI folder")
     else:
         # Fallback if ui directory is missing
         @app.get("/")
