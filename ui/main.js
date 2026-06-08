@@ -201,9 +201,6 @@ const VIEWS = {
                                 </select>
                             </div>
                         </div>
-                        <div class="p-4 rounded-md bg-green-50 border border-green-200 text-sm text-green-700">
-                            Multi-tenancy is currently in <strong class="text-green-800">Prototype Mode</strong>. Tenant selection is simulated and local logins are enabled.
-                        </div>
 
                         <div class="pt-6 border-t border-slate-200">
                             <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Maintenance</h3>
