@@ -667,11 +667,12 @@ function applyAppearance(config) {
 
     if (rightLogo) {
         rightLogo.style.display = config.show_logo_right ? 'flex' : 'none';
-        if (config.logo_url === 'hpe-svg' || !config.logo_url) {
+        const rightUrl = config.logo_url_right || config.logo_url;
+        if (rightUrl === 'hpe-svg' || !rightUrl) {
             rightLogo.innerHTML = 'LM';
             rightLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
         } else {
-            rightLogo.innerHTML = `<img src="${config.logo_url}" class="h-full w-auto object-contain">`;
+            rightLogo.innerHTML = `<img src="${rightUrl}" class="h-full w-auto object-contain">`;
             rightLogo.className = 'h-8 w-auto flex items-center justify-center';
         }
     }

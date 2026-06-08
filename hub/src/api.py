@@ -129,6 +129,7 @@ def create_app(hub):
             "primary_color": "#01A982",
             "navy_color": "#263040",
             "logo_url": "hpe-svg", # Special keyword for the built-in HPE logo
+            "logo_url_right": "hpe-svg",
             "show_logo_left": True,
             "show_logo_right": True
         })
