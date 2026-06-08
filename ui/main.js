@@ -750,6 +750,7 @@ function selectVM(vmId) {
         lookupFirewall();
     }
 }
+async function lookupFirewall() {
     const vmId = document.getElementById('vm-id-input').value.trim();
     if (!vmId) return;
 

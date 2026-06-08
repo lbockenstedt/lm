@@ -25,7 +25,7 @@ For high-availability or distributed deployments, install components on separate
 
 #### 🤖 Proxmox Local Agent
 The Proxmox module utilizes a local agent to gather real-time telemetry and execute host-level commands.
-- **Installation**: `sudo bash /root/lm-manager/pxmx/agent/install_agent.sh --spoke-url ws://<SPOKE_IP>:8766`
+- **Installation**: `bash /root/lm-manager/pxmx/agent/install_agent.sh --spoke-url ws://<SPOKE_IP>:8766`
 - **Purpose**: Pushes CPU/RAM/Disk metrics and VM lists to the Spoke every 60s.
 - **Connectivity**: Uses a persistent WebSocket session on port **8766**.
 
