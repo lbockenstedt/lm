@@ -85,9 +85,21 @@ const VIEWS = {
                         </div>
                     </div>
 
-                    <div id="vm-empty-state" class="py-12 text-center text-slate-400">
+                    <div id="vm-inventory" class="space-y-4">
+                        <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">Cluster Inventory</h3>
+                        <div id="vm-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                            <div class="animate-pulse flex space-x-4 p-3 bg-slate-50 rounded-md">
+                                <div class="flex-1 space-y-3 py-1">
+                                    <div class="h-2 bg-slate-200 rounded w-1/4"></div>
+                                    <div class="h-2 bg-slate-200 rounded w-1/2"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="vm-empty-state" class="hidden py-12 text-center text-slate-400">
                         <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                        <p>Enter a VM ID to inspect its Proxmox resource mapping.</p>
+                        <p>No VMs found in the cluster.</p>
                     </div>
                 </div>
             </div>
@@ -499,6 +511,9 @@ function setView(viewId) {
             loadSetupConfig();
             if (currentSubView === 'Spoke Approvals') loadPendingSpokes();
         }
+        if (viewId === 'pxmx') {
+            loadVMInventory();
+        }
     }
 
     if (viewId === 'dashboard' || viewId === 'settings') updateStatus();
@@ -687,7 +702,54 @@ async function handleSearch(query) {
     }
 }
 
-async function lookupFirewall() {
+async function loadVMInventory() {
+    const listEl = document.getElementById('vm-list');
+    const inventoryEl = document.getElementById('vm-inventory');
+    const emptyStateEl = document.getElementById('vm-empty-state');
+    if (!listEl) return;
+
+    try {
+        const response = await fetch('/status');
+        if (!response.ok) throw new Error('Failed to fetch status');
+        const data = await response.json();
+        const resources = data.state?.resources || {};
+        const vms = Object.entries(resources);
+
+        if (vms.length === 0) {
+            if (inventoryEl) inventoryEl.classList.add('hidden');
+            if (emptyStateEl) emptyStateEl.classList.remove('hidden');
+            return;
+        }
+
+        if (emptyStateEl) emptyStateEl.classList.add('hidden');
+        if (inventoryEl) inventoryEl.classList.remove('hidden');
+
+        listEl.innerHTML = vms.map(([id, info]) => {
+            const ip = info.metadata?.ip || 'No IP';
+            const name = info.metadata?.name || id;
+            return `
+                <div onclick="selectVM('${id}')" class="p-3 rounded-md bg-white border border-slate-200 hover:border-green-500 cursor-pointer transition-all group">
+                    <div class="flex justify-between items-start">
+                        <span class="text-sm font-bold text-slate-800 group-hover:text-green-600 transition-colors">${name}</span>
+                        <span class="text-[10px] font-mono text-slate-400">${id}</span>
+                    </div>
+                    <div class="text-xs text-slate-500 mt-1 font-mono">${ip}</div>
+                </div>
+            `;
+        }).join('');
+    } catch (err) {
+        console.error('Error loading VM inventory:', err);
+        listEl.innerHTML = `<div class="col-span-full text-center text-red-500 text-xs py-4">Error loading inventory: ${err.message}</div>`;
+    }
+}
+
+function selectVM(vmId) {
+    const input = document.getElementById('vm-id-input');
+    if (input) {
+        input.value = vmId;
+        lookupFirewall();
+    }
+}
     const vmId = document.getElementById('vm-id-input').value.trim();
     if (!vmId) return;
 
