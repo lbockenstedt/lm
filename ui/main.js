@@ -1,7 +1,7 @@
 const VIEWS = {
     dashboard: {
         name: 'Dashboard',
-        subMenus: ['Overview', 'Global Status', 'Notifications'],
+        subMenus: ['Overview', 'Notifications'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a8 8 0 018 8 8 8 0 018-8m-12 8a8 8 0 01-8-8 8 8 0 018-8m0 16v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
         render: () => `
             <div class="space-y-6">
@@ -435,13 +435,21 @@ function setSubView(subMenu) {
             </div>
         `).join('');
 
+        topNav.innerHTML = view.subMenus.map(menu => `
+            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+                ${menu}
+            </div>
+        `).join('');
+
         // Re-render content
         const viewport = document.getElementById('viewport');
         if (viewport) {
             viewport.innerHTML = view.render(currentSubView);
             if (currentView === 'setup') {
                 loadSetupConfig();
-                if (currentSubView === 'Spoke Approvals') loadPendingSpokes();
+                if (currentSubView === 'Spoke Approvals') {
+                    loadPendingSpokes();
+                }
             }
             if (currentView === 'settings' && currentSubView === 'Logs') loadSystemLogs();
         }
@@ -698,7 +706,7 @@ function applyAppearance(config) {
             rightLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
         } else {
             rightLogo.innerHTML = `<img src="${rightUrl}" class="h-full w-auto object-contain">`;
-            rightLogo.className = 'h-8 w-auto flex items-center justify-center';
+            rightLogo.className = 'h-12 w-auto flex items-center justify-center';
         }
     }
 }
@@ -727,14 +735,20 @@ async function loadAppearance() {
 }
 
 async function loadPendingSpokes() {
+    console.log('Loading pending spokes...');
     const listEl = document.getElementById('pending-spokes-list');
-    if (!listEl) return;
+    if (!listEl) {
+        console.error('Could not find pending-spokes-list element');
+        return;
+    }
 
     try {
         const response = await fetch('/setup/pending_spokes');
-        if (!response.ok) throw new Error('Failed to fetch pending spokes');
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
         const pending = data.pending_spokes || [];
+
+        console.log(`Found ${pending.length} pending spokes:`, pending);
 
         if (pending.length === 0) {
             listEl.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No spokes currently awaiting approval.</div>`;
@@ -753,6 +767,7 @@ async function loadPendingSpokes() {
             </div>
         `).join('');
     } catch (err) {
+        console.error('Error in loadPendingSpokes:', err);
         listEl.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading pending spokes: ${err.message}</div>`;
     }
 }
