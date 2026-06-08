@@ -680,9 +680,40 @@ async function updateAppearance() {
     }
 }
 
+function renderLogo(config, side) {
+    const container = document.getElementById(`logo-${side}`);
+    if (!container) return;
+
+    const showLogo = side === 'left' ? config.show_logo_left : config.show_logo_right;
+    const logoUrl = side === 'left' ? config.logo_url : config.logo_url_right;
+
+    if (!showLogo) {
+        container.innerHTML = '';
+        return;
+    }
+
+    let html = '';
+    if (logoUrl === 'hpe-svg' || !logoUrl) {
+        html = `
+            <svg viewBox="0 0 504 144" class="${side === 'left' ? 'h-10' : 'h-8'} w-auto" xmlns="http://www.w3.org/2000/svg" fill="var(--hpe-green)">
+                <rect x="0" y="40" width="30" height="64" fill="currentColor"/>
+                <rect x="40" y="40" width="30" height="64" fill="currentColor"/>
+                <rect x="80" y="40" width="30" height="64" fill="currentColor"/>
+                <text x="125" y="95" font-family="Arial, sans-serif" font-weight="900" font-size="64" fill="currentColor">HPE</text>
+            </svg>
+        `;
+    } else {
+        html = `<img src="${logoUrl}" class="${side === 'left' ? 'h-12' : 'h-8'} w-auto" alt="Logo" onerror="this.style.display='none'">`;
+    }
+
+    container.innerHTML = html;
+}
+
 function applyAppearance(config) {
     document.documentElement.style.setProperty('--hpe-green', config.primary_color);
     document.documentElement.style.setProperty('--hpe-navy', config.navy_color);
+    renderLogo(config, 'left');
+    renderLogo(config, 'right');
 }
 
 async function loadAppearance() {
