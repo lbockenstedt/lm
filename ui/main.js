@@ -180,6 +180,30 @@ const VIEWS = {
                     </div>
                 `;
             }
+            if (subMenu === 'Proxmox') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Proxmox Configuration</h2>
+                        <div class="hpe-card rounded-lg p-6 space-y-6">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Default Node</label>
+                                    <input type="text" id="pxmx-default-node" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Cluster ID</label>
+                                    <input type="text" id="pxmx-cluster-id" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                            </div>
+                            <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                <button onclick="saveProxmoxConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                    Save Configuration
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
             return `
                 <div class="space-y-6">
                     <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Setup</h2>
@@ -201,7 +225,6 @@ const VIEWS = {
                                 </select>
                             </div>
                         </div>
-
                         <div class="pt-6 border-t border-slate-200">
                             <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Maintenance</h3>
                             <div class="flex flex-col gap-4 p-4 rounded-md bg-slate-50 border border-slate-200">
@@ -385,8 +408,43 @@ async function loadSetupConfig() {
 
         if (chk) chk.checked = config.autoupdate !== false; // Default to true
         if (int) int.value = config.update_interval || 1;
+
+        // Load module-specific configs if we are in a module subview
+        if (currentView === 'setup') {
+            if (currentSubView === 'Proxmox') {
+                loadProxmoxConfig(config.pxmx || {});
+            }
+        }
     } catch (err) {
         console.error('Failed to load setup config', err);
+    }
+}
+
+function loadProxmoxConfig(config) {
+    const nodeEl = document.getElementById('pxmx-default-node');
+    const clusterEl = document.getElementById('pxmx-cluster-id');
+    if (nodeEl) nodeEl.value = config.default_node || '';
+    if (clusterEl) clusterEl.value = config.cluster_id || '';
+}
+
+async function saveProxmoxConfig() {
+    const config = {
+        default_node: document.getElementById('pxmx-default-node').value,
+        cluster_id: document.getElementById('pxmx-cluster-id').value,
+    };
+    try {
+        const response = await fetch('/setup/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { pxmx: config } })
+        });
+        if (response.ok) {
+            alert('Proxmox configuration saved successfully!');
+        } else {
+            alert('Failed to save Proxmox configuration.');
+        }
+    } catch (err) {
+        alert('Error saving Proxmox configuration: ' + err.message);
     }
 }
 
@@ -426,12 +484,6 @@ function setSubView(subMenu) {
     if (view) {
         // Update sub-nav active state
         const topNav = document.getElementById('top-nav');
-        topNav.innerHTML = view.subMenus.map(menu => `
-            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
-                ${menu}
-            </div>
-        `).join('');
-
         topNav.innerHTML = view.subMenus.map(menu => `
             <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
                 ${menu}
@@ -506,6 +558,14 @@ async function updateStatus() {
                 }
             }
         });
+
+        // Dynamic setup submenus based on approved modules
+        const baseSetupMenus = ['General', 'Tenant Config', 'User Access', 'Spoke Approvals'];
+        const extendedSetupMenus = [...baseSetupMenus];
+        if (activeModules.has('pxmx')) {
+            extendedSetupMenus.push('Proxmox');
+        }
+        VIEWS.setup.subMenus = extendedSetupMenus;
 
         const staticNavs = ['dashboard', 'settings', 'setup'];
         const dynamicHtml = Array.from(activeModules).map(viewId => {
