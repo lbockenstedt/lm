@@ -20,159 +20,198 @@
 
         /* LCARS Theme Overrides */
         body.lcars-theme {
-            --hpe-bg-light: #000;
-            --hpe-white: #000;
-            --hpe-text-main: #ffcc00;
-            --hpe-text-muted: #ff9900;
-            --hpe-border: #ffcc00;
-            --hpe-green: #cc6699;
-            --hpe-navy: #000;
-            background-color: #000 !important;
-            color: #ffcc00 !important;
-            font-family: 'Inter', 'Segoe UI', Roboto, Arial, sans-serif !important;
+            --lcars-gold: #ffcc00;
+            --lcars-orange: #ff9900;
+            --lcars-pink: #cc6699;
+            --lcars-blue: #6699ff;
+            --lcars-black: #000;
+            background-color: var(--lcars-black) !important;
+            color: var(--lcars-gold) !important;
+            font-family: 'Inter', sans-serif !important;
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 2px;
+            display: grid !important;
+            grid-template-columns: 220px 1fr !important;
+            grid-template-rows: 100px 1fr !important;
+            flex: none !important; /* Kill flex layout */
         }
 
+        /* THE SIDEBAR AS A COMMAND COLUMN */
         body.lcars-theme .hpe-sidebar {
-            background-color: #000 !important;
-            border-right: 30px solid #ffcc00 !important;
-            border-radius: 0;
-            padding-right: 10px;
+            grid-row: 1 / 3;
+            background: var(--lcars-black) !important;
+            border: none !important;
+            padding: 20px 0 20px 20px !important;
+            width: auto !important;
+            display: flex !important;
+            flex-direction: column !important;
+            justify-content: flex-start !important;
         }
 
+        /* THE TOPBAR AS AN UPPER BEAM */
         body.lcars-theme .hpe-topbar {
-            background-color: #000 !important;
-            border-bottom: 30px solid #ff9900 !important;
-            border-radius: 0;
-            height: 60px !important;
-        }
-
-        body.lcars-theme .hpe-card {
-            background: #000 !important;
-            border: 2px solid #ffcc00 !important;
-            border-radius: 40px 0 40px 0 !important;
-            box-shadow: none !important;
+            grid-column: 2 / 3;
+            background: var(--lcars-black) !important;
+            border: none !important;
+            height: 100px !important;
             position: relative;
-            padding-top: 20px;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
         }
 
-        /* LCARS Block-style Header for Cards */
-        body.lcars-theme .hpe-card::before {
+        /* THE "ELBOW" - The signature LCARS curved structural beam */
+        body.lcars-theme .hpe-topbar::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 30px;
+            background: var(--lcars-orange);
+            border-radius: 0 0 40px 40px;
+            box-shadow: 0 6px 0 var(--lcars-gold);
+            z-index: -1;
+        }
+
+        body.lcars-theme .hpe-sidebar::after {
             content: "";
             position: absolute;
             top: 0;
-            left: 0;
-            width: 60px;
-            height: 15px;
-            background: #cc6699;
-            border-radius: 0 0 15px 0;
+            right: 0;
+            width: 30px;
+            height: 100%;
+            background: var(--lcars-gold);
+            border-radius: 0 40px 40px 0;
+            z-index: -1;
         }
 
+        /* INTERLOCKING NAV BLOCKS */
         body.lcars-theme .nav-item {
-            color: #ffcc00 !important;
-            background: #333 !important;
+            color: var(--lcars-black) !important;
+            background: var(--lcars-blue) !important;
             border: none !important;
             border-radius: 20px 0 0 20px !important;
-            margin-bottom: 8px;
-            padding: 10px 20px !important;
+            margin-bottom: 12px !important;
+            padding: 15px !important;
+            text-align: right !important;
+            font-weight: 900 !important;
             transition: all 0.1s ease;
-            text-align: right;
-            font-weight: bold;
         }
 
         body.lcars-theme .nav-item:hover {
-            background: #ffcc00 !important;
-            color: #000 !important;
+            background: var(--lcars-gold) !important;
+            transform: translateX(8px);
         }
 
         body.lcars-theme .nav-item.active {
-            background: #ff9900 !important;
-            color: #000 !important;
+            background: var(--lcars-pink) !important;
+            color: white !important;
             border-radius: 0 20px 20px 0 !important;
-            text-align: left;
+            text-align: left !important;
         }
 
-        body.lcars-theme .sub-nav-item {
-            color: #6699ff !important;
-            background: #222 !important;
-            border: 1px solid #6699ff !important;
-            border-radius: 15px !important;
-            padding: 4px 12px !important;
-            margin: 0 4px;
-            text-align: center;
-        }
-
-        body.lcars-theme .sub-nav-item.active {
-            background: #ffcc00 !important;
-            color: #000 !important;
-            border-color: #ffcc00 !important;
-            font-weight: bold !important;
-        }
-
+        /* CONTENT VIEWPORT - Pushed into the "Elbow" */
         body.lcars-theme #viewport {
-            background-color: #000 !important;
-            padding-left: 40px !important;
+            grid-column: 2 / 3;
+            background-color: var(--lcars-black) !important;
+            padding: 40px !important;
+            border-left: 25px solid var(--lcars-gold) !important;
+            border-top: 25px solid var(--lcars-orange) !important;
+            border-radius: 0 0 0 60px !important;
+            margin: 0 !important;
         }
 
+        /* LCARS-STYLE CARDS - Modular data panels */
+        body.lcars-theme .hpe-card {
+            background: #080808 !important;
+            border: 3px solid var(--lcars-gold) !important;
+            border-radius: 50px 0 50px 0 !important;
+            padding: 25px !important;
+            position: relative;
+            box-shadow: inset 0 0 20px rgba(255,204,0,0.1) !important;
+        }
+
+        body.lcars-theme .hpe-card::before {
+            content: "DATA_SEC_01";
+            position: absolute;
+            top: -12px;
+            left: 30px;
+            background: var(--lcars-pink);
+            color: white;
+            font-size: 9px;
+            padding: 2px 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+
+        /* THE BUTTONS - Aggressive override for all button-like elements */
+        body.lcars-theme button,
+        body.lcars-theme [onclick].bg-\[#01A982\],
+        body.lcars-theme [onclick].bg-green-600 {
+            background-color: var(--lcars-gold) !important;
+            color: var(--lcars-black) !important;
+            border-radius: 25px 0 25px 0 !important;
+            font-weight: 900 !important;
+            text-transform: uppercase !important;
+            border: none !important;
+            padding: 12px 30px !important;
+            transition: all 0.2s ease;
+            box-shadow: 6px 6px 0 var(--lcars-orange) !important;
+            cursor: pointer;
+        }
+
+        body.lcars-theme button:hover,
+        body.lcars-theme [onclick].bg-\[#01A982\]:hover,
+        body.lcars-theme [onclick].bg-green-600:hover {
+            background-color: var(--lcars-orange) !important;
+            transform: translate(4px, 4px);
+            box-shadow: 2px 2px 0 var(--lcars-gold) !important;
+        }
+
+        /* INPUTS as recessed terminals */
         body.lcars-theme input,
         body.lcars-theme select {
             background-color: #000 !important;
-            border: 2px solid #ffcc00 !important;
-            color: #ffcc00 !important;
-            border-radius: 15px 0 15px 0 !important;
-            font-family: monospace !important;
+            border: 3px solid var(--lcars-blue) !important;
+            color: var(--lcars-blue) !important;
+            border-radius: 0 !important;
+            font-family: 'Courier New', monospace !important;
             padding-left: 15px !important;
-        }
-
-        body.lcars-theme button {
-            background-color: #ffcc00 !important;
-            color: #000 !important;
-            border-radius: 20px 0 20px 0 !important;
-            font-weight: bold !important;
             text-transform: uppercase !important;
-            border: none !important;
-            padding: 8px 20px !important;
-            transition: all 0.2s ease;
         }
 
-        body.lcars-theme button:hover {
-            background-color: #ff9900 !important;
-            transform: scale(1.05);
+        body.lcars-theme .sub-nav-item {
+            background: var(--lcars-orange) !important;
+            color: var(--lcars-black) !important;
+            border-radius: 20px !important;
+            font-weight: bold !important;
+            padding: 6px 18px !important;
+            margin: 0 6px !important;
+        }
+
+        body.lcars-theme .sub-nav-item.active {
+            background: var(--lcars-blue) !important;
+            color: white !important;
         }
 
         body.lcars-theme .text-slate-500,
-        body.lcars-theme .text-slate-400,
+        body.lcars-s-theme .text-slate-400,
         body.lcars-theme .text-slate-600 {
-            color: #ff9900 !important;
+            color: var(--lcars-orange) !important;
         }
 
         body.lcars-theme .text-blue-600 {
-            color: #6699ff !important;
+            color: var(--lcars-blue) !important;
         }
 
         body.lcars-theme .bg-slate-50,
         body.lcars-theme .bg-slate-100 {
-            background-color: #000 !important;
-            border: 2px solid #ffcc00 !important;
-            border-radius: 15px 0 15px 0 !important;
+            background-color: #050505 !important;
+            border: 3px solid var(--lcars-gold) !important;
+            border-radius: 20px 0 20px 0 !important;
         }
-
-        body.lcars-theme .status-pulse {
-            background-color: #ffcc00 !important;
-        }
-
-        /* Add a decorative LCARS strip to the bottom of the viewport */
-        body.lcars-theme ::after {
-            content: "";
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            width: 100%;
-            height: 10px;
-            background: linear-gradient(90deg, #ffcc00 20%, #ff9900 20%, #ff9900 40%, #cc6699 40%, #cc6699 60%, #ff9900 60%, #ff9900 80%, #ffcc00 80%);
-            z-index: 100;
-        }
+ la-manager secret $\rightarrow$ lab-manager-secret.
 
         /* Star Wars Imperial Theme Overrides */
         body.sw-theme {
@@ -308,7 +347,7 @@
     <aside class="h-full w-64 hpe-sidebar flex flex-col">
         <div class="p-6 mb-4">
             <div class="flex items-center gap-3">
-                <div class="w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm">LM</div>
+                <div id="logo-left" class="w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm">LM</div>
                 <h1 class="text-xl font-bold tracking-tight text-[#263040]">Lab Manager</h1>
             </div>
             <div id="connection-status" class="mt-4 flex items-center gap-2 px-2 py-1 rounded-full bg-slate-100 text-[10px] font-medium w-fit border border-slate-200">
@@ -349,6 +388,7 @@
             </div>
 
             <div class="flex items-center gap-4">
+                <div id="logo-right" class="hidden h-8 w-auto flex items-center justify-center"></div>
                 <!-- GLOBAL SEARCH -->
                 <div class="relative group">
                     <span class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">

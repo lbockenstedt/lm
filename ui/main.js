@@ -270,11 +270,48 @@ const VIEWS = {
                             <div class="flex items-center gap-2">
                                 <span class="text-xs font-medium text-slate-400 uppercase">Theme:</span>
                                 <select id="theme-selector" onchange="setTheme(this.value)"
-                                       class="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-800 outline-none focus:ring-1 focus la-manager secret $\rightarrow$ lab-manager-secret.focus:ring-green-500 cursor-pointer">
+                                       class="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500 cursor-pointer">
                                     <option value="default">HPE Default</option>
                                     <option value="lcars">Star Trek (LCARS)</option>
                                     <option value="sw">Star Wars (Imperial)</option>
                                 </select>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-6 hpe-card rounded-lg p-6 space-y-6">
+                        <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Appearance Configuration</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div class="space-y-4">
+                                <div class="flex items-center justify-between gap-4">
+                                    <label class="text-xs font-bold text-slate-500 uppercase">Primary Color</label>
+                                    <div class="flex items-center gap-2">
+                                        <input type="color" id="app-primary-color" oninput="updateAppearance()" class="w-6 h-6 border-none cursor-pointer bg-transparent">
+                                        <input type="text" id="app-primary-hex" class="w-20 bg-white border border-slate-300 rounded px-2 py-0.5 text-xs font-mono text-slate-800 outline-none">
+                                    </div>
+                                </div>
+                                <div class="flex items-center justify-between gap-4">
+                                    <label class="text-xs font-bold text-slate-500 uppercase">Navy Color</label>
+                                    <div class="flex items-center gap-2">
+                                        <input type="color" id="app-navy-color" oninput="updateAppearance()" class="w-6 h-6 border-none cursor-pointer bg-transparent">
+                                        <input type="text" id="app-navy-hex" class="w-20 bg-white border border-slate-300 rounded px-2 py-0.5 text-xs font-mono text-slate-800 outline-none">
+                                    </div>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs font-bold text-slate-500 uppercase block">Custom Logo URL</label>
+                                    <input type="text" id="app-logo-url" oninput="updateAppearance()"
+                                           placeholder="Enter image URL or 'hpe-svg'"
+                                           class="w-full bg-white border border-slate-300 rounded px-3 py-2 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500">
+                                </div>
+                            </div>
+                            <div class="space-y-4">
+                                <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
+                                    <span class="text-xs font-medium text-slate-600">Show Logo (Left)</span>
+                                    <input type="checkbox" id="app-show-logo-left" onchange="updateAppearance()" class="w-4 h-4 text-green-600 border-slate-300 rounded">
+                                </div>
+                                <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
+                                    <span class="text-xs font-medium text-slate-600">Show Logo (Right)</span>
+                                    <input type="checkbox" id="app-show-logo-right" onchange="updateAppearance()" class="w-4 h-4 text-green-600 border-slate-300 rounded">
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -614,11 +651,30 @@ function applyAppearance(config) {
     document.documentElement.style.setProperty('--hpe-green', config.primary_color);
     document.documentElement.style.setProperty('--hpe-navy', config.navy_color);
 
-    // Handle logo visibility
-    const leftLogo = document.querySelector('.hpe-sidebar .flex.items-center.gap-3 div');
-    if (leftLogo) leftLogo.style.display = config.show_logo_left ? 'flex' : 'none';
+    const leftLogo = document.getElementById('logo-left');
+    const rightLogo = document.getElementById('logo-right');
 
-    // Note: Right logo is not currently in index.html, but logic is here for when it is added
+    if (leftLogo) {
+        leftLogo.style.display = config.show_logo_left ? 'flex' : 'none';
+        if (config.logo_url === 'hpe-svg' || !config.logo_url) {
+            leftLogo.innerHTML = 'LM';
+            leftLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
+        } else {
+            leftLogo.innerHTML = `<img src="${config.logo_url}" class="w-full h-full object-contain rounded">`;
+            leftLogo.className = 'w-8 h-8 flex items-center justify-center';
+        }
+    }
+
+    if (rightLogo) {
+        rightLogo.style.display = config.show_logo_right ? 'flex' : 'none';
+        if (config.logo_url === 'hpe-svg' || !config.logo_url) {
+            rightLogo.innerHTML = 'LM';
+            rightLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
+        } else {
+            rightLogo.innerHTML = `<img src="${config.logo_url}" class="h-full w-auto object-contain">`;
+            rightLogo.className = 'h-8 w-auto flex items-center justify-center';
+        }
+    }
 }
 
 async function loadAppearance() {
