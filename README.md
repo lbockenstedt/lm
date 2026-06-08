@@ -25,22 +25,9 @@ For high-availability or distributed deployments, install components on separate
 
 ---
 
-## 🖥️ The WebUI (Static Deployment)
+## 🖥️ Accessing the Dashboard
 
-To maintain a zero-dependency footprint on the server, the WebUI is served as a **static build**. 
-
-**1. Build the UI (on a Dev machine with Node.js):**
-```bash
-cd lm/ui
-npm install
-npm run build
-```
-
-**2. Deploy the Build:**
-Upload the resulting `dist` folder to the Hub server at: `/root/lab-manager/lm/ui/dist`
-
-**3. Access the Dashboard:**
-The Hub serves the UI natively on port 8000.
+The Hub serves the WebUI natively. No separate build or installation is required.
 - **Dashboard**: `http://<HUB_IP>:8000`
 - **REST API**: `http://<HUB_IP>:8000/status`
 

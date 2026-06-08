@@ -21,19 +21,13 @@ else
     git clone https://github.com/lbockenstedt/lm.git
 fi
 
-UI_DIST_DIR="$INSTALL_DIR/lm/ui/dist"
+UI_DIST_DIR="$INSTALL_DIR/lm/ui"
 
-# Check if the build exists
-if [ ! -d "$UI_DIST_DIR" ]; then
-    echo "⚠️  Warning: UI build folder (dist) not found at $UI_DIST_DIR"
-    echo "------------------------------------------------------------------------"
-    echo "The WebUI is a static build. It must be compiled on a development machine"
-    echo "using Node.js (npm run build) and the 'dist' folder must be uploaded to"
-    echo "the server at $UI_DIST_DIR."
-    echo "------------------------------------------------------------------------"
-    echo "The Hub will still start, but the dashboard will be empty."
+# Verify UI assets are present
+if [ -d "$UI_DIST_DIR" ]; then
+    echo "✅ UI assets found at $UI_DIST_DIR"
 else
-    echo "✅ UI build assets found at $UI_DIST_DIR"
+    echo "⚠️  Warning: UI folder not found at $UI_DIST_DIR"
 fi
 
 echo ""

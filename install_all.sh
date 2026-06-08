@@ -19,7 +19,7 @@ BASE_DIR="/root/lab-manager"
 mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
 
-REPOS=("lm" "cs" "pxmx" "opnsense")
+REPOS=("lm" "cs" "pxmx" "opnsense" "cppm")
 
 # 4. Repository Sync
 for repo in "${REPOS[@]}"; do
@@ -59,10 +59,10 @@ cd "$BASE_DIR/pxmx"
 bash ./install_pxmx.sh
 cd "$BASE_DIR"
 
-# OPNsense
-echo "Setting up OPNsense Manager..."
-cd "$BASE_DIR/opnsense"
-bash ./install_opnsense.sh
+# CPPM
+echo "Setting up ClearPass Policy Manager..."
+cd "$BASE_DIR/cppm"
+bash ./install.sh
 cd "$BASE_DIR"
 
 # 6. Persistence & Auto-start
