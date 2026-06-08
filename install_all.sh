@@ -12,7 +12,7 @@ fi
 # 2. System Dependencies
 echo "📦 Installing system dependencies..."
 apt-get update
-apt-get install -y python3-pip python3-venv git curl
+apt-get install -y python3-pip python3-venv git curl lsof net-tools
 
 # 3. Path Configuration
 BASE_DIR="/root/lab-manager"

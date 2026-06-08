@@ -200,10 +200,15 @@ class LabManagerHub:
         # Load version
         version = "unknown"
         try:
-            with open("../VERSION", "r") as f:
+            # Try relative to the script directory first, then fallback to repo root
+            version_path = os.path.join(os.path.dirname(__file__), "../../VERSION")
+            if not os.path.exists(version_path):
+                version_path = os.path.join(os.path.dirname(__file__), "../VERSION")
+
+            with open(version_path, "r") as f:
                 version = f.read().strip()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Could not load version file: {e}")
 
         # Start the REST API server in a separate thread
         api_thread = threading.Thread(target=run_api_server, args=(self,), daemon=True)
