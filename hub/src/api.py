@@ -46,33 +46,29 @@ def create_app(hub):
             raise HTTPException(status_code=500, detail=str(e))
 
     # --- Static File Serving ---
-    # This mimics the webui-hub pattern: serve the built frontend from the dist folder
-    ui_dist_path = os.path.join(os.path.dirname(__file__), "../../ui/dist")
+    # We serve the UI directly from the 'ui' directory (Vanilla JS version)
+    ui_path = os.path.join(os.path.dirname(__file__), "../../ui")
 
-    if os.path.exists(ui_dist_path):
-        # Serve the static assets (js, css, images)
-        app.mount("/assets", StaticFiles(directory=os.path.join(ui_dist_path, "assets")), name="static")
-
+    if os.path.exists(ui_path):
         # Serve the index.html for any route not matched by the API
         @app.get("/{full_path:path}")
-        async def serve_spa(full_path: str):
-            # If it's a request for a file that exists in dist, serve it
-            file_path = os.path.join(ui_dist_path, full_path)
+        async def serve_ui(full_path: str):
+            # If it's a request for a file that exists in the ui folder, serve it
+            file_path = os.path.join(ui_path, full_path)
             if os.path.exists(file_path) and os.path.isfile(file_path):
                 return FileResponse(file_path)
 
-            # Fallback to index.html (standard for React SPAs)
-            index_html_path = os.path.join(ui_dist_path, "index.html")
+            # Fallback to index.html for all other routes
+            index_html_path = os.path.join(ui_path, "index.html")
             if os.path.exists(index_html_path):
                 return FileResponse(index_html_path)
 
-            # If both are missing, return a 404 instead of crashing with a 500
-            raise HTTPException(status_code=404, detail="UI index.html not found in dist folder")
+            raise HTTPException(status_code=404, detail="UI index.html not found in ui folder")
     else:
-        # Fallback if dist folder is missing (e.g., during initial dev)
+        # Fallback if ui directory is missing
         @app.get("/")
         async def root():
-            return {"message": "Hub API is running. UI build folder (dist) not found. Please run 'npm run build' in the ui directory."}
+            return {"message": "Hub API is running. UI folder not found. Please check repository structure."}
 
     return app
 
