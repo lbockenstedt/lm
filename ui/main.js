@@ -736,7 +736,7 @@ async function loadAppearance() {
 }
 
 async function loadPendingSpokes() {
-    console.log('Loading pending spokes...');
+    console.log('Loading spoke statuses...');
     const listEl = document.getElementById('pending-spokes-list');
     if (!listEl) {
         console.error('Could not find pending-spokes-list element');
@@ -747,29 +747,39 @@ async function loadPendingSpokes() {
         const response = await fetch('/setup/pending_spokes');
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
-        const pending = data.pending_spokes || [];
+        const spokes = data.spokes || [];
 
-        console.log(`Found ${pending.length} pending spokes:`, pending);
+        console.log(`Found ${spokes.length} known spokes:`, spokes);
 
-        if (pending.length === 0) {
-            listEl.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No spokes currently awaiting approval.</div>`;
+        if (spokes.length === 0) {
+            listEl.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No spokes have attempted to connect yet.</div>`;
             return;
         }
 
-        listEl.innerHTML = pending.map(sid => `
-            <div class="flex items-center justify-between p-4 rounded-lg bg-slate-50 border border-slate-200 hover:border-blue-500 transition-all">
-                <div class="flex items-center gap-3">
-                    <div class="w-2 h-2 rounded-full bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.6)]"></div>
-                    <span class="text-sm font-medium text-slate-700">${sid}</span>
+        listEl.innerHTML = spokes.map(spoke => {
+            const sid = spoke.spoke_id;
+            const isApproved = spoke.approved;
+
+            return `
+                <div class="flex items-center justify-between p-4 rounded-lg bg-slate-50 border border-slate-200 hover:border-blue-500 transition-all">
+                    <div class="flex items-center gap-3">
+                        <div class="w-2 h-2 rounded-full ${isApproved ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.6)]'}"></div>
+                        <span class="text-sm font-medium text-slate-700">${sid}</span>
+                        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isApproved ? 'bg-green-100 text-green-600' : 'bg-yellow-100 text-yellow-600'}">
+                            ${isApproved ? 'Approved' : 'Pending'}
+                        </span>
+                    </div>
+                    ${!isApproved ? `
+                        <button onclick="approveSpoke('${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
+                            Approve
+                        </button>
+                    ` : '<span class="text-xs text-slate-400 italic">Authorized</span>'}
                 </div>
-                <button onclick="approveSpoke('${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
-                    Approve
-                </button>
-            </div>
-        `).join('');
+            `;
+        }).join('');
     } catch (err) {
         console.error('Error in loadPendingSpokes:', err);
-        listEl.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading pending spokes: ${err.message}</div>`;
+        listEl.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading spoke statuses: ${err.message}</div>`;
     }
 }
 

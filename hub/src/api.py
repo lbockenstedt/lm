@@ -53,12 +53,18 @@ def create_app(hub):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/setup/pending_spokes")
-    async def get_pending_spokes():
+    async def get_all_spokes_status():
         hub = app.state.hub
-        # Use known_spokes from state instead of only active_connections
         known_spokes = hub.state.state.get("known_spokes", [])
-        pending = [sid for sid in known_spokes if not hub.approved_spokes.get(sid, False)]
-        return {"pending_spokes": pending}
+
+        spokes_status = []
+        for sid in known_spokes:
+            spokes_status.append({
+                "spoke_id": sid,
+                "approved": hub.approved_spokes.get(sid, False)
+            })
+
+        return {"spokes": spokes_status}
 
     @app.post("/setup/approve_spoke")
     async def approve_spoke(request: Request):
