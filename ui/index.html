@@ -20,36 +20,50 @@
 
         /* LCARS Theme Overrides */
         body.lcars-theme {
-            --hpe-bg-light: #000000;
-            --hpe-white: #000000;
+            --hpe-bg-light: #000;
+            --hpe-white: #000;
             --hpe-text-main: #ffcc00;
             --hpe-text-muted: #ff9900;
             --hpe-border: #ffcc00;
-            --hpe-green: #ff9900;
-            --hpe-navy: #000000;
-            background-color: #000000 !important;
+            --hpe-green: #cc6699;
+            --hpe-navy: #000;
+            background-color: #000 !important;
             color: #ffcc00 !important;
-            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
+            font-family: 'Inter', 'Segoe UI', Roboto, Arial, sans-serif !important;
             text-transform: uppercase;
+            letter-spacing: 1px;
         }
 
         body.lcars-theme .hpe-sidebar {
-            background-color: #000000 !important;
-            border-right: 4px solid #ffcc00 !important;
+            background-color: #000 !important;
+            border-right: 20px solid #ffcc00 !important;
             border-radius: 0;
         }
 
         body.lcars-theme .hpe-topbar {
-            background-color: #000000 !important;
-            border-bottom: 10px solid #ffcc00 !important;
+            background-color: #000 !important;
+            border-bottom: 20px solid #ff9900 !important;
             border-radius: 0;
         }
 
         body.lcars-theme .hpe-card {
-            background: #000000 !important;
+            background: #000 !important;
             border: 3px solid #ffcc00 !important;
-            border-radius: 20px !important;
+            border-radius: 15px !important;
             box-shadow: none !important;
+            position: relative;
+        }
+
+        /* LCARS-style "tabs" on cards */
+        body.lcars-theme .hpe-card::before {
+            content: "";
+            position: absolute;
+            top: -5px;
+            left: -5px;
+            width: 40px;
+            height: 10px;
+            background: #cc6699;
+            border-radius: 5px 5px 0 0;
         }
 
         body.lcars-theme .nav-item {
@@ -57,42 +71,52 @@
             border-radius: 20px 0 0 20px !important;
             border-left: 0 !important;
             background: transparent !important;
+            margin-bottom: 4px;
         }
 
         body.lcars-theme .nav-item:hover,
         body.lcars-theme .nav-item.active {
-            background: #ff9900 !important;
-            color: #000000 !important;
+            background: #ffcc00 !important;
+            color: #000 !important;
             font-weight: bold !important;
+            border-radius: 0 !important;
         }
 
         body.lcars-theme .sub-nav-item {
-            color: #99ccff !important;
+            color: #6699ff !important;
         }
 
         body.lcars-theme .sub-nav-item.active {
             color: #ffcc00 !important;
-            text-decoration: underline;
+            background: #cc6699 !important;
+            border-radius: 10px;
+            padding: 2px 8px !important;
         }
 
         body.lcars-theme #viewport {
-            background-color: #000000 !important;
+            background-color: #000 !important;
         }
 
         body.lcars-theme input,
         body.lcars-theme select {
-            background-color: #222 !important;
-            border-color: #ffcc00 !important;
+            background-color: #000 !important;
+            border: 2px solid #ffcc00 !important;
             color: #ffcc00 !important;
-            border-radius: 10px !important;
+            border-radius: 0 !important;
+            font-family: monospace !important;
         }
 
         body.lcars-theme button {
             background-color: #ffcc00 !important;
-            color: #000000 !important;
-            border-radius: 10px !important;
+            color: #000 !important;
+            border-radius: 0 !important;
             font-weight: bold !important;
             text-transform: uppercase !important;
+            border: none !important;
+        }
+
+        body.lcars-theme button:hover {
+            background-color: #ff9900 !important;
         }
 
         body.lcars-theme .text-slate-500,
@@ -102,13 +126,17 @@
         }
 
         body.lcars-theme .text-blue-600 {
-            color: #66aaff !important;
+            color: #6699ff !important;
         }
 
         body.lcars-theme .bg-slate-50,
         body.lcars-theme .bg-slate-100 {
-            background-color: #111 !important;
-            border-color: #ffcc00 !important;
+            background-color: #000 !important;
+            border: 2px solid #ffcc00 !important;
+        }
+
+        body.lcars-theme .status-pulse {
+            background-color: #ffcc00 !important;
         }
 
         /* Star Wars Imperial Theme Overrides */
