@@ -16,13 +16,7 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
-if ! command -v node &> /dev/null || ! command -v npm &> /dev/null; then
-    echo "❌ Error: Node.js and npm are not installed."
-    echo "Please install Node.js from https://nodejs.org/"
-    exit 1
-fi
-
-echo "✅ Prerequisites found (Python3, Node.js)."
+echo "✅ Prerequisites found (Python3)."
 
 # 2. Hub Setup
 echo "📦 Setting up Hub..."
@@ -43,10 +37,7 @@ echo "✅ Hub setup complete."
 echo "📦 Setting up WebUI plugin..."
 cd "$(dirname "$0")/ui"
 
-echo "Installing Node dependencies..."
-npm install
-
-echo "✅ WebUI setup complete."
+echo "✅ WebUI setup complete (Static assets are now served by the Hub)."
 
 # 4. CS Module Setup
 echo "📦 Setting up Client Simulator (CS) module..."
