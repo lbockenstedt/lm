@@ -188,9 +188,6 @@ const VIEWS = {
                             </select>
                         </div>
                     </div>
-                    <div class="p-4 rounded-md bg-green-50 border border-green-200 text-sm text-green-700">
-                        Multi-tenancy is currently in <strong class="text-green-800">Prototype Mode</strong>. Tenant selection is simulated and local logins are enabled.
-                    </div>
 
                     <div class="pt-6 border-t border-slate-200">
                         <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Maintenance</h3>
@@ -297,8 +294,14 @@ const VIEWS = {
                                     </div>
                                 </div>
                                 <div class="space-y-2">
-                                    <label class="text-xs font-bold text-slate-500 uppercase block">Custom Logo URL</label>
+                                    <label class="text-xs font-bold text-slate-500 uppercase block">Left Logo URL</label>
                                     <input type="text" id="app-logo-url" oninput="updateAppearance()"
+                                           placeholder="Enter image URL or 'hpe-svg'"
+                                           class="w-full bg-white border border-slate-300 rounded px-3 py-2 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs font-bold text-slate-500 uppercase block">Right Logo URL</label>
+                                    <input type="text" id="app-logo-url-right" oninput="updateAppearance()"
                                            placeholder="Enter image URL or 'hpe-svg'"
                                            class="w-full bg-white border border-slate-300 rounded px-3 py-2 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500">
                                 </div>
@@ -626,6 +629,7 @@ async function updateAppearance() {
         primary_color: document.getElementById('app-primary-color').value,
         navy_color: document.getElementById('app-navy-color').value,
         logo_url: document.getElementById('app-logo-url').value,
+        logo_url_right: document.getElementById('app-logo-url-right').value,
         show_logo_left: document.getElementById('app-show-logo-left').checked,
         show_logo_right: document.getElementById('app-show-logo-right').checked,
     };
@@ -691,6 +695,7 @@ async function loadAppearance() {
             document.getElementById('app-navy-color').value = config.navy_color;
             document.getElementById('app-navy-hex').value = config.navy_color;
             document.getElementById('app-logo-url').value = config.logo_url;
+            document.getElementById('app-logo-url-right').value = config.logo_url_right || config.logo_url;
             document.getElementById('app-show-logo-left').checked = config.show_logo_left;
             document.getElementById('app-show-logo-right').checked = config.show_logo_right;
         }
