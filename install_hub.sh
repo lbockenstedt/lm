@@ -11,40 +11,34 @@ fi
 apt-get update
 apt-get install -y python3-pip python3-venv git curl
 
-INSTALL_DIR="/root/lm-manager"
+INSTALL_DIR="/root/lm"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-if [ -d "lm/.git" ]; then
-    echo "📂 Hub repository already exists. Updating..."
-    cd lm && git pull && cd ..
-else
-    echo "🌐 Cloning Hub repository..."
-    git clone https://github.com/lbockenstedt/lm.git
-fi
+# Clone and restructure core repo
+echo "🌐 Cloning Core repository..."
+git clone "https://github.com/lbockenstedt/lm.git" lm_tmp
+mv lm_tmp/hub "$INSTALL_DIR/core"
+mv lm_tmp/ui "$INSTALL_DIR/WebUI"
+cp -r lm_tmp/* "$INSTALL_DIR/" 2>/dev/null || true
+rm -rf lm_tmp
 
 echo "🛠️ Setting up Hub Backend..."
-cd lm
+cd "$INSTALL_DIR/core"
 
 # Robust Venv Setup
 if [ -d "venv" ] && [ ! -f "venv/bin/python3" ]; then
     rm -rf venv
 fi
-
 if [ ! -d "venv" ]; then
     python3 -m venv venv
 fi
 
-if [ ! -f "venv/bin/python3" ]; then
-    echo "❌ Critical Error: venv creation failed."
-    exit 1
-fi
-
 echo "Installing backend requirements..."
-./venv/bin/python3 -m pip install --upgrade pip
-./venv/bin/python3 -m pip install -r hub/requirementslerini.txt 2>/dev/null || ./venv/bin/python3 -m pip install -r hub/requirements.txt
+./venv/bin/python3 -m pip install --upgrade pip -q
+./venv/bin/python3 -m pip install -r requirements.txt -q
 
 echo "🎉 Hub Backend installation complete!"
-echo "🚀 Start with: cd $INSTALL_DIR/lm && ./start_all.sh"
+echo "🚀 Start with: cd $INSTALL_DIR && ./start_all.sh"
 echo "🌐 API Access: http://$(hostname -I | awk '{print $1}'):8000"
 echo "📦 Version: 0.08"

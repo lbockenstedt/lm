@@ -15,16 +15,33 @@ apt-get update
 apt-get install -y python3-pip python3-venv git curl lsof net-tools jq
 
 # 3. Path Configuration
-BASE_DIR="/root/lm-manager"
+BASE_DIR="/root/lm"
+OLD_BASE_DIR="/root/lm-manager"
+
+# Cleanup legacy installations
+if [ -d "$OLD_BASE_DIR" ]; then
+    echo "🗑️  Removing legacy installation at $OLD_BASE_DIR..."
+    rm -rf "$OLD_BASE_DIR"
+fi
+
 mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
 
-REPOS=("lm" "cs" "pxmx" "opnsense" "cppm")
+# Clone core components (Hub and WebUI)
+echo "🌐 Cloning Core Repository..."
+git clone "https://github.com/lbockenstedt/lm.git" lm_tmp
+mv lm_tmp/hub "$BASE_DIR/core"
+mv lm_tmp/ui "$BASE_DIR/WebUI"
+# Move remaining files from root of repo (start_all.sh, install scripts, etc.)
+cp -r lm_tmp/* "$BASE_DIR/" 2>/dev/null || true
+rm -rf lm_tmp
 
-# 4. Repository Sync
+# Now we are in /root/lm, and we have /root/lm/core and /root/lm/WebUI
+# Sync other spokes
+REPOS=("cs" "pxmx" "opnsense" "cppm")
 for repo in "${REPOS[@]}"; do
     if [ -d "$repo/.git" ]; then
-        echo "📂 $repo already exists. Updating via git pull..."
+        echo "📂 $repo already exists. Updating..."
         cd "$repo" && git pull && cd ..
     else
         echo "🌐 Cloning $repo..."
@@ -37,13 +54,13 @@ echo "🛠️ Running modular installations..."
 
 # Hub
 echo "Setting up Hub Backend..."
-cd "$BASE_DIR/lm"
+cd "$BASE_DIR/core"
 bash ./install_hub.sh
 cd "$BASE_DIR"
 
 # UI (Assets only)
 echo "Setting up WebUI assets..."
-cd "$BASE_DIR/lm"
+cd "$BASE_DIR/WebUI"
 bash ./install_ui.sh
 cd "$BASE_DIR"
 
@@ -94,7 +111,7 @@ for mod in "${!MODULES[@]}"; do
 
     if [ -z "$SPOKE_SECRET" ] || [ "$SPOKE_SECRET" == "null" ]; then
         echo "❌ Failed to generate secret for $SPOKE_ID. Using default (will fail auth)."
-        SPOKE_SECRET="lm-manager-secret"
+        SPOKE_SECRET="lm-secret"
     fi
 
     # Run the modular installer with the Hub-provided secret
@@ -106,7 +123,7 @@ done
 echo "⚙️ Configuring systemd for auto-start on reboot..."
 
 # Create the systemd service unit
-cat <<EOF > /etc/systemd/system/lm-manager.service
+cat <<EOF > /etc/systemd/system/lm.service
 [Unit]
 Description=Lab Manager Orchestrator
 After=network.target
@@ -115,8 +132,8 @@ After=network.target
 Type=oneshot
 RemainAfterExit=yes
 User=root
-WorkingDirectory=/root/lm-manager/lm
-ExecStart=/bin/bash /root/lm-manager/lm/start_all.sh
+WorkingDirectory=/root/lm
+ExecStart=/bin/bash /root/lm/start_all.sh
 ExecStop=/usr/bin/pkill -f python
 Restart=on-failure
 RestartSec=10
@@ -127,13 +144,13 @@ EOF
 
 # Enable and start the service
 systemctl daemon-reload
-systemctl enable lm-manager
-systemctl restart lm-manager
+systemctl enable lm
+systemctl restart lm
 
 echo ""
 echo "🎉 Native installation complete!"
 echo "📂 All modules are located in: $BASE_DIR"
-echo "⚙️ Service 'lm-manager' is enabled and running."
-echo "🚀 To manage the system: systemctl start|stop|restart lm-manager"
+echo "⚙️ Service 'lm' is enabled and running."
+echo "🚀 To manage the system: systemctl start|stop|restart lm"
 echo "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print $1}'):8000"
 echo "📦 Version: 0.08"

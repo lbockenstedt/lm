@@ -15,30 +15,31 @@ apt-get update
 apt-get install -y python3-pip python3-venv git curl lsof net-tools
 
 # 3. Setup Paths
-BASE_DIR="/root/lm-manager"
+BASE_DIR="/root/lm"
 mkdir -p "$BASE_DIR"
 cd "$BASE_DIR"
 
-# 4. Install Hub Backend
-echo "🛠️ Installing Hub Backend..."
-cd "$BASE_DIR/lm" 2>/dev/null || {
-    echo "🌐 Cloning Hub repository..."
-    cd "$BASE_DIR"
-    git clone https://github.com/lbockenstedt/lm.git
-    cd "$BASE_DIR/lm"
-}
+# 4. Install Hub Core
+echo "🛠️ Installing Hub Core..."
+# Clone and restructure as a single step to avoid nested folders
+git clone "https://github.com/lbockenstedt/lm.git" lm_tmp
+mv lm_tmp/hub "$BASE_DIR/core"
+mv lm_tmp/ui "$BASE_DIR/WebUI"
+cp -r lm_tmp/* "$BASE_DIR/" 2>/dev/null || true
+rm -rf lm_tmp
+
+# Now run the installers from their new locations
+cd "$BASE_DIR/core"
 bash ./install_hub.sh
 cd "$BASE_DIR"
 
-# 5. Install WebUI Assets
-echo "🛠️ Installing WebUI Assets..."
-cd "$BASE_DIR/lm"
+cd "$BASE_DIR/WebUI"
 bash ./install_ui.sh
 cd "$BASE_DIR"
 
 # 6. Configure Auto-start
 echo "⚙️ Configuring systemd for auto-start on reboot..."
-cat <<EOF > /etc/systemd/system/lm-manager.service
+cat <<EOF > /etc/systemd/system/lm.service
 [Unit]
 Description=Lab Manager Orchestrator
 After=network.target
@@ -47,8 +48,8 @@ After=network.target
 Type=oneshot
 RemainAfterExit=yes
 User=root
-WorkingDirectory=/root/lm-manager/lm
-ExecStart=/bin/bash /root/lm-manager/lm/start_all.sh
+WorkingDirectory=/root/lm
+ExecStart=/bin/bash /root/lm/start_all.sh
 ExecStop=/usr/bin/pkill -f python
 Restart=on-failure
 RestartSec=10
@@ -58,11 +59,11 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable lm-manager
-systemctl restart lm-manager
+systemctl enable lm
+systemctl restart lm
 
 echo ""
 echo "🎉 Lab Manager Core installation complete!"
-echo "⚙️ Service 'lm-manager' is enabled and running."
+echo "⚙️ Service 'lm' is enabled and running."
 echo "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print $1}'):8000"
 echo "📦 Version: 0.08"

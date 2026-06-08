@@ -144,6 +144,46 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/setup/pxmx-config")
+    async def get_pxmx_config():
+        hub = app.state.hub
+        config = hub.state.state.get("global_config", {}).get("pxmx", {
+            "default_node": "pve",
+            "cluster_id": "cluster-1"
+        })
+        return {"config": config}
+
+    @app.post("/setup/pxmx-config")
+    async def update_pxmx_config(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            config = data.get("config", {})
+
+            global_config = hub.state.state.get("global_config", {})
+            global_config["pxmx"] = config
+            hub.state.state["global_config"] = global_config
+            hub.state.save_state()
+
+            pxmx_spoke = next((sid for sid in hub.active_connections if "pxmx" in sid), None)
+            if pxmx_spoke:
+                msg_id = str(uuid.uuid4())
+                msg = Message(
+                    header=MessageHeader(
+                        message_id=msg_id,
+                        timestamp=time.time(),
+                        sender_id="hub",
+                        destination_id=pxmx_spoke
+                    ),
+                    payload=MessagePayload(type="update_config", data=config)
+                )
+                await hub.send_to_spoke(msg)
+                return {"status": "success", "message": "Configuration updated and pushed to spoke."}
+            else:
+                return {"status": "partial_success", "message": "Configuration saved, but Proxmox spoke is not connected."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/opn-config")
     async def get_opn_config():
         hub = app.state.hub

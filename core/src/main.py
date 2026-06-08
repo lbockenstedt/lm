@@ -354,7 +354,7 @@ class LabManagerHub:
 
         try:
             logger.info(f"Updating system from v{local_v} to v{remote_v}...")
-            cmd = "cd /root/lm-manager/lm && git pull"
+            cmd = "cd /root/lm/lm && git pull"
             process = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -364,7 +364,7 @@ class LabManagerHub:
 
             if process.returncode == 0:
                 logger.info("Update successful. Triggering service restart...")
-                subprocess.Popen(["systemctl", "restart", "lm-manager"])
+                subprocess.Popen(["systemctl", "restart", "lm"])
                 return {"status": "success", "message": f"Updated from v{local_v} to v{remote_v}. Server is restarting..."}
             else:
                 logger.error(f"Git pull failed: {stderr.decode()}")

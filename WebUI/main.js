@@ -40,127 +40,184 @@ const VIEWS = {
         name: 'Proxmox',
         subMenus: ['VM Management', 'Cluster Status', 'Storage', 'Configuration'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>',
-        render: () => `
-            <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6 text-[#263040]">Proxmox Cluster Management</h2>
-                <div class="hpe-card rounded-lg p-6 shadow-sm">
-                    <div class="flex gap-4 mb-8">
-                        <input id="vm-id-input" type="text" placeholder="Enter VM ID (e.g. vm-101)"
-                               class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none transition-all text-slate-800 placeholder-slate-400">
-                        <button onclick="lookupFirewall()"
-                                class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-medium transition-all">
-                            Lookup Firewall
-                        </button>
-                    </div>
-
-                    <div id="vm-details" class="hidden space-y-6">
-                        <div class="grid grid-cols-2 gap-4">
-                            <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
-                                <label class="text-xs text-slate-500 uppercase font-bold">VM ID</label>
-                                <div id="res-vm-id" class="text-lg font-medium text-slate-800">-</div>
+        render: (subMenu) => {
+            if (subMenu === 'Configuration') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Proxmox Configuration</h2>
+                        <div class="hpe-card rounded-lg p-6 space-y-6">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Default Node</label>
+                                    <input type="text" id="pxmx-default-node" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Cluster ID</label>
+                                    <input type="text" id="pxmx-cluster-id" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
                             </div>
-                            <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
-                                <label class="text-xs text-slate-500 uppercase font-bold">IP Address</label>
-                                <div id="res-ip" class="text-lg font-medium text-blue-600">-</div>
-                            </div>
-                        </div>
-
-                        <div class="mt-6">
-                            <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Firewall Rules</h3>
-                            <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
-                                <table class="w-full text-left text-sm">
-                                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                                        <tr id="firewall-headers">
-                                            <th class="px-4 py-3">Rule ID</th>
-                                            <th class="px-4 py-3">Action</th>
-                                            <th class="px-4 py-3">Protocol</th>
-                                            <th class="px-4 py-3">Destination</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="firewall-table-body" class="divide-y divide-slate-200">
-                                        <!-- Rows injected here -->
-                                    </tbody>
-                                </table>
+                            <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                <button onclick="saveProxmoxConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                    Save Configuration
+                                </button>
                             </div>
                         </div>
                     </div>
+                `;
+            }
+            return `
+                <div class="space-y-6">
+                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">Proxmox Cluster Management</h2>
+                    <div class="hpe-card rounded-lg p-6 shadow-sm">
+                        <div class="flex gap-4 mb-8">
+                            <input id="vm-id-input" type="text" placeholder="Enter VM ID (e.g. vm-101)"
+                                   class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none transition-all text-slate-800 placeholder-slate-400">
+                            <button onclick="lookupFirewall()"
+                                    class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-medium transition-all">
+                                Lookup Firewall
+                            </button>
+                        </div>
 
-                    <div id="vm-inventory" class="space-y-4">
-                        <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">Cluster Inventory</h3>
-                        <div id="vm-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                            <div class="animate-pulse flex space-x-4 p-3 bg-slate-50 rounded-md">
-                                <div class="flex-1 space-y-3 py-1">
-                                    <div class="h-2 bg-slate-200 rounded w-1/4"></div>
-                                    <div class="h-2 bg-slate-200 rounded w-1/2"></div>
+                        <div id="vm-details" class="hidden space-y-6">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">VM ID</label>
+                                    <div id="res-vm-id" class="text-lg font-medium text-slate-800">-</div>
+                                </div>
+                                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">IP Address</label>
+                                    <div id="res-ip" class="text-lg font-medium text-blue-600">-</div>
+                                </div>
+                            </div>
+
+                            <div class="mt-6">
+                                <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Firewall Rules</h3>
+                                <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
+                                    <table class="w-full text-left text-sm">
+                                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                                            <tr id="firewall-headers">
+                                                <th class="px-4 py-3">Rule ID</th>
+                                                <th class="px-4 py-3">Action</th>
+                                                <th class="px-4 py-3">Protocol</th>
+                                                <th class="px-4 py-3">Destination</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="firewall-table-body" class="divide-y divide-slate-200">
+                                            <!-- Rows injected here -->
+                                        </tbody>
+                                    </table>
                                 </div>
                             </div>
                         </div>
-                    </div>
 
-                    <div id="vm-empty-state" class="hidden py-12 text-center text-slate-400">
-                        <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                        <p>No VMs found in the cluster.</p>
+                        <div id="vm-inventory" class="space-y-4">
+                            <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">Cluster Inventory</h3>
+                            <div id="vm-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                                <div class="animate-pulse flex space-x-4 p-3 bg-slate-50 rounded-md">
+                                    <div class="flex-1 space-y-3 py-1">
+                                        <div class="h-2 bg-slate-200 rounded w-1/4"></div>
+                                        <div class="h-2 bg-slate-200 rounded w-1/2"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        <div id="vm-empty-state" class="hidden py-12 text-center text-slate-400">
+                            <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                            <p>No VMs found in the cluster.</p>
+                        </div>
                     </div>
                 </div>
-            </div>
-        `
+            `;
+        }
     },
     opnsense: {
         name: 'OPNsense',
-        subMenus: ['Firewall Rules', 'Interfaces', 'DHCP Leases'],
+        subMenus: ['Firewall Rules', 'Configuration', 'Interfaces', 'DHCP Leases'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.C18.4 5.6 17.4 5.4 16.3 5.4a4.4 4.4 0 00-4.4 4.4c0 1.1.2 2.1.6 3.1"></path></svg>',
-        render: () => `
-            <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Firewall Manager</h2>
-                <div class="hpe-card rounded-lg p-6 shadow-sm">
-                    <div class="flex gap-4 mb-8">
-                        <input id="vm-id-input" type="text" placeholder="Enter VM IP or ID..."
-                               class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none transition-all text-slate-800 placeholder-slate-400">
-                        <button onclick="lookupFirewall()"
-                                class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-medium transition-all">
-                            Query Rules
-                        </button>
-                    </div>
-
-                    <div id="vm-details" class="hidden space-y-6">
-                        <div class="grid grid-cols-2 gap-4">
-                            <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
-                                <label class="text-xs text-slate-500 uppercase font-bold">Identity</label>
-                                <div id="res-vm-id" class="text-lg font-medium text-slate-800">-</div>
+        render: (subMenu) => {
+            if (subMenu === 'Configuration') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Configuration</h2>
+                        <div class="hpe-card rounded-lg p-6 space-y-6">
+                            <div class="grid grid-cols-1 gap-6">
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">OPNsense Host / IP</label>
+                                    <input type="text" id="opn-host" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div class="space-y-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">API Key</label>
+                                        <input type="text" id="opn-api-key" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">API Secret</label>
+                                        <input type="password" id="opn-api-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    </div>
+                                </div>
                             </div>
-                            <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
-                                <label class="text-xs text-slate-500 uppercase font-bold">Assigned IP</label>
-                                <div id="res-ip" class="text-lg font-medium text-blue-600">-</div>
-                            </div>
-                        </div>
-
-                        <div class="mt-6">
-                            <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Active Rules for this IP</h3>
-                            <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
-                                <table class="w-full text-left text-sm">
-                                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                                        <tr id="firewall-headers">
-                                            <th class="px-4 py-3">Rule ID</th>
-                                            <th class="px-4 py-3">Action</th>
-                                            <th class="px-4 py-3">Protocol</th>
-                                            <th class="px-4 py-3">Destination</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="firewall-table-body" class="divide-y divide-slate-200">
-                                        <!-- Rows injected here -->
-                                    </tbody>
-                                </table>
+                            <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                <button onclick="saveOpnsenseConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                    Save Configuration
+                                </button>
                             </div>
                         </div>
                     </div>
+                `;
+            }
+            return `
+                <div class="space-y-6">
+                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Firewall Manager</h2>
+                    <div class="hpe-card rounded-lg p-6 shadow-sm">
+                        <div class="flex gap-4 mb-8">
+                            <input id="vm-id-input" type="text" placeholder="Enter VM IP or ID..."
+                                   class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none transition-all text-slate-800 placeholder-slate-400">
+                            <button onclick="lookupFirewall()"
+                                    class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-medium transition-all">
+                                Query Rules
+                            </button>
+                        </div>
 
-                    <div id="vm-empty-state" class="py-12 text-center text-slate-400">
-                        <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                        <p>Enter a VM ID to retrieve OPNsense firewall rules.</p>
+                        <div id="vm-details" class="hidden space-y-6">
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Identity</label>
+                                    <div id="res-vm-id" class="text-lg font-medium text-slate-800">-</div>
+                                </div>
+                                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Assigned IP</label>
+                                    <div id="res-ip" class="text-lg font-medium text-blue-600">-</div>
+                                </div>
+                            </div>
+
+                            <div class="mt-6">
+                                <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Active Rules for this IP</h3>
+                                <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
+                                    <table class="w-full text-left text-sm">
+                                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                                            <tr id="firewall-headers">
+                                                <th class="px-4 py-3">Rule ID</th>
+                                                <th class="px-4 py-3">Action</th>
+                                                <th class="px-4 py-3">Protocol</th>
+                                                <th class="px-4 py-3">Destination</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="firewall-table-body" class="divide-y divide-slate-200">
+                                            <!-- Rows injected here -->
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="vm-empty-state" class="py-12 text-center text-slate-400">
+                            <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                            <p>Enter a VM ID to retrieve OPNsense firewall rules.</p>
+                        </div>
                     </div>
                 </div>
-            </div>
-        `
+            `;
+        }
     },
     cs: {
         name: 'Client Sim',
@@ -526,16 +583,14 @@ async function loadSetupConfig() {
         if (int) int.value = config.update_interval || 1;
 
         // Load module-specific configs if we are in a module subview
-        if (currentView === 'setup') {
-            if (currentSubView === 'Proxmox') {
-                loadProxmoxConfig(config.pxmx || {});
-            } else if (currentSubView === 'OPNsense') {
-                loadOpnsenseConfig(config.opnsense || {});
-            } else if (currentSubView === 'Client Sim') {
-                loadCSConfig(config.cs || {});
-            } else if (currentSubView === 'CPPM') {
-                loadCPPMConfig(config.cppm || {});
-            }
+        if ((currentView === 'setup' && currentSubView === 'Proxmox') || (currentView === 'pxmx' && currentSubView === 'Configuration')) {
+            loadProxmoxConfig(config.pxmx || {});
+        } else if ((currentView === 'setup' && currentSubView === 'OPNsense') || (currentView === 'opnsense' && currentSubView === 'Configuration')) {
+            loadOpnsenseConfig(config.opnsense || {});
+        } else if ((currentView === 'setup' && currentSubView === 'Client Sim') || (currentView === 'cs' && currentSubView === 'Configuration')) {
+            loadCSConfig(config.cs || {});
+        } else if ((currentView === 'setup' && currentSubView === 'CPPM') || (currentView === 'cppm' && currentSubView === 'Configuration')) {
+            loadCPPMConfig(config.cppm || {});
         }
     } catch (err) {
         console.error('Failed to load setup config', err);
@@ -580,10 +635,10 @@ async function saveProxmoxConfig() {
         cluster_id: document.getElementById('pxmx-cluster-id').value,
     };
     try {
-        const response = await fetch('/setup/config', {
+        const response = await fetch('/setup/pxmx-config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config: { pxmx: config } })
+            body: JSON.stringify({ config: config })
         });
         if (response.ok) {
             alert('Proxmox configuration saved successfully!');
@@ -602,10 +657,10 @@ async function saveOpnsenseConfig() {
         api_secret: document.getElementById('opn-api-secret').value,
     };
     try {
-        const response = await fetch('/setup/config', {
+        const response = await fetch('/setup/opn-config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config: { opnsense: config } })
+            body: JSON.stringify({ config: config })
         });
         if (response.ok) {
             alert('OPNsense configuration saved successfully!');
@@ -718,6 +773,10 @@ function setSubView(subMenu) {
                 if (currentSubView === 'Spoke Approvals') {
                     loadPendingSpokes();
                 }
+            }
+            if ((currentView === 'pxmx' && currentSubView === 'Configuration') ||
+                (currentView === 'opnsense' && currentSubView === 'Configuration')) {
+                loadSetupConfig();
             }
             if (currentView === 'settings' && currentSubView === 'Logs') loadSystemLogs();
             if (currentView === 'settings' && currentSubView === 'General') updateStatus();
@@ -1186,7 +1245,7 @@ async function unapproveSpoke(spokeId) {
 document.addEventListener('DOMContentLoaded', () => {
     currentTenant = localStorage.getItem('lm_tenant') || 'default';
 
-    const savedTheme = localStorage.getItem('lm_theme') || 'default';
+    const savedTheme = localStorage能夠getItem('lm_theme') || 'default';
     setTheme(savedTheme);
 
     loadAppearance();

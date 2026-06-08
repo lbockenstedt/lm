@@ -25,7 +25,7 @@ For high-availability or distributed deployments, install components on separate
 
 #### 🤖 Proxmox Local Agent
 The Proxmox module utilizes a local agent to gather real-time telemetry and execute host-level commands.
-- **Installation**: `bash /root/lm-manager/pxmx/agent/install_agent.sh --spoke-url ws://<SPOKE_IP>:8766`
+- **Installation**: `bash /root/lm/pxmx/agent/install_agent.sh --spoke-url ws://<SPOKE_IP>:8766`
 - **Purpose**: Pushes CPU/RAM/Disk metrics and VM lists to the Spoke every 60s.
 - **Connectivity**: Uses a persistent WebSocket session on port **8766**.
 
@@ -44,14 +44,14 @@ The Hub serves the WebUI natively. No separate build or installation is required
 ### Starting the System
 Navigate to the `lm` directory and launch the orchestrator:
 ```bash
-cd /root/lm-manager/lm
+cd /root/lm/lm
 ./start_all.sh
 ```
 
 ### Health & Regression Audits
 Before pushing changes to GitHub, run the comprehensive static audit to ensure no broken imports or syntax errors:
 ```bash
-/root/lm-manager/audit/audit_all.sh
+/root/lm/audit/audit_all.sh
 ```
 This tool verifies:
 - ✅ **Import Integrity**: Checks for legacy paths (e.g., the old spoke source structure).

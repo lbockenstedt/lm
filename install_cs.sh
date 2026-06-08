@@ -4,7 +4,7 @@ set -e
 # Default Configuration
 HUB_URL="ws://localhost:8765"
 SPOKE_ID="cs-spoke-1"
-SPOKE_SECRET="lm-manager-secret"
+SPOKE_SECRET="lm-secret"
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
@@ -27,7 +27,7 @@ fi
 apt-get update
 apt-get install -y python3-pip python3-venv git curl
 
-INSTALL_DIR="/root/lm-manager"
+INSTALL_DIR="/root/lm"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
@@ -74,7 +74,7 @@ EOF
 
 # --- Systemd Service (For Remote/Independent Deployment) ---
 echo "⚙️ Creating systemd service for auto-start..."
-cat <<EOF > /etc/systemd/system/lm-manager-cs.service
+cat <<EOF > /etc/systemd/system/lm-cs.service
 [Unit]
 Description=Lab Manager Spoke - Client Simulator
 After=network.target
@@ -92,7 +92,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable lm-manager-cs
+systemctl enable lm-cs
 
 echo "🎉 Client Simulator installation complete!"
 echo "🌐 Hub Target: $HUB_URL"

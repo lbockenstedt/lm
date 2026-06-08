@@ -5,13 +5,13 @@
 # ------------------------------------------------------------------
 # DEBUGGING: Log every step of the start process to a separate file
 # ------------------------------------------------------------------
-LOG_FILE="/root/lm-manager/lm/start_all.log"
+LOG_FILE="/root/lm/start_all.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # ------------------------------------------------------------------
 # CONFIGURATION: Hub Server URL
 # ------------------------------------------------------------------
-HUB_URL_FILE="/root/lm-manager/hub_url.conf"
+HUB_URL_FILE="/root/lm/hub_url.conf"
 DEFAULT_HUB_URL="ws://localhost:8765"
 
 # Parse arguments for --server
@@ -40,8 +40,7 @@ echo "🕒 Start time: $(date)"
 echo "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
 
 # Get the absolute paths
-BASE_DIR="/root/lm-manager/lm"
-PARENT_DIR="/root/lm-manager"
+BASE_DIR="/root/lm"
 
 # Ensure we are in the correct directory
 cd "$BASE_DIR" || { echo "❌ Failed to cd to $BASE_DIR"; exit 1; }
@@ -62,15 +61,15 @@ sleep 2
 # --- 1. Launch Hub ---
 echo "Starting Hub..."
 # Set PYTHONPATH to include the hub source directory so imports work
-export PYTHONPATH="$BASE_DIR/hub/src:$PYTHONPATH"
+export PYTHONPATH="$BASE_DIR/core/src:$PYTHONPATH"
 
 # Launch Hub in background
-/usr/bin/nohup "$BASE_DIR/venv/bin/python3" "$BASE_DIR/hub/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+/usr/bin/nohup "$BASE_DIR/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
 echo "Hub started (logs: $BASE_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
 # --- 2. Launch Spokes ---
-SECRET="lm-manager-secret"
+SECRET="lm-secret"
 
 # Define spokes and their folders
 SPOKES=("cs" "pxmx" "opnsense" "cppm")
