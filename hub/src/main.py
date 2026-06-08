@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 import time
+import subprocess
 from typing import Dict, Any
 import websockets
 
@@ -45,6 +46,9 @@ class LabManagerHub:
 
         # Initialize Auth with LDAP
         self.auth = AuthManager(LDAPAuthProvider({"server": "ldap://localhost"}))
+
+        # { spoke_id: bool } tracking approval status
+        self.approved_spokes: Dict[str, bool] = {}
 
         # { spoke_id: websocket_connection }
         self.active_connections: Dict[str, websockets.WebSocketServerProtocol] = {}
@@ -139,6 +143,25 @@ class LabManagerHub:
             # Initialize rate limiter (e.g., 5 messages/sec burst of 10)
             self.rate_limiters[spoke_id] = TokenBucket(capacity=10, fill_rate=5)
 
+            # Check if the spoke is already approved
+            if not self.approved_spokes.get(spoke_id, False):
+                logger.info(f"Spoke {spoke_id} is pending approval.")
+                # Send Approval Required message
+                approval_msg = {
+                    "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
+                               "sender_id": "hub", "destination_id": spoke_id},
+                    "payload": {"type": "APPROVAL_REQUIRED", "data": {}}
+                }
+                # Sign the message
+                message_bytes = json.dumps({
+                    "header": vars(approval_msg["header"]),
+                    "payload": vars(approval_msg["payload"])
+                }, sort_keys=True).encode()
+                approval_msg["signature"] = self.key_manager.sign_message(spoke_id, message_bytes)
+
+                await websocket.send(json.dumps(approval_msg))
+                # We don't return; we enter the loop but the loop will filter messages
+
             # 2. Flush Mailbox
             await self.mailbox.flush_mailbox(spoke_id, self.send_to_spoke)
 
@@ -155,6 +178,17 @@ class LabManagerHub:
                     logger.warning(f"Invalid signature from spoke {spoke_id}")
                     continue
 
+                # Process Heartbeat (Always allowed for pending spokes to maintain connection)
+                payload = msg_data.get("payload", {})
+                if payload.get("type") == "HEARTBEAT":
+                    self.heartbeat.update_heartbeat(spoke_id)
+                    continue
+
+                # If the spoke is not approved, ignore all other messages
+                if not self.approved_spokes.get(spoke_id, False):
+                    logger.debug(f"Dropping message from unapproved spoke {spoke_id}")
+                    continue
+
                 # Process Acknowledgement
                 if "correlation_id" in msg_data:
                     corr_id = msg_data["correlation_id"]
@@ -168,12 +202,6 @@ class LabManagerHub:
                     # Store in response cache for API request bridging
                     if hasattr(self, "response_cache"):
                         self.response_cache[corr_id] = msg_data
-                    continue
-
-                # Process Heartbeat
-                payload = msg_data.get("payload", {})
-                if payload.get("type") == "HEARTBEAT":
-                    self.heartbeat.update_heartbeat(spoke_id)
                     continue
 
                 # Rate Limiting for non-heartbeat messages
@@ -192,6 +220,56 @@ class LabManagerHub:
         finally:
             if spoke_id and spoke_id in self.active_connections:
                 del self.active_connections[spoke_id]
+
+    async def perform_update(self):
+        """
+        Performs a git pull and triggers a systemd restart of the hub service.
+        """
+        try:
+            logger.info("Checking for updates from GitHub...")
+            cmd = "cd /root/lab-manager/lm && git pull"
+            process = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode == 0:
+                logger.info("Update successful. Triggering service restart...")
+                subprocess.Popen(["systemctl", "restart", "lab-manager"])
+                return True
+            else:
+                logger.error(f"Git pull failed: {stderr.decode()}")
+                return False
+        except Exception as e:
+            logger.error(f"Unexpected error during update: {e}")
+            return False
+
+    async def run_autoupdate_loop(self):
+        """
+        Background loop that checks for updates based on global configuration.
+        """
+        logger.info("Auto-update loop started.")
+        while True:
+            try:
+                config = self.state.state.get("global_config", {})
+                enabled = config.get("autoupdate", True) # Default to enabled
+                interval_hours = config.get("update_interval", 1) # Default to 1 hour
+
+                if enabled:
+                    logger.info(f"Auto-update enabled. Checking for updates every {interval_hours} hours.")
+                    # Wait for the configured interval
+                    await asyncio.sleep(interval_hours * 3600)
+
+                    # Trigger update
+                    await self.perform_update()
+                else:
+                    # If disabled, check again every 5 minutes to see if it was enabled
+                    await asyncio.sleep(300)
+            except Exception as e:
+                logger.error(f"Error in auto-update loop: {e}")
+                await asyncio.sleep(300)
 
     async def start(self):
         """
@@ -217,6 +295,7 @@ class LabManagerHub:
         # Start the retry loop as a background task
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
+        autoupdate_task = asyncio.create_task(self.run_autoupdate_loop())
 
         async with websockets.serve(self.handle_connection, self.host, self.port):
             logger.info(f"Lab Manager Hub v{version} started on ws://{self.host}:{self.port}")

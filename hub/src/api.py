@@ -46,25 +46,52 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/setup/pending_spokes")
+    async def get_pending_spokes():
+        hub = app.state.hub
+        pending = [sid for sid in hub.active_connections if not hub.approved_spokes.get(sid, False)]
+        return {"pending_spokes": pending}
+
+    @app.post("/setup/approve_spoke")
+    async def approve_spoke(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            spoke_id = data.get("spoke_id")
+            if not spoke_id:
+                raise HTTPException(status_code=400, detail="Missing spoke_id")
+
+            # Update approval status
+            hub.approved_spokes[spoke_id] = True
+
+            # Send APPROVED message to the spoke
+            msg_id = str(uuid.uuid4())
+            approval_msg = Message(
+                header=MessageHeader(
+                    message_id=msg_id,
+                    timestamp=time.time(),
+                    sender_id="hub",
+                    destination_id=spoke_id
+                ),
+                payload=MessagePayload(type="APPROVED", data={})
+            )
+            await hub.send_to_spoke(approval_msg)
+
+            return {"status": "success", "message": f"Spoke {spoke_id} approved."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.post("/setup/update")
     async def trigger_update():
         """
         Triggers a git pull and restarts the service to apply updates.
         """
-        try:
-            # Use a shell command to pull and then restart
-            # We target /root/lab-manager/lm specifically
-            cmd = "cd /root/lab-manager/lm && git pull"
-            subprocess.run(cmd, shell=True, check=True)
-
-            # Restart the systemd service
-            subprocess.Popen(["systemctl", "restart", "lab-manager"])
-
+        hub = app.state.hub
+        success = await hub.perform_update()
+        if success:
             return {"status": "success", "message": "Update triggered. The server is restarting..."}
-        except subprocess.CalledProcessError as e:
-            raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        else:
+            raise HTTPException(status_code=500, detail="Update failed. Check Hub logs.")
 
     @app.get("/setup/config")
     async def get_setup_config():

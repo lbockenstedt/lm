@@ -45,7 +45,7 @@ sleep 5 # Give hub time to initialize
 SECRET="lab-manager-secret"
 
 # Define spokes and their folders
-SPOKES=("cs" "pxmx" "opnsense")
+SPOKES=("cs" "pxmx" "opnsense" "cppm")
 
 for spoke in "${SPOKES[@]}"; do
     SPOKE_DIR="$PARENT_DIR/$spoke"
@@ -59,6 +59,7 @@ for spoke in "${SPOKES[@]}"; do
             "cs") SPOKE_ID="cs-spoke-1" ;;
             "pxmx") SPOKE_ID="pxmx-spoke-1" ;;
             "opnsense") SPOKE_ID="opn-spoke-1" ;;
+            "cppm") SPOKE_ID="cppm-spoke-1" ;;
         esac
 
         /usr/bin/nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub ws://localhost:8765 > "$BASE_DIR/$spoke.log" 2>&1 &

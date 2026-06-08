@@ -194,11 +194,34 @@ const VIEWS = {
 
                     <div class="pt-6 border-t border-slate-200">
                         <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Maintenance</h3>
-                        <div class="flex items-center justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
-                            <div class="text-sm text-slate-600">Check for updates and synchronize from GitHub repository.</div>
-                            <button onclick="triggerUpdate()" id="update-btn" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-xs font-bold transition-all shadow-sm">
-                                Update System
-                            </button>
+                        <div class="flex flex-col gap-4 p-4 rounded-md bg-slate-50 border border-slate-200">
+                            <div class="flex items-center justify-between">
+                                <div class="flex flex-col gap-2">
+                                    <div class="text-sm text-slate-600 font-medium">Automated System Updates</div>
+                                    <div class="flex items-center gap-4">
+                                        <label class="flex items-center gap-2 cursor-pointer group">
+                                            <input type="checkbox" id="auto-update-chk" onchange="updateAutoUpdate(this.checked)" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                                            <span class="text-xs font-medium text-slate-500 group-hover:text-slate-700 transition-colors">Enable Auto-Update</span>
+                                        </label>
+                                        <span class="text-slate-300">|</span>
+                                        <div class="flex items-center gap-2">
+                                            <span class="text-xs text-slate-500">Interval:</span>
+                                            <input type="number" id="auto-update-int" onchange="updateAutoUpdateInterval(this.value)"
+                                                   class="w-12 bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500">
+                                            <span class="text-xs text-slate-500">hours</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="text-right">
+                                    <span id="last-update-ts" class="text-[10px] text-slate-400 block">Last check: Never</span>
+                                </div>
+                            </div>
+                            <div class="pt-3 border-t border-slate-200 flex justify-between items-center">
+                                <div class="text-xs text-slate-400 italic">Manually synchronize from GitHub repository.</div>
+                                <button onclick="triggerUpdate()" id="update-btn" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-xs font-bold transition-all shadow-sm">
+                                    Update System Now
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -257,6 +280,31 @@ async function updateGlobalConfig(key, value) {
     }
 }
 
+async function updateAutoUpdate(enabled) {
+    await updateGlobalConfig('autoupdate', enabled);
+}
+
+async function updateAutoUpdateInterval(hours) {
+    await updateGlobalConfig('update_interval', parseInt(hours) || 1);
+}
+
+async function loadSetupConfig() {
+    try {
+        const response = await fetch('/setup/config');
+        if (!response.ok) return;
+        const data = await response.json();
+        const config = data.global_config || {};
+
+        const chk = document.getElementById('auto-update-chk');
+        const int = document.getElementById('auto-update-int');
+
+        if (chk) chk.checked = config.autoupdate !== false; // Default to true
+        if (int) int.value = config.update_interval || 1;
+    } catch (err) {
+        console.error('Failed to load setup config', err);
+    }
+}
+
 function setView(viewId) {
     currentView = viewId;
 
@@ -277,6 +325,9 @@ function setView(viewId) {
     const viewport = document.getElementById('viewport');
     if (viewport && view) {
         viewport.innerHTML = view.render();
+        if (viewId === 'setup') {
+            loadSetupConfig();
+        }
     }
 
     if (viewId === 'dashboard') updateStatus();
