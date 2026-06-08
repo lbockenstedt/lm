@@ -399,7 +399,8 @@ async function updateStatus() {
         const moduleMap = {
             'pxmx': 'pxmx',
             'opn': 'opnsense',
-            'cs': 'cs'
+            'cs': 'cs',
+            'cppm': 'cppm'
         };
 
         const activeModules = new Set();
