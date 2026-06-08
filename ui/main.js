@@ -268,9 +268,13 @@ const VIEWS = {
                         <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
                             <span class="text-slate-500">UI Theme</span>
                             <div class="flex items-center gap-2">
-                                <span class="text-xs font-medium text-slate-400 uppercase">LCARS Mode</span>
-                                <input type="checkbox" id="theme-toggle" onchange="toggleTheme(this.checked)"
-                                       class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500 cursor-pointer">
+                                <span class="text-xs font-medium text-slate-400 uppercase">Theme:</span>
+                                <select id="theme-selector" onchange="setTheme(this.value)"
+                                       class="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-800 outline-none focus:ring-1 focus la-manager secret $\rightarrow$ lab-manager-secret.focus:ring-green-500 cursor-pointer">
+                                    <option value="default">HPE Default</option>
+                                    <option value="lcars">Star Trek (LCARS)</option>
+                                    <option value="sw">Star Wars (Imperial)</option>
+                                </select>
                             </div>
                         </div>
                     </div>
@@ -543,13 +547,14 @@ async function lookupFirewall() {
     }
 }
 
-function toggleTheme(enabled) {
-    if (enabled) {
+function setTheme(theme) {
+    document.body.classList.remove('lcars-theme', 'sw-theme');
+    if (theme === 'lcars') {
         document.body.classList.add('lcars-theme');
-    } else {
-        document.body.classList.remove('lcars-theme');
+    } else if (theme === 'sw') {
+        document.body.classList.add('sw-theme');
     }
-    localStorage.setItem('lm_theme', enabled ? 'lcars' : 'default');
+    localStorage.setItem('lm_theme', theme);
 }
 
 async function loadSystemLogs() {
@@ -582,10 +587,8 @@ async function loadSystemLogs() {
 document.addEventListener('DOMContentLoaded', () => {
     currentTenant = localStorage.getItem('lm_tenant') || 'default';
 
-    const savedTheme = localStorage.getItem('lm_theme');
-    if (savedTheme === 'lcars') {
-        toggleTheme(true);
-    }
+    const savedTheme = localStorage.getItem('lm_theme') || 'default';
+    setTheme(savedTheme);
 
     setView('dashboard');
     setInterval(updateStatus, 10000);
