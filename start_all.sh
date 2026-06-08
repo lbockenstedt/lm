@@ -37,7 +37,7 @@ echo "Starting Hub..."
 export PYTHONPATH="$BASE_DIR/hub/src:$PYTHONPATH"
 
 # Launch Hub in background
-/usr/bin/nohup "$BASE_DIR/venv/bin/python" "$BASE_DIR/hub/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+/usr/bin/nohup "$BASE_DIR/venv/bin/python3" "$BASE_DIR/hub/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
 echo "Hub started (logs: $BASE_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
@@ -61,7 +61,7 @@ for spoke in "${SPOKES[@]}"; do
             "opnsense") SPOKE_ID="opn-spoke-1" ;;
         esac
 
-        /usr/bin/nohup "$SPOKE_DIR/venv/bin/python" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub ws://localhost:8765 > "$BASE_DIR/$spoke.log" 2>&1 &
+        /usr/bin/nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub ws://localhost:8765 > "$BASE_DIR/$spoke.log" 2>&1 &
         echo "$spoke started (logs: $BASE_DIR/$spoke.log)"
     else
         echo "⚠️  Warning: Spoke directory $SPOKE_DIR not found. Skipping..."

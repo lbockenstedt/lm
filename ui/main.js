@@ -182,6 +182,16 @@ const VIEWS = {
                     <div class="p-4 rounded-md bg-green-50 border border-green-200 text-sm text-green-700">
                         Multi-tenancy is currently in <strong class="text-green-800">Prototype Mode</strong>. Tenant selection is simulated and local logins are enabled.
                     </div>
+
+                    <div class="pt-6 border-t border-slate-200">
+                        <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Maintenance</h3>
+                        <div class="flex items-center justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
+                            <div class="text-sm text-slate-600">Check for updates and synchronize from GitHub repository.</div>
+                            <button onclick="triggerUpdate()" id="update-btn" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-xs font-bold transition-all shadow-sm">
+                                Update System
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         `

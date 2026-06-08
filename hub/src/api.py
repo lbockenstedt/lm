@@ -1,4 +1,5 @@
 import os
+import subprocess
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -44,6 +45,26 @@ def create_app(hub):
             return result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/setup/update")
+    async def trigger_update():
+        """
+        Triggers a git pull and restarts the service to apply updates.
+        """
+        try:
+            # 1. Pull latest changes from GitHub
+            # We assume the installation is in /root/lab-manager/lm
+            subprocess.run(["cd", "/root/lab-manager/lm", "&&", "git", "pull"], shell=True, check=True)
+
+            # 2. Restart the systemd service
+            # This will kill the current process, which is the desired behavior for a full update
+            subprocess.Popen(["systemctl", "restart", "lab-manager"])
+
+            return {"status": "success", "message": "Update triggered. The server is restarting..."}
+        except subprocess.CalledProcessError as e:
+            raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
     # --- Static File Serving ---
     # We serve the UI directly from the 'ui' directory (Vanilla JS version)
