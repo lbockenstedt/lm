@@ -804,7 +804,7 @@ async function approveSpoke(spokeId) {
         const response = await fetch('/setup/approve_spoke', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ spoke_id: spokeId })
+            body: JSON.stringify({ spoke_id: spokeId, action: 'approve' })
         });
         if (!response.ok) throw new Error('Approval failed');
 
@@ -812,6 +812,22 @@ async function approveSpoke(spokeId) {
         updateStatus();
     } catch (err) {
         alert('Error approving spoke: ' + err.message);
+    }
+}
+
+async function unapproveSpoke(spokeId) {
+    try {
+        const response = await fetch('/setup/approve_spoke', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, action: 'unapprove' })
+        });
+        if (!response.ok) throw new Error('Un-approval failed');
+
+        await loadPendingSpokes();
+        updateStatus();
+    } catch (err) {
+        alert('Error un-approving spoke: ' + err.message);
     }
 }
 
