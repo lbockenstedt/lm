@@ -378,6 +378,42 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/setup/tenants")
+    async def get_tenants():
+        hub = app.state.hub
+        # Return list of tenant IDs and basic info from tenant_state
+        tenants = hub.state.tenant_state.get("tenants", {})
+        tenant_list = [{"id": tid, "name": tid} for tid in tenants.keys()]
+
+        # Always include default if not present
+        if "default" not in [t["id"] for t in tenant_list]:
+            tenant_list.append({"id": "default", "name": "Default Tenant"})
+
+        return {"tenants": tenant_list}
+
+    @app.get("/setup/tenants/{tenant_id}")
+    async def get_tenant_details(tenant_id: str):
+        hub = app.state.hub
+        tenant = hub.state.get_tenant(tenant_id)
+        if not tenant:
+            raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
+        return {"tenant_id": tenant_id, "config": tenant}
+
+    @app.post("/setup/tenants")
+    async def create_tenant(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            tenant_id = data.get("tenant_id")
+            if not tenant_id:
+                raise HTTPException(status_code=400, detail="Missing tenant_id")
+
+            hub.state.update_tenant(tenant_id, {})
+            hub.state.save_state()
+            return {"status": "success", "message": f"Tenant {tenant_id} created."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.post("/setup/tenant")
     async def update_tenant(request: Request):
         hub = app.state.hub

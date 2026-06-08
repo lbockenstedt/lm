@@ -64,6 +64,11 @@ if [ ! -d "venv" ]; then python3 -m venv venv; fi
 ./venv/bin/python3 -m pip install --upgrade pip -q
 ./venv/bin/python3 -m pip install -r requirements.txt -q
 
+# Start Hub temporarily for modular installation
+echo "🚀 Starting Hub temporarily for modular setup..."
+export PYTHONPATH="$BASE_DIR/core/src"
+nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+
 cd "$BASE_DIR"
 
 # UI (Assets only)

@@ -4,8 +4,10 @@ import hmac
 import time
 import json
 import os
+import uuid
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
+from .encryption import hub_encryption
 
 @dataclass
 class ManagedKey:
@@ -27,17 +29,25 @@ class KeyManager:
         """Loads or generates the persistent secret used by the Hub to prove its identity."""
         if os.path.exists(self.hub_secret_path):
             try:
-                with open(self.hub_secret_path, "r") as f:
-                    return f.read().strip()
+                with open(self.hub_secret_path, "rb") as f:
+                    content = f.read()
+                    try:
+                        # Try decrypting
+                        return hub_encryption.decrypt(content)
+                    except Exception:
+                        # Fallback to plain text for migration
+                        return content.decode().strip()
             except Exception as e:
-                logger.error(f"Failed to load hub secret: {e}")
+                print(f"Failed to load hub secret: {e}")
 
         secret = secrets.token_urlsafe(64)
         try:
-            with open(self.hub_secret_path, "w") as f:
-                f.write(secret)
+            # Encrypt the secret before saving
+            encrypted_secret = hub_encryption.encrypt(secret)
+            with open(self.hub_secret_path, "wb") as f:
+                f.write(encrypted_secret)
         except Exception as e:
-            logger.error(f"Failed to save hub secret: {e}")
+            print(f"Failed to save hub secret: {e}")
         return secret
 
     def sign_hub_challenge(self, challenge_bytes: bytes) -> str:
@@ -53,14 +63,24 @@ class KeyManager:
             "current": {sid: asdict(k) for sid, k in self.keys.items()},
             "history": {sid: [asdict(k) for k in ks] for sid, ks in self.history.items()}
         }
-        with open(self.storage_path, "w") as f:
-            json.dump(data, f)
+        json_data = json.dumps(data)
+        encrypted_data = hub_encryption.encrypt(json_data)
+        with open(self.storage_path, "wb") as f:
+            f.write(encrypted_data)
 
     def load_keys(self):
         if os.path.exists(self.storage_path):
             try:
-                with open(self.storage_path, "r") as f:
-                    data = json.load(f)
+                with open(self.storage_path, "rb") as f:
+                    content = f.read()
+                    try:
+                        # Try decrypting
+                        decrypted = hub_encryption.decrypt(content)
+                        data = json.loads(decrypted)
+                    except Exception:
+                        # Fallback to plain text for migration
+                        data = json.load(open(self.storage_path, "r"))
+
                     for sid, k in data["current"].items():
                         self.keys[sid] = ManagedKey(**k)
                     for sid, ks in data["history"].items():

@@ -3,6 +3,7 @@ import os
 import logging
 import asyncio
 from typing import Dict, Any, Optional
+from security.encryption import hub_encryption
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("State")
@@ -29,12 +30,20 @@ class StateManager:
         self.load_state()
 
     def load_state(self):
-        """Loads state from dual JSON disk caches."""
+        """Loads state from dual JSON disk caches with decryption."""
         # Load System State
         if os.path.exists(self.system_path):
             try:
-                with open(self.system_path, "r") as f:
-                    self.system_state = json.load(f)
+                with open(self.system_path, "rb") as f:
+                    content = f.read()
+                    try:
+                        # Try decrypting
+                        decrypted = hub_encryption.decrypt(content)
+                        self.system_state = json.loads(decrypted)
+                    except Exception:
+                        # Fallback to plain text for migration
+                        with open(self.system_path, "r") as pf:
+                            self.system_state = json.load(pf)
                 logger.info(f"System state loaded from {self.system_path}")
             except Exception as e:
                 logger.error(f"Failed to load system state: {e}")
@@ -42,19 +51,33 @@ class StateManager:
         # Load Tenant State
         if os.path.exists(self.tenants_path):
             try:
-                with open(self.tenants_path, "r") as f:
-                    self.tenant_state = json.load(f)
+                with open(self.tenants_path, "rb") as f:
+                    content = f.read()
+                    try:
+                        # Try decrypting
+                        decrypted = hub_encryption.decrypt(content)
+                        self.tenant_state = json.loads(decrypted)
+                    except Exception:
+                        # Fallback to plain text for migration
+                        with open(self.tenants_path, "r") as pf:
+                            self.tenant_state = json.load(pf)
                 logger.info(f"Tenant state loaded from {self.tenants_path}")
             except Exception as e:
                 logger.error(f"Failed to load tenant state: {e}")
 
     def save_state(self):
-        """Saves memory state to dual JSON disk caches."""
+        """Saves memory state to dual JSON disk caches with encryption."""
         try:
-            with open(self.system_path, "w") as f:
-                json.dump(self.system_state, f, indent=2)
-            with open(self.tenants_path, "w") as f:
-                json.dump(self.tenant_state, f, indent=2)
+            # Save System State
+            sys_json = json.dumps(self.system_state, indent=2)
+            with open(self.system_path, "wb") as f:
+                f.write(hub_encryption.encrypt(sys_json))
+
+            # Save Tenant State
+            ten_json = json.dumps(self.tenant_state, indent=2)
+            with open(self.tenants_path, "wb") as f:
+                f.write(hub_encryption.encrypt(ten_json))
+
             logger.info("State persisted to disk (system & tenants)")
         except Exception as e:
             logger.error(f"Failed to save state to disk: {e}")

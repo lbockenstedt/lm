@@ -359,9 +359,7 @@ const VIEWS = {
                             <div class="space-y-2">
                                 <label class="text-xs text-slate-500 uppercase font-bold">Active Tenant</label>
                                 <select id="tenant-selector" onchange="setTenant(this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                    <option value="default">Default Tenant</option>
-                                    <option value="tenant-a">Tenant A</option>
-                                    <option value="tenant-b">Tenant B</option>
+                                    <!-- Options injected dynamically -->
                                 </select>
                             </div>
                             <div class="space-y-2">
@@ -538,15 +536,43 @@ let currentView = 'dashboard';
 let currentSubView = 'General';
 let currentTenant = 'default';
 
-function setTenant(tenant) {
+async function setTenant(tenant) {
     currentTenant = tenant;
     localStorage.setItem('lm_tenant', tenant);
 
-    fetch('/setup/tenant', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tenant_id: tenant, config: { active: true } })
-    });
+    try {
+        const response = await fetch('/setup/tenant', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: tenant, config: { active: true } })
+        });
+        if (response.ok) {
+            console.log(`Switched to tenant: ${tenant}`);
+            // Refresh current view to load tenant-specific data
+            setView(currentView);
+        }
+    } catch (err) {
+        console.error('Failed to set tenant', err);
+    }
+}
+
+async function loadTenants() {
+    const selector = document.getElementById('tenant-selector');
+    if (!selector) return;
+
+    try {
+        const response = await fetch('/setup/tenants');
+        if (!response.ok) throw new Error('Failed to fetch tenants');
+        const data = await response.json();
+        const tenants = data.tenants || [];
+
+        selector.innerHTML = tenants.map(t => `
+            <option value="${t.id}" ${t.id === currentTenant ? 'selected' : ''}>${t.name}</option>
+        `).join('');
+    } catch (err) {
+        console.error('Error loading tenants:', err);
+        selector.innerHTML = `<option value="default">Default Tenant (Error Loading)</option>`;
+    }
 }
 
 async function updateGlobalConfig(key, value) {

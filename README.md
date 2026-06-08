@@ -43,7 +43,7 @@ The project is consolidated under the `/root/lm` (or local equivalent) directory
 
 ### 🛠️ Active / Pending Tasks
 - [ ] **OPNsense Deep Dive**: Implement full rule creation/deletion via UI (currently supports query).
-- [ ] **CPPM Advanced Reporting**: Expand CPPM queries to include detailed session and endpoint analytics.
+- [ la-manager ] **CPPM Advanced Reporting**: Expand CPPM queries to include detailed session and endpoint analytics.
 - [ ] **Client Sim Controls**: Build out the UI components for triggering and managing simulation profiles.
 - [ ] **Telemetry Dashboards**: Create visual real-time graphs for the metrics pushed by the Proxmox Agent.
 
@@ -56,6 +56,7 @@ The project is consolidated under the `/root/lm` (or local equivalent) directory
 2. **`lm/WebUI/main.js`**: To review the frontend routing and dynamic menu logic.
 3. **`lm/pxmx/src/proxmox_spoke.py`**: To see how the agent-bridge is implemented.
 4. **`audit/audit_all.sh`**: To verify the current build integrity before pushing changes.
+5. **`docs/`**: For technical specifications and user guides.
 
 **Key Architectural Constraints:**
 - **No CLI for Users**: All configuration must be handled via the WebUI.
