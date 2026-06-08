@@ -52,11 +52,9 @@ class LabManagerHub:
         # Initialize Auth with LDAP
         self.auth = AuthManager(LDAPAuthProvider({"server": "ldap://localhost"}))
 
-        # Approval status stored in StateManager for persistence
-        self.approved_spokes = self.state.state.setdefault("approved_spokes", {})
-
-        # Track all spokes that have authenticated at least once
-        self.known_spokes = self.state.state.setdefault("known_spokes", [])
+        # State is now managed via StateManager methods
+        self.approved_modules = self.state.get_approved_modules()
+        self.known_modules = self.state.system_state.get("known_modules", [])
 
         # { spoke_id: str } tracking spoke versions
         self.spoke_versions: Dict[str, str] = {}
@@ -206,10 +204,10 @@ class LabManagerHub:
             logger.info(f"Spoke {spoke_id} authenticated successfully.")
             self.active_connections[spoke_id] = websocket
 
-            # Track this spoke as known for approval lists
-            if spoke_id not in self.known_spokes:
-                self.known_spokes.append(spoke_id)
-                self.state.save_state()
+            # Track this module as known for approval lists
+            if spoke_id not in self.known_modules:
+                self.state.register_module(spoke_id, approved=False)
+                self.known_modules = self.state.system_state["known_modules"]
 
             # Initialize rate limiter (e.g., 5 messages/sec burst of 10)
             self.rate_limiters[spoke_id] = TokenBucket(capacity=10, fill_rate=5)
@@ -229,9 +227,9 @@ class LabManagerHub:
             except Exception as e:
                 logger.error(f"Failed to request version from {spoke_id}: {e}")
 
-            # Check if the spoke is already approved
-            if not self.approved_spokes.get(spoke_id, False):
-                logger.info(f"Spoke {spoke_id} is pending approval.")
+            # Check if the module is already approved
+            if not self.approved_modules.get(spoke_id, False):
+                logger.info(f"Module {spoke_id} is pending approval.")
                 # Send Approval Required message
                 approval_msg = {
                     "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
@@ -248,7 +246,7 @@ class LabManagerHub:
                 await websocket.send(json.dumps(approval_msg))
                 # We don't return; we enter the loop but the loop will filter messages
             else:
-                # SPOKE IS APPROVED: Push initial configuration
+                # MODULE IS APPROVED: Push initial configuration
                 await self.push_config_to_spoke(spoke_id)
 
             # 2. Flush Mailbox
@@ -273,9 +271,9 @@ class LabManagerHub:
                     self.heartbeat.update_heartbeat(spoke_id)
                     continue
 
-                # If the spoke is not approved, ignore all other messages
-                if not self.approved_spokes.get(spoke_id, False):
-                    logger.debug(f"Dropping message from unapproved spoke {spoke_id}")
+                # If the module is not approved, ignore all other messages
+                if not self.approved_modules.get(spoke_id, False):
+                    logger.debug(f"Dropping message from unapproved module {spoke_id}")
                     continue
 
                 # Process Acknowledgement

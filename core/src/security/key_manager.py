@@ -15,11 +15,38 @@ class ManagedKey:
     expires_at: float
 
 class KeyManager:
-    def __init__(self, storage_path="keys.json"):
+    def __init__(self, storage_path="keys.json", hub_secret_path="hub_secret.json"):
         self.storage_path = storage_path
+        self.hub_secret_path = hub_secret_path
         self.keys: Dict[str, ManagedKey] = {} # { spoke_id: current_key }
         self.history: Dict[str, List[ManagedKey]] = {} # { spoke_id: [previous_keys] }
+        self.hub_secret = self._load_or_generate_hub_secret()
         self.load_keys()
+
+    def _load_or_generate_hub_secret(self) -> str:
+        """Loads or generates the persistent secret used by the Hub to prove its identity."""
+        if os.path.exists(self.hub_secret_path):
+            try:
+                with open(self.hub_secret_path, "r") as f:
+                    return f.read().strip()
+            except Exception as e:
+                logger.error(f"Failed to load hub secret: {e}")
+
+        secret = secrets.token_urlsafe(64)
+        try:
+            with open(self.hub_secret_path, "w") as f:
+                f.write(secret)
+        except Exception as e:
+            logger.error(f"Failed to save hub secret: {e}")
+        return secret
+
+    def sign_hub_challenge(self, challenge_bytes: bytes) -> str:
+        """Signs a challenge to prove the Hub's identity to a spoke."""
+        return hmac.new(
+            self.hub_secret.encode(),
+            challenge_bytes,
+            hashlib.sha256
+        ).hexdigest()
 
     def _save_keys(self):
         data = {
