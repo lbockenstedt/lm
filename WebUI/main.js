@@ -249,108 +249,6 @@ const VIEWS = {
                     </div>
                 `;
             }
-            if (subMenu === 'Proxmox') {
-                return `
-                    <div class="space-y-6">
-                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Proxmox Configuration</h2>
-                        <div class="hpe-card rounded-lg p-6 space-y-6">
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                <div class="space-y-2">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">Default Node</label>
-                                    <input type="text" id="pxmx-default-node" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">Cluster ID</label>
-                                    <input type="text" id="pxmx-cluster-id" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                </div>
-                            </div>
-                            <div class="pt-6 border-t border-slate-200 flex justify-end">
-                                <button onclick="saveProxmoxConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
-                                    Save Configuration
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }
-            if (subMenu === 'OPNsense') {
-                return `
-                    <div class="space-y-6">
-                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Configuration</h2>
-                        <div class="hpe-card rounded-lg p-6 space-y-6">
-                            <div class="grid grid-cols-1 gap-6">
-                                <div class="space-y-2">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">OPNsense Host / IP</label>
-                                    <input type="text" id="opn-host" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                </div>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div class="space-y-2">
-                                        <label class="text-xs text-slate-500 uppercase font-bold">API Key</label>
-                                        <input type="text" id="opn-api-key" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                    </div>
-                                    <div class="space-y-2">
-                                        <label class="text-xs text-slate-500 uppercase font-bold">API Secret</label>
-                                        <input type="password" id="opn-api-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="pt-6 border-t border-slate-200 flex justify-end">
-                                <button onclick="saveOpnsenseConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
-                                    Save Configuration
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }
-            if (subMenu === 'Client Sim') {
-                return `
-                    <div class="space-y-6">
-                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Client Simulator Configuration</h2>
-                        <div class="hpe-card rounded-lg p-6 space-y-6">
-                            <div class="space-y-4">
-                                <label class="text-xs text-slate-500 uppercase font-bold block">Simulation Profiles (JSON)</label>
-                                <textarea id="cs-profiles" rows="8" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm font-mono text-slate-800 outline-none focus:ring-2 focus:ring-green-500" placeholder='{"profile1": {...}}'></textarea>
-                            </div>
-                            <div class="pt-6 border-t border-slate-200 flex justify-end">
-                                <button onclick="saveCSConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
-                                    Save Configuration
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }
-            if (subMenu === 'CPPM') {
-                return `
-                    <div class="space-y-6">
-                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">ClearPass (CPPM) Configuration</h2>
-                        <div class="hpe-card rounded-lg p-6 space-y-6">
-                            <div class="grid grid-cols-1 gap-6">
-                                <div class="space-y-2">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">CPPM Host / IP</label>
-                                    <input type="text" id="cppm-host" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                </div>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div class="space-y-2">
-                                        <label class="text-xs text-slate-500 uppercase font-bold">API Username</label>
-                                        <input type="text" id="cppm-user" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                    </div>
-                                    <div class="space-y-2">
-                                        <label class="text-xs text-slate-500 uppercase font-bold">API Password</label>
-                                        <input type="password" id="cppm-pass" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="pt-6 border-t border-slate-200 flex justify-end">
-                                <button onclick="saveCPPMConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
-                                    Save Configuration
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }
             return `
                 <div class="space-y-6">
                     <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Setup</h2>
@@ -749,12 +647,16 @@ function setView(viewId) {
     currentView = viewId;
     currentSubView = 'General'; // Default sub-view
 
+    const view = VIEWS[viewId];
+    if (view && view.subMenus && !view.subMenus.includes('General')) {
+        currentSubView = view.subMenus[0];
+    }
+
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const navItem = document.getElementById(`nav-${viewId}`);
     if (navItem) navItem.classList.add('active');
 
     const topNav = document.getElementById('top-nav');
-    const view = VIEWS[viewId];
     if (view) {
         topNav.innerHTML = view.subMenus.map((menu, i) => `
             <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
@@ -883,20 +785,7 @@ async function updateStatus() {
 
         // Dynamic setup submenus based on approved modules
         const baseSetupMenus = ['General', 'Tenant Config', 'User Access', 'Spoke Approvals'];
-        const extendedSetupMenus = [...baseSetupMenus];
-        if (activeModules.has('pxmx')) {
-            extendedSetupMenus.push('Proxmox');
-        }
-        if (activeModules.has('opnsense')) {
-            extendedSetupMenus.push('OPNsense');
-        }
-        if (activeModules.has('cs')) {
-            extendedSetupMenus.push('Client Sim');
-        }
-        if (activeModules.has('cppm')) {
-            extendedSetupMenus.push('CPPM');
-        }
-        VIEWS.setup.subMenus = extendedSetupMenus;
+        VIEWS.setup.subMenus = baseSetupMenus;
 
         const staticNavs = ['dashboard', 'settings', 'setup'];
         const dynamicHtml = Array.from(activeModules).map(viewId => {
