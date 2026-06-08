@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import time
-from typing import Dict
+from typing import Dict, Any
 import websockets
 
 from messaging.protocol import Message, MessageHeader, MessagePayload, Acknowledgement
