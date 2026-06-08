@@ -29,9 +29,10 @@ cd "$BASE_DIR"
 
 # Clone core components (Hub and WebUI)
 echo "🌐 Cloning Core Repository..."
+rm -rf lm_tmp
 git clone "https://github.com/lbockenstedt/lm.git" lm_tmp
-mv lm_tmp/hub "$BASE_DIR/core"
-mv lm_tmp/ui "$BASE_DIR/WebUI"
+mv lm_tmp/core "$BASE_DIR/core"
+mv lm_tmp/WebUI "$BASE_DIR/WebUI"
 # Move remaining files from root of repo (start_all.sh, install scripts, etc.)
 cp -r lm_tmp/* "$BASE_DIR/" 2>/dev/null || true
 rm -rf lm_tmp
@@ -55,7 +56,13 @@ echo "🛠️ Running modular installations..."
 # Hub
 echo "Setting up Hub Backend..."
 cd "$BASE_DIR/core"
-bash ./install_hub.sh
+
+# Hub venv setup
+if [ -d "venv" ] && [ ! -f "venv/bin/python3" ]; then rm -rf venv; fi
+if [ ! -d "venv" ]; then python3 -m venv venv; fi
+./venv/bin/python3 -m pip install --upgrade pip -q
+./venv/bin/python3 -m pip install -r requirements.txt -q
+
 cd "$BASE_DIR"
 
 # UI (Assets only)

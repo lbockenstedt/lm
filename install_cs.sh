@@ -31,9 +31,9 @@ INSTALL_DIR="/root/lm"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-if [ ! -d "lm/.git" ]; then
+if [ ! -d "core/.git" ]; then
     echo "🌐 Cloning required Hub repository..."
-    git clone https://github.com/lbockenstedt/lm.git
+    git clone https://github.com/lbockenstedt/lm.git core
 fi
 
 if [ -d "cs/.git" ]; then
@@ -83,7 +83,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR/cs
-ExecStart=/usr/bin/env PYTHONPATH=$INSTALL_DIR/lm/hub/src $INSTALL_DIR/cs/venv/bin/python3 -m src.control_plane --id $SPOKE_ID --secret $SPOKE_SECRET --hub $HUB_URL
+ExecStart=/usr/bin/env PYTHONPATH=$INSTALL_DIR/lm/core/src $INSTALL_DIR/cs/venv/bin/python3 -m src.control_plane --id $SPOKE_ID --secret $SPOKE_SECRET --hub $HUB_URL
 Restart=on-failure
 RestartSec=10
 

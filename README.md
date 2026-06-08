@@ -1,78 +1,71 @@
-# 🌐 Lab Manager (LM)
+# 🌐 Lab Manager (LM) - Project Master Registry
 
-Lab Manager is a centralized orchestrator for remote node management, designed as a hub-and-spoke architecture. It provides a "single pane of glass" interface for managing multitenant infrastructure across various specialized spokes.
+This repository serves as the central orchestrator for a Hub-and-Spoke management system. It is designed to provide a "single pane of glass" for managing multitenant infrastructure across various specialized spokes.
 
-## 🚀 Deployment Overview
+## 🗺️ Repository & Directory Map
 
-The system is optimized for **Proxmox LXC containers** and **Azure VMs** using a lean, native Python installation. It removes the need for Docker nesting and minimizes system overhead.
+The project is consolidated under the `/root/lm` (or local equivalent) directory structure:
 
-### ⚡ Quick Start (Full Stack)
-To deploy the Hub, WebUI, and all default spokes on a single server:
-```bash
-curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_all.sh | bash
-```
-
-### 🧩 Modular Installation (Separate Containers)
-For high-availability or distributed deployments, install components on separate LXC instances:
-
-| Component | Installation Command | Role |
+| Directory | Component | Description |
 | :--- | :--- | :--- |
-| **Hub Backend** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_hub.sh \| bash` | Central API, State, & Messaging |
-| **WebUI** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_ui.sh \| bash` | Static Dashboard (via Hub) |
-| **Client Sim** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/cs/main/install_cs.sh \| bash` | Traffic & DNS Simulation |
-| **Proxmox** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/install_pxmx.sh \| bash` | VM Lifecycle & Agent Server |
-| **OPNsense** | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/opnsense/main/install_opnsense.sh \| bash` | Firewall & Interface Mgmt |
-
-#### 🤖 Proxmox Local Agent
-The Proxmox module utilizes a local agent to gather real-time telemetry and execute host-level commands.
-- **Installation**: `bash /root/lm/pxmx/agent/install_agent.sh --spoke-url ws://<SPOKE_IP>:8766`
-- **Purpose**: Pushes CPU/RAM/Disk metrics and VM lists to the Spoke every 60s.
-- **Connectivity**: Uses a persistent WebSocket session on port **8766**.
+| `lm/core` | **Hub Backend** | Core API Server, State Management, WebSocket Control Plane, and Security (HMAC/Auth). |
+| `lm/WebUI` | **Web Interface** | Dynamic dashboard, theme engine, and module configuration pages. |
+| `lm/pxmx` | **Proxmox Spoke** | Bridge between Hub and Proxmox cluster; manages the Local Agent. |
+| `lm/pxmx/agent` | **Proxmox Agent** | Lightweight host-level service for real-time telemetry and API execution. |
+| `lm/opnsense` | **OPNsense Spoke** | Firewall rule management and interface status reporting. |
+| `lm/cs` | **Client Sim Spoke** | Traffic and DNS simulation engine for network testing. |
+| `lm/cppm` | **CPPM Spoke** | ClearPass Policy Manager integration for endpoint and session auditing. |
+| `audit/` | **Audit Suite** | Static analysis tools for imports, syntax, and dependency verification. |
 
 ---
 
-## 🖥️ Accessing the Dashboard
+## 🚀 Current Implementation State
 
-The Hub serves the WebUI natively. No separate build or installation is required.
-- **Dashboard**: `http://<HUB_IP>:8000`
-- **REST API**: `http://<HUB_IP>:8000/status`
+### ✅ Completed Features
+- **Hub Core**:
+    - [x] WebSocket control plane for real-time Hub $\leftrightarrow$ Spoke communication.
+    - [x] Persistent JSON state management for global config and approvals.
+    - [x] Mutual authentication via First-Secret exchange.
+    - [x] HMAC-SHA256 message signing for all control plane traffic.
+    - [x] Dynamic Spoke Approval workflow (`Pending` $\rightarrow$ `Approved`).
+- **WebUI**:
+    - [x] Theme Engine (HPE Default, LCARS, Imperial) with CSS variables.
+    - [x] Configurable logos (left/right) and primary colors via UI.
+    - [x] Dynamic Menu rendering based on approved spokes.
+    - [x] Configuration pages for all modules (Proxmox, OPNsense, CS, CPPM).
+- **Proxmox Integration**:
+    - [x] Real API-based VM list and node telemetry gathering via Local Agent.
+    - [x] Command bridging: `WebUI` $\rightarrow$ `Hub` $\rightarrow$ `Spoke` $\rightarrow$ `Agent` $\rightarrow$ `Proxmox API`.
+- **Deployment**:
+    - [x] `install_all.sh` for full-stack native installation.
+    - [x] Standardized modular installers for individual spokes.
+    - [x] Rebranded from `lm-manager` to `lm`.
 
----
-
-## 🛠️ Management & Maintenance
-
-### Starting the System
-Navigate to the `lm` directory and launch the orchestrator:
-```bash
-cd /root/lm/lm
-./start_all.sh
-```
-
-### Health & Regression Audits
-Before pushing changes to GitHub, run the comprehensive static audit to ensure no broken imports or syntax errors:
-```bash
-/root/lm/audit/audit_all.sh
-```
-This tool verifies:
-- ✅ **Import Integrity**: Checks for legacy paths (e.g., the old spoke source structure).
-- ✅ **Dependency Alignment**: Ensures `requirements.txt` matches the code.
-- ✅ **Python Syntax**: Compiles all files to detect runtime crashes.
-
-### Stopping Services
-```bash
-pkill -f python
-```
+### 🛠️ Active / Pending Tasks
+- [ ] **OPNsense Deep Dive**: Implement full rule creation/deletion via UI (currently supports query).
+- [ ] **CPPM Advanced Reporting**: Expand CPPM queries to include detailed session and endpoint analytics.
+- [ ] **Client Sim Controls**: Build out the UI components for triggering and managing simulation profiles.
+- [ ] **Telemetry Dashboards**: Create visual real-time graphs for the metrics pushed by the Proxmox Agent.
 
 ---
 
-## 🛡️ Architecture Highlights
-- **LXC-Native**: No Docker nesting required; runs directly on the OS.
-- **Hub-and-Spoke**: Hub manages state; Spokes execute hardware-specific logic.
-- **HMAC Security**: Every message between Hub and Spoke is signed for authenticity.
-- **Multitenancy**: Native support for tenant-scoped resource mapping and quotas.
+## 📝 Session Continuity Guide (For Claude)
 
-## 📖 Developer Guide
-To build a new plugin module:
-1. Inherit from `BaseSpoke` in `lm/hub/src/base_spoke.py`.
-2. Implement the `handle_command` and `get_status` methods.
-3. Use `ControlPlane` to enable both Standalone and Connected modes.
+**When resuming this project, always start by reading this file and the following:**
+1. **`lm/core/src/main.py`**: To understand the current Hub logic and state.
+2. **`lm/WebUI/main.js`**: To review the frontend routing and dynamic menu logic.
+3. **`lm/pxmx/src/proxmox_spoke.py`**: To see how the agent-bridge is implemented.
+4. **`audit/audit_all.sh`**: To verify the current build integrity before pushing changes.
+
+**Key Architectural Constraints:**
+- **No CLI for Users**: All configuration must be handled via the WebUI.
+- **Security First**: No message is processed without a valid HMAC signature.
+- **LXC-Native**: Avoid Docker nesting; use native Python venvs and systemd units.
+- **Stateful**: Hub is the source of truth; spokes are stateless executors.
+
+---
+
+## 🛠️ Maintenance Commands
+- **Start All**: `cd /root/lm && ./start_all.sh`
+- **Audit System**: `bash /root/audit/audit_all.sh`
+- **Stop All**: `pkill -f python`
