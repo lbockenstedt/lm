@@ -126,8 +126,18 @@ for mod in "${!MODULES[@]}"; do
         SPOKE_SECRET="lm-secret"
     fi
 
-    # Run the modular installer with the Hub-provided secret
-    bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET"
+    # Fetch Hub Secret for mutual authentication
+    HUB_SECRET_FILE="$BASE_DIR/core/src/hub_secret.json"
+    if [ -f "$HUB_SECRET_FILE" ]; then
+        HUB_SECRET=$(cat "$HUB_SECRET_FILE")
+        echo "✅ Loaded Hub secret for mutual auth"
+    else
+        echo "⚠️  Hub secret file not found at $HUB_SECRET_FILE. Mutual auth will be disabled."
+        HUB_SECRET=""
+    fi
+
+    # Run the modular installer with the Hub-provided secret and Hub secret
+    bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET" --hub-secret "$HUB_SECRET"
 done
 
 
