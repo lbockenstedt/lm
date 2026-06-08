@@ -14,7 +14,9 @@ echo "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
 echo "🧹 Cleaning up existing processes..."
 # Specifically target the Hub ports to avoid OSError 48
 for port in 8000 8765; do
-    PORT_PID=$(lsof -t -i :$port)
+    # Use || true because lsof returns 1 if no process is found,
+    # which would trigger 'set -e' and kill the script.
+    PORT_PID=$(lsof -t -i :$port || true)
     if [ -n "$PORT_PID" ]; then
         echo "Found process $PORT_PID on port $port. Killing it..."
         kill -9 $PORT_PID
