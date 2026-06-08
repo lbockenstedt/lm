@@ -68,7 +68,11 @@ cd "$BASE_DIR"
 # UI (Assets only)
 echo "Setting up WebUI assets..."
 cd "$BASE_DIR/WebUI"
-bash ./install_ui.sh
+if [ -f "install_ui.sh" ]; then
+    bash ./install_ui.sh
+else
+    echo "✅ UI assets already in place (install_ui.sh not found in WebUI directory, skipping)."
+fi
 cd "$BASE_DIR"
 
 # Give the Hub API a moment to fully start and stabilize
