@@ -55,3 +55,4 @@ if [ -f "requirements.txt" ]; then
 fi
 
 echo "🎉 OPNsense Manager native installation complete!"
+echo "📦 Version: 0.01"
