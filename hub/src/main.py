@@ -205,6 +205,26 @@ class LabManagerHub:
             # 2. Flush Mailbox
             await self.mailbox.flush_mailbox(spoke_id, self.send_to_spoke)
 
+            # Push CPPM config if this is a CPPM spoke and already approved
+            if "cppm" in spoke_id and self.approved_spokes.get(spoke_id, False):
+                try:
+                    cppm_config = self.state.state.get("global_config", {}).get("cppm", {})
+                    if cppm_config:
+                        msg_id = str(uuid.uuid4())
+                        msg = Message(
+                            header=MessageHeader(
+                                message_id=msg_id,
+                                timestamp=time.time(),
+                                sender_id="hub",
+                                destination_id=spoke_id
+                            ),
+                            payload=MessagePayload(type="update_config", data=cppm_config)
+                        )
+                        await self.send_to_spoke(msg)
+                        logger.info(f"Pushed saved CPPM config to spoke {spoke_id}")
+                except Exception as e:
+                    logger.error(f"Failed to push CPPM config to {spoke_id}: {e}")
+
             # 3. Message Loop
             async for message_json in websocket:
                 msg_data = json.loads(message_json)

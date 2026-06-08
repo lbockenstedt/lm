@@ -83,7 +83,47 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/setup/cppm-config")
+    async def get_cppm_config():
+        hub = app.state.hub
+        config = hub.state.state.get("global_config", {}).get("cppm", {})
+        return {"config": config}
+
+    @app.post("/setup/cppm-config")
+    async def update_cppm_config(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            config = data.get("config", {})
+
+            # Save to persistent state
+            global_config = hub.state.state.get("global_config", {})
+            global_config["cppm"] = config
+            hub.state.state["global_config"] = global_config
+            hub.state.save_state()
+
+            # Push to CPPM spoke if connected
+            cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
+            if cppm_spoke:
+                msg_id = str(uuid.uuid4())
+                msg = Message(
+                    header=MessageHeader(
+                        message_id=msg_id,
+                        timestamp=time.time(),
+                        sender_id="hub",
+                        destination_id=cppm_spoke
+                    ),
+                    payload=MessagePayload(type="update_config", data=config)
+                )
+                await hub.send_to_spoke(msg)
+                return {"status": "success", "message": "Configuration updated and pushed to spoke."}
+            else:
+                return {"status": "partial_success", "message": "Configuration saved, but CPPM spoke is not connected."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/logs")
+
     async def get_system_logs():
         hub = app.state.hub
         return {"logs": list(hub.logs)}
