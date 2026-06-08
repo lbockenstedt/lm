@@ -143,7 +143,7 @@ const VIEWS = {
                     </div>
 
                     <div id="vm-empty-state" class="py-12 text-center text-slate-400">
-                        <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01- la-manager secret $\rightarrow$ lab-manager-secret.2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                         <p>Enter a VM ID to retrieve OPNsense firewall rules.</p>
                     </div>
                 </div>
@@ -171,13 +171,22 @@ const VIEWS = {
             <div class="space-y-6">
                 <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Setup</h2>
                 <div class="hpe-card rounded-lg p-6 space-y-6">
-                    <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Active Tenant</label>
-                        <select id="tenant-selector" onchange="setTenant(this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                            <option value="default">Default Tenant</option>
-                            <option value="tenant-a">Tenant A</option>
-                            <option value="tenant-b">Tenant B</option>
-                        </select>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="space-y-2">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Active Tenant</label>
+                            <select id="tenant-selector" onchange="setTenant(this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="default">Default Tenant</option>
+                                <option value="tenant-a">Tenant A</option>
+                                <option value="tenant-b">Tenant B</option>
+                            </select>
+                        </div>
+                        <div class="space-y-2">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Authentication Mode</label>
+                            <select id="auth-mode" onchange="updateGlobalConfig('auth_mode', this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="local">Local Login</option>
+                                <option value="ldap">LDAP Integration</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="p-4 rounded-md bg-green-50 border border-green-200 text-sm text-green-700">
                         Multi-tenancy is currently in <strong class="text-green-800">Prototype Mode</strong>. Tenant selection is simulated and local logins are enabled.
@@ -206,7 +215,7 @@ const VIEWS = {
                 <div class="hpe-card rounded-lg p-6 space-y-4">
                     <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
                         <span class="text-slate-500">Hub Version</span>
-                        <span class="text-blue-600 font-mono font-bold">0.07</span>
+                        <span class="text-blue-600 font-mono font-bold">0.08</span>
                     </div>
                     <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
                         <span class="text-slate-500">API Status</span>
@@ -228,7 +237,24 @@ let currentTenant = 'default';
 function setTenant(tenant) {
     currentTenant = tenant;
     localStorage.setItem('lm_tenant', tenant);
-    console.log(`Tenant switched to: ${tenant}`);
+
+    fetch('/setup/tenant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenant_id: tenant, config: { active: true } })
+    });
+}
+
+async function updateGlobalConfig(key, value) {
+    try {
+        await fetch('/setup/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { [key]: value } })
+        });
+    } catch (err) {
+        console.error('Failed to update config', err);
+    }
 }
 
 function setView(viewId) {
@@ -403,7 +429,7 @@ async function lookupFirewall() {
                     <td class="px-4 py-3">
                         <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${rule.action === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">
                             ${rule.action}
-                        </span
+                        </span>
                     </td>
                     <td class="px-4 py-3 text-slate-600">${rule.protocol || 'TCP'}</td>
                     <td class="px-4 py-3 text-slate-600">${rule.destination || '-'}</td>

@@ -5,30 +5,30 @@ const VIEWS = {
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a8 8 0 018 8 8 8 0 018-8m-12 8a8 8 0 01-8-8 8 8 0 018-8m0 16v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
         render: () => `
             <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6">Infrastructure Overview</h2>
+                <h2 class="text-2xl font-bold mb-6 text-[#263040]">Infrastructure Overview</h2>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <div class="hpe-card rounded-2xl p-6">
+                    <div class="hpe-card rounded-lg p-6 shadow-sm">
                         <label class="text-xs text-slate-500 uppercase font-bold">Active Spokes</label>
-                        <div id="spoke-count" class="text-4xl font-bold mt-2 text-blue-400">0</div>
+                        <div id="spoke-count" class="text-4xl font-bold mt-2 text-[#01A982]">0</div>
                     </div>
-                    <div class="hpe-card rounded-2xl p-6">
+                    <div class="hpe-card rounded-lg p-6 shadow-sm">
                         <label class="text-xs text-slate-500 uppercase font-bold">System Health</label>
-                        <div id="health-status" class="text-4xl font-bold mt-2 text-green-400">Optimal</div>
+                        <div id="health-status" class="text-4xl font-bold mt-2 text-green-600">Optimal</div>
                     </div>
-                    <div class="hpe-card rounded-2xl p-6">
+                    <div class="hpe-card rounded-lg p-6 shadow-sm">
                         <label class="text-xs text-slate-500 uppercase font-bold">Network Latency</label>
-                        <div class="text-4xl font-bold mt-2 text-slate-200">~1.2ms</div>
+                        <div class="text-4xl font-bold mt-2 text-slate-700">~1.2ms</div>
                     </div>
                 </div>
 
-                <div class="hpe-card rounded-2xl p-6">
-                    <h3 class="text-lg font-semibold mb-4">Connected Spokes</h3>
+                <div class="hpe-card rounded-lg p-6 shadow-sm">
+                    <h3 class="text-lg font-semibold mb-4 text-[#263040]">Connected Spokes</h3>
                     <div id="spoke-list" class="space-y-3">
                         <div class="animate-pulse flex space-x-4 p-2">
-                            <div class="rounded-full bg-slate-700 h-10 w-10"></div>
+                            <div class="rounded-full bg-slate-200 h-10 w-10"></div>
                             <div class="flex-1 space-y-6 py-1">
-                                <div class="h-2 bg-slate-700 rounded"></div>
-                                <div class="h-2 bg-slate-700 rounded w-5/6"></div>
+                                <div class="h-2 bg-slate-200 rounded"></div>
+                                <div class="h-2 bg-slate-200 rounded w-5/6"></div>
                             </div>
                         </div>
                     </div>
@@ -42,34 +42,34 @@ const VIEWS = {
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>',
         render: () => `
             <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6">Proxmox Cluster Management</h2>
-                <div class="hpe-card rounded-2xl p-6">
+                <h2 class="text-2xl font-bold mb-6 text-[#263040]">Proxmox Cluster Management</h2>
+                <div class="hpe-card rounded-lg p-6 shadow-sm">
                     <div class="flex gap-4 mb-8">
                         <input id="vm-id-input" type="text" placeholder="Enter VM ID (e.g. vm-101)"
-                               class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white">
+                               class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none transition-all text-slate-800 placeholder-slate-400">
                         <button onclick="lookupFirewall()"
-                                class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-lg text-sm font-medium transition-all">
+                                class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-medium transition-all">
                             Lookup Firewall
                         </button>
                     </div>
 
                     <div id="vm-details" class="hidden space-y-6">
                         <div class="grid grid-cols-2 gap-4">
-                            <div class="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
+                            <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
                                 <label class="text-xs text-slate-500 uppercase font-bold">VM ID</label>
-                                <div id="res-vm-id" class="text-lg font-medium text-slate-200">-</div>
+                                <div id="res-vm-id" class="text-lg font-medium text-slate-800">-</div>
                             </div>
-                            <div class="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
+                            <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
                                 <label class="text-xs text-slate-500 uppercase font-bold">IP Address</label>
-                                <div id="res-ip" class="text-lg font-medium text-blue-400">-</div>
+                                <div id="res-ip" class="text-lg font-medium text-blue-600">-</div>
                             </div>
                         </div>
 
                         <div class="mt-6">
-                            <h3 class="text-sm font-semibold text-slate-400 mb-3 uppercase tracking-wider">Firewall Rules</h3>
-                            <div class="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/50">
+                            <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Firewall Rules</h3>
+                            <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
                                 <table class="w-full text-left text-sm">
-                                    <thead class="bg-slate-800 text-slate-400 uppercase text-xs">
+                                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
                                         <tr id="firewall-headers">
                                             <th class="px-4 py-3">Rule ID</th>
                                             <th class="px-4 py-3">Action</th>
@@ -77,7 +77,7 @@ const VIEWS = {
                                             <th class="px-4 py-3">Destination</th>
                                         </tr>
                                     </thead>
-                                    <tbody id="firewall-table-body" class="divide-y divide-slate-800">
+                                    <tbody id="firewall-table-body" class="divide-y divide-slate-200">
                                         <!-- Rows injected here -->
                                     </tbody>
                                 </table>
@@ -85,7 +85,7 @@ const VIEWS = {
                         </div>
                     </div>
 
-                    <div id="vm-empty-state" class="py-12 text-center text-slate-500">
+                    <div id="vm-empty-state" class="py-12 text-center text-slate-400">
                         <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                         <p>Enter a VM ID to inspect its Proxmox resource mapping.</p>
                     </div>
@@ -99,34 +99,34 @@ const VIEWS = {
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.C18.4 5.6 17.4 5.4 16.3 5.4a4.4 4.4 0 00-4.4 4.4c0 1.1.2 2.1.6 3.1"></path></svg>',
         render: () => `
             <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6">OPNsense Firewall Manager</h2>
-                <div class="hpe-card rounded-2xl p-6">
+                <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Firewall Manager</h2>
+                <div class="hpe-card rounded-lg p-6 shadow-sm">
                     <div class="flex gap-4 mb-8">
                         <input id="vm-id-input" type="text" placeholder="Enter VM IP or ID..."
-                               class="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all text-white">
+                               class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none transition-all text-slate-800 placeholder-slate-400">
                         <button onclick="lookupFirewall()"
-                                class="bg-blue-600 hover:bg-blue-500 text-white px-6 py-3 rounded-lg text-sm font-medium transition-all">
+                                class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-medium transition-all">
                             Query Rules
                         </button>
                     </div>
 
                     <div id="vm-details" class="hidden space-y-6">
                         <div class="grid grid-cols-2 gap-4">
-                            <div class="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
+                            <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
                                 <label class="text-xs text-slate-500 uppercase font-bold">Identity</label>
-                                <div id="res-vm-id" class="text-lg font-medium text-slate-200">-</div>
+                                <div id="res-vm-id" class="text-lg font-medium text-slate-800">-</div>
                             </div>
-                            <div class="p-4 rounded-xl bg-slate-900/50 border border-slate-800">
+                            <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
                                 <label class="text-xs text-slate-500 uppercase font-bold">Assigned IP</label>
-                                <div id="res-ip" class="text-lg font-medium text-blue-400">-</div>
+                                <div id="res-ip" class="text-lg font-medium text-blue-600">-</div>
                             </div>
                         </div>
 
                         <div class="mt-6">
-                            <h3 class="text-sm font-semibold text-slate-400 mb-3 uppercase tracking-wider">Active Rules for this IP</h3>
-                            <div class="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/50">
+                            <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Active Rules for this IP</h3>
+                            <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
                                 <table class="w-full text-left text-sm">
-                                    <thead class="bg-slate-800 text-slate-400 uppercase text-xs">
+                                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
                                         <tr id="firewall-headers">
                                             <th class="px-4 py-3">Rule ID</th>
                                             <th class="px-4 py-3">Action</th>
@@ -134,7 +134,7 @@ const VIEWS = {
                                             <th class="px-4 py-3">Destination</th>
                                         </tr>
                                     </thead>
-                                    <tbody id="firewall-table-body" class="divide-y divide-slate-800">
+                                    <tbody id="firewall-table-body" class="divide-y divide-slate-200">
                                         <!-- Rows injected here -->
                                     </tbody>
                                 </table>
@@ -142,7 +142,7 @@ const VIEWS = {
                         </div>
                     </div>
 
-                    <div id="vm-empty-state" class="py-12 text-center text-slate-500">
+                    <div id="vm-empty-state" class="py-12 text-center text-slate-400">
                         <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                         <p>Enter a VM ID to retrieve OPNsense firewall rules.</p>
                     </div>
@@ -156,8 +156,8 @@ const VIEWS = {
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>',
         render: () => `
             <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6">Client Simulator</h2>
-                <div class="hpe-card rounded-2xl p-6 text-center py-12">
+                <h2 class="text-2xl font-bold mb-6 text-[#263040]">Client Simulator</h2>
+                <div class="hpe-card rounded-lg p-6 text-center py-12">
                     <div class="text-slate-500">Traffic simulation controls coming soon...</div>
                 </div>
             </div>
@@ -169,18 +169,43 @@ const VIEWS = {
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110-4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
         render: () => `
             <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6">System Setup</h2>
-                <div class="hpe-card rounded-2xl p-6 space-y-6">
-                    <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Active Tenant</label>
-                        <select id="tenant-selector" onchange="setTenant(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white outline-none focus:ring-2 focus:ring-blue-500">
-                            <option value="default">Default Tenant</option>
-                            <option value="tenant-a">Tenant A</option>
-                            <option value="tenant-b">Tenant B</option>
-                        </select>
+                <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Setup</h2>
+                <div class="hpe-card rounded-lg p-6 space-y-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div class="space-y-4">
+                            <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">Tenant Configuration</h3>
+                            <div class="space-y-2">
+                                <label class="text-xs text-slate-500 uppercase font-bold">Active Tenant</label>
+                                <select id="tenant-selector" onchange="setTenant(this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    <option value="default">Default Tenant</option>
+                                    <option value="tenant-a">Tenant A</option>
+                                    <option value="tenant-b">Tenant B</option>
+                                </select>
+                            </div>
+                            <div class="p-3 rounded-md bg-green-50 border border-green-200 text-xs text-green-700">
+                                Multi-tenancy is currently in <strong class="text-green-800">Prototype Mode</strong>.
+                            </div>
+                        </div>
+                        <div class="space-y-4">
+                            <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">User Access</h3>
+                            <div class="space-y-2">
+                                <label class="text-xs text-slate-500 uppercase font-bold">Authentication Mode</label>
+                                <select id="auth-mode" onchange="updateGlobalConfig('auth_mode', this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                    <option value="local">Local Login</option>
+                                    <option value="ldap">LDAP Integration</option>
+                                </select>
+                            </div>
+                        </div>
                     </div>
-                    <div class="p-4 rounded-xl bg-blue-500/10 border border-blue-500/30 text-sm text-blue-300">
-                        Multi-tenancy is currently in <strong class="text-white">Prototype Mode</strong>. Tenant selection is simulated and local logins are enabled.
+
+                    <div class="pt-6 border-t border-slate-200">
+                        <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Maintenance</h3>
+                        <div class="flex items-center justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
+                            <div class="text-sm text-slate-600">Check for updates and synchronize from GitHub repository.</div>
+                            <button onclick="triggerUpdate()" id="update-btn" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-xs font-bold transition-all shadow-sm">
+                                Update System
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -192,19 +217,19 @@ const VIEWS = {
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-1.59 4.04-1.59 5.583 0a1.724 1.724 0 001.28 2.915c-1.344 1.35-3.77 1.35-5.114 0a1.724 1.724 0 00-1.28-2.915zM12 18a6 6 0 100-12 6 6 0 000 12z"></path></svg>',
         render: () => `
             <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6">System Configuration</h2>
-                <div class="hpe-card rounded-2xl p-6 space-y-4">
-                    <div class="flex justify-between p-4 rounded-lg bg-slate-900/50 border border-slate-800">
-                        <span class="text-slate-400">Hub Version</span>
-                        <span class="text-blue-400 font-mono font-bold">0.07</span>
+                <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Configuration</h2>
+                <div class="hpe-card rounded-lg p-6 space-y-4">
+                    <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
+                        <span class="text-slate-500">Hub Version</span>
+                        <span class="text-blue-600 font-mono font-bold">0.08</span>
                     </div>
-                    <div class="flex justify-between p-4 rounded-lg bg-slate-900/50 border border-slate-800">
-                        <span class="text-slate-400">API Status</span>
-                        <span class="text-green-400 font-bold">Active</span>
+                    <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
+                        <span class="text-slate-500">API Status</span>
+                        <span class="text-green-600 font-bold">Active</span>
                     </div>
-                    <div class="flex justify-between p-4 rounded-lg bg-slate-900/50 border border-slate-800">
-                        <span class="text-slate-400">Deployment Mode</span>
-                        <span class="text-slate-200">LXC Native</span>
+                    <div class="flex justify-between p-4 rounded-md bg-slate-50 border border-slate-200">
+                        <span class="text-slate-500">Deployment Mode</span>
+                        <span class="text-slate-700">LXC Native</span>
                     </div>
                 </div>
             </div>
@@ -218,7 +243,24 @@ let currentTenant = 'default';
 function setTenant(tenant) {
     currentTenant = tenant;
     localStorage.setItem('lm_tenant', tenant);
-    console.log(`Tenant switched to: ${tenant}`);
+
+    fetch('/setup/tenant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tenant_id: tenant, config: { active: true } })
+    });
+}
+
+async function updateGlobalConfig(key, value) {
+    try {
+        await fetch('/setup/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { [key]: value } })
+        });
+    } catch (err) {
+        console.error('Failed to update config', err);
+    }
 }
 
 function setView(viewId) {
@@ -261,7 +303,7 @@ async function updateStatus() {
 
         statusEl.innerHTML = `
             <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div>
-            <span class="text-green-400">Hub Online</span>
+            <span class="text-green-600">Hub Online</span>
         `;
 
         const connections = data.active_connections || [];
@@ -285,7 +327,7 @@ async function updateStatus() {
             const view = VIEWS[viewId];
             const isActive = currentView === viewId ? 'active' : '';
             return `
-                <div onclick="setView('${viewId}')" id="nav-${viewId}" class="nav-item ${isActive} p-3 rounded-lg flex items-center gap-3 text-sm font-medium">
+                <div onclick="setView('${viewId}')" id="nav-${viewId}" class="nav-item ${isActive} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
                     ${view.icon}
                     ${view.name}
                 </div>
@@ -299,22 +341,22 @@ async function updateStatus() {
         mainNav.innerHTML = `
             ${dashboardNav}
             ${dynamicHtml}
-            <div class="pt-4 mt-4 border-t border-slate-800"></div>
+            <div class="pt-4 mt-4 border-t border-slate-200"></div>
             ${setupNav}
             ${settingsNav}
         `;
 
         if (spokeList) {
             if (connections.length === 0) {
-                spokeList.innerHTML = `<p class="text-xs text-slate-500 italic">No spokes connected.</p>`;
+                spokeList.innerHTML = `<p class="text-xs text-slate-400 italic">No spokes connected.</p>`;
             } else {
                 spokeList.innerHTML = connections.map(id => `
-                    <div class="flex items-center justify-between p-3 rounded-xl bg-slate-800/40 border border-slate-700/50 hover:border-blue-500/50 transition-all group">
+                    <div class="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-200 hover:border-green-500 transition-all group">
                         <div class="flex items-center gap-3">
                             <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]"></div>
-                            <span class="text-sm font-medium text-slate-300 group-hover:text-white transition-colors">${id}</span>
+                            <span class="text-sm font-medium text-slate-700 group-hover:text-green-600 transition-colors">${id}</span>
                         </div>
-                        <span class="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Online</span>
+                        <span class="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Online</span>
                     </div>
                 `).join('');
             }
@@ -322,7 +364,7 @@ async function updateStatus() {
     } catch (err) {
         statusEl.innerHTML = `
             <div class="w-1.5 h-1.5 rounded-full bg-red-500"></div>
-            <span class="text-red-400">Hub Offline</span>
+            <span class="text-red-600">Hub Offline</span>
         `;
         if (spokeList) spokeList.innerHTML = `<p class="text-xs text-red-500 italic">Error connecting to Hub API.</p>`;
     }
@@ -346,7 +388,7 @@ async function handleSearch(query) {
             resultsEl.innerHTML = `<div class="p-3 text-xs text-slate-500 italic">No matches found</div>`;
         } else {
             resultsEl.innerHTML = filtered.map(id => `
-                <div onclick="setView('dashboard')" class="p-2 text-xs text-slate-300 hover:bg-slate-700 rounded cursor-pointer transition-colors">
+                <div onclick="setView('dashboard')" class="p-2 text-xs text-slate-700 hover:bg-slate-100 rounded cursor-pointer transition-colors">
                     ${id}
                 </div>
             `).join('');
@@ -370,7 +412,7 @@ async function lookupFirewall() {
 
     emptyState.classList.add('hidden');
     details.classList.remove('hidden');
-    tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-slate-500 animate-pulse">Querying spoke...</td></tr>`;
+    tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 animate-pulse">Querying spoke...</td></tr>`;
 
     try {
         const response = await fetch(`/vm/${vmId}/firewall`);
@@ -385,23 +427,23 @@ async function lookupFirewall() {
 
         const rules = data.rules || [];
         if (rules.length === 0) {
-            tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-slate-500 italic">No rules found for this IP.</td></tr>`;
+            tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-slate-400 italic">No rules found for this IP.</td></tr>`;
         } else {
             tableBody.innerHTML = rules.map(rule => `
-                <tr class="hover:bg-slate-800/30 transition-colors">
+                <tr class="hover:bg-slate-50 transition-colors">
                     <td class="px-4 py-3 font-mono text-xs text-slate-400">${rule.id || 'N/A'}</td>
                     <td class="px-4 py-3">
-                        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${rule.action === 'pass' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}">
+                        <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${rule.action === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">
                             ${rule.action}
-                        </span>
+                        </span
                     </td>
-                    <td class="px-4 py-3 text-slate-300">${rule.protocol || 'TCP'}</td>
-                    <td class="px-4 py-3 text-slate-300">${rule.destination || '-'}</td>
+                    <td class="px-4 py-3 text-slate-600">${rule.protocol || 'TCP'}</td>
+                    <td class="px-4 py-3 text-slate-600">${rule.destination || '-'}</td>
                 </tr>
             `).join('');
         }
     } catch (err) {
-        tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-400 font-medium">${err.message}</td></tr>`;
+        tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-500 font-medium">${err.message}</td></tr>`;
     }
 }
 

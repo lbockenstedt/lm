@@ -1,6 +1,22 @@
 #!/bin/bash
 set -e
 
+# Default Configuration
+HUB_URL="ws://localhost:8765"
+SPOKE_ID="opn-spoke-1"
+SPOKE_SECRET="lab-manager-secret"
+
+# Parse arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --hub) HUB_URL="$2"; shift ;;
+        --id) SPOKE_ID="$2"; shift ;;
+        --secret) SPOKE_SECRET="$2"; shift ;;
+        *) echo "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
+
 echo "🚀 Installing OPNsense Manager Module (Native)..."
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -15,7 +31,6 @@ INSTALL_DIR="/root/lab-manager"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 
-# Ensure Hub is present for shared logic
 if [ ! -d "lm/.git" ]; then
     echo "🌐 Cloning required Hub repository..."
     git clone https://github.com/lbockenstedt/lm.git
@@ -32,19 +47,14 @@ fi
 echo "🛠️ Setting up OPNsense Manager..."
 cd opnsense
 
-# --- Robust Venv Setup ---
 if [ -d "venv" ] && [ ! -f "venv/bin/python3" ]; then
-    echo "⚠️  Broken venv detected. Recreating..."
     rm -rf venv
 fi
-
 if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
     python3 -m venv venv
 fi
-
 if [ ! -f "venv/bin/python3" ]; then
-    echo "❌ Critical Error: venv creation failed. Binary not found at $(pwd)/venv/bin/python3"
+    echo "❌ Critical Error: venv creation failed."
     exit 1
 fi
 
@@ -54,5 +64,37 @@ if [ -f "requirements.txt" ]; then
     ./venv/bin/python3 -m pip install -r requirements.txt
 fi
 
-echo "🎉 OPNsense Manager native installation complete!"
-echo "📦 Version: 0.03"
+# --- Persistence Configuration ---
+echo "⚙️ Configuring Spoke Identity..."
+cat <<EOF > .env
+HUB_URL=$HUB_URL
+SPOKE_ID=$SPOKE_ID
+SPOKE_SECRET=$SPOKE_SECRET
+EOF
+
+# --- Systemd Service (For Remote/Independent Deployment) ---
+echo "⚙️ Creating systemd service for auto-start..."
+cat <<EOF > /etc/systemd/system/lab-manager-opnsense.service
+[Unit]
+Description=Lab Manager Spoke - OPNsense Manager
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR/opnsense
+ExecStart=$INSTALL_DIR/opnsense/venv/bin/python3 -m src.control_plane --id $SPOKE_ID --secret $SPOKE_SECRET --hub $HUB_URL
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable lab-manager-opnsense
+
+echo "🎉 OPNsense Manager installation complete!"
+echo "🌐 Hub Target: $HUB_URL"
+echo "🆔 Spoke ID: $SPOKE_ID"
+echo "📦 Version: 0.08"

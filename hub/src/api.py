@@ -52,12 +52,12 @@ def create_app(hub):
         Triggers a git pull and restarts the service to apply updates.
         """
         try:
-            # 1. Pull latest changes from GitHub
-            # We assume the installation is in /root/lab-manager/lm
-            subprocess.run(["cd", "/root/lab-manager/lm", "&&", "git", "pull"], shell=True, check=True)
+            # Use a shell command to pull and then restart
+            # We target /root/lab-manager/lm specifically
+            cmd = "cd /root/lab-manager/lm && git pull"
+            subprocess.run(cmd, shell=True, check=True)
 
-            # 2. Restart the systemd service
-            # This will kill the current process, which is the desired behavior for a full update
+            # Restart the systemd service
             subprocess.Popen(["systemctl", "restart", "lab-manager"])
 
             return {"status": "success", "message": "Update triggered. The server is restarting..."}
@@ -65,6 +65,43 @@ def create_app(hub):
             raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+    @app.get("/setup/config")
+    async def get_setup_config():
+        hub = app.state.hub
+        return {
+            "tenants": hub.state.state["tenants"],
+            "global_config": hub.state.state["global_config"]
+        }
+
+    @app.post("/setup/tenant")
+    async def update_tenant(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            tenant_id = data.get("tenant_id", "default")
+            config = data.get("config", {})
+
+            hub.state.update_tenant(tenant_id, config)
+            hub.state.save_state() # Immediate persist
+
+            return {"status": "success", "message": f"Tenant {tenant_id} updated."}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
+
+    @app.post("/setup/config")
+    async def update_global_config(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            config = data.get("config", {})
+
+            hub.state.state["global_config"].update(config)
+            hub.state.save_state() # Immediate persist
+
+            return {"status": "success", "message": "Global configuration updated."}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
 
     # --- Static File Serving ---
     # We serve the UI directly from the 'ui' directory (Vanilla JS version)
