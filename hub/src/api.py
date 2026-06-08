@@ -55,7 +55,9 @@ def create_app(hub):
     @app.get("/setup/pending_spokes")
     async def get_pending_spokes():
         hub = app.state.hub
-        pending = [sid for sid in hub.active_connections if not hub.approved_spokes.get(sid, False)]
+        # Use known_spokes from state instead of only active_connections
+        known_spokes = hub.state.state.get("known_spokes", [])
+        pending = [sid for sid in known_spokes if not hub.approved_spokes.get(sid, False)]
         return {"pending_spokes": pending}
 
     @app.post("/setup/approve_spoke")
@@ -69,19 +71,21 @@ def create_app(hub):
 
             # Update approval status
             hub.approved_spokes[spoke_id] = True
+            hub.state.save_state() # Persist approval status immediately
 
-            # Send APPROVED message to the spoke
-            msg_id = str(uuid.uuid4())
-            approval_msg = Message(
-                header=MessageHeader(
-                    message_id=msg_id,
-                    timestamp=time.time(),
-                    sender_id="hub",
-                    destination_id=spoke_id
-                ),
-                payload=MessagePayload(type="APPROVED", data={})
-            )
-            await hub.send_to_spoke(approval_msg)
+            # Send APPROVED message to the spoke if connected
+            if spoke_id in hub.active_connections:
+                msg_id = str(uuid.uuid4())
+                approval_msg = Message(
+                    header=MessageHeader(
+                        message_id=msg_id,
+                        timestamp=time.time(),
+                        sender_id="hub",
+                        destination_id=spoke_id
+                    ),
+                    payload=MessagePayload(type="APPROVED", data={})
+                )
+                await hub.send_to_spoke(approval_msg)
 
             return {"status": "success", "message": f"Spoke {spoke_id} approved."}
         except Exception as e:

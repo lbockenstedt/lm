@@ -55,6 +55,9 @@ class LabManagerHub:
         # Approval status stored in StateManager for persistence
         self.approved_spokes = self.state.state.setdefault("approved_spokes", {})
 
+        # Track all spokes that have authenticated at least once
+        self.known_spokes = self.state.state.setdefault("known_spokes", [])
+
         # { spoke_id: str } tracking spoke versions
         self.spoke_versions: Dict[str, str] = {}
 
@@ -165,6 +168,12 @@ class LabManagerHub:
 
             logger.info(f"Spoke {spoke_id} authenticated successfully.")
             self.active_connections[spoke_id] = websocket
+
+            # Track this spoke as known for approval lists
+            if spoke_id not in self.known_spokes:
+                self.known_spokes.append(spoke_id)
+                self.state.save_state()
+
             # Initialize rate limiter (e.g., 5 messages/sec burst of 10)
             self.rate_limiters[spoke_id] = TokenBucket(capacity=10, fill_rate=5)
 
