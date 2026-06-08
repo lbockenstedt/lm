@@ -136,8 +136,8 @@ for mod in "${!MODULES[@]}"; do
         HUB_SECRET=""
     fi
 
-    # Run the modular installer with the Hub-provided secret and Hub secret
-    bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET" --hub-secret "$HUB_SECRET"
+    # Run the modular installer with the Hub-provided secret
+    bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET"
 done
 
 
