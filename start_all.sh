@@ -27,6 +27,8 @@ sleep 2
 # --- 1. Launch Hub ---
 echo "Starting Hub..."
 cd "$BASE_DIR"
+# Set PYTHONPATH to include the hub source directory so imports work
+export PYTHONPATH="$BASE_DIR/hub/src:$PYTHONPATH"
 nohup ./venv/bin/python hub/src/main.py > hub.log 2>&1 &
 echo "Hub started (logs: hub.log)"
 sleep 5 # Give hub time to initialize
