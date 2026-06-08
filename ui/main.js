@@ -785,7 +785,11 @@ async function loadPendingSpokes() {
                         <button onclick="approveSpoke('${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
                             Approve
                         </button>
-                    ` : '<span class="text-xs text-slate-400 italic">Authorized</span>'}
+                    ` : `
+                        <button onclick="unapproveSpoke('${sid}')" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-1 rounded text-xs font-bold transition-colors">
+                            Un-approve
+                        </button>
+                    `}
                 </div>
             `;
         }).join('');

@@ -72,16 +72,24 @@ def create_app(hub):
         try:
             data = await request.json()
             spoke_id = data.get("spoke_id")
+            action = data.get("action", "approve") # Default to approve
+
             if not spoke_id:
                 raise HTTPException(status_code=400, detail="Missing spoke_id")
 
-            # Update approval status
-            hub.approved_spokes[spoke_id] = True
-            hub.state.save_state() # Persist approval status immediately
+            if action == "unapprove":
+                # Remove approval status
+                hub.approved_spokes[spoke_id] = False
+            else:
+                # Update approval status
+                hub.approved_spokes[spoke_id] = True
 
-            # Send APPROVED message to the spoke if connected
+            hub.state.save_state() # Persist status immediately
+
+            # Notify the spoke if connected
             if spoke_id in hub.active_connections:
                 msg_id = str(uuid.uuid4())
+                msg_type = "APPROVED" if action != "unapprove" else "DENIED"
                 approval_msg = Message(
                     header=MessageHeader(
                         message_id=msg_id,
@@ -89,11 +97,11 @@ def create_app(hub):
                         sender_id="hub",
                         destination_id=spoke_id
                     ),
-                    payload=MessagePayload(type="APPROVED", data={})
+                    payload=MessagePayload(type=msg_type, data={})
                 )
                 await hub.send_to_spoke(approval_msg)
 
-            return {"status": "success", "message": f"Spoke {spoke_id} approved."}
+            return {"status": "success", "message": f"Spoke {spoke_id} {'approved' if action != 'unapprove' else 'un-approved'}."}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
