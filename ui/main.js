@@ -681,17 +681,25 @@ async function updateAppearance() {
 }
 
 function applyAppearance(config) {
-    document.documentElement.style.setProperty('--hpe-green', config.primary_color);
-    document.documentElement.style.setProperty('--hpe-navy', config.navy_color);
+    const primary = (config.primary_color || '#01A982').trim();
+    const navy = (config.navy_color || '#263040').trim();
+
+    document.documentElement.style.setProperty('--hpe-green', primary);
+    document.documentElement.style.setProperty('--hpe-navy', navy);
 
     const leftLogo = document.getElementById('logo-left');
     const rightLogo = document.getElementById('logo-right');
 
+    const hpeSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 504 144" class="w-full h-full object-contain">
+        <path fill="${primary}" d="M391.2 81.27v35.46H504V144H362.4v-90H504v27.27H391.2Z"/>
+        <path fill="${navy}" d="M276.67 0h-89.25v144h28.8v-36.6h60c37.92 0 59.7-21.6 59.7-53.4 0-32.01-21.78-54-59.25-54Zm-1.88 79.8h-58.57v-52.54h58.57c22.68 0 31.28 10.48 31.28 26.73 0 16.08-8.6 25.8-31.28 25.8Zm116.41-39.18h-28.8V0H504v27.27H391.2v13.36ZM151.2 0v144h-28.8v-59.02H28.8V144H0V0h28.8v57.38h93.6V0h28.8Z"/>
+    </svg>`;
+
     if (leftLogo) {
         leftLogo.style.display = config.show_logo_left ? 'flex' : 'none';
         if (config.logo_url === 'hpe-svg' || !config.logo_url) {
-            leftLogo.innerHTML = 'LM';
-            leftLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
+            leftLogo.innerHTML = hpeSvg;
+            leftLogo.className = 'w-12 h-12 flex items-center justify-center';
         } else {
             leftLogo.innerHTML = `<img src="${config.logo_url}" class="w-full h-full object-contain rounded">`;
             leftLogo.className = 'w-12 h-12 flex items-center justify-center';
@@ -702,8 +710,8 @@ function applyAppearance(config) {
         rightLogo.style.display = config.show_logo_right ? 'flex' : 'none';
         const rightUrl = config.logo_url_right || config.logo_url;
         if (rightUrl === 'hpe-svg' || !rightUrl) {
-            rightLogo.innerHTML = 'LM';
-            rightLogo.className = 'w-8 h-8 bg-[#01A982] rounded flex items-center justify-center font-bold text-white shadow-sm';
+            rightLogo.innerHTML = hpeSvg;
+            rightLogo.className = 'h-12 w-auto flex items-center justify-center';
         } else {
             rightLogo.innerHTML = `<img src="${rightUrl}" class="h-full w-auto object-contain">`;
             rightLogo.className = 'h-12 w-auto flex items-center justify-center';

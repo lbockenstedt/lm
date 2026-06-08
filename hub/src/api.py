@@ -260,14 +260,18 @@ def create_app(hub):
             # Hub API address for the module
             hub_url = f"ws://{hub.host}:{hub.port}"
 
+            # Generate spoke ID and first secret for onboarding
+            spoke_id = f"{module_id}-spoke-1"
+            first_secret = hub.key_manager.generate_first_secret(spoke_id)
+
             # Execute installation script as a background process
-            # We use a single-line command approach
-            full_cmd = f"bash {script_path} --hub {hub_url} --all-prereqs"
+            # We now pass the spoke_id and the first_secret to the install script
+            full_cmd = f"bash {script_path} --hub {hub_url} --id {spoke_id} --secret {first_secret} --all-prereqs"
 
             # Start the process without blocking the API
             subprocess.Popen(full_cmd, shell=True, cwd=os.path.join(os.path.dirname(__file__), "../../.."))
 
-            return {"status": "success", "message": f"Installation of {module_id} triggered in background."}
+            return {"status": "success", "message": f"Installation of {module_id} triggered for {spoke_id} in background."}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
