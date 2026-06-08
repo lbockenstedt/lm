@@ -18,6 +18,7 @@ cd "$INSTALL_DIR"
 # Clone and restructure core repo
 echo "🌐 Cloning Core repository..."
 git clone "https://github.com/lbockenstedt/lm.git" lm_tmp
+rm -rf "$INSTALL_DIR/core" "$INSTALL_DIR/WebUI"
 mv lm_tmp/core "$INSTALL_DIR/core"
 mv lm_tmp/WebUI "$INSTALL_DIR/WebUI"
 cp -r lm_tmp/* "$INSTALL_DIR/" 2>/dev/null || true

@@ -157,7 +157,7 @@ class LabManagerHub:
             if not module_key:
                 return
 
-            config = self.state.state.get("global_config", {}).get(module_key, {})
+            config = self.state.get_global_config().get(module_key, {})
             if not config:
                 return
 
@@ -172,7 +172,7 @@ class LabManagerHub:
                 payload=MessagePayload(type="UPDATE_CONFIG", data=config)
             )
             await self.send_to_spoke(msg)
-            logger.info(f"Pushed {module_key} config to spoke {spoke_id}")
+            logger.info(f"Pushed {module_key} config to module {spoke_id}")
         except Exception as e:
             logger.error(f"Failed to push config to {spoke_id}: {e}")
 
@@ -407,7 +407,7 @@ class LabManagerHub:
         logger.info("Auto-update loop started.")
         while True:
             try:
-                config = self.state.state.get("global_config", {})
+                config = self.state.get_global_config()
                 enabled = config.get("autoupdate", True) # Default to enabled
                 interval_hours = config.get("update_interval", 1) # Default to 1 hour
 

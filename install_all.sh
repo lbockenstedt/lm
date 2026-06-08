@@ -31,6 +31,7 @@ cd "$BASE_DIR"
 echo "🌐 Cloning Core Repository..."
 rm -rf lm_tmp
 git clone "https://github.com/lbockenstedt/lm.git" lm_tmp
+rm -rf "$BASE_DIR/core" "$BASE_DIR/WebUI"
 mv lm_tmp/core "$BASE_DIR/core"
 mv lm_tmp/WebUI "$BASE_DIR/WebUI"
 # Move remaining files from root of repo (start_all.sh, install scripts, etc.)
