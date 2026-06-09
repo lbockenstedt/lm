@@ -405,7 +405,7 @@ def create_app(hub):
         config = hub.state.system_state.get("global_config", {}).get("appearance", {
             "primary_color": "#01A982",
             "navy_color": "#263040",
-            "logo_url": "hpe-svg", # Special keyword for the built-in HPE logo
+            "logo_url": "assets/logo.png",
             "logo_url_right": "hpe-svg",
             "show_logo_left": True,
             "show_logo_right": True

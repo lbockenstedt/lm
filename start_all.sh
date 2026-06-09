@@ -13,6 +13,11 @@ else
 fi
 
 LOG_DIR="/var/log/lm"
+# Fallback to ROOT_DIR if /var/log/lm is not writable
+if [ ! -w "$LOG_DIR" ]; then
+    LOG_DIR="$ROOT_DIR/logs"
+    mkdir -p "$LOG_DIR"
+fi
 LOG_FILE="$LOG_DIR/start_all.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 

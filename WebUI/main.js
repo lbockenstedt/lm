@@ -494,7 +494,8 @@ const VIEWS = {
                                 <span class="text-xs font-medium text-slate-400 uppercase">Theme:</span>
                                 <select id="theme-selector" onchange="setTheme(this.value)"
                                        class="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500 cursor-pointer">
-                                    <option value="default">HPE Default</option>
+                                    <option value="default">Default</option>
+                                    <option value="cicada">Cicada</option>
                                     <option value="lcars">Star Trek (LCARS)</option>
                                     <option value="sw">Star Wars (Imperial)</option>
                                 </select>
@@ -1351,11 +1352,13 @@ async function loadOpnsenseManagement() {
 }
 
 function setTheme(theme) {
-    document.body.classList.remove('lcars-theme', 'sw-theme');
+    document.body.classList.remove('lcars-theme', 'sw-theme', 'cicada-theme');
     if (theme === 'lcars') {
         document.body.classList.add('lcars-theme');
     } else if (theme === 'sw') {
         document.body.classList.add('sw-theme');
+    } else if (theme === 'cicada') {
+        document.body.classList.add('cicada-theme');
     }
     localStorage.setItem('lm_theme', theme);
 }
