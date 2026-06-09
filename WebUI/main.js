@@ -755,7 +755,12 @@ async function updateStatus() {
         `;
 
         const connections = statusData.active_connections || [];
-        if (spokeCount) spokeCount.textContent = connections.length;
+
+        // Count approved spokes for the dashboard metric
+        const allSpokes = approvalsData.spokes || [];
+        const approvedSpokes = allSpokes.filter(s => s.approved);
+
+        if (spokeCount) spokeCount.textContent = approvedSpokes.length;
 
         const moduleMap = {
             'pxmx': 'pxmx',
@@ -812,18 +817,22 @@ async function updateStatus() {
         `;
 
         if (spokeList) {
-            if (connections.length === 0) {
-                spokeList.innerHTML = `<p class="text-xs text-slate-400 italic">No spokes connected.</p>`;
+            if (approvedSpokes.length === 0) {
+                spokeList.innerHTML = `<p class="text-xs text-slate-400 italic">No approved spokes configured.</p>`;
             } else {
-                spokeList.innerHTML = connections.map(id => `
-                    <div class="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-200 hover:border-green-500 transition-all group">
-                        <div class="flex items-center gap-3">
-                            <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]"></div>
-                            <span class="text-sm font-medium text-slate-700 group-hover:text-green-600 transition-colors">${id}</span>
+                spokeList.innerHTML = approvedSpokes.map(spoke => {
+                    const id = spoke.spoke_id;
+                    const isOnline = connections.includes(id);
+                    return `
+                        <div class="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-200 hover:border-green-500 transition-all group">
+                            <div class="flex items-center gap-3">
+                                <div class="w-2 h-2 rounded-full ${isOnline ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-slate-400'}"></div>
+                                <span class="text-sm font-medium text-slate-700 group-hover:text-green-600 transition-colors">${id}</span>
+                            </div>
+                            <span class="text-[10px] uppercase tracking-widest ${isOnline ? 'text-green-600 font-bold' : 'text-slate-400 font-bold'}">${isOnline ? 'Online' : 'Offline'}</span>
                         </div>
-                        <span class="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Online</span>
-                    </div>
-                `).join('');
+                    `;
+                }).join('');
             }
         }
     } catch (err) {
