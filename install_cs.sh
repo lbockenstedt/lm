@@ -70,6 +70,7 @@ cat <<EOF > .env
 HUB_URL=$HUB_URL
 SPOKE_ID=$SPOKE_ID
 SPOKE_SECRET=$SPOKE_SECRET
+HUB_SECRET=$HUB_SECRET
 EOF
 
 # --- Systemd Service (For Remote/Independent Deployment) ---
