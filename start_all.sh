@@ -40,7 +40,12 @@ echo "🕒 Start time: $(date)"
 echo "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
 
 # Get the absolute paths
-BASE_DIR="/root/lm"
+# Default to /root/lm if it exists, otherwise use the current directory
+if [ -d "/root/lm" ]; then
+    BASE_DIR="/root/lm"
+else
+    BASE_DIR="$(pwd)"
+fi
 
 # Ensure we are in the correct directory
 cd "$BASE_DIR" || { echo "❌ Failed to cd to $BASE_DIR"; exit 1; }

@@ -282,6 +282,69 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/opn/nat")
+    async def get_opn_nat():
+        hub = app.state.hub
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            return await hub.request_response(opn_spoke, "OPNSENSE_GET_NAT_POLICIES", {})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/opn/dns")
+    async def get_opn_dns():
+        hub = app.state.hub
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            return await hub.request_response(opn_spoke, "OPNSENSE_GET_DNS_RECORDS", {})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/vm/{vm_id}/details")
+    async def get_vm_details(vm_id: str):
+        hub = app.state.hub
+        res_info = hub.state.system_state.get("resources", {}).get(vm_id, {})
+        ip = res_info.get("metadata", {}).get("ip")
+
+        details = {
+            "vm_id": vm_id,
+            "metadata": res_info,
+            "proxmox": {"status": "OFFLINE"},
+            "opnsense": {"status": "OFFLINE", "rules": [], "dhcp": None},
+            "cppm": {"status": "OFFLINE", "policy": "Unknown"}
+        }
+
+        # 1. Fetch from Proxmox
+        pxmx_spoke = next((sid for sid in hub.active_connections if "pxmx" in sid), None)
+        if pxmx_spoke:
+            px_res = await hub.request_response(pxmx_spoke, "GET_VM_INFO", {"vm_id": vm_id})
+            details["proxmox"] = px_res if px_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": px_res.get("message")}
+
+        # 2. Fetch from OPNsense
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if opn_spoke and ip:
+            rules = await hub.request_response(opn_spoke, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
+            dhcp = await hub.request_response(opn_spoke, "OPNSENSE_GET_DHCP_LEASES", {})
+            lease = next((l for l in dhcp.get("data", []) if l.get("ip") == ip), None) if dhcp.get("status") == "SUCCESS" else None
+
+            details["opnsense"] = {
+                "status": "ONLINE",
+                "rules": rules.get("rules", []) if rules.get("status") == "SUCCESS" else [],
+                "dhcp": lease
+            }
+
+        # 3. Fetch from CPPM
+        cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
+        if cppm_spoke and ip:
+            cppm_res = await hub.request_response(cppm_spoke, "CPPM_GET_POLICY_BY_IP", {"ip": ip})
+            details["cppm"] = cppm_res if cppm_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": cppm_res.get("message")}
+
+        return details
+
     @app.get("/setup/appearance")
     async def get_appearance():
         hub = app.state.hub
