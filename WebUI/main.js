@@ -8,6 +8,7 @@ const MODULE_CLASSES = {
 const PRODUCT_MAP = {
     'pxmx': 'pxmx',
     'opn': 'opnsense',
+    'opnsense': 'opnsense',
     'cs': 'cs',
     'cppm': 'cppm'
 };
