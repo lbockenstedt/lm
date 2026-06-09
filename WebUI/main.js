@@ -420,6 +420,23 @@ const VIEWS = {
                     </div>
                 `;
             }
+            if (subMenu === 'Diagnostics') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Spoke Diagnostics</h2>
+                        <div class="hpe-card rounded-lg p-6 shadow-sm">
+                            <div id="diag-container" class="space-y-4">
+                                <div class="py-12 text-center text-slate-400 italic">Loading diagnostics...</div>
+                            </div>
+                        </div>
+                        <div class="pt-4 flex justify-end">
+                            <button onclick="loadDiagnostics()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                Refresh Diagnostics
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }
             return `
                 <div class="space-y-6">
                     <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Performance</h2>
@@ -976,6 +993,7 @@ function setSubView(subMenu) {
             }
             if (currentView === 'settings' && currentSubView === 'Logs') loadSystemLogs();
             if (currentView === 'settings' && currentSubView === 'General') updateStatus();
+            if (currentView === 'settings' && currentSubView === 'Diagnostics') loadDiagnostics();
             if (currentView === 'opnsense' && currentSubView !== 'Configuration') {
                 loadOpnsenseManagement();
             }
@@ -1324,30 +1342,61 @@ function setTheme(theme) {
     localStorage.setItem('lm_theme', theme);
 }
 
-async function loadSystemLogs() {
-    const logsContainer = document.getElementById('system-logs-container');
-    if (!logsContainer) return;
+async function loadDiagnostics() {
+    const container = document.getElementById('diag-container');
+    if (!container) return;
 
-    logsContainer.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching system logs...</div>`;
+    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching spoke telemetry...</div>`;
 
     try {
-        const response = await fetch('/setup/logs');
-        if (!response.ok) throw new Error('Failed to fetch logs');
+        const response = await fetch('/setup/diagnostics');
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
-        const logs = data.logs || [];
+        const spokes = data.spokes || [];
 
-        if (logs.length === 0) {
-            logsContainer.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No system logs available.</div>`;
+        if (spokes.length === 0) {
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No spoke telemetry available.</div>`;
             return;
         }
 
-        logsContainer.innerHTML = logs.map(log => `
-            <div class="p-2 border-b border-slate-100 font-mono text-[11px] text-slate-600 hover:bg-slate-50 transition-colors">
-                ${log}
+        container.innerHTML = `
+            <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                        <tr>
+                            <th class="px-4 py-3 font-bold">Spoke ID</th>
+                            <th class="px-4 py-3 font-bold">Auth</th>
+                            <th class="px-4 py-3 font-bold">Approved</th>
+                            <th class="px-4 py-3 font-bold">State</th>
+                            <th class="px-4 py-3 font-bold">Last Status</th>
+                            <th class="px-4 py-3 font-bold">Error</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-200">
+                        ${spokes.map(s => `
+                            <tr class="hover:bg-slate-50 transition-colors">
+                                <td class="px-4 py-3 font-mono text-xs text-slate-700">${s.spoke_id}</td>
+                                <td class="px-4 py-3">
+                                    <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${s.authenticated ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">
+                                        ${s.authenticated ? 'Yes' : 'No'}
+                                    </span>
+                                </td>
+                                <td class="px-4 py-3">
+                                    <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${s.approved ? 'bg-green-100 text-green-600' : 'bg-yellow-100 text-yellow-600'}">
+                                        ${s.approved ? 'Yes' : 'Pending'}
+                                    </span>
+                                </td>
+                                <td class="px-4 py-3 text-slate-600 font-mono text-xs">${s.connection_state}</td>
+                                <td class="px-4 py-3 text-slate-600 text-xs">${s.last_status || '-'}</td>
+                                <td class="px-4 py-3 text-red-500 text-xs">${s.last_error || '-'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
             </div>
-        `).join('');
+        `;
     } catch (err) {
-        logsContainer.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading logs: ${err.message}</div>`;
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading diagnostics: ${err.message}</div>`;
     }
 }
 
