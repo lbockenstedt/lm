@@ -80,6 +80,8 @@ class LabManagerHub:
 
         # { spoke_id: websocket_connection }
         self.active_connections: Dict[str, websockets.WebSocketServerProtocol] = {}
+        # { spoke_id: ConnectionTelemetry }
+        self.spoke_telemetry: Dict[str, Dict[str, Any]] = {}
         # { spoke_id: TokenBucket } for rate limiting non-heartbeat messages
         self.rate_limiters: Dict[str, TokenBucket] = {}
         # { correlation_id: response_data } for request-response bridging
@@ -200,16 +202,30 @@ class LabManagerHub:
 
             key_id = self.key_manager.get_valid_key(spoke_id, secret)
             if not key_id:
-                logger.warning(f"Authentication failed for spoke {spoke_id}")
-                # Still track as known so it can be approved manually if it's a secret mismatch
+                logger.warning(f"Authentication failed for spoke {spoke_id}: Secret mismatch or key not found.")
                 if spoke_id not in self.known_modules:
                     self.state.register_module(spoke_id, approved=False)
                     self.known_modules = self.state.system_state["known_modules"]
+
+                # Update telemetry
+                self.spoke_telemetry[spoke_id] = {
+                    "last_attempt": time.time(),
+                    "status": "AUTH_FAILED",
+                    "error": "Invalid secret"
+                }
+
                 await websocket.close(1008, "Authentication failed")
                 return
 
             logger.info(f"Spoke {spoke_id} authenticated successfully.")
             self.active_connections[spoke_id] = websocket
+
+            # Update telemetry
+            self.spoke_telemetry[spoke_id] = {
+                "last_attempt": time.time(),
+                "status": "CONNECTED",
+                "error": None
+            }
 
             # Track this module as known for approval lists
             if spoke_id not in self.known_modules:
@@ -320,8 +336,16 @@ class LabManagerHub:
 
         except websockets.ConnectionClosed:
             logger.info(f"Connection closed for spoke {spoke_id}")
+            if spoke_id:
+                self.spoke_telemetry[spoke_id]["status"] = "DISCONNECTED"
         except Exception as e:
             logger.error(f"Error handling connection for {spoke_id}: {e}")
+            if spoke_id:
+                self.spoke_telemetry[spoke_id] = {
+                    "last_attempt": time.time(),
+                    "status": "ERROR",
+                    "error": str(e)
+                }
         finally:
             if spoke_id and spoke_id in self.active_connections:
                 del self.active_connections[spoke_id]
