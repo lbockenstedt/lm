@@ -260,6 +260,28 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/opn/firewall/all")
+    async def get_opn_firewall_all():
+        hub = app.state.hub
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            return await hub.request_response(opn_spoke, "OPNSENSE_GET_ALL_RULES", {})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/opn/firewall/stats")
+    async def get_opn_firewall_stats():
+        hub = app.state.hub
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            return await hub.request_response(opn_spoke, "OPNSENSE_GET_FIREWALL_STATS", {})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/appearance")
     async def get_appearance():
         hub = app.state.hub
