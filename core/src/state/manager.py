@@ -10,8 +10,14 @@ logger = logging.getLogger("State")
 
 class StateManager:
     def __init__(self, system_path="system.json", tenants_path="tenants.json"):
-        self.system_path = system_path
-        self.tenants_path = tenants_path
+        # Resolve absolute paths to ensure persistence works under systemd/different CWDs
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        # Move up to the core root or appropriate data directory
+        data_dir = os.path.abspath(os.path.join(base_dir, "../../data"))
+        os.makedirs(data_dir, exist_ok=True)
+
+        self.system_path = os.path.join(data_dir, system_path)
+        self.tenants_path = os.path.join(data_dir, tenants_path)
 
         # System-level state: Hardware, Global Config, Modules, Auth
         self.system_state: Dict[str, Any] = {

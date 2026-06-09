@@ -221,6 +221,33 @@ class LabManagerHub:
             logger.info(f"Spoke {spoke_id} authenticated successfully.")
             self.active_connections[spoke_id] = websocket
 
+            # --- Mutual Authentication (Hub Identity Proof) ---
+            try:
+                challenge = secrets.token_urlsafe(32)
+                signature = self.key_manager.sign_hub_challenge(challenge.encode())
+
+                proof = {
+                    "status": "HUB_VERIFIED",
+                    "challenge": challenge,
+                    "signature": signature
+                }
+                await websocket.send(json.dumps(proof))
+
+                # Wait for spoke to verify and respond
+                hub_response_json = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                hub_response = json.loads(hub_response_json)
+
+                if hub_response.get("status") != "HUB_OK":
+                    logger.warning(f"Mutual auth failed: Spoke {spoke_id} rejected Hub identity.")
+                    await websocket.close(1008, "Hub identity rejected")
+                    return
+
+                logger.info(f"Mutual authentication complete for {spoke_id}.")
+            except Exception as e:
+                logger.error(f"Mutual authentication error for {spoke_id}: {e}")
+                await websocket.close(1008, "Mutual authentication failed")
+                return
+
             # Update telemetry
             self.spoke_telemetry[spoke_id] = {
                 "last_attempt": time.time(),
