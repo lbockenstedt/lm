@@ -12,6 +12,7 @@ while [[ "$#" -gt 0 ]]; do
         --hub) HUB_URL="$2"; shift ;;
         --id) SPOKE_ID="$2"; shift ;;
         --secret) SPOKE_SECRET="$2"; shift ;;
+        --hub-secret) HUB_SECRET="$2"; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
     shift

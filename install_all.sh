@@ -15,8 +15,15 @@ apt-get update
 apt-get install -y python3-pip python3-venv git curl lsof net-tools jq
 
 # 3. Path Configuration
-BASE_DIR="/root/lm"
+BASE_DIR="/opt/lm"
 OLD_BASE_DIR="/root/lm-manager"
+SvcUser="lmuser"
+
+# Create non-root user for the service
+if ! id -u "$SvcUser" >/dev/null 2>&1; then
+    echo "👤 Creating system user $SvcUser..."
+    useradd -r -m -d /opt/lm -s /usr/sbin/nologin "$SvcUser" || true
+fi
 
 # Cleanup legacy installations
 if [ -d "$OLD_BASE_DIR" ]; then
@@ -25,6 +32,7 @@ if [ -d "$OLD_BASE_DIR" ]; then
 fi
 
 mkdir -p "$BASE_DIR"
+chown -R $SvcUser:$SvcUser "$BASE_DIR"
 cd "$BASE_DIR"
 
 # Clone core components (Hub and WebUI)
@@ -171,9 +179,9 @@ After=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-User=root
-WorkingDirectory=/root/lm
-ExecStart=/bin/bash /root/lm/start_all.sh
+User=$SvcUser
+WorkingDirectory=$BASE_DIR
+ExecStart=/bin/bash $BASE_DIR/start_all.sh
 ExecStop=/usr/bin/pkill -f python
 Restart=on-failure
 RestartSec=10

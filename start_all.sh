@@ -5,13 +5,20 @@
 # ------------------------------------------------------------------
 # DEBUGGING: Log every step of the start process to a separate file
 # ------------------------------------------------------------------
-LOG_FILE="/root/lm/start_all.log"
+# Determine root directory for logs and config
+if [ -d "/root/lm" ]; then
+    ROOT_DIR="/root/lm"
+else
+    ROOT_DIR="$(pwd)"
+fi
+
+LOG_FILE="$ROOT_DIR/start_all.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # ------------------------------------------------------------------
 # CONFIGURATION: Hub Server URL
 # ------------------------------------------------------------------
-HUB_URL_FILE="/root/lm/hub_url.conf"
+HUB_URL_FILE="$ROOT_DIR/hub_url.conf"
 DEFAULT_HUB_URL="ws://localhost:8765"
 
 # Parse arguments for --server
@@ -39,38 +46,35 @@ fi
 echo "🕒 Start time: $(date)"
 echo "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
 
-# Get the absolute paths
-# Default to /root/lm if it exists, otherwise use the current directory
-if [ -d "/root/lm" ]; then
-    BASE_DIR="/root/lm"
-else
-    BASE_DIR="$(pwd)"
-fi
-
-# Ensure we are in the correct directory
-cd "$BASE_DIR" || { echo "❌ Failed to cd to $BASE_DIR"; exit 1; }
+# --- 0. Environment Setup ---
+# We assume we are running from the project root where 'lm' folder and spokes exist
+BASE_DIR="$(pwd)"
 
 echo "🧹 Cleaning up existing processes..."
-# Use absolute paths for binaries to ensure systemd can find them
 for port in 8000 8765; do
-    PORT_PID=$(/usr/bin/lsof -t -i :$port || true)
+    PORT_PID=$(lsof -t -i :$port || true)
     if [ -n "$PORT_PID" ]; then
         echo "Found process $PORT_PID on port $port. Killing it..."
-        /usr/bin/kill -9 $PORT_PID || true
+        kill -9 $PORT_PID || true
     fi
 done
-/usr/bin/pkill -f python || true
-/usr/bin/pkill -f node || true
+pkill -f python || true
+pkill -f node || true
 sleep 2
 
 # --- 1. Launch Hub ---
 echo "Starting Hub..."
-# Set PYTHONPATH to include the hub source directory so imports work
-export PYTHONPATH="$BASE_DIR/core/src:$PYTHONPATH"
+HUB_DIR="$BASE_DIR/lm"
+if [ ! -d "$HUB_DIR/core" ]; then
+    echo "❌ Hub core not found at $HUB_DIR/core. Please run this script from the project root."
+    exit 1
+fi
+
+export PYTHONPATH="$HUB_DIR/core/src:$PYTHONPATH"
 
 # Launch Hub in background
-/usr/bin/nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
-echo "Hub started (logs: $BASE_DIR/hub.log)"
+nohup "$HUB_DIR/core/venv/bin/python3" "$HUB_DIR/core/src/main.py" > "$HUB_DIR/hub.log" 2>&1 &
+echo "Hub started (logs: $HUB_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
 # --- 2. Launch Spokes ---
@@ -94,8 +98,8 @@ for spoke in "${SPOKES[@]}"; do
             "cppm") SPOKE_ID="cppm-spoke-1" ;;
         esac
 
-        /usr/bin/nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" > "$BASE_DIR/$spoke.log" 2>&1 &
-        echo "$spoke started (logs: $BASE_DIR/$spoke.log)"
+        nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" > "$BASE_DIR/lm/$spoke.log" 2>&1 &
+        echo "$spoke started (logs: $BASE_DIR/lm/$spoke.log)"
     else
         echo "⚠️  Warning: Spoke directory $SPOKE_DIR not found. Skipping..."
     fi
