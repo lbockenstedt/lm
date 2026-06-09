@@ -48,7 +48,7 @@ def create_app(hub):
         # 3. Use the async bridge to request rules from the spoke
         try:
             result = await hub.request_response(opn_spoke, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
-            return result
+            return result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -234,7 +234,8 @@ def create_app(hub):
         if not opn_spoke:
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
-            return await hub.request_response(opn_spoke, "GET_INTERFACE_STATUS", {})
+            result = await hub.request_response(opn_spoke, "GET_INTERFACE_STATUS", {})
+            return result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -245,7 +246,8 @@ def create_app(hub):
         if not opn_spoke:
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
-            return await hub.request_response(opn_spoke, "GET_SYSTEM_HEALTH", {})
+            result = await hub.request_response(opn_spoke, "GET_SYSTEM_HEALTH", {})
+            return result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -256,7 +258,8 @@ def create_app(hub):
         if not opn_spoke:
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
-            return await hub.request_response(opn_spoke, "OPNSENSE_GET_DHCP_LEASES", {})
+            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_DHCP_LEASES", {})
+            return result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -267,7 +270,8 @@ def create_app(hub):
         if not opn_spoke:
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
-            return await hub.request_response(opn_spoke, "OPNSENSE_GET_ALL_RULES", {})
+            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_ALL_RULES", {})
+            return result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -278,7 +282,8 @@ def create_app(hub):
         if not opn_spoke:
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
-            return await hub.request_response(opn_spoke, "OPNSENSE_GET_FIREWALL_STATS", {})
+            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_FIREWALL_STATS", {})
+            return result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -289,7 +294,8 @@ def create_app(hub):
         if not opn_spoke:
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
-            return await hub.request_response(opn_spoke, "OPNSENSE_GET_NAT_POLICIES", {})
+            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_NAT_POLICIES", {})
+            return result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -300,7 +306,8 @@ def create_app(hub):
         if not opn_spoke:
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
-            return await hub.request_response(opn_spoke, "OPNSENSE_GET_DNS_RECORDS", {})
+            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_DNS_RECORDS", {})
+            return result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -327,13 +334,17 @@ def create_app(hub):
         # 2. Fetch from OPNsense
         opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
         if opn_spoke and ip:
-            rules = await hub.request_response(opn_spoke, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
-            dhcp = await hub.request_response(opn_spoke, "OPNSENSE_GET_DHCP_LEASES", {})
-            lease = next((l for l in dhcp.get("data", []) if l.get("ip") == ip), None) if dhcp.get("status") == "SUCCESS" else None
+            rules_raw = await hub.request_response(opn_spoke, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
+            dhcp_raw = await hub.request_response(opn_spoke, "OPNSENSE_GET_DHCP_LEASES", {})
+
+            rules_data = rules_raw.get("payload", {}).get("data", {}) if isinstance(rules_raw, dict) else {}
+            dhcp_data = dhcp_raw.get("payload", {}).get("data", []) if isinstance(dhcp_raw, dict) else []
+
+            lease = next((l for l in dhcp_data if l.get("ip") == ip), None) if isinstance(dhcp_data, list) else None
 
             details["opnsense"] = {
                 "status": "ONLINE",
-                "rules": rules.get("rules", []) if rules.get("status") == "SUCCESS" else [],
+                "rules": rules_data.get("rules", []) if rules_data.get("status") == "SUCCESS" else [],
                 "dhcp": lease
             }
 

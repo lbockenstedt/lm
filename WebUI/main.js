@@ -949,7 +949,7 @@ async function lookupVMDetails() {
         dhcpEnd.textContent = dhcp.lease_end || '-';
 
         // 4. Update Firewall Rules (OPNsense)
-        const rules = data.rules || [];
+        const rules = (data.opnsense && data.opnsense.rules) || [];
         if (rules.length === 0) {
             tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-slate-400 italic">No rules found for this VM.</td></tr>`;
         } else {
