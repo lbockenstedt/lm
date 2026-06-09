@@ -29,6 +29,11 @@ if ! id -u "$SvcUser" >/dev/null 2>&1; then
     useradd -r -m -d /opt/lm -s /usr/sbin/nologin "$SvcUser" || true
 fi
 
+# Grant svc_lm permission to restart the LM service without a password
+echo "⚙️ Configuring sudoers for $SvcUser..."
+echo "$SvcUser ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lm" > /etc/sudoers.d/lm
+chmod 440 /etc/sudoers.d/lm
+
 # Cleanup legacy installations
 if [ -d "$OLD_BASE_DIR" ]; then
     echo "🗑️  Removing legacy installation at $OLD_BASE_DIR..."
