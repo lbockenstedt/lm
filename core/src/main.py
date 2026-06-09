@@ -64,6 +64,7 @@ class LabManagerHub:
         self.logs = deque(maxlen=500)
         self.message_count = 0
         self.mps = 0.0
+        self.message_history = deque(maxlen=10) # Last 10 seconds of counts
 
         class HubLogHandler(logging.Handler):
             def __init__(self, hub):
@@ -375,12 +376,13 @@ class LabManagerHub:
 
     async def run_mps_loop(self):
         """
-        Calculates messages per second by polling the counter every second.
+        Calculates messages per second using a 10-second moving average.
         """
         logger.info("MPS monitoring loop started.")
         while True:
             await asyncio.sleep(1.0)
-            self.mps = float(self.message_count)
+            self.message_history.append(self.message_count)
+            self.mps = sum(self.message_history) / len(self.message_history)
             self.message_count = 0
 
     async def get_system_metrics(self) -> Dict[str, Any]:
