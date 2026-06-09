@@ -11,6 +11,38 @@ for arg in "$@"; do
     fi
 done
 
+# ------------------------------------------------------------------
+# Path Configuration & Logging
+# ------------------------------------------------------------------
+BASE_DIR="/opt/lm"
+OLD_BASE_DIR="/opt/lm-manager"
+SvcUser="svc_lm"
+LOG_DIR="/var/log/lm"
+INSTALL_LOG="$LOG_DIR/install.log"
+
+# Create log directory early so logging helpers can work
+mkdir -p "$LOG_DIR"
+chown -R root:root "$LOG_DIR" # Temporary root ownership for installer
+chmod 755 "$LOG_DIR"
+
+# Logging Helpers
+log() {
+    # Standard info log: only to file
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $1" >> "$INSTALL_LOG" 2>/dev/null || true
+}
+
+log_c() {
+    # Console and file: for high-level progress
+    echo "$1"
+    log "$1"
+}
+
+log_e() {
+    # Error log: console and file
+    echo "❌ $1" >&2
+    log "ERROR: $1"
+}
+
 echo "🚀 Starting Native Lab Manager Installation (LXC-Optimized)..."
 
 # 1. Pre-flight Check (Permissions)
@@ -31,50 +63,24 @@ log_c "📦 Installing system dependencies..."
 apt-get update >> "$INSTALL_LOG" 2>&1
 apt-get install -y python3-pip python3-venv git curl lsof net-tools jq sudo psmisc >> "$INSTALL_LOG" 2>&1
 
-
 # Mark all directories under /opt/lm as safe for git to avoid dubious ownership errors
 git config --global --add safe.directory /opt/lm
 git config --global --add safe.directory '/opt/lm/*'
 
-# 3. Path Configuration
-BASE_DIR="/opt/lm"
-OLD_BASE_DIR="/opt/lm-manager"
-SvcUser="svc_lm"
-LOG_DIR="/var/log/lm"
-INSTALL_LOG="$LOG_DIR/install.log"
-
-# Logging Helpers
-log() {
-    # Standard info log: only to file
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $1" >> "$INSTALL_LOG" 2>/dev/null || true
-}
-
-log_c() {
-    # Console and file: for high-level progress
-    echo "$1"
-    log "$1"
-}
-
-log_e() {
-    # Error log: console and file
-    echo "❌ $1" >&2
-    log "ERROR: $1"
-}
-
+# ------------------------------------------------------------------
+# User & Permission Setup
+# ------------------------------------------------------------------
 # Create non-root user for the service
 if ! id -u "$SvcUser" >/dev/null 2>&1; then
-    echo "👤 Creating system user $SvcUser..."
+    log_c "👤 Creating system user $SvcUser..."
     useradd -r -m -d /opt/lm -s /usr/sbin/nologin "$SvcUser" || true
 fi
 
-# Create global log directory and set permissions
-echo "📂 Creating system log directory at $LOG_DIR..."
-mkdir -p "$LOG_DIR"
+# Ensure global log directory ownership is correct now that user exists
 chown -R $SvcUser:$SvcUser "$LOG_DIR"
-chmod 755 "$LOG_DIR"
 
 # Grant svc_lm permission to restart the LM service without a password
-echo "⚙️ Configuring sudoers for $SvcUser..."
+log_c "⚙️ Configuring sudoers for $SvcUser..."
 echo "$SvcUser ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lm" > /etc/sudoers.d/lm
 chmod 440 /etc/sudoers.d/lm
 
@@ -82,7 +88,7 @@ chmod 440 /etc/sudoers.d/lm
 # Reinstall Logic
 # ------------------------------------------------------------------
 # Always kill existing Hub processes to prevent "Address already in use"
-echo "🧹 Cleaning up existing Hub processes..."
+log_c "🧹 Cleaning up existing Hub processes..."
 systemctl stop lm || true
 pkill -9 python || true
 for port in 8000 8765; do
@@ -93,25 +99,16 @@ for port in 8000 8765; do
 done
 
 if [ "$REINSTALL" = true ]; then
-    echo "⚠️  REINSTALL MODE: Wiping all configuration, state, and installations..."
-    # Stop everything first
-    systemctl stop lm || true
-    pkill -9 python || true
-    # Force kill anything on the Hub ports to prevent "Address already in use"
-    fuser -k 8000/tcp 8765/tcp || true
-
-
+    log_c "⚠️  REINSTALL MODE: Wiping all configuration, state, and installations..."
     # Remove installation directory and secrets
     rm -rf "$BASE_DIR"
     rm -f /etc/systemd/system/lm.service
-    # Note: we keep the SvcUser but wipe their home/data dir
-
-    echo "🧹 Clean slate achieved. Proceeding with fresh installation..."
+    log_c "🧹 Clean slate achieved. Proceeding with fresh installation..."
 fi
 
 # Cleanup legacy installations
 if [ -d "$OLD_BASE_DIR" ]; then
-    echo "🗑️  Removing legacy installation at $OLD_BASE_DIR..."
+    log_c "🗑️  Removing legacy installation at $OLD_BASE_DIR..."
     rm -rf "$OLD_BASE_DIR"
 fi
 
@@ -120,13 +117,12 @@ chown -R $SvcUser:$SvcUser "$BASE_DIR"
 cd "$BASE_DIR"
 
 # Clone core components (Hub and WebUI)
-echo "🌐 Cloning Core Repository..."
+log_c "🌐 Cloning Core Repository..."
 rm -rf lm_tmp
 git clone "https://github.com/lbockenstedt/lm.git" lm_tmp
 rm -rf "$BASE_DIR/core" "$BASE_DIR/WebUI"
 mv lm_tmp/core "$BASE_DIR/core"
 mv lm_tmp/WebUI "$BASE_DIR/WebUI"
-# Move remaining files from root of repo (start_all.sh, install scripts, etc.)
 cp -r lm_tmp/* "$BASE_DIR/" 2>/dev/null || true
 rm -rf lm_tmp
 
@@ -134,23 +130,23 @@ rm -rf lm_tmp
 REPOS=("cs" "pxmx" "opnsense" "cppm")
 for repo in "${REPOS[@]}"; do
     if [ -d "$repo/.git" ]; then
-        echo "📂 $repo already exists. Updating..."
+        log_c "📂 $repo already exists. Updating..."
         cd "$repo"
         rm -rf venv
         git checkout .
         git pull
         cd ..
     else
-        echo "🌐 Cloning $repo..."
+        log_c "🌐 Cloning $repo..."
         git clone "https://github.com/lbockenstedt/$repo.git"
     fi
 done
 
 # 5. Run Modular Installers
-echo "🛠️ Running modular installations..."
+log_c "🛠️ Running modular installations..."
 
 # Hub
-echo "Setting up Hub Backend..."
+log_c "Setting up Hub Backend..."
 cd "$BASE_DIR/core"
 
 # Hub venv setup
@@ -175,17 +171,17 @@ fi
 cd "$BASE_DIR"
 
 # UI (Assets only)
-echo "Setting up WebUI assets..."
+log_c "Setting up WebUI assets..."
 cd "$BASE_DIR/WebUI"
 if [ -f "install_ui.sh" ]; then
     bash ./install_ui.sh
 else
-    echo "✅ UI assets already in place (install_ui.sh not found in WebUI directory, skipping)."
+    log_c "✅ UI assets already in place (install_ui.sh not found in WebUI directory, skipping)."
 fi
 cd "$BASE_DIR"
 
 # Give the Hub API a moment to fully start and stabilize
-echo "⏳ Waiting for Hub API and WebSocket server to initialize..."
+log_c "⏳ Waiting for Hub API and WebSocket server to initialize..."
 until curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/status | grep -q "200"; do
     sleep 2
 done
@@ -210,10 +206,10 @@ declare -A SPOKE_IDS=(
     ["cppm"]="cppm-spoke-1"
 )
 
-for mod in "${!MODULES[@]}"; do # Fixed bug here: should be MODULES
+for mod in "${!MODULES[@]}"; do
     installer=${MODULES[$mod]}
     SPOKE_ID=${SPOKE_IDS[$mod]}
-    echo "Setting up $mod..."
+    log_c "Setting up $mod..."
 
     # Fetch First Secret from Hub API with retries
     SPOKE_SECRET=""
@@ -222,21 +218,21 @@ for mod in "${!MODULES[@]}"; do # Fixed bug here: should be MODULES
             -H "Content-Type: application/json" \
             -d "{\"spoke_id\": \"$SPOKE_ID\"}" | jq -r '.secret' 2>/dev/null)
         if [ "$SPOKE_SECRET" != "null" ] && [ -n "$SPOKE_SECRET" ]; then
-            echo "✅ Generated first-secret for $SPOKE_ID"
+            log_c "✅ Generated first-secret for $SPOKE_ID"
             break
         fi
-        echo "⏳ Secret generation failed, retrying in 2s... ($i/10)"
+        log_c "⏳ Secret generation failed, retrying in 2s... ($i/10)"
         sleep 2
     done
 
     if [ -z "$SPOKE_SECRET" ] || [ "$SPOKE_SECRET" == "null" ]; then
-        echo "❌ Failed to generate secret for $SPOKE_ID. Using default (will fail auth)."
+        log_e "Failed to generate secret for $SPOKE_ID. Using default (will fail auth)."
         SPOKE_SECRET="lm-secret"
     fi
 
     # Fetch Hub Secret for mutual authentication
     HUB_SECRET_FILE="$BASE_DIR/core/data/hub_secret.json"
-    echo "⏳ Waiting for Hub to generate master secret..."
+    log_c "⏳ Waiting for Hub to generate master secret..."
     for i in {1..10}; do
         if [ -f "$HUB_SECRET_FILE" ]; then
             break
@@ -246,9 +242,9 @@ for mod in "${!MODULES[@]}"; do # Fixed bug here: should be MODULES
 
     if [ -f "$HUB_SECRET_FILE" ]; then
         HUB_SECRET=$(cat "$HUB_SECRET_FILE")
-        echo "✅ Loaded Hub secret for mutual auth"
+        log_c "✅ Loaded Hub secret for mutual auth"
     else
-        echo "⚠️  Hub secret file not found at $HUB_SECRET_FILE. Mutual auth will be disabled."
+        log_c "⚠️  Hub secret file not found at $HUB_SECRET_FILE. Mutual auth will be disabled."
         HUB_SECRET=""
     fi
 
@@ -257,7 +253,7 @@ for mod in "${!MODULES[@]}"; do # Fixed bug here: should be MODULES
 done
 
 # 6. Persistence & Auto-start
-echo "⚙️ Configuring systemd for auto-start on reboot..."
+log_c "⚙️ Configuring systemd for auto-start on reboot..."
 
 # Final permission fix: ensure service user owns everything including files created by root during install
 chown -R $SvcUser:$SvcUser "$BASE_DIR"
@@ -288,9 +284,9 @@ systemctl enable lm
 systemctl restart lm
 
 echo ""
-echo "🎉 Native installation complete!"
-echo "📂 All modules are located in: $BASE_DIR"
-echo "⚙️ Service 'lm' is enabled and running."
-echo "🚀 To manage the system: systemctl start|stop|restart lm"
-echo "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print $1}'):8000"
-echo "📦 Version: 0.08"
+log_c "🎉 Native installation complete!"
+log_c "📂 All modules are located in: $BASE_DIR"
+log_c "⚙️ Service 'lm' is enabled and running."
+log_c "🚀 To manage the system: systemctl start|stop|restart lm"
+log_c "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print $1}'):8000"
+log_c "📦 Version: 0.08"
