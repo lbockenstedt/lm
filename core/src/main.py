@@ -107,6 +107,7 @@ class LabManagerHub:
                 "signature": message.signature
             }
             await ws.send(json.dumps(payload))
+            self.message_count += 1
         else:
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
 
