@@ -44,7 +44,11 @@ REPOS=("cs" "pxmx" "opnsense" "cppm")
 for repo in "${REPOS[@]}"; do
     if [ -d "$repo/.git" ]; then
         echo "📂 $repo already exists. Updating..."
-        cd "$repo" && git pull && cd ..
+        cd "$repo"
+        rm -rf venv
+        git checkout .
+        git pull
+        cd ..
     else
         echo "🌐 Cloning $repo..."
         git clone "https://github.com/lbockenstedt/$repo.git"
