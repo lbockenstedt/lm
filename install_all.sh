@@ -14,6 +14,10 @@ echo "📦 Installing system dependencies..."
 apt-get update
 apt-get install -y python3-pip python3-venv git curl lsof net-tools jq
 
+# Mark all directories under /opt/lm as safe for git to avoid dubious ownership errors
+git config --global --add safe.directory /opt/lm
+git config --global --add safe.directory '/opt/lm/*'
+
 # 3. Path Configuration
 BASE_DIR="/opt/lm"
 OLD_BASE_DIR="/root/lm-manager"
