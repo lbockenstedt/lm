@@ -45,6 +45,8 @@ log_e() {
 
 echo "🚀 Starting Native Lab Manager Installation (LXC-Optimized)..."
 
+echo "🚀 Starting Native Lab Manager Installation (LXC-Optimized)..."
+
 # 1. Pre-flight Check (Permissions)
 log_c "🔍 Performing pre-flight checks..."
 if [ "$(id -u)" -ne 0 ]; then
@@ -120,9 +122,25 @@ cd "$BASE_DIR"
 log_c "🌐 Cloning Core Repository..."
 rm -rf lm_tmp
 git clone "https://github.com/lbockenstedt/lm.git" lm_tmp
+
+# Preserve data directory during updates
+DATA_BACKUP_DIR="$BASE_DIR/core_data_backup"
+if [ "$REINSTALL" = false ] && [ -d "$BASE_DIR/core/data" ]; then
+    log "Preserving existing data directory during update..."
+    mv "$BASE_DIR/core/data" "$DATA_BACKUP_DIR"
+fi
+
 rm -rf "$BASE_DIR/core" "$BASE_DIR/WebUI"
 mv lm_tmp/core "$BASE_DIR/core"
 mv lm_tmp/WebUI "$BASE_DIR/WebUI"
+
+# Restore data directory
+if [ -d "$DATA_BACKUP_DIR" ]; then
+    log "Restoring preserved data directory..."
+    rm -rf "$BASE_DIR/core/data"
+    mv "$DATA_BACKUP_DIR" "$BASE_DIR/core/data"
+fi
+
 cp -r lm_tmp/* "$BASE_DIR/" 2>/dev/null || true
 rm -rf lm_tmp
 
