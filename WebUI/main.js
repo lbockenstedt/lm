@@ -114,7 +114,7 @@ const VIEWS = {
 
                             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                                 <div>
-                                    <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Firewall Rules (OPNsense)</h3>
+                                    <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Firewall Rules</h3>
                                     <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
                                         <table class="w-full text-left text-sm">
                                             <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
@@ -132,7 +132,7 @@ const VIEWS = {
                                     </div>
                                 </div>
                                 <div>
-                                    <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">DHCP Lease (OPNsense)</h3>
+                                    <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">DHCP Lease</h3>
                                     <div id="res-dhcp" class="p-4 rounded-md bg-slate-50 border border-slate-200 text-sm text-slate-600 space-y-2">
                                         <div><span class="font-bold">Hostname:</span> <span id="dhcp-host">-</span></div>
                                         <div><span class="font-bold">MAC:</span> <span id="dhcp-mac">-</span></div>
