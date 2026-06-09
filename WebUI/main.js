@@ -1,3 +1,17 @@
+const MODULE_CLASSES = {
+    'Virtual Machines': ['pxmx', 'kvm', 'vmware', 'utm'],
+    'Firewall': ['opnsense', 'pfsense', 'juniper', 'fortigate'],
+    'IPAM': ['netbox', 'phpipam'],
+    'Security/NAC': ['cppm', 'ise']
+};
+
+const PRODUCT_MAP = {
+    'pxmx': 'pxmx',
+    'opn': 'opnsense',
+    'cs': 'cs',
+    'cppm': 'cppm'
+};
+
 const VIEWS = {
     dashboard: {
         name: 'Dashboard',
@@ -38,6 +52,7 @@ const VIEWS = {
     },
     pxmx: {
         name: 'Proxmox',
+        className: 'Virtual Machines',
         subMenus: ['VM Management', 'Cluster Status', 'Storage', 'Configuration'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>',
         render: (subMenu) => {
@@ -149,6 +164,7 @@ const VIEWS = {
     },
     opnsense: {
         name: 'OPNsense',
+        className: 'Firewall',
         subMenus: ['Firewall Rules', 'Configuration', 'Interfaces', 'DHCP Leases', 'NAT Policies', 'DNS Records'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.66 15l3.34-.5 3.34.5C18.5 15.5 20 13.5 20 11c0-3-3-5.5-6-7-3 1.5-6 4-6 7 0 2.5 2 5 4 5.5z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18l-1.5-1.5"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22l-1.5-1.5"></path></svg>',
         render: (subMenu) => {
@@ -196,6 +212,7 @@ const VIEWS = {
     },
     cs: {
         name: 'Client Sim',
+        className: 'Simulation',
         subMenus: ['Traffic Gen', 'DNS Config', 'Schedules'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>',
         render: () => `
@@ -212,6 +229,41 @@ const VIEWS = {
         subMenus: ['General', 'Tenant Config', 'User Access', 'Spoke Approvals'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110-4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
         render: (subMenu) => {
+            if (subMenu === 'User Access') {
+                return `
+                    <div class="space-y-6">
+                        <div class="flex justify-between items-center mb-6">
+                            <h2 class="text-2xl font-bold text-[#263040]">User Access Control</h2>
+                            <button onclick="showAddUserModal()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm flex items-center gap-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                                Add User
+                            </button>
+                        </div>
+                        <div class="hpe-card rounded-lg overflow-hidden shadow-sm border border-slate-200">
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-left text-sm">
+                                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                                        <tr>
+                                            <th class="px-4 py-3 font-bold">User ID</th>
+                                            <th class="px-4 py-3 font-bold">System Admin</th>
+                                            <th class="px-4 py-3 font-bold">Manage Proxmox</th>
+                                            <th class="px-4 py-3 font-bold">View Proxmox</th>
+                                            <th class="px-4 py-3 font-bold">Edit Firewall</th>
+                                            <th class="px-4 py-3 font-bold">Manage DNS</th>
+                                            <th class="px-4 py-3 font-bold">Manage CPPM</th>
+                                            <th class="px-4 py-3 font-bold">View CPPM</th>
+                                            <th class="px-4 py-3 font-bold text-right">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="user-permissions-body" class="divide-y divide-slate-200">
+                                        <!-- User rows injected here -->
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
             if (subMenu === 'Spoke Approvals') {
                 return `
                     <div class="space-y-6">
@@ -219,6 +271,73 @@ const VIEWS = {
                         <div class="hpe-card rounded-lg p-6 shadow-sm">
                             <div id="pending-spokes-list" class="space-y-3">
                                 <div class="py-12 text-center text-slate-400 italic">Loading pending spokes...</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            if (subMenu === 'Tenant Config') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Tenant Configuration</h2>
+                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                            <div class="lg:col-span-1 space-y-4">
+                                <div class="hpe-card rounded-lg p-4 shadow-sm">
+                                    <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Tenants</h3>
+                                    <div id="tenant-list" class="space-y-2">
+                                        <div class="py-4 text-center text-slate-400 italic text-xs">Loading tenants...</div>
+                                    </div>
+                                    <div class="pt-4 mt-4 border-t border-slate-200 flex gap-2">
+                                        <input type="text" id="new-tenant-id" placeholder="Tenant ID" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                        <button onclick="addTenant()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-3 py-1.5 rounded text-xs font-bold transition-all">Add</button>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="lg:col-span-2">
+                                <div id="tenant-editor" class="hpe-card rounded-lg p-6 shadow-sm hidden space-y-6">
+                                    <div class="flex justify-between items-center mb-6">
+                                        <h3 class="text-lg font-semibold text-[#263040]">Edit Tenant: <span id="edit-tenant-id" class="font-mono text-green-600"></span></h3>
+                                        <button onclick="closeTenantEditor()" class="text-slate-400 hover:text-slate-600 text-xs">Close</button>
+                                    </div>
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div class="space-y-2">
+                                            <label class="text-xs text-slate-500 uppercase font-bold">Display Name</label>
+                                            <input type="text" id="tenant-name" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                        </div>
+                                        <div class="space-y-2">
+                                            <label class="text-xs text-slate-500 uppercase font-bold">Active Tenant</label>
+                                            <div class="flex items-center gap-3 py-2">
+                                                <input type="checkbox" id="tenant-active" onchange="setTenant(document.getElementById('edit-tenant-id').textContent)" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                                                <span class="text-sm text-slate-600">Set as active hub tenant</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="pt-6 border-t border-slate-200">
+                                        <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4">Quotas (Maximum Resources)</h4>
+                                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                            <div class="space-y-2">
+                                                <label class="text-[10px] text-slate-400 uppercase font-bold">VMs</label>
+                                                <input type="number" id="quota-vm" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1 text-sm outline-none focus:ring-1 focus:ring-green-500">
+                                            </div>
+                                            <div class="space-y-2">
+                                                <label class="text-[10px] text-slate-400 uppercase font-bold">CPPM Policies</label>
+                                                <input type="number" id="quota-cppm" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1 text-sm outline-none focus:ring-1 focus:ring-green-500">
+                                            </div>
+                                            <div class="space-y-2">
+                                                <label class="text-[10px] text-slate-400 uppercase font-bold">Firewall Rules</label>
+                                                <input type="number" id="quota-opn" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1 text-sm outline-none focus:ring-1 focus:ring-green-500">
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                        <button onclick="saveTenantConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                            Save Tenant Settings
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="tenant-empty-state" class="hpe-card rounded-lg p-12 text-center text-slate-400 italic shadow-sm">
+                                    Select a tenant from the list to configure its settings.
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -408,6 +527,7 @@ const VIEWS = {
 let currentView = 'dashboard';
 let currentSubView = 'General';
 let currentTenant = 'default';
+let currentProduct = null;
 
 async function setTenant(tenant) {
     currentTenant = tenant;
@@ -618,26 +738,181 @@ async function saveCPPMConfig() {
     }
 }
 
+async function loadTenantConfig() {
+    const listEl = document.getElementById('tenant-list');
+    if (!listEl) return;
+
+    try {
+        const response = await fetch('/setup/tenants');
+        if (!response.ok) throw new Error('Failed to fetch tenants');
+        const data = await response.json();
+        const tenants = data.tenants || [];
+
+        listEl.innerHTML = tenants.map(t => `
+            <div onclick="editTenant('${t.id}')" class="flex items-center justify-between p-2 rounded-md cursor-pointer transition-all group ${t.id === currentTenant ? 'bg-green-50 border-l-4 border-green-500' : 'bg-white border border-slate-200 hover:bg-slate-50'}">
+                <div class="flex items-center gap-2">
+                    <span class="text-xs font-medium text-slate-700 group-hover:text-green-600">${t.name}</span>
+                </div>
+                <span class="text-[10px] font-mono text-slate-400">${t.id}</span>
+            </div>
+        `).join('');
+    } catch (err) {
+        console.error('Error loading tenant config:', err);
+        listEl.innerHTML = `<div class="py-4 text-center text-red-500 text-xs">Error loading tenants: ${err.message}</div>`;
+    }
+}
+
+async function editTenant(tenantId) {
+    const editor = document.getElementById('tenant-editor');
+    const emptyState = document.getElementById('tenant-empty-state');
+    if (!editor) return;
+
+    try {
+        const response = await fetch(`/setup/tenants/${tenantId}`);
+        if (!response.ok) throw new Error('Failed to fetch tenant details');
+        const data = await response.json();
+        const config = data.config || {};
+
+        document.getElementById('edit-tenant-id').textContent = tenantId;
+        document.getElementById('tenant-name').value = config.name || tenantId;
+        document.getElementById('tenant-active').checked = (currentTenant === tenantId);
+
+        const quotas = config.quotas || {};
+        document.getElementById('quota-vm').value = quotas.vm || 0;
+        document.getElementById('quota-cppm').value = quotas.cppm || 0;
+        document.getElementById('quota-opn').value = quotas.opn || 0;
+
+        editor.classList.remove('hidden');
+        emptyState.classList.add('hidden');
+    } catch (err) {
+        alert('Error loading tenant: ' + err.message);
+    }
+}
+
+function closeTenantEditor() {
+    document.getElementById('tenant-editor').classList.add('hidden');
+    document.getElementById('tenant-empty-state').classList.remove('hidden');
+}
+
+async function saveTenantConfig() {
+    const tenantId = document.getElementById('edit-tenant-id').textContent;
+    const config = {
+        name: document.getElementById('tenant-name').value,
+        quotas: {
+            vm: parseInt(document.getElementById('quota-vm').value) || 0,
+            cppm: parseInt(document.getElementById('quota-cppm').value) || 0,
+            opn: parseInt(document.getElementById('quota-opn').value) || 0,
+        }
+    };
+
+    try {
+        const response = await fetch('/setup/tenant', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: tenantId, config: config })
+        });
+        if (response.ok) {
+            alert('Tenant configuration saved successfully!');
+            await loadTenantConfig();
+        } else {
+            alert('Failed to save tenant configuration.');
+        }
+    } catch (err) {
+        alert('Error saving tenant: ' + err.message);
+    }
+}
+
+async function addTenant() {
+    const tenantId = document.getElementById('new-tenant-id').value.trim();
+    if (!tenantId) {
+        alert('Please enter a Tenant ID');
+        return;
+    }
+
+    try {
+        const response = await fetch('/setup/tenants', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: tenantId })
+        });
+        if (response.ok) {
+            document.getElementById('new-tenant-id').value = '';
+            await loadTenantConfig();
+        } else {
+            alert('Failed to create tenant.');
+        }
+    } catch (err) {
+        alert('Error creating tenant: ' + err.message);
+    }
+}
+
 function setView(viewId) {
-    currentView = viewId;
+    const isClass = Object.keys(MODULE_CLASSES).includes(viewId);
+
+    if (isClass) {
+        // Find active products for this class
+        const activeProducts = [];
+        // We need to get the approved/connected spokes again
+        // In a real app, we'd cache this, but for now we can call the API or use a global
+        // Since updateStatus is called every 10s, let's use a global cache for active products
+        const products = Array.from(window.activeProducts || []).filter(p =>
+            MODULE_CLASSES[viewId].includes(p)
+        );
+
+        if (products.length === 0) {
+            alert('No active products available for this category.');
+            return;
+        }
+
+        if (products.length === 1) {
+            currentView = products[0];
+            currentProduct = products[0];
+        } else {
+            currentView = viewId;
+            currentProduct = products[0];
+        }
+    } else {
+        currentView = viewId;
+        currentProduct = viewId;
+    }
+
     currentSubView = 'General'; // Default sub-view
 
-    const view = VIEWS[viewId];
+    const view = VIEWS[currentView] || VIEWS[currentProduct];
     if (view && view.subMenus && !view.subMenus.includes('General')) {
         currentSubView = view.subMenus[0];
     }
 
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-    const navItem = document.getElementById(`nav-${viewId}`);
+    const navItem = document.getElementById(`nav-${isClass ? viewId : currentView}`);
     if (navItem) navItem.classList.add('active');
 
     const topNav = document.getElementById('top-nav');
     if (view) {
-        topNav.innerHTML = view.subMenus.map((menu, i) => `
+        let topNavHtml = '';
+
+        // 1. Render Product Tabs if we are in a multi-product class
+        if (isClass && MODULE_CLASSES[viewId] &&
+            Array.from(window.activeProducts || []).filter(p => MODULE_CLASSES[viewId].includes(p)).length > 1) {
+
+            const products = Array.from(window.activeProducts || []).filter(p => MODULE_CLASSES[viewId].includes(p));
+            topNavHtml += `<div class="flex gap-2 mr-4 border-r border-slate-300 pr-4">`;
+            topNavHtml += products.map(p => `
+                <div onclick="switchProduct('${p}')" class="px-3 py-1 text-xs font-bold rounded cursor-pointer transition-all ${p === currentProduct ? 'bg-green-600 text-white' : 'bg-slate-200 text-slate-600 hover:bg-slate-300'}">
+                    ${VIEWS[p].name}
+                </div>
+            `).join('');
+            topNavHtml += `</div>`;
+        }
+
+        // 2. Render Sub-menus
+        topNavHtml += view.subMenus.map((menu, i) => `
             <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
                 ${menu}
             </div>
         `).join('');
+
+        topNav.innerHTML = topNavHtml;
     }
 
     const viewport = document.getElementById('viewport');
@@ -647,16 +922,23 @@ function setView(viewId) {
             loadSetupConfig();
             loadTenants();
             if (currentSubView === 'Spoke Approvals') loadPendingSpokes();
+            if (currentSubView === 'Tenant Config') loadTenantConfig();
         }
-        if (viewId === 'pxmx') {
+        if (currentView === 'pxmx') {
             loadVMInventory();
         }
-        if (viewId === 'opnsense') {
+        if (currentView === 'opnsense') {
             loadOpnsenseManagement();
         }
     }
 
-    if (viewId === 'dashboard' || viewId === 'settings') updateStatus();
+    if (currentView === 'dashboard' || currentView === 'settings') updateStatus();
+}
+
+function switchProduct(productId) {
+    currentProduct = productId;
+    currentView = productId; // Treat as the product view
+    setView(currentView);
 }
 
 function setSubView(subMenu) {
@@ -680,6 +962,12 @@ function setSubView(subMenu) {
                 loadTenants();
                 if (currentSubView === 'Spoke Approvals') {
                     loadPendingSpokes();
+                }
+                if (currentSubView === 'Tenant Config') {
+                    loadTenantConfig();
+                }
+                if (currentSubView === 'User Access') {
+                    loadUsers();
                 }
             }
             if ((currentView === 'pxmx' && currentSubView === 'Configuration') ||
@@ -743,44 +1031,45 @@ async function updateStatus() {
 
         if (spokeCount) spokeCount.textContent = approvedSpokes.length;
 
-        const moduleMap = {
-            'pxmx': 'pxmx',
-            'opn': 'opnsense',
-            'cs': 'cs',
-            'cppm': 'cppm'
-        };
+        const activeProducts = new Set();
 
-        const activeModules = new Set();
-
-        // 1. Add modules that are currently online
+        // 1. Add products that are currently online
         connections.forEach(id => {
-            for (const [key, viewId] of Object.entries(moduleMap)) {
-                if (id.includes(key)) activeModules.add(viewId);
+            for (const [key, product] of Object.entries(PRODUCT_MAP)) {
+                if (id.includes(key)) activeProducts.add(product);
             }
         });
 
-        // 2. Add modules that are known and approved (even if offline)
+        // 2. Add products that are known and approved (even if offline)
         const allSpokesList = approvalsData.spokes || [];
         allSpokesList.forEach(spoke => {
             if (spoke.approved) {
-                for (const [key, viewId] of Object.entries(moduleMap)) {
-                    if (spoke.spoke_id.includes(key)) activeModules.add(viewId);
+                for (const [key, product] of Object.entries(PRODUCT_MAP)) {
+                    if (spoke.spoke_id.includes(key)) activeProducts.add(product);
                 }
             }
         });
 
-        // Dynamic setup submenus based on approved modules
-        const baseSetupMenus = ['General', 'Tenant Config', 'User Access', 'Spoke Approvals'];
-        VIEWS.setup.subMenus = baseSetupMenus;
+        window.activeProducts = activeProducts;
+
+        // Determine which classes are active
+        const activeClasses = [];
+        for (const [className, products] of Object.entries(MODULE_CLASSES)) {
+            if (products.some(p => activeProducts.has(p))) {
+                activeClasses.push(className);
+            }
+        }
 
         const staticNavs = ['dashboard', 'settings', 'setup'];
-        const dynamicHtml = Array.from(activeModules).map(viewId => {
-            const view = VIEWS[viewId];
-            const isActive = currentView === viewId ? 'active' : '';
+        const dynamicHtml = activeClasses.map(className => {
+            const isActive = currentView === className ? 'active' : '';
+            // Use an icon from the first active product in the class
+            const firstProduct = MODULE_CLASSES[className].find(p => activeProducts.has(p));
+            const icon = VIEWS[firstProduct]?.icon || '';
             return `
-                <div onclick="setView('${viewId}')" id="nav-${viewId}" class="nav-item ${isActive} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
-                    ${view.icon}
-                    ${view.name}
+                <div onclick="setView('${className}')" id="nav-${className}" class="nav-item ${isActive} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
+                    ${icon}
+                    ${className}
                 </div>
             `;
         }).join('');
@@ -1161,31 +1450,51 @@ async function loadPendingSpokes() {
             return;
         }
 
-        listEl.innerHTML = spokes.map(spoke => {
-            const sid = spoke.spoke_id;
-            const isApproved = spoke.approved;
-
-            return `
-                <div class="flex items-center justify-between p-4 rounded-lg bg-slate-50 border border-slate-200 hover:border-blue-500 transition-all">
-                    <div class="flex items-center gap-3">
-                        <div class="w-2 h-2 rounded-full ${isApproved ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.6)]'}"></div>
-                        <span class="text-sm font-medium text-slate-700">${sid}</span>
-                        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isApproved ? 'bg-green-100 text-green-600' : 'bg-yellow-100 text-yellow-600'}">
-                            ${isApproved ? 'Approved' : 'Pending'}
-                        </span
-                    </div>
-                    ${!isApproved ? `
-                        <button onclick="approveSpoke('${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
-                            Approve
-                        </button>
-                    ` : `
-                        <button onclick="unapproveSpoke('${sid}')" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-1 rounded text-xs font-bold transition-colors">
-                            Un-approve
-                        </button>
-                    `}
-                </div>
-            `;
-        }).join('');
+        listEl.innerHTML = `
+            <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                        <tr>
+                            <th class="px-4 py-3 font-bold">Spoke ID</th>
+                            <th class="px-4 py-3 font-bold">Status</th>
+                            <th class="px-4 py-3 font-bold text-right">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-200">
+                        ${spokes.map(spoke => {
+                            const sid = spoke.spoke_id;
+                            const isApproved = spoke.approved;
+                            return `
+                                <tr class="hover:bg-slate-50 transition-colors">
+                                    <td class="px-4 py-3">
+                                        <div class="flex items-center gap-3">
+                                            <div class="w-2 h-2 rounded-full ${isApproved ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.6)]'}"></div>
+                                            <span class="font-medium text-slate-700">${sid}</span>
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isApproved ? 'bg-green-100 text-green-600' : 'bg-yellow-100 text-yellow-600'}">
+                                            ${isApproved ? 'Approved' : 'Pending'}
+                                        </span>
+                                    </td>
+                                    <td class="px-4 py-3 text-right">
+                                        ${!isApproved ? `
+                                            <button onclick="approveSpoke('${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
+                                                Approve
+                                            </button>
+                                        ` : `
+                                            <button onclick="unapproveSpoke('${sid}')" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-1 rounded text-xs font-bold transition-colors">
+                                                Un-approve
+                                            </button>
+                                        `}
+                                    </td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
     } catch (err) {
         console.error('Error in loadPendingSpokes:', err);
         listEl.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading spoke statuses: ${err.message}</div>`;

@@ -366,8 +366,9 @@ def create_app(hub):
         # 1. Fetch from Proxmox
         pxmx_spoke = next((sid for sid in hub.active_connections if "pxmx" in sid), None)
         if pxmx_spoke:
-            px_res = await hub.request_response(pxmx_spoke, "GET_VM_INFO", {"vm_id": vm_id})
-            details["proxmox"] = px_res if px_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": px_res.get("message")}
+            px_res_raw = await hub.request_response(pxmx_spoke, "GET_VM_INFO", {"vm_id": vm_id})
+            px_res = px_res_raw.get("payload", {}).get("data", {}) if isinstance(px_res_raw, dict) else {}
+            details["proxmox"] = px_res if px_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": px_res.get("message", "Unknown error")}
 
         # 2. Fetch from OPNsense
         opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
@@ -389,8 +390,9 @@ def create_app(hub):
         # 3. Fetch from CPPM
         cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
         if cppm_spoke and ip:
-            cppm_res = await hub.request_response(cppm_spoke, "CPPM_GET_POLICY_BY_IP", {"ip": ip})
-            details["cppm"] = cppm_res if cppm_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": cppm_res.get("message")}
+            cppm_res_raw = await hub.request_response(cppm_spoke, "CPPM_GET_POLICY_BY_IP", {"ip": ip})
+            cppm_res = cppm_res_raw.get("payload", {}).get("data", {}) if isinstance(cppm_res_raw, dict) else {}
+            details["cppm"] = cppm_res if cppm_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": cppm_res.get("message", "Unknown error")}
 
         return details
 
@@ -616,6 +618,45 @@ def create_app(hub):
             return {"spoke_id": spoke_id, "secret": secret}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/setup/users")
+    async def get_users():
+        hub = app.state.hub
+        users = hub.state.system_state.get("users", {})
+        return {"users": users}
+
+    @app.post("/setup/users")
+    async def update_user(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            user_id = data.get("user_id")
+            permissions = data.get("permissions", {})
+
+            if not user_id:
+                raise HTTPException(status_code=400, detail="Missing user_id")
+
+            if "users" not in hub.state.system_state:
+                hub.state.system_state["users"] = {}
+
+            hub.state.system_state["users"][user_id] = {
+                "permissions": permissions,
+                "updated_at": time.time()
+            }
+            hub.state.save_state()
+
+            return {"status": "success", "message": f"User {user_id} updated."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/setup/users/{user_id}")
+    async def delete_user(user_id: str):
+        hub = app.state.hub
+        if "users" in hub.state.system_state and user_id in hub.state.system_state["users"]:
+            del hub.state.system_state["users"][user_id]
+            hub.state.save_state()
+            return {"status": "success", "message": f"User {user_id} deleted."}
+        raise HTTPException(status_code=404, detail="User not found")
 
     @app.get("/setup/config")
     async def get_global_config():
