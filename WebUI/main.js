@@ -401,7 +401,7 @@ const VIEWS = {
     },
     settings: {
         name: 'System',
-        subMenus: ['General', 'Network', 'Auth', 'Logs'],
+        subMenus: ['General', 'Network', 'Auth', 'Logs', 'Diagnostics'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-1.59 4.04-1.59 5.583 0a1.724 1.724 0 001.28 2.915c-1.344 1.35-3.77 1.35-5.114 0a1.724 1.724 0 00-1.28-2.915zM12 18a6 6 0 100-12 6 6 0 000 12z"></path></svg>',
         render: (subMenu) => {
             if (subMenu === 'Logs') {

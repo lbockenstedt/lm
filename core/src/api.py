@@ -437,14 +437,23 @@ def create_app(hub):
         hub = app.state.hub
         metrics = await hub.get_system_metrics()
         diagnostics = []
-        for sid, ws in hub.active_connections.items():
+        # Get all known modules (approved or pending)
+        known_spokes = hub.state.system_state.get("known_modules", [])
+
+        for sid in known_spokes:
+            ws = hub.active_connections.get(sid)
+            telemetry = hub.spoke_telemetry.get(sid, {})
+
             diagnostics.append({
                 "spoke_id": sid,
-                "authenticated": True,
+                "authenticated": sid in hub.active_connections,
                 "approved": hub.approved_modules.get(sid, False),
                 "heartbeat_status": hub.heartbeat.get_status(sid),
-                "connection_state": ws.state,
-                "version": hub.spoke_versions.get(sid, "unknown")
+                "connection_state": ws.state if ws else "OFFLINE",
+                "version": hub.spoke_versions.get(sid, "unknown"),
+                "last_attempt": telemetry.get("last_attempt"),
+                "last_status": telemetry.get("status", "UNKNOWN"),
+                "last_error": telemetry.get("error")
             })
 
         # Get Hub version
