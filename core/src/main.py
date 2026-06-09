@@ -104,7 +104,7 @@ class LabManagerHub:
             message_bytes = json.dumps({
                 "header": asdict(message.header),
                 "payload": asdict(message.payload)
-            }, sort_keys=True).encode()
+            }, sort_keys=True, separators=(',', ':')).encode()
 
             message.signature = self.key_manager.sign_message(spoke_id, message_bytes)
 
@@ -113,7 +113,7 @@ class LabManagerHub:
                 "payload": asdict(message.payload),
                 "signature": message.signature
             }
-            json_payload = json.dumps(payload)
+            json_payload = json.dumps(payload, separators=(',', ':'))
             self.bytes_count += len(json_payload.encode())
             await ws.send(json_payload)
             self.message_count += 1
@@ -297,7 +297,7 @@ class LabManagerHub:
                 message_bytes = json.dumps({
                     "header": approval_msg["header"],
                     "payload": approval_msg["payload"]
-                }, sort_keys=True).encode()
+                }, sort_keys=True, separators=(',', ':')).encode()
                 approval_msg["signature"] = self.key_manager.sign_message(spoke_id, message_bytes)
 
                 await websocket.send(json.dumps(approval_msg))
@@ -316,7 +316,7 @@ class LabManagerHub:
                 # Signature Verification
                 signature = msg_data.get("signature")
                 data_to_verify = {k: v for k, v in msg_data.items() if k != "signature"}
-                message_bytes = json.dumps(data_to_verify, sort_keys=True).encode()
+                message_bytes = json.dumps(data_to_verify, sort_keys=True, separators=(',', ':')).encode()
 
                 if not self.key_manager.verify_signature(spoke_id, message_bytes, signature):
                     logger.warning(f"Invalid signature from spoke {spoke_id}")

@@ -129,12 +129,12 @@ class BaseControlPlane:
 
     def _sign(self, msg):
         data = {k: v for k, v in msg.items() if k != "signature"}
-        message_bytes = json.dumps(data, sort_keys=True).encode()
+        message_bytes = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
         return hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
 
     def _verify_signature(self, msg):
         sig = msg.get("signature")
         data = {k: v for k, v in msg.items() if k != "signature"}
-        message_bytes = json.dumps(data, sort_keys=True).encode()
+        message_bytes = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
         expected = hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, sig)
