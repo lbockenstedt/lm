@@ -65,12 +65,11 @@ fi
 echo "🛠️ Setting up Proxmox Manager..."
 cd pxmx
 
-if [ -d "venv" ] && [ ! -f "venv/bin/python3" ]; then
-    rm -rf venv
-fi
-if [ ! -d "venv" ]; then
-    python3 -m venv venv
-fi
+# Always remove existing venv to ensure clean local environment (prevents cross-platform path issues)
+echo "♻️ Resetting virtual environment..."
+rm -rf venv
+
+python3 -m venv venv
 if [ ! -f "venv/bin/python3" ]; then
     echo "❌ Critical Error: venv creation failed."
     exit 1
