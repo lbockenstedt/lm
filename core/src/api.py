@@ -23,6 +23,8 @@ def create_app(hub):
     @app.get("/status")
     async def get_status():
         hub = app.state.hub
+        if not getattr(hub, "is_ready", False):
+            raise HTTPException(status_code=503, detail="Hub is not yet ready (WebSocket server starting)")
         metrics = await hub.get_system_metrics()
         return {
             "active_connections": list(hub.active_connections.keys()),
@@ -30,6 +32,7 @@ def create_app(hub):
             "state": hub.state.system_state,
             "metrics": metrics
         }
+
 
     @app.get("/vm/{vm_id}/firewall")
     async def get_vm_firewall(vm_id: str):

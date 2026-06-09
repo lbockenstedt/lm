@@ -87,6 +87,8 @@ class LabManagerHub:
         self.rate_limiters: Dict[str, TokenBucket] = {}
         # { correlation_id: response_data } for request-response bridging
         self.response_cache: Dict[str, Any] = {}
+        self.is_ready = False
+
 
     async def send_to_spoke(self, message: Message):
         """
@@ -537,10 +539,12 @@ class LabManagerHub:
         autoupdate_task = asyncio.create_task(self.run_autoupdate_loop())
         mps_task = asyncio.create_task(self.run_mps_loop())
 
-        async with websockets.serve(self.handle_connection, self.host, self.port):
+        async with websockets.serve(self.handle_connection, self.host, self.port) as server:
+            self.is_ready = True
             logger.info(f"Lab Manager Hub v{version} started on ws://{self.host}:{self.port}")
             logger.info(f"Hub API started on port 8000")
             await asyncio.Future()
+
 
     async def run_retry_loop(self):
         class ConnectionMap(dict):

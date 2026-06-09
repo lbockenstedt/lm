@@ -59,6 +59,9 @@ if [ "$REINSTALL" = true ]; then
     # Stop everything first
     systemctl stop lm || true
     pkill -9 python || true
+    # Force kill anything on the Hub ports to prevent "Address already in use"
+    fuser -k 8000/tcp 8765/tcp || true
+
 
     # Remove installation directory and secrets
     rm -rf "$BASE_DIR"
@@ -194,7 +197,7 @@ for mod in "${!MODULES[@]}"; do # Fixed bug here: should be MODULES
     fi
 
     # Fetch Hub Secret for mutual authentication
-    HUB_SECRET_FILE="$BASE_DIR/hub_secret.json"
+    HUB_SECRET_FILE="$BASE_DIR/core/data/hub_secret.json"
     echo "⏳ Waiting for Hub to generate master secret..."
     for i in {1..10}; do
         if [ -f "$HUB_SECRET_FILE" ]; then
