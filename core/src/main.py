@@ -11,6 +11,7 @@ import uuid
 import secrets
 from collections import deque
 from typing import Dict, Any
+from dataclasses import asdict
 import websockets
 
 from messaging.protocol import Message, MessageHeader, MessagePayload, Acknowledgement
@@ -97,15 +98,15 @@ class LabManagerHub:
         if ws:
             # Sign the message before sending
             message_bytes = json.dumps({
-                "header": vars(message.header),
-                "payload": vars(message.payload)
+                "header": asdict(message.header),
+                "payload": asdict(message.payload)
             }, sort_keys=True).encode()
 
             message.signature = self.key_manager.sign_message(spoke_id, message_bytes)
 
             payload = {
-                "header": vars(message.header),
-                "payload": vars(message.payload),
+                "header": asdict(message.header),
+                "payload": asdict(message.payload),
                 "signature": message.signature
             }
             await ws.send(json.dumps(payload))
@@ -261,8 +262,8 @@ class LabManagerHub:
                 }
                 # Sign the message
                 message_bytes = json.dumps({
-                    "header": vars(approval_msg["header"]),
-                    "payload": vars(approval_msg["payload"])
+                    "header": approval_msg["header"],
+                    "payload": approval_msg["payload"]
                 }, sort_keys=True).encode()
                 approval_msg["signature"] = self.key_manager.sign_message(spoke_id, message_bytes)
 
@@ -413,7 +414,13 @@ class LabManagerHub:
         while True:
             await asyncio.sleep(1.0)
             self.message_history.append(self.message_count)
-            self.mps = sum(self.message_history) / len(self.message_history)
+
+            # Calculate MPS based on available history to avoid ZeroDivisionError
+            if len(self.message_history) > 0:
+                self.mps = sum(self.message_history) / len(self.message_history)
+            else:
+                self.mps = 0.0
+
             self.message_count = 0
 
     async def get_system_metrics(self) -> Dict[str, Any]:
