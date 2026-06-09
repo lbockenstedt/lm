@@ -29,7 +29,7 @@ fi
 # 2. System Dependencies
 echo "📦 Installing system dependencies..."
 apt-get update
-apt-get install -y python3-pip python3-venv git curl lsof net-tools jq sudo
+apt-get install -y python3-pip python3-venv git curl lsof net-tools jq sudo psmisc
 
 # Mark all directories under /opt/lm as safe for git to avoid dubious ownership errors
 git config --global --add safe.directory /opt/lm
@@ -54,6 +54,17 @@ chmod 440 /etc/sudoers.d/lm
 # ------------------------------------------------------------------
 # Reinstall Logic
 # ------------------------------------------------------------------
+# Always kill existing Hub processes to prevent "Address already in use"
+echo "🧹 Cleaning up existing Hub processes..."
+systemctl stop lm || true
+pkill -9 python || true
+for port in 8000 8765; do
+    pid=$(lsof -t -i :$port || true)
+    if [ -n "$pid" ]; then
+        kill -9 $pid || true
+    fi
+done
+
 if [ "$REINSTALL" = true ]; then
     echo "⚠️  REINSTALL MODE: Wiping all configuration, state, and installations..."
     # Stop everything first
@@ -147,11 +158,11 @@ fi
 cd "$BASE_DIR"
 
 # Give the Hub API a moment to fully start and stabilize
-echo "⏳ Waiting for Hub API to initialize..."
-until curl -s http://localhost:8000/status > /dev/null; do
+echo "⏳ Waiting for Hub API and WebSocket server to initialize..."
+until curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/status | grep -q "200"; do
     sleep 2
 done
-sleep 5
+sleep 2
 
 HUB_API="http://localhost:8000"
 HUB_WS="ws://localhost:8765"
