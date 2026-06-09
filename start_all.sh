@@ -6,8 +6,8 @@
 # DEBUGGING: Log every step of the start process to a separate file
 # ------------------------------------------------------------------
 # Determine root directory for logs and config
-if [ -d "/root/lm" ]; then
-    ROOT_DIR="/root/lm"
+if [ -d "/opt/lm" ]; then
+    ROOT_DIR="/opt/lm"
 else
     ROOT_DIR="$(pwd)"
 fi
@@ -64,17 +64,17 @@ sleep 2
 
 # --- 1. Launch Hub ---
 echo "Starting Hub..."
-HUB_DIR="$BASE_DIR/lm"
-if [ ! -d "$HUB_DIR/core" ]; then
-    echo "❌ Hub core not found at $HUB_DIR/core. Please run this script from the project root."
+HUB_DIR="$ROOT_DIR/core"
+if [ ! -d "$HUB_DIR/src" ]; then
+    echo "❌ Hub core not found at $HUB_DIR/src. Please run this script from the project root."
     exit 1
 fi
 
-export PYTHONPATH="$HUB_DIR/core/src:$PYTHONPATH"
+export PYTHONPATH="$HUB_DIR/src:$PYTHONPATH"
 
 # Launch Hub in background
-nohup "$HUB_DIR/core/venv/bin/python3" "$HUB_DIR/core/src/main.py" > "$HUB_DIR/hub.log" 2>&1 &
-echo "Hub started (logs: $HUB_DIR/hub.log)"
+nohup "$HUB_DIR/venv/bin/python3" "$HUB_DIR/src/main.py" > "$ROOT_DIR/hub.log" 2>&1 &
+echo "Hub started (logs: $ROOT_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
 # --- 2. Launch Spokes ---
@@ -84,7 +84,7 @@ SECRET="lm-secret"
 SPOKES=("cs" "pxmx" "opnsense" "cppm")
 
 for spoke in "${SPOKES[@]}"; do
-    SPOKE_DIR="$BASE_DIR/$spoke"
+    SPOKE_DIR="$ROOT_DIR/$spoke"
     if [ -d "$SPOKE_DIR" ]; then
         echo "Starting $spoke..."
         cd "$SPOKE_DIR" || continue
@@ -98,8 +98,8 @@ for spoke in "${SPOKES[@]}"; do
             "cppm") SPOKE_ID="cppm-spoke-1" ;;
         esac
 
-        nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" > "$BASE_DIR/lm/$spoke.log" 2>&1 &
-        echo "$spoke started (logs: $BASE_DIR/lm/$spoke.log)"
+        nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" > "$ROOT_DIR/$spoke.log" 2>&1 &
+        echo "$spoke started (logs: $ROOT_DIR/$spoke.log)"
     else
         echo "⚠️  Warning: Spoke directory $SPOKE_DIR not found. Skipping..."
     fi
