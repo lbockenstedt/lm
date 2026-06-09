@@ -17,9 +17,14 @@ class ManagedKey:
     expires_at: float
 
 class KeyManager:
-    def __init__(self, storage_path="keys.json", hub_secret_path="hub_secret.json"):
-        self.storage_path = storage_path
-        self.hub_secret_path = hub_secret_path
+    def __init__(self, system_path="keys.json", hub_secret_path="hub_secret.json"):
+        # Resolve absolute paths to avoid PermissionErrors under systemd/different CWDs
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.abspath(os.path.join(base_dir, "../../data"))
+        os.makedirs(data_dir, exist_ok=True)
+
+        self.storage_path = os.path.join(data_dir, system_path)
+        self.hub_secret_path = os.path.join(data_dir, hub_secret_path)
         self.keys: Dict[str, ManagedKey] = {} # { spoke_id: current_key }
         self.history: Dict[str, List[ManagedKey]] = {} # { spoke_id: [previous_keys] }
         self.hub_secret = self._load_or_generate_hub_secret()

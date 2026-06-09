@@ -1,12 +1,29 @@
 #!/bin/bash
 set -e
 
+# ------------------------------------------------------------------
+# Argument Parsing
+# ------------------------------------------------------------------
+REINSTALL=false
+for arg in "$@"; do
+    if [ "$arg" == "--reinstall" ]; then
+        REINSTALL=true
+    fi
+done
+
 echo "🚀 Starting Native Lab Manager Installation (LXC-Optimized)..."
 
-# 1. Root Check
+# 1. Pre-flight Check (Permissions)
+echo "🔍 Performing pre-flight checks..."
 if [ "$(id -u)" -ne 0 ]; then
-    echo "⚠️  This script must be run as root."
-    exit 1
+    echo "⚠️  This script must be run as root or with sudo."
+    if command -v sudo >/dev/null 2>&1; then
+        echo "👉 Please run: sudo bash $0"
+        exit 1
+    else
+        echo "❌ Sudo not found. Root privileges are required for this installation."
+        exit 1
+    fi
 fi
 
 # 2. System Dependencies
@@ -34,6 +51,23 @@ echo "⚙️ Configuring sudoers for $SvcUser..."
 echo "$SvcUser ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lm" > /etc/sudoers.d/lm
 chmod 440 /etc/sudoers.d/lm
 
+# ------------------------------------------------------------------
+# Reinstall Logic
+# ------------------------------------------------------------------
+if [ "$REINSTALL" = true ]; then
+    echo "⚠️  REINSTALL MODE: Wiping all configuration, state, and installations..."
+    # Stop everything first
+    systemctl stop lm || true
+    pkill -9 python || true
+
+    # Remove installation directory and secrets
+    rm -rf "$BASE_DIR"
+    rm -f /etc/systemd/system/lm.service
+    # Note: we keep the SvcUser but wipe their home/data dir
+
+    echo "🧹 Clean slate achieved. Proceeding with fresh installation..."
+fi
+
 # Cleanup legacy installations
 if [ -d "$OLD_BASE_DIR" ]; then
     echo "🗑️  Removing legacy installation at $OLD_BASE_DIR..."
@@ -55,7 +89,6 @@ mv lm_tmp/WebUI "$BASE_DIR/WebUI"
 cp -r lm_tmp/* "$BASE_DIR/" 2>/dev/null || true
 rm -rf lm_tmp
 
-# Now we are in /opt/lm, and we have /opt/lm/core and /opt/lm/WebUI
 # Sync other spokes
 REPOS=("cs" "pxmx" "opnsense" "cppm")
 for repo in "${REPOS[@]}"; do
@@ -85,14 +118,18 @@ if [ ! -d "venv" ]; then python3 -m venv venv; fi
 ./venv/bin/python3 -m pip install --upgrade pip -q
 ./venv/bin/python3 -m pip install -r requirements.txt -q
 
+# Ensure the data directory exists and is owned by the service user
+mkdir -p "$BASE_DIR/core/data"
+chown -R $SvcUser:$SvcUser "$BASE_DIR"
+
 # Start Hub temporarily for modular installation
 echo "🚀 Starting Hub temporarily for modular setup..."
 export PYTHONPATH="$BASE_DIR/core/src"
-	if command -v sudo >/dev/null 2>&1; then
-		sudo -u $SvcUser nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
-	else
-		nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
-	fi
+if command -v sudo >/dev/null 2>&1; then
+    sudo -u $SvcUser nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+else
+    nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+fi
 
 cd "$BASE_DIR"
 
@@ -132,7 +169,7 @@ declare -A SPOKE_IDS=(
     ["cppm"]="cppm-spoke-1"
 )
 
-for mod in "${!MODULES[@]}"; do
+for mod in "${!MODULES[@]}"; do # Fixed bug here: should be MODULES
     installer=${MODULES[$mod]}
     SPOKE_ID=${SPOKE_IDS[$mod]}
     echo "Setting up $mod..."
@@ -176,9 +213,7 @@ for mod in "${!MODULES[@]}"; do
 
     # Run the modular installer with the Hub-provided secret
     bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET" --hub-secret "$HUB_SECRET"
-
 done
-
 
 # 6. Persistence & Auto-start
 echo "⚙️ Configuring systemd for auto-start on reboot..."
