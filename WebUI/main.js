@@ -150,7 +150,7 @@ const VIEWS = {
     opnsense: {
         name: 'OPNsense',
         subMenus: ['Firewall Rules', 'Configuration', 'Interfaces', 'DHCP Leases', 'NAT Policies', 'DNS Records'],
-        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.C18.4 5.6 17.4 5.4 16.3 5.4a4.4 4.4 0 00-4.4 4.4c0 1.1.2 2.1.6 3.1"></path></svg>',
+        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.66 15l3.34-.5 3.34.5C18.5 15.5 20 13.5 20 11c0-3-3-5.5-6-7-3 1.5-6 4-6 7 0 2.5 2 5 4 5.5z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18l-1.5-1.5"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22l-1.5-1.5"></path></svg>',
         render: (subMenu) => {
             if (subMenu === 'Configuration') {
                 return `
