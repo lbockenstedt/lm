@@ -14,22 +14,23 @@ done
 echo "🚀 Starting Native Lab Manager Installation (LXC-Optimized)..."
 
 # 1. Pre-flight Check (Permissions)
-echo "🔍 Performing pre-flight checks..."
+log_c "🔍 Performing pre-flight checks..."
 if [ "$(id -u)" -ne 0 ]; then
-    echo "⚠️  This script must be run as root or with sudo."
+    log_e "This script must be run as root or with sudo."
     if command -v sudo >/dev/null 2>&1; then
         echo "👉 Please run: sudo bash $0"
         exit 1
     else
-        echo "❌ Sudo not found. Root privileges are required for this installation."
+        log_e "Sudo not found. Root privileges are required for this installation."
         exit 1
     fi
 fi
 
 # 2. System Dependencies
-echo "📦 Installing system dependencies..."
-apt-get update
-apt-get install -y python3-pip python3-venv git curl lsof net-tools jq sudo psmisc
+log_c "📦 Installing system dependencies..."
+apt-get update >> "$INSTALL_LOG" 2>&1
+apt-get install -y python3-pip python3-venv git curl lsof net-tools jq sudo psmisc >> "$INSTALL_LOG" 2>&1
+
 
 # Mark all directories under /opt/lm as safe for git to avoid dubious ownership errors
 git config --global --add safe.directory /opt/lm
@@ -39,12 +40,38 @@ git config --global --add safe.directory '/opt/lm/*'
 BASE_DIR="/opt/lm"
 OLD_BASE_DIR="/opt/lm-manager"
 SvcUser="svc_lm"
+LOG_DIR="/var/log/lm"
+INSTALL_LOG="$LOG_DIR/install.log"
+
+# Logging Helpers
+log() {
+    # Standard info log: only to file
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $1" >> "$INSTALL_LOG" 2>/dev/null || true
+}
+
+log_c() {
+    # Console and file: for high-level progress
+    echo "$1"
+    log "$1"
+}
+
+log_e() {
+    # Error log: console and file
+    echo "❌ $1" >&2
+    log "ERROR: $1"
+}
 
 # Create non-root user for the service
 if ! id -u "$SvcUser" >/dev/null 2>&1; then
     echo "👤 Creating system user $SvcUser..."
     useradd -r -m -d /opt/lm -s /usr/sbin/nologin "$SvcUser" || true
 fi
+
+# Create global log directory and set permissions
+echo "📂 Creating system log directory at $LOG_DIR..."
+mkdir -p "$LOG_DIR"
+chown -R $SvcUser:$SvcUser "$LOG_DIR"
+chmod 755 "$LOG_DIR"
 
 # Grant svc_lm permission to restart the LM service without a password
 echo "⚙️ Configuring sudoers for $SvcUser..."
@@ -137,12 +164,12 @@ mkdir -p "$BASE_DIR/core/data"
 chown -R $SvcUser:$SvcUser "$BASE_DIR"
 
 # Start Hub temporarily for modular installation
-echo "🚀 Starting Hub temporarily for modular setup..."
+log_c "🚀 Starting Hub temporarily for modular setup..."
 export PYTHONPATH="$BASE_DIR/core/src"
 if command -v sudo >/dev/null 2>&1; then
-    sudo -u $SvcUser nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+    sudo -u $SvcUser nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
 else
-    nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+    nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
 fi
 
 cd "$BASE_DIR"

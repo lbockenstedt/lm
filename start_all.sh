@@ -12,7 +12,8 @@ else
     ROOT_DIR="$(pwd)"
 fi
 
-LOG_FILE="$ROOT_DIR/start_all.log"
+LOG_DIR="/var/log/lm"
+LOG_FILE="$LOG_DIR/start_all.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # ------------------------------------------------------------------
@@ -73,8 +74,8 @@ fi
 export PYTHONPATH="$HUB_DIR/src:$PYTHONPATH"
 
 # Launch Hub in background
-nohup "$HUB_DIR/venv/bin/python3" "$HUB_DIR/src/main.py" > "$ROOT_DIR/hub.log" 2>&1 &
-echo "Hub started (logs: $ROOT_DIR/hub.log)"
+nohup "$HUB_DIR/venv/bin/python3" "$HUB_DIR/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
+echo "Hub started (logs: $LOG_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
 # --- 2. Launch Spokes ---
@@ -98,8 +99,8 @@ for spoke in "${SPOKES[@]}"; do
             "cppm") SPOKE_ID="cppm-spoke-1" ;;
         esac
 
-        nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" > "$ROOT_DIR/$spoke.log" 2>&1 &
-        echo "$spoke started (logs: $ROOT_DIR/$spoke.log)"
+        nohup "$SPOKE_DIR/venv/bin/python3" -m src.control_plane --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" > "$LOG_DIR/$spoke.log" 2>&1 &
+        echo "$spoke started (logs: $LOG_DIR/$spoke.log)"
     else
         echo "⚠️  Warning: Spoke directory $SPOKE_DIR not found. Skipping..."
     fi

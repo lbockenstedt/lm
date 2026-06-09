@@ -455,14 +455,22 @@ const VIEWS = {
                             <div id="sys-disk" class="text-4xl font-bold mt-2 text-slate-800">0%</div>
                         </div>
                     </div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div class="hpe-card rounded-lg p-6 shadow-sm">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Throughput (MPS)</label>
-                            <div id="sys-mps" class="text-4xl font-bold mt-2 text-[#01A982]">0.0 msg/s</div>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-6">
+                        <div class="hpe-card rounded-lg p-4 shadow-sm">
+                            <label class="text-[10px] text-slate-500 uppercase font-bold">Throughput</label>
+                            <div id="sys-throughput" class="text-2xl font-bold mt-1 text-[#01A982]">0.0 MB/s</div>
                         </div>
-                        <div class="hpe-card rounded-lg p-6 shadow-sm">
-                            <label class="text-xs text-slate-500 uppercase font-bold">Mailbox Backlog</label>
-                            <div id="sys-queue" class="text-4xl font-bold mt-2 text-slate-800">0</div>
+                        <div class="hpe-card rounded-lg p-4 shadow-sm">
+                            <label class="text-[10px] text-slate-500 uppercase font-bold">Packets/s</label>
+                            <div id="sys-mps" class="text-2xl font-bold mt-1 text-[#01A982]">0.0 msg/s</div>
+                        </div>
+                        <div class="hpe-card rounded-lg p-4 shadow-sm">
+                            <label class="text-[10px] text-slate-500 uppercase font-bold">Mailbox Queue</label>
+                            <div id="sys-queue" class="text-2xl font-bold mt-1 text-slate-800">0</div>
+                        </div>
+                        <div class="hpe-card rounded-lg p-4 shadow-sm">
+                            <label class="text-[10px] text-slate-500 uppercase font-bold">Backlog</label>
+                            <div id="sys-backlog" class="text-2xl font-bold mt-1 text-slate-800">0</div>
                         </div>
                     </div>
 
@@ -1030,11 +1038,15 @@ async function updateStatus() {
             const diskEl = document.getElementById('sys-disk');
             const mpsEl = document.getElementById('sys-mps');
             const qEl = document.getElementById('sys-queue');
+            const bEl = document.getElementById('sys-backlog');
+            const tEl = document.getElementById('sys-throughput');
             if (cpuEl) cpuEl.textContent = `${m.cpu_util}%`;
             if (memEl) memEl.textContent = `${m.mem_util}%`;
             if (diskEl) diskEl.textContent = `${m.disk_util}%`;
             if (mpsEl) mpsEl.textContent = `${m.mps.toFixed(1)} msg/s`;
             if (qEl) qEl.textContent = m.queue_size;
+            if (bEl) bEl.textContent = m.backlog;
+            if (tEl) tEl.textContent = `${m.throughput.toFixed(2)} MB/s`;
         }
 
         statusEl.innerHTML = `

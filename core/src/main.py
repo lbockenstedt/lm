@@ -65,6 +65,8 @@ class LabManagerHub:
         self.logs = deque(maxlen=500)
         self.message_count = 0
         self.mps = 0.0
+        self.bytes_count = 0 # Total bytes sent/received in the current window
+        self.throughput_mbps = 0.0 # Throughput in Mbps (or MB/s)
         self.message_history = deque(maxlen=10) # Last 10 seconds of counts
 
         class HubLogHandler(logging.Handler):
@@ -111,7 +113,9 @@ class LabManagerHub:
                 "payload": asdict(message.payload),
                 "signature": message.signature
             }
-            await ws.send(json.dumps(payload))
+            json_payload = json.dumps(payload)
+            self.bytes_count += len(json_payload.encode())
+            await ws.send(json_payload)
             self.message_count += 1
         else:
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
@@ -320,6 +324,7 @@ class LabManagerHub:
 
                 # Process Heartbeat (Always allowed for pending spokes to maintain connection)
                 payload = msg_data.get("payload", {})
+                self.bytes_count += len(message_json) # Track received bytes
                 if payload.get("type") == "HEARTBEAT":
                     self.message_count += 1
                     self.heartbeat.update_heartbeat(spoke_id)
@@ -439,20 +444,26 @@ class LabManagerHub:
 
     async def run_mps_loop(self):
         """
-        Calculates messages per second using a 10-second moving average.
+        Calculates messages per second and throughput using a 10-second moving average.
         """
-        logger.info("MPS monitoring loop started.")
+        logger.info("MPS and Throughput monitoring loop started.")
         while True:
             await asyncio.sleep(1.0)
             self.message_history.append(self.message_count)
 
-            # Calculate MPS based on available history to avoid ZeroDivisionError
+            # Calculate MPS (Packets Per Second)
             if len(self.message_history) > 0:
                 self.mps = sum(self.message_history) / len(self.message_history)
             else:
                 self.mps = 0.0
 
+            # Calculate Throughput (MB/s)
+            # bytes_count is total bytes since last check.
+            # Divide by 1024 * 1024 to get MB.
+            self.throughput_mbps = self.bytes_count / (1024 * 1024)
+
             self.message_count = 0
+            self.bytes_count = 0
 
     async def get_system_metrics(self) -> Dict[str, Any]:
         """
@@ -472,7 +483,8 @@ class LabManagerHub:
                 "disk_total": disk.total // (1024 * 1024), # MB
                 "queue_size": len(self.mailbox.get_all_pending()),
                 "backlog": len(self.mailbox.get_all_pending()),
-                "mps": self.mps
+                "mps": self.mps,
+                "throughput": self.throughput_mbps
             }
         except Exception as e:
             logger.error(f"Error collecting system metrics: {e}")
@@ -484,7 +496,8 @@ class LabManagerHub:
                 "disk_total": 0,
                 "queue_size": len(self.mailbox.get_all_pending()) if hasattr(self, 'mailbox') else 0,
                 "backlog": len(self.mailbox.get_all_pending()) if hasattr(self, 'mailbox') else 0,
-                "mps": getattr(self, 'mps', 0.0)
+                "mps": getattr(self, 'mps', 0.0),
+                "throughput": getattr(self, 'throughput_mbps', 0.0)
             }
 
     async def run_autoupdate_loop(self):
