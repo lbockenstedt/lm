@@ -72,40 +72,57 @@ const VIEWS = {
                         <div class="flex gap-4 mb-8">
                             <input id="vm-id-input" type="text" placeholder="Enter VM ID (e.g. vm-101)"
                                    class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none transition-all text-slate-800 placeholder-slate-400">
-                            <button onclick="lookupFirewall()"
+                            <button onclick="lookupVMDetails()"
                                     class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-medium transition-all">
-                                Lookup Firewall
+                                Stitched View
                             </button>
                         </div>
 
                         <div id="vm-details" class="hidden space-y-6">
-                            <div class="grid grid-cols-2 gap-4">
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">VM ID</label>
-                                    <div id="res-vm-id" class="text-lg font-medium text-slate-800">-</div>
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Identity</label>
+                                    <div class="flex justify-between items-center mt-1">
+                                        <div id="res-vm-id" class="text-lg font-medium text-slate-800">-</div>
+                                        <div id="res-ip" class="text-sm font-mono text-blue-600">-</div>
+                                    </div>
                                 </div>
                                 <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">IP Address</label>
-                                    <div id="res-ip" class="text-lg font-medium text-blue-600">-</div>
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Resources (Proxmox)</label>
+                                    <div id="res-resources" class="text-sm text-slate-600 mt-1">CPU: - | RAM: - | Disk: -</div>
+                                </div>
+                                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Security (CPPM)</label>
+                                    <div id="res-security" class="text-sm text-slate-600 mt-1">Policy: - | Posture: -</div>
                                 </div>
                             </div>
 
-                            <div class="mt-6">
-                                <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Firewall Rules</h3>
-                                <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
-                                    <table class="w-full text-left text-sm">
-                                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                                            <tr id="firewall-headers">
-                                                <th class="px-4 py-3">Rule ID</th>
-                                                <th class="px-4 py-3">Action</th>
-                                                <th class="px-4 py-3">Protocol</th>
-                                                <th class="px-4 py-3">Destination</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="firewall-table-body" class="divide-y divide-slate-200">
-                                            <!-- Rows injected here -->
-                                        </tbody>
-                                    </table>
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                <div>
+                                    <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Firewall Rules (OPNsense)</h3>
+                                    <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
+                                        <table class="w-full text-left text-sm">
+                                            <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                                                <tr id="firewall-headers">
+                                                    <th class="px-4 py-3">Rule ID</th>
+                                                    <th class="px-4 py-3">Action</th>
+                                                    <th class="px-4 py-3">Protocol</th>
+                                                    <th class="px-4 py-3">Destination</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="firewall-table-body" class="divide-y divide-slate-200">
+                                                <!-- Rows injected here -->
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                <div>
+                                    <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">DHCP Lease (OPNsense)</h3>
+                                    <div id="res-dhcp" class="p-4 rounded-md bg-slate-50 border border-slate-200 text-sm text-slate-600 space-y-2">
+                                        <div><span class="font-bold">Hostname:</span> <span id="dhcp-host">-</span></div>
+                                        <div><span class="font-bold">MAC:</span> <span id="dhcp-mac">-</span></div>
+                                        <div><span class="font-bold">Expires:</span> <span id="dhcp-end">-</span></div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -132,7 +149,7 @@ const VIEWS = {
     },
     opnsense: {
         name: 'OPNsense',
-        subMenus: ['Firewall Rules', 'Configuration', 'Interfaces', 'DHCP Leases'],
+        subMenus: ['Firewall Rules', 'Configuration', 'Interfaces', 'DHCP Leases', 'NAT Policies', 'DNS Records'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.C18.4 5.6 17.4 5.4 16.3 5.4a4.4 4.4 0 00-4.4 4.4c0 1.1.2 2.1.6 3.1"></path></svg>',
         render: (subMenu) => {
             if (subMenu === 'Configuration') {
@@ -167,52 +184,10 @@ const VIEWS = {
             }
             return `
                 <div class="space-y-6">
-                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Firewall Manager</h2>
+                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Management: ${subMenu}</h2>
                     <div class="hpe-card rounded-lg p-6 shadow-sm">
-                        <div class="flex gap-4 mb-8">
-                            <input id="vm-id-input" type="text" placeholder="Enter VM IP or ID..."
-                                   class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm focus:ring-2 focus:ring-green-500 outline-none transition-all text-slate-800 placeholder-slate-400">
-                            <button onclick="lookupFirewall()"
-                                    class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-medium transition-all">
-                                Query Rules
-                            </button>
-                        </div>
-
-                        <div id="vm-details" class="hidden space-y-6">
-                            <div class="grid grid-cols-2 gap-4">
-                                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">Identity</label>
-                                    <div id="res-vm-id" class="text-lg font-medium text-slate-800">-</div>
-                                </div>
-                                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">Assigned IP</label>
-                                    <div id="res-ip" class="text-lg font-medium text-blue-600">-</div>
-                                </div>
-                            </div>
-
-                            <div class="mt-6">
-                                <h3 class="text-sm font-semibold text-slate-500 mb-3 uppercase tracking-wider">Active Rules for this IP</h3>
-                                <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
-                                    <table class="w-full text-left text-sm">
-                                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                                            <tr id="firewall-headers">
-                                                <th class="px-4 py-3">Rule ID</th>
-                                                <th class="px-4 py-3">Action</th>
-                                                <th class="px-4 py-3">Protocol</th>
-                                                <th class="px-4 py-3">Destination</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="firewall-table-body" class="divide-y divide-slate-200">
-                                            <!-- Rows injected here -->
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="vm-empty-state" class="py-12 text-center text-slate-400">
-                            <svg class="w-12 h-12 mx-auto mb-3 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                            <p>Enter a VM ID to retrieve OPNsense firewall rules.</p>
+                        <div id="opn-table-container" class="space-y-4">
+                            <div class="py-12 text-center text-slate-400 italic">Loading OPNsense data...</div>
                         </div>
                     </div>
                 </div>
@@ -676,6 +651,9 @@ function setView(viewId) {
         if (viewId === 'pxmx') {
             loadVMInventory();
         }
+        if (viewId === 'opnsense') {
+            loadOpnsenseManagement();
+        }
     }
 
     if (viewId === 'dashboard' || viewId === 'settings') updateStatus();
@@ -710,6 +688,9 @@ function setSubView(subMenu) {
             }
             if (currentView === 'settings' && currentSubView === 'Logs') loadSystemLogs();
             if (currentView === 'settings' && currentSubView === 'General') updateStatus();
+            if (currentView === 'opnsense' && currentSubView !== 'Configuration') {
+                loadOpnsenseManagement();
+            }
         }
     }
 }
@@ -919,37 +900,58 @@ function selectVM(vmId) {
     const input = document.getElementById('vm-id-input');
     if (input) {
         input.value = vmId;
-        lookupFirewall();
+        lookupVMDetails();
     }
 }
-async function lookupFirewall() {
+
+async function lookupVMDetails() {
     const vmId = document.getElementById('vm-id-input').value.trim();
     if (!vmId) return;
 
     const details = document.getElementById('vm-details');
     const emptyState = document.getElementById('vm-empty-state');
     const tableBody = document.getElementById('firewall-table-body');
-    const ipEl = document.getElementById('res-ip');
     const idEl = document.getElementById('res-vm-id');
+    const ipEl = document.getElementById('res-ip');
+    const resResources = document.getElementById('res-resources');
+    const resSecurity = document.getElementById('res-security');
+    const dhcpHost = document.getElementById('dhcp-host');
+    const dhcpMac = document.getElementById('dhcp-mac');
+    const dhcpEnd = document.getElementById('dhcp-end');
 
     emptyState.classList.add('hidden');
     details.classList.remove('hidden');
-    tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 animate-pulse">Querying spoke...</td></tr>`;
+    tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 animate-pulse">Stitching VM data...</td></tr>`;
 
     try {
-        const response = await fetch(`/vm/${vmId}/firewall`);
+        const response = await fetch(`/vm/${vmId}/details`);
         if (!response.ok) {
             const error = await response.json();
-            throw new Error(error.detail || 'Failed to fetch firewall rules');
+            throw new Error(error.detail || 'Failed to fetch VM details');
         }
         const data = await response.json();
 
         idEl.textContent = vmId;
         ipEl.textContent = data.ip || 'Unknown';
 
+        // 1. Update Resources (Proxmox)
+        const res = data.proxmox || {};
+        resResources.textContent = `CPU: ${res.cpu || '-'}% | RAM: ${res.ram || '-'}MB | Disk: ${res.disk || '-'}%`;
+
+        // 2. Update Security (CPPM)
+        const sec = data.cppm || {};
+        resSecurity.textContent = `Policy: ${sec.policy || '-'} | Posture: ${sec.posture || '-'}`;
+
+        // 3. Update DHCP (OPNsense)
+        const dhcp = data.dhcp || {};
+        dhcpHost.textContent = dhcp.hostname || '-';
+        dhcpMac.textContent = dhcp.mac || '-';
+        dhcpEnd.textContent = dhcp.lease_end || '-';
+
+        // 4. Update Firewall Rules (OPNsense)
         const rules = data.rules || [];
         if (rules.length === 0) {
-            tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-slate-400 italic">No rules found for this IP.</td></tr>`;
+            tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-slate-400 italic">No rules found for this VM.</td></tr>`;
         } else {
             tableBody.innerHTML = rules.map(rule => `
                 <tr class="hover:bg-slate-50 transition-colors">
@@ -966,6 +968,60 @@ async function lookupFirewall() {
         }
     } catch (err) {
         tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-500 font-medium">${err.message}</td></tr>`;
+    }
+}
+
+async function loadOpnsenseManagement() {
+    const container = document.getElementById('opn-table-container');
+    if (!container) return;
+
+    const subMenu = currentSubView;
+    if (subMenu === 'Configuration') return;
+
+    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${subMenu} data...</div>`;
+
+    try {
+        let endpoint = '';
+        if (subMenu === 'Firewall Rules') endpoint = '/opn/firewall/all';
+        else if (subMenu === 'DHCP Leases') endpoint = '/opn/dhcp';
+        else if (subMenu === 'Interfaces') endpoint = '/opn/interfaces'; // Mocked or generic
+        else if (subMenu === 'NAT Policies') endpoint = '/opn/nat';
+        else if (subMenu === 'DNS Records') endpoint = '/opn/dns';
+        else return;
+
+        const response = await fetch(endpoint);
+        if (!response.ok) throw new Error(`Failed to fetch ${subMenu}`);
+        const data = await response.json();
+        const items = data.data || [];
+
+        if (items.length === 0) {
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.</div>`;
+            return;
+        }
+
+        // Generic Table Renderer
+        const keys = Object.keys(items[0]);
+        const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace('_', ' ')}</th>`).join('');
+        const rows = items.map(item => `
+            <tr class="hover:bg-slate-50 transition-colors">
+                ${keys.map(k => `<td class="px-4 py-3 text-slate-600 font-mono text-xs">${item[k]}</td>`).join('')}
+            </tr>
+        `).join('');
+
+        container.innerHTML = `
+            <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                        <tr>${headers}</tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-200">
+                        ${rows}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    } catch (err) {
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${subMenu}: ${err.message}</div>`;
     }
 }
 
@@ -1116,7 +1172,7 @@ async function loadPendingSpokes() {
                         <span class="text-sm font-medium text-slate-700">${sid}</span>
                         <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isApproved ? 'bg-green-100 text-green-600' : 'bg-yellow-100 text-yellow-600'}">
                             ${isApproved ? 'Approved' : 'Pending'}
-                        </span>
+                        </span
                     </div>
                     ${!isApproved ? `
                         <button onclick="approveSpoke('${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
