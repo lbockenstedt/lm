@@ -136,7 +136,15 @@ for mod in "${!MODULES[@]}"; do
     fi
 
     # Fetch Hub Secret for mutual authentication
-    HUB_SECRET_FILE="$BASE_DIR/core/src/hub_secret.json"
+    HUB_SECRET_FILE="$BASE_DIR/hub_secret.json"
+    echo "⏳ Waiting for Hub to generate master secret..."
+    for i in {1..10}; do
+        if [ -f "$HUB_SECRET_FILE" ]; then
+            break
+        fi
+        sleep 1
+    done
+
     if [ -f "$HUB_SECRET_FILE" ]; then
         HUB_SECRET=$(cat "$HUB_SECRET_FILE")
         echo "✅ Loaded Hub secret for mutual auth"
@@ -146,7 +154,8 @@ for mod in "${!MODULES[@]}"; do
     fi
 
     # Run the modular installer with the Hub-provided secret
-    bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET"
+    bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET" --hub-secret "$HUB_SECRET"
+
 done
 
 
