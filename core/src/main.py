@@ -115,6 +115,7 @@ class LabManagerHub:
         Sends a command to a spoke and waits for its acknowledgement.
         """
         msg_id = str(uuid.uuid4())
+        logger.info(f"Request: {msg_id} -> {spoke_id} [{command_type}] data={data}")
         msg = Message(
             header=MessageHeader(
                 message_id=msg_id,
@@ -140,8 +141,11 @@ class LabManagerHub:
             # We would need a way to retrieve the result of a specific correlation_id.
             # I will add a simple result cache to the Hub.
             if msg_id in getattr(self, "response_cache", {}):
-                return self.response_cache.pop(msg_id)
+                result = self.response_cache.pop(msg_id)
+                logger.info(f"Response: {msg_id} received from {spoke_id}: {result}")
+                return result
 
+        logger.error(f"Request Timeout: {msg_id} from {spoke_id} after {timeout}s")
         return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
 
     async def push_config_to_spoke(self, spoke_id: str):
