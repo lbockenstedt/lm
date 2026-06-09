@@ -12,7 +12,7 @@ fi
 # 2. System Dependencies
 echo "📦 Installing system dependencies..."
 apt-get update
-apt-get install -y python3-pip python3-venv git curl lsof net-tools jq
+apt-get install -y python3-pip python3-venv git curl lsof net-tools jq sudo
 
 # Mark all directories under /opt/lm as safe for git to avoid dubious ownership errors
 git config --global --add safe.directory /opt/lm
@@ -83,7 +83,11 @@ if [ ! -d "venv" ]; then python3 -m venv venv; fi
 # Start Hub temporarily for modular installation
 echo "🚀 Starting Hub temporarily for modular setup..."
 export PYTHONPATH="$BASE_DIR/core/src"
-nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+	if command -v sudo >/dev/null 2>&1; then
+		sudo -u $SvcUser nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+	else
+		nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$BASE_DIR/hub.log" 2>&1 &
+	fi
 
 cd "$BASE_DIR"
 
@@ -173,6 +177,9 @@ done
 
 # 6. Persistence & Auto-start
 echo "⚙️ Configuring systemd for auto-start on reboot..."
+
+# Final permission fix: ensure service user owns everything including files created by root during install
+chown -R $SvcUser:$SvcUser "$BASE_DIR"
 
 # Create the systemd service unit
 cat <<EOF > /etc/systemd/system/lm.service
