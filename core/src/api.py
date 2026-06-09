@@ -227,6 +227,39 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/opn/interfaces")
+    async def get_opn_interfaces():
+        hub = app.state.hub
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            return await hub.request_response(opn_spoke, "GET_INTERFACE_STATUS", {})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/opn/health")
+    async def get_opn_health():
+        hub = app.state.hub
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            return await hub.request_response(opn_spoke, "GET_SYSTEM_HEALTH", {})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/opn/dhcp")
+    async def get_opn_dhcp():
+        hub = app.state.hub
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            return await hub.request_response(opn_spoke, "OPNSENSE_GET_DHCP_LEASES", {})
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/appearance")
     async def get_appearance():
         hub = app.state.hub
