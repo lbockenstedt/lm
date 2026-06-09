@@ -130,7 +130,7 @@ for mod in "${!MODULES[@]}"; do
 
     # Fetch First Secret from Hub API with retries
     SPOKE_SECRET=""
-    for i in {1..5}; do
+    for i in {1..10}; do
         SPOKE_SECRET=$(curl -s -X POST "$HUB_API/setup/generate-secret" \
             -H "Content-Type: application/json" \
             -d "{\"spoke_id\": \"$SPOKE_ID\"}" | jq -r '.secret' 2>/dev/null)
@@ -138,7 +138,7 @@ for mod in "${!MODULES[@]}"; do
             echo "✅ Generated first-secret for $SPOKE_ID"
             break
         fi
-        echo "⏳ Secret generation failed, retrying in 2s... ($i/5)"
+        echo "⏳ Secret generation failed, retrying in 2s... ($i/10)"
         sleep 2
     done
 
