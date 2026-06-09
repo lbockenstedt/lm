@@ -1297,10 +1297,15 @@ async function loadOpnsenseManagement() {
         else if (subMenu === 'DNS Records') endpoint = '/opn/dns';
         else return;
 
+        console.log(`[OPNsense] Fetching ${subMenu} from ${endpoint}...`);
         const response = await fetch(endpoint);
-        if (!response.ok) throw new Error(`Failed to fetch ${subMenu}`);
+        if (!response.ok) throw new Error(`Failed to fetch ${subMenu}: ${response.status} ${response.statusText}`);
+
         const data = await response.json();
-        const items = data.data || [];
+        console.log(`[OPNsense] Received raw data for ${subMenu}:`, data);
+
+        const items = Array.isArray(data) ? data : (data.data || []);
+        console.log(`[OPNsense] Processed items for ${subMenu}:`, items);
 
         if (items.length === 0) {
             container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.</div>`;
@@ -1454,6 +1459,35 @@ function applyAppearance(config) {
     document.documentElement.style.setProperty('--hpe-green', config.primary_color);
     document.documentElement.style.setProperty('--hpe-navy', config.navy_color);
     renderLogo(config, 'left');
+}
+
+async function loadSystemLogs() {
+    const container = document.getElementById('system-logs-container');
+    if (!container) return;
+
+    try {
+        const response = await fetch('/setup/logs');
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        const logs = data.logs || [];
+
+        if (logs.length === 0) {
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No logs available.</div>`;
+            return;
+        }
+
+        container.innerHTML = logs.map(log => `
+            <div class="px-4 py-1 border-b border-slate-100 text-xs font-mono text-slate-600 hover:bg-slate-50">
+                ${log}
+            </div>
+        `).join('');
+
+        // Auto-scroll to bottom
+        container.scrollTop = container.scrollHeight;
+    } catch (err) {
+        console.error('Error loading system logs:', err);
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading logs: ${err.message}</div>`;
+    }
 }
 
 async function loadAppearance() {
