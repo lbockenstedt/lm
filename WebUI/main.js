@@ -779,8 +779,8 @@ async function updateStatus() {
         });
 
         // 2. Add modules that are known and approved (even if offline)
-        const allSpokes = approvalsData.spokes || [];
-        allSpokes.forEach(spoke => {
+        const allSpokesList = approvalsData.spokes || [];
+        allSpokesList.forEach(spoke => {
             if (spoke.approved) {
                 for (const [key, viewId] of Object.entries(moduleMap)) {
                     if (spoke.spoke_id.includes(key)) activeModules.add(viewId);
