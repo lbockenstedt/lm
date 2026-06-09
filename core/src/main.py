@@ -303,6 +303,8 @@ class LabManagerHub:
                     # Store in response cache for API request bridging
                     if hasattr(self, "response_cache"):
                         self.response_cache[corr_id] = msg_data
+
+                    self.message_count += 1
                     continue
 
                 # Rate Limiting for non-heartbeat messages

@@ -10,11 +10,11 @@ The project is consolidated under the `/root/lm` (or local equivalent) directory
 | :--- | :--- | :--- |
 | `lm/core` | **Hub Backend** | Core API Server, State Management, WebSocket Control Plane, and Security (HMAC/Auth). |
 | `lm/WebUI` | **Web Interface** | Dynamic dashboard, theme engine, and module configuration pages. |
-| `lm/pxmx` | **Proxmox Spoke** | Bridge between Hub and Proxmox cluster; manages the Local Agent. |
-| `lm/pxmx/agent` | **Proxmox Agent** | Lightweight host-level service for real-time telemetry and API execution. |
-| `lm/opnsense` | **OPNsense Spoke** | Firewall rule management and interface status reporting. |
-| `lm/cs` | **Client Sim Spoke** | Traffic and DNS simulation engine for network testing. |
-| `lm/cppm` | **CPPM Spoke** | ClearPass Policy Manager integration for endpoint and session auditing. |
+| `pxmx` | **Proxmox Spoke** | Bridge between Hub and Proxmox cluster; manages the Local Agent. |
+| `pxmx/agent` | **Proxmox Agent** | Lightweight host-level service for real-time telemetry and API execution. |
+| `opnsense` | **OPNsense Spoke** | Firewall rule management and interface status reporting. |
+| `cs` | **Client Sim Spoke** | Traffic and DNS simulation engine for network testing. |
+| `cppm` | **CPPM Spoke** | ClearPass Policy Manager integration for endpoint and session auditing. |
 | `audit/` | **Audit Suite** | Static analysis tools for imports, syntax, and dependency verification. |
 
 ---
@@ -54,7 +54,7 @@ The project is consolidated under the `/root/lm` (or local equivalent) directory
 **When resuming this project, always start by reading this file and the following:**
 1. **`lm/core/src/main.py`**: To understand the current Hub logic and state.
 2. **`lm/WebUI/main.js`**: To review the frontend routing and dynamic menu logic.
-3. **`lm/pxmx/src/proxmox_spoke.py`**: To see how the agent-bridge is implemented.
+3. **`pxmx/src/proxmox_spoke.py`**: To see how the agent-bridge is implemented.
 4. **`audit/audit_all.sh`**: To verify the current build integrity before pushing changes.
 5. **`docs/`**: For technical specifications and user guides.
 
@@ -67,6 +67,6 @@ The project is consolidated under the `/root/lm` (or local equivalent) directory
 ---
 
 ## 🛠️ Maintenance Commands
-- **Start All**: `cd /root/lm && ./start_all.sh`
-- **Audit System**: `bash /root/audit/audit_all.sh`
+- **Start All**: `./start_all.sh` (from root)
+- **Audit System**: `bash audit/audit_all.sh`
 - **Stop All**: `pkill -f python`

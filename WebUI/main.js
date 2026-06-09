@@ -163,7 +163,7 @@ const VIEWS = {
         }
     },
     opnsense: {
-        name: 'OPNsense',
+        name: 'Firewall',
         className: 'Firewall',
         subMenus: ['Firewall Rules', 'Configuration', 'Interfaces', 'DHCP Leases', 'NAT Policies', 'DNS Records'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.66 15l3.34-.5 3.34.5C18.5 15.5 20 13.5 20 11c0-3-3-5.5-6-7-3 1.5-6 4-6 7 0 2.5 2 5 4 5.5z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18l-1.5-1.5"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22l-1.5-1.5"></path></svg>',
@@ -171,7 +171,7 @@ const VIEWS = {
             if (subMenu === 'Configuration') {
                 return `
                     <div class="space-y-6">
-                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Configuration</h2>
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Firewall Configuration</h2>
                         <div class="hpe-card rounded-lg p-6 space-y-6">
                             <div class="grid grid-cols-1 gap-6">
                                 <div class="space-y-2">
@@ -200,10 +200,10 @@ const VIEWS = {
             }
             return `
                 <div class="space-y-6">
-                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">OPNsense Management: ${subMenu}</h2>
+                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">Firewall Management: ${subMenu}</h2>
                     <div class="hpe-card rounded-lg p-6 shadow-sm">
                         <div id="opn-table-container" class="space-y-4">
-                            <div class="py-12 text-center text-slate-400 italic">Loading OPNsense data...</div>
+                            <div class="py-12 text-center text-slate-400 italic">Loading firewall data...</div>
                         </div>
                     </div>
                 </div>
@@ -682,12 +682,12 @@ async function saveOpnsenseConfig() {
             body: JSON.stringify({ config: config })
         });
         if (response.ok) {
-            alert('OPNsense configuration saved successfully!');
+            alert('Firewall configuration saved successfully!');
         } else {
-            alert('Failed to save OPNsense configuration.');
+            alert('Failed to save firewall configuration.');
         }
     } catch (err) {
-        alert('Error saving OPNsense configuration: ' + err.message);
+        alert('Error saving firewall configuration: ' + err.message);
     }
 }
 
