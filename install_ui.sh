@@ -8,7 +8,7 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-INSTALL_DIR="/root/lm"
+INSTALL_DIR="/opt/lm"
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 

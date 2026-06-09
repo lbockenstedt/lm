@@ -20,7 +20,7 @@ git config --global --add safe.directory '/opt/lm/*'
 
 # 3. Path Configuration
 BASE_DIR="/opt/lm"
-OLD_BASE_DIR="/root/lm-manager"
+OLD_BASE_DIR="/opt/lm-manager"
 SvcUser="svc_lm"
 
 # Create non-root user for the service
@@ -50,7 +50,7 @@ mv lm_tmp/WebUI "$BASE_DIR/WebUI"
 cp -r lm_tmp/* "$BASE_DIR/" 2>/dev/null || true
 rm -rf lm_tmp
 
-# Now we are in /root/lm, and we have /root/lm/core and /root/lm/WebUI
+# Now we are in /opt/lm, and we have /opt/lm/core and /opt/lm/WebUI
 # Sync other spokes
 REPOS=("cs" "pxmx" "opnsense" "cppm")
 for repo in "${REPOS[@]}"; do

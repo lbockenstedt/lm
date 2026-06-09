@@ -387,7 +387,9 @@ class LabManagerHub:
 
         try:
             logger.info(f"Updating system from v{local_v} to v{remote_v}...")
-            cmd = "cd /root/lm/lm && git pull"
+            # Update by navigating to the root of the hub repository
+            hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+            cmd = f"cd {hub_root} && git pull"
             process = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -426,20 +428,35 @@ class LabManagerHub:
     async def get_system_metrics(self) -> Dict[str, Any]:
         """
         Collects CPU, Memory, and Disk metrics.
+        Returns default values if collection fails to prevent API errors.
         """
-        cpu = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
+        try:
+            cpu = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
 
-        return {
-            "cpu_util": cpu,
-            "mem_util": mem.percent,
-            "disk_util": disk.percent,
-            "disk_free": disk.free // (1024 * 1024), # MB
-            "disk_total": disk.total // (1024 * 1024), # MB
-            "queue_size": len(self.mailbox.get_all_pending()),
-            "mps": self.mps
-        }
+            return {
+                "cpu_util": cpu,
+                "mem_util": mem.percent,
+                "disk_util": disk.percent,
+                "disk_free": disk.free // (1024 * 1024), # MB
+                "disk_total": disk.total // (1024 * 1024), # MB
+                "queue_size": len(self.mailbox.get_all_pending()),
+                "backlog": len(self.mailbox.get_all_pending()),
+                "mps": self.mps
+            }
+        except Exception as e:
+            logger.error(f"Error collecting system metrics: {e}")
+            return {
+                "cpu_util": 0,
+                "mem_util": 0,
+                "disk_util": 0,
+                "disk_free": 0,
+                "disk_total": 0,
+                "queue_size": len(self.mailbox.get_all_pending()) if hasattr(self, 'mailbox') else 0,
+                "backlog": len(self.mailbox.get_all_pending()) if hasattr(self, 'mailbox') else 0,
+                "mps": getattr(self, 'mps', 0.0)
+            }
 
     async def run_autoupdate_loop(self):
         """
