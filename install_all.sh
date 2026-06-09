@@ -21,7 +21,7 @@ git config --global --add safe.directory '/opt/lm/*'
 # 3. Path Configuration
 BASE_DIR="/opt/lm"
 OLD_BASE_DIR="/root/lm-manager"
-SvcUser="lmuser"
+SvcUser="svc_lm"
 
 # Create non-root user for the service
 if ! id -u "$SvcUser" >/dev/null 2>&1; then
