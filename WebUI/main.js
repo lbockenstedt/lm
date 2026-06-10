@@ -370,6 +370,44 @@ const VIEWS = {
                                     </button>
                                 </div>
                             </div>
+                            <div class="pt-6 border-t border-slate-200">
+                                <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Repository Sources</h3>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div class="space-y-2">
+                                        <label class="text-[10px] text-slate-500 uppercase font-bold">Hub Repository</label>
+                                        <input type="text" id="update-source-hub" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-[10px] text-slate-500 uppercase font-bold">Proxmox Agent</label>
+                                        <input type="text" id="update-source-pxmx" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-[10px] text-slate-500 uppercase font-bold">OPNsense Spoke</label>
+                                        <input type="text" id="update-source-opn" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-[10px] text-slate-500 uppercase font-bold">Client Sim</label>
+                                        <input type="text" id="update-source-cs" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-[10px] text-slate-500 uppercase font-bold">CPPM Spoke</label>
+                                        <input type="text" id="update-source-cppm" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-[10px] text-slate-500 uppercase font-bold">Netbox Spoke</label>
+                                        <input type="text" id="update-source-netbox" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-[10px] text-slate-500 uppercase font-bold">LDAP Spoke</label>
+                                        <input type="text" id="update-source-ldap" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                    </div>
+                                </div>
+                                <div class="pt-4 flex justify-end">
+                                    <button onclick="saveUpdateSources()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-xs font-bold transition-all shadow-sm">
+                                        Save Repository Sources
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -571,6 +609,57 @@ async function updateAutoUpdateInterval(hours) {
     await updateGlobalConfig('update_interval', parseInt(hours) || 1);
 }
 
+async function triggerUpdate() {
+    const btn = document.getElementById('update-btn');
+    if (!btn) return;
+
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Updating...';
+
+    try {
+        const response = await fetch('/setup/update', { method: 'POST' });
+        const data = await response.json();
+        if (response.ok) {
+            alert(data.message || 'Update triggered successfully!');
+        } else {
+            alert('Update failed: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Error triggering update: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+    }
+}
+
+async function saveUpdateSources() {
+    const sources = {
+        hub: document.getElementById('update-source-hub').value,
+        pxmx: document.getElementById('update-source-pxmx').value,
+        opn: document.getElementById('update-source-opn').value,
+        cs: document.getElementById('update-source-cs').value,
+        cppm: document.getElementById('update-source-cppm').value,
+        netbox: document.getElementById('update-source-netbox').value,
+        ldap: document.getElementById('update-source-ldap').value,
+    };
+
+    try {
+        const response = await fetch('/setup/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { update_sources: sources } })
+        });
+        if (response.ok) {
+            alert('Update sources saved successfully!');
+        } else {
+            alert('Failed to save update sources.');
+        }
+    } catch (err) {
+        alert('Error saving update sources: ' + err.message);
+    }
+}
+
 async function loadSetupConfig() {
     try {
         const response = await fetch('/setup/config');
@@ -583,6 +672,22 @@ async function loadSetupConfig() {
 
         if (chk) chk.checked = config.autoupdate !== false; // Default to true
         if (int) int.value = config.update_interval || 1;
+
+        // Load update sources
+        const sources = config.update_sources || {};
+        const sourceFields = {
+            'hub': 'update-source-hub',
+            'pxmx': 'update-source-pxmx',
+            'opn': 'update-source-opn',
+            'cs': 'update-source-cs',
+            'cppm': 'update-source-cppm',
+            'netbox': 'update-source-netbox',
+            'ldap': 'update-source-ldap'
+        };
+        for (const [key, id] of Object.entries(sourceFields)) {
+            const el = document.getElementById(id);
+            if (el) el.value = sources[key] || '';
+        }
 
         // Load module-specific configs if we are in a module subview
         if ((currentView === 'setup' && currentSubView === 'Proxmox') || (currentView === 'pxmx' && currentSubView === 'Configuration')) {
@@ -1382,16 +1487,7 @@ async function loadOpnsenseManagement() {
         }
         console.log(`[OPNsense] Processed items for ${subMenu} (count: ${items.length}):`, items);
 
-        // Fallback for mocking purposes: if items is empty and we are in Firewall Rules,
-        // provide a small set of dummy data to verify the UI works.
         let finalItems = items;
-        if ((!finalItems || finalItems.length === 0) && subMenu === 'Firewall Rules') {
-            console.log('[OPNsense] No rules found, injecting dummy data for UI verification');
-            finalItems = [
-                { id: 'mock-1', action: 'pass', protocol: 'TCP', destination: 'Port 80', description: 'Allow HTTP (Mock)' },
-                { id: 'mock-2', action: 'pass', protocol: 'TCP', destination: 'Port 443', description: 'Allow HTTPS (Mock)' },
-            ];
-        }
 
         if (!finalItems || finalItems.length === 0) {
             container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.</div>`;
