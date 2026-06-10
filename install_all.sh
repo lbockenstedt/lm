@@ -244,16 +244,20 @@ for mod in "${!MODULES[@]}"; do
 
     # Fetch First Secret from Hub API with retries
     SPOKE_SECRET=""
-    for i in {1..10}; do
-        SPOKE_SECRET=$(curl -s -X POST "$HUB_API/setup/generate-secret" \
+    for i in {1..15}; do
+        # Using -v internally to log the attempt to the install log
+        RESPONSE=$(curl -s -X POST "$HUB_API/setup/generate-secret" \
             -H "Content-Type: application/json" \
-            -d "{\"spoke_id\": \"$SPOKE_ID\"}" | jq -r '.secret' 2>/dev/null)
+            -d "{\"spoke_id\": \"$SPOKE_ID\"}")
+
+        SPOKE_SECRET=$(echo "$RESPONSE" | jq -r '.secret' 2>/dev/null)
+
         if [ "$SPOKE_SECRET" != "null" ] && [ -n "$SPOKE_SECRET" ]; then
             log_c "✅ Generated first-secret for $SPOKE_ID"
             break
         fi
-        log_c "⏳ Secret generation failed, retrying in 2s... ($i/10)"
-        sleep 2
+        log_c "⏳ Secret generation failed, retrying in 3s... ($i/15). Response: $RESPONSE"
+        sleep 3
     done
 
     if [ -z "$SPOKE_SECRET" ] || [ "$SPOKE_SECRET" == "null" ]; then
