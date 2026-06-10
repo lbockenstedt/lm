@@ -86,6 +86,16 @@ sleep 5 # Give hub time to initialize
 # --- 2. Launch Spokes ---
 SECRET="lm-secret"
 
+# Fetch Hub Secret for mutual authentication
+HUB_SECRET_FILE="$ROOT_DIR/core/data/hub_secret.json"
+if [ -f "$HUB_SECRET_FILE" ]; then
+    HUB_SECRET=$(cat "$HUB_SECRET_FILE")
+    echo "📖 Loaded Hub secret for mutual auth"
+else
+    HUB_SECRET=""
+    echo "⚠️  Hub secret file not found. Mutual auth will be disabled."
+fi
+
 # Define spokes and their folders
 SPOKES=("cs" "pxmx" "opnsense" "cppm")
 
@@ -104,7 +114,7 @@ for spoke in "${SPOKES[@]}"; do
             "cppm") SPOKE_ID="cppm-spoke-1" ;;
         esac
 
-        nohup "$SPOKE_DIR/venv/bin/python3" "$SPOKE_DIR/src/control_plane.py" --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" > "$LOG_DIR/$spoke.log" 2>&1 &
+        nohup "$SPOKE_DIR/venv/bin/python3" "$SPOKE_DIR/src/control_plane.py" --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" --hub-secret "$HUB_SECRET" > "$LOG_DIR/$spoke.log" 2>&1 &
         echo "$spoke started (logs: $LOG_DIR/$spoke.log)"
     else
         echo "⚠️  Warning: Spoke directory $SPOKE_DIR not found. Skipping..."

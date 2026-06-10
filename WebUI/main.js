@@ -853,7 +853,7 @@ function renderTopNav() {
     topNavHtml += view.subMenus.map((menu, i) => {
         if (menu === 'Logs') {
             return `
-                <div class="relative group">
+                <div class="relative group inline-flex items-center">
                     <div onclick="setSubView('Logs')" class="sub-nav-item ${currentSubView.startsWith('logs-') || currentSubView === 'Logs' ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
                         Logs ▾
                     </div>
@@ -864,7 +864,8 @@ function renderTopNav() {
                         <div onclick="setSubView('logs-cppm')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-cppm' ? 'text-green-600 font-bold' : ''}">CPPM Logs</div>
                         <div onclick="setSubView('logs-cs')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-cs' ? 'text-green-600 font-bold' : ''}">CS Logs</div>
                     </div>
-                `;
+                </div>
+            `;
         }
         return `
             <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
