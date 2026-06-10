@@ -77,8 +77,9 @@ class BaseControlPlane:
             # Heartbeat loop
             async def heartbeat():
                 while True:
+                    ts = round(time.time(), 6)
                     msg = {
-                        "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
+                        "header": {"message_id": str(uuid.uuid4()), "timestamp": ts,
                                    "sender_id": self.spoke_id, "destination_id": "hub"},
                         "payload": {"type": "HEARTBEAT", "data": {}}
                     }
@@ -115,8 +116,9 @@ class BaseControlPlane:
                     first_mod = list(self.modules.values())[0]
                     result = await first_mod.handle_command(cmd_type, data)
 
+                ts = round(time.time(), 6)
                 resp = {
-                    "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
+                    "header": {"message_id": str(uuid.uuid4()), "timestamp": ts,
                                "sender_id": self.spoke_id, "destination_id": "hub",
                                "correlation_id": corr_id},
                     "payload": {"type": "COMMAND_RESULT", "data": result}

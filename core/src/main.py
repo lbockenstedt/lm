@@ -101,15 +101,20 @@ class LabManagerHub:
 
         if ws:
             # Sign the message before sending
+            # Round timestamp to 6 decimal places to ensure consistent serialization across environments
+            header_dict = asdict(message.header)
+            if "timestamp" in header_dict:
+                header_dict["timestamp"] = round(header_dict["timestamp"], 6)
+
             message_bytes = json.dumps({
-                "header": asdict(message.header),
+                "header": header_dict,
                 "payload": asdict(message.payload)
             }, sort_keys=True, separators=(',', ':')).encode()
 
             message.signature = self.key_manager.sign_message(spoke_id, message_bytes)
 
             payload = {
-                "header": asdict(message.header),
+                "header": header_dict,
                 "payload": asdict(message.payload),
                 "signature": message.signature
             }
