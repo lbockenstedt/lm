@@ -36,7 +36,7 @@ class BaseControlPlane:
 
         async with websockets.connect(self.hub_url) as websocket:
             # 1. Spoke Authentication Handshake
-            await websocket.send(json.dumps({"spoke_id": self.spoke_id, "secret": self.secret}))
+            await websocket.send(json.dumps({"spoke_id": self.spoke_id, "secret": self.secret}, separators=(',', ':')))
             logger.info(f"Connected to Lab Manager Hub as {self.spoke_id}. Performing mutual authentication...")
 
             # 2. Hub Mutual Authentication (Verify Hub's identity)
@@ -57,14 +57,14 @@ class BaseControlPlane:
 
                         if hmac.compare_digest(expected_sig, signature):
                             logger.info("Hub identity verified successfully.")
-                            await websocket.send(json.dumps({"status": "HUB_OK"}))
+                            await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                         else:
                             logger.error("Hub identity verification failed: Invalid signature.")
                             await websocket.close(1008, "Hub verification failed")
                             return
                     else:
                         logger.warning("Hub secret not configured. Skipping Hub identity verification (Insecure).")
-                        await websocket.send(json.dumps({"status": "HUB_OK"}))
+                        await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                 else:
                     logger.error(f"Unexpected response during Hub verification: {hub_proof.get('status')}")
                     await websocket.close(1008, "Mutual authentication failed")
@@ -84,7 +84,7 @@ class BaseControlPlane:
                         "payload": {"type": "HEARTBEAT", "data": {}}
                     }
                     msg["signature"] = self._sign(msg)
-                    await websocket.send(json.dumps(msg))
+                    await websocket.send(json.dumps(msg, separators=(',', ':')))
                     await asyncio.sleep(30)
 
             asyncio.create_task(heartbeat())
@@ -124,7 +124,7 @@ class BaseControlPlane:
                     "payload": {"type": "COMMAND_RESULT", "data": result}
                 }
                 resp["signature"] = self._sign(resp)
-                await websocket.send(json.dumps(resp))
+                await websocket.send(json.dumps(resp, separators=(',', ':')))
 
     def _module_handles_command(self, module, cmd_type: str) -> bool:
         """Check if a module should handle a specific command type."""

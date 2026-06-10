@@ -61,7 +61,11 @@ fi
 # 2. System Dependencies
 log_c "📦 Installing system dependencies..."
 apt-get update >> "$INSTALL_LOG" 2>&1
-apt-get install -y python3-pip python3-venv git curl lsof net-tools jq sudo psmisc >> "$INSTALL_LOG" 2>&1
+apt-get install -y python3-pip python3-venv git curl lsof net-tools jq sudo psmisc hostname systemd-container >> "$INSTALL_LOG" 2>&1
+
+# Ensure consistent hostname for logging and diagnostics
+log_c "🏷️  Setting system hostname to lm-hub..."
+hostnamectl set-hostname lm-hub || echo "Hostname change failed (expected in some LXC environments)"
 
 # Mark all directories under /opt/lm as safe for git to avoid dubious ownership errors
 git config --global --add safe.directory /opt/lm

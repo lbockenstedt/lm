@@ -72,7 +72,7 @@ class KeyManager:
             "current": {sid: asdict(k) for sid, k in self.keys.items()},
             "history": {sid: [asdict(k) for k in ks] for sid, ks in self.history.items()}
         }
-        json_data = json.dumps(data)
+        json_data = json.dumps(data, sort_keys=True, separators=(',', ':'))
         encrypted_data = hub_encryption.encrypt(json_data)
         with open(self.storage_path, "wb") as f:
             f.write(encrypted_data)
