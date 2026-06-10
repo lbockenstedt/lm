@@ -95,7 +95,7 @@ const VIEWS = {
     },
     opnsense: {
         name: 'OPNsense',
-        subMenus: ['Firewall Rules', 'Interfaces', 'DHCP Leases'],
+        subMenus: ['Firewall Rules', 'Interfaces', 'DHCP Leases', 'config'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.C18.4 5.6 17.4 5.4 16.3 5.4a4.4 4.4 0 00-4.4 4.4c0 1.1.2 2.1.6 3.1"></path></svg>',
         render: () => `
             <div class="space-y-6">
