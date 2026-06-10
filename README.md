@@ -4,7 +4,7 @@ This repository serves as the central orchestrator for a Hub-and-Spoke managemen
 
 ## 🗺️ Repository & Directory Map
 
-The project is consolidated under the `/root/lm` (or local equivalent) directory structure:
+The project is consolidated under the `/opt/lm` (on server) or local directory structure:
 
 | Directory | Component | Description |
 | :--- | :--- | :--- |
@@ -26,25 +26,29 @@ The project is consolidated under the `/root/lm` (or local equivalent) directory
     - [x] WebSocket control plane for real-time Hub $\leftrightarrow$ Spoke communication.
     - [x] Persistent JSON state management for global config and approvals.
     - [x] Mutual authentication via First-Secret exchange.
-    - [x] HMAC-SHA256 message signing for all control plane traffic.
+    - [x] **Deterministic HMAC-SHA256 signing** to prevent serialization-driven signature mismatches.
+    - [x] **Multi-tenant configuration model** for isolated resource quotas and settings.
     - [x] Dynamic Spoke Approval workflow (`Pending` $\rightarrow$ `Approved`).
+    - [x] **System Diagnostics** providing real-time spoke health, versions, and authentication state.
 - **WebUI**:
     - [x] Theme Engine (HPE Default, LCARS, Imperial) with CSS variables.
     - [x] Configurable logos (left/right) and primary colors via UI.
     - [x] Dynamic Menu rendering based on approved spokes.
     - [x] Configuration pages for all modules (Proxmox, OPNsense, CS, CPPM).
+    - [x] Tenant management interface for creating and switching tenants.
 - **Proxmox Integration**:
     - [x] Real API-based VM list and node telemetry gathering via Local Agent.
     - [x] Command bridging: `WebUI` $\rightarrow$ `Hub` $\rightarrow$ `Spoke` $\rightarrow$ `Agent` $\rightarrow$ `Proxmox API`.
 - **Deployment**:
     - [x] `install_all.sh` for full-stack native installation.
+    - [x] **Secure non-root service user (`svc_lm`)** for all Hub and Spoke processes.
     - [x] Standardized modular installers for individual spokes.
     - [x] Rebranded from `lm-manager` to `lm`.
 
 ### 🛠️ Active / Pending Tasks
 - [ ] **OPNsense Deep Dive**: Implement full rule creation/deletion via UI (currently supports query).
-- [ la-manager ] **CPPM Advanced Reporting**: Expand CPPM queries to include detailed session and endpoint analytics.
-- [ ] **Client Sim Controls**: Build out the UI components for triggering and managing simulation profiles.
+- [ ] **CPPM Advanced Reporting**: Expand CPPM queries to include detailed session and endpoint analytics.
+- [ la-manager ] **Client Sim Controls**: Build out the UI components for triggering and managing simulation profiles.
 - [ ] **Telemetry Dashboards**: Create visual real-time graphs for the metrics pushed by the Proxmox Agent.
 
 ---
@@ -55,8 +59,8 @@ The project is consolidated under the `/root/lm` (or local equivalent) directory
 1. **`lm/core/src/main.py`**: To understand the current Hub logic and state.
 2. **`lm/WebUI/main.js`**: To review the frontend routing and dynamic menu logic.
 3. **`pxmx/src/proxmox_spoke.py`**: To see how the agent-bridge is implemented.
-4. **`audit/audit_all.sh`**: To verify the current build integrity before pushing changes.
-5. **`docs/`**: For technical specifications and user guides.
+4.	**`audit/audit_all.sh`**: To verify the current build integrity before pushing changes.
+5.	**`docs/`**: For technical specifications and user guides.
 
 **Key Architectural Constraints:**
 - **No CLI for Users**: All configuration must be handled via the WebUI.

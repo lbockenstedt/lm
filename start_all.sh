@@ -94,7 +94,7 @@ for spoke in "${SPOKES[@]}"; do
     if [ -d "$SPOKE_DIR" ]; then
         echo "Starting $spoke..."
         cd "$SPOKE_DIR" || continue
-        export PYTHONPATH="$SPOKE_DIR/src:$PYTHONPATH"
+        export PYTHONPATH="$SPOKE_DIR/src:$ROOT_DIR:$PYTHONPATH"
 
         # Determine the correct spoke ID
         case $spoke in

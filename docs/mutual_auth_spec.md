@@ -13,8 +13,9 @@ The Spoke initiates the connection to the Hub via WebSocket.
 ### Phase 2: Hub $\rightarrow$ Spoke (Identity Proof)
 To prove it is the legitimate Hub, the Hub must respond to the Spoke.
 1. **Challenge Generation**: The Hub generates a cryptographically secure random 32-byte challenge.
-2. **Signing**: The Hub signs this challenge using its persistent `hub_secret` (stored in `hub_secret.json`) using HMAC-SHA256.
-3. **Response**: The Hub sends a `HUB_VERIFIED` message:
+2. **Deterministic Serialization**: Before signing, the challenge payload is serialized to a canonical JSON string to ensure consistency across different platforms and languages. This is achieved using `json.dumps` with `sort_keys=True` and `separators=(',', ':')`.
+3. **Signing**: The Hub signs this canonical string using its persistent `hub_secret` (stored in `hub_secret.json`) using HMAC-SHA256.
+4. **Response**: The Hub sends a `HUB_VERIFIED` message:
    ```json
    {
      "status": "HUB_VERIFIED",
@@ -25,9 +26,10 @@ To prove it is the legitimate Hub, the Hub must respond to the Spoke.
 
 ### Phase 3: Spoke $\rightarrow$ Hub (Verification)
 The Spoke verifies the Hub's identity.
-1. **Signature Check**: The Spoke uses its local copy of the `hub_secret` to compute the expected HMAC of the challenge.
-2. **Validation**: If the computed signature matches the provided signature, the Hub is verified.
-3. **Confirmation**: The Spoke sends a `HUB_OK` message to signal the completion of the mutual handshake.
+1. **Signature Check**: The Spoke uses its local copy of the `hub_secret` to compute the expected HMAC of the challenge. The Spoke must apply the same deterministic serialization (`sort_keys=True`, `separators=(',', ':')`) to the challenge payload before hashing.
+2. **Criticality of Serialization**: Deterministic serialization is critical to prevent signature mismatches. Without it, different environments might introduce varying whitespace or key orders in the JSON representation, resulting in different HMAC signatures for the same logical data.
+3. **Validation**: If the computed signature matches the provided signature, the Hub is verified.
+4. **Confirmation**: The Spoke sends a `HUB_OK` message to signal the completion of the mutual handshake.
 
 ## 🏗️ Multi-Module Spoke Architecture
 
@@ -38,6 +40,8 @@ To support "multi-module" spokes (where one process hosts multiple specialized m
 *   **Module Registration**: Each specific module (e.g., `pxmx`, `opn`) implements the `BaseSpoke` interface and is registered with a unique name.
 *   **Command Routing**: When the Hub sends a command, the `ControlPlane` iterates through registered modules. It routes the command to the first module that acknowledges the `command_type` or matches the module name prefix.
 
-## 🗝️ Key Management
-*   **Hub Secret**: Generated once on Hub startup and persisted to `hub_secret.json`. Distributed to spokes during installation.
-*   **Spoke Secrets**: Managed by the Hub, rotated every 7 days, with 4 keys of history maintained for recovery.
+## 🗝️ Key Management and Trust Model
+The system employs a **symmetric trust model**, where both the Hub and the Spoke share identical secret keys for specific verification paths. Trust is not hierarchical but mutual; neither party is trusted until they have proven possession of the shared secret.
+
+*   **Hub Secret**: Generated once on Hub startup and persisted to `hub_secret.json`. Distributed to spokes during installation. This key allows the Spoke to verify the Hub.
+*   **Spoke Secrets**: Managed by the Hub, rotated every 7 days, with 4 keys of history maintained for recovery. This key allows the Hub to verify the Spoke.
