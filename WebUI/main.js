@@ -20,33 +20,9 @@ const VIEWS = {
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a8 8 0 018 8 8 8 0 018-8m-12 8a8 8 0 01-8-8 8 8 0 018-8m0 16v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
         render: () => `
             <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6 text-[#263040]">Infrastructure Overview</h2>
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <div class="hpe-card rounded-lg p-6 shadow-sm">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Active Spokes</label>
-                        <div id="spoke-count" class="text-4xl font-bold mt-2 text-[#01A982]">0</div>
-                    </div>
-                    <div class="hpe-card rounded-lg p-6 shadow-sm">
-                        <label class="text-xs text-slate-500 uppercase font-bold">System Health</label>
-                        <div id="health-status" class="text-4xl font-bold mt-2 text-green-600">Optimal</div>
-                    </div>
-                    <div class="hpe-card rounded-lg p-6 shadow-sm">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Network Latency</label>
-                        <div class="text-4xl font-bold mt-2 text-slate-700">~1.2ms</div>
-                    </div>
-                </div>
-
-                <div class="hpe-card rounded-lg p-6 shadow-sm">
-                    <h3 class="text-lg font-semibold mb-4 text-[#263040]">Connected Spokes</h3>
-                    <div id="spoke-list" class="space-y-3">
-                        <div class="animate-pulse flex space-x-4 p-2">
-                            <div class="rounded-full bg-slate-200 h-10 w-10"></div>
-                            <div class="flex-1 space-y-6 py-1">
-                                <div class="h-2 bg-slate-200 rounded"></div>
-                                <div class="h-2 bg-slate-200 rounded w-5/6"></div>
-                            </div>
-                        </div>
-                    </div>
+                <h2 class="text-2xl font-bold mb-6 text-[#263040]">Welcome to Lab Manager</h2>
+                <div class="hpe-card rounded-lg p-12 text-center">
+                    <p class="text-slate-500">Select a module from the sidebar to begin management.</p>
                 </div>
             </div>
         `
@@ -167,7 +143,7 @@ const VIEWS = {
         name: 'Firewall',
         className: 'Firewall',
         subMenus: ['Firewall Rules', 'Configuration', 'Interfaces', 'DHCP Leases', 'NAT Policies', 'DNS Records'],
-        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.66 15l3.34-.5 3.34.5C18.5 15.5 20 13.5 20 11c0-3-3-5.5-6-7-3 1.5-6 4-6 7 0 2.5 2 5 4 5.5z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18l-1.5-1.5"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22l-1.5-1.5"></path></svg>',
+        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 2a5 5 0 00-5 5v2a5 5 0 0010 0V7a5 5 0 00-5-5z"></path></svg>',
         render: (subMenu) => {
             if (subMenu === 'Configuration') {
                 return `
@@ -502,49 +478,9 @@ const VIEWS = {
                             </div>
                         </div>
                     </div>
-                    <div class="mt-6 hpe-card rounded-lg p-6 space-y-6">
-                        <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Appearance Configuration</h3>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <div class="space-y-4">
-                                <div class="flex items-center justify-between gap-4">
-                                    <label class="text-xs font-bold text-slate-500 uppercase">Primary Color</label>
-                                    <div class="flex items-center gap-2">
-                                        <input type="color" id="app-primary-color" oninput="updateAppearance()" class="w-6 h-6 border-none cursor-pointer bg-transparent">
-                                        <input type="text" id="app-primary-hex" class="w-20 bg-white border border-slate-300 rounded px-2 py-0.5 text-xs font-mono text-slate-800 outline-none">
-                                    </div>
-                                </div>
-                                <div class="flex items-center justify-between gap-4">
-                                    <label class="text-xs font-bold text-slate-500 uppercase">Navy Color</label>
-                                    <div class="flex items-center gap-2">
-                                        <input type="color" id="app-navy-color" oninput="updateAppearance()" class="w-6 h-6 border-none cursor-pointer bg-transparent">
-                                        <input type="text" id="app-navy-hex" class="w-20 bg-white border border-slate-300 rounded px-2 py-0.5 text-xs font-mono text-slate-800 outline-none">
-                                    </div>
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-xs font-bold text-slate-500 uppercase block">Left Logo URL</label>
-                                    <input type="text" id="app-logo-url" oninput="updateAppearance()"
-                                           placeholder="Enter image URL or 'hpe-svg'"
-                                           class="w-full bg-white border border-slate-300 rounded px-3 py-2 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500">
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-xs font-bold text-slate-500 uppercase block">Right Logo URL</label>
-                                    <input type="text" id="app-logo-url-right" oninput="updateAppearance()"
-                                           placeholder="Enter image URL or 'hpe-svg'"
-                                           class="w-full bg-white border border-slate-300 rounded px-3 py-2 text-xs text-slate-800 outline-none focus:ring-1 focus:ring-green-500">
-                                </div>
-                            </div>
-                            <div class="space-y-4">
-                                <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                                    <span class="text-xs font-medium text-slate-600">Show Logo (Left)</span>
-                                    <input type="checkbox" id="app-show-logo-left" onchange="updateAppearance()" class="w-4 h-4 text-green-600 border-slate-300 rounded">
-                                </div>
-                                <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                                    <span class="text-xs font-medium text-slate-600">Show Logo (Right)</span>
-                                    <input type="checkbox" id="app-show-logo-right" onchange="updateAppearance()" class="w-4 h-4 text-green-600 border-slate-300 rounded">
-                                </div>
-                            </div>
-                        </div>
                     </div>
+                </div>
+            `;
                 </div>
             `;
         }
@@ -1358,13 +1294,15 @@ async function loadOpnsenseManagement() {
 }
 
 function setTheme(theme) {
-    document.body.classList.remove('lcars-theme', 'sw-theme', 'cicada-theme');
+    document.body.classList.remove('lcars-theme', 'sw-theme', 'cicada-theme', 'gl-theme');
     if (theme === 'lcars') {
         document.body.classList.add('lcars-theme');
     } else if (theme === 'sw') {
         document.body.classList.add('sw-theme');
     } else if (theme === 'cicada') {
         document.body.classList.add('cicada-theme');
+    } else if (theme === 'gl') {
+        document.body.classList.add('gl-theme');
     }
     localStorage.setItem('lm_theme', theme);
 }
@@ -1455,11 +1393,12 @@ async function updateAppearance() {
 }
 
 function renderLogo(config, side) {
+    if (side === 'left') return;
     const container = document.getElementById(`logo-${side}`);
     if (!container) return;
 
-    const showLogo = side === 'left' ? config.show_logo_left : config.show_logo_right;
-    const logoUrl = side === 'left' ? config.logo_url : config.logo_url_right;
+    const showLogo = config.show_logo_right;
+    const logoUrl = config.logo_url_right;
 
     if (!showLogo) {
         container.innerHTML = '';
@@ -1468,9 +1407,9 @@ function renderLogo(config, side) {
 
     let html = '';
     if (logoUrl === 'hpe-svg' || !logoUrl) {
-        html = `<img src="assets/hpe-logo.svg" class="${side === 'left' ? 'h-10' : 'h-8'} w-auto" alt="HPE Logo">`;
+        html = `<img src="assets/hpe-logo.svg" class="h-8 w-auto" alt="HPE Logo">`;
     } else {
-        html = `<img src="${logoUrl}" class="${side === 'left' ? 'h-12' : 'h-8'} w-auto" alt="Logo" onerror="this.style.display='none'">`;
+        html = `<img src="${logoUrl}" class="h-8 w-auto" alt="Logo" onerror="this.style.display='none'">`;
     }
 
     container.innerHTML = html;
@@ -1479,7 +1418,7 @@ function renderLogo(config, side) {
 function applyAppearance(config) {
     document.documentElement.style.setProperty('--hpe-green', config.primary_color);
     document.documentElement.style.setProperty('--hpe-navy', config.navy_color);
-    renderLogo(config, 'left');
+    renderLogo(config, 'right');
 }
 
 async function loadSystemLogs() {
