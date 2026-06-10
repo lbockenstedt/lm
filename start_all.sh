@@ -8,8 +8,10 @@
 # Determine root directory for logs and config
 if [ -d "/opt/lm" ]; then
     ROOT_DIR="/opt/lm"
+    SPOKE_ROOT="/opt/lm"
 else
     ROOT_DIR="$(pwd)"
+    SPOKE_ROOT="$(dirname "$ROOT_DIR")"
 fi
 
 LOG_DIR="/var/log/lm"
@@ -100,7 +102,7 @@ fi
 SPOKES=("cs" "pxmx" "opnsense" "cppm")
 
 for spoke in "${SPOKES[@]}"; do
-    SPOKE_DIR="$ROOT_DIR/$spoke"
+    SPOKE_DIR="$SPOKE_ROOT/$spoke"
     if [ -d "$SPOKE_DIR" ]; then
         echo "Starting $spoke..."
         cd "$SPOKE_DIR" || continue
