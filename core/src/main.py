@@ -407,8 +407,23 @@ class LabManagerHub:
 
     async def get_remote_version(self) -> str:
         try:
+            config = self.state.get_global_config()
+            sources = config.get("update_sources", {})
+            repo_url = sources.get("hub", "https://github.com/lbockenstedt/lm")
+
+            # Convert github.com/user/repo to raw.githubusercontent.com/user/repo/main/VERSION
+            if "github.com" in repo_url:
+                parts = repo_url.rstrip("/").split("github.com/")
+                if len(parts) == 2:
+                    path = parts[1]
+                    version_url = f"https://raw.githubusercontent.com/{path}/main/VERSION"
+                else:
+                    version_url = "https://raw.githubusercontent.com/lbockenstedt/lm/main/VERSION"
+            else:
+                version_url = "https://raw.githubusercontent.com/lbockenstedt/lm/main/VERSION"
+
             async with httpx.AsyncClient() as client:
-                resp = await client.get("https://raw.githubusercontent.com/lbockenstedt/lm/main/VERSION")
+                resp = await client.get(version_url)
                 if resp.status_code == 200:
                     return resp.text.strip()
         except Exception as e:
@@ -418,11 +433,14 @@ class LabManagerHub:
     async def perform_update(self):
         """
         Checks for updates and performs a git pull if a new version is available.
+        Also triggers updates for all connected spokes.
         """
         local_v = await self.get_local_version()
         remote_v = await self.get_remote_version()
 
         if local_v == remote_v:
+            # Even if Hub is up to date, we might want to trigger spoke updates
+            # For now, we'll return early to match previous behavior unless we want forced updates
             return {"status": "no_update", "message": f"System is already up to date (v{local_v})."}
 
         if remote_v == "unknown":
@@ -430,23 +448,66 @@ class LabManagerHub:
 
         try:
             logger.info(f"Updating system from v{local_v} to v{remote_v}...")
-            # Update by navigating to the root of the hub repository
+
+            # 1. Update Hub itself
             hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-            cmd = f"cd {hub_root} && git pull"
+
+            # Use configured repo URL if available
+            config = self.state.get_global_config()
+            sources = config.get("update_sources", {})
+            hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
+
+            # Set remote origin to the configured URL before pulling
+            update_cmd = f"cd {hub_root} && git remote set-url origin {hub_repo} && git pull"
+
             process = await asyncio.create_subprocess_shell(
-                cmd,
+                update_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
             stdout, stderr = await process.communicate()
 
-            if process.returncode == 0:
-                logger.info("Update successful. Triggering service restart...")
-                subprocess.Popen(["sudo", "systemctl", "restart", "lm"])
-                return {"status": "success", "message": f"Updated from v{local_v} to v{remote_v}. Server is restarting..."}
-            else:
-                logger.error(f"Git pull failed: {stderr.decode()}")
-                return {"status": "error", "message": f"Update failed: {stderr.decode()}"}
+            if process.returncode != 0:
+                logger.error(f"Hub git pull failed: {stderr.decode()}")
+                return {"status": "error", "message": f"Hub update failed: {stderr.decode()}"}
+
+            # 2. Trigger updates for all connected spokes
+            update_results = []
+            for spoke_id, ws in self.active_connections.items():
+                # Identify module type
+                module_key = None
+                module_map = {'pxmx': 'pxmx', 'opn': 'opnsense', 'cs': 'cs', 'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap'}
+                for key in module_map:
+                    if key in spoke_id:
+                        module_key = key
+                        break
+
+                if module_key:
+                    repo_url = sources.get(module_key)
+                    if repo_url:
+                        logger.info(f"Triggering update for spoke {spoke_id} from {repo_url}...")
+                        msg_id = str(uuid.uuid4())
+                        msg = Message(
+                            header=MessageHeader(
+                                message_id=msg_id,
+                                timestamp=time.time(),
+                                sender_id="hub",
+                                destination_id=spoke_id
+                            ),
+                            payload=MessagePayload(type="SPOKE_UPDATE", data={"repo_url": repo_url})
+                        )
+                        await self.send_to_spoke(msg)
+                        update_results.append(f"{spoke_id}: triggered")
+                    else:
+                        update_results.append(f"{spoke_id}: no repo configured")
+                else:
+                    update_results.append(f"{spoke_id}: unknown module type")
+
+            logger.info(f"Spoke update triggers: {update_results}")
+            logger.info("Update successful. Triggering service restart...")
+            subprocess.Popen(["sudo", "systemctl", "restart", "lm"])
+            return {"status": "success", "message": f"Updated Hub from v{local_v} to v{remote_v} and triggered spoke updates. Server is restarting..."}
+
         except Exception as e:
             logger.error(f"Unexpected error during update: {e}")
             return {"status": "error", "message": f"Unexpected error: {str(e)}"}

@@ -6,6 +6,8 @@ import websockets
 import logging
 import hmac
 import hashlib
+import subprocess
+import os
 from typing import Dict, Any, Type
 from .protocol import Message, MessageHeader, MessagePayload
 from ..security.signer import MessageSigner
@@ -100,21 +102,22 @@ class BaseControlPlane:
                 data = payload.get("data", {})
                 corr_id = msg.get("header", {}).get("message_id")
 
-                # Route to the appropriate module
-                # If a module explicitly handles this command_type, use it.
-                # Otherwise, try all registered modules.
-                result = None
-                for module_name, module in self.modules.items():
-                    # We check if the command_type is specific to this module
-                    # In a real system, cmd_type might be "pxmx.get_vms"
-                    if cmd_type.startswith(module_name) or self._module_handles_command(module, cmd_type):
-                        result = await module.handle_command(cmd_type, data)
-                        break
+                # First, try handling as a system command
+                result = await self.handle_system_command(cmd_type, data)
 
-                if result is None and self.modules:
-                    # Fallback: Try the first module if no specific match
-                    first_mod = list(self.modules.values())[0]
-                    result = await first_mod.handle_command(cmd_type, data)
+                # Route to the appropriate module if not handled by system
+                if result is None:
+                    for module_name, module in self.modules.items():
+                        # We check if the command_type is specific to this module
+                        # In a real system, cmd_type might be "pxmx.get_vms"
+                        if cmd_type.startswith(module_name) or self._module_handles_command(module, cmd_type):
+                            result = await module.handle_command(cmd_type, data)
+                            break
+
+                    if result is None and self.modules:
+                        # Fallback: Try the first module if no specific match
+                        first_mod = list(self.modules.values())[0]
+                        result = await first_mod.handle_command(cmd_type, data)
 
                 ts = round(time.time(), 6)
                 resp = {
@@ -130,6 +133,44 @@ class BaseControlPlane:
         """Check if a module should handle a specific command type."""
         # This can be expanded with a registry of commands per module
         return True # Default to true for now, let the module decide
+
+    async def handle_system_command(self, cmd_type: str, data: Dict[str, Any]) -> Any:
+        """Handles commands that affect the entire spoke system rather than a specific module."""
+        if cmd_type == "SPOKE_UPDATE":
+            repo_url = data.get("repo_url")
+            if not repo_url:
+                return {"status": "ERROR", "message": "Missing repo_url for update"}
+
+            try:
+                # Identify spoke root directory (assuming the control plane is running from src/...)
+                # e.g. /opt/lm/pxmx/src/control_plane.py -> /opt/lm/pxmx
+                cwd = os.path.abspath(os.getcwd())
+                # If we are in a src folder, go up one level
+                if cwd.endswith("src"):
+                    cwd = os.path.dirname(cwd)
+
+                logger.info(f"Performing update in {cwd} from {repo_url}...")
+
+                # 1. Update remote origin
+                subprocess.run(["git", "remote", "set-url", "origin", repo_url], cwd=cwd, check=True)
+
+                # 2. Pull latest changes
+                subprocess.run(["git", "pull"], cwd=cwd, check=True)
+
+                # 3. Restart the service
+                # Derive service name from spoke_id (e.g., pxmx-spoke-1 -> lm-pxmx)
+                module_name = self.spoke_id.split("-")[0]
+                service_name = f"lm-{module_name}"
+
+                logger.info(f"Restarting service {service_name}...")
+                subprocess.Popen(["sudo", "systemctl", "restart", service_name])
+
+                return {"status": "SUCCESS", "message": f"Updated from {repo_url} and triggered restart of {service_name}"}
+            except Exception as e:
+                logger.error(f"SPOKE_UPDATE failed: {e}")
+                return {"status": "ERROR", "message": str(e)}
+
+        return None
 
     def _sign(self, msg):
         return self.signer.sign(msg)
