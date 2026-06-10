@@ -431,9 +431,28 @@ def create_app(hub):
     @app.get("/setup/logs")
 
 
+    @app.get("/setup/logs")
     async def get_system_logs():
         hub = app.state.hub
         return {"logs": list(hub.logs)}
+
+    @app.get("/setup/logs/{module}")
+    async def get_module_logs(module: str):
+        try:
+            # Log files are stored in /var/log/lm/<module>.log
+            log_path = f"/var/log/lm/{module}.log"
+            if not os.path.exists(log_path):
+                raise HTTPException(status_code=404, detail=f"Log file for {module} not found.")
+
+            with open(log_path, "r") as f:
+                logs = f.readlines()
+
+            # Return last 500 lines
+            return {"logs": [log.strip() for log in logs[-500:]]}
+        except Exception as e:
+            logger.error(f"Error reading logs for {module}: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
 
     @app.get("/setup/diagnostics")
     async def get_diagnostics():

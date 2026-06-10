@@ -378,17 +378,19 @@ const VIEWS = {
     },
     settings: {
         name: 'System',
-        subMenus: ['General', 'Network', 'Auth', 'Logs', 'Diagnostics'],
+        subMenus: ['General', 'Network', 'Auth', 'Hub Logs', 'Proxmox Logs', 'OPNsense Logs', 'CPPM Logs', 'CS Logs', 'Diagnostics'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-1.59 4.04-1.59 5.583 0a1.724 1.724 0 001.28 2.915c-1.344 1.35-3.77 1.35-5.114 0a1.724 1.724 0 00-1.28-2.915zM12 18a6 6 0 100-12 6 6 0 000 12z"></path></svg>',
         render: (subMenu) => {
-            if (subMenu === 'Logs') {
+            if (subMenu.includes('Logs')) {
+                const module = subMenu.replace(' Logs', '').toLowerCase();
+                const logTitle = subMenu === 'Hub Logs' ? 'Hub Console Output' : `${subMenu} Output`;
                 return `
                     <div class="space-y-6">
-                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Logs</h2>
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">${logTitle}</h2>
                         <div class="hpe-card rounded-lg overflow-hidden shadow-sm border border-slate-200">
                             <div class="bg-slate-100 px-4 py-2 border-b border-slate-200 flex justify-between items-center">
-                                <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">Hub Console Output</span>
-                                <button onclick="loadSystemLogs()" class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium">Refresh</button>
+                                <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">${logTitle}</span>
+                                <button onclick="loadModuleLogs('${module}')" class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium">Refresh</button>
                             </div>
                             <div id="system-logs-container" class="h-[600px] overflow-y-auto bg-white font-mono">
                                 <!-- Logs injected here -->
@@ -935,7 +937,10 @@ function setSubView(subMenu) {
                 (currentView === 'opnsense' && currentSubView === 'Configuration')) {
                 loadSetupConfig();
             }
-            if (currentView === 'settings' && currentSubView === 'Logs') loadSystemLogs();
+            if (currentView === 'settings' && currentSubView.includes('Logs')) {
+                const module = currentSubView.replace(' Logs', '').toLowerCase();
+                loadModuleLogs(module);
+            }
             if (currentView === 'settings' && currentSubView === 'General') updateStatus();
             if (currentView === 'settings' && currentSubView === 'Diagnostics') loadDiagnostics();
             if (currentView === 'opnsense' && currentSubView !== 'Configuration') {
@@ -1419,18 +1424,21 @@ function applyAppearance(config) {
     renderLogo(config, 'right');
 }
 
-async function loadSystemLogs() {
+async function loadModuleLogs(module) {
     const container = document.getElementById('system-logs-container');
     if (!container) return;
 
+    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${module} logs...</div>`;
+
     try {
-        const response = await fetch('/setup/logs');
+        const endpoint = module === 'hub' ? '/setup/logs' : `/setup/logs/${module}`;
+        const response = await fetch(endpoint);
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
         const logs = data.logs || [];
 
         if (logs.length === 0) {
-            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No logs available.</div>`;
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No logs available for ${module}.</div>`;
             return;
         }
 
@@ -1440,12 +1448,15 @@ async function loadSystemLogs() {
             </div>
         `).join('');
 
-        // Auto-scroll to bottom
         container.scrollTop = container.scrollHeight;
     } catch (err) {
-        console.error('Error loading system logs:', err);
-        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading logs: ${err.message}</div>`;
+        console.error(`Error loading ${module} logs:`, err);
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${module} logs: ${err.message}</div>`;
     }
+}
+
+async function loadSystemLogs() {
+    await loadModuleLogs('hub');
 }
 
 async function loadAppearance() {
