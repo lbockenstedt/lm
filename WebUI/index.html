@@ -305,6 +305,78 @@
             border-color: #222 !important;
         }
 
+        /* HPE GreenLake Theme Overrides */
+        body.gl-theme {
+            --gl-green: #01A982;
+            --gl-navy: #00213B;
+            --gl-light-gray: #F8F9FA;
+            --gl-white: #FFFFFF;
+            --gl-text-dark: #263040;
+            --gl-text-muted: #6C757D;
+            background-color: var(--gl-light-gray) !important;
+            color: var(--gl-text-dark) !important;
+        }
+
+        body.gl-theme .hpe-sidebar {
+            background-color: var(--gl-navy) !important;
+            border-right: 1px solid rgba(255,255,255,0.1) !important;
+            color: white !important;
+        }
+
+        body.gl-theme .nav-item {
+            color: rgba(255,255,255,0.7) !important;
+            border-radius: 4px !important;
+            margin: 4px 8px !important;
+            padding: 10px 12px !important;
+        }
+
+        body.gl-theme .nav-item:hover {
+            background: rgba(255,255,255,0.1) !important;
+            color: white !important;
+        }
+
+        body.gl-theme .nav-item.active {
+            background: var(--gl-green) !important;
+            color: white !important;
+            border-left: 4px solid white !important;
+        }
+
+        body.gl-theme .hpe-topbar {
+            background-color: var(--gl-white) !important;
+            border-bottom: 1px solid #E5E7EB !important;
+            color: var(--gl-text-dark) !important;
+        }
+
+        body.gl-theme #viewport {
+            background-color: var(--gl-light-gray) !important;
+        }
+
+        body.gl-theme .hpe-card {
+            background: var(--gl-white) !important;
+            border: 1px solid #E5E7EB !important;
+            border-radius: 8px !important;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05) !important;
+            color: var(--gl-text-dark) !important;
+        }
+
+        body.gl-theme button {
+            background-color: var(--gl-green) !important;
+            color: white !important;
+            border-radius: 4px !important;
+            box-shadow: none !important;
+        }
+
+        body.gl-theme .sub-nav-item {
+            color: var(--gl-text-muted) !important;
+            background: #E5E7EB !important;
+            border-radius: 4px !important;
+        }
+
+        body.gl-theme .sub-nav-item.active {
+            background: var(--gl-green) !important;
+            color: white !important;
+        }
+
         /* Cicada Theme (OPNsense Inspired) */
         body.cicada-theme {
             --hpe-bg-light: #0d1117;
@@ -500,6 +572,18 @@
             <!-- VIEWS INJECTED HERE -->
         </div>
     </main>
+
+    <footer id="lcars-footer" class="hidden h-10 w-full fixed bottom-0 left-0 z-50 font-mono text-[10px] uppercase tracking-tighter">
+        <div class="flex items-center gap-4">
+            <span>SENS-C-47</span>
+            <span>HUB_STAT: OK</span>
+            <span>SEC_LEVEL: 4</span>
+        </div>
+        <div class="flex items-center gap-4">
+            <span>TIMESTAMP: <span id="footer-timestamp">--:--:--</span></span>
+            <span>SESS_ID: <span id="footer-session">S-000</span></span>
+        </div>
+    </footer>
 
     <script src="main.js"></script>
     <script src="update_handler.js"></script>
