@@ -29,6 +29,7 @@ class MessageSigner:
         canonical_data = self._canonicalize(data)
         message_bytes = json.dumps(canonical_data, separators=(',', ':')).encode()
         sig = self.sign_bytes(message_bytes)
+        # logger.debug(f"Signing with secret {self.secret[:4]}...{self.secret[-4:]} -> {sig[:8]}")
         return sig
 
     def sign_bytes(self, message_bytes: bytes) -> str:
