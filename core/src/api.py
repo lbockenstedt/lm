@@ -243,6 +243,21 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/opn/refresh")
+    async def refresh_opn_cache():
+        hub = app.state.hub
+        logger.info("API: Triggering OPNsense cache refresh")
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            logger.error("API: No OPNsense spoke connected for refresh")
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            result = await hub.request_response(opn_spoke, "OPNSENSE_REFRESH_CACHE", {})
+            return result
+        except Exception as e:
+            logger.error(f"API: Error refreshing OPNsense cache: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/opn/interfaces")
     async def get_opn_interfaces():
         hub = app.state.hub

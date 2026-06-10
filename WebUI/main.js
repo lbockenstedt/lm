@@ -424,7 +424,10 @@ const VIEWS = {
                                 <div class="py-12 text-center text-slate-400 italic">Loading diagnostics...</div>
                             </div>
                         </div>
-                        <div class="pt-4 flex justify-end">
+                        <div class="pt-4 flex justify-end gap-3">
+                            <button onclick="refreshOpnsenseCache()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                Refresh OPNsense Cache
+                            </button>
                             <button onclick="loadDiagnostics()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
                                 Refresh Diagnostics
                             </button>
@@ -1407,6 +1410,24 @@ function setTheme(theme) {
         document.body.classList.add('gl-theme');
     }
     localStorage.setItem('lm_theme', theme);
+}
+
+async function refreshOpnsenseCache() {
+    try {
+        const response = await fetch('/opn/refresh');
+        if (!response.ok) throw new Error('Failed to refresh OPNsense cache');
+        const data = await response.json();
+        alert('OPNsense cache refreshed successfully!');
+        console.log('OPNsense cache refresh result:', data);
+
+        // If we are currently viewing OPNsense management, reload the data
+        if (currentView === 'opnsense' && currentSubView !== 'Configuration') {
+            loadOpnsenseManagement();
+        }
+    } catch (err) {
+        alert('Error refreshing OPNsense cache: ' + err.message);
+        console.error('Error refreshing OPNsense cache:', err);
+    }
 }
 
 async function loadDiagnostics() {
