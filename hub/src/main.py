@@ -341,6 +341,7 @@ class LabManagerHub:
         cpu = psutil.cpu_percent(interval=None)
         mem = psutil.virtual_memory()
         disk = psutil.disk_io_counters()
+        version = await self.get_local_version()
 
         return {
             "cpu_util": cpu,
@@ -348,7 +349,8 @@ class LabManagerHub:
             "disk_read": disk.read_bytes if disk else 0,
             "disk_write": disk.write_bytes if disk else 0,
             "queue_size": len(self.mailbox.get_all_pending()) if hasattr(self.mailbox, 'get_all_pending') else 0,
-            "mps": self.mps
+            "mps": self.mps,
+            "version": version
         }
 
     async def run_autoupdate_loop(self):

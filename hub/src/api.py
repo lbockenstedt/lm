@@ -173,6 +173,34 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
 
+    @app.get("/firewall/health")
+    async def get_firewall_health():
+        hub = app.state.hub
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            result = await hub.request_response(opn_spoke, "GET_SYSTEM_HEALTH", {})
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/firewall/status")
+    async def get_firewall_status():
+        hub = app.state.hub
+        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+        try:
+            interface_status = await hub.request_response(opn_spoke, "GET_INTERFACE_STATUS", {})
+            firewall_stats = await hub.request_response(opn_spoke, "OPNSENSE_GET_FIREWALL_STATS", {})
+            return {
+                "interface_status": interface_status,
+                "firewall_stats": firewall_stats
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     # --- Static File Serving ---
     # We serve the UI directly from the 'ui' directory (Vanilla JS version)
     ui_path = os.path.join(os.path.dirname(__file__), "../../ui")

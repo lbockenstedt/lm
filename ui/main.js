@@ -396,6 +396,12 @@ async function updateStatus() {
         const connections = data.active_connections || [];
         if (spokeCount) spokeCount.textContent = connections.length;
 
+        // Update version in footer
+        const versionEl = document.getElementById('footer-version');
+        if (versionEl && data.metrics && data.metrics.version) {
+            versionEl.textContent = data.metrics.version;
+        }
+
         const moduleMap = {
             'pxmx': 'pxmx',
             'opn': 'opnsense',
