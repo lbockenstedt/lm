@@ -208,11 +208,15 @@ class LabManagerHub:
             spoke_id = auth_data.get("spoke_id")
             secret = auth_data.get("secret")
 
+            logger.info(f"Auth attempt: spoke_id={spoke_id}, secret={f'{secret[:4]}...{secret[-4:]}' if secret and len(secret) > 8 else '***'}")
+
             if not spoke_id or not secret:
                 await websocket.close(1008, "Missing spoke_id or secret")
                 return
 
             key_id = self.key_manager.get_valid_key(spoke_id, secret)
+            logger.info(f"KeyManager result for {spoke_id}: key_id={key_id}")
+
             if not key_id:
                 masked_secret = f"{secret[:4]}...{secret[-4:]}" if secret and len(secret) > 8 else "***"
                 logger.warning(f"Authentication failed for spoke {spoke_id}: Secret {masked_secret} is invalid.")
