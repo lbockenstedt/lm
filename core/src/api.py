@@ -439,19 +439,27 @@ def create_app(hub):
     @app.get("/setup/logs/{module}")
     async def get_module_logs(module: str):
         try:
+            # Map short UI module names to actual log filenames
+            log_name_map = {
+                "opn": "opnsense"
+            }
+            filename = log_name_map.get(module, module)
+
             # Log files are stored in /var/log/lm/<module>.log
-            log_path = f"/var/log/lm/{module}.log"
+            log_path = f"/var/log/lm/{filename}.log"
             if not os.path.exists(log_path):
-                raise HTTPException(status_code=404, detail=f"Log file for {module} not found.")
+                raise HTTPException(status_code=404, detail=f"Log file for {module} not found at {log_path}.")
 
             with open(log_path, "r") as f:
                 logs = f.readlines()
 
             # Return last 500 lines
             return {"logs": [log.strip() for log in logs[-500:]]}
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error reading logs for {module}: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=f"Permission or I/O error reading {log_path}: {str(e)}")
 
 
     @app.get("/setup/diagnostics")
