@@ -319,7 +319,17 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
             result = await hub.request_response(opn_spoke, "OPNSENSE_GET_ALL_RULES", {})
-            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
+
+            # Robust extraction: handle both wrapped (payload) and flat responses
+            data = {}
+            if isinstance(result, dict):
+                if "data" in result:
+                    data = result["data"]
+                elif "payload" in result and isinstance(result["payload"], dict):
+                    data = result["payload"].get("data", {})
+            else:
+                data = result
+
             logger.info(f"API: Received OPNsense firewall rules: {data}")
             return data
         except Exception as e:
