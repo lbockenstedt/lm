@@ -24,36 +24,69 @@ if [ ! -f "$HUB_LOG" ]; then
     exit 0
 fi
 
-log_c "🔍 Scanning Hub logs for authentication failures..."
+log_c "🔍 Scanning Hub logs for authentication status..."
 
-# Look for "Authentication failed" warnings specifically involving the dev secret
-# We use a case-insensitive grep for "Authentication failed" and check for "lm-secret"
-FAILURES=$(grep "Authentication failed" "$HUB_LOG" | grep "lm-s...cret" || true)
+# Define the spokes we expect to see
+SPOKES=("pxmx-spoke-1" "opn-spoke-1" "cs-spoke-1" "cppm-spoke-1")
+ANY_FAILURES=false
 
-if [ -z "$FAILURES" ]; then
-    log_c "✅ No dev-secret authentication failures detected. Auth is healthy."
+echo "--------------------------------------------------"
+printf "%-20s | %-15s\n" "SPOKE ID" "STATUS"
+echo "--------------------------------------------------"
+
+for sid in "${SPOKES[@]}"; do
+    # Check if this spoke has a recent "Authentication failed" with lm-secret
+    if grep "Authentication failed for spoke $sid" "$HUB_LOG" | grep -q "lm-s...cret"; then
+        printf "%-20s | \033[0;31mFAIL (Fallback)\033[0m\n" "$sid"
+        ANY_FAILURES=true
+    elif grep -q "SPOKE_ID $sid" "$HUB_LOG" || grep -q "authenticated successfully" "$HUB_LOG" && grep -q "$sid" "$HUB_LOG"; then
+        # Check for a positive authentication signal in the logs for this specific spoke
+        printf "%-20s | \033[0;32mOK\033[0m\n" "$sid"
+    else
+        printf "%-20s | \033[0;33mUNKNOWN\033[0m\n" "$sid"
+    fi
+done
+echo "--------------------------------------------------"
+
+if [ "$ANY_FAILURES" = false ]; then
+    log_c "✅ All spokes appear to be authenticating with real secrets."
     exit 0
 fi
 
 log_c "❌ Detected spokes attempting to connect with fallback 'lm-secret'."
-echo "$FAILURES" | tail -n 5
 
 if [ -f "$SNC_SCRIPT" ]; then
     log_c "🚀 Triggering automatic secret synchronization..."
     bash "$SNC_SCRIPT"
 
     # Wait for spokes to reconnect and attempt auth again
-    log_c "⏳ Waiting 10s for spokes to reconnect..."
-    sleep 10
+    log_c "⏳ Waiting 15s for spokes to reconnect..."
+    sleep 15
 
-    # Final check
-    RETRY_FAILURES=$(grep "Authentication failed" "$HUB_LOG" | tail -n 20 | grep "lm-s...cret" || true)
-    if [ -z "$RETRY_FAILURES" ]; then
+    log_c "🔄 Re-verifying authentication..."
+    echo "--------------------------------------------------"
+    printf "%-20s | %-15s\n" "SPOKE ID" "STATUS"
+    echo "--------------------------------------------------"
+
+    FINAL_FAILURES=false
+    for sid in "${SPOKES[@]}"; do
+        # Check the end of the log for this spoke
+        if grep "Authentication failed for spoke $sid" "$HUB_LOG" | tail -n 20 | grep -q "lm-s...cret"; then
+            printf "%-20s | \033[0;31mSTILL FAILING\033[0m\n" "$sid"
+            FINAL_FAILURES=true
+        else
+            printf "%-20s | \033[0;32mFIXED/OK\033[0m\n" "$sid"
+        fi
+    done
+    echo "--------------------------------------------------"
+
+    if [ "$FINAL_FAILURES" = false ]; then
         log_c "✅ Self-healing successful: Fallback auth errors resolved."
     else
-        log_e "⚠️  Secret sync was triggered, but authentication failures persist. Manual intervention may be required."
+        log_c "⚠️  Secret sync was triggered, but some spokes still fail. Manual intervention may be required."
+        exit 1
     fi
 else
-    log_e "Error: Secret sync script not found at $SNC_SCRIPT. Cannot self-heal."
+    log_c "❌ Error: Secret sync script not found at $SNC_SCRIPT. Cannot self-heal."
     exit 1
 fi
