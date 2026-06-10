@@ -214,7 +214,8 @@ class LabManagerHub:
 
             key_id = self.key_manager.get_valid_key(spoke_id, secret)
             if not key_id:
-                logger.warning(f"Authentication failed for spoke {spoke_id}: Secret mismatch or key not found.")
+                masked_secret = f"{secret[:4]}...{secret[-4:]}" if secret and len(secret) > 8 else "***"
+                logger.warning(f"Authentication failed for spoke {spoke_id}: Secret {masked_secret} is invalid.")
                 if spoke_id not in self.known_modules:
                     self.state.register_module(spoke_id, approved=False)
                     self.known_modules = self.state.system_state["known_modules"]
