@@ -327,6 +327,9 @@ def create_app(hub):
                     data = result["data"]
                 elif "payload" in result and isinstance(result["payload"], dict):
                     data = result["payload"].get("data", {})
+                else:
+                    # If it's a flat success response from the spoke, it might be the result itself
+                    data = result
             else:
                 data = result
 
