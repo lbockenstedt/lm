@@ -242,53 +242,51 @@ for mod in "${!MODULES[@]}"; do
     SPOKE_ID=${SPOKE_IDS[$mod]}
     log_c "Setting up $mod..."
 
-    # Fetch First Secret from Hub API with retries
-    SPOKE_SECRET=""
-    for i in {1..15}; do
-        # Using -v internally to log the attempt to the install log
-        RESPONSE=$(curl -s -X POST "$HUB_API/setup/generate-secret" \
-            -H "Content-Type: application/json" \
-            -d "{\"spoke_id\": \"$SPOKE_ID\"}")
+    # Run the modular installer with a temporary secret (will be updated later)
+    bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "lm-secret" --hub-secret "$HUB_SECRET"
 
-        SPOKE_SECRET=$(echo "$RESPONSE" | jq -r '.secret' 2>/dev/null)
-
-        if [ "$SPOKE_SECRET" != "null" ] && [ -n "$SPOKE_SECRET" ]; then
-            log_c "✅ Generated first-secret for $SPOKE_ID"
-            break
-        fi
-        log_c "⏳ Secret generation failed, retrying in 3s... ($i/15). Response: $RESPONSE"
-        sleep 3
-    done
-
-    if [ -z "$SPOKE_SECRET" ] || [ "$SPOKE_SECRET" == "null" ]; then
-        log_e "Failed to generate secret for $SPOKE_ID. Using default (will fail auth)."
-        SPOKE_SECRET="lm-secret"
-    fi
-
-    # Fetch Hub Secret for mutual authentication
-    HUB_SECRET_FILE="$BASE_DIR/core/data/hub_secret.json"
-    log_c "⏳ Waiting for Hub to generate master secret..."
-    for i in {1..10}; do
-        if [ -f "$HUB_SECRET_FILE" ]; then
-            break
-        fi
-        sleep 1
-    done
-
-    if [ -f "$HUB_SECRET_FILE" ]; then
-        HUB_SECRET=$(cat "$HUB_SECRET_FILE")
-        log_c "✅ Loaded Hub secret for mutual auth"
-    else
-        log_c "⚠️  Hub secret file not found at $HUB_SECRET_FILE. Mutual auth will be disabled."
-        HUB_SECRET=""
-    fi
-
-    # Run the modular installer with the Hub-provided secret
-    bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET" --hub-secret "$HUB_SECRET"
-
-    # Restart the spoke service to ensure it picks up the new secret
-    log_c "🔄 Restarting $mod service to apply new secret..."
+    # Restart the spoke service to ensure it's running
+    log_c "🔄 Restarting $mod service..."
     systemctl restart "lm-$mod" || true
+done
+
+# ------------------------------------------------------------------
+# 7. Post-Installation Secret Synchronization
+# ------------------------------------------------------------------
+log_c "🔑 Synchronizing secrets between Hub and Spokes..."
+
+for mod in "${!MODULES[@]}"; do
+    SPOKE_ID=${SPOKE_IDS[$mod]}
+
+    # Generate real secret from Hub API
+    SPOKE_SECRET=$(curl -s -X POST "$HUB_API/setup/generate-secret" \
+        -H "Content-Type: application/json" \
+        -d "{\"spoke_id\": \"$SPOKE_ID\"}" | jq -r '.secret' 2>/dev/null)
+
+    if [ "$SPOKE_SECRET" != "null" ] && [ -n "$SPOKE_SECRET" ]; then
+        log_c "✅ Fetched secret for $SPOKE_ID: ${SPOKE_SECRET:0:4}...${SPOKE_SECRET: -4}"
+
+        # Push the real secret into the spoke's .env file
+        SPOKE_PATH="$BASE_DIR/$mod"
+        if [ -d "$SPOKE_PATH" ]; then
+            # Use sed to replace SPOKE_SECRET in .env
+            # This handles both 'SPOKE_SECRET=...' and 'SPOKE_SECRET="...'"
+            sed -i "s/^SPOKE_SECRET=.*/SPOKE_SECRET=$SPOKE_SECRET/" "$SPOKE_PATH/.env"
+
+            # Also update the systemd unit if it's using the --secret flag directly
+            SERVICE_FILE="/etc/systemd/system/lm-$mod.service"
+            if [ -f "$SERVICE_FILE" ]; then
+                sed -i "s/--secret [^ ]*/--secret $SPOKE_SECRET/" "$SERVICE_FILE"
+                systemctl daemon-reload
+            fi
+
+            # Restart to apply the real secret
+            systemctl restart "lm-$mod" || true
+            log_c "🔄 $SPOKE_ID restarted with real secret."
+        fi
+    else
+        log_e "Failed to generate secret for $SPOKE_ID during final sync."
+    fi
 done
 
 # 6. Persistence & Auto-start
