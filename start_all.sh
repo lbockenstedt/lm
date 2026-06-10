@@ -91,8 +91,13 @@ SECRET="lm-secret"
 # Fetch Hub Secret for mutual authentication
 HUB_SECRET_FILE="$ROOT_DIR/core/data/hub_secret.json"
 if [ -f "$HUB_SECRET_FILE" ]; then
-    HUB_SECRET=$(cat "$HUB_SECRET_FILE")
-    echo "📖 Loaded Hub secret for mutual auth"
+    HUB_SECRET=$(PYTHONPATH="$HUB_DIR/src/security" "$HUB_DIR/venv/bin/python3" "$HUB_DIR/src/security/decrypt_secret.py" "$HUB_SECRET_FILE")
+    if [ $? -eq 0 ] && [ -n "$HUB_SECRET" ]; then
+        echo "📖 Loaded and decrypted Hub secret for mutual auth"
+    else
+        echo "⚠️  Failed to decrypt Hub secret. Mutual auth will be disabled."
+        HUB_SECRET=""
+    fi
 else
     HUB_SECRET=""
     echo "⚠️  Hub secret file not found. Mutual auth will be disabled."

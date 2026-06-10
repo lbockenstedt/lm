@@ -507,6 +507,7 @@ let currentView = 'dashboard';
 let currentSubView = 'General';
 let currentTenant = 'default';
 let currentProduct = null;
+let logRefreshInterval = null;
 
 async function setTenant(tenant) {
     currentTenant = tenant;
@@ -1464,11 +1465,13 @@ function applyAppearance(config) {
     renderLogo(config, 'right');
 }
 
-async function loadModuleLogs(module) {
+async function loadModuleLogs(module, isRefresh = false) {
     const container = document.getElementById('system-logs-container');
     if (!container) return;
 
-    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${module} logs...</div>`;
+    if (!isRefresh) {
+        container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${module} logs...</div>`;
+    }
 
     try {
         const endpoint = module === 'hub' ? '/setup/logs' : `/setup/logs/${module}`;
@@ -1491,7 +1494,9 @@ async function loadModuleLogs(module) {
         container.scrollTop = container.scrollHeight;
     } catch (err) {
         console.error(`Error loading ${module} logs:`, err);
-        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${module} logs: ${err.message}</div>`;
+        if (!isRefresh) {
+            container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${module} logs: ${err.message}</div>`;
+        }
     }
 }
 

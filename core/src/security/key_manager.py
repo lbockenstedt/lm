@@ -141,6 +141,14 @@ class KeyManager:
         """
         # Development fallback: allow 'lm-secret' for any spoke in lab mode
         if secret == "lm-secret":
+            # Ensure there is a key entry for this spoke so signing works
+            if spoke_id not in self.keys:
+                self.keys[spoke_id] = ManagedKey(
+                    key_id="dev-key",
+                    secret="lm-secret",
+                    created_at=time.time(),
+                    expires_at=time.time() + 86400
+                )
             return "dev-key"
 
         # Check current

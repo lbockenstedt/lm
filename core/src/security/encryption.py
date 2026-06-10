@@ -46,7 +46,11 @@ class HubEncryption:
                 except Exception as e:
                     logger.error(f"Failed to read {path}: {e}")
 
-        # Fallback: generate a persistent local secret if machine-id is missing
+        # Mac/BSD fallback: Use the hardware UUID or MAC address
+        import uuid
+        machine_uuid = str(uuid.getnode())
+
+        # Still try the fallback path for persistent override
         fallback_path = "/etc/lm-encryption-secret"
         if os.path.exists(fallback_path):
             try:
@@ -55,14 +59,8 @@ class HubEncryption:
             except Exception as e:
                 logger.error(f"Failed to read fallback secret: {e}")
 
-        # Last resort: generate one and save it
-        secret = os.urandom(32).hex()
-        try:
-            with open(fallback_path, 'w') as f:
-                f.write(secret)
-        except Exception as e:
-            logger.error(f"Could not write fallback secret to {fallback_path}: {e}")
-        return secret
+        # If we have a stable hardware ID, use it as the base for the fallback secret
+        return machine_uuid
 
     def encrypt(self, data: str) -> bytes:
         """Encrypts a string and returns the ciphertext bytes."""
