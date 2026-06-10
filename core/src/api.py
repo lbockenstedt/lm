@@ -7,6 +7,7 @@ import logging
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Any
 import uvicorn
 
@@ -16,6 +17,15 @@ from messaging.protocol import Message, MessageHeader, MessagePayload, Acknowled
 
 def create_app(hub):
     app = FastAPI(title="Lab Manager Hub API")
+
+    # Enable CORS to allow WebUI to connect from different origins
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     # Attach hub instance to app state for access in routes
     app.state.hub = hub

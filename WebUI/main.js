@@ -1278,6 +1278,64 @@ async function lookupVMDetails() {
     }
 }
 
+async function loadUsers() {
+    const bodyEl = document.getElementById('user-permissions-body');
+    if (!bodyEl) return;
+
+    try {
+        const response = await fetch('/setup/users');
+        if (!response.ok) throw new Error('Failed to fetch users');
+        const data = await response.json();
+        const users = data.users || {};
+
+        if (Object.keys(users).length === 0) {
+            bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-400 italic"><td colspan="8">No users configured.</td></tr>`;
+            return;
+        }
+
+        bodyEl.innerHTML = Object.entries(users).map(([userId, user]) => {
+            const perms = user.permissions || {};
+            const check = (key) => perms[key] ?
+                `<svg class="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg>` :
+                `<div class="w-4 h-4 rounded-full border-2 border-slate-200"></div>`;
+
+            return `
+                <tr class="hover:bg-slate-50 transition-colors">
+                    <td class="px-4 py-3 font-mono text-xs font-medium text-slate-700">${userId}</td>
+                    <td class="px-4 py-3">${check('admin')}</td>
+                    <td class="px-4 py-3">${check('pxmx_manage')}</td>
+                    <td class="px-4 py-3">${check('pxmx_view')}</td>
+                    <td class="px-4 py-3">${check('opn_edit')}</td>
+                    <td class="px-4 py-3">${check('dns_manage')}</td>
+                    <td class="px-4 py-3">${check('cppm_manage')}</td>
+                    <td class="px-4 py-3">${check('cppm_view')}</td>
+                    <td class="px-4 py-3 text-right">
+                        <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold">Delete</button>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    } catch (err) {
+        console.error('Error loading users:', err);
+        bodyEl.innerHTML = `<tr class="text-center py-8 text-red-500 text-xs">Error loading users: ${err.message}</tr>`;
+    }
+}
+
+async function deleteUser(userId) {
+    if (!confirm(`Are you sure you want to delete user ${userId}?`)) return;
+    try {
+        const response = await fetch(`/setup/users/${userId}`, { method: 'DELETE' });
+        if (response.ok) {
+            alert('User deleted');
+            await loadUsers();
+        } else {
+            alert('Failed to delete user');
+        }
+    } catch (err) {
+        alert('Error deleting user: ' + err.message);
+    }
+}
+
 async function loadOpnsenseManagement() {
     const container = document.getElementById('opn-table-container');
     if (!container) return;

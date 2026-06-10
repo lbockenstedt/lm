@@ -1,7 +1,10 @@
 import hmac
 import hashlib
 import json
+import logging
 from typing import Dict, Any
+
+logger = logging.getLogger("Signer")
 
 class MessageSigner:
     """Utility for signing and verifying messages using HMAC-SHA256.
@@ -16,7 +19,8 @@ class MessageSigner:
         # Exclude signature from the data being signed
         data = {k: v for k, v in msg.items() if k != "signature"}
         message_bytes = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
-        return self.sign_bytes(message_bytes)
+        sig = self.sign_bytes(message_bytes)
+        return sig
 
     def sign_bytes(self, message_bytes: bytes) -> str:
         """Signs raw bytes using HMAC-SHA256."""
@@ -29,9 +33,17 @@ class MessageSigner:
             return False
 
         expected = self.sign(msg)
-        return hmac.compare_digest(expected, sig)
+        result = hmac.compare_digest(expected, sig)
+        if not result:
+            data = {k: v for k, v in msg.items() if k != "signature"}
+            bytes_used = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
+            logger.warning(f"Signature mismatch! Expected: {expected}, Got: {sig}. Data: {bytes_used}")
+        return result
 
     def verify_bytes(self, message_bytes: bytes, signature: str) -> bool:
         """Verifies a signature against raw bytes."""
         expected = self.sign_bytes(message_bytes)
-        return hmac.compare_digest(expected, signature)
+        result = hmac.compare_digest(expected, signature)
+        if not result:
+            logger.warning(f"Bytes signature mismatch! Expected: {expected}, Got: {signature}. Bytes: {message_bytes}")
+        return result
