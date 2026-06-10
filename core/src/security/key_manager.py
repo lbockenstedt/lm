@@ -149,20 +149,21 @@ class KeyManager:
             if key.secret == secret:
                 return key.key_id
 
-        # Development fallback: allow 'lm-secret' for any spoke in lab mode
-        if secret == "lm-secret":
+        # Development fallback: allow configured dev secret for any spoke in lab mode
+        dev_secret = os.getenv("LM_DEV_SECRET", "lm-secret")
+        if secret == dev_secret:
             # Only allow this if no real keys exist for this spoke to avoid symmetry failures
             if not current and not self.history.get(spoke_id):
                 # Ensure there is a key entry for this spoke so signing works
                 self.keys[spoke_id] = ManagedKey(
                     key_id="dev-key",
-                    secret="lm-secret",
+                    secret=dev_secret,
                     created_at=time.time(),
                     expires_at=time.time() + 86400
                 )
                 return "dev-key"
             else:
-                logger.warning(f"Dev-mode secret 'lm-secret' rejected for spoke {spoke_id} because a real key is already configured.")
+                logger.warning(f"Dev-mode secret '{dev_secret}' rejected for spoke {spoke_id} because a real key is already configured.")
 
         return None
 

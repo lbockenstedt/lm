@@ -6,7 +6,20 @@ import hmac
 import hashlib
 import secrets
 import time
+import os
 from typing import Dict, Any
+
+def load_dotenv():
+    if os.path.exists(".env"):
+        with open(".env") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        os.environ[key.strip()] = value.strip().strip('"').strip("'")
+
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("QA-Tester")
@@ -91,9 +104,9 @@ async def test_mutual_auth():
     # This requires a running Hub.
     # For the purpose of this QA module, we assume Hub is at localhost:8765
     spoke_id = "qa-spoke-1"
-    secret = "qa-secret-123"
-    hub_secret = "hub-secret-abc" # This must match the Hub's hub_secret.json
-    hub_url = "ws://localhost:8765"
+    secret = os.getenv("QA_SPOKE_SECRET", "qa-secret-123")
+    hub_secret = os.getenv("QA_HUB_SECRET", "hub-secret-abc") # This must match the Hub's hub_secret.json
+    hub_url = os.getenv("QA_HUB_URL", "ws://localhost:8765")
 
     tester = QASpokeMock(spoke_id, secret, hub_secret, hub_url)
     try:

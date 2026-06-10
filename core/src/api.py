@@ -268,7 +268,7 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
             result = await hub.request_response(opn_spoke, "GET_INTERFACE_STATUS", {})
-            data = result.get("data", {}) if isinstance(result, dict) else result
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
             logger.info(f"API: Received OPNsense interfaces: {data}")
             return data
         except Exception as e:
@@ -285,7 +285,7 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
             result = await hub.request_response(opn_spoke, "GET_SYSTEM_HEALTH", {})
-            data = result.get("data", {}) if isinstance(result, dict) else result
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
             logger.info(f"API: Received OPNsense health: {data}")
             return data
         except Exception as e:
@@ -302,7 +302,7 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
             result = await hub.request_response(opn_spoke, "OPNSENSE_GET_DHCP_LEASES", {})
-            data = result.get("data", {}) if isinstance(result, dict) else result
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
             logger.info(f"API: Received OPNsense DHCP leases: {data}")
             return data
         except Exception as e:
@@ -319,7 +319,7 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
             result = await hub.request_response(opn_spoke, "OPNSENSE_GET_ALL_RULES", {})
-            data = result.get("data", {}) if isinstance(result, dict) else result
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
             logger.info(f"API: Received OPNsense firewall rules: {data}")
             return data
         except Exception as e:
@@ -336,7 +336,7 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
             result = await hub.request_response(opn_spoke, "OPNSENSE_GET_FIREWALL_STATS", {})
-            data = result.get("data", {}) if isinstance(result, dict) else result
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
             logger.info(f"API: Received OPNsense firewall stats: {data}")
             return data
         except Exception as e:
@@ -353,7 +353,7 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
             result = await hub.request_response(opn_spoke, "OPNSENSE_GET_NAT_POLICIES", {})
-            data = result.get("data", {}) if isinstance(result, dict) else result
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
             logger.info(f"API: Received OPNsense NAT policies: {data}")
             return data
         except Exception as e:
@@ -370,7 +370,7 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
         try:
             result = await hub.request_response(opn_spoke, "OPNSENSE_GET_DNS_RECORDS", {})
-            data = result.get("data", {}) if isinstance(result, dict) else result
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
             logger.info(f"API: Received OPNsense DNS records: {data}")
             return data
         except Exception as e:
