@@ -45,8 +45,6 @@ log_e() {
 
 echo "🚀 Starting Native Lab Manager Installation (LXC-Optimized)..."
 
-echo "🚀 Starting Native Lab Manager Installation (LXC-Optimized)..."
-
 # 1. Pre-flight Check (Permissions)
 log_c "🔍 Performing pre-flight checks..."
 if [ "$(id -u)" -ne 0 ]; then
@@ -268,6 +266,10 @@ for mod in "${!MODULES[@]}"; do
 
     # Run the modular installer with the Hub-provided secret
     bash "$BASE_DIR/$mod/$installer" --hub "$HUB_WS" --id "$SPOKE_ID" --secret "$SPOKE_SECRET" --hub-secret "$HUB_SECRET"
+
+    # Restart the spoke service to ensure it picks up the new secret
+    log_c "🔄 Restarting $mod service to apply new secret..."
+    systemctl restart "lm-$mod" || true
 done
 
 # 6. Persistence & Auto-start
