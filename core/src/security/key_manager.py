@@ -139,18 +139,6 @@ class KeyManager:
         Validates a secret against the current key or the history of keys.
         Returns the key_id if valid.
         """
-        # Development fallback: allow 'lm-secret' for any spoke in lab mode
-        if secret == "lm-secret":
-            # Ensure there is a key entry for this spoke so signing works
-            if spoke_id not in self.keys:
-                self.keys[spoke_id] = ManagedKey(
-                    key_id="dev-key",
-                    secret="lm-secret",
-                    created_at=time.time(),
-                    expires_at=time.time() + 86400
-                )
-            return "dev-key"
-
         # Check current
         current = self.keys.get(spoke_id)
         if current and current.secret == secret:
@@ -160,6 +148,18 @@ class KeyManager:
         for key in self.history.get(spoke_id, []):
             if key.secret == secret:
                 return key.key_id
+
+        # Development fallback: allow 'lm-secret' for any spoke in lab mode
+        # Only allow this if no real keys exist for this spoke to avoid symmetry failures
+        if secret == "lm-secret" and (not current and not self.history.get(spoke_id)):
+            # Ensure there is a key entry for this spoke so signing works
+            self.keys[spoke_id] = ManagedKey(
+                key_id="dev-key",
+                secret="lm-secret",
+                created_at=time.time(),
+                expires_at=time.time() + 86400
+            )
+            return "dev-key"
 
         return None
 
