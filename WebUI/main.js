@@ -978,8 +978,8 @@ function setSubView(subMenu) {
                 (currentView === 'opnsense' && currentSubView === 'Configuration')) {
                 loadSetupConfig();
             }
-            if (currentView === 'settings' && currentSubView.includes('Logs')) {
-                const module = currentSubView.replace(' Logs', '').toLowerCase();
+            if (currentView === 'settings' && currentSubView.startsWith('logs-')) {
+                const module = currentSubView.replace('logs-', '');
                 loadModuleLogs(module);
             }
             if (currentView === 'settings' && currentSubView === 'General') updateStatus();
