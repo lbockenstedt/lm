@@ -143,7 +143,7 @@ const VIEWS = {
         name: 'Firewall',
         className: 'Firewall',
         subMenus: ['Firewall Rules', 'Configuration', 'Interfaces', 'DHCP Leases', 'NAT Policies', 'DNS Records'],
-        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 2a5 5 0 00-5 5v2a5 5 0 0010 0V7a5 5 0 00-5-5z"></path></svg>',
+        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>',
         render: (subMenu) => {
             if (subMenu === 'Configuration') {
                 return `
