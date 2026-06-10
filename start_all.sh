@@ -86,23 +86,6 @@ echo "Hub started (logs: $LOG_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
 # --- 2. Launch Spokes ---
-SECRET="lm-secret"
-
-# Fetch Hub Secret for mutual authentication
-HUB_SECRET_FILE="$ROOT_DIR/core/data/hub_secret.json"
-if [ -f "$HUB_SECRET_FILE" ]; then
-    HUB_SECRET=$(PYTHONPATH="$HUB_DIR/src/security" "$HUB_DIR/venv/bin/python3" "$HUB_DIR/src/security/decrypt_secret.py" "$HUB_SECRET_FILE")
-    if [ $? -eq 0 ] && [ -n "$HUB_SECRET" ]; then
-        echo "📖 Loaded and decrypted Hub secret for mutual auth"
-    else
-        echo "⚠️  Failed to decrypt Hub secret. Mutual auth will be disabled."
-        HUB_SECRET=""
-    fi
-else
-    HUB_SECRET=""
-    echo "⚠️  Hub secret file not found. Mutual auth will be disabled."
-fi
-
 # Define spokes and their folders
 SPOKES=("cs" "pxmx" "opnsense" "cppm")
 
@@ -121,8 +104,18 @@ for spoke in "${SPOKES[@]}"; do
             "cppm") SPOKE_ID="cppm-spoke-1" ;;
         esac
 
+        # READ SECRET FROM .ENV FILE (Crucial for synchronization)
+        SECRET="lm-secret"
+        if [ -f ".env" ]; then
+            # Extract SPOKE_SECRET from .env, removing quotes if present
+            SPOKE_SECRET_FILE=$(grep "^SPOKE_SECRET=" .env | cut -d'=' -f2 | tr -d '"' | tr -d "'")
+            if [ -n "$SPOKE_SECRET_FILE" ]; then
+                SECRET="$SPOKE_SECRET_FILE"
+            fi
+        fi
+
         nohup "$SPOKE_DIR/venv/bin/python3" "$SPOKE_DIR/src/control_plane.py" --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" --hub-secret "$HUB_SECRET" > "$LOG_DIR/$spoke.log" 2>&1 &
-        echo "$spoke started (logs: $LOG_DIR/$spoke.log)"
+        echo "$spoke started (logs: $LOG_DIR/$spoke.log) with secret ${SECRET:0:4}...${SECRET: -4}"
     else
         echo "⚠️  Warning: Spoke directory $SPOKE_DIR not found. Skipping..."
     fi
