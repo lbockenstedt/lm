@@ -269,7 +269,32 @@ const VIEWS = {
                 </div>
             `;
         }
+    },
+    security: {
+        name: 'Security / NAC',
+        subMenus: ['Network Access Control', 'Key Management', 'Audit Logs'],
+        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>',
+        render: (subMenu) => `
+            <div class="space-y-6">
+                <h2 class="text-2xl font-bold mb-6 text-[#263040]">Security & NAC Management</h2>
+                <div class="hpe-card rounded-lg p-6 shadow-sm">
+                    <div class="flex items-center gap-3 mb-6">
+                        <div class="p-2 bg-green-100 rounded-full text-green-600">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4C18.4 5.6 17.4 5.4 16.3 5.4a4.4 4.4 0 00-4.4 4.4c0 1.1.2 2.1.6 3.1"></path></svg>
+                        </div>
+                        <div>
+                            <h3 class="text-lg font-semibold text-slate-800">${subMenu}</h3>
+                            <p class="text-sm text-slate-500">Configure and monitor network access control policies.</p>
+                        </div>
+                    </div>
+                    <div class="bg-slate-50 rounded-lg border border-dashed border-slate-300 py-12 text-center">
+                        <p class="text-slate-400 italic">Functional interface for ${subMenu} is currently under development.</p>
+                    </div>
+                </div>
+            </div>
+        `
     }
+
 };
 
 let currentView = 'dashboard';
