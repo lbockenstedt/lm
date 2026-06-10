@@ -5,9 +5,12 @@ set -e
 # Argument Parsing
 # ------------------------------------------------------------------
 REINSTALL=false
+RESET_SECRETS=false
 for arg in "$@"; do
     if [ "$arg" == "--reinstall" ]; then
         REINSTALL=true
+    elif [ "$arg" == "--reset-secrets" ]; then
+        RESET_SECRETS=true
     fi
 done
 
@@ -108,6 +111,14 @@ if [ "$REINSTALL" = true ]; then
     rm -rf "$BASE_DIR"
     rm -f /etc/systemd/system/lm.service
     log_c "🧹 Clean slate achieved. Proceeding with fresh installation..."
+fi
+
+if [ "$RESET_SECRETS" = true ]; then
+    log_c "🔑 RESET-SECRETS MODE: Wiping Hub identity and spoke keys..."
+    # The secrets are located in $BASE_DIR/core/data
+    rm -f "$BASE_DIR/core/data/keys.json"
+    rm -f "$BASE_DIR/core/data/hub_secret.json"
+    log_c "🧹 Secrets wiped. Hub will regenerate a new identity on start."
 fi
 
 # Cleanup legacy installations
