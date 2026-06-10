@@ -295,6 +295,12 @@ log_c "⚙️ Configuring systemd for auto-start on reboot..."
 # Final permission fix: ensure service user owns everything including files created by root during install
 chown -R $SvcUser:$SvcUser "$BASE_DIR"
 
+# Copy utility scripts to the installation directory
+log_c "🛠️ Deploying utility scripts..."
+cp "$BASE_DIR/sync_secrets.sh" "$BASE_DIR/sync_secrets.sh" 2>/dev/null || true
+cp "$BASE_DIR/verify_auth.sh" "$BASE_DIR/verify_auth.sh" 2>/dev/null || true
+chown $SvcUser:$SvcUser "$BASE_DIR/sync_secrets.sh" "$BASE_DIR/verify_auth.sh" 2>/dev/null || true
+
 # Create the systemd service unit
 cat <<EOF > /etc/systemd/system/lm.service
 [Unit]
@@ -319,6 +325,16 @@ EOF
 systemctl daemon-reload
 systemctl enable lm
 systemctl restart lm
+
+# ------------------------------------------------------------------
+# 7. Post-Installation Auth Verification & Self-Healing
+# ------------------------------------------------------------------
+log_c "🔍 Running final authentication verification..."
+if [ -f "$BASE_DIR/verify_auth.sh" ]; then
+    bash "$BASE_DIR/verify_auth.sh"
+else
+    log_e "Verification script verify_auth.sh not found. Skipping final auth check."
+fi
 
 echo ""
 log_c "🎉 Native installation complete!"
