@@ -1643,26 +1643,7 @@ async function updateAppearance() {
 }
 
 function renderLogo(config, side) {
-    if (side === 'left') return;
-    const container = document.getElementById(`logo-${side}`);
-    if (!container) return;
-
-    const showLogo = config.show_logo_right;
-    const logoUrl = config.logo_url_right;
-
-    if (!showLogo) {
-        container.innerHTML = '';
-        return;
-    }
-
-    let html = '';
-    if (logoUrl === 'hpe-svg' || !logoUrl) {
-        html = `<img src="assets/hpe-logo.svg" class="h-8 w-auto" alt="HPE Logo">`;
-    } else {
-        html = `<img src="${logoUrl}" class="h-8 w-auto" alt="Logo" onerror="this.style.display='none'">`;
-    }
-
-    container.innerHTML = html;
+    return; // Disabled logo rendering
 }
 
 function applyAppearance(config) {
@@ -1724,8 +1705,8 @@ async function loadAppearance() {
             document.getElementById('app-navy-hex').value = config.navy_color;
             document.getElementById('app-logo-url').value = config.logo_url;
             document.getElementById('app-logo-url-right').value = config.logo_url_right || config.logo_url;
-            document.getElementById('app-show-logo-left').checked = config.show_logo_left;
-            document.getElementById('app-show-logo-right').checked = config.show_logo_right;
+            document.getElementById('app-show-logo-left').checked = false; // Forced to false
+            document.getElementById('app-show-logo-right').checked = false; // Forced to false
         }
         applyAppearance(config);
     } catch (err) {
