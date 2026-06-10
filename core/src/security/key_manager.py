@@ -163,15 +163,16 @@ class KeyManager:
 
         return None
 
-    def sign_message(self, spoke_id: str, message_bytes: bytes) -> str:
+    def sign_message(self, spoke_id: str, message_dict: Dict[str, Any]) -> str:
         """
-        Signs a message using the current secret for the spoke.
+        Signs a message dictionary using the current secret for the spoke.
+        Uses canonical serialization for deterministic results.
         """
         key = self.keys.get(spoke_id)
         if not key:
             raise ValueError(f"No key found for spoke {spoke_id}")
 
-        return MessageSigner(key.secret).sign_bytes(message_bytes)
+        return MessageSigner(key.secret).sign(message_dict)
 
     def verify_signature(self, spoke_id: str, message_bytes: bytes, signature: str) -> bool:
         """

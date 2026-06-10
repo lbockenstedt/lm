@@ -14,11 +14,20 @@ class MessageSigner:
     def __init__(self, secret: str):
         self.secret = secret
 
+    def _canonicalize(self, obj: Any) -> Any:
+        """Recursively sorts dictionary keys to ensure deterministic serialization."""
+        if isinstance(obj, dict):
+            return {k: self._canonicalize(obj[k]) for k in sorted(obj.keys())}
+        elif isinstance(obj, list):
+            return [self._canonicalize(i) for i in obj]
+        return obj
+
     def sign(self, msg: Dict[str, Any]) -> str:
-        """Signs a message by creating an HMAC-SHA256 hash of its JSON representation."""
+        """Signs a message by creating an HMAC-SHA256 hash of its canonical JSON representation."""
         # Exclude signature from the data being signed
         data = {k: v for k, v in msg.items() if k != "signature"}
-        message_bytes = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
+        canonical_data = self._canonicalize(data)
+        message_bytes = json.dumps(canonical_data, separators=(',', ':')).encode()
         sig = self.sign_bytes(message_bytes)
         return sig
 
@@ -36,7 +45,8 @@ class MessageSigner:
         result = hmac.compare_digest(expected, sig)
         if not result:
             data = {k: v for k, v in msg.items() if k != "signature"}
-            bytes_used = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
+            canonical_data = self._canonicalize(data)
+            bytes_used = json.dumps(canonical_data, separators=(',', ':')).encode()
             logger.warning(f"Signature mismatch! Expected: {expected}, Got: {sig}. Data: {bytes_used}")
         return result
 

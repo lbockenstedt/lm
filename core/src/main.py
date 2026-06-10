@@ -101,21 +101,21 @@ class LabManagerHub:
 
         if ws:
             # Sign the message before sending
-            # Round timestamp to 6 decimal places to ensure consistent serialization across environments
             header_dict = asdict(message.header)
             if "timestamp" in header_dict:
                 header_dict["timestamp"] = round(header_dict["timestamp"], 6)
 
-            message_bytes = json.dumps({
-                "header": header_dict,
-                "payload": asdict(message.payload)
-            }, sort_keys=True, separators=(',', ':')).encode()
+            payload_dict = asdict(message.payload)
 
-            message.signature = self.key_manager.sign_message(spoke_id, message_bytes)
+            # Sign the structured data (KeyManager now handles canonicalization)
+            message.signature = self.key_manager.sign_message(spoke_id, {
+                "header": header_dict,
+                "payload": payload_dict
+            })
 
             payload = {
                 "header": header_dict,
-                "payload": asdict(message.payload),
+                "payload": payload_dict,
                 "signature": message.signature
             }
             json_payload = json.dumps(payload, separators=(',', ':'))
@@ -299,11 +299,10 @@ class LabManagerHub:
                     "payload": {"type": "APPROVAL_REQUIRED", "data": {}}
                 }
                 # Sign the message
-                message_bytes = json.dumps({
+                approval_msg["signature"] = self.key_manager.sign_message(spoke_id, {
                     "header": approval_msg["header"],
                     "payload": approval_msg["payload"]
-                }, sort_keys=True, separators=(',', ':')).encode()
-                approval_msg["signature"] = self.key_manager.sign_message(spoke_id, message_bytes)
+                })
 
                 await websocket.send(json.dumps(approval_msg))
                 # We don't return; we enter the loop but the loop will filter messages
