@@ -481,8 +481,6 @@ const VIEWS = {
                     </div>
                 </div>
             `;
-                </div>
-            `;
         }
     }
 };
