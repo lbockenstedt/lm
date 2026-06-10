@@ -9,6 +9,7 @@ import logging
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from .signer import MessageSigner
+from .encryption import hub_encryption
 
 logger = logging.getLogger("KeyManager")
 
