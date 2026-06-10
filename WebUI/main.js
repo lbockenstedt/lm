@@ -1352,10 +1352,13 @@ async function loadOpnsenseManagement() {
         let endpoint = '';
         if (subMenu === 'Firewall Rules') endpoint = '/opn/firewall/all';
         else if (subMenu === 'DHCP Leases') endpoint = '/opn/dhcp';
-        else if (subMenu === 'Interfaces') endpoint = '/opn/interfaces'; // Mocked or generic
+        else if (subMenu === 'Interfaces') endpoint = '/opn/interfaces';
         else if (subMenu === 'NAT Policies') endpoint = '/opn/nat';
         else if (subMenu === 'DNS Records') endpoint = '/opn/dns';
-        else return;
+        else {
+            console.log(`[OPNsense] No endpoint defined for subMenu: ${subMenu}`);
+            return;
+        }
 
         console.log(`[OPNsense] Fetching ${subMenu} from ${endpoint}...`);
         const response = await fetch(endpoint);
@@ -1364,13 +1367,25 @@ async function loadOpnsenseManagement() {
         const data = await response.json();
         console.log(`[OPNsense] Received raw data for ${subMenu}:`, data);
 
-        const items = Array.isArray(data) ? data : (data.data || []);
-        console.log(`[OPNsense] Processed items for ${subMenu}:`, items);
+        // Robust item extraction
+        let items = [];
+        if (Array.isArray(data)) {
+            items = data;
+        } else if (data && typeof data === 'object') {
+            if (Array.isArray(data.data)) {
+                items = data.data;
+            } else if (Array.isArray(data.payload?.data)) {
+                items = data.payload.data;
+            } else if (data.rows && Array.isArray(data.rows)) {
+                items = data.rows;
+            }
+        }
+        console.log(`[OPNsense] Processed items for ${subMenu} (count: ${items.length}):`, items);
 
         // Fallback for mocking purposes: if items is empty and we are in Firewall Rules,
         // provide a small set of dummy data to verify the UI works.
         let finalItems = items;
-        if (finalItems.length === 0 && subMenu === 'Firewall Rules') {
+        if ((!finalItems || finalItems.length === 0) && subMenu === 'Firewall Rules') {
             console.log('[OPNsense] No rules found, injecting dummy data for UI verification');
             finalItems = [
                 { id: 'mock-1', action: 'pass', protocol: 'TCP', destination: 'Port 80', description: 'Allow HTTP (Mock)' },
@@ -1378,17 +1393,21 @@ async function loadOpnsenseManagement() {
             ];
         }
 
-        if (finalItems.length === 0) {
+        if (!finalItems || finalItems.length === 0) {
             container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.</div>`;
             return;
         }
 
         // Generic Table Renderer
-        const keys = Object.keys(finalItems[0]);
+        const firstItem = finalItems[0];
+        if (!firstItem || typeof firstItem !== 'object') {
+            throw new Error('Unexpected data format: first item is not an object');
+        }
+        const keys = Object.keys(firstItem);
         const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace('_', ' ')}</th>`).join('');
         const rows = finalItems.map(item => `
             <tr class="hover:bg-slate-50 transition-colors">
-                ${keys.map(k => `<td class="px-4 py-3 text-slate-600 font-mono text-xs">${item[k]}</td>`).join('')}
+                ${keys.map(k => `<td class="px-4 py-3 text-slate-600 font-mono text-xs">${item[k] !== undefined ? item[k] : '-'}</td>`).join('')}
             </tr>
         `).join('');
 
@@ -1405,6 +1424,7 @@ async function loadOpnsenseManagement() {
             </div>
         `;
     } catch (err) {
+        console.error(`[OPNsense] Error in loadOpnsenseManagement:`, err);
         container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${subMenu}: ${err.message}</div>`;
     }
 }
