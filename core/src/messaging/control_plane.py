@@ -8,6 +8,7 @@ import hmac
 import hashlib
 from typing import Dict, Any, Type
 from .protocol import Message, MessageHeader, MessagePayload
+from ..security.signer import MessageSigner
 
 logger = logging.getLogger("BaseControlPlane")
 
@@ -22,6 +23,7 @@ class BaseControlPlane:
         self.hub_secret = hub_secret
         self.hub_url = hub_url
         self.modules: Dict[str, Any] = {} # { module_name: BaseSpoke instance }
+        self.signer = MessageSigner(secret)
 
     def register_module(self, name: str, module_instance: Any):
         """Registers a module to be handled by this control plane."""
@@ -128,13 +130,7 @@ class BaseControlPlane:
         return True # Default to true for now, let the module decide
 
     def _sign(self, msg):
-        data = {k: v for k, v in msg.items() if k != "signature"}
-        message_bytes = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
-        return hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
+        return self.signer.sign(msg)
 
     def _verify_signature(self, msg):
-        sig = msg.get("signature")
-        data = {k: v for k, v in msg.items() if k != "signature"}
-        message_bytes = json.dumps(data, sort_keys=True, separators=(',', ':')).encode()
-        expected = hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
-        return hmac.compare_digest(expected, sig)
+        return self.signer.verify(msg)

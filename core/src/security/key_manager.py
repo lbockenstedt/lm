@@ -7,7 +7,7 @@ import os
 import uuid
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
-from .encryption import hub_encryption
+from .signer import MessageSigner
 
 @dataclass
 class ManagedKey:
@@ -159,20 +159,15 @@ class KeyManager:
         if not key:
             raise ValueError(f"No key found for spoke {spoke_id}")
 
-        return hmac.new(
-            key.secret.encode(),
-            message_bytes,
-            hashlib.sha256
-        ).hexdigest()
+        return MessageSigner(key.secret).sign_bytes(message_bytes)
 
     def verify_signature(self, spoke_id: str, message_bytes: bytes, signature: str) -> bool:
         """
         Verifies the HMAC signature of a message.
         """
-        try:
-            expected = self.sign_message(spoke_id, message_bytes)
-            return hmac.compare_digest(expected, signature)
-        except ValueError:
+        key = self.keys.get(spoke_id)
+        if not key:
             return False
+        return MessageSigner(key.secret).verify_bytes(message_bytes, signature)
 
 import uuid # needed for generate_first_secret
