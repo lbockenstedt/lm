@@ -378,12 +378,12 @@ const VIEWS = {
     },
     settings: {
         name: 'System',
-        subMenus: ['General', 'Network', 'Auth', 'Hub Logs', 'Proxmox Logs', 'OPNsense Logs', 'CPPM Logs', 'CS Logs', 'Diagnostics'],
+        subMenus: ['General', 'Network', 'Auth', 'Logs', 'Diagnostics'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-1.59 4.04-1.59 5.583 0a1.724 1.724 0 001.28 2.915c-1.344 1.35-3.77 1.35-5.114 0a1.724 1.724 0 00-1.28-2.915zM12 18a6 6 0 100-12 6 6 0 000 12z"></path></svg>',
         render: (subMenu) => {
-            if (subMenu.includes('Logs')) {
-                const module = subMenu.replace(' Logs', '').toLowerCase();
-                const logTitle = subMenu === 'Hub Logs' ? 'Hub Console Output' : `${subMenu} Output`;
+            if (subMenu.startsWith('logs-')) {
+                const module = subMenu.replace('logs-', '');
+                const logTitle = module === 'hub' ? 'Hub Console Output' : `${module.toUpperCase()} Logs`;
                 return `
                     <div class="space-y-6">
                         <h2 class="text-2xl font-bold mb-6 text-[#263040]">${logTitle}</h2>
@@ -396,6 +396,22 @@ const VIEWS = {
                                 <!-- Logs injected here -->
                             </div>
                         </div>
+                    </div>
+                `;
+            }
+            if (subMenu === 'Logs') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Logs</h2>
+                        <p class="text-sm text-slate-500 mb-4">Select a module from the list to view its specific output.</p>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            ${['hub', 'pxmx', 'opn', 'cppm', 'cs'].map(mod => `
+                                <div onclick="setSubView('logs-${mod}')" class="p-4 rounded-md bg-white border border-slate-200 hover:border-green-500 cursor-pointer transition-all flex justify-between items-center group">
+                                    <span class="text-sm font-medium text-slate-700 group-hover:text-green-600">${mod.toUpperCase()} Logs</span>
+                                    <svg class="w-4 h-4 text-slate-400 group-hover:text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                                </div>
+                            `).join('')}
+                        </div}
                     </div>
                 `;
             }
@@ -809,6 +825,57 @@ async function addTenant() {
     }
 }
 
+function renderTopNav() {
+    const topNav = document.getElementById('top-nav');
+    if (!topNav) return;
+
+    const view = VIEWS[currentView] || VIEWS[currentProduct];
+    if (!view) return;
+
+    let topNavHtml = '';
+
+    // 1. Render Product Tabs if we are in a multi-product class
+    const isClass = Object.keys(MODULE_CLASSES).includes(currentView);
+    if (isClass && MODULE_CLASSES[currentView] &&
+        Array.from(window.activeProducts || []).filter(p => MODULE_CLASSES[currentView].includes(p)).length > 1) {
+
+        const products = Array.from(window.activeProducts || []).filter(p => MODULE_CLASSES[currentView].includes(p));
+        topNavHtml += `<div class="flex gap-2 mr-4 border-r border-slate-300 pr-4">`;
+        topNavHtml += products.map(p => `
+            <div onclick="switchProduct('${p}')" class="px-3 py-1 text-xs font-bold rounded cursor-pointer transition-all ${p === currentProduct ? 'bg-green-600 text-white' : 'bg-slate-200 text-slate-600 hover:bg-slate-300'}">
+                ${VIEWS[p].name}
+            </div>
+        `).join('');
+        topNavHtml += `</div>`;
+    }
+
+    // 2. Render Sub-menus
+    topNavHtml += view.subMenus.map((menu, i) => {
+        if (menu === 'Logs') {
+            return `
+                <div class="relative group">
+                    <div onclick="setSubView('Logs')" class="sub-nav-item ${currentSubView.startsWith('logs-') || currentSubView === 'Logs' ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+                        Logs ▾
+                    </div>
+                    <div class="absolute left-0 top-full hidden group-hover:block w-40 bg-white border border-slate-200 shadow-xl z-50 rounded-b-md">
+                        <div onclick="setSubView('logs-hub')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-hub' ? 'text-green-600 font-bold' : ''}">Hub Logs</div>
+                        <div onclick="setSubView('logs-pxmx')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-pxmx' ? 'text-green-600 font-bold' : ''}">Proxmox Logs</div>
+                        <div onclick="setSubView('logs-opn')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-opn' ? 'text-green-600 font-bold' : ''}">OPNsense Logs</div>
+                        <div onclick="setSubView('logs-cppm')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-cppm' ? 'text-green-600 font-bold' : ''}">CPPM Logs</div>
+                        <div onclick="setSubView('logs-cs')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-cs' ? 'text-green-600 font-bold' : ''}">CS Logs</div>
+                    </div>
+                `;
+        }
+        return `
+            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+                ${menu}
+            </div>
+        `;
+    }).join('');
+
+    topNav.innerHTML = topNavHtml;
+}
+
 function setView(viewId) {
     const isClass = Object.keys(MODULE_CLASSES).includes(viewId);
 
@@ -852,30 +919,7 @@ function setView(viewId) {
 
     const topNav = document.getElementById('top-nav');
     if (view) {
-        let topNavHtml = '';
-
-        // 1. Render Product Tabs if we are in a multi-product class
-        if (isClass && MODULE_CLASSES[viewId] &&
-            Array.from(window.activeProducts || []).filter(p => MODULE_CLASSES[viewId].includes(p)).length > 1) {
-
-            const products = Array.from(window.activeProducts || []).filter(p => MODULE_CLASSES[viewId].includes(p));
-            topNavHtml += `<div class="flex gap-2 mr-4 border-r border-slate-300 pr-4">`;
-            topNavHtml += products.map(p => `
-                <div onclick="switchProduct('${p}')" class="px-3 py-1 text-xs font-bold rounded cursor-pointer transition-all ${p === currentProduct ? 'bg-green-600 text-white' : 'bg-slate-200 text-slate-600 hover:bg-slate-300'}">
-                    ${VIEWS[p].name}
-                </div>
-            `).join('');
-            topNavHtml += `</div>`;
-        }
-
-        // 2. Render Sub-menus
-        topNavHtml += view.subMenus.map((menu, i) => `
-            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
-                ${menu}
-            </div>
-        `).join('');
-
-        topNav.innerHTML = topNavHtml;
+        renderTopNav();
     }
 
     const viewport = document.getElementById('viewport');
@@ -909,12 +953,7 @@ function setSubView(subMenu) {
     const view = VIEWS[currentView];
     if (view) {
         // Update sub-nav active state
-        const topNav = document.getElementById('top-nav');
-        topNav.innerHTML = view.subMenus.map(menu => `
-            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
-                ${menu}
-            </div>
-        `).join('');
+        renderTopNav();
 
         // Re-render content
         const viewport = document.getElementById('viewport');
