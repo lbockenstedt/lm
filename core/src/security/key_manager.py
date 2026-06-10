@@ -5,9 +5,12 @@ import time
 import json
 import os
 import uuid
+import logging
 from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 from .signer import MessageSigner
+
+logger = logging.getLogger("KeyManager")
 
 @dataclass
 class ManagedKey:
@@ -91,7 +94,7 @@ class KeyManager:
                     for sid, ks in data["history"].items():
                         self.history[sid] = [ManagedKey(**k) for k in ks]
             except Exception as e:
-                print(f"Error loading keys: {e}")
+                logger.error(f"Error loading keys from {self.storage_path}: {e}")
 
     def generate_first_secret(self, spoke_id: str) -> str:
         """
