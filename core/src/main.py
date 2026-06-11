@@ -544,6 +544,7 @@ class LabManagerHub:
             cpu = psutil.cpu_percent(interval=None)
             mem = psutil.virtual_memory()
             disk = psutil.disk_usage('/')
+            version = await self.get_local_version()
 
             return {
                 "cpu_util": cpu,
@@ -554,7 +555,8 @@ class LabManagerHub:
                 "queue_size": len(self.mailbox.get_all_pending()),
                 "backlog": len(self.mailbox.get_all_pending()),
                 "mps": self.mps,
-                "throughput": self.throughput_mbps
+                "throughput": self.throughput_mbps,
+                "version": version
             }
         except Exception as e:
             logger.error(f"Error collecting system metrics: {e}")
@@ -567,7 +569,8 @@ class LabManagerHub:
                 "queue_size": len(self.mailbox.get_all_pending()) if hasattr(self, 'mailbox') else 0,
                 "backlog": len(self.mailbox.get_all_pending()) if hasattr(self, 'mailbox') else 0,
                 "mps": getattr(self, 'mps', 0.0),
-                "throughput": getattr(self, 'throughput_mbps', 0.0)
+                "throughput": getattr(self, 'throughput_mbps', 0.0),
+                "version": "unknown"
             }
 
     async def run_autoupdate_loop(self):
