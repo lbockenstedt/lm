@@ -463,6 +463,10 @@ const VIEWS = {
                             </div>
                         </div>
                         <div class="pt-4 flex justify-end gap-3">
+                            <button onclick="triggerUpdate(event)" id="diag-update-btn" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm flex items-center gap-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0a2 2 0 012-2h6a2 2 0 012 2m-6 0v12m0-12l-4 4m4-4l4 4"></path></svg>
+                                Update from GitHub
+                            </button>
                             <button onclick="refreshOpnsenseCache()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
                                 Refresh OPNsense Cache
                             </button>
@@ -609,8 +613,8 @@ async function updateAutoUpdateInterval(hours) {
     await updateGlobalConfig('update_interval', parseInt(hours) || 1);
 }
 
-async function triggerUpdate() {
-    const btn = document.getElementById('update-btn');
+async function triggerUpdate(event) {
+    const btn = event ? event.currentTarget : document.getElementById('update-btn');
     if (!btn) return;
 
     const originalText = btn.textContent;
