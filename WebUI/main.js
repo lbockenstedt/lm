@@ -1482,6 +1482,117 @@ async function deleteUser(userId) {
     }
 }
 
+function showAddUserModal() {
+    const modal = document.createElement('div');
+    modal.id = 'add-user-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">Add New User</h3>
+                <button onclick="closeAddUserModal()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">User ID</label>
+                    <input type="text" id="new-user-id" placeholder="e.g. admin-user" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">System Admin</label>
+                        <div class="flex items-center gap-2 py-2">
+                            <input type="checkbox" id="perm-admin" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Manage Proxmox</label>
+                        <div class="flex items-center gap-2 py-2">
+                            <input type="checkbox" id="perm-pxmx_manage" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">View Proxmox</label>
+                        <div class="flex items-center gap-2 py-2">
+                            <input type="checkbox" id="perm-pxmx_view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Edit Firewall</label>
+                        <div class="flex items-center gap-2 py-2">
+                            <input type="checkbox" id="perm-opn_edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Manage DNS</label>
+                        <div class="flex items-center gap-2 py-2">
+                            <input type="checkbox" id="perm-dns_manage" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Manage CPPM</label>
+                        <div class="flex items-center gap-2 py-2">
+                            <input type="checkbox" id="perm-cppm_manage" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">View CPPM</label>
+                        <div class="flex items-center gap-2 py-2">
+                            <input type="checkbox" id="perm-cppm_view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+                <button onclick="closeAddUserModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+                <button onclick="saveUser()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Create User</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+function closeAddUserModal() {
+    const modal = document.getElementById('add-user-modal');
+    if (modal) modal.remove();
+}
+
+async function saveUser() {
+    const userId = document.getElementById('new-user-id').value.trim();
+    if (!userId) {
+        alert('Please enter a User ID');
+        return;
+    }
+
+    const permissions = {
+        admin: document.getElementById('perm-admin').checked,
+        pxmx_manage: document.getElementById('perm-pxmx_manage').checked,
+        pxmx_view: document.getElementById('perm-pxmx_view').checked,
+        opn_edit: document.getElementById('perm-opn_edit').checked,
+        dns_manage: document.getElementById('perm-dns_manage').checked,
+        cppm_manage: document.getElementById('perm-cppm_manage').checked,
+        cppm_view: document.getElementById('perm-cppm_view').checked,
+    };
+
+    try {
+        const response = await fetch('/setup/users', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId, permissions: permissions })
+        });
+        if (response.ok) {
+            alert('User created successfully');
+            closeAddUserModal();
+            await loadUsers();
+        } else {
+            alert('Failed to create user');
+        }
+    } catch (err) {
+        alert('Error creating user: ' + err.message);
+    }
+}
+
 async function loadOpnsenseManagement() {
     const container = document.getElementById('opn-table-container');
     if (!container) return;
@@ -1503,27 +1614,37 @@ async function loadOpnsenseManagement() {
             return;
         }
 
-        console.log(`[OPNsense] Fetching ${subMenu} from ${endpoint}...`);
+        console.log(`[OPNsense-Debug] Fetching ${subMenu} from ${endpoint}...`);
         const response = await fetch(endpoint);
+        console.log(`[OPNsense-Debug] Response status: ${response.status} ${response.statusText}`);
         if (!response.ok) throw new Error(`Failed to fetch ${subMenu}: ${response.status} ${response.statusText}`);
 
         const data = await response.json();
-        console.log(`[OPNsense] Received raw data for ${subMenu}:`, data);
+        console.log(`[OPNsense-Debug] Received raw data for ${subMenu}:`, data);
+        console.log(`[OPNsense-Debug] Data keys:`, Object.keys(data));
 
         // Robust item extraction
         let items = [];
         if (Array.isArray(data)) {
+            console.log(`[OPNsense-Debug] Data is an array, using as items.`);
             items = data;
         } else if (data && typeof data === 'object') {
             if (Array.isArray(data.data)) {
+                console.log(`[OPNsense-Debug] Found items in data.data`);
                 items = data.data;
             } else if (Array.isArray(data.payload?.data)) {
+                console.log(`[OPNsense-Debug] Found items in data.payload.data`);
                 items = data.payload.data;
             } else if (data.rows && Array.isArray(data.rows)) {
+                console.log(`[OPNsense-Debug] Found items in data.rows`);
                 items = data.rows;
+            } else {
+                console.log(`[OPNsense-Debug] No known item arrays found in data object. Keys were:`, Object.keys(data));
             }
+        } else {
+            console.log(`[OPNsense-Debug] Data is neither array nor object:`, typeof data);
         }
-        console.log(`[OPNsense] Processed items for ${subMenu} (count: ${items.length}):`, items);
+        console.log(`[OPNsense-Debug] Processed items for ${subMenu} (count: ${items.length}):`, items);
 
         let finalItems = items;
 
