@@ -390,7 +390,74 @@ def create_app(hub):
             logger.error(f"API: Error fetching OPNsense DNS records: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/cppm/refresh")
+    async def refresh_cppm_cache():
+        hub = app.state.hub
+        logger.info("API: Triggering CPPM cache refresh")
+        cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
+        if not cppm_spoke:
+            logger.error("API: No CPPM spoke connected for refresh")
+            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+        try:
+            result = await hub.request_response(cppm_spoke, "CPPM_REFRESH_CACHE", {})
+            return result
+        except Exception as e:
+            logger.error(f"API: Error refreshing CPPM cache: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/cppm/health")
+    async def get_cppm_health():
+        hub = app.state.hub
+        logger.info("API: Requesting CPPM health")
+        cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
+        if not cppm_spoke:
+            logger.error("API: No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+        try:
+            result = await hub.request_response(cppm_spoke, "CPPM_GET_SYSTEM_HEALTH", {})
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
+            logger.info(f"API: Received CPPM health: {data}")
+            return data
+        except Exception as e:
+            logger.error(f"API: Error fetching CPPM health: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/cppm/policies")
+    async def get_cppm_policies():
+        hub = app.state.hub
+        logger.info("API: Requesting CPPM policies")
+        cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
+        if not cppm_spoke:
+            logger.error("API: No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+        try:
+            result = await hub.request_response(cppm_spoke, "CPPM_GET_ALL_POLICIES", {})
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
+            logger.info(f"API: Received CPPM policies: {data}")
+            return data
+        except Exception as e:
+            logger.error(f"API: Error fetching CPPM policies: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/cppm/endpoints")
+    async def get_cppm_endpoints():
+        hub = app.state.hub
+        logger.info("API: Requesting CPPM endpoints")
+        cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
+        if not cppm_spoke:
+            logger.error("API: No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+        try:
+            result = await hub.request_response(cppm_spoke, "CPPM_GET_ALL_ENDPOINTS", {})
+            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
+            logger.info(f"API: Received CPPM endpoints: {data}")
+            return data
+        except Exception as e:
+            logger.error(f"API: Error fetching CPPM endpoints: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/vm/{vm_id}/details")
+
     async def get_vm_details(vm_id: str):
         hub = app.state.hub
         res_info = hub.state.system_state.get("resources", {}).get(vm_id, {})
@@ -437,8 +504,66 @@ def create_app(hub):
 
         return details
 
-    @app.get("/setup/appearance")
-    async def get_appearance():
+    @app.get("/api/aggregate/opnsense")
+    async def aggregate_opnsense():
+        hub = app.state.hub
+        opn_spokes = [sid for sid in hub.active_connections if "opn" in sid]
+
+        results = []
+        for sid in opn_spokes:
+            try:
+                # Fetch health and interface status to provide a summary
+                health_raw = await hub.request_response(sid, "GET_SYSTEM_HEALTH", {})
+                int_raw = await hub.request_response(sid, "GET_INTERFACE_STATUS", {})
+
+                health_data = health_raw.get("payload", {}).get("data", {}) if isinstance(health_raw, dict) else {}
+                int_data = int_raw.get("payload", {}).get("data", {}) if isinstance(int_raw, dict) else {}
+
+                results.append({
+                    "spoke_id": sid,
+                    "spoke_online": True,
+                    "health": health_data,
+                    "interfaces": int_data,
+                    "status": "ONLINE"
+                })
+            except Exception as e:
+                results.append({
+                    "spoke_id": sid,
+                    "spoke_online": False,
+                    "status": "ERROR",
+                    "error": str(e)
+                })
+
+        return {"hosts": results}
+
+    @app.get("/api/aggregate/proxmox")
+    async def aggregate_proxmox():
+        hub = app.state.hub
+        pxmx_spokes = [sid for sid in hub.active_connections if "pxmx" in sid]
+
+        results = []
+        for sid in pxmx_spokes:
+            try:
+                # Assuming Proxmox spokes have a similar health/info command
+                res_raw = await hub.request_response(sid, "GET_VM_INFO", {"vm_id": "all"})
+                res_data = res_raw.get("payload", {}).get("data", {}) if isinstance(res_raw, dict) else {}
+
+                results.append({
+                    "spoke_id": sid,
+                    "spoke_online": True,
+                    "data": res_data,
+                    "status": "ONLINE"
+                })
+            except Exception as e:
+                results.append({
+                    "spoke_id": sid,
+                    "spoke_online": False,
+                    "status": "ERROR",
+                    "error": str(e)
+                })
+
+        return {"hosts": results}
+
         hub = app.state.hub
         config = hub.state.system_state.get("global_config", {}).get("appearance", {
             "primary_color": "#01A982",
