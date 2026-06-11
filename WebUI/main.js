@@ -13,6 +13,14 @@ const PRODUCT_MAP = {
     'cppm': 'cppm'
 };
 
+const LOG_NAMES = {
+    'hub': 'Lab Manager Logs',
+    'opn': 'Firewall Logs',
+    'pxmx': 'Hypervisor Logs',
+    'cppm': 'Security/NAC Logs',
+    'cs': 'Client Simulator Logs'
+};
+
 const VIEWS = {
     dashboard: {
         name: 'Dashboard',
@@ -443,7 +451,7 @@ const VIEWS = {
         render: (subMenu) => {
             if (subMenu.startsWith('logs-')) {
                 const module = subMenu.replace('logs-', '');
-                const logTitle = module === 'hub' ? 'Hub Console Output' : `${module.toUpperCase()} Logs`;
+                const logTitle = LOG_NAMES[module] || `${module.toUpperCase()} Logs`;
                 return `
                     <div class="space-y-6">
                         <h2 class="text-2xl font-bold mb-6 text-[#263040]">${logTitle}</h2>
@@ -473,7 +481,7 @@ const VIEWS = {
                         <div class="grid grid-cols-1 gap-4">
                             ${['hub', 'pxmx', 'opn', 'cppm', 'cs'].map(mod => `
                                 <div onclick="setSubView('logs-${mod}')" class="p-4 rounded-md bg-white border border-slate-200 hover:border-green-500 cursor-pointer transition-all flex justify-between items-center group">
-                                    <span class="text-sm font-medium text-slate-700 group-hover:text-green-600">${mod.toUpperCase()} Logs</span>
+                                    <span class="text-sm font-medium text-slate-700 group-hover:text-green-600">${LOG_NAMES[mod] || mod.toUpperCase() + ' Logs'}</span>
                                     <svg class="w-4 h-4 text-slate-400 group-hover:text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
                                 </div>
                             `).join('')}
