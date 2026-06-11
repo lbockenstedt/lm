@@ -442,7 +442,7 @@ class LabManagerHub:
     async def perform_update(self, force=False):
         """
         Checks for updates and performs a git pull if a new version is available.
-        Also triggers updates for all connected spokes.
+        Also triggers updates for all approved modules (connected or offline).
         """
         local_v = await self.get_local_version()
         remote_v = await self.get_remote_version()
@@ -496,9 +496,12 @@ class LabManagerHub:
                     logger.error(f"Hub git pull failed: {err_msg}")
                     return {"status": "error", "message": f"Hub update failed: {err_msg}"}
 
-            # 2. Trigger updates for all connected spokes
+            # 2. Trigger updates for all approved modules (connected or offline)
             update_results = []
-            for spoke_id, ws in self.active_connections.items():
+            for spoke_id, approved in self.approved_modules.items():
+                if not approved:
+                    continue
+
                 # Identify module type
                 module_key = None
                 module_map = {'pxmx': 'pxmx', 'opn': 'opnsense', 'cs': 'cs', 'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap'}
@@ -521,8 +524,12 @@ class LabManagerHub:
                             ),
                             payload=MessagePayload(type="SPOKE_UPDATE", data={"repo_url": repo_url, "branch": branch})
                         )
-                        await self.send_to_spoke(msg)
-                        update_results.append(f"{spoke_id}: triggered ({branch})")
+                        try:
+                            await self.mailbox.push(msg, self.send_to_spoke)
+                            update_results.append(f"{spoke_id}: triggered ({branch})")
+                        except Exception as e:
+                            logger.error(f"Failed to push update for {spoke_id}: {e}")
+                            update_results.append(f"{spoke_id}: failed")
                     else:
                         update_results.append(f"{spoke_id}: no repo configured")
                 else:
@@ -748,11 +755,17 @@ class LabManagerHub:
     async def run_retry_loop(self):
         class ConnectionMap(dict):
             def get(self, spoke_id):
+                # Access the Hub instance (the outer 'self')
+                hub = self.hub_instance
+                if spoke_id not in hub.active_connections:
+                    return None
                 async def _send(msg):
-                    await self.send_to_spoke(msg)
+                    await hub.send_to_spoke(msg)
                 return _send
 
-        await self.mailbox.retry_loop(ConnectionMap())
+        conn_map = ConnectionMap()
+        conn_map.hub_instance = self
+        await self.mailbox.retry_loop(conn_map)
 
 if __name__ == "__main__":
     hub = LabManagerHub()
