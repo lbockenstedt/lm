@@ -1156,7 +1156,10 @@ async function updateStatus() {
     const spokeCount = document.getElementById('spoke-count');
     const mainNav = document.getElementById('main-nav');
 
-    if (!statusEl) return;
+    if (!statusEl) {
+        // Connection status pill removed from UI, but we still need to process status updates
+    }
+
 
     try {
         // Fetch both connection status and approval status
@@ -1189,10 +1192,12 @@ async function updateStatus() {
             if (tEl) tEl.textContent = `${m.throughput.toFixed(2)} MB/s`;
         }
 
-        statusEl.innerHTML = `
-            <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div>
-            <span class="text-green-600">Hub Online</span>
-        `;
+        if (statusEl) {
+            statusEl.innerHTML = `
+                <div class="w-1.5 h-1.5 rounded-full bg-green-500"></div>
+                <span class="text-green-600">Hub Online</span>
+            `;
+        }
 
         const connections = statusData.active_connections || [];
 
