@@ -142,10 +142,10 @@ const VIEWS = {
     opnsense: {
         name: 'Firewall',
         className: 'Firewall',
-        subMenus: ['Firewall Rules', 'Configuration', 'Interfaces', 'DHCP Leases', 'NAT Policies', 'DNS Records'],
+        subMenus: ['Firewall Rules', 'Interfaces', 'DHCP Leases', 'NAT Policies', 'DNS Records', 'config'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>',
         render: (subMenu) => {
-            if (subMenu === 'Configuration') {
+            if (subMenu === 'config') {
                 return `
                     <div class="space-y-6">
                         <h2 class="text-2xl font-bold mb-6 text-[#263040]">Firewall Configuration</h2>
@@ -977,7 +977,7 @@ function renderTopNav() {
             `;
         }
         return `
-            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === 'config' ? 'ml-auto' : ''} ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
                 ${menu}
             </div>
         `;
