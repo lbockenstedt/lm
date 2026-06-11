@@ -159,9 +159,15 @@ const VIEWS = {
                         <h2 class="text-2xl font-bold mb-6 text-[#263040]">Firewall Configuration</h2>
                         <div class="hpe-card rounded-lg p-6 space-y-6">
                             <div class="grid grid-cols-1 gap-6">
-                                <div class="space-y-2">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">OPNsense Host / IP</label>
-                                    <input type="text" id="opn-host" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <div class="space-y-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">Firewall Host/IP</label>
+                                        <input type="text" id="opn-host" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500" placeholder="e.g. 172.16.1.1">
+                                    </div>
+                                    <div class="space-y-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">Port</label>
+                                        <input type="text" id="opn-port" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500" placeholder="e.g. 8443">
+                                    </div>
                                 </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     <div class="space-y-2">
@@ -788,9 +794,11 @@ function loadProxmoxConfig(config) {
 
 function loadOpnsenseConfig(config) {
     const hostEl = document.getElementById('opn-host');
+    const portEl = document.getElementById('opn-port');
     const keyEl = document.getElementById('opn-api-key');
     const secretEl = document.getElementById('opn-api-secret');
     if (hostEl) hostEl.value = config.opn_host || '';
+    if (portEl) portEl.value = config.opn_port || '8443';
     if (keyEl) keyEl.value = config.api_key || '';
     if (secretEl) secretEl.value = config.api_secret || '';
 }
@@ -835,6 +843,7 @@ async function saveProxmoxConfig() {
 async function saveOpnsenseConfig() {
     const config = {
         opn_host: document.getElementById('opn-host').value,
+        opn_port: document.getElementById('opn-port').value,
         api_key: document.getElementById('opn-api-key').value,
         api_secret: document.getElementById('opn-api-secret').value,
     };
