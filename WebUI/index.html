@@ -384,19 +384,21 @@
         </div>
     </main>
 
-    <footer id="lcars-footer" class="hidden h-10 w-full fixed bottom-0 left-0 z-50 font-mono text-[10px] uppercase tracking-tighter">
-        <div class="flex items-center gap-4">
-            <span>SENS-C-47</span>
-            <span>HUB_STAT: OK</span>
-            <span>SEC_LEVEL: 4</span>
-        </div>
-        <div class="flex items-center gap-4">
-            <span>TIMESTAMP: <span id="footer-timestamp">--:--:--</span></span>
-            <span>SESS_ID: <span id="footer-session">S-000</span></span>
+    <footer class="h-10 w-full flex items-center px-6 text-white text-xs font-medium transition-all" style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
+        <div class="flex justify-between w-full items-center">
+            <div class="flex items-center gap-4 opacity-70">
+                <span>© 2026 Lab Manager Hub</span>
+                <span class="text-slate-400">|</span>
+                <span class="font-bold">Enterprise Edition</span>
+            </div>
+            <div class="flex items-center gap-3">
+                <span class="text-[10px] uppercase tracking-widest opacity-60">System Status: Online</span>
+                <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.6)]"></div>
+            </div>
         </div>
     </footer>
 
-    <script src="main.js?v=1.0.1"></script>
-    <script src="update_handler.js?v=1.0.1"></script>
+    <script src="main.js?v=0.09"></script>
+    <script src="update_handler.js?v=0.09"></script>
 </body>
 </html>
