@@ -456,9 +456,10 @@ class LabManagerHub:
             config = self.state.get_global_config()
             sources = config.get("update_sources", {})
             hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
+            branch = config.get("global_branch", "main")
 
-            # Set remote origin to the configured URL before pulling
-            update_cmd = f"cd {hub_root} && git remote set-url origin {hub_repo} && git pull"
+            # Set remote origin, fetch, and checkout the specified branch
+            update_cmd = f"cd {hub_root} && git remote set-url origin {hub_repo} && git fetch origin && git checkout {branch} && git pull origin {branch}"
 
             process = await asyncio.create_subprocess_shell(
                 update_cmd,
@@ -485,7 +486,7 @@ class LabManagerHub:
                 if module_key:
                     repo_url = sources.get(module_key)
                     if repo_url:
-                        logger.info(f"Triggering update for spoke {spoke_id} from {repo_url}...")
+                        logger.info(f"Triggering update for spoke {spoke_id} from {repo_url} on branch {branch}...")
                         msg_id = str(uuid.uuid4())
                         msg = Message(
                             header=MessageHeader(
@@ -494,10 +495,10 @@ class LabManagerHub:
                                 sender_id="hub",
                                 destination_id=spoke_id
                             ),
-                            payload=MessagePayload(type="SPOKE_UPDATE", data={"repo_url": repo_url})
+                            payload=MessagePayload(type="SPOKE_UPDATE", data={"repo_url": repo_url, "branch": branch})
                         )
                         await self.send_to_spoke(msg)
-                        update_results.append(f"{spoke_id}: triggered")
+                        update_results.append(f"{spoke_id}: triggered ({branch})")
                     else:
                         update_results.append(f"{spoke_id}: no repo configured")
                 else:
@@ -506,7 +507,7 @@ class LabManagerHub:
             logger.info(f"Spoke update triggers: {update_results}")
             logger.info("Update successful. Triggering service restart...")
             subprocess.Popen(["sudo", "systemctl", "restart", "lm"])
-            return {"status": "success", "message": f"Updated Hub from v{local_v} to v{remote_v} and triggered spoke updates. Server is restarting..."}
+            return {"status": "success", "message": f"Updated Hub from v{local_v} to v{remote_v} on branch {branch} and triggered spoke updates. Server is restarting..."}
 
         except Exception as e:
             logger.error(f"Unexpected error during update: {e}")

@@ -860,6 +860,44 @@ def create_app(hub):
             return {"status": "success", "message": f"User {user_id} deleted."}
         raise HTTPException(status_code=404, detail="User not found")
 
+    @app.get("/setup/github-repos")
+    async def get_github_repos():
+        try:
+            async with httpx.AsyncClient() as client:
+                # Fetch public repos for lbockenstedt
+                resp = await client.get("https://api.github.com/users/lbockenstedt/repos")
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=resp.status_code, detail="Failed to fetch repos from GitHub")
+                repos = resp.json()
+                return {
+                    "repos": [
+                        {"name": r["name"], "url": r["clone_url"], "description": r["description"]}
+                        for r in repos
+                    ]
+                }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/setup/github-branches/{repo}")
+    async def get_github_branches(repo: str):
+        try:
+            # The repo might be the full name (lbockenstedt/lm) or just the name (lm)
+            if "/" not in repo:
+                repo_full = f"lbockenstedt/{repo}"
+            else:
+                repo_full = repo
+
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"https://api.github.com/repos/{repo_full}/branches")
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=resp.status_code, detail=f"Failed to fetch branches for {repo_full}")
+                branches = resp.json()
+                return {
+                    "branches": [b["name"] for b in branches]
+                }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/config")
     async def get_global_config():
         hub = app.state.hub

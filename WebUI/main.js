@@ -371,7 +371,23 @@ const VIEWS = {
                                 </div>
                             </div>
                             <div class="pt-6 border-t border-slate-200">
-                                <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-4">Repository Sources</h3>
+                                <div class="flex justify-between items-center mb-4">
+                                    <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">Repository Sources</h3>
+                                    <div class="flex gap-2">
+                                        <button onclick="scanGitHubRepos()" class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
+                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                                            Scan GitHub
+                                        </button>
+                                        <div class="flex items-center gap-2 bg-slate-100 px-2 py-1 rounded border border-slate-200">
+                                            <label class="text-[10px] text-slate-500 uppercase font-bold">Global Branch</label>
+                                            <select id="global-branch" class="bg-white border border-slate-300 rounded px-1 py-0.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                                <option value="main">main</option>
+                                                <option value="develop">develop</option>
+                                                <option value="master">master</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                                     <div class="space-y-2">
                                         <label class="text-[10px] text-slate-500 uppercase font-bold">Hub Repository</label>
@@ -637,6 +653,35 @@ async function triggerUpdate(event) {
     }
 }
 
+async function scanGitHubRepos() {
+    try {
+        const response = await fetch('/setup/github-repos');
+        if (!response.ok) throw new Error('Failed to fetch repos');
+        const data = await response.json();
+        const repos = data.repos;
+
+        if (repos.length === 0) {
+            alert('No repositories found for lbockenstedt');
+            return;
+        }
+
+        let repoList = repos.map((r, i) => `${i + 1}: ${r.name} (${r.url})`).join('\\n');
+        const choice = prompt(`Found ${repos.length} repositories. Enter the number of the repo to use as the Hub source, or 0 to cancel:\\n\\n${repoList}`);
+
+        if (choice && choice !== '0') {
+            const idx = parseInt(choice) - 1;
+            if (idx >= 0 && idx < repos.length) {
+                document.getElementById('update-source-hub').value = repos[idx].url;
+                alert(`Set Hub source to ${repos[idx].name}`);
+            } else {
+                alert('Invalid selection');
+            }
+        }
+    } catch (err) {
+        alert('Error scanning GitHub: ' + err.message);
+    }
+}
+
 async function saveUpdateSources() {
     const sources = {
         hub: document.getElementById('update-source-hub').value,
@@ -647,15 +692,16 @@ async function saveUpdateSources() {
         netbox: document.getElementById('update-source-netbox').value,
         ldap: document.getElementById('update-source-ldap').value,
     };
+    const globalBranch = document.getElementById('global-branch').value;
 
     try {
         const response = await fetch('/setup/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config: { update_sources: sources } })
+            body: JSON.stringify({ config: { update_sources: sources, global_branch: globalBranch } })
         });
         if (response.ok) {
-            alert('Update sources saved successfully!');
+            alert('Update sources and global branch saved successfully!');
         } else {
             alert('Failed to save update sources.');
         }
@@ -679,6 +725,10 @@ async function loadSetupConfig() {
 
         // Load update sources
         const sources = config.update_sources || {};
+        const globalBranch = config.global_branch || 'main';
+        if (document.getElementById('global-branch')) {
+            document.getElementById('global-branch').value = globalBranch;
+        }
         const sourceFields = {
             'hub': 'update-source-hub',
             'pxmx': 'update-source-pxmx',
