@@ -105,9 +105,10 @@ const VIEWS = {
                                             <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
                                                 <tr id="firewall-headers">
                                                     <th class="px-4 py-3">Source</th>
-                                                    <th class="px-4 py-3">Action</th>
-                                                    <th class="px-4 py-3">Protocol</th>
                                                     <th class="px-4 py-3">Destination</th>
+                                                    <th class="px-4 py-3">Protocol</th>
+                                                    <th class="px-4 py-3">Action</th>
+                                                    <th class="px-4 py-3">Description</th>
                                                 </tr>
                                             </thead>
                                             <tbody id="firewall-table-body" class="divide-y divide-slate-200">
@@ -515,6 +516,35 @@ const VIEWS = {
                             <button onclick="loadDiagnostics()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
                                 Refresh Diagnostics
                             </button>
+                        </div>
+
+                        <div class="mt-8 space-y-4">
+                            <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">API Explorer (Debug Tool)</h3>
+                            <div class="hpe-card rounded-lg p-6 shadow-sm space-y-4">
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div class="space-y-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">Target Spoke</label>
+                                        <select id="probe-spoke-selector" onchange="updateQuickPaths()" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                            <option value="">Select Spoke...</option>
+                                        </select>
+                                    </div>
+                                    <div class="space-y-2 md:col-span-2">
+                                        <label class="text-xs text-slate-500 uppercase font-bold">API Path</label>
+                                        <div class="flex gap-2">
+                                            <input type="text" id="probe-path" placeholder="/api/..." class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 font-mono">
+                                            <button onclick="executeProbe()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all">Probe</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="flex flex-wrap gap-2">
+                                    <label class="text-[10px] text-slate-400 uppercase font-bold w-full">Quick Paths:</label>
+                                    <div id="probe-quick-paths" class="flex flex-wrap gap-2"></div>
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Response</label>
+                                    <pre id="probe-response" class="w-full h-64 overflow-auto p-4 bg-slate-900 text-green-400 text-xs font-mono rounded-md border border-slate-800 whitespace-pre-wrap">No data probed yet...</pre>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 `;
@@ -1444,23 +1474,24 @@ async function lookupVMDetails() {
         // 4. Update Firewall Rules (OPNsense)
         const rules = (data.opnsense && data.opnsense.rules) || [];
         if (rules.length === 0) {
-            tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-4 text-center text-slate-400 italic">No rules found for this VM.</td></tr>`;
+            tableBody.innerHTML = `<tr><td colspan="5" class="px-4 py-4 text-center text-slate-400 italic">No rules found for this VM.</td></tr>`;
         } else {
             tableBody.innerHTML = rules.map(rule => `
                 <tr class="hover:bg-slate-50 transition-colors">
                     <td class="px-4 py-3 font-mono text-xs text-slate-600">${rule.source || 'any'}</td>
+                    <td class="px-4 py-3 text-slate-600">${rule.destination || '-'}</td>
+                    <td class="px-4 py-3 text-slate-600">${rule.protocol || 'TCP'}</td>
                     <td class="px-4 py-3">
                         <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${rule.action === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">
                             ${rule.action}
                         </span>
                     </td>
-                    <td class="px-4 py-3 text-slate-600">${rule.protocol || 'TCP'}</td>
-                    <td class="px-4 py-3 text-slate-600">${rule.destination || '-'}</td>
+                    <td class="px-4 py-3 text-slate-600 text-xs">${rule.description || '-'}</td>
                 </tr>
             `).join('');
         }
     } catch (err) {
-        tableBody.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-500 font-medium">${err.message}</td></tr>`;
+        tableBody.innerHTML = `<tr><td colspan="5" class="px-4 py-8 text-center text-red-500 font-medium">${err.message}</td></tr>`;
     }
 }
 
@@ -1699,7 +1730,7 @@ async function loadOpnsenseManagement() {
 
         if (subMenu === 'Firewall Rules') {
             // Use specialized columns for firewall rules to hide ID and ensure Source is present
-            keys = ['action', 'protocol', 'source', 'destination', 'description'].filter(k => k in firstItem || true);
+            keys = ['source', 'destination', 'protocol', 'action', 'description'].filter(k => k in firstItem || true);
         }
 
         const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace('_', ' ')}</th>`).join('');
@@ -1769,6 +1800,7 @@ async function refreshOpnsenseCache() {
 
 async function loadDiagnostics() {
     const container = document.getElementById('diag-container');
+    const spokeSelector = document.getElementById('probe-spoke-selector');
     if (!container) return;
 
     container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching spoke telemetry...</div>`;
@@ -1778,6 +1810,11 @@ async function loadDiagnostics() {
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         const data = await response.json();
         const spokes = data.spokes || [];
+
+        if (spokeSelector) {
+            spokeSelector.innerHTML = '<option value="">Select Spoke...</option>' +
+                spokes.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('');
+        }
 
         if (spokes.length === 0) {
             container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No spoke telemetry available.</div>`;
@@ -2047,6 +2084,58 @@ async function unapproveSpoke(spokeId) {
     } catch (err) {
         alert('Error un-approving spoke: ' + err.message);
     }
+}
+
+async function executeProbe() {
+    const spokeId = document.getElementById('probe-spoke-selector').value;
+    const path = document.getElementById('probe-path').value;
+    const responseEl = document.getElementById('probe-response');
+
+    if (!spokeId || !path) {
+        alert('Please select a spoke and enter a path');
+        return;
+    }
+
+    responseEl.textContent = 'Probing...';
+    try {
+        const res = await fetch(`/setup/api-probe?spoke_id=${spokeId}&path=${encodeURIComponent(path)}`);
+        const data = await res.json();
+        responseEl.textContent = JSON.stringify(data, null, 2);
+    } catch (err) {
+        responseEl.textContent = `Error: ${err.message}`;
+    }
+}
+
+function updateQuickPaths() {
+    const spokeId = document.getElementById('probe-spoke-selector').value;
+    const container = document.getElementById('probe-quick-paths');
+    if (!container) return;
+
+    const paths = {
+        'opn': ['/api/unbound/overrides', '/api/unbound/dns', '/api/firewall/rules', '/api/interfaces'],
+        'pxmx': ['/api/vms', '/api/nodes', '/api/storage'],
+        'cppm': ['/api/policies', '/api/endpoints', '/api/health'],
+        'cs': ['/api/simulations', '/api/profiles'],
+        'default': ['/api/health', '/api/status']
+    };
+
+    let type = 'default';
+    if (spokeId.includes('opn')) type = 'opn';
+    else if (spokeId.includes('pxmx')) type = 'pxmx';
+    else if (spokeId.includes('cppm')) type = 'cppm';
+    else if (spokeId.includes('cs')) type = 'cs';
+
+    const selectedPaths = paths[type];
+    container.innerHTML = selectedPaths.map(p => `
+        <button onclick="setProbePath('${p}')" class="text-[10px] bg-slate-100 border border-slate-200 px-2 py-1 rounded hover:bg-slate-200 transition-colors text-slate-600 font-medium">
+            ${p}
+        </button>
+    `).join('');
+}
+
+function setProbePath(path) {
+    document.getElementById('probe-path').value = path;
+    executeProbe();
 }
 
 document.addEventListener('DOMContentLoaded', () => {

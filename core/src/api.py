@@ -571,6 +571,8 @@ def create_app(hub):
 
         return {"hosts": results}
 
+    @app.get("/setup/appearance")
+    async def get_appearance():
         hub = app.state.hub
         config = hub.state.system_state.get("global_config", {}).get("appearance", {
             "primary_color": "#01A982",
@@ -630,6 +632,22 @@ def create_app(hub):
         except Exception as e:
             logger.error(f"Error reading logs for {module}: {e}")
             raise HTTPException(status_code=500, detail=f"Permission or I/O error reading {log_path}: {str(e)}")
+
+    @app.get("/setup/api-probe")
+    async def probe_spoke_api(spoke_id: str, path: str):
+        """
+        Generic probe endpoint to explore any spoke's API.
+        """
+        hub = app.state.hub
+        if spoke_id not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"Spoke {spoke_id} not connected")
+
+        try:
+            # Use a generic command type that the spoke should handle by calling the provided path
+            result = await hub.request_response(spoke_id, "PROBE_API", {"path": path})
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Probe failed: {str(e)}")
 
 
     @app.get("/setup/diagnostics")
