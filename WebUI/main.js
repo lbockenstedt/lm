@@ -1207,6 +1207,11 @@ async function updateStatus() {
             if (qEl) qEl.textContent = m.queue_size;
             if (bEl) bEl.textContent = m.backlog;
             if (tEl) tEl.textContent = `${m.throughput.toFixed(2)} MB/s`;
+
+            const versionEl = document.getElementById('footer-sys-version');
+            if (versionEl && m.version) {
+                versionEl.textContent = `v${m.version}`;
+            }
         }
 
         if (statusEl) {
@@ -1689,15 +1694,24 @@ async function loadOpnsenseManagement() {
         }
 
         // Generic Table Renderer
-        const firstItem = finalItems[0];
-        if (!firstItem || typeof firstItem !== 'object') {
-            throw new Error('Unexpected data format: first item is not an object');
+        let keys = Object.keys(firstItem);
+
+        if (subMenu === 'Firewall Rules') {
+            // Use specialized columns for firewall rules to hide ID and ensure Source is present
+            keys = ['action', 'protocol', 'source', 'destination', 'description'].filter(k => k in firstItem || true);
         }
-        const keys = Object.keys(firstItem);
+
         const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace('_', ' ')}</th>`).join('');
         const rows = finalItems.map(item => `
             <tr class="hover:bg-slate-50 transition-colors">
-                ${keys.map(k => `<td class="px-4 py-3 text-slate-600 font-mono text-xs">${item[k] !== undefined ? item[k] : '-'}</td>`).join('')}
+                ${keys.map(k => {
+                    const val = item[k] !== undefined ? item[k] : '-';
+                    if (k === 'action' && typeof val === 'string') {
+                        const color = val === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600';
+                        return `<td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${color}">${val}</span></td>`;
+                    }
+                    return `<td class="px-4 py-3 text-slate-600 font-mono text-xs">${val}</td>`;
+                }).join('')}
             </tr>
         `).join('');
 
