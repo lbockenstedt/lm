@@ -322,10 +322,6 @@
             <div class="flex items-center gap-3 mb-6">
                 <h1 class="text-xl font-bold tracking-tight text-[#263040]">Lab Manager</h1>
             </div>
-            <div id="connection-status" class="flex items-center gap-2 px-2 py-1 rounded-full bg-slate-100 text-[10px] font-medium w-fit border border-slate-200">
-                <div class="w-1.5 h-1.5 rounded-full bg-slate-400 status-pulse"></div>
-                <span class="text-slate-500">Connecting...</span
-            </div>
         </div>
 
         <nav id="main-nav" class="flex-1 px-3 space-y-1">
@@ -382,23 +378,22 @@
         <div id="viewport" class="flex-1 p-8 overflow-y-auto bg-[#F5F5F5]">
             <!-- VIEWS INJECTED HERE -->
         </div>
+        <footer class="h-10 w-full flex items-center px-6 text-white text-xs font-medium transition-all" style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
+            <div class="flex justify-between w-full items-center">
+                <div class="flex items-center gap-4 opacity-70">
+                    <span>© 2026 Lab Manager Hub</span>
+                    <span class="text-slate-400">|</span>
+                    <span class="font-bold">Enterprise Edition</span>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="text-[10px] uppercase tracking-widest opacity-60">System Status: Online</span>
+                    <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.6)]"></div>
+                </div>
+            </div>
+        </footer>
     </main>
 
-    <footer class="h-10 w-full flex items-center px-6 text-white text-xs font-medium transition-all" style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
-        <div class="flex justify-between w-full items-center">
-            <div class="flex items-center gap-4 opacity-70">
-                <span>© 2026 Lab Manager Hub</span>
-                <span class="text-slate-400">|</span>
-                <span class="font-bold">Enterprise Edition</span>
-            </div>
-            <div class="flex items-center gap-3">
-                <span class="text-[10px] uppercase tracking-widest opacity-60">System Status: Online</span>
-                <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.6)]"></div>
-            </div>
-        </div>
-    </footer>
-
-    <script src="main.js?v=0.10"></script>
-    <script src="update_handler.js?v=0.10"></script>
+    <script src="main.js?v=0.11"></script>
+    <script src="update_handler.js?v=0.11"></script>
 </body>
 </html>
