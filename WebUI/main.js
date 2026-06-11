@@ -449,7 +449,7 @@ const VIEWS = {
                                     <svg class="w-4 h-4 text-slate-400 group-hover:text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
                                 </div>
                             `).join('')}
-                        </div}
+                        </div>
                     </div>
                 `;
             }
@@ -964,22 +964,6 @@ function renderTopNav() {
 
     // 2. Render Sub-menus
     topNavHtml += view.subMenus.map((menu, i) => {
-        if (menu === 'Logs') {
-            return `
-                <div class="relative group inline-flex items-center">
-                    <div onclick="setSubView('Logs')" class="sub-nav-item ${currentSubView.startsWith('logs-') || currentSubView === 'Logs' ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
-                        Logs ▾
-                    </div>
-                    <div class="absolute left-0 top-full hidden group-hover:block w-40 bg-white border border-slate-200 shadow-xl z-50 rounded-b-md">
-                        <div onclick="setSubView('logs-hub')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-hub' ? 'text-green-600 font-bold' : ''}">Hub Logs</div>
-                        <div onclick="setSubView('logs-pxmx')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-pxmx' ? 'text-green-600 font-bold' : ''}">Proxmox Logs</div>
-                        <div onclick="setSubView('logs-opn')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-opn' ? 'text-green-600 font-bold' : ''}">OPNsense Logs</div>
-                        <div onclick="setSubView('logs-cppm')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-cppm' ? 'text-green-600 font-bold' : ''}">CPPM Logs</div>
-                        <div onclick="setSubView('logs-cs')" class="px-4 py-2 text-xs hover:bg-slate-100 cursor-pointer ${currentSubView === 'logs-cs' ? 'text-green-600 font-bold' : ''}">CS Logs</div>
-                    </div>
-                </div>
-            `;
-        }
         return `
             <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === 'config' ? 'ml-auto' : ''} ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
                 ${menu}
