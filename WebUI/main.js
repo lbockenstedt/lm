@@ -650,7 +650,8 @@ async function triggerUpdate(event) {
     btn.textContent = 'Updating...';
 
     try {
-        const response = await fetch('/setup/update', { method: 'POST' });
+        // Append ?force=true to ensure we pull even if version is the same
+        const response = await fetch('/setup/update?force=true', { method: 'POST' });
         const data = await response.json();
         if (response.ok) {
             alert(data.message || 'Update triggered successfully!');

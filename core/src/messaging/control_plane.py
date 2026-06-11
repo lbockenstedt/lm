@@ -121,9 +121,9 @@ class BaseControlPlane:
 
                 ts = round(time.time(), 6)
                 resp = {
+                    "correlation_id": corr_id,
                     "header": {"message_id": str(uuid.uuid4()), "timestamp": ts,
-                               "sender_id": self.spoke_id, "destination_id": "hub",
-                               "correlation_id": corr_id},
+                               "sender_id": self.spoke_id, "destination_id": "hub"},
                     "payload": {"type": "COMMAND_RESULT", "data": result}
                 }
                 resp["signature"] = self._sign(resp)

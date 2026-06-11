@@ -10,14 +10,24 @@ logger = logging.getLogger("State")
 
 class StateManager:
     def __init__(self, system_path="system.json", tenants_path="tenants.json"):
-        # Resolve absolute paths to ensure persistence works under systemd/different CWDs
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        # Move up to the core root or appropriate data directory
-        data_dir = os.path.abspath(os.path.join(base_dir, "../../data"))
-        os.makedirs(data_dir, exist_ok=True)
+        # Use /var/lib/lm/state for production persistence to avoid being overwritten by git updates
+        # Fallback to a local 'data' directory if /var/lib/lm is not writable (e.g. in dev environments)
+        self.data_dir = "/var/lib/lm/state"
+        try:
+            if not os.path.exists(self.data_dir):
+                os.makedirs(self.data_dir, exist_ok=True)
+            # Test writability
+            test_file = os.path.join(self.data_dir, ".write_test")
+            with open(test_file, "w") as f:
+                f.write("test")
+            os.remove(test_file)
+        except Exception as e:
+            logger.warning(f"Cannot use {self.data_dir} (Permission denied or error: {e}). Falling back to home directory state storage.")
+            self.data_dir = os.path.expanduser("~/.local/share/lm/state")
+            os.makedirs(self.data_dir, exist_ok=True)
 
-        self.system_path = os.path.join(data_dir, system_path)
-        self.tenants_path = os.path.join(data_dir, tenants_path)
+        self.system_path = os.path.join(self.data_dir, system_path)
+        self.tenants_path = os.path.join(self.data_dir, tenants_path)
 
         # System-level state: Hardware, Global Config, Modules, Auth
         self.system_state: Dict[str, Any] = {

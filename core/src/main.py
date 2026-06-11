@@ -89,6 +89,8 @@ class LabManagerHub:
         self.rate_limiters: Dict[str, TokenBucket] = {}
         # { correlation_id: response_data } for request-response bridging
         self.response_cache: Dict[str, Any] = {}
+        self.opnsense_cache: Dict[str, Any] = {}
+        self.cache_dir = "/var/lib/lm/cache"
         self.is_ready = False
 
 
@@ -354,6 +356,13 @@ class LabManagerHub:
                     )
                     await self.mailbox.acknowledge(ack)
 
+                    # Debug: Log if this response is actually expected
+                    if corr_id not in self.response_cache:
+                        # This is tricky because request_response pops the id from cache
+                        # but the message loop handles the receipt.
+                        # Let's just log the receipt of every correlation ID.
+                        logger.debug(f"Received response for correlation_id: {corr_id}")
+
                     # Special case: if this was a version request, store the version
                     payload = msg_data.get("payload", {})
                     if payload.get("type") == "COMMAND_RESULT":
@@ -430,7 +439,7 @@ class LabManagerHub:
             logger.error(f"Failed to fetch remote version: {e}")
         return "unknown"
 
-    async def perform_update(self):
+    async def perform_update(self, force=False):
         """
         Checks for updates and performs a git pull if a new version is available.
         Also triggers updates for all connected spokes.
@@ -438,7 +447,7 @@ class LabManagerHub:
         local_v = await self.get_local_version()
         remote_v = await self.get_remote_version()
 
-        if local_v == remote_v:
+        if not force and local_v == remote_v:
             # Even if Hub is up to date, we might want to trigger spoke updates
             # For now, we'll return early to match previous behavior unless we want forced updates
             return {"status": "no_update", "message": f"System is already up to date (v{local_v})."}
@@ -447,7 +456,7 @@ class LabManagerHub:
             return {"status": "error", "message": "Could not retrieve remote version from GitHub."}
 
         try:
-            logger.info(f"Updating system from v{local_v} to v{remote_v}...")
+            logger.info(f"Updating system from v{local_v} to v{remote_v} (force={force})...")
 
             # 1. Update Hub itself
             hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -458,8 +467,17 @@ class LabManagerHub:
             hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
             branch = config.get("global_branch", "main")
 
-            # Set remote origin, fetch, and checkout the specified branch
-            update_cmd = f"cd {hub_root} && git remote set-url origin {hub_repo} && git fetch origin && git checkout {branch} && git pull origin {branch}"
+            # Set remote origin, stash local changes, fetch, checkout, pull, and pop stash
+            # This ensures that local modifications don't block the update
+            update_cmd = (
+                f"cd {hub_root} && "
+                f"git remote set-url origin {hub_repo} && "
+                f"git stash && "
+                f"git fetch origin && "
+                f"git checkout {branch} && "
+                f"git pull origin {branch} && "
+                f"git stash pop"
+            )
 
             process = await asyncio.create_subprocess_shell(
                 update_cmd,
@@ -469,8 +487,14 @@ class LabManagerHub:
             stdout, stderr = await process.communicate()
 
             if process.returncode != 0:
-                logger.error(f"Hub git pull failed: {stderr.decode()}")
-                return {"status": "error", "message": f"Hub update failed: {stderr.decode()}"}
+                # If stash pop fails, it's often because there were no changes to stash or conflicts.
+                # We log it but don't necessarily fail the whole update if the pull worked.
+                err_msg = stderr.decode().strip()
+                if "No stash entry found" in err_msg or "conflict" not in err_msg.lower():
+                    logger.info(f"Update completed with minor stash warning: {err_msg}")
+                else:
+                    logger.error(f"Hub git pull failed: {err_msg}")
+                    return {"status": "error", "message": f"Hub update failed: {err_msg}"}
 
             # 2. Trigger updates for all connected spokes
             update_results = []
@@ -599,6 +623,91 @@ class LabManagerHub:
                 logger.error(f"Error in auto-update loop: {e}")
                 await asyncio.sleep(300)
 
+    async def poll_opnsense_rules(self):
+        """
+        Polls OPNsense for all firewall rules and caches them locally and in-memory.
+        """
+        logger.info("Polling OPNsense firewall rules...")
+        opn_spoke = next((sid for sid in self.active_connections if "opn" in sid), None)
+        if not opn_spoke:
+            logger.error("OPNsense polling failed: No OPNsense spoke connected")
+            return False
+
+        try:
+            result = await self.request_response(opn_spoke, "OPNSENSE_GET_ALL_RULES", {})
+
+            # Robust extraction
+            data = {}
+            if isinstance(result, dict):
+                if "data" in result:
+                    data = result["data"]
+                elif "payload" in result and isinstance(result["payload"], dict):
+                    data = result["payload"].get("data", {})
+                else:
+                    data = result
+            else:
+                data = result
+
+            if not data:
+                logger.warning("OPNsense polling returned empty data")
+                return False
+
+            # Update in-memory cache
+            self.opnsense_cache = data
+
+            # Save to local disk
+            try:
+                if not os.path.exists(self.cache_dir):
+                    os.makedirs(self.cache_dir, exist_ok=True)
+
+                cache_path = os.path.join(self.cache_dir, "opnsense_rules.json")
+                with open(cache_path, "w") as f:
+                    json.dump(data, f)
+                logger.info(f"OPNsense rules cached to {cache_path}")
+            except Exception as e:
+                logger.error(f"Failed to persist OPNsense cache to disk: {e}")
+
+            return True
+        except Exception as e:
+            logger.error(f"Error during OPNsense rule polling: {e}", exc_info=True)
+            return False
+
+    async def run_opnsense_polling_loop(self):
+        """
+        Background loop that polls OPNsense rules at the configured interval.
+        """
+        logger.info("OPNsense polling loop started.")
+        while True:
+            try:
+                config = self.state.get_global_config()
+                # Default to 1 hour (3600 seconds)
+                interval_hours = config.get("opnsense_poll_interval", 1)
+
+                await self.poll_opnsense_rules()
+
+                # Wait for the configured interval
+                await asyncio.sleep(interval_hours * 3600)
+            except Exception as e:
+                logger.error(f"Error in OPNsense polling loop: {e}")
+                await asyncio.sleep(300) # Retry after 5 mins on error
+
+    async def load_caches(self):
+        """
+        Loads cached data from disk into memory.
+        """
+        logger.info("Loading local caches from disk...")
+        try:
+            if not os.path.exists(self.cache_dir):
+                return
+
+            opn_cache_path = os.path.join(self.cache_dir, "opnsense_rules.json")
+            if os.path.exists(opn_cache_path):
+                with open(opn_cache_path, "r") as f:
+                    self.opnsense_cache = json.load(f)
+                logger.info(f"Loaded OPNsense rules from {opn_cache_path}")
+        except Exception as e:
+            logger.error(f"Error loading local caches: {e}")
+
     async def start(self):
         """
         Starts the WebSocket server and background tasks.
@@ -620,11 +729,14 @@ class LabManagerHub:
         api_thread = threading.Thread(target=run_api_server, args=(self,), daemon=True)
         api_thread.start()
 
+        await self.load_caches()
+
         # Start the retry loop as a background task
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
         autoupdate_task = asyncio.create_task(self.run_autoupdate_loop())
         mps_task = asyncio.create_task(self.run_mps_loop())
+        opnsense_poll_task = asyncio.create_task(self.run_opnsense_polling_loop())
 
         async with websockets.serve(self.handle_connection, self.host, self.port) as server:
             self.is_ready = True

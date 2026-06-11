@@ -247,16 +247,12 @@ def create_app(hub):
     async def refresh_opn_cache():
         hub = app.state.hub
         logger.info("API: Triggering OPNsense cache refresh")
-        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-        if not opn_spoke:
-            logger.error("API: No OPNsense spoke connected for refresh")
-            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
-        try:
-            result = await hub.request_response(opn_spoke, "OPNSENSE_REFRESH_CACHE", {})
-            return result
-        except Exception as e:
-            logger.error(f"API: Error refreshing OPNsense cache: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
+        success = await hub.poll_opnsense_rules()
+        if not success:
+            logger.error("API: OPNsense cache refresh failed")
+            raise HTTPException(status_code=503, detail="Failed to refresh OPNsense cache (Spoke not connected or API error)")
+
+        return {"status": "success", "message": "OPNsense cache refreshed successfully!"}
 
     @app.get("/opn/interfaces")
     async def get_opn_interfaces():
@@ -312,7 +308,13 @@ def create_app(hub):
     @app.get("/opn/firewall/all")
     async def get_opn_firewall_all():
         hub = app.state.hub
-        logger.info("API: Requesting OPNsense all firewall rules")
+
+        # Return cached data if available
+        if hub.opnsense_cache:
+            logger.info("API: Serving OPNsense firewall rules from cache")
+            return hub.opnsense_cache
+
+        logger.info("API: No cache available, requesting OPNsense all firewall rules")
         opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
         if not opn_spoke:
             logger.error("API: No OPNsense spoke connected")
@@ -334,6 +336,11 @@ def create_app(hub):
                 data = result
 
             logger.info(f"API: Received OPNsense firewall rules: {data}")
+
+            # Update cache if data was successfully retrieved
+            if data:
+                hub.opnsense_cache = data
+
             return data
         except Exception as e:
             logger.error(f"API: Error fetching OPNsense firewall rules: {e}", exc_info=True)
@@ -671,13 +678,22 @@ def create_app(hub):
         }
 
     @app.post("/setup/update")
-    async def trigger_update():
+    async def trigger_update(request: Request):
         """
         Triggers a git pull and restarts the service to apply updates.
         """
         hub = app.state.hub
-        success = await hub.perform_update()
-        if success:
+        # Check for force parameter in query string
+        force = request.query_params.get("force", "false").lower() == "true"
+        success = await hub.perform_update(force=force)
+        if isinstance(success, dict):
+            if success.get("status") == "success":
+                return {"status": "success", "message": success["message"]}
+            elif success.get("status") == "no_update":
+                return {"status": "no_update", "message": success["message"]}
+            else:
+                raise HTTPException(status_code=500, detail=success.get("message", "Update failed"))
+        elif success:
             return {"status": "success", "message": "Update triggered. The server is restarting..."}
         else:
             raise HTTPException(status_code=500, detail="Update failed. Check Hub logs.")
