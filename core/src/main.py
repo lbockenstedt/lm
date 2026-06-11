@@ -611,11 +611,11 @@ class LabManagerHub:
 
                 if enabled:
                     logger.info(f"Auto-update enabled. Checking for updates every {interval_hours} hours.")
+                    # Trigger update check immediately on loop start or every interval
+                    await self.perform_update()
+
                     # Wait for the configured interval
                     await asyncio.sleep(interval_hours * 3600)
-
-                    # Trigger update
-                    await self.perform_update()
                 else:
                     # If disabled, check again every 5 minutes to see if it was enabled
                     await asyncio.sleep(300)
