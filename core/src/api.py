@@ -944,7 +944,11 @@ def create_app(hub):
             # If it's a request for a file that exists in the ui folder, serve it
             file_path = os.path.join(ui_path, full_path)
             if os.path.exists(file_path) and os.path.isfile(file_path):
-                return FileResponse(file_path)
+                response = FileResponse(file_path)
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+                return response
 
             # Fallback to index.html for all other routes
             index_html_path = os.path.join(ui_path, "index.html")

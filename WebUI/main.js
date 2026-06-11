@@ -104,7 +104,7 @@ const VIEWS = {
                                         <table class="w-full text-left text-sm">
                                             <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
                                                 <tr id="firewall-headers">
-                                                    <th class="px-4 py-3">Rule ID</th>
+                                                    <th class="px-4 py-3">Source</th>
                                                     <th class="px-4 py-3">Action</th>
                                                     <th class="px-4 py-3">Protocol</th>
                                                     <th class="px-4 py-3">Destination</th>
@@ -1448,7 +1448,7 @@ async function lookupVMDetails() {
         } else {
             tableBody.innerHTML = rules.map(rule => `
                 <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-4 py-3 font-mono text-xs text-slate-400">${rule.id || 'N/A'}</td>
+                    <td class="px-4 py-3 font-mono text-xs text-slate-600">${rule.source || 'any'}</td>
                     <td class="px-4 py-3">
                         <span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${rule.action === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">
                             ${rule.action}
@@ -1694,6 +1694,7 @@ async function loadOpnsenseManagement() {
         }
 
         // Generic Table Renderer
+        const firstItem = finalItems[0] || {};
         let keys = Object.keys(firstItem);
 
         if (subMenu === 'Firewall Rules') {
@@ -1733,20 +1734,6 @@ async function loadOpnsenseManagement() {
     }
 }
 
-async function refreshOpnsenseCache() {
-    try {
-        const response = await fetch('/opn/refresh', { method: 'POST' });
-        if (response.ok) {
-            alert('OPNsense cache refreshed successfully!');
-            loadOpnsenseManagement();
-        } else {
-            const data = await response.json();
-            alert('Failed to refresh cache: ' + (data.detail || 'Unknown error'));
-        }
-    } catch (err) {
-        alert('Error refreshing cache: ' + err.message);
-    }
-}
 
 function setTheme(theme) {
     document.body.classList.remove('lcars-theme', 'sw-theme', 'cicada-theme', 'gl-theme');

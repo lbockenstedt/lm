@@ -46,56 +46,85 @@ class StateManager:
 
         self.load_state()
 
+    def _load_file(self, path: str) -> Optional[Dict]:
+        """Helper to load and decrypt a state file, falling back to plain text."""
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "rb") as f:
+                content = f.read()
+                if not content:
+                    return None
+                try:
+                    # Try decrypting
+                    decrypted = hub_encryption.decrypt(content)
+                    return json.loads(decrypted)
+                except Exception as e:
+                    logger.warning(f"Decryption failed for {path}, trying plain text: {e}")
+                    # Fallback to plain text for migration (re-read as text)
+                    with open(path, "r") as pf:
+                        return json.load(pf)
+        except Exception as e:
+            logger.error(f"Critical error reading state file {path}: {e}")
+            return None
+
+    def _save_file(self, path: str, data: Dict):
+        """Helper to save state file atomically with encryption and backup."""
+        tmp_path = path + ".tmp"
+        bak_path = path + ".bak"
+        try:
+            json_data = json.dumps(data, indent=2)
+            encrypted_data = hub_encryption.encrypt(json_data)
+
+            # 1. Write to temporary file
+            with open(tmp_path, "wb") as f:
+                f.write(encrypted_data)
+                f.flush()
+                os.fsync(f.fileno())
+
+            # 2. Create backup of existing file if it exists
+            if os.path.exists(path):
+                import shutil
+                shutil.copy2(path, bak_path)
+
+            # 3. Atomic replace
+            os.replace(tmp_path, path)
+        except Exception as e:
+            logger.error(f"Failed to atomically save state to {path}: {e}")
+            raise e
+
     def load_state(self):
-        """Loads state from dual JSON disk caches with decryption."""
+        """Loads state from dual JSON disk caches with backup recovery."""
         # Load System State
-        if os.path.exists(self.system_path):
-            try:
-                with open(self.system_path, "rb") as f:
-                    content = f.read()
-                    try:
-                        # Try decrypting
-                        decrypted = hub_encryption.decrypt(content)
-                        self.system_state = json.loads(decrypted)
-                    except Exception:
-                        # Fallback to plain text for migration
-                        with open(self.system_path, "r") as pf:
-                            self.system_state = json.load(pf)
-                logger.info(f"System state loaded from {self.system_path}")
-            except Exception as e:
-                logger.error(f"Failed to load system state: {e}")
+        sys_state = self._load_file(self.system_path)
+        if sys_state is None and os.path.exists(self.system_path + ".bak"):
+            logger.warning(f"System state {self.system_path} corrupted or missing, trying backup...")
+            sys_state = self._load_file(self.system_path + ".bak")
+
+        if sys_state:
+            self.system_state = sys_state
+            logger.info(f"System state loaded successfully from {self.system_path}")
+        else:
+            logger.info("No valid system state found, using defaults.")
 
         # Load Tenant State
-        if os.path.exists(self.tenants_path):
-            try:
-                with open(self.tenants_path, "rb") as f:
-                    content = f.read()
-                    try:
-                        # Try decrypting
-                        decrypted = hub_encryption.decrypt(content)
-                        self.tenant_state = json.loads(decrypted)
-                    except Exception:
-                        # Fallback to plain text for migration
-                        with open(self.tenants_path, "r") as pf:
-                            self.tenant_state = json.load(pf)
-                logger.info(f"Tenant state loaded from {self.tenants_path}")
-            except Exception as e:
-                logger.error(f"Failed to load tenant state: {e}")
+        ten_state = self._load_file(self.tenants_path)
+        if ten_state is None and os.path.exists(self.tenants_path + ".bak"):
+            logger.warning(f"Tenant state {self.tenants_path} corrupted or missing, trying backup...")
+            ten_state = self._load_file(self.tenants_path + ".bak")
+
+        if ten_state:
+            self.tenant_state = ten_state
+            logger.info(f"Tenant state loaded successfully from {self.tenants_path}")
+        else:
+            logger.info("No valid tenant state found, using defaults.")
 
     def save_state(self):
-        """Saves memory state to dual JSON disk caches with encryption."""
+        """Saves memory state to dual JSON disk caches with atomic writes."""
         try:
-            # Save System State
-            sys_json = json.dumps(self.system_state, indent=2)
-            with open(self.system_path, "wb") as f:
-                f.write(hub_encryption.encrypt(sys_json))
-
-            # Save Tenant State
-            ten_json = json.dumps(self.tenant_state, indent=2)
-            with open(self.tenants_path, "wb") as f:
-                f.write(hub_encryption.encrypt(ten_json))
-
-            logger.info("State persisted to disk (system & tenants)")
+            self._save_file(self.system_path, self.system_state)
+            self._save_file(self.tenants_path, self.tenant_state)
+            logger.info("State persisted to disk (system & tenants) atomically")
         except Exception as e:
             logger.error(f"Failed to save state to disk: {e}")
 
