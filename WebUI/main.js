@@ -1806,8 +1806,16 @@ function renderLogo(config, side) {
 }
 
 function applyAppearance(config) {
-    document.documentElement.style.setProperty('--hpe-green', config.primary_color);
-    document.documentElement.style.setProperty('--hpe-navy', config.navy_color);
+    if (!config) return;
+    const primary = config.primary_color || '#01A982';
+    const navy = config.navy_color || '#263040';
+
+    try {
+        document.documentElement.style.setProperty('--hpe-green', primary);
+        document.documentElement.style.setProperty('--hpe-navy', navy);
+    } catch (e) {
+        console.error('Failed to set CSS variables:', e);
+    }
     renderLogo(config, 'right');
 }
 
