@@ -483,6 +483,8 @@ class LabManagerHub:
         local_v = await self.get_local_version()
         remote_v = await self.get_remote_version()
 
+        logger.info(f"Update check: local={local_v}, remote={remote_v}, force={force}")
+
         if not force and local_v == remote_v:
             # Even if Hub is up to date, we might want to trigger spoke updates
             # For now, we'll return early to match previous behavior unless we want forced updates

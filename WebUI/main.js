@@ -1582,13 +1582,14 @@ async function loadUsers() {
             return `
                 <tr class="hover:bg-slate-50 transition-colors">
                     <td class="px-4 py-3 font-mono text-xs font-medium text-slate-700">${userId}</td>
-                    <td class="px-4 py-3">${check('admin')}</td>
-                    <td class="px-4 py-3">${check('pxmx_manage')}</td>
-                    <td class="px-4 py-3">${check('pxmx_view')}</td>
-                    <td class="px-4 py-3">${check('opn_edit')}</td>
-                    <td class="px-4 py-3">${check('dns_manage')}</td>
-                    <td class="px-4 py-3">${check('cppm_manage')}</td>
-                    <td class="px-4 py-3">${check('cppm_view')}</td>
+                    <td class="px-4 py-3 text-center">${check('view')}</td>
+                    <td class="px-4 py-3 text-center">${check('edit')}</td>
+                    <td class="px-4 py-3 text-center">${check('pxmx')}</td>
+                    <td class="px-4 py-3 text-center">${check('firewall')}</td>
+                    <td class="px-4 py-3 text-center">${check('dns')}</td>
+                    <td class="px-4 py-3 text-center">${check('dhcp')}</td>
+                    <td class="px-4 py-3 text-center">${check('security')}</td>
+                    <td class="px-4 py-3 text-center bg-slate-50 font-bold">${check('admin')}</td>
                     <td class="px-4 py-3 text-right">
                         <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold">Delete</button>
                     </td>

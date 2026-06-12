@@ -810,9 +810,12 @@ def create_app(hub):
         """
         hub = app.state.hub
         # Check for force parameter in query string
-        force = request.query_params.get("force", "false").lower() == "true"
+        force_param = request.query_params.get("force", "false")
+        force = force_param.lower() == "true"
+        logger.info(f"API: Triggering update with force={force} (param: {force_param})")
         success = await hub.perform_update(force=force)
         if isinstance(success, dict):
+
             if success.get("status") == "success":
                 return {"status": "success", "message": success["message"]}
             elif success.get("status") == "no_update":
