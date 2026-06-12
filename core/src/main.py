@@ -165,8 +165,14 @@ class LabManagerHub:
         logger.error(f"Request Timeout: {msg_id} from {spoke_id} after {timeout}s")
         return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
 
+    def get_spoke_for_firewall(self, firewall_id: str) -> Optional[str]:
+        """Finds the spoke associated with a given firewall ID."""
+        firewalls = self.state.get_global_config().get("firewalls", [])
+        fw = next((f for f in firewalls if f["id"] == firewall_id), None)
+        return fw.get("spoke_id") if fw else None
+
     async def push_config_to_spoke(self, spoke_id: str):
-        """Pushes the module-specific configuration from global state to the spoke."""
+        """Pushes the firewall/module-specific configuration from global state to the spoke."""
         try:
             # Identify which module this spoke belongs to
             module_key = None
@@ -179,7 +185,22 @@ class LabManagerHub:
             if not module_key:
                 return
 
-            config = self.state.get_global_config().get(module_key, {})
+            # Handle Firewall multi-instance config
+            if module_key == 'opn':
+                firewalls = self.state.get_global_config().get("firewalls", [])
+                # Find the firewall that matches this spoke_id
+                fw_config = next((f for f in firewalls if f.get("spoke_id") == spoke_id), None)
+
+                if fw_config:
+                    config = fw_config
+                else:
+                    # Fallback to first OPNsense firewall if no explicit mapping
+                    opn_fws = [f for f in firewalls if f.get("model") == "opnsense"]
+                    config = opn_fws[0] if opn_fws else {}
+            else:
+                # Use existing singleton pattern for other modules (pxmx, cppm, cs)
+                config = self.state.get_global_config().get(module_key, {})
+
             if not config:
                 return
 
@@ -482,8 +503,16 @@ class LabManagerHub:
             hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
             branch = config.get("global_branch", "main")
 
+            # Record the attempt timestamp
+            self.state.update_global_config({"last_update_ts": time.time()})
+            self.state.save_state()
+
             # Set remote origin, stash local changes, fetch, checkout, pull, and pop stash
             # This ensures that local modifications don't block the update
+
+            # Ensure the directory is marked as safe for git (especially if running as root)
+            await asyncio.create_subprocess_shell(f"git config --global --add safe.directory {hub_root}")
+
             update_cmd = (
                 f"cd {hub_root} && "
                 f"git remote set-url origin {hub_repo} && "

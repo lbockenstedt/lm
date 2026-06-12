@@ -153,47 +153,71 @@ const VIEWS = {
         className: 'Firewall',
         subMenus: ['Firewall Rules', 'Interfaces', 'DHCP Leases', 'NAT Policies', 'DNS Records', 'config'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>',
-        render: (subMenu) => {
+        render: async (subMenu) => {
             if (subMenu === 'config') {
+                const firewalls = await loadFirewalls();
                 return `
                     <div class="space-y-6">
-                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Firewall Configuration</h2>
-                        <div class="hpe-card rounded-lg p-6 space-y-6">
-                            <div class="grid grid-cols-1 gap-6">
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div class="space-y-2">
-                                        <label class="text-xs text-slate-500 uppercase font-bold">Firewall Host/IP</label>
-                                        <input type="text" id="opn-host" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500" placeholder="e.g. 172.16.1.1">
+                        <div class="flex justify-between items-center mb-6">
+                            <h2 class="text-2xl font-bold text-[#263040]">Firewall Configuration</h2>
+                            <button onclick="showAddFirewallModal()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm flex items-center gap-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                                Add Firewall
+                            </button>
+                        </div>
+                        <div class="grid grid-cols-1 gap-4">
+                            ${firewalls.map(fw => `
+                                <div class="hpe-card rounded-lg p-4 border border-slate-200 bg-white flex justify-between items-center hover:border-green-500 transition-all group">
+                                    <div class="flex items-center gap-4">
+                                        <div class="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-500">
+                                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m0 0l-4 4m4-4V4a2 2 0 00-2-2H4a2 2 0 00-2 2v16a2 2 0 002 2h14a2 2 0 002-2v-4"></path></svg>
+                                        </div>
+                                        <div>
+                                            <div class="font-bold text-slate-800">${fw.name}</div>
+                                            <div class="text-xs text-slate-500 font-mono">${fw.model} | ${fw.host}:${fw.port}</div>
+                                        </div>
                                     </div>
-                                    <div class="space-y-2">
-                                        <label class="text-xs text-slate-500 uppercase font-bold">Port</label>
-                                        <input type="text" id="opn-port" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500" placeholder="e.g. 8443">
+                                    <div class="flex items-center gap-2">
+                                        <button onclick="editFirewall('${fw.id}')" class="p-2 text-slate-400 hover:text-green-600 transition-colors">
+                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9"></path></svg>
+                                        </button>
+                                        <button onclick="deleteFirewall('${fw.id}')" class="p-2 text-slate-400 hover:text-red-600 transition-colors">
+                                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                        </button>
                                     </div>
                                 </div>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                    <div class="space-y-2">
-                                        <label class="text-xs text-slate-500 uppercase font-bold">API Key</label>
-                                        <input type="text" id="opn-api-key" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                    </div>
-                                    <div class="space-y-2">
-                                        <label class="text-xs text-slate-500 uppercase font-bold">API Secret</label>
-                                        <input type="password" id="opn-api-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="pt-6 border-t border-slate-200 flex justify-end">
-                                <button onclick="saveOpnsenseConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
-                                    Save Configuration
-                                </button>
-                            </div>
+                            `).join('')}
                         </div>
                     </div>
                 `;
             }
+
+            const firewalls = await loadFirewalls();
+            if (firewalls.length === 0) {
+                return `<div class="py-12 text-center text-slate-400 italic">No firewalls configured. Please add one in the configuration tab.</div>`;
+            }
+
+            // Set active firewall if none selected
+            if (!activeFirewallId) {
+                activeFirewallId = firewalls[0].id;
+            }
+
+            const activeFw = firewalls.find(f => f.id === activeFirewallId) || firewalls[0];
+
             return `
                 <div class="space-y-6">
                     <div class="flex justify-between items-center mb-6">
-                        <h2 class="text-2xl font-bold text-[#263040]">Firewall Management: ${subMenu}</h2>
+                        <div class="flex items-center gap-4">
+                            <h2 class="text-2xl font-bold text-[#263040]">Firewall Management: ${subMenu}</h2>
+                            <div class="relative inline-block">
+                                <select onchange="setActiveFirewall(this.value)" class="bg-white border border-slate-300 rounded-md px-3 py-1 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-green-500 cursor-pointer">
+                                    ${firewalls.map(fw => `<option value="${fw.id}" ${fw.id === activeFirewallId ? 'selected' : ''}>${fw.name}</option>`).join('')}
+                                </select>
+                                <div class="absolute right-2 top-1.5 pointer-events-none">
+                                    <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                                </div>
+                            </div>
+                        </div>
                         <button onclick="refreshOpnsenseCache()" class="bg-white border border-slate-300 hover:bg-slate-50 text-slate-600 px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 shadow-sm">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 00-15.357-2m15.357 2H15"></path></svg>
                             Refresh Cache
@@ -630,7 +654,19 @@ const VIEWS = {
 };
 
 let currentView = 'dashboard';
-let currentSubView = 'General';
+let activeFirewallId = null;
+
+async function loadFirewalls() {
+    try {
+        const response = await fetch('/setup/firewalls');
+        if (!response.ok) throw new Error('Failed to fetch firewalls');
+        const data = await response.json();
+        return data.firewalls || [];
+    } catch (err) {
+        console.error('Error loading firewalls:', err);
+        return [];
+    }
+}
 let currentTenant = 'default';
 let currentProduct = null;
 let logRefreshInterval = null;
@@ -796,6 +832,12 @@ async function loadSetupConfig() {
 
         if (chk) chk.checked = config.autoupdate !== false; // Default to true
         if (int) int.value = config.update_interval || 1;
+
+        const tsEl = document.getElementById('last-update-ts');
+        if (tsEl && config.last_update_ts) {
+            const date = new Date(config.last_update_ts * 1000);
+            tsEl.textContent = `Last check: ${date.toLocaleString()}`;
+        }
 
         // Load update sources
         const sources = config.update_sources || {};
@@ -1783,7 +1825,6 @@ async function loadOpnsenseManagement() {
                 </tr>
             `;
         }).join('');
-        }).join('');
 
         let footerHtml = '';
         if (subMenu === 'Firewall Rules' && hiddenRules.length > 0) {
@@ -2209,7 +2250,137 @@ function setProbePath(path) {
     executeProbe();
 }
 
+async function setActiveFirewall(id) {
+    activeFirewallId = id;
+    console.log(`Active firewall switched to: ${id}`);
+    setView(currentView);
+}
+
+function showAddFirewallModal() {
+    const modal = document.createElement('div');
+    modal.id = 'firewall-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]" id="fw-modal-title">Add New Firewall</h3>
+                <button onclick="closeFirewallModal()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Firewall Name</label>
+                    <input type="text" id="fw-name" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Model</label>
+                    <select id="fw-model" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="opnsense">OPNsense</option>
+                        <option value="juniper">Juniper</option>
+                        <option value="fortigate">Fortigate</option>
+                        <option value="pfsense">pfSense</option>
+                    </select>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Host/IP</label>
+                        <input type="text" id="fw-host" placeholder="172.16.1.1" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Port</label>
+                        <input type="text" id="fw-port" placeholder="8443" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">API Key</label>
+                    <input type="text" id="fw-api-key" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">API Secret</label>
+                    <input type="password" id="fw-api-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+                <button onclick="closeFirewallModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+                <button onclick="saveFirewall()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Firewall</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+async function editFirewall(id) {
+    const firewalls = await loadFirewalls();
+    const fw = firewalls.find(f => f.id === id);
+    if (!fw) return;
+
+    showAddFirewallModal();
+    document.getElementById('fw-modal-title').textContent = 'Edit Firewall';
+    document.getElementById('fw-name').value = fw.name;
+    document.getElementById('fw-model').value = fw.model;
+    document.getElementById('fw-host').value = fw.host;
+    document.getElementById('fw-port').value = fw.port;
+    document.getElementById('fw-api-key').value = fw.api_key;
+    document.getElementById('fw-api-secret').value = fw.api_secret;
+
+    document.getElementById('firewall-modal').dataset.firewallId = id;
+}
+
+async function deleteFirewall(id) {
+    if (!confirm('Are you sure you want to delete this firewall?')) return;
+    try {
+        const response = await fetch(`/setup/firewalls/${id}`, { method: 'DELETE' });
+        if (response.ok) {
+            alert('Firewall deleted successfully');
+            setView(currentView);
+        } else {
+            alert('Failed to delete firewall');
+        }
+    } catch (err) {
+        alert('Error deleting firewall: ' + err.message);
+    }
+}
+
+async function saveFirewall() {
+    const modal = document.getElementById('firewall-modal');
+    const id = modal.dataset.firewallId;
+    const config = {
+        name: document.getElementById('fw-name').value,
+        model: document.getElementById('fw-model').value,
+        host: document.getElementById('fw-host').value,
+        port: parseInt(document.getElementById('fw-port').value) || 8443,
+        api_key: document.getElementById('fw-api-key').value,
+        api_secret: document.getElementById('fw-api-secret').value,
+    };
+
+    try {
+        const method = id ? 'PUT' : 'POST';
+        const url = id ? `/setup/firewalls/${id}` : '/setup/firewalls';
+        const response = await fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config)
+        });
+        if (response.ok) {
+            alert(`Firewall ${id ? 'updated' : 'added'} successfully!`);
+            closeFirewallModal();
+            setView(currentView);
+        } else {
+            alert('Failed to save firewall configuration');
+        }
+    } catch (err) {
+        alert('Error saving firewall: ' + err.message);
+    }
+}
+
+function closeFirewallModal() {
+    const modal = document.getElementById('firewall-modal');
+    if (modal) modal.remove();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+
     console.log("Lab Manager UI: Initializing...");
     try {
         currentTenant = localStorage.getItem('lm_tenant') || 'default';

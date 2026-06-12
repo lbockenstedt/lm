@@ -1074,7 +1074,11 @@ def create_app(hub):
             # Fallback to index.html for all other routes
             index_html_path = os.path.join(ui_path, "index.html")
             if os.path.exists(index_html_path):
-                return FileResponse(index_html_path)
+                response = FileResponse(index_html_path)
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+                return response
 
             raise HTTPException(status_code=404, detail="UI index.html not found in WebUI folder")
     else:
