@@ -2198,14 +2198,14 @@ async function loadOpnsenseManagement() {
         let filteredItems = finalItems;
         if (subMenu === 'Firewall Rules') {
             filteredItems = finalItems.filter(item => {
-                const id = JSON.stringify(item);
+                const id = item.id || JSON.stringify(item);
                 return !hiddenRules.includes(id);
             });
         }
 
         const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace('_', ' ')}</th>`).join('');
         const rows = filteredItems.map(item => {
-            const ruleId = JSON.stringify(item);
+            const ruleId = item.id || JSON.stringify(item);
             return `
                 <tr class="hover:bg-slate-50 transition-colors">
                     ${keys.map(k => {
