@@ -996,6 +996,7 @@ async function saveLDAPConfig() {
         alert('Error saving LDAP configuration: ' + err.message);
     }
 }
+function loadProxmoxConfig(config) {
     const nodeEl = document.getElementById('pxmx-default-node');
     const clusterEl = document.getElementById('pxmx-cluster-id');
     if (nodeEl) nodeEl.value = config.default_node || '';

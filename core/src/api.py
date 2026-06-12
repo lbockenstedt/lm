@@ -206,6 +206,53 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/setup/ldap-config")
+    async def get_ldap_config():
+        hub = app.state.hub
+        config = hub.state.system_state.get("global_config", {}).get("ldap", {})
+        return {"config": config}
+
+    @app.post("/setup/ldap-config")
+    async def update_ldap_config(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            config = data.get("config", {})
+
+            # Map lowercase keys from UI to uppercase keys for spoke
+            spoke_config = {
+                "LDAP_SERVER_URL": config.get("server_url"),
+                "LDAP_BASE_DN": config.get("base_dn"),
+                "LDAP_ADMIN_DN": config.get("admin_dn"),
+                "LDAP_ADMIN_PW": config.get("admin_pw"),
+            }
+            # Remove None values
+            spoke_config = {k: v for k, v in spoke_config.items() if v is not None}
+
+            global_config = hub.state.system_state.get("global_config", {})
+            global_config["ldap"] = config # Store lowercase version in state for UI
+            hub.state.system_state["global_config"] = global_config
+            hub.state.save_state()
+
+            ldap_spoke = next((sid for sid in hub.active_connections if "ldap" in sid), None)
+            if ldap_spoke:
+                msg_id = str(uuid.uuid4())
+                msg = Message(
+                    header=MessageHeader(
+                        message_id=msg_id,
+                        timestamp=time.time(),
+                        sender_id="hub",
+                        destination_id=ldap_spoke
+                    ),
+                    payload=MessagePayload(type="UPDATE_CONFIG", data=spoke_config)
+                )
+                await hub.send_to_spoke(msg)
+                return {"status": "success", "message": "LDAP configuration updated and pushed to spoke."}
+            else:
+                return {"status": "partial_success", "message": "Configuration saved, but LDAP spoke is not connected."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/firewalls")
     async def get_firewalls():
         hub = app.state.hub
