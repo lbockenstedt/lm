@@ -1783,10 +1783,12 @@ async function deleteLDAPEntity(dn) {
     }
 }
 
+async function loadVMInventory() {
     const listEl = document.getElementById('vm-list');
     const inventoryEl = document.getElementById('vm-inventory');
     const emptyStateEl = document.getElementById('vm-empty-state');
     if (!listEl) return;
+
 
     try {
         const response = await fetch('/status');
