@@ -1775,7 +1775,7 @@ async function loadOpnsenseManagement() {
                     <td class="px-4 py-3 text-center">
                         <label class="flex items-center justify-center cursor-pointer">
                             <input type="checkbox"
-                                   onchange="toggleFirewallRuleVisibility('${ruleId.replace(/'g, '\\\'')}', this.checked)"
+                                   onchange="toggleFirewallRuleVisibility('${ruleId.replace(/'/g, "\\'")}', this.checked)"
                                    ${hiddenRules.includes(ruleId) ? 'checked' : ''}
                                    class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                         </label>
