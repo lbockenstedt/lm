@@ -18,8 +18,6 @@
             --hpe-border: #CCCCCC;
         }
 
-        /* HPE GreenLake Theme Overrides */
-
         /* Star Wars Imperial Theme Overrides */
         body.sw-theme {
             --hpe-bg-light: #0a0a0a;
@@ -92,25 +90,6 @@
         body.sw-theme .text-slate-400,
         body.sw-theme .text-slate-600 {
             color: #666 !important;
-        }
-
-        /* Star Wars Imperial Theme Overrides */
-        body.sw-theme {
-            --hpe-bg-light: #0a0a0a;
-            --hpe-white: #111;
-            --hpe-text-main: #e2e2e2;
-            --hpe-text-muted: #888;
-            --hpe-border: #333;
-            --hpe-green: #ff0000;
-            --hpe-navy: #000;
-            background-color: #0a0a0a !important;
-            color: #e2e2e2 !important;
-        }
-
-        body.sw-theme .bg-slate-50,
-        body.sw-theme .bg-slate-100 {
-            background-color: #0f0f0f !important;
-            border-color: #222 !important;
         }
 
         /* HPE GreenLake Theme Overrides */
@@ -320,17 +299,17 @@
     <header class="h-16 hpe-topbar flex items-center px-6 justify-between border-b border-slate-800 shrink-0">
         <div class="flex items-center gap-3">
             <h1 class="text-xl font-bold tracking-tight text-white">Lab Manager</h1>
-        </div
+        </div>
 
         <div class="flex items-center gap-4">
             <div id="logo-right" class="flex justify-end">
                 <!-- Logo injected here -->
-            </div
+            </div>
             <!-- GLOBAL SEARCH -->
             <div class="relative group">
                 <span class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
                     <svg class="w-4 h-4 text-slate-400 group-focus-within:text-white transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-                </span
+                </span>
                 <input id="global-search" type="text"
                        placeholder="Search spokes, VMs..."
                        class="bg-slate-800 border border-slate-700 rounded-full pl-10 pr-4 py-1.5 text-xs focus:ring-2 focus:ring-green-500 outline-none transition-all w-64 text-white placeholder-slate-400"
@@ -339,9 +318,9 @@
                 <!-- Search Results Dropdown -->
                 <div id="search-results" class="hidden absolute top-full mt-2 w-full max-h-60 overflow-y-auto bg-white border border-slate-300 rounded-xl shadow-2xl z-50 p-2 space-y-1">
                     <!-- Results injected here -->
-                </div
-            </div
-        </div
+                </div>
+            </div>
+        </div>
     </header>
 
     <!-- MIDDLE AREA -->
@@ -350,20 +329,20 @@
         <aside class="h-full w-64 hpe-sidebar flex flex-col">
             <div class="p-6 mb-6">
                 <!-- Title moved to header -->
-            </div
+            </div>
 
             <nav id="main-nav" class="flex-1 px-3 space-y-1">
                 <div onclick="setView('dashboard')" id="nav-dashboard" class="nav-item active p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
                     Dashboard
-                </div
+                </div>
                 <!-- Dynamic Module Navs Injected Here -->
-                <div class="pt-4 mt-4 border-t border-slate-200"></div
+                <div class="pt-4 mt-4 border-t border-slate-200"></div>
                 <div onclick="setView('setup')" id="nav-setup" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
                     Setup
-                </div
+                </div>
                 <div onclick="setView('settings')" id="nav-settings" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
                     System
-                </div
+                </div>
             </nav>
         </aside>
 
@@ -371,31 +350,30 @@
         <main class="flex-1 flex flex-col min-w-0">
             <div id="top-nav" class="h-12 flex items-center px-6 gap-6 text-sm font-medium text-slate-600 bg-white border-b border-slate-200 shrink-0">
                 <!-- Dynamically injected sub-menu items -->
-            </div
+            </div>
             <div id="viewport" class="flex-1 p-8 overflow-y-auto bg-[#F5F5F5]">
                 <!-- VIEWS INJECTED HERE -->
-            </div
+            </div>
         </main>
-    </div
+    </div>
 
     <!-- FOOTER -->
     <footer class="h-10 w-full flex items-center px-6 text-white text-xs font-medium transition-all shrink-0" style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
         <div class="flex justify-between w-full items-center">
             <div class="flex items-center gap-4 opacity-70">
-                <span>© 2026 Lab Manager Hub</span
-                <span class="text-slate-400">|</span
-                <span class="font-bold">Enterprise Edition</span
-            </div
+                <span>© 2026 Lab Manager Hub</span>
+                <span class="text-slate-400">|</span>
+                <span class="font-bold">Enterprise Edition</span>
+            </div>
             <div class="flex items-center gap-3">
-                <span class="text-[10px] uppercase tracking-widest opacity-60">System Status: Online</span
-                <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.6)]"></div
-                <span class="text-[10px] uppercase tracking-widest opacity-60 ml-2 border-l border-slate-500 pl-2" id="footer-sys-version">v0.00</span
-            </div
-        </div
-    </footer
+                <span class="text-[10px] uppercase tracking-widest opacity-60">System Status: Online</span>
+                <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.6)]"></div>
+                <span class="text-[10px] uppercase tracking-widest opacity-60 ml-2 border-l border-slate-500 pl-2" id="footer-sys-version">v0.00</span >
+            </div>
+        </div>
+    </footer>
 
     <script src="main.js?v=0.23"></script>
     <script src="update_handler.js?v=0.23"></script>
-</body
-</html
->
+</body>
+</html>
