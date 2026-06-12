@@ -176,7 +176,7 @@ done
 # 5. Run Modular Installers
 log_c "🛠️ Running modular installations..."
 
-# Hub
+# --- Step A: Hub Backend ---
 log_c "Setting up Hub Backend..."
 cd "$BASE_DIR/core"
 
@@ -190,18 +190,7 @@ if [ ! -d "venv" ]; then python3 -m venv venv; fi
 mkdir -p "$BASE_DIR/core/data"
 chown -R $SvcUser:$SvcUser "$BASE_DIR"
 
-# Start Hub temporarily for modular installation
-log_c "🚀 Starting Hub temporarily for modular setup..."
-export PYTHONPATH="$BASE_DIR/core/src"
-if command -v sudo >/dev/null 2>&1; then
-    sudo -u $SvcUser nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
-else
-    nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
-fi
-
-cd "$BASE_DIR"
-
-# UI (Assets only)
+# --- Step B: WebUI Assets ---
 log_c "Setting up WebUI assets..."
 cd "$BASE_DIR/WebUI"
 if [ -f "install_ui.sh" ]; then
@@ -210,6 +199,15 @@ else
     log_c "✅ UI assets already in place (install_ui.sh not found in WebUI directory, skipping)."
 fi
 cd "$BASE_DIR"
+
+# --- Step C: Start Hub (API & UI Server) ---
+log_c "🚀 Starting Hub (API & WebUI)..."
+export PYTHONPATH="$BASE_DIR/core/src"
+if command -v sudo >/dev/null 2>&1; then
+    sudo -u $SvcUser nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
+else
+    nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
+fi
 
 # Give the Hub API a moment to fully start and stabilize
 log_c "⏳ Waiting for Hub API and WebSocket server to initialize..."

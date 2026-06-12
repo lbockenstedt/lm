@@ -1143,8 +1143,9 @@ function renderTopNav() {
     topNav.innerHTML = topNavHtml;
 }
 
-function setView(viewId) {
+async function setView(viewId) {
     const isClass = Object.keys(MODULE_CLASSES).includes(viewId);
+
 
     if (isClass) {
         // Find active products for this class
@@ -1191,8 +1192,9 @@ function setView(viewId) {
 
     const viewport = document.getElementById('viewport');
     if (viewport && view) {
-        viewport.innerHTML = view.render(currentSubView);
+        viewport.innerHTML = await view.render(currentSubView);
         if (viewId === 'setup') {
+
             loadSetupConfig();
             loadTenants();
             if (currentSubView === 'Spoke Approvals') loadPendingSpokes();
@@ -1215,18 +1217,20 @@ function switchProduct(productId) {
     setView(currentView);
 }
 
-function setSubView(subMenu) {
+async function setSubView(subMenu) {
     currentSubView = subMenu;
     const view = VIEWS[currentView];
     if (view) {
+
         // Update sub-nav active state
         renderTopNav();
 
         // Re-render content
         const viewport = document.getElementById('viewport');
         if (viewport) {
-            viewport.innerHTML = view.render(currentSubView);
+            viewport.innerHTML = await view.render(currentSubView);
             if (currentView === 'setup') {
+
                 loadSetupConfig();
                 loadTenants();
                 if (currentSubView === 'Spoke Approvals') {
