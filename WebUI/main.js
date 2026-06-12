@@ -2274,6 +2274,18 @@ async function setActiveFirewall(id) {
     setView(currentView);
 }
 
+async function loadApprovedSpokes() {
+    try {
+        const response = await fetch('/setup/pending_spokes');
+        if (!response.ok) throw new Error('Failed to fetch spokes');
+        const data = await response.json();
+        return (data.spokes || []).filter(s => s.approved);
+    } catch (err) {
+        console.error('Error loading approved spokes:', err);
+        return [];
+    }
+}
+
 function showAddFirewallModal() {
     const modal = document.createElement('div');
     modal.id = 'firewall-modal';
@@ -2291,14 +2303,22 @@ function showAddFirewallModal() {
                     <label class="text-xs text-slate-500 uppercase font-bold">Firewall Name</label>
                     <input type="text" id="fw-name" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
-                <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Model</label>
-                    <select id="fw-model" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                        <option value="opnsense">OPNsense</option>
-                        <option value="juniper">Juniper</option>
-                        <option value="fortigate">Fortigate</option>
-                        <option value="pfsense">pfSense</option>
-                    </select>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Model</label>
+                        <select id="fw-model" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="opnsense">OPNsense</option>
+                            <option value="juniper">Juniper</option>
+                            <option value="fortigate">Fortigate</option>
+                            <option value="pfsense">pfSense</option>
+                        </select>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label>
+                        <select id="fw-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="">Loading spokes...</option>
+                        </select>
+                    </div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="space-y-2">
@@ -2326,6 +2346,16 @@ function showAddFirewallModal() {
         </div>
     `;
     document.body.appendChild(modal);
+
+    // Populate spoke selector
+    loadApprovedSpokes().then(spokes => {
+        const selector = document.getElementById('fw-spoke');
+        if (selector) {
+            selector.innerHTML = spokes.length > 0
+                ? spokes.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('')
+                : '<option value="">No approved spokes found</option>';
+        }
+    });
 }
 
 async function editFirewall(id) {
