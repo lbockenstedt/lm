@@ -2372,6 +2372,12 @@ async function editFirewall(id) {
     document.getElementById('fw-api-key').value = fw.api_key;
     document.getElementById('fw-api-secret').value = fw.api_secret;
 
+    // Wait for the spoke selector to be populated and then set value
+    setTimeout(() => {
+        const selector = document.getElementById('fw-spoke');
+        if (selector) selector.value = fw.spoke_id || '';
+    }, 100);
+
     document.getElementById('firewall-modal').dataset.firewallId = id;
 }
 
@@ -2396,6 +2402,7 @@ async function saveFirewall() {
     const config = {
         name: document.getElementById('fw-name').value,
         model: document.getElementById('fw-model').value,
+        spoke_id: document.getElementById('fw-spoke').value,
         host: document.getElementById('fw-host').value,
         port: parseInt(document.getElementById('fw-port').value) || 8443,
         api_key: document.getElementById('fw-api-key').value,
