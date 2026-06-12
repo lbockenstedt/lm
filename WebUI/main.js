@@ -2192,7 +2192,7 @@ async function loadOpnsenseManagement() {
 
         if (subMenu === 'Firewall Rules') {
             // Use specialized columns for firewall rules to hide ID and ensure Source is present
-            keys = ['source', 'destination', 'protocol', 'action', 'description'].filter(k => k in firstItem || true);
+            keys = ['source', 'destination', 'protocol', 'action', 'hits', 'description'].filter(k => k in firstItem || true);
         }
 
         const hiddenRules = JSON.parse(localStorage.getItem('lm_hidden_firewall_rules') || '[]');
