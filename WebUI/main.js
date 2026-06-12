@@ -242,7 +242,7 @@ const VIEWS = {
                 <h2 class="text-2xl font-bold mb-6 text-[#263040]">Client Simulator</h2>
                 <div class="hpe-card rounded-lg p-6 text-center py-12">
                     <div class="text-slate-500">Traffic simulation controls coming soon...</div>
-                </div}
+                </div >
             </div>
         `
     },

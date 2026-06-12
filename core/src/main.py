@@ -752,7 +752,7 @@ class LabManagerHub:
 
     async def run_opnsense_polling_loop(self):
         """
-        Background loop that polls OPNsense rules at the configured interval.
+        Background loop that polls OPNsense rules at the configured interval for all configured firewalls.
         """
         logger.info("OPNsense polling loop started.")
         while True:
@@ -761,7 +761,15 @@ class LabManagerHub:
                 # Default to 1 hour (3600 seconds)
                 interval_hours = config.get("opnsense_poll_interval", 1)
 
-                await self.poll_opnsense_rules()
+                # Poll all configured firewalls of model 'opnsense'
+                firewalls = config.get("firewalls", [])
+                opn_firewalls = [fw for fw in firewalls if fw.get("model") == "opnsense"]
+
+                if not opn_firewalls:
+                    logger.info("No OPNsense firewalls configured to poll.")
+                else:
+                    for fw in opn_firewalls:
+                        await self.poll_opnsense_rules(firewall_id=fw["id"])
 
                 # Wait for the configured interval
                 await asyncio.sleep(interval_hours * 3600)

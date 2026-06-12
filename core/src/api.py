@@ -393,11 +393,6 @@ def create_app(hub):
         hub.state.save_state()
         return {"status": "success", "message": f"Firewall {firewall_id} deleted."}
 
-    @app.get("/opn/refresh")
-    async def refresh_opn_cache():
-        # Fallback for old UI
-        return await refresh_firewall_cache("default")
-
     @app.get("/api/firewall/{firewall_id}/refresh")
     async def refresh_firewall_cache(firewall_id: str):
         hub = app.state.hub
@@ -409,148 +404,7 @@ def create_app(hub):
 
         return {"status": "success", "message": f"Cache for firewall {firewall_id} refreshed successfully!"}
 
-    @app.get("/opn/interfaces")
-    async def get_opn_interfaces():
-        hub = app.state.hub
-        logger.info("API: Requesting OPNsense interfaces")
-        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-        if not opn_spoke:
-            logger.error("API: No OPNsense spoke connected")
-            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
-        try:
-            result = await hub.request_response(opn_spoke, "GET_INTERFACE_STATUS", {})
-            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
-            logger.info(f"API: Received OPNsense interfaces: {data}")
-            return data
-        except Exception as e:
-            logger.error(f"API: Error fetching OPNsense interfaces: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/opn/health")
-    async def get_opn_health():
-        hub = app.state.hub
-        logger.info("API: Requesting OPNsense health")
-        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-        if not opn_spoke:
-            logger.error("API: No OPNsense spoke connected")
-            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
-        try:
-            result = await hub.request_response(opn_spoke, "GET_SYSTEM_HEALTH", {})
-            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
-            logger.info(f"API: Received OPNsense health: {data}")
-            return data
-        except Exception as e:
-            logger.error(f"API: Error fetching OPNsense health: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/opn/dhcp")
-    async def get_opn_dhcp():
-        hub = app.state.hub
-        logger.info("API: Requesting OPNsense DHCP leases")
-        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-        if not opn_spoke:
-            logger.error("API: No OPNsense spoke connected")
-            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
-        try:
-            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_DHCP_LEASES", {})
-            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
-            logger.info(f"API: Received OPNsense DHCP leases: {data}")
-            return data
-        except Exception as e:
-            logger.error(f"API: Error fetching OPNsense DHCP leases: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/opn/firewall/all")
-    async def get_opn_firewall_all():
-        hub = app.state.hub
-
-        # Return cached data if available
-        if hub.opnsense_cache:
-            logger.info("API: Serving OPNsense firewall rules from cache")
-            return hub.opnsense_cache
-
-        logger.info("API: No cache available, requesting OPNsense all firewall rules")
-        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-        if not opn_spoke:
-            logger.error("API: No OPNsense spoke connected")
-            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
-        try:
-            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_ALL_RULES", {})
-
-            # Robust extraction: handle both wrapped (payload) and flat responses
-            data = {}
-            if isinstance(result, dict):
-                if "data" in result:
-                    data = result["data"]
-                elif "payload" in result and isinstance(result["payload"], dict):
-                    data = result["payload"].get("data", {})
-                else:
-                    # If it's a flat success response from the spoke, it might be the result itself
-                    data = result
-            else:
-                data = result
-
-            logger.info(f"API: Received OPNsense firewall rules: {data}")
-
-            # Update cache if data was successfully retrieved
-            if data:
-                hub.opnsense_cache = data
-
-            return data
-        except Exception as e:
-            logger.error(f"API: Error fetching OPNsense firewall rules: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/opn/firewall/stats")
-    async def get_opn_firewall_stats():
-        hub = app.state.hub
-        logger.info("API: Requesting OPNsense firewall stats")
-        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-        if not opn_spoke:
-            logger.error("API: No OPNsense spoke connected")
-            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
-        try:
-            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_FIREWALL_STATS", {})
-            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
-            logger.info(f"API: Received OPNsense firewall stats: {data}")
-            return data
-        except Exception as e:
-            logger.error(f"API: Error fetching OPNsense firewall stats: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/opn/nat")
-    async def get_opn_nat():
-        hub = app.state.hub
-        logger.info("API: Requesting OPNsense NAT policies")
-        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-        if not opn_spoke:
-            logger.error("API: No OPNsense spoke connected")
-            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
-        try:
-            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_NAT_POLICIES", {})
-            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
-            logger.info(f"API: Received OPNsense NAT policies: {data}")
-            return data
-        except Exception as e:
-            logger.error(f"API: Error fetching OPNsense NAT policies: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/opn/dns")
-    async def get_opn_dns():
-        hub = app.state.hub
-        logger.info("API: Requesting OPNsense DNS records")
-        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-        if not opn_spoke:
-            logger.error("API: No OPNsense spoke connected")
-            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
-        try:
-            result = await hub.request_response(opn_spoke, "OPNSENSE_GET_DNS_RECORDS", {})
-            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
-            logger.info(f"API: Received OPNsense DNS records: {data}")
-            return data
-        except Exception as e:
-            logger.error(f"API: Error fetching OPNsense DNS records: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
+    @app.get("/cppm/refresh")
 
     @app.get("/cppm/refresh")
     async def refresh_cppm_cache():
@@ -641,21 +495,40 @@ def create_app(hub):
             details["proxmox"] = px_res if px_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": px_res.get("message", "Unknown error")}
 
         # 2. Fetch from OPNsense
-        opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-        if opn_spoke and ip:
-            rules_raw = await hub.request_response(opn_spoke, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
-            dhcp_raw = await hub.request_response(opn_spoke, "OPNSENSE_GET_DHCP_LEASES", {})
+        opn_spokes = [sid for sid in hub.active_connections if "opn" in sid]
+        if opn_spokes and ip:
+            # Try to find rules for this IP from any connected OPNsense spoke
+            rules_data = None
+            lease = None
 
-            rules_data = rules_raw.get("payload", {}).get("data", {}) if isinstance(rules_raw, dict) else {}
-            dhcp_data = dhcp_raw.get("payload", {}).get("data", []) if isinstance(dhcp_raw, dict) else []
+            for spoke_id in opn_spokes:
+                try:
+                    rules_raw = await hub.request_response(spoke_id, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
+                    dhcp_raw = await hub.request_response(spoke_id, "OPNSENSE_GET_DHCP_LEASES", {})
 
-            lease = next((l for l in dhcp_data if l.get("ip") == ip), None) if isinstance(dhcp_data, list) else None
+                    rules_res = rules_raw.get("payload", {}).get("data", {}) if isinstance(rules_raw, dict) else {}
+                    dhcp_res = dhcp_raw.get("payload", {}).get("data", []) if isinstance(dhcp_raw, dict) else []
 
-            details["opnsense"] = {
-                "status": "ONLINE",
-                "rules": rules_data.get("rules", []) if rules_data.get("status") == "SUCCESS" else [],
-                "dhcp": lease
-            }
+                    if rules_res.get("status") == "SUCCESS" and rules_res.get("rules"):
+                        rules_data = rules_res
+                        break # Found the firewall managing this VM
+
+                    if isinstance(dhcp_res, list):
+                        lease = next((l for l in dhcp_res if l.get("ip") == ip), None)
+                        if lease:
+                            rules_data = rules_res
+                            break
+                except Exception as e:
+                    logger.error(f"Error querying OPNsense spoke {spoke_id} for VM {vm_id}: {e}")
+
+            if rules_data:
+                details["opnsense"] = {
+                    "status": "ONLINE",
+                    "rules": rules_data.get("rules", []),
+                    "dhcp": lease
+                }
+            else:
+                details["opnsense"] = {"status": "OFFLINE", "rules": [], "dhcp": None}
 
         # 3. Fetch from CPPM
         cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
