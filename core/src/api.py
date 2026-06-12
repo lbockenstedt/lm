@@ -803,6 +803,109 @@ def create_app(hub):
             "system": metrics
         }
 
+    # --- LDAP Management API ---
+    async def get_ldap_spoke(hub):
+        spoke_id = next((sid for sid in hub.active_connections if "ldap" in sid), None)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="LDAP spoke not connected")
+        return spoke_id
+
+    @app.get("/api/ldap/ous")
+    async def get_ldap_ous():
+        hub = app.state.hub
+        spoke_id = await get_ldap_spoke(hub)
+        try:
+            result = await hub.request_response(spoke_id, "LIST_OUS", {})
+            return result.get("data", result) if isinstance(result, dict) else result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/ldap/ous")
+    async def create_ldap_ou(request: Request):
+        hub = app.state.hub
+        spoke_id = await get_ldap_spoke(hub)
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "CREATE_OU", data)
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/ldap/users")
+    async def get_ldap_users():
+        hub = app.state.hub
+        spoke_id = await get_ldap_spoke(hub)
+        try:
+            result = await hub.request_response(spoke_id, "LIST_USERS", {})
+            return result.get("data", result) if isinstance(result, dict) else result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/ldap/users")
+    async def create_ldap_user(request: Request):
+        hub = app.state.hub
+        spoke_id = await get_ldap_spoke(hub)
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "CREATE_USER", data)
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/ldap/groups")
+    async def get_ldap_groups():
+        hub = app.state.hub
+        spoke_id = await get_ldap_spoke(hub)
+        try:
+            result = await hub.request_response(spoke_id, "LIST_GROUPS", {})
+            return result.get("data", result) if isinstance(result, dict) else result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/ldap/groups")
+    async def create_ldap_group(request: Request):
+        hub = app.state.hub
+        spoke_id = await get_ldap_spoke(hub)
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "CREATE_GROUP", data)
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/ldap/users/group")
+    async def add_ldap_user_to_group(request: Request):
+        hub = app.state.hub
+        spoke_id = await get_ldap_spoke(hub)
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "ADD_USER_TO_GROUP", data)
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/api/ldap/users/group")
+    async def remove_ldap_user_from_group(request: Request):
+        hub = app.state.hub
+        spoke_id = await get_ldap_spoke(hub)
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "REMOVE_USER_FROM_GROUP", data)
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/api/ldap/entity")
+    async def delete_ldap_entity(request: Request):
+        hub = app.state.hub
+        spoke_id = await get_ldap_spoke(hub)
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "DELETE_ENTITY", data)
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.post("/setup/update")
     async def trigger_update(request: Request):
         """

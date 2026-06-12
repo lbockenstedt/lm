@@ -463,16 +463,22 @@ class LabManagerHub:
                     path = parts[1]
                     version_url = f"https://raw.githubusercontent.com/{path}/main/VERSION"
                 else:
+                    logger.warning(f"Malformed GitHub URL: {repo_url}. Falling back to default.")
                     version_url = "https://raw.githubusercontent.com/lbockenstedt/lm/main/VERSION"
             else:
+                logger.warning(f"Non-GitHub repository URL configured ({repo_url}). Version check requires GitHub Raw format. Falling back to default.")
                 version_url = "https://raw.githubusercontent.com/lbockenstedt/lm/main/VERSION"
+
+            logger.info(f"Fetching remote version from: {version_url}")
 
             async with httpx.AsyncClient() as client:
                 resp = await client.get(version_url)
                 if resp.status_code == 200:
                     return resp.text.strip()
+                else:
+                    logger.error(f"Failed to fetch remote version: HTTP {resp.status_code}")
         except Exception as e:
-            logger.error(f"Failed to fetch remote version: {e}")
+            logger.error(f"Error fetching remote version: {e}")
         return "unknown"
 
     async def perform_update(self, force=False):
@@ -480,115 +486,119 @@ class LabManagerHub:
         Checks for updates and performs a git pull if a new version is available.
         Also triggers updates for all approved modules (connected or offline).
         """
+        logger.info(f"Running update check (force={force})...")
         local_v = await self.get_local_version()
         remote_v = await self.get_remote_version()
 
         logger.info(f"Update check: local={local_v}, remote={remote_v}, force={force}")
 
-        if not force and local_v == remote_v:
-            # Even if Hub is up to date, we might want to trigger spoke updates
-            # For now, we'll return early to match previous behavior unless we want forced updates
-            return {"status": "no_update", "message": f"System is already up to date (v{local_v})."}
+        hub_updated = False
+        if force or local_v != remote_v:
+            if remote_v == "unknown":
+                logger.error("Could not retrieve remote version from GitHub. Skipping Hub update.")
+            else:
+                try:
+                    logger.info(f"Updating Hub from v{local_v} to v{remote_v} (force={force})...")
 
-        if remote_v == "unknown":
-            return {"status": "error", "message": "Could not retrieve remote version from GitHub."}
+                    # 1. Update Hub itself
+                    hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 
-        try:
-            logger.info(f"Updating system from v{local_v} to v{remote_v} (force={force})...")
+                    # Use configured repo URL if available
+                    config = self.state.get_global_config()
+                    sources = config.get("update_sources", {})
+                    hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
+                    branch = config.get("global_branch", "main")
 
-            # 1. Update Hub itself
-            hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+                    # Record the attempt timestamp
+                    self.state.update_global_config({"last_update_ts": time.time()})
+                    self.state.save_state()
 
-            # Use configured repo URL if available
-            config = self.state.get_global_config()
-            sources = config.get("update_sources", {})
-            hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
-            branch = config.get("global_branch", "main")
+                    # Ensure the directory is marked as safe for git
+                    await asyncio.create_subprocess_shell(f"git config --global --add safe.directory {hub_root}")
 
-            # Record the attempt timestamp
-            self.state.update_global_config({"last_update_ts": time.time()})
-            self.state.save_state()
+                    update_cmd = (
+                        f"cd {hub_root} && "
+                        f"git remote set-url origin {hub_repo} && "
+                        f"git stash && "
+                        f"git fetch origin && "
+                        f"git checkout {branch} && "
+                        f"git pull origin {branch} && "
+                        f"git stash pop"
+                    )
 
-            # Set remote origin, stash local changes, fetch, checkout, pull, and pop stash
-            # This ensures that local modifications don't block the update
+                    process = await asyncio.create_subprocess_shell(
+                        update_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await process.communicate()
 
-            # Ensure the directory is marked as safe for git (especially if running as root)
-            await asyncio.create_subprocess_shell(f"git config --global --add safe.directory {hub_root}")
-
-            update_cmd = (
-                f"cd {hub_root} && "
-                f"git remote set-url origin {hub_repo} && "
-                f"git stash && "
-                f"git fetch origin && "
-                f"git checkout {branch} && "
-                f"git pull origin {branch} && "
-                f"git stash pop"
-            )
-
-            process = await asyncio.create_subprocess_shell(
-                update_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-
-            if process.returncode != 0:
-                # If stash pop fails, it's often because there were no changes to stash or conflicts.
-                # We log it but don't necessarily fail the whole update if the pull worked.
-                err_msg = stderr.decode().strip()
-                if "No stash entry found" in err_msg or "conflict" not in err_msg.lower():
-                    logger.info(f"Update completed with minor stash warning: {err_msg}")
-                else:
-                    logger.error(f"Hub git pull failed: {err_msg}")
-                    return {"status": "error", "message": f"Hub update failed: {err_msg}"}
-
-            # 2. Trigger updates for all approved modules (connected or offline)
-            update_results = []
-            for spoke_id, approved in self.approved_modules.items():
-                if not approved:
-                    continue
-
-                # Identify module type
-                module_key = None
-                module_map = {'pxmx': 'pxmx', 'opn': 'opnsense', 'cs': 'cs', 'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap'}
-                for key in module_map:
-                    if key in spoke_id:
-                        module_key = key
-                        break
-
-                if module_key:
-                    repo_url = sources.get(module_key)
-                    if repo_url:
-                        logger.info(f"Triggering update for spoke {spoke_id} from {repo_url} on branch {branch}...")
-                        msg_id = str(uuid.uuid4())
-                        msg = Message(
-                            header=MessageHeader(
-                                message_id=msg_id,
-                                timestamp=time.time(),
-                                sender_id="hub",
-                                destination_id=spoke_id
-                            ),
-                            payload=MessagePayload(type="SPOKE_UPDATE", data={"repo_url": repo_url, "branch": branch})
-                        )
-                        try:
-                            await self.mailbox.push(msg, self.send_to_spoke)
-                            update_results.append(f"{spoke_id}: triggered ({branch})")
-                        except Exception as e:
-                            logger.error(f"Failed to push update for {spoke_id}: {e}")
-                            update_results.append(f"{spoke_id}: failed")
+                    if process.returncode != 0:
+                        err_msg = stderr.decode().strip()
+                        if "No stash entry found" in err_msg or "conflict" not in err_msg.lower():
+                            logger.info(f"Hub update completed with minor stash warning: {err_msg}")
+                        else:
+                            logger.error(f"Hub git pull failed: {err_msg}")
+                            # We don't return here anymore, we still want to try spoke updates
                     else:
-                        update_results.append(f"{spoke_id}: no repo configured")
+                        hub_updated = True
+                        logger.info("Hub successfully updated.")
+
+                except Exception as e:
+                    logger.error(f"Unexpected error during Hub update: {e}")
+        else:
+            logger.info("Hub is already up to date. Skipping Hub pull.")
+
+        # 2. Trigger updates for all approved modules (connected or offline)
+        # We do this even if Hub didn't update, because spokes might have updates
+        update_results = []
+        sources = self.state.get_global_config().get("update_sources", {})
+        branch = self.state.get_global_config().get("global_branch", "main")
+
+        for spoke_id, approved in self.approved_modules.items():
+            if not approved:
+                continue
+
+            module_key = None
+            module_map = {'pxmx': 'pxmx', 'opn': 'opnsense', 'cs': 'cs', 'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap'}
+            for key in module_map:
+                if key in spoke_id:
+                    module_key = key
+                    break
+
+            if module_key:
+                repo_url = sources.get(module_key)
+                if repo_url:
+                    logger.info(f"Triggering update for spoke {spoke_id} from {repo_url} on branch {branch}...")
+                    msg_id = str(uuid.uuid4())
+                    msg = Message(
+                        header=MessageHeader(
+                            message_id=msg_id,
+                            timestamp=time.time(),
+                            sender_id="hub",
+                            destination_id=spoke_id
+                        ),
+                        payload=MessagePayload(type="SPOKE_UPDATE", data={"repo_url": repo_url, "branch": branch})
+                    )
+                    try:
+                        await self.mailbox.push(msg, self.send_to_spoke)
+                        update_results.append(f"{spoke_id}: triggered")
+                    except Exception as e:
+                        logger.error(f"Failed to push update for {spoke_id}: {e}")
+                        update_results.append(f"{spoke_id}: failed")
                 else:
-                    update_results.append(f"{spoke_id}: unknown module type")
+                    update_results.append(f"{spoke_id}: no repo configured")
+            else:
+                update_results.append(f"{spoke_id}: unknown module type")
 
-            logger.info(f"Spoke update triggers: {update_results}")
-            logger.info("Update successful. Triggering service restart...")
+        logger.info(f"Spoke update results: {update_results}")
+
+        if hub_updated:
+            logger.info("Hub was updated. Triggering service restart...")
             subprocess.Popen(["sudo", "systemctl", "restart", "lm"])
-            return {"status": "success", "message": f"Updated Hub from v{local_v} to v{remote_v} on branch {branch} and triggered spoke updates. Server is restarting..."}
+            return {"status": "success", "message": f"Updated Hub to v{remote_v} and triggered spoke updates. Server is restarting..."}
 
-        except Exception as e:
-            logger.error(f"Unexpected error during update: {e}")
-            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+        return {"status": "checked", "message": f"Update check complete. Hub is v{local_v}. Spoke updates triggered: {len(update_results)}"}
 
     async def run_mps_loop(self):
         """
@@ -664,7 +674,8 @@ class LabManagerHub:
 
                 if enabled:
                     logger.info(f"Auto-update enabled. Checking for updates every {interval_hours} hours.")
-                    # Trigger update check immediately on loop start or every interval
+
+                    logger.info("Performing scheduled auto-update check...")
                     await self.perform_update()
 
                     # Wait for the configured interval
@@ -673,7 +684,7 @@ class LabManagerHub:
                     # If disabled, check again every 5 minutes to see if it was enabled
                     await asyncio.sleep(300)
             except Exception as e:
-                logger.error(f"Error in auto-update loop: {e}")
+                logger.error(f"Error in auto-update loop: {e}", exc_info=True)
                 await asyncio.sleep(300)
 
     async def poll_opnsense_rules(self, firewall_id: str = None):

@@ -1,6 +1,6 @@
 const MODULE_CLASSES = {
-    'Virtual Machines': ['pxmx', 'kvm', 'vmware', 'utm'],
-    'Firewall': ['opnsense', 'pfsense', 'juniper', 'fortigate'],
+    'Hypervisors': ['pxmx', 'kvm', 'vmware', 'utm'],
+    'Firewalls': ['opnsense', 'pfsense', 'juniper', 'fortigate'],
     'IPAM': ['netbox', 'phpipam'],
     'Security/NAC': ['cppm', 'ise']
 };
@@ -242,9 +242,64 @@ const VIEWS = {
                 <h2 class="text-2xl font-bold mb-6 text-[#263040]">Client Simulator</h2>
                 <div class="hpe-card rounded-lg p-6 text-center py-12">
                     <div class="text-slate-500">Traffic simulation controls coming soon...</div>
-                </div>
+                </div}
             </div>
         `
+    },
+    cppm: {
+        name: 'Security/NAC',
+        className: 'Security/NAC',
+        subMenus: ['Access Tracker', 'Devices', 'Roles'],
+        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>',
+        render: (subMenu) => {
+            return `
+                <div class="space-y-6">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-2xl font-bold text-[#263040]">Security/NAC: ${subMenu}</h2>
+                    </div>
+                    <div class="hpe-card rounded-lg p-12 text-center">
+                        <div class="flex flex-col items-center gap-4">
+                            <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center text-slate-400">
+                                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+                            </div>
+                            <p class="text-slate-500">The ${subMenu} view is currently under development.</p>
+                            <div class="text-xs text-slate-400 italic">Implementation of CPPM API integration pending.</div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+    },
+    ldap: {
+        name: 'LDAP',
+        className: 'Directory Services',
+        subMenus: ['OUs', 'Users', 'Groups'],
+        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>',
+        render: async (subMenu) => {
+            return `
+                <div class="space-y-6">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-2xl font-bold text-[#263040]">LDAP Management: ${subMenu}</h2>
+                        <button onclick="showLDAPModal('${subMenu}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                            Add ${subMenu === 'OUs' ? 'OU' : (subMenu === 'Users' ? 'User' : 'Group')}
+                        </button>
+                    </div>
+                    <div class="hpe-card rounded-lg overflow-hidden shadow-sm border border-slate-200">
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-sm">
+                                <thead id="ldap-table-head" class="bg-slate-100 text-slate-600 uppercase text-xs">
+                                    <!-- Headers injected here -->
+                                </thead>
+                                <tbody id="ldap-table-body" class="divide-y divide-slate-200">
+                                    <tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">Loading ${subMenu} data...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
     },
     setup: {
         name: 'Setup',
@@ -1140,6 +1195,27 @@ function renderTopNav() {
         `;
     }).join('');
 
+    // 3. Render Spoke Indicators (at the far right)
+    if (window.spokeHealth) {
+        topNavHtml += `<div class="ml-auto flex items-center gap-3 border-l border-slate-200 pl-6">`;
+        topNavHtml += Object.entries(window.spokeHealth).map(([id, health]) => {
+            let color = 'bg-red-500';
+            if (health.online) {
+                color = health.error ? 'bg-yellow-500' : 'bg-green-500';
+            }
+            return `
+                <div class="flex items-center gap-1.5 group relative">
+                    <div class="w-2 h-2 rounded-full ${color} shadow-sm transition-all group-hover:scale-125"></div>
+                    <span class="text-[10px] font-mono text-slate-400 group-hover:text-slate-600 transition-colors">${id}</span>
+                    <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-slate-800 text-white text-[10px] px-2 py-1 rounded shadow-lg whitespace-nowrap z-50">
+                        ${id}: ${health.online ? (health.error ? 'Online (Error)' : 'Online') : 'Offline'}
+                    </div>
+                </div>
+            `;
+        }).join('');
+        topNavHtml += `</div>`;
+    }
+
     topNav.innerHTML = topNavHtml;
 }
 
@@ -1243,6 +1319,9 @@ async function setSubView(subMenu) {
                     loadUsers();
                 }
             }
+            if (currentView === 'ldap') {
+                loadLDAPData(currentSubView);
+            }
             if ((currentView === 'pxmx' && currentSubView === 'Configuration') ||
                 (currentView === 'opnsense' && currentSubView === 'Configuration')) {
                 loadSetupConfig();
@@ -1273,15 +1352,17 @@ async function updateStatus() {
 
     try {
         // Fetch both connection status and approval status
-        const [statusRes, approvalsRes] = await Promise.all([
+        const [statusRes, approvalsRes, diagRes] = await Promise.all([
             fetch('/status'),
-            fetch('/setup/pending_spokes')
+            fetch('/setup/pending_spokes'),
+            fetch('/setup/diagnostics')
         ]);
 
-        if (!statusRes.ok || !approvalsRes.ok) throw new Error('API Error');
+        if (!statusRes.ok || !approvalsRes.ok || !diagRes.ok) throw new Error('API Error');
 
         const statusData = await statusRes.json();
         const approvalsData = await approvalsRes.json();
+        const diagData = await diagRes.json();
 
         // Update system metrics if elements exist
         if (statusData.metrics) {
@@ -1315,6 +1396,15 @@ async function updateStatus() {
         }
 
         const connections = statusData.active_connections || [];
+
+        // Store health for the top nav indicators
+        window.spokeHealth = {};
+        (diagData.spokes || []).forEach(s => {
+            window.spokeHealth[s.spoke_id] = {
+                online: s.authenticated,
+                error: !!s.last_error
+            };
+        });
 
         // Count approved spokes for the dashboard metric
         const allSpokes = approvalsData.spokes || [];
@@ -1441,7 +1531,191 @@ async function handleSearch(query) {
     }
 }
 
-async function loadVMInventory() {
+async function loadLDAPData(subMenu) {
+    const headEl = document.getElementById('ldap-table-head');
+    const bodyEl = document.getElementById('ldap-table-body');
+    if (!headEl || !bodyEl) return;
+
+    try {
+        let endpoint = '';
+        let headers = [];
+        if (subMenu === 'OUs') {
+            endpoint = '/api/ldap/ous';
+            headers = ['Name', 'DN', 'Actions'];
+        } else if (subMenu === 'Users') {
+            endpoint = '/api/ldap/users';
+            headers = ['Username', 'First Name', 'Last Name', 'Email', 'DN', 'Actions'];
+        } else if (subMenu === 'Groups') {
+            endpoint = '/api/ldap/groups';
+            headers = ['Name', 'DN', 'Actions'];
+        }
+
+        headEl.innerHTML = `<tr>${headers.map(h => `<th class="px-4 py-3 font-bold">${h}</th>`).join('')}</tr>`;
+        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">Fetching ${subMenu}...</td></tr>`;
+
+        const response = await fetch(endpoint);
+        if (!response.ok) throw new Error(`Failed to fetch ${subMenu}`);
+        const data = await response.json();
+        const items = data.data || [];
+
+        if (items.length === 0) {
+            bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">No ${subMenu.toLowerCase()} found.</td></tr>`;
+            return;
+        }
+
+        bodyEl.innerHTML = items.map(item => {
+            let row = '';
+            if (subMenu === 'OUs') {
+                row = `<td class="px-4 py-3 text-slate-700">${item.name}</td><td class="px-4 py-3 font-mono text-xs text-slate-500">${item.dn}</td>`;
+            } else if (subMenu === 'Users') {
+                row = `<td class="px-4 py-3 text-slate-700 font-medium">${item.username}</td><td class="px-4 py-3 text-slate-600">${item.first_name}</td><td class="px-4 py-3 text-slate-600">${item.last_name}</td><td class="px-4 py-3 text-slate-600">${item.email}</td><td class="px-4 py-3 font-mono text-xs text-slate-500">${item.dn}</td>`;
+            } else if (subMenu === 'Groups') {
+                row = `<td class="px-4 py-3 text-slate-700">${item.name}</td><td class="px-4 py-3 font-mono text-xs text-slate-500">${item.dn}</td>`;
+            }
+
+            row += `<td class="px-4 py-3 text-right">
+                <button onclick="deleteLDAPEntity('${item.dn}')" class="p-1 text-slate-400 hover:text-red-600 transition-colors">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                </button>
+            </td>`;
+            return `<tr class="hover:bg-slate-50 transition-colors">${row}</tr>`;
+        }).join('');
+
+    } catch (err) {
+        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-red-500">${err.message}</td></tr>`;
+    }
+}
+
+function showLDAPModal(subMenu) {
+    const modal = document.createElement('div');
+    modal.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50';
+
+    let fields = '';
+    if (subMenu === 'OUs') {
+        fields = `
+            <div class="space-y-2">
+                <label class="text-xs text-slate-500 uppercase font-bold">OU Name</label>
+                <input type="text" id="ldap-ou-name" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+            </div>
+            <div class="space-y-2">
+                <label class="text-xs text-slate-500 uppercase font-bold">Parent DN</label>
+                <input type="text" id="ldap-ou-parent" placeholder="dc=example,dc=org" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+            </div>
+        `;
+    } else if (subMenu === 'Users') {
+        fields = `
+            <div class="grid grid-cols-2 gap-4">
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Username</label>
+                    <input type="text" id="ldap-user-username" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">First Name</label>
+                    <input type="text" id="ldap-user-first" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Last Name</label>
+                    <input type="text" id="ldap-user-last" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Email</label>
+                    <input type="text" id="ldap-user-email" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+            </div>
+            <div class="space-y-2">
+                <label class="text-xs text-slate-500 uppercase font-bold">OU DN</label>
+                <input type="text" id="ldap-user-ou" placeholder="ou=Users,dc=example,dc=org" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+            </div>
+        `;
+    } else if (subMenu === 'Groups') {
+        fields = `
+            <div class="space-y-2">
+                <label class="text-xs text-slate-500 uppercase font-bold">Group Name</label>
+                <input type="text" id="ldap-group-name" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+            </div>
+            <div class="space-y-2">
+                <label class="text-xs text-slate-500 uppercase font-bold">OU DN</label>
+                <input type="text" id="ldap-group-ou" placeholder="ou=Groups,dc=example,dc=org" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+            </div>
+        `;
+    }
+
+    modal.innerHTML = `
+        <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
+                <h3 class="text-lg font-bold text-slate-800">Add ${subMenu === 'OUs' ? 'OU' : (subMenu === 'Users' ? 'User' : 'Group')}</h3>
+                <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                ${fields}
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+                <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                <button onclick="saveLDAPEntity('${subMenu}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all">Save Entity</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+async function saveLDAPEntity(subMenu) {
+    const body = {};
+    if (subMenu === 'OUs') {
+        body.name = document.getElementById('ldap-ou-name').value;
+        body.parent_dn = document.getElementById('ldap-ou-parent').value;
+    } else if (subMenu === 'Users') {
+        body.username = document.getElementById('ldap-user-username').value;
+        body.first_name = document.getElementById('ldap-user-first').value;
+        body.last_name = document.getElementById('ldap-user-last').value;
+        body.email = document.getElementById('ldap-user-email').value;
+        body.ou_dn = document.getElementById('ldap-user-ou').value;
+    } else if (subMenu === 'Groups') {
+        body.name = document.getElementById('ldap-group-name').value;
+        body.ou_dn = document.getElementById('ldap-group-ou').value;
+    }
+
+    try {
+        const endpoint = subMenu === 'OUs' ? '/api/ldap/ous' : (subMenu === 'Users' ? '/api/ldap/users' : '/api/ldap/groups');
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (response.ok) {
+            alert('Entity created successfully!');
+            document.querySelector('.fixed').remove();
+            loadLDAPData(subMenu);
+        } else {
+            const err = await response.json();
+            alert('Error: ' + (err.message || 'Failed to create entity'));
+        }
+    } catch (e) {
+        alert('Request failed: ' + e.message);
+    }
+}
+
+async function deleteLDAPEntity(dn) {
+    if (!confirm(`Are you sure you want to delete ${dn}?`)) return;
+    try {
+        const response = await fetch('/api/ldap/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dn: dn })
+        });
+        if (response.ok) {
+            alert('Entity deleted successfully!');
+            loadLDAPData(currentSubView);
+        } else {
+            const err = await response.json();
+            alert('Error: ' + (err.message || 'Failed to delete entity'));
+        }
+    } catch (e) {
+        alert('Request failed: ' + e.message);
+    }
+}
+
     const listEl = document.getElementById('vm-list');
     const inventoryEl = document.getElementById('vm-inventory');
     const emptyStateEl = document.getElementById('vm-empty-state');
