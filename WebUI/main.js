@@ -1750,30 +1750,66 @@ async function loadOpnsenseManagement() {
             keys = ['source', 'destination', 'protocol', 'action', 'description'].filter(k => k in firstItem || true);
         }
 
+        const hiddenRules = JSON.parse(localStorage.getItem('lm_hidden_firewall_rules') || '[]');
+        let filteredItems = finalItems;
+        if (subMenu === 'Firewall Rules') {
+            filteredItems = finalItems.filter(item => {
+                const id = JSON.stringify(item);
+                return !hiddenRules.includes(id);
+            });
+        }
+
         const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace('_', ' ')}</th>`).join('');
-        const rows = finalItems.map(item => `
-            <tr class="hover:bg-slate-50 transition-colors">
-                ${keys.map(k => {
-                    const val = item[k] !== undefined ? item[k] : '-';
-                    if (k === 'action' && typeof val === 'string') {
-                        const color = val === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600';
-                        return `<td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${color}">${val}</span></td>`;
-                    }
-                    return `<td class="px-4 py-3 text-slate-600 font-mono text-xs">${val}</td>`;
-                }).join('')}
-            </tr>
-        `).join('');
+        const rows = filteredItems.map(item => {
+            const ruleId = JSON.stringify(item);
+            return `
+                <tr class="hover:bg-slate-50 transition-colors">
+                    ${keys.map(k => {
+                        const val = item[k] !== undefined ? item[k] : '-';
+                        if (k === 'action' && typeof val === 'string') {
+                            const color = val === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600';
+                            return `<td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${color}">${val}</span></td>`;
+                        }
+                        return `<td class="px-4 py-3 text-slate-600 font-mono text-xs">${val}</td>`;
+                    }).join('')}
+                    <td class="px-4 py-3 text-center">
+                        <label class="flex items-center justify-center cursor-pointer">
+                            <input type="checkbox"
+                                   onchange="toggleFirewallRuleVisibility('${ruleId.replace(/'g, '\\\'')}', this.checked)"
+                                   ${hiddenRules.includes(ruleId) ? 'checked' : ''}
+                                   class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                        </label>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+        }).join('');
+
+        let footerHtml = '';
+        if (subMenu === 'Firewall Rules' && hiddenRules.length > 0) {
+            footerHtml = `
+                <div class="pt-4 flex justify-between items-center">
+                    <span class="text-xs text-slate-400">${hiddenRules.length} rules hidden</span>
+                    <button onclick="unhideAllFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors">
+                        Unhide All Rules
+                    </button>
+                </div>
+            `;
+        }
 
         container.innerHTML = `
-            <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
-                <table class="w-full text-left text-sm">
-                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                        <tr>${headers}</tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-200">
-                        ${rows}
-                    </tbody>
-                </table>
+            <div class="space-y-4">
+                <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                            <tr>${headers}<th class="px-4 py-3 text-center">Action</th></tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-200">
+                            ${rows}
+                        </tbody>
+                    </table>
+                </div>
+                ${footerHtml}
             </div>
         `;
     } catch (err) {
@@ -1813,6 +1849,24 @@ async function refreshOpnsenseCache() {
         alert('Error refreshing OPNsense cache: ' + err.message);
         console.error('Error refreshing OPNsense cache:', err);
     }
+}
+
+function toggleFirewallRuleVisibility(ruleId, isHidden) {
+    let hiddenRules = JSON.parse(localStorage.getItem('lm_hidden_firewall_rules') || '[]');
+    if (isHidden) {
+        if (!hiddenRules.includes(ruleId)) {
+            hiddenRules.push(ruleId);
+        }
+    } else {
+        hiddenRules = hiddenRules.filter(id => id !== ruleId);
+    }
+    localStorage.setItem('lm_hidden_firewall_rules', JSON.stringify(hiddenRules));
+    loadOpnsenseManagement();
+}
+
+function unhideAllFirewallRules() {
+    localStorage.removeItem('lm_hidden_firewall_rules');
+    loadOpnsenseManagement();
 }
 
 async function loadDiagnostics() {

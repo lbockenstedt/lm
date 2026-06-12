@@ -102,6 +102,23 @@ class StateManager:
             sys_state = self._load_file(self.system_path + ".bak")
 
         if sys_state:
+            # Migration: move global_config["opn"] to global_config["firewalls"]
+            global_config = sys_state.get("global_config", {})
+            if "opn" in global_config and "firewalls" not in global_config:
+                opn_cfg = global_config.pop("opn")
+                if isinstance(opn_cfg, dict):
+                    import uuid
+                    firewall_id = str(uuid.uuid4())
+                    firewall_entry = {
+                        "id": firewall_id,
+                        "name": "Default OPNsense Firewall",
+                        "model": "opnsense",
+                        **opn_cfg
+                    }
+                    global_config["firewalls"] = [firewall_entry]
+                    sys_state["global_config"] = global_config
+                    logger.info(f"Migrated OPNsense singleton config to multi-firewall list (ID: {firewall_id})")
+
             self.system_state = sys_state
             logger.info(f"System state loaded successfully from {self.system_path}")
         else:

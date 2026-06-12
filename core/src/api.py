@@ -206,46 +206,145 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/setup/opn-config")
-    async def get_opn_config():
+    @app.get("/setup/firewalls")
+    async def get_firewalls():
         hub = app.state.hub
-        config = hub.state.system_state.get("global_config", {}).get("opn", {
-            "opn_host": "localhost",
-            "api_key": "",
-            "api_secret": ""
-        })
-        return {"config": config}
+        firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
+        return {"firewalls": firewalls}
 
-    @app.post("/setup/opn-config")
-    async def update_opn_config(request: Request):
+    @app.get("/api/firewall/{firewall_id}/{endpoint}")
+    async def get_firewall_data(firewall_id: str, endpoint: str):
+        hub = app.state.hub
+
+        # 1. Find the firewall config
+        firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
+        fw = next((f for f in firewalls if f["id"] == firewall_id), None)
+        if not fw:
+            raise HTTPException(status_code=404, detail="Firewall not found")
+
+        # 2. Map endpoint to spoke command based on model
+        model = fw.get("model", "opnsense").lower()
+        command_map = {
+            "opnsense": {
+                "rules": "OPNSENSE_GET_ALL_RULES",
+                "interfaces": "GET_INTERFACE_STATUS",
+                "health": "GET_SYSTEM_HEALTH",
+                "dhcp": "OPNSENSE_GET_DHCP_LEASES",
+                "nat": "OPNSENSE_GET_NAT_POLICIES",
+                "dns": "OPNSENSE_GET_DNS_RECORDS",
+            },
+            "juniper": {
+                # Placeholder for future Juniper commands
+                "rules": "JUNIPER_GET_RULES",
+                "health": "JUNIPER_GET_HEALTH",
+            }
+        }
+
+        model_commands = command_map.get(model, {})
+        spoke_cmd = model_commands.get(endpoint)
+        if not spoke_cmd:
+            raise HTTPException(status_code=400, detail=f"Endpoint {endpoint} not supported for model {model}")
+
+        # 3. Identify the spoke
+        spoke_id = fw.get("spoke_id")
+        if not spoke_id or spoke_id not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
+
+        try:
+            result = await hub.request_response(spoke_id, spoke_cmd, {})
+            # Robust extraction
+            data = {}
+            if isinstance(result, dict):
+                if "data" in result:
+                    data = result["data"]
+                elif "payload" in result and isinstance(result["payload"], dict):
+                    data = result["payload"].get("data", {})
+                else:
+                    data = result
+            else:
+                data = result
+            return data
+        except Exception as e:
+            logger.error(f"Error fetching {endpoint} for firewall {firewall_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/setup/firewalls")
+    async def add_firewall(request: Request):
         hub = app.state.hub
         try:
             data = await request.json()
-            config = data.get("config", {})
+            new_fw = data.get("firewall", {})
+            if not new_fw.get("name") or not new_fw.get("model"):
+                raise HTTPException(status_code=400, detail="Missing firewall name or model")
+
+            if "id" not in new_fw:
+                import uuid
+                new_fw["id"] = str(uuid.uuid4())
 
             global_config = hub.state.system_state.get("global_config", {})
-            global_config["opn"] = config
+            firewalls = global_config.get("firewalls", [])
+            firewalls.append(new_fw)
+            global_config["firewalls"] = firewalls
             hub.state.system_state["global_config"] = global_config
             hub.state.save_state()
 
-            opn_spoke = next((sid for sid in hub.active_connections if "opn" in sid), None)
-            if opn_spoke:
+            return {"status": "success", "firewall": new_fw}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.put("/setup/firewalls/{firewall_id}")
+    async def update_firewall(firewall_id: str, request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            update_data = data.get("config", {})
+
+            global_config = hub.state.system_state.get("global_config", {})
+            firewalls = global_config.get("firewalls", [])
+
+            fw_index = next((i for i, fw in enumerate(firewalls) if fw["id"] == firewall_id), None)
+            if fw_index is None:
+                raise HTTPException(status_code=404, detail="Firewall not found")
+
+            firewalls[fw_index].update(update_data)
+            hub.state.system_state["global_config"] = global_config
+            hub.state.save_state()
+
+            # Push config to the associated spoke if connected
+            spoke_id = firewalls[fw_index].get("spoke_id")
+            if spoke_id and spoke_id in hub.active_connections:
                 msg_id = str(uuid.uuid4())
                 msg = Message(
                     header=MessageHeader(
                         message_id=msg_id,
                         timestamp=time.time(),
                         sender_id="hub",
-                        destination_id=opn_spoke
+                        destination_id=spoke_id
                     ),
-                    payload=MessagePayload(type="update_config", data=config)
+                    payload=MessagePayload(type="UPDATE_CONFIG", data=firewalls[fw_index])
                 )
                 await hub.send_to_spoke(msg)
-                return {"status": "success", "message": "Configuration updated and pushed to spoke."}
+                return {"status": "success", "message": "Firewall configuration updated and pushed to spoke."}
             else:
-                return {"status": "partial_success", "message": "Configuration saved, but OPNsense spoke is not connected."}
+                return {"status": "partial_success", "message": "Configuration saved, but associated spoke is not connected."}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/setup/firewalls/{firewall_id}")
+    async def delete_firewall(firewall_id: str):
+        hub = app.state.hub
+        global_config = hub.state.system_state.get("global_config", {})
+        firewalls = global_config.get("firewalls", [])
+
+        original_len = len(firewalls)
+        firewalls[:] = [fw for fw in firewalls if fw["id"] != firewall_id]
+
+        if len(firewalls) == original_len:
+            raise HTTPException(status_code=404, detail="Firewall not found")
+
+        hub.state.system_state["global_config"] = global_config
+        hub.state.save_state()
+        return {"status": "success", "message": f"Firewall {firewall_id} deleted."}
 
     @app.get("/opn/refresh")
     async def refresh_opn_cache():
