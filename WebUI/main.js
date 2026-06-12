@@ -303,10 +303,42 @@ const VIEWS = {
     },
     setup: {
         name: 'Setup',
-        subMenus: ['General', 'Tenant Config', 'User Access', 'Spoke Approvals'],
+        subMenus: ['General', 'Tenant Config', 'User Access', 'Spoke Approvals', 'LDAP Config'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110-4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
-        
+
         render: (subMenu) => {
+            if (subMenu === 'LDAP Config') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">LDAP Server Configuration</h2>
+                        <div class="hpe-card rounded-lg p-6 space-y-6 shadow-sm">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">LDAP Server URL</label>
+                                    <input type="text" id="ldap-server-url" placeholder="ldap://localhost:389" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class la-text-xs text-slate-500 uppercase font-bold">Base DN</label>
+                                    <input type="text" id="ldap-base-dn" placeholder="dc=example,dc=org" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Admin DN</label>
+                                    <input type="text" id="ldap-admin-dn" placeholder="cn=admin,dc=example,dc=org" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Admin Password</label>
+                                    <input type="password" id="ldap-admin-pw" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                            </div>
+                            <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                <button onclick="saveLDAPConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                    Save LDAP Configuration
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
             if (subMenu === 'User Access') {
                 return `
                     <div class="space-y-6">
@@ -923,13 +955,47 @@ async function loadSetupConfig() {
             loadCSConfig(config.cs || {});
         } else if ((currentView === 'setup' && currentSubView === 'CPPM') || (currentView === 'cppm' && currentSubView === 'Configuration')) {
             loadCPPMConfig(config.cppm || {});
+        } else if (currentView === 'setup' && currentSubView === 'LDAP Config') {
+            loadLDAPConfig(config.ldap || {});
         }
     } catch (err) {
         console.error('Failed to load setup config', err);
     }
 }
 
-function loadProxmoxConfig(config) {
+function loadLDAPConfig(config) {
+    const urlEl = document.getElementById('ldap-server-url');
+    const baseEl = document.getElementById('ldap-base-dn');
+    const adminEl = document.getElementById('ldap-admin-dn');
+    const passEl = document.getElementById('ldap-admin-pw');
+    if (urlEl) urlEl.value = config.server_url || 'ldap://localhost:389';
+    if (baseEl) baseEl.value = config.base_dn || 'dc=example,dc=org';
+    if (adminEl) adminEl.value = config.admin_dn || 'cn=admin,dc=example,dc=org';
+    if (passEl) passEl.value = config.admin_pw || 'admin';
+}
+
+async function saveLDAPConfig() {
+    const config = {
+        server_url: document.getElementById('ldap-server-url').value,
+        base_dn: document.getElementById('ldap-base-dn').value,
+        admin_dn: document.getElementById('ldap-admin-dn').value,
+        admin_pw: document.getElementById('ldap-admin-pw').value,
+    };
+    try {
+        const response = await fetch('/setup/ldap-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: config })
+        });
+        if (response.ok) {
+            alert('LDAP configuration saved successfully!');
+        } else {
+            alert('Failed to save LDAP configuration.');
+        }
+    } catch (err) {
+        alert('Error saving LDAP configuration: ' + err.message);
+    }
+}
     const nodeEl = document.getElementById('pxmx-default-node');
     const clusterEl = document.getElementById('pxmx-cluster-id');
     if (nodeEl) nodeEl.value = config.default_node || '';
@@ -2034,7 +2100,17 @@ async function loadOpnsenseManagement() {
         console.log(`[OPNsense-Debug] Fetching ${subMenu} from ${endpoint}...`);
         const response = await fetch(endpoint);
         console.log(`[OPNsense-Debug] Response status: ${response.status} ${response.statusText}`);
-        if (!response.ok) throw new Error(`Failed to fetch ${subMenu}: ${response.status} ${response.statusText}`);
+        if (!response.ok) {
+            let errorMessage = `Failed to fetch ${subMenu}: ${response.status} ${response.statusText}`;
+            try {
+                const errorData = await response.json();
+                if (errorData.detail) errorMessage = errorData.detail;
+                else if (errorData.message) errorMessage = errorData.message;
+            } catch (e) {
+                // fallback to default
+            }
+            throw new Error(errorMessage);
+        }
 
         const data = await response.json();
         console.log(`[OPNsense-Debug] Received raw data for ${subMenu}:`, data);
@@ -2686,10 +2762,11 @@ async function saveFirewall() {
     try {
         const method = id ? 'PUT' : 'POST';
         const url = id ? `/setup/firewalls/${id}` : '/setup/firewalls';
+        const payload = id ? { config: config } : { firewall: config };
         const response = await fetch(url, {
             method: method,
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(config)
+            body: JSON.stringify(payload)
         });
         if (response.ok) {
             alert(`Firewall ${id ? 'updated' : 'added'} successfully!`);
