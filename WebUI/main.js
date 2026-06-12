@@ -303,7 +303,7 @@ const VIEWS = {
     },
     setup: {
         name: 'Setup',
-        subMenus: ['General', 'Tenant Config', 'User Access', 'Spoke Approvals', 'LDAP Config'],
+        subMenus: ['General', 'Tenant Config', 'User Access', 'Spoke Approvals', 'LDAP Config', 'Generic Nodes'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110-4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
 
         render: (subMenu) => {
@@ -334,6 +334,36 @@ const VIEWS = {
                                 <button onclick="saveLDAPConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
                                     Save LDAP Configuration
                                 </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            if (subMenu === 'Generic Nodes') {
+                return `
+                    <div class="space-y-6">
+                        <div class="flex justify-between items-center mb-6">
+                            <h2 class="text-2xl font-bold text-[#263040]">Generic Agent Nodes</h2>
+                            <button onclick="showProvisionModal()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm flex items-center gap-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                                Provision Module
+                            </button>
+                        </div>
+                        <div class="hpe-card rounded-lg overflow-hidden shadow-sm border border-slate-200">
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-left text-sm">
+                                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                                        <tr>
+                                            <th class="px-4 py-3 font-bold">Agent ID</th>
+                                            <th class="px-4 py-3 font-bold">Status</th>
+                                            <th class="px-4 py-3 font-bold">Connected</th>
+                                            <th class="px-4 py-3 font-bold text-right">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="generic-agents-body" class="divide-y divide-slate-200">
+                                        <tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">Loading generic agents...</td></tr>
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
                     </div>
@@ -1262,28 +1292,28 @@ function renderTopNav() {
         `;
     }).join('');
 
-    // 3. Render Spoke Indicators (at the far right)
-    if (window.spokeHealth) {
-        topNavHtml += `<div class="ml-auto flex items-center gap-3 border-l border-slate-200 pl-6">`;
-        topNavHtml += Object.entries(window.spokeHealth).map(([id, health]) => {
-            let color = 'bg-red-500';
-            if (health.online) {
-                color = health.error ? 'bg-yellow-500' : 'bg-green-500';
-            }
-            return `
-                <div class="flex items-center gap-1.5 group relative">
-                    <div class="w-2 h-2 rounded-full ${color} shadow-sm transition-all group-hover:scale-125"></div>
-                    <span class="text-[10px] font-mono text-slate-400 group-hover:text-slate-600 transition-colors">${id}</span>
-                    <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-slate-800 text-white text-[10px] px-2 py-1 rounded shadow-lg whitespace-nowrap z-50">
-                        ${id}: ${health.online ? (health.error ? 'Online (Error)' : 'Online') : 'Offline'}
-                    </div>
-                </div>
-            `;
-        }).join('');
-        topNavHtml += `</div>`;
-    }
-
     topNav.innerHTML = topNavHtml;
+}
+
+function renderSpokeIndicators() {
+    const bannerEl = document.getElementById('spoke-indicators-banner');
+    if (!bannerEl || !window.spokeHealth) return;
+
+    bannerEl.innerHTML = Object.entries(window.spokeHealth).map(([id, health]) => {
+        let color = 'bg-red-500';
+        if (health.online) {
+            color = health.error ? 'bg-yellow-500' : 'bg-green-500';
+        }
+        return `
+            <div class="flex items-center gap-1.5 group relative">
+                <div class="w-2 h-2 rounded-full ${color} shadow-sm transition-all group-hover:scale-125"></div>
+                <span class="text-[10px] font-mono text-slate-400 group-hover:text-slate-600 transition-colors">${id}</span>
+                <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-slate-800 text-white text-[10px] px-2 py-1 rounded shadow-lg whitespace-nowrap z-50">
+                    ${id}: ${health.online ? (health.error ? 'Online (Error)' : 'Online') : 'Offline'}
+                </div>
+            </div>
+        `;
+    }).join('');
 }
 
 async function setView(viewId) {
@@ -1342,6 +1372,7 @@ async function setView(viewId) {
             loadTenants();
             if (currentSubView === 'Spoke Approvals') loadPendingSpokes();
             if (currentSubView === 'Tenant Config') loadTenantConfig();
+            if (currentSubView === 'Generic Nodes') loadGenericAgents();
         }
         if (currentView === 'pxmx') {
             loadVMInventory();
@@ -1384,6 +1415,9 @@ async function setSubView(subMenu) {
                 }
                 if (currentSubView === 'User Access') {
                     loadUsers();
+                }
+                if (currentSubView === 'Generic Nodes') {
+                    loadGenericAgents();
                 }
             }
             if (currentView === 'ldap') {
@@ -1472,6 +1506,8 @@ async function updateStatus() {
                 error: !!s.last_error
             };
         });
+        renderSpokeIndicators();
+
 
         // Count approved spokes for the dashboard metric
         const allSpokes = approvalsData.spokes || [];
@@ -2209,7 +2245,7 @@ async function loadOpnsenseManagement() {
                 <div class="overflow-hidden rounded-md border border-slate-200 bg-white">
                     <table class="w-full text-left text-sm">
                         <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                            <tr>${headers}<th class="px-4 py-3 text-center">Action</th></tr>
+                            <tr>${headers}<th class="px-4 py-3 text-center">Hide</th></tr>
                         </thead>
                         <tbody class="divide-y divide-slate-200">
                             ${rows}
@@ -2788,7 +2824,113 @@ function closeFirewallModal() {
     if (modal) modal.remove();
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+
+async function loadGenericAgents() {
+    const bodyEl = document.getElementById('generic-agents-body');
+    if (!bodyEl) return;
+
+    try {
+        const response = await fetch('/setup/diagnostics');
+        if (!response.ok) throw new Error('Failed to fetch diagnostics');
+        const data = await response.json();
+        const spokes = data.spokes || [];
+
+        // Filter for agents (this is a simple heuristic, might need a better way if roles aren't clearly defined)
+        const agents = spokes.filter(s => s.spoke_id.includes('generic'));
+
+        if (agents.length === 0) {
+            bodyEl.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">No generic agents found.</td></tr>`;
+            return;
+        }
+
+        bodyEl.innerHTML = agents.map(agent => `
+            <tr class="hover:bg-slate-50 transition-colors">
+                <td class="px-4 py-3 font-mono text-xs text-slate-700">${agent.spoke_id}</td>
+                <td class="px-4 py-3">
+                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${agent.authenticated ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
+                        ${agent.authenticated ? 'Online' : 'Offline'}
+                    </span>
+                </td>
+                <td class="px-4 py-3 text-xs text-slate-500">${agent.last_error ? 'Error' : 'OK'}</td>
+                <td class="px-4 py-3 text-right">
+                    <button onclick="showProvisionModal('${agent.spoke_id}')" class="text-xs font-bold text-[#01A982] hover:text-[#008c6a] transition-colors">Provision</button>
+                </td>
+            </tr>
+        `).join('');
+    } catch (err) {
+        console.error('Error loading generic agents:', err);
+        bodyEl.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-500 italic">Error loading agents: ${err.message}</td></tr>`;
+    }
+}
+
+function showProvisionModal(agentId = '') {
+    const modal = document.createElement('div');
+    modal.id = 'provision-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200 animate-in fade-in zoom-in duration-200">
+            <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+                <h3 class="text-lg font-bold text-slate-800">Provision Module</h3>
+                <button onclick="closeProvisionModal()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Target Agent ID</label>
+                    <input type="text" id="prov-agent-id" value="${agentId}" placeholder="e.g. generic-agent-1" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Module ID</label>
+                    <input type="text" id="prov-module-id" placeholder="e.g. ldap" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Repository URL</label>
+                    <input type="text" id="prov-repo-url" placeholder="https://github.com/..." class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+                <button onclick="closeProvisionModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+                <button onclick="provisionModule()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Provision</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+function closeProvisionModal() {
+    const modal = document.getElementById('provision-modal');
+    if (modal) modal.remove();
+}
+
+async function provisionModule() {
+    const agent_id = document.getElementById('prov-agent-id').value.trim();
+    const module_id = document.getElementById('prov-module-id').value.trim();
+    const repo_url = document.getElementById('prov-repo-url').value.trim();
+
+    if (!agent_id || !module_id || !repo_url) {
+        alert('Please fill in all fields');
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/generic/provision', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_id, module_id, repo_url })
+        });
+        const data = await response.json();
+        if (response.ok) {
+            alert('Provisioning request sent successfully! The module will be installed in the background.');
+            closeProvisionModal();
+        } else {
+            alert('Provisioning failed: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Error triggering provisioning: ' + err.message);
+    }
+}
+
 
     console.log("Lab Manager UI: Initializing...");
     try {

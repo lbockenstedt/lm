@@ -1212,6 +1212,53 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
 
+
+    @app.post("/api/generic/provision")
+    async def provision_generic_agent(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            agent_id = data.get("agent_id")
+            module_id = data.get("module_id")
+            repo_url = data.get("repo_url")
+
+            if not agent_id or not module_id or not repo_url:
+                raise HTTPException(status_code=400, detail="Missing agent_id, module_id, or repo_url")
+
+            if agent_id not in hub.active_connections:
+                raise HTTPException(status_code=503, detail=f"Generic agent {agent_id} not connected")
+
+            # Generate credentials for the new spoke
+            spoke_id = f"{module_id}-spoke-1"
+            secret = hub.key_manager.generate_first_secret(spoke_id)
+            hub_secret = hub.key_manager.hub_secret # Simplified for now
+
+            provision_data = {
+                "module_id": module_id,
+                "repo_url": repo_url,
+                "hub_url": f"ws://{hub.host}:{hub.port}",
+                "spoke_id": spoke_id,
+                "secret": secret,
+                "hub_secret": hub_secret
+            }
+
+            msg_id = str(uuid.uuid4())
+            msg = Message(
+                header=MessageHeader(
+                    message_id=msg_id,
+                    timestamp=time.time(),
+                    sender_id="hub",
+                    destination_id=agent_id
+                ),
+                payload=MessagePayload(type="PROVISION_MODULE", data=provision_data)
+            )
+
+            result = await hub.request_response(agent_id, "PROVISION_MODULE", provision_data)
+            return result
+        except Exception as e:
+            logger.error(f"Provisioning failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
     # --- Static File Serving ---
     # We serve the UI directly from the 'WebUI' directory (Vanilla JS version)
     ui_path = os.path.join(os.path.dirname(__file__), "../../WebUI")
