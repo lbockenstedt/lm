@@ -772,6 +772,7 @@ const VIEWS = {
 
 let currentView = 'dashboard';
 let activeFirewallId = null;
+let showHiddenOnlyFirewallRules = false;
 
 async function loadFirewalls() {
     try {
@@ -2199,7 +2200,8 @@ async function loadOpnsenseManagement() {
         if (subMenu === 'Firewall Rules') {
             filteredItems = finalItems.filter(item => {
                 const id = item.id || JSON.stringify(item);
-                return !hiddenRules.includes(id);
+                const isHidden = hiddenRules.includes(id);
+                return showHiddenOnlyFirewallRules ? isHidden : !isHidden;
             });
         }
 
@@ -2233,7 +2235,12 @@ async function loadOpnsenseManagement() {
         if (subMenu === 'Firewall Rules' && hiddenRules.length > 0) {
             footerHtml = `
                 <div class="pt-4 flex justify-between items-center">
-                    <span class="text-xs text-slate-400">${hiddenRules.length} rules hidden</span>
+                    <div class="flex items-center gap-4">
+                        <span class="text-xs text-slate-400">${hiddenRules.length} rules hidden</span>
+                        <button onclick="toggleHiddenFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors">
+                            ${showHiddenOnlyFirewallRules ? 'Show All' : 'View Hidden'}
+                        </button>
+                    </div>
                     <button onclick="unhideAllFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors">
                         Unhide All Rules
                     </button>
@@ -2310,6 +2317,11 @@ function toggleFirewallRuleVisibility(ruleId, isHidden) {
         hiddenRules = hiddenRules.filter(id => id !== ruleId);
     }
     localStorage.setItem('lm_hidden_firewall_rules', JSON.stringify(hiddenRules));
+    loadOpnsenseManagement();
+}
+
+function toggleHiddenFirewallRules() {
+    showHiddenOnlyFirewallRules = !showHiddenOnlyFirewallRules;
     loadOpnsenseManagement();
 }
 
