@@ -1734,11 +1734,12 @@ async function loadOpnsenseManagement() {
 
     try {
         let endpoint = '';
-        if (subMenu === 'Firewall Rules') endpoint = '/opn/firewall/all';
-        else if (subMenu === 'DHCP Leases') endpoint = '/opn/dhcp';
-        else if (subMenu === 'Interfaces') endpoint = '/opn/interfaces';
-        else if (subMenu === 'NAT Policies') endpoint = '/opn/nat';
-        else if (subMenu === 'DNS Records') endpoint = '/opn/dns';
+        const fwId = activeFirewallId;
+        if (subMenu === 'Firewall Rules') endpoint = `/api/firewall/${fwId}/rules`;
+        else if (subMenu === 'DHCP Leases') endpoint = `/api/firewall/${fwId}/dhcp`;
+        else if (subMenu === 'Interfaces') endpoint = `/api/firewall/${fwId}/interfaces`;
+        else if (subMenu === 'NAT Policies') endpoint = `/api/firewall/${fwId}/nat`;
+        else if (subMenu === 'DNS Records') endpoint = `/api/firewall/${fwId}/dns`;
         else {
             console.log(`[OPNsense] No endpoint defined for subMenu: ${subMenu}`);
             return;
@@ -1876,19 +1877,24 @@ function setTheme(theme) {
 
 async function refreshOpnsenseCache() {
     try {
-        const response = await fetch('/opn/refresh');
-        if (!response.ok) throw new Error('Failed to refresh OPNsense cache');
+        const fwId = activeFirewallId;
+        if (!fwId) {
+            alert('No active firewall selected to refresh.');
+            return;
+        }
+        const response = await fetch(`/api/firewall/${fwId}/refresh`);
+        if (!response.ok) throw new Error('Failed to refresh firewall cache');
         const data = await response.json();
-        alert('OPNsense cache refreshed successfully!');
-        console.log('OPNsense cache refresh result:', data);
+        alert(data.message || 'Firewall cache refreshed successfully!');
+        console.log('Firewall cache refresh result:', data);
 
         // If we are currently viewing OPNsense management, reload the data
         if (currentView === 'opnsense' && currentSubView !== 'Configuration') {
             loadOpnsenseManagement();
         }
     } catch (err) {
-        alert('Error refreshing OPNsense cache: ' + err.message);
-        console.error('Error refreshing OPNsense cache:', err);
+        alert('Error refreshing firewall cache: ' + err.message);
+        console.error('Error refreshing firewall cache:', err);
     }
 }
 

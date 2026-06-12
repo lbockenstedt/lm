@@ -348,14 +348,19 @@ def create_app(hub):
 
     @app.get("/opn/refresh")
     async def refresh_opn_cache():
-        hub = app.state.hub
-        logger.info("API: Triggering OPNsense cache refresh")
-        success = await hub.poll_opnsense_rules()
-        if not success:
-            logger.error("API: OPNsense cache refresh failed")
-            raise HTTPException(status_code=503, detail="Failed to refresh OPNsense cache (Spoke not connected or API error)")
+        # Fallback for old UI
+        return await refresh_firewall_cache("default")
 
-        return {"status": "success", "message": "OPNsense cache refreshed successfully!"}
+    @app.get("/api/firewall/{firewall_id}/refresh")
+    async def refresh_firewall_cache(firewall_id: str):
+        hub = app.state.hub
+        logger.info(f"API: Triggering cache refresh for firewall {firewall_id}")
+        success = await hub.poll_opnsense_rules(firewall_id=firewall_id)
+        if not success:
+            logger.error(f"API: Cache refresh failed for firewall {firewall_id}")
+            raise HTTPException(status_code=503, detail=f"Failed to refresh cache for firewall {firewall_id} (Spoke not connected or API error)")
+
+        return {"status": "success", "message": f"Cache for firewall {firewall_id} refreshed successfully!"}
 
     @app.get("/opn/interfaces")
     async def get_opn_interfaces():

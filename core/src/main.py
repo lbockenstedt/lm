@@ -10,7 +10,7 @@ import os
 import uuid
 import secrets
 from collections import deque
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from dataclasses import asdict
 import websockets
 
@@ -674,18 +674,27 @@ class LabManagerHub:
                 logger.error(f"Error in auto-update loop: {e}")
                 await asyncio.sleep(300)
 
-    async def poll_opnsense_rules(self):
+    async def poll_opnsense_rules(self, firewall_id: str = None):
         """
         Polls OPNsense for all firewall rules and caches them locally and in-memory.
+        If firewall_id is provided, it polls that specific firewall.
         """
-        logger.info("Polling OPNsense firewall rules...")
-        opn_spoke = next((sid for sid in self.active_connections if "opn" in sid), None)
-        if not opn_spoke:
-            logger.error("OPNsense polling failed: No OPNsense spoke connected")
-            return False
+        logger.info(f"Polling OPNsense firewall rules (ID: {firewall_id or 'Default'})...")
+
+        if firewall_id:
+            spoke_id = self.get_spoke_for_firewall(firewall_id)
+            if not spoke_id:
+                logger.error(f"OPNsense polling failed: No spoke found for firewall {firewall_id}")
+                return False
+        else:
+            opn_spoke = next((sid for sid in self.active_connections if "opn" in sid), None)
+            if not opn_spoke:
+                logger.error("OPNsense polling failed: No OPNsense spoke connected")
+                return False
+            spoke_id = opn_spoke
 
         try:
-            result = await self.request_response(opn_spoke, "OPNSENSE_GET_ALL_RULES", {})
+            result = await self.request_response(spoke_id, "OPNSENSE_GET_ALL_RULES", {})
 
             # Robust extraction
             data = {}
@@ -700,27 +709,32 @@ class LabManagerHub:
                 data = result
 
             if not data:
-                logger.warning("OPNsense polling returned empty data")
+                logger.warning(f"OPNsense polling returned empty data for {spoke_id}")
                 return False
 
-            # Update in-memory cache
-            self.opnsense_cache = data
+            # Update in-memory cache (now keyed by firewall_id or spoke_id)
+            if not hasattr(self, "firewall_caches"):
+                self.firewall_caches = {}
+
+            cache_key = firewall_id or spoke_id
+            self.firewall_caches[cache_key] = data
 
             # Save to local disk
             try:
                 if not os.path.exists(self.cache_dir):
                     os.makedirs(self.cache_dir, exist_ok=True)
 
-                cache_path = os.path.join(self.cache_dir, "opnsense_rules.json")
+                cache_filename = f"rules_{cache_key}.json"
+                cache_path = os.path.join(self.cache_dir, cache_filename)
                 with open(cache_path, "w") as f:
                     json.dump(data, f)
                 logger.info(f"OPNsense rules cached to {cache_path}")
             except Exception as e:
-                logger.error(f"Failed to persist OPNsense cache to disk: {e}")
+                logger.error(f"Failed to persist OPNsense cache to disk for {cache_key}: {e}")
 
             return True
         except Exception as e:
-            logger.error(f"Error during OPNsense rule polling: {e}", exc_info=True)
+            logger.error(f"Error during OPNsense rule polling for {spoke_id}: {e}", exc_info=True)
             return False
 
     async def run_opnsense_polling_loop(self):
