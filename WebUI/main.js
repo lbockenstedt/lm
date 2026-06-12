@@ -226,6 +226,7 @@ const VIEWS = {
         name: 'Setup',
         subMenus: ['General', 'Tenant Config', 'User Access', 'Spoke Approvals'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110-4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m-2 8h4m-2 4h4m-4-8a4 4 0 01-4-4V4a4 4 0 014 0v4a4 4 0 014 0v4a4 4 0 01-4 0z"></path></svg>',
+        
         render: (subMenu) => {
             if (subMenu === 'User Access') {
                 return `
@@ -314,15 +315,15 @@ const VIEWS = {
                                         <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4">Quotas (Maximum Resources)</h4>
                                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                             <div class="space-y-2">
-                                                <label class="text-[10px] text-slate-400 uppercase font-bold">VMs</label>
+                                                <label class="text-slate-400">VMs</label>
                                                 <input type="number" id="quota-vm" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1 text-sm outline-none focus:ring-1 focus:ring-green-500">
                                             </div>
                                             <div class="space-y-2">
-                                                <label class="text-[10px] text-slate-400 uppercase font-bold">CPPM Policies</label>
+                                                <label class="text-xs text-slate-500 uppercase font-bold">CPPM Policies</label>
                                                 <input type="number" id="quota-cppm" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1 text-sm outline-none focus:ring-1 focus:ring-green-500">
                                             </div>
                                             <div class="space-y-2">
-                                                <label class="text-[10px] text-slate-400 uppercase font-bold">Firewall Rules</label>
+                                                <label class="text-xs text-slate-500 uppercase font-bold">Firewall Rules</label>
                                                 <input type="number" id="quota-opn" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1 text-sm outline-none focus:ring-1 focus:ring-green-500">
                                             </div>
                                         </div>
@@ -381,7 +382,7 @@ const VIEWS = {
                                         </div>
                                     </div>
                                     <div class="text-right">
-                                        <span id="last-update-ts" class="text-[10px] text-slate-400 block">Last check: Never</span>
+                                        <span id="last-update-ts" class="text-slate-400">Last check: Never</span>
                                     </div>
                                 </div>
                                 <div class="pt-3 border-t border-slate-200 flex justify-between items-center">
@@ -393,63 +394,71 @@ const VIEWS = {
                             </div>
                             <div class="pt-6 border-t border-slate-200">
                                 <div class="flex justify-between items-center mb-4">
-                                    <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">Repository Sources</h3>
-                                    <div class="flex gap-2">
-                                        <button onclick="scanGitHubRepos()" class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
-                                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-                                            Scan GitHub
-                                        </button>
-                                        <div class="flex items-center gap-2 bg-slate-100 px-2 py-1 rounded border border-slate-200">
-                                            <label class="text-[10px] text-slate-500 uppercase font-bold">Global Branch</label>
-                                            <select id="global-branch" class="bg-white border border-slate-300 rounded px-1 py-0.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
-                                                <option value="main">main</option>
-                                                <option value="develop">develop</option>
-                                                <option value="master">master</option>
-                                            </select>
+                                    <h3 class="text-sm font-semibold text-slate-500 uppercase tracking-wider">Advanced Settings</h3>
+                                    <button onclick="toggleAdvancedSettings()" class="text l-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                        Toggle Repository Sources
+                                    </button>
+                                </div>
+                                <div id="setup-advanced-section" class="hidden space-y-6">
+                                    <div class="flex justify-between items-center mb-4">
+                                        <h3 class="textL-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">Repository Sources</h3>
+                                        <div class="flex gap-2">
+                                            <button onclick="scanGitHubRepos()" class="text l-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                                                Scan GitHub
+                                            </button>
+                                            <div class="flex items-center gap-2 bg-slate-100 px-2 py-1 rounded border border-slate-200">
+                                                <label class="text-xs text-slate-500 uppercase font-bold"">Global Branch</label>
+                                                <select id="global-branch" class="bg-white border border-slate-300 rounded px-1 py-0.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                                    <option value="main">main</option>
+                                                    <option value="develop">develop</option>
+                                                    <option value="master">master</option>
+                                                </select>
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div class="space-y-2">
-                                        <label class="text-[10px] text-slate-500 uppercase font-bold">Hub Repository</label>
-                                        <input type="text" id="update-source-hub" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div class="space-y-2">
+                                            <labelL-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">Hub Repository</label>
+                                            <input type="text" id="update-source-hub" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                        </div>
+                                        <div class="space-y-2">
+                                            <label class="text-xs text-slate-500 uppercase font-bold">Proxmox Agent</label>
+                                            <input type="text" id="update-source-pxmx" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                        </div>
+                                        <div class="space-y-2">
+                                            <label class="text-xs text-slate-500 uppercase font-bold">OPNsense Spoke</label>
+                                            <input type="text" id="update-source-opn" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                        </div>
+                                        <div class="space-y-2">
+                                            <label class="text-xs text-slate-500 uppercase font-bold">Client Sim</label>
+                                            <input type="text" id="update-source-cs" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                        </div>
+                                        <div class="space-y-2">
+                                            <label class="text-xs text-slate-500 uppercase font-bold">CPPM Spoke</label>
+                                            <input type="text" id="update-source-cppm" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                        </div>
+                                        <div class="space-y-2">
+                                            <label class="text-xs text-slate-500 uppercase font-bold">Netbox Spoke</label>
+                                            <input type="text" id="update-source-netbox" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                        </div>
+                                        <div class="space-y-2">
+                                            <labelL-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">LDAP Spoke</label>
+                                            <input type="text" id="update-source-ldap" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                        </div>
                                     </div>
-                                    <div class="space-y-2">
-                                        <label class="text-[10px] text-slate-500 uppercase font-bold">Proxmox Agent</label>
-                                        <input type="text" id="update-source-pxmx" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                    <div class="pt-4 flex justify-end">
+                                        <button onclick="saveUpdateSources()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-xs font-bold transition-all shadow-sm">
+                                            Save Repository Sources
+                                        </button>
                                     </div>
-                                    <div class="space-y-2">
-                                        <label class="text-[10px] text-slate-500 uppercase font-bold">OPNsense Spoke</label>
-                                        <input type="text" id="update-source-opn" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
-                                    </div>
-                                    <div class="space-y-2">
-                                        <label class="text-[10px] text-slate-500 uppercase font-bold">Client Sim</label>
-                                        <input type="text" id="update-source-cs" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
-                                    </div>
-                                    <div class="space-y-2">
-                                        <label class="text-[10px] text-slate-500 uppercase font-bold">CPPM Spoke</label>
-                                        <input type="text" id="update-source-cppm" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
-                                    </div>
-                                    <div class="space-y-2">
-                                        <label class="text-[10px] text-slate-500 uppercase font-bold">Netbox Spoke</label>
-                                        <input type="text" id="update-source-netbox" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
-                                    </div>
-                                    <div class="space-y-2">
-                                        <label class="text-[10px] text-slate-500 uppercase font-bold">LDAP Spoke</label>
-                                        <input type="text" id="update-source-ldap" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-green-500">
-                                    </div>
-                                </div>
-                                <div class="pt-4 flex justify-end">
-                                    <button onclick="saveUpdateSources()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-xs font-bold transition-all shadow-sm">
-                                        Save Repository Sources
-                                    </button>
                                 </div>
                             </div>
                         </div>
                     </div>
-                </div>
-            `;
+                `;
         }
+
     },
     settings: {
         name: 'System',
@@ -766,6 +775,14 @@ async function saveUpdateSources() {
         alert('Error saving update sources: ' + err.message);
     }
 }
+
+function toggleAdvancedSettings() {
+    const section = document.getElementById('setup-advanced-section');
+    if (section) {
+        section.classList.toggle('hidden');
+    }
+}
+
 
 async function loadSetupConfig() {
     try {

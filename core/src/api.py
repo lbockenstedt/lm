@@ -119,6 +119,10 @@ def create_app(hub):
                 )
                 await hub.send_to_spoke(approval_msg)
 
+                # Immediately push config and hub secret now that it's approved
+                if action != "unapprove":
+                    await hub.push_config_to_spoke(spoke_id)
+
             return {"status": "success", "message": f"Spoke {spoke_id} {'approved' if action != 'unapprove' else 'un-approved'}."}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))

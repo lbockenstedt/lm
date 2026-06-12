@@ -170,6 +170,11 @@ class BaseControlPlane:
                 logger.error(f"SPOKE_UPDATE failed: {e}")
                 return {"status": "ERROR", "message": str(e)}
 
+        if cmd_type == "SPOKE_SET_HUB_SECRET":
+            self.hub_secret = data.get("hub_secret")
+            logger.info(f"Hub secret updated for {self.spoke_id}")
+            return {"status": "SUCCESS", "message": "Hub secret updated successfully"}
+
         return None
 
     def _sign(self, msg):

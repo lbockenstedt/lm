@@ -90,7 +90,7 @@ class LabManagerHub:
         # { correlation_id: response_data } for request-response bridging
         self.response_cache: Dict[str, Any] = {}
         self.opnsense_cache: Dict[str, Any] = {}
-        self.cache_dir = "/var/lib/lm/cache"
+        self.cache_dir = os.path.join(self.state.data_dir, "cache")
         self.is_ready = False
 
 
@@ -195,6 +195,21 @@ class LabManagerHub:
             )
             await self.send_to_spoke(msg)
             logger.info(f"Pushed {module_key} config to module {spoke_id}")
+
+            # Push the Hub Secret for mutual authentication
+            hub_secret = self.key_manager.hub_secret
+            secret_msg_id = str(uuid.uuid4())
+            secret_msg = Message(
+                header=MessageHeader(
+                    message_id=secret_msg_id,
+                    timestamp=time.time(),
+                    sender_id="hub",
+                    destination_id=spoke_id
+                ),
+                payload=MessagePayload(type="SPOKE_SET_HUB_SECRET", data={"hub_secret": hub_secret})
+            )
+            await self.send_to_spoke(secret_msg)
+            logger.info(f"Pushed Hub secret to {spoke_id}")
         except Exception as e:
             logger.error(f"Failed to push config to {spoke_id}: {e}")
 
