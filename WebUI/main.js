@@ -1642,39 +1642,45 @@ function showAddUserModal() {
                         </div>
                     </div>
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Manage Proxmox</label>
+                        <label class="text-xs text-slate-500 uppercase font-bold">View</label>
                         <div class="flex items-center gap-2 py-2">
-                            <input type="checkbox" id="perm-pxmx_manage" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                            <input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                         </div>
                     </div>
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">View Proxmox</label>
+                        <label class="text-xs text-slate-500 uppercase font-bold">Edit</label>
                         <div class="flex items-center gap-2 py-2">
-                            <input type="checkbox" id="perm-pxmx_view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                            <input type="checkbox" id="perm-edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                         </div>
                     </div>
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Edit Firewall</label>
+                        <label class="text-xs text-slate-500 uppercase font-bold">Hypervisor</label>
                         <div class="flex items-center gap-2 py-2">
-                            <input type="checkbox" id="perm-opn_edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                            <input type="checkbox" id="perm-pxmx" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                         </div>
                     </div>
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Manage DNS</label>
+                        <label class="text-xs text-slate-500 uppercase font-bold">Firewall</label>
                         <div class="flex items-center gap-2 py-2">
-                            <input type="checkbox" id="perm-dns_manage" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                            <input type="checkbox" id="perm-firewall" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                         </div>
                     </div>
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Manage CPPM</label>
+                        <label class="text-xs text-slate-500 uppercase font-bold">DNS</label>
                         <div class="flex items-center gap-2 py-2">
-                            <input type="checkbox" id="perm-cppm_manage" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                            <input type="checkbox" id="perm-dns" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                         </div>
                     </div>
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">View CPPM</label>
+                        <label class="text-xs text-slate-500 uppercase font-bold">DHCP</label>
                         <div class="flex items-center gap-2 py-2">
-                            <input type="checkbox" id="perm-cppm_view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                            <input type="checkbox" id="perm-dhcp" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Security/NAC</label>
+                        <div class="flex items-center gap-2 py-2">
+                            <input type="checkbox" id="perm-security" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                         </div>
                     </div>
                 </div>
@@ -1702,12 +1708,13 @@ async function saveUser() {
 
     const permissions = {
         admin: document.getElementById('perm-admin').checked,
-        pxmx_manage: document.getElementById('perm-pxmx_manage').checked,
-        pxmx_view: document.getElementById('perm-pxmx_view').checked,
-        opn_edit: document.getElementById('perm-opn_edit').checked,
-        dns_manage: document.getElementById('perm-dns_manage').checked,
-        cppm_manage: document.getElementById('perm-cppm_manage').checked,
-        cppm_view: document.getElementById('perm-cppm_view').checked,
+        view: document.getElementById('perm-view').checked,
+        edit: document.getElementById('perm-edit').checked,
+        pxmx: document.getElementById('perm-pxmx').checked,
+        firewall: document.getElementById('perm-firewall').checked,
+        dns: document.getElementById('perm-dns').checked,
+        dhcp: document.getElementById('perm-dhcp').checked,
+        security: document.getElementById('perm-security').checked,
     };
 
     try {
