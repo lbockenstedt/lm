@@ -808,6 +808,7 @@ class LabManagerHub:
                 logger.error(f"Error in key rotation loop: {e}", exc_info=True)
 
             await asyncio.sleep(3600) # Check every hour
+    async def run_opnsense_polling_loop(self):
         """
         Background loop that polls OPNsense rules at the configured interval for all configured firewalls.
         """

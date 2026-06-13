@@ -193,6 +193,28 @@ class BaseControlPlane:
                 return {"status": "SUCCESS", "message": "Session key updated successfully"}
             return {"status": "ERROR", "message": "Missing secret in data"}
 
+        if cmd_type == "SPOKE_SET_HOSTNAME":
+            new_hostname = data.get("hostname")
+            if not new_hostname:
+                return {"status": "ERROR", "message": "Missing hostname in data"}
+
+            try:
+                logger.info(f"Updating system hostname to: {new_hostname}")
+                # 1. Set the hostname
+                subprocess.run(["sudo", "hostnamectl", "set-hostname", new_hostname], check=True)
+
+                # 2. Update /etc/hosts to prevent sudo/etc lag (replace 127.0.1.1 entry)
+                # This is a simple sed replacement for the 127.0.1.1 line commonly found in Debian/Ubuntu
+                subprocess a = subprocess.run(
+                    ["sudo", "sed", "-i", f"s/127.0.1.1[[:space:]]*.*/127.0.1.1 {new_hostname}/", "/etc/hosts"],
+                    check=True
+                )
+
+                return {"status": "SUCCESS", "message": f"Hostname updated to {new_hostname}"}
+            except Exception as e:
+                logger.error(f"SPOKE_SET_HOSTNAME failed: {e}")
+                return {"status": "ERROR", "message": str(e)}
+
         return None
 
     def _sign(self, msg):
