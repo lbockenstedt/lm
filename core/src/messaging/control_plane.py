@@ -205,7 +205,7 @@ class BaseControlPlane:
 
                 # 2. Update /etc/hosts to prevent sudo/etc lag (replace 127.0.1.1 entry)
                 # This is a simple sed replacement for the 127.0.1.1 line commonly found in Debian/Ubuntu
-                subprocess a = subprocess.run(
+                a = subprocess.run(
                     ["sudo", "sed", "-i", f"s/127.0.1.1[[:space:]]*.*/127.0.1.1 {new_hostname}/", "/etc/hosts"],
                     check=True
                 )
