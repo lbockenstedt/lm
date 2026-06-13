@@ -181,6 +181,7 @@ class StateManager:
     # --- Tenant Management ---
 
     def get_tenant(self, tenant_id: str) -> Optional[Dict]:
+        logger.info(f"StateManager: get_tenant requested for id='{tenant_id}'. Available tenants: {list(self.tenant_state['tenants'].keys())}")
         return self.tenant_state["tenants"].get(tenant_id)
 
     def update_tenant(self, tenant_id: str, data: Dict):
