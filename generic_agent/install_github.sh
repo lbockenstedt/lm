@@ -1,16 +1,16 @@
 #!/bin/bash
-set -e
+# ------------------------------------------------------------------
+# Lab Manager GitHub Bootstrap
+# This script allows for direct installation of the Generic Agent from GitHub.
+# ------------------------------------------------------------------
 
-# ------------------------------------------------------------------
-# Lab Manager Bootstrap Installer
-# This script installs the Generic Agent and the necessary Core libraries
-# so the agent can call home to the Hub and receive provisioning commands.
-# ------------------------------------------------------------------
+set -e
 
 HUB_WS=""
 SPOKE_ID=""
 SPOKE_SECRET=""
 HUB_SECRET=""
+CLONE_ONLY=false
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
@@ -18,21 +18,23 @@ while [[ "$#" -gt 0 ]]; do
         --id) SPOKE_ID="$2"; shift ;;
         --secret) SPOKE_SECRET="$2"; shift ;;
         --hub-secret) HUB_SECRET="$2"; shift ;;
+        --clone) CLONE_ONLY=true; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
     shift
 done
 
-if [ -z "$HUB_WS" ] || [ -z "$SPOKE_ID" ] || [ -z "$SPOKE_SECRET" ]; then
-    echo "❌ Missing required arguments: --hub, --id, and --secret are required."
+# If not in clone mode, we still need the HUB_WS to configure the service
+if [ "$CLONE_ONLY" = false ] && [ -z "$HUB_WS" ]; then
+    echo "❌ Missing required argument: --hub is required for full installation."
+    echo "Usage: curl -sSL <url> | sudo bash -s -- --hub <hub_ws>"
     exit 1
 fi
 
-echo "🚀 Starting Lab Manager Bootstrap..."
+echo "🚀 Starting Lab Manager GitHub Bootstrap..."
 
 # 1. Install System Dependencies
-apt-get update
-apt-get install -y python3-pip python3-venv git
+apt-get update && apt-get install -y python3-pip python3-venv git
 
 # 2. Create service user
 if ! id "svc_lm" &>/dev/null; then
@@ -45,24 +47,13 @@ ROOT_DIR="/opt/lm"
 mkdir -p "$ROOT_DIR/core"
 mkdir -p "$ROOT_DIR/generic-agent"
 
-echo "📦 Deploying Core and Generic Agent files..."
+echo "📦 Cloning Core and Generic Agent from GitHub..."
+REPO_URL="https://github.com/lbockenstedt/lm"
 
-# Assuming the script is run from the repo root or we have the files locally
-# In a real-world scenario, these might be cloned from Git or downloaded as a tarball.
-# For this installer, we copy from the current working directory.
-if [ -d "core" ]; then
-    cp -r core "$ROOT_DIR/"
-else
-    echo "⚠️  Core directory not found locally. Please run this from the repo root."
-    exit 1
-fi
-
-if [ -d "generic_agent" ]; then
-    cp -r generic_agent "$ROOT_DIR/generic-agent"
-else
-    echo "⚠️  generic_agent directory not found locally. Please run this from the repo root."
-    exit 1
-fi
+git clone --depth 1 "$REPO_URL" "$ROOT_DIR/tmp_repo"
+cp -r "$ROOT_DIR/tmp_repo/core" "$ROOT_DIR/"
+cp -r "$ROOT_DIR/tmp_repo/generic_agent" "$ROOT_DIR/generic-agent"
+rm -rf "$ROOT_DIR/tmp_repo"
 
 # 4. Python Environment Setup
 cd "$ROOT_DIR/generic-agent"
@@ -71,7 +62,7 @@ python3 -m venv venv
 ./venv/bin/python3 -m pip install websockets python-dotenv -q
 
 # 5. Systemd Service Setup
-# Note: We add PYTHONPATH=/opt/lm so that 'import core...' works.
+# We use a template-like approach or just write the file.
 cat <<EOF > /etc/systemd/system/lm-bootstrap.service
 [Unit]
 Description=Lab Manager Bootstrap Agent
@@ -90,7 +81,16 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable lm-bootstrap
-systemctl restart lm-bootstrap
 
-echo "🎉 Bootstrap installation complete! The agent is now calling home to $HUB_WS"
+# Enable the service so it starts on next reboot
+systemctl enable lm-bootstrap
+
+if [ "$CLONE_ONLY" = true ]; then
+    echo "❄️  Clone-only mode active. Files and service enabled, but service is NOT started."
+    echo "The agent will start automatically on the next reboot."
+    echo "Note: To change the spoke ID manually, edit /etc/systemd/system/lm-bootstrap.service"
+else
+    systemctl restart lm-bootstrap
+    echo "🎉 Bootstrap installation complete! The agent is now calling home to $HUB_WS"
+    echo "You can now approve this spoke in the Hub WebUI to negotiate its session secret."
+fi

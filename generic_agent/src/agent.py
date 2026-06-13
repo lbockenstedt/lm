@@ -13,6 +13,47 @@ from core.src.base_spoke import BaseSpoke
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("GenericAgent")
 
+def get_machine_id() -> str:
+    """Generates a unique ID for the agent based on the machine ID or a random UUID."""
+    try:
+        if os.path.exists("/etc/machine-id"):
+            with open("/etc/machine-id", "r") as f:
+                mid = f.read().strip()
+                if mid:
+                    return f"hw-{mid[:12]}"
+        if os.path.exists("/var/lib/dbus/machine-id"):
+            with open("/var/lib/dbus/machine-id", "r") as f:
+                mid = f.read().strip()
+                if mid:
+                    return f"hw-{mid[:12]}"
+    except Exception as e:
+        logger.debug(f"Could not read machine-id: {e}")
+
+    # Fallback to a persisted random ID
+    id_file = "/etc/lm-agent-id"
+    if os.path.exists(id_file):
+        with open(id_file, "r") as f:
+            return f.read().strip()
+
+    new_id = f"agent-{str(uuid.uuid4())[:8]}"
+    try:
+        with open(id_file, "w") as f:
+            f.write(new_id)
+    except Exception as e:
+        logger.warning(f"Could not persist agent ID: {e}")
+
+    return new_id
+
+def get_vm_uuid() -> Optional[str]:
+    """Retrieves the SMBIOS UUID, which can be used by the Hub to identify the Proxmox VMID."""
+    try:
+        if os.path.exists("/sys/class/dmi/id/product_uuid"):
+            with open("/sys/class/dmi/id/product_uuid", "r") as f:
+                return f.read().strip()
+    except Exception as e:
+        logger.debug(f"Could not read product_uuid: {e}")
+    return None
+
 class AgentModule(BaseSpoke):
     """
     The core module of the generic agent.
@@ -125,11 +166,15 @@ class GenericAgentControlPlane(BaseControlPlane):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--id", required=True)
-    parser.add_argument("--secret", required=True)
+    parser.add_argument("--id") # Now optional
+    parser.add_argument("--secret") # Now optional to support secret-less bootstrap
     parser.add_argument("--hub-secret")
     parser.add_argument("--hub", required=True)
     args = parser.parse_args()
 
-    cp = GenericAgentControlPlane(args.id, args.secret, args.hub_secret, args.hub)
+    # Use provided ID or generate one automatically
+    spoke_id = args.id or get_machine_id()
+    logger.info(f"Starting agent with spoke_id: {spoke_id}")
+
+    cp = GenericAgentControlPlane(spoke_id, args.secret, args.hub_secret, args.hub)
     asyncio.run(cp.run())

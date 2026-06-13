@@ -19,13 +19,14 @@ class BaseControlPlane:
     Generic Control Plane for Lab Manager Spokes.
     Handles Hub connectivity, mutual authentication, and module routing.
     """
-    def __init__(self, spoke_id: str, secret: str, hub_secret: str = None, hub_url: str = None):
+    def __init__(self, spoke_id: str, secret: str = None, hub_secret: str = None, hub_url: str = None):
         self.spoke_id = spoke_id
         self.secret = secret
         self.hub_secrets = [hub_secret] if hub_secret else []
         self.hub_url = hub_url
         self.modules: Dict[str, Any] = {} # { module_name: BaseSpoke instance }
-        self.signer = MessageSigner(secret)
+        self.signer = MessageSigner(secret) if secret else None
+
 
     def register_module(self, name: str, module_instance: Any):
         """Registers a module to be handled by this control plane."""
@@ -38,7 +39,11 @@ class BaseControlPlane:
 
         async with websockets.connect(self.hub_url) as websocket:
             # 1. Spoke Authentication Handshake
-            await websocket.send(json.dumps({"spoke_id": self.spoke_id, "secret": self.secret}, separators=(',', ':')))
+            auth_payload = {"spoke_id": self.spoke_id}
+            if self.secret:
+                auth_payload["secret"] = self.secret
+
+            await websocket.send(json.dumps(auth_payload, separators=(',', ':')))
             logger.info(f"Connected to Lab Manager Hub as {self.spoke_id}. Performing mutual authentication...")
 
             # 2. Hub Mutual Authentication (Verify Hub's identity)
@@ -221,4 +226,8 @@ class BaseControlPlane:
         return self.signer.sign(msg)
 
     def _verify_signature(self, msg):
+        if not self.secret or not self.signer:
+            # If we don't have a secret yet, we can't verify signatures.
+            # In the bootstrap phase, we allow this so heartbeats can pass.
+            return True
         return self.signer.verify(msg)

@@ -248,16 +248,24 @@ class LabManagerHub:
 
             logger.info(f"Auth attempt: spoke_id={spoke_id}, secret={f'{secret[:4]}...{secret[-4:]}' if secret and len(secret) > 8 else '***'}")
 
-            if not spoke_id or not secret:
-                await websocket.close(1008, "Missing spoke_id or secret")
+            if not spoke_id:
+                await websocket.close(1008, "Missing spoke_id")
                 return
 
-            key_id = self.key_manager.get_valid_key(spoke_id, secret)
-            logger.info(f"KeyManager result for {spoke_id}: key_id={key_id}")
+            # If secret is provided, verify it. If not, the spoke is in 'pending secret' state.
+            is_authenticated = False
+            if secret:
+                key_id = self.key_manager.get_valid_key(spoke_id, secret)
+                if key_id:
+                    is_authenticated = True
+                    logger.info(f"Spoke {spoke_id} authenticated successfully with secret.")
+                else:
+                    logger.warning(f"Authentication failed for spoke {spoke_id}: Invalid secret.")
+            else:
+                logger.info(f"Spoke {spoke_id} connected without secret. Entering pending-negotiation state.")
 
-            if not key_id:
-                masked_secret = f"{secret[:4]}...{secret[-4:]}" if secret and len(secret) > 8 else "***"
-                logger.warning(f"Authentication failed for spoke {spoke_id}: Secret {masked_secret} is invalid.")
+            if not is_authenticated:
+                # Register as known if not already
                 if spoke_id not in self.known_modules:
                     self.state.register_module(spoke_id, approved=False)
                     self.known_modules = self.state.system_state["known_modules"]
@@ -265,15 +273,18 @@ class LabManagerHub:
                 # Update telemetry
                 self.spoke_telemetry[spoke_id] = {
                     "last_attempt": time.time(),
-                    "status": "AUTH_FAILED",
-                    "error": "Invalid secret"
+                    "status": "PENDING_SECRET" if not secret else "AUTH_FAILED",
+                    "error": None if not secret else "Invalid secret"
                 }
 
-                await websocket.close(1008, "Authentication failed")
-                return
-
-            logger.info(f"Spoke {spoke_id} authenticated successfully.")
-            self.active_connections[spoke_id] = websocket
+                # If they provided a secret and it was wrong, we close.
+                # If they provided no secret, we KEEP the connection open to negotiate one.
+                if secret:
+                    await websocket.close(1008, "Authentication failed")
+                    return
+            else:
+                logger.info(f"Spoke {spoke_id} authenticated successfully.")
+                self.active_connections[spoke_id] = websocket
 
             # --- Mutual Authentication (Hub Identity Proof) ---
             try:
@@ -287,20 +298,30 @@ class LabManagerHub:
                 }
                 await websocket.send(json.dumps(proof))
 
-                # Wait for spoke to verify and respond
-                hub_response_json = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-                hub_response = json.loads(hub_response_json)
+                # If the spoke has a secret, it will respond. If not, it might just ignore or respond HUB_OK.
+                try:
+                    hub_response_json = await asyncio.wait_for(websocket.recv(), timeout=2.0)
+                    hub_response = json.loads(hub_response_json)
 
-                if hub_response.get("status") != "HUB_OK":
-                    logger.warning(f"Mutual auth failed: Spoke {spoke_id} rejected Hub identity.")
-                    await websocket.close(1008, "Hub identity rejected")
-                    return
-
-                logger.info(f"Mutual authentication complete for {spoke_id}.")
+                    if hub_response.get("status") != "HUB_OK":
+                        logger.warning(f"Mutual auth failed: Spoke {spoke_id} rejected Hub identity.")
+                        await websocket.close(1008, "Hub identity rejected")
+                        return
+                    logger.info(f"Mutual authentication complete for {spoke_id}.")
+                except asyncio.TimeoutError:
+                    if not secret:
+                        logger.info(f"No response for Hub proof from {spoke_id} (expected for secret-less connection).")
+                    else:
+                        logger.error(f"Mutual authentication timed out for {spoke_id}")
+                        await websocket.close(1008, "Mutual authentication timed out")
+                        return
             except Exception as e:
                 logger.error(f"Mutual authentication error for {spoke_id}: {e}")
                 await websocket.close(1008, "Mutual authentication failed")
                 return
+
+            # Ensure connection is tracked even if not fully auth'd (for negotiation)
+            self.active_connections[spoke_id] = websocket
 
             # Update telemetry
             self.spoke_telemetry[spoke_id] = {
@@ -341,11 +362,14 @@ class LabManagerHub:
                                "sender_id": "hub", "destination_id": spoke_id},
                     "payload": {"type": "APPROVAL_REQUIRED", "data": {}}
                 }
-                # Sign the message
-                approval_msg["signature"] = self.key_manager.sign_message(spoke_id, {
-                    "header": approval_msg["header"],
-                    "payload": approval_msg["payload"]
-                })
+                # Only sign if we have a key
+                try:
+                    approval_msg["signature"] = self.key_manager.sign_message(spoke_id, {
+                        "header": approval_msg["header"],
+                        "payload": approval_msg["payload"]
+                    })
+                except Exception:
+                    approval_msg["signature"] = None
 
                 await websocket.send(json.dumps(approval_msg))
                 # We don't return; we enter the loop but the loop will filter messages
@@ -365,9 +389,16 @@ class LabManagerHub:
                 data_to_verify = {k: v for k, v in msg_data.items() if k != "signature"}
                 message_bytes = json.dumps(data_to_verify, sort_keys=True, separators=(',', ':')).encode()
 
-                if not self.key_manager.verify_signature(spoke_id, message_bytes, signature):
-                    logger.warning(f"Invalid signature from spoke {spoke_id}")
-                    continue
+                if signature:
+                    if not self.key_manager.verify_signature(spoke_id, message_bytes, signature):
+                        logger.warning(f"Invalid signature from spoke {spoke_id}")
+                        continue
+                else:
+                    # No signature provided. Allow ONLY heartbeats for unauthenticated spokes.
+                    payload = msg_data.get("payload", {})
+                    if payload.get("type") != "HEARTBEAT":
+                        logger.warning(f"Unauthenticated message from {spoke_id} (only HEARTBEAT allowed). Dropping.")
+                        continue
 
                 # Process Heartbeat (Always allowed for pending spokes to maintain connection)
                 payload = msg_data.get("payload", {})
