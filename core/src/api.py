@@ -259,6 +259,17 @@ def create_app(hub):
         firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
         return {"firewalls": firewalls}
 
+    @app.get("/api/firewall/{firewall_id}/refresh")
+    async def refresh_firewall_cache(firewall_id: str):
+        hub = app.state.hub
+        logger.info(f"API: Triggering cache refresh for firewall {firewall_id}")
+        success = await hub.poll_opnsense_rules(firewall_id=firewall_id)
+        if not success:
+            logger.error(f"API: Cache refresh failed for firewall {firewall_id}")
+            raise HTTPException(status_code=503, detail=f"Failed to refresh cache for firewall {firewall_id} (Spoke not connected or API error)")
+
+        return {"status": "success", "message": f"Cache for firewall {firewall_id} refreshed successfully!"}
+
     @app.get("/api/firewall/{firewall_id}/{endpoint}")
     async def get_firewall_data(firewall_id: str, endpoint: str):
         hub = app.state.hub

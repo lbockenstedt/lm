@@ -492,26 +492,12 @@ class LabManagerHub:
 
         logger.info(f"Update check: local={local_v}, remote={remote_v}, force={force}")
 
+        # Record the attempt timestamp regardless of whether an update is found
+        self.state.update_global_config({"last_update_ts": time.time()})
+        self.state.save_state()
+
         hub_updated = False
         if force or local_v != remote_v:
-            if remote_v == "unknown":
-                logger.error("Could not retrieve remote version from GitHub. Skipping Hub update.")
-            else:
-                try:
-                    logger.info(f"Updating Hub from v{local_v} to v{remote_v} (force={force})...")
-
-                    # 1. Update Hub itself
-                    hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-
-                    # Use configured repo URL if available
-                    config = self.state.get_global_config()
-                    sources = config.get("update_sources", {})
-                    hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
-                    branch = config.get("global_branch", "main")
-
-                    # Record the attempt timestamp
-                    self.state.update_global_config({"last_update_ts": time.time()})
-                    self.state.save_state()
 
                     # Ensure the directory is marked as safe for git
                     await asyncio.create_subprocess_shell(f"git config --global --add safe.directory {hub_root}")
