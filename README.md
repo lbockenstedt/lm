@@ -47,8 +47,8 @@ The project is consolidated under the `/opt/lm` (on server) or local directory s
 
 ### 🛠️ Active / Pending Tasks
 - [ ] **OPNsense Deep Dive**: Implement full rule creation/deletion via UI (currently supports query).
-- [ ] **CPPM Advanced Reporting**: Expand CPPM queries to include detailed session and endpoint analytics.
 - [ la-manager ] **Client Sim Controls**: Build out the UI components for triggering and managing simulation profiles.
+- [ ] **CPPM Advanced Reporting**: Expand CPPM queries to include detailed session and endpoint analytics.
 - [ ] **Telemetry Dashboards**: Create visual real-time graphs for the metrics pushed by the Proxmox Agent.
 
 ---
@@ -74,3 +74,28 @@ The project is consolidated under the `/opt/lm` (on server) or local directory s
 - **Start All**: `./start_all.sh` (from root)
 - **Audit System**: `bash audit/audit_all.sh`
 - **Stop All**: `pkill -f python`
+
+---
+
+## 📖 User Documentation
+
+### 📖 Help: firewall-config
+**Firewall Configuration**
+- **Name**: A friendly label for the firewall (e.g., "Core-Edge-01").
+- **Model**: The firewall vendor (currently supports `opnsense`).
+- **Host/IP**: The management IP address of the firewall.
+- **Port**: The API port (default for OPNsense is usually 8443).
+- **API Key/Secret**: Generated from the firewall's administrative interface under System $\rightarrow$ Access $\rightarrow$ Users.
+
+### 📖 Help: ldap-config
+**LDAP Integration**
+- **Server URL**: The full LDAP provider URL (e.g., `ldap://corp-dc.local:389`).
+- **Base DN**: The starting point for user searches (e.g., `dc=example,dc=com`).
+- **Admin DN**: The distinguished name of the user used to bind to the LDAP server.
+- **Admin Password**: The password for the bind user.
+
+### 📖 Help: tenant-quotas
+**Resource Quotas**
+- **VM Quota**: Maximum number of Virtual Machines this tenant can associate.
+- **CPPM Quota**: Maximum number of endpoints allowed in the Policy Manager.
+- **OPNsense Quota**: Maximum number of firewall instances mapped to this tenant.

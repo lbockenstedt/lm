@@ -72,11 +72,13 @@ def create_app(hub):
     async def get_all_spokes_status():
         hub = app.state.hub
         known_spokes = hub.state.system_state.get("known_modules", [])
+        module_names = hub.state.system_state.get("module_names", {})
 
         spokes_status = []
         for sid in known_spokes:
             spokes_status.append({
                 "spoke_id": sid,
+                "display_name": module_names.get(sid, sid),
                 "approved": hub.approved_modules.get(sid, False)
             })
 
@@ -610,6 +612,40 @@ def create_app(hub):
 
         return {"hosts": results}
 
+    @app.get("/setup/docs/{section}")
+    async def get_docs(section: str):
+        """
+        Extracts a specific help section from the README.md file.
+        """
+        try:
+            readme_path = os.path.join(os.path.dirname(__file__), "../../README.md")
+            if not os.path.exists(readme_path):
+                raise HTTPException(status_code=404, detail="README.md documentation not found")
+
+            with open(readme_path, "r") as f:
+                content = f.read()
+
+            # Documentation sections start with '### 📖 Help: section_id'
+            marker = "### 📖 Help:"
+            sections = content.split(marker)
+
+            for s in sections[1:]: # Skip content before the first marker
+                lines = s.split('\n')
+                header = lines[0].strip()
+                if header == section:
+                    # Return everything until the next marker or end of file
+                    # The 'sections' split already handles the boundaries,
+                    # we just need to return the content after the section_id header
+                    body = '\n'.join(lines[1:]).strip()
+                    return {"content": body}
+
+            raise HTTPException(status_code=404, detail=f"Help section '{section}' not found in documentation.")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error reading documentation section {section}: {e}")
+            raise HTTPException(status_code=500, detail=f"Error retrieving documentation: {str(e)}")
+
     @app.get("/setup/appearance")
     async def get_appearance():
         hub = app.state.hub
@@ -896,6 +932,9 @@ def create_app(hub):
         try:
             data = await request.json()
             module_id = data.get("module_id")
+            custom_spoke_id = data.get("spoke_id")
+            display_name = data.get("display_name")
+
             if not module_id:
                 raise HTTPException(status_code=400, detail="Missing module_id")
 
@@ -915,18 +954,43 @@ def create_app(hub):
             # Hub API address for the module
             hub_url = f"ws://{hub.host}:{hub.port}"
 
-            # Generate spoke ID and first secret for onboarding
-            spoke_id = f"{module_id}-spoke-1"
+            # Use custom spoke ID if provided, otherwise generate default
+            spoke_id = custom_spoke_id if custom_spoke_id else f"{module_id}-spoke-1"
+
+            # Register the module and its display name
+            hub.state.register_module(spoke_id, approved=False, display_name=display_name or spoke_id)
+            hub.known_modules = hub.state.system_state["known_modules"]
+
             first_secret = hub.key_manager.generate_first_secret(spoke_id)
 
             # Execute installation script as a background process
-            # We now pass the spoke_id and the first_secret to the install script
             full_cmd = f"bash {script_path} --hub {hub_url} --id {spoke_id} --secret {first_secret} --all-prereqs"
 
             # Start the process without blocking the API
             subprocess.Popen(full_cmd, shell=True, cwd=os.path.join(os.path.dirname(__file__), "../../.."))
 
             return {"status": "success", "message": f"Installation of {module_id} triggered for {spoke_id} in background."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/setup/spoke-name")
+    async def rename_spoke(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            spoke_id = data.get("spoke_id")
+            new_name = data.get("display_name")
+
+            if not spoke_id or not new_name:
+                raise HTTPException(status_code=400, detail="Missing spoke_id or display_name")
+
+            if spoke_id not in hub.state.system_state["known_modules"]:
+                raise HTTPException(status_code=404, detail="Spoke not found")
+
+            hub.state.set_module_name(spoke_id, new_name)
+            hub.state.save_state()
+
+            return {"status": "success", "message": f"Spoke {spoke_id} renamed to {new_name}."}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -1105,6 +1169,8 @@ def create_app(hub):
             agent_id = data.get("agent_id")
             module_id = data.get("module_id")
             repo_url = data.get("repo_url")
+            custom_spoke_id = data.get("spoke_id")
+            display_name = data.get("display_name")
 
             if not agent_id or not module_id or not repo_url:
                 raise HTTPException(status_code=400, detail="Missing agent_id, module_id, or repo_url")
@@ -1113,7 +1179,12 @@ def create_app(hub):
                 raise HTTPException(status_code=503, detail=f"Generic agent {agent_id} not connected")
 
             # Generate credentials for the new spoke
-            spoke_id = f"{module_id}-spoke-1"
+            spoke_id = custom_spoke_id if custom_spoke_id else f"{module_id}-spoke-1"
+
+            # Register the module and its display name
+            hub.state.register_module(spoke_id, approved=False, display_name=display_name or spoke_id)
+            hub.known_modules = hub.state.system_state["known_modules"]
+
             secret = hub.key_manager.generate_first_secret(spoke_id)
             hub_secret = hub.key_manager.hub_secret # Simplified for now
 

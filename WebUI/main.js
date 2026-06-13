@@ -314,19 +314,19 @@ const VIEWS = {
                         <div class="hpe-card rounded-lg p-6 space-y-6 shadow-sm">
                             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                                 <div class="space-y-2">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">LDAP Server URL</label>
+                                    <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">LDAP Server URL <span onclick="showHelp('ldap-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                                     <input type="text" id="ldap-server-url" placeholder="ldap://localhost:389" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
                                 </div>
                                 <div class="space-y-2">
-                                    <label class la-text-xs text-slate-500 uppercase font-bold">Base DN</label>
+                                    <label class la-text-xs text-slate-500 uppercase font-bold flex items-center gap-1">Base DN <span onclick="showHelp('ldap-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                                     <input type="text" id="ldap-base-dn" placeholder="dc=example,dc=org" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
                                 </div>
                                 <div class="space-y-2">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">Admin DN</label>
+                                    <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">Admin DN <span onclick="showHelp('ldap-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                                     <input type="text" id="ldap-admin-dn" placeholder="cn=admin,dc=example,dc=org" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
                                 </div>
                                 <div class="space-y-2">
-                                    <label class="text-xs text-slate-500 uppercase font-bold">Admin Password</label>
+                                    <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">Admin Password <span onclick="showHelp('ldap-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                                     <input type="password" id="ldap-admin-pw" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
                                 </div>
                             </div>
@@ -456,15 +456,15 @@ const VIEWS = {
                                         <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4">Quotas (Maximum Resources)</h4>
                                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                             <div class="space-y-2">
-                                                <label class="text-slate-400">VMs</label>
+                                                <label class="text-slate-400 flex items-center gap-1">VMs <span onclick="showHelp('tenant-quotas')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                                                 <input type="number" id="quota-vm" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1 text-sm outline-none focus:ring-1 focus:ring-green-500">
                                             </div>
                                             <div class="space-y-2">
-                                                <label class="text-xs text-slate-500 uppercase font-bold">CPPM Policies</label>
+                                                <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">CPPM Policies <span onclick="showHelp('tenant-quotas')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                                                 <input type="number" id="quota-cppm" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1 text-sm outline-none focus:ring-1 focus:ring-green-500">
                                             </div>
                                             <div class="space-y-2">
-                                                <label class="text-xs text-slate-500 uppercase font-bold">Firewall Rules</label>
+                                                <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">Firewall Rules <span onclick="showHelp('tenant-quotas')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                                                 <input type="number" id="quota-opn" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1 text-sm outline-none focus:ring-1 focus:ring-green-500">
                                             </div>
                                         </div>
@@ -2540,21 +2540,25 @@ async function loadPendingSpokes() {
                 <table class="w-full text-left text-sm">
                     <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
                         <tr>
-                            <th class="px-4 py-3 font-bold">Spoke ID</th>
+                            <th class="px-4 py-3 font-bold">Spoke Name / ID</th>
                             <th class="px-4 py-3 font-bold">Status</th>
-                            <th class="px-4 py-3 font-bold text-right">Action</th>
+                            <th class="px-4 py-3 font-bold text-right">Actions</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-200">
                         ${spokes.map(spoke => {
                             const sid = spoke.spoke_id;
+                            const name = spoke.display_name || sid;
                             const isApproved = spoke.approved;
                             return `
                                 <tr class="hover:bg-slate-50 transition-colors">
                                     <td class="px-4 py-3">
                                         <div class="flex items-center gap-3">
                                             <div class="w-2 h-2 rounded-full ${isApproved ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-yellow-500 shadow-[0_0_8px_rgba(234,179,8,0.6)]'}"></div>
-                                            <span class="font-medium text-slate-700">${sid}</span>
+                                            <div class="flex flex-col">
+                                                <span class="font-medium text-slate-700">${name}</span>
+                                                <span class="text-[10px] font-mono text-slate-400">${sid}</span>
+                                            </div>
                                         </div>
                                     </td>
                                     <td class="px-4 py-3">
@@ -2562,7 +2566,10 @@ async function loadPendingSpokes() {
                                             ${isApproved ? 'Approved' : 'Pending'}
                                         </span>
                                     </td>
-                                    <td class="px-4 py-3 text-right">
+                                    <td class="px-4 py-3 text-right flex justify-end gap-2">
+                                        <button onclick="renameSpoke('${sid}', '${name}')" class="text-slate-400 hover:text-slate-600 p-1 transition-colors" title="Rename Spoke">
+                                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9"></path></svg>
+                                        </button>
                                         ${!isApproved ? `
                                             <button onclick="approveSpoke('${sid}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-xs font-bold transition-colors">
                                                 Approve
@@ -2583,6 +2590,26 @@ async function loadPendingSpokes() {
     } catch (err) {
         console.error('Error in loadPendingSpokes:', err);
         listEl.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading spoke statuses: ${err.message}</div>`;
+    }
+}
+
+async function renameSpoke(spokeId, currentName) {
+    const newName = prompt(`Enter a new display name for spoke ${spokeId}:`, currentName);
+    if (newName === null || newName.trim() === '') return;
+
+    try {
+        const response = await fetch('/setup/spoke-name', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, display_name: newName.trim() })
+        });
+        if (!response.ok) throw new Error('Rename failed');
+
+        alert(`Spoke ${spokeId} renamed to ${newName}`);
+        await loadPendingSpokes();
+        updateStatus();
+    } catch (err) {
+        alert('Error renaming spoke: ' + err.message);
     }
 }
 
@@ -2724,20 +2751,20 @@ function showAddFirewallModal() {
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Host/IP</label>
+                        <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">Host/IP <span onclick="showHelp('firewall-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                         <input type="text" id="fw-host" placeholder="172.16.1.1" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
                     <div class="space-y-2">
-                        <label class="text-xs text-slate-500 uppercase font-bold">Port</label>
+                        <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">Port <span onclick="showHelp('firewall-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                         <input type="text" id="fw-port" placeholder="8443" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
                 </div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">API Key</label>
+                    <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">API Key <span onclick="showHelp('firewall-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                     <input type="text" id="fw-api-key" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">API Secret</label>
+                    <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">API Secret <span onclick="showHelp('firewall-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                     <input type="password" id="fw-api-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
             </div>
@@ -2887,7 +2914,7 @@ function showProvisionModal(agentId = '') {
                 <button onclick="closeProvisionModal()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
-            </div>
+            </div_div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Target Agent ID</label>
@@ -2901,6 +2928,16 @@ function showProvisionModal(agentId = '') {
                     <label class="text-xs text-slate-500 uppercase font-bold">Repository URL</label>
                     <input type="text" id="prov-repo-url" placeholder="https://github.com/..." class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-400 uppercase font-bold">Custom Spoke ID</label>
+                        <input type="text" id="prov-spoke-id" placeholder="e.g. ldap-prod-1" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-400 uppercase font-bold">Display Name</label>
+                        <input type="text" id="prov-display-name" placeholder="e.g. Main LDAP Server" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeProvisionModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
@@ -2911,6 +2948,7 @@ function showProvisionModal(agentId = '') {
     document.body.appendChild(modal);
 }
 
+
 function closeProvisionModal() {
     const modal = document.getElementById('provision-modal');
     if (modal) modal.remove();
@@ -2920,9 +2958,11 @@ async function provisionModule() {
     const agent_id = document.getElementById('prov-agent-id').value.trim();
     const module_id = document.getElementById('prov-module-id').value.trim();
     const repo_url = document.getElementById('prov-repo-url').value.trim();
+    const spoke_id = document.getElementById('prov-spoke-id').value.trim();
+    const display_name = document.getElementById('prov-display-name').value.trim();
 
     if (!agent_id || !module_id || !repo_url) {
-        alert('Please fill in all fields');
+        alert('Please fill in all required fields');
         return;
     }
 
@@ -2930,7 +2970,7 @@ async function provisionModule() {
         const response = await fetch('/api/generic/provision', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agent_id, module_id, repo_url })
+            body: JSON.stringify({ agent_id, module_id, repo_url, spoke_id, display_name })
         });
         const data = await response.json();
         if (response.ok) {
@@ -2944,8 +2984,41 @@ async function provisionModule() {
     }
 }
 
+async function showHelp(section) {
+    try {
+        const response = await fetch(`/setup/docs/${section}`);
+        if (!response.ok) throw new Error('Help section not found');
+        const data = await response.json();
+        const content = data.content || 'No documentation available for this section.';
 
-document.addEventListener('DOMContentLoaded', () => {
+        const modal = document.createElement('div');
+        modal.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-[100] p-4 animate-in fade-in duration-200';
+        modal.innerHTML = `
+            <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden border border-slate-200 flex flex-col max-h-[80vh]">
+                <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                    <h3 class="text-lg font-bold text-slate-800 flex items-center gap-2">
+                        <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        Help: ${section.replace(/-/g, ' ')}
+                    </h3>
+                    <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+                <div class="p-6 overflow-y-auto prose prose-slate max-w-none">
+                    <div class="text-sm text-slate-600 leading-relaxed whitespace-pre-wrap">${content}</div>
+                </div>
+                <div class="px-6 py-4 border-t border-slate-200 flex justify-end bg-slate-50">
+                    <button onclick="this.closest('.fixed').remove()" class="bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2 rounded-md text-sm font-bold transition-all">Close</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    } catch (err) {
+        console.error('Error loading help:', err);
+        alert('Could not load help documentation: ' + err.message);
+    }
+}
+
     console.log("Lab Manager UI: Initializing...");
     try {
         currentTenant = localStorage.getItem('lm_tenant') || 'default';
