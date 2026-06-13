@@ -980,6 +980,7 @@ def create_app(hub):
             data = await request.json()
             spoke_id = data.get("spoke_id")
             new_name = data.get("display_name")
+            new_hostname = data.get("hostname")
 
             if not spoke_id or not new_name:
                 raise HTTPException(status_code=400, detail="Missing spoke_id or display_name")
@@ -990,7 +991,39 @@ def create_app(hub):
             hub.state.set_module_name(spoke_id, new_name)
             hub.state.save_state()
 
-            return {"status": "success", "message": f"Spoke {spoke_id} renamed to {new_name}."}
+            # If a new hostname was provided, send the command to the spoke
+            if new_hostname:
+                if spoke_id in hub.active_connections:
+                    msg_id = str(uuid.uuid4())
+                    msg = Message(
+                        header=MessageHeader(
+                            message_id=msg_id,
+                            timestamp=time.time(),
+                            sender_id="hub",
+                            destination_id=spoke_id
+                        ),
+                        payload=MessagePayload(type="SPOKE_SET_HOSTNAME", data={"hostname": new_hostname})
+                    )
+                    await hub.send_to_spoke(msg)
+                    hostname_status = "Hostname update triggered."
+                else:
+                    hostname_status = "Spoke not connected; hostname update will be queued."
+                    # Queue it in mailbox for when they connect
+                    msg_id = str(uuid.uuid4())
+                    msg = Message(
+                        header=MessageHeader(
+                            message_id=msg_id,
+                            timestamp=time.time(),
+                            sender_id="hub",
+                            destination_id=spoke_id
+                        ),
+                        payload=MessagePayload(type="SPOKE_SET_HOSTNAME", data={"hostname": new_hostname})
+                    )
+                    await hub.mailbox.push(msg, hub.send_to_spoke)
+            else:
+                hostname_status = ""
+
+            return {"status": "success", "message": f"Spoke {spoke_id} renamed to {new_name}. {hostname_status}".strip()}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 

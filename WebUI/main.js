@@ -5,6 +5,19 @@ const MODULE_CLASSES = {
     'Security/NAC': ['cppm', 'ise']
 };
 
+const PROVISIONABLE_MODULES = {
+    'ldap': { name: 'LDAP Server', repo: 'https://github.com/lbockenstedt/ldap' },
+    'netbox': { name: 'NetBox IPAM', repo: 'https://github.com/lbockenstedt/netbox' },
+    'unbound': { name: 'Unbound DNS', repo: 'https://github.com/lbockenstedt/unbound' },
+    'kea': { name: 'Kea DHCP', repo: 'https://github.com/lbockenstedt/kea' },
+    'zabbix': { name: 'Zabbix Monitoring', repo: 'https://github.com/lbockenstedt/zabbix' },
+    'graylog': { name: 'Graylog Log Management', repo: 'https://github.com/lbockenstedt/graylog' },
+    'iperf': { name: 'iPerf Speed Test', repo: 'https://github.com/lbockenstedt/iperf' },
+    'bugfix': { name: 'Bugfix Agent', repo: 'https://github.com/lbockenstedt/bugfix' },
+    'pihole': { name: 'Pi-hole DNS Filter', repo: 'https://github.com/lbockenstedt/pihole' },
+    'consolepi': { name: 'ConsolePi', repo: 'https://github.com/lbockenstedt/consolepi' },
+};
+
 const PRODUCT_MAP = {
     'pxmx': 'pxmx',
     'opn': 'opnsense',
@@ -2597,15 +2610,21 @@ async function renameSpoke(spokeId, currentName) {
     const newName = prompt(`Enter a new display name for spoke ${spokeId}:`, currentName);
     if (newName === null || newName.trim() === '') return;
 
+    const newHostname = prompt(`Enter a new system hostname for spoke ${spokeId} (optional, leave blank to keep current):`);
+
     try {
         const response = await fetch('/setup/spoke-name', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ spoke_id: spokeId, display_name: newName.trim() })
+            body: JSON.stringify({
+                spoke_id: spokeId,
+                display_name: newName.trim(),
+                hostname: newHostname ? newHostname.trim() : null
+            })
         });
         if (!response.ok) throw new Error('Rename failed');
 
-        alert(`Spoke ${spokeId} renamed to ${newName}`);
+        alert(`Spoke ${spokeId} renamed to ${newName}${newHostname ? ' with hostname ' + newHostname : ''}.`);
         await loadPendingSpokes();
         updateStatus();
     } catch (err) {
@@ -2914,15 +2933,21 @@ function showProvisionModal(agentId = '') {
                 <button onclick="closeProvisionModal()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
-            </div_div>
+            </div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Target Agent ID</label>
                     <input type="text" id="prov-agent-id" value="${agentId}" placeholder="e.g. generic-agent-1" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Module ID</label>
-                    <input type="text" id="prov-module-id" placeholder="e.g. ldap" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Module to Install</label>
+                    <select id="prov-module-id" onchange="updateProvisionRepo(this.value)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="">-- Select a Module --</option>
+                        ${Object.entries(PROVISIONABLE_MODULES).map(([id, info]) => `
+                            <option value="${id}">${info.name}</option>
+                        `).join('')}
+                        <option value="custom">Custom Repository...</option>
+                    </select>
                 </div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Repository URL</label>
@@ -2946,6 +2971,22 @@ function showProvisionModal(agentId = '') {
         </div>
     `;
     document.body.appendChild(modal);
+}
+
+function updateProvisionRepo(moduleId) {
+    const repoInput = document.getElementById('prov-repo-url');
+    if (moduleId === 'custom') {
+        repoInput.disabled = false;
+        repoInput.value = '';
+        repoInput.placeholder = 'Enter custom repository URL...';
+    } else if (PROVISIONABLE_MODULES[moduleId]) {
+        repoInput.value = PROVISIONABLE_MODULES[moduleId].repo;
+        repoInput.disabled = true;
+        repoInput.placeholder = 'Automatic repo for ' + PROVISIONABLE_MODULES[moduleId].name;
+    } else {
+        repoInput.disabled = true;
+        repoInput.value = '';
+    }
 }
 
 
