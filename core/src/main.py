@@ -498,40 +498,38 @@ class LabManagerHub:
 
         hub_updated = False
         if force or local_v != remote_v:
+            try:
+                # Ensure the directory is marked as safe for git
+                await asyncio.create_subprocess_shell(f"git config --global --add safe.directory {hub_root}")
 
-                    # Ensure the directory is marked as safe for git
-                    await asyncio.create_subprocess_shell(f"git config --global --add safe.directory {hub_root}")
+                update_cmd = (
+                    f"cd {hub_root} && "
+                    f"git remote set-url origin {hub_repo} && "
+                    f"git stash && "
+                    f"git fetch origin && "
+                    f"git checkout {branch} && "
+                    f"git pull origin {branch} && "
+                    f"git stash pop"
+                )
 
-                    update_cmd = (
-                        f"cd {hub_root} && "
-                        f"git remote set-url origin {hub_repo} && "
-                        f"git stash && "
-                        f"git fetch origin && "
-                        f"git checkout {branch} && "
-                        f"git pull origin {branch} && "
-                        f"git stash pop"
-                    )
+                process = await asyncio.create_subprocess_shell(
+                    update_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await process.communicate()
 
-                    process = await asyncio.create_subprocess_shell(
-                        update_cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout, stderr = await process.communicate()
-
-                    if process.returncode != 0:
-                        err_msg = stderr.decode().strip()
-                        if "No stash entry found" in err_msg or "conflict" not in err_msg.lower():
-                            logger.info(f"Hub update completed with minor stash warning: {err_msg}")
-                        else:
-                            logger.error(f"Hub git pull failed: {err_msg}")
-                            # We don't return here anymore, we still want to try spoke updates
+                if process.returncode != 0:
+                    err_msg = stderr.decode().strip()
+                    if "No stash entry found" in err_msg or "conflict" not in err_msg.lower():
+                        logger.info(f"Hub update completed with minor stash warning: {err_msg}")
                     else:
-                        hub_updated = True
-                        logger.info("Hub successfully updated.")
-
-                except Exception as e:
-                    logger.error(f"Unexpected error during Hub update: {e}")
+                        logger.error(f"Hub git pull failed: {err_msg}")
+                else:
+                    hub_updated = True
+                    logger.info("Hub successfully updated.")
+            except Exception as e:
+                logger.error(f"Unexpected error during Hub update: {e}")
         else:
             logger.info("Hub is already up to date. Skipping Hub pull.")
 
@@ -736,7 +734,80 @@ class LabManagerHub:
             logger.error(f"Error during OPNsense rule polling for {spoke_id}: {e}", exc_info=True)
             return False
 
-    async def run_opnsense_polling_loop(self):
+    async def run_key_rotation_loop(self):
+        """
+        Background loop that monitors and executes the periodic rotation of
+        cryptographic secrets for both spokes and the Hub.
+
+        Rotation Policy:
+        - Spoke Session Keys: Rotated every 30 days.
+        - Hub Root Secret: Rotated every 30 days.
+
+        The loop runs hourly. It ensures that keys are rotated before expiration
+        and that the corresponding updates are pushed to all active spokes
+        via the WebSocket control plane.
+        """
+        logger.info("Key rotation monitoring loop started.")
+        while True:
+            try:
+                # 1. Check Spoke Keys
+                due_spokes = self.key_manager.get_keys_due_for_rotation(days=30)
+                for sid in due_spokes:
+                    if sid in self.active_connections:
+                        logger.info(f"Rotating session key for spoke {sid} (due for rotation)")
+                        new_key = self.key_manager.rotate_key(sid)
+
+                        msg_id = str(uuid.uuid4())
+                        msg = Message(
+                            header=MessageHeader(
+                                message_id=msg_id,
+                                timestamp=time.time(),
+                                sender_id="hub",
+                                destination_id=sid
+                            ),
+                            payload=MessagePayload(type="SPOKE_UPDATE_SESSION_KEY", data={"secret": new_key.secret})
+                        )
+                        await self.send_to_spoke(msg)
+                        logger.info(f"New session key pushed to {sid}")
+
+                # 2. Check Hub Root Secret Rotation (approx every 30 days)
+                # We use a simple timestamp in global config to track the last root rotation
+                global_config = self.state.get_global_config()
+                last_root_rot = global_config.get("last_hub_root_rotation", 0)
+
+                if (time.time() - last_root_rot) > (30 * 24 * 3600):
+                    logger.info("Rotating Hub root secret (30-day interval)...")
+                    new_root_secret = self.key_manager.rotate_hub_secret()
+
+                    # Persist rotation time
+                    global_config["last_hub_root_rotation"] = time.time()
+                    self.state.system_state["global_config"] = global_config
+                    self.state.save_state()
+
+                    # Push new root secret to all approved spokes
+                    for sid, approved in self.approved_modules.items():
+                        if approved:
+                            msg_id = str(uuid.uuid4())
+                            msg = Message(
+                                header=MessageHeader(
+                                    message_id=msg_id,
+                                    timestamp=time.time(),
+                                    sender_id="hub",
+                                    destination_id=sid
+                                ),
+                                payload=MessagePayload(type="SPOKE_SET_HUB_SECRET", data={"hub_secret": new_root_secret})
+                            )
+                            try:
+                                await self.send_to_spoke(msg)
+                            except Exception as e:
+                                logger.error(f"Failed to push new hub secret to {sid}: {e}")
+
+                    logger.info("Hub root secret rotated and pushed to all approved spokes.")
+
+            except Exception as e:
+                logger.error(f"Error in key rotation loop: {e}", exc_info=True)
+
+            await asyncio.sleep(3600) # Check every hour
         """
         Background loop that polls OPNsense rules at the configured interval for all configured firewalls.
         """
@@ -809,6 +880,7 @@ class LabManagerHub:
         autoupdate_task = asyncio.create_task(self.run_autoupdate_loop())
         mps_task = asyncio.create_task(self.run_mps_loop())
         opnsense_poll_task = asyncio.create_task(self.run_opnsense_polling_loop())
+        rotation_task = asyncio.create_task(self.run_key_rotation_loop())
 
         async with websockets.serve(self.handle_connection, self.host, self.port) as server:
             self.is_ready = True
