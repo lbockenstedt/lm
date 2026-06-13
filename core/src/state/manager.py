@@ -181,8 +181,28 @@ class StateManager:
     # --- Tenant Management ---
 
     def get_tenant(self, tenant_id: str) -> Optional[Dict]:
+        # Try exact match first
+        tenant = self.tenant_state["tenants"].get(tenant_id)
+        if tenant:
+            return tenant
+
+        # Fallback: Try converting to int if the input looks like a number
+        # or try converting existing keys to strings
+        try:
+            int_id = int(tenant_id)
+            tenant = self.tenant_state["tenants"].get(int_id)
+            if tenant:
+                return tenant
+        except (ValueError, TypeError):
+            pass
+
+        # Final fallback: scan for a string match among keys
+        for key in self.tenant_state["tenants"].keys():
+            if str(key) == str(tenant_id):
+                return self.tenant_state["tenants"][key]
+
         logger.info(f"StateManager: get_tenant requested for id='{tenant_id}'. Available tenants: {list(self.tenant_state['tenants'].keys())}")
-        return self.tenant_state["tenants"].get(tenant_id)
+        return None
 
     def update_tenant(self, tenant_id: str, data: Dict):
         if tenant_id not in self.tenant_state["tenants"]:
