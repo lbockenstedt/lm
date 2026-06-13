@@ -22,7 +22,7 @@ class BaseControlPlane:
     def __init__(self, spoke_id: str, secret: str, hub_secret: str = None, hub_url: str = None):
         self.spoke_id = spoke_id
         self.secret = secret
-        self.hub_secret = hub_secret
+        self.hub_secrets = [hub_secret] if hub_secret else []
         self.hub_url = hub_url
         self.modules: Dict[str, Any] = {} # { module_name: BaseSpoke instance }
         self.signer = MessageSigner(secret)
@@ -50,22 +50,27 @@ class BaseControlPlane:
                     challenge = hub_proof.get("challenge")
                     signature = hub_proof.get("signature")
 
-                    if self.hub_secret:
-                        expected_sig = hmac.new(
-                            self.hub_secret.encode(),
-                            challenge.encode(),
-                            hashlib.sha256
-                        ).hexdigest()
+                    if self.hub_secrets:
+                        verified = False
+                        for hs in self.hub_secrets:
+                            expected_sig = hmac.new(
+                                hs.encode(),
+                                challenge.encode(),
+                                hashlib.sha256
+                            ).hexdigest()
+                            if hmac.compare_digest(expected_sig, signature):
+                                verified = True
+                                break
 
-                        if hmac.compare_digest(expected_sig, signature):
+                        if verified:
                             logger.info("Hub identity verified successfully.")
                             await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                         else:
-                            logger.error("Hub identity verification failed: Invalid signature.")
+                            logger.error("Hub identity verification failed: Invalid signature for all known secrets.")
                             await websocket.close(1008, "Hub verification failed")
                             return
                     else:
-                        logger.warning("Hub secret not configured. Skipping Hub identity verification (Insecure).")
+                        logger.warning("Hub secrets not configured. Skipping Hub identity verification (Insecure).")
                         await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                 else:
                     logger.error(f"Unexpected response during Hub verification: {hub_proof.get('status')}")
@@ -171,9 +176,22 @@ class BaseControlPlane:
                 return {"status": "ERROR", "message": str(e)}
 
         if cmd_type == "SPOKE_SET_HUB_SECRET":
-            self.hub_secret = data.get("hub_secret")
-            logger.info(f"Hub secret updated for {self.spoke_id}")
-            return {"status": "SUCCESS", "message": "Hub secret updated successfully"}
+            new_secret = data.get("hub_secret")
+            if new_secret:
+                self.hub_secrets.insert(0, new_secret)
+                self.hub_secrets = self.hub_secrets[:3] # Window of 3
+                logger.info(f"Hub secret updated for {self.spoke_id}. Current window size: {len(self.hub_secrets)}")
+                return {"status": "SUCCESS", "message": "Hub secret updated successfully"}
+            return {"status": "ERROR", "message": "Missing hub_secret in data"}
+
+        if cmd_type == "SPOKE_UPDATE_SESSION_KEY":
+            new_secret = data.get("secret")
+            if new_secret:
+                self.secret = new_secret
+                self.signer = MessageSigner(new_secret)
+                logger.info(f"Session key updated for {self.spoke_id}")
+                return {"status": "SUCCESS", "message": "Session key updated successfully"}
+            return {"status": "ERROR", "message": "Missing secret in data"}
 
         return None
 

@@ -35,6 +35,7 @@ class StateManager:
             "resources": {},
             "approved_modules": {},
             "known_modules": [],
+            "module_names": {},
             "active_sessions": {},
             "active_tenant": "default"
         }
@@ -159,10 +160,20 @@ class StateManager:
     def update_global_config(self, config: Dict):
         self.system_state["global_config"].update(config)
 
-    def register_module(self, module_id: str, approved: bool = False):
+    def register_module(self, module_id: str, approved: bool = False, display_name: str = None):
         if module_id not in self.system_state["known_modules"]:
             self.system_state["known_modules"].append(module_id)
         self.system_state["approved_modules"][module_id] = approved
+        if display_name:
+            self.system_state["module_names"][module_id] = display_name
+        elif module_id not in self.system_state["module_names"]:
+            self.system_state["module_names"][module_id] = module_id
+
+    def set_module_name(self, module_id: str, name: str):
+        self.system_state["module_names"][module_id] = name
+
+    def get_module_name(self, module_id: str) -> str:
+        return self.system_state["module_names"].get(module_id, module_id)
 
     def get_approved_modules(self) -> Dict[str, bool]:
         return self.system_state["approved_modules"]

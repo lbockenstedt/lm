@@ -21,6 +21,17 @@ class ManagedKey:
     expires_at: float
 
 class KeyManager:
+    """
+    The KeyManager is the central authority for cryptographic secrets within the Hub.
+    It manages two distinct types of secrets:
+    1. The Hub Root Secret: A long-term secret used by the Hub to prove its identity
+       to spokes during mutual authentication. It maintains a rotation window to
+       support system restores.
+    2. ManagedKeys (Spoke Secrets): Short-to-medium term secrets used for HMAC
+       signing of per-message traffic between the Hub and a specific spoke.
+
+    Persistence is handled independently via encrypted JSON files in the data directory.
+    """
     def __init__(self, system_path="keys.json", hub_secret_path="hub_secret.json"):
         # Resolve absolute paths to avoid PermissionErrors under systemd/different CWDs
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -31,38 +42,72 @@ class KeyManager:
         self.hub_secret_path = os.path.join(data_dir, hub_secret_path)
         self.keys: Dict[str, ManagedKey] = {} # { spoke_id: current_key }
         self.history: Dict[str, List[ManagedKey]] = {} # { spoke_id: [previous_keys] }
-        self.hub_secret = self._load_or_generate_hub_secret()
+        self.hub_secrets = self._load_or_generate_hub_secrets()
         self.load_keys()
 
-    def _load_or_generate_hub_secret(self) -> str:
-        """Loads or generates the persistent secret used by the Hub to prove its identity."""
+    def _load_or_generate_hub_secrets(self) -> List[str]:
+        """Loads or generates the persistent secrets used by the Hub.
+        Maintains a window of the last 3 secrets.
+        """
         if os.path.exists(self.hub_secret_path):
             try:
                 with open(self.hub_secret_path, "rb") as f:
                     content = f.read()
                     try:
-                        # Try decrypting
-                        return hub_encryption.decrypt(content)
+                        decrypted = hub_encryption.decrypt(content)
+                        data = json.loads(decrypted)
+                        if isinstance(data, list):
+                            return data[:3]
+                        # Migration: if it was a single string
+                        return [data] if isinstance(data, str) else [str(data)]
                     except Exception:
                         # Fallback to plain text for migration
-                        return content.decode().strip()
+                        text = content.decode().strip()
+                        return [text] if "," not in text else text.split(",")
             except Exception as e:
-                print(f"Failed to load hub secret: {e}")
+                logger.error(f"Failed to load hub secrets: {e}")
 
-        secret = secrets.token_urlsafe(64)
+        # Initial generation
+        secrets_list = [secrets.token_urlsafe(64)]
+        self._save_hub_secrets(secrets_list)
+        return secrets_list
+
+    def _save_hub_secrets(self, secrets_list: List[str]):
         try:
-            # Encrypt the secret before saving
-            encrypted_secret = hub_encryption.encrypt(secret)
+            json_data = json.dumps(secrets_list, separators=(',', ':'))
+            encrypted_secret = hub_encryption.encrypt(json_data)
             with open(self.hub_secret_path, "wb") as f:
                 f.write(encrypted_secret)
         except Exception as e:
-            print(f"Failed to save hub secret: {e}")
-        return secret
+            logger.error(f"Failed to save hub secrets: {e}")
+
+    def rotate_hub_secret(self) -> str:
+        """
+        Rotates the Hub's root identity secret.
+
+        The Hub maintains a window of the last 3 root secrets. When a rotation occurs:
+        1. A new 64-character URL-safe token is generated.
+        2. The new secret is prepended to the `hub_secrets` list.
+        3. The list is truncated to 3 entries.
+        4. The updated list is encrypted and persisted to disk.
+
+        This window allows spokes to verify the Hub's identity even if they have
+        not yet received the latest rotation update or if they were restored
+        from a backup.
+
+        Returns:
+            The new root secret as a string.
+        """
+        new_secret = secrets.token_urlsafe(64)
+        self.hub_secrets.insert(0, new_secret)
+        self.hub_secrets = self.hub_secrets[:3]
+        self._save_hub_secrets(self.hub_secrets)
+        return new_secret
 
     def sign_hub_challenge(self, challenge_bytes: bytes) -> str:
-        """Signs a challenge to prove the Hub's identity to a spoke."""
+        """Signs a challenge using the most recent Hub secret."""
         return hmac.new(
-            self.hub_secret.encode(),
+            self.hub_secrets[0].encode(),
             challenge_bytes,
             hashlib.sha256
         ).hexdigest()
@@ -114,21 +159,38 @@ class KeyManager:
 
     def rotate_key(self, spoke_id: str) -> ManagedKey:
         """
-        Rotates the key for a spoke. Moves current key to history.
+        Rotates the session key for a specific spoke.
+
+        The system implements a "grace window" for session keys. Only the current
+        key and one previous key are kept valid. This ensures that if a spoke
+        is restored from a VM snapshot, it can still authenticate using its
+        last known key, which the Hub will still recognize.
+
+        Process:
+        1. Move current key to the history list.
+        2. Truncate history to 1 entry (Current + 1 Previous).
+        3. Generate a new secret with a 30-day expiration.
+        4. Update the current key and persist.
+
+        Args:
+            spoke_id: The unique identifier of the spoke whose key is being rotated.
+
+        Returns:
+            The newly generated ManagedKey object.
         """
         if spoke_id in self.keys:
             old_key = self.keys[spoke_id]
             if spoke_id not in self.history:
                 self.history[spoke_id] = []
             self.history[spoke_id].insert(0, old_key)
-            # Keep only 4 previous keys
-            self.history[spoke_id] = self.history[spoke_id][:4]
+            # Keep only 1 previous key (Total: Current + 1 Previous)
+            self.history[spoke_id] = self.history[spoke_id][:1]
 
         new_key = ManagedKey(
             key_id=str(uuid.uuid4()),
             secret=secrets.token_urlsafe(32),
             created_at=time.time(),
-            expires_at=time.time() + (7 * 24 * 3600) # 7 days
+            expires_at=time.time() + (30 * 24 * 3600) # 30 days
         )
         self.keys[spoke_id] = new_key
         self._save_keys()
@@ -166,6 +228,16 @@ class KeyManager:
                 logger.warning(f"Dev-mode secret '{dev_secret}' rejected for spoke {spoke_id} because a real key is already configured.")
 
         return None
+
+    def get_keys_due_for_rotation(self, days: int = 30) -> List[str]:
+        """Returns a list of spoke IDs whose keys were created more than 'days' ago."""
+        now = time.time()
+        threshold = days * 24 * 3600
+        due = []
+        for sid, key in self.keys.items():
+            if (now - key.created_at) > threshold:
+                due.append(sid)
+        return due
 
     def sign_message(self, spoke_id: str, message_dict: Dict[str, Any]) -> str:
         """
