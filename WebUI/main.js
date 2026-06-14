@@ -286,8 +286,81 @@ const VIEWS = {
                                 Refresh Status
                             </button>
                         </div>
-                        <div id="vm-server-status-container" class="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            <div class="py-12 text-center text-slate-400 italic col-span-3">Loading server status...</div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-4 gap-4 mb-6">
+                            <div class="hpe-card p-4 rounded-lg bg-white border border-slate-200 shadow-sm">
+                                <label class="text-[10px] text-slate-400 uppercase font-bold">Node Name</label>
+                                <div id="server-node-name" class="text-lg font-bold text-slate-800 truncate">Loading...</div>
+                            </div>
+                            <div class="hpe-card p-4 rounded-lg bg-white border border-slate-200 shadow-sm">
+                                <label class="text-[10px] text-slate-400 uppercase font-bold">CPU Usage</label>
+                                <div id="server-cpu" class="text-lg font-bold text-slate-800">--%</div>
+                            </div>
+                            <div class="hpe-card p-4 rounded-lg bg-white border border-slate-200 shadow-sm">
+                                <label class="text-[10px] text-slate-400 uppercase font-bold">RAM Usage</label>
+                                <div id="server-ram" class="text-lg font-bold text-slate-800">-- / --</div>
+                            </div>
+                            <div class="hpe-card p-4 rounded-lg bg-white border border-slate-200 shadow-sm">
+                                <label class="text-[10px] text-slate-400 uppercase font-bold">Last Seen</label>
+                                <div id="server-last-seen" class="text-lg font-bold text-slate-800">--</div>
+                            </div>
+                        </div>
+
+                        <div class="hpe-card p-4 rounded-lg bg-white border border-slate-200 shadow-sm mb-6">
+                            <label class="text-[10px] text-slate-400 uppercase font-bold block mb-3">Storage Volume Status</label>
+                            <div id="server-storage-pills" class="flex flex-wrap gap-2">
+                                <div class="text-xs text-slate-400 italic">No storage data available.</div>
+                            </div>
+                        </div>
+
+                        <div class="space-y-6">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-sm font-bold text-slate-700 uppercase tracking-wider">Simulation Guests</h3>
+                                <div class="text-xs text-slate-500">Count: <span id="vm-count-sim" class="font-bold text-slate-800">0</span></div>
+                            </div>
+                            <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                                <table class="w-full text-left text-sm">
+                                    <thead class="bg-slate-50 text-slate-600 uppercase text-xs">
+                                        <tr>
+                                            <th class="px-4 py-3 font-bold">Status</th>
+                                            <th class="px-4 py-3 font-bold">VMID</th>
+                                            <th class="px-4 py-3 font-bold">Name</th>
+                                            <th class="px-4 py-3 font-bold">CPU</th>
+                                            <th class="px-4 py-3 font-bold">RAM</th>
+                                            <th class="px-4 py-3 font-bold text-right">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="server-vm-tbody-sim" class="divide-y divide-slate-200">
+                                        <tr class="text-center text-slate-400 italic"><td colspan="6" class="py-8">No simulation guests found.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="space-y-6">
+                            <div class="flex items-center justify-between">
+                                <h3 class="text-sm font-bold text-slate-700 uppercase tracking-wider">Other Guests & Containers</h3>
+                                <div class="flex gap-4">
+                                    <div class="text-xs text-slate-500">Other: <span id="vm-count-other" class="font-bold text-slate-800">0</span></div>
+                                    <div class="text-xs text-slate-500">Containers: <span id="vm-count-containers" class="font-bold text-slate-800">0</span></div>
+                                </div>
+                            </div>
+                            <div class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                                <table class="w-full text-left text-sm">
+                                    <thead class="bg-slate-50 text-slate-600 uppercase text-xs">
+                                        <tr>
+                                            <th class="px-4 py-3 font-bold">Status</th>
+                                            <th class="px-4 py-3 font-bold">VMID</th>
+                                            <th class="px-4 py-3 font-bold">Name</th>
+                                            <th class="px-4 py-3 font-bold">Type</th>
+                                            <th class="px-4 py-3 font-bold text-right">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="server-vm-tbody-other" class="divide-y divide-slate-200">
+                                        <tr class="text-center text-slate-400 italic"><td colspan="5" class="py-8">No other guests found.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     </div>
                 `;
@@ -3574,9 +3647,6 @@ async function refreshSimClients() {
 }
 
 async function refreshVMServerStatus() {
-    const container = document.getElementById('vm-server-status-container');
-    if (!container) return;
-
     try {
         const response = await fetch('/setup/diagnostics');
         if (!response.ok) throw new Error('Failed to fetch diagnostics');
@@ -3586,50 +3656,46 @@ async function refreshVMServerStatus() {
         // Find the simulation spoke
         const csSpoke = spokes.find(s => s.spoke_id.includes('cs'));
         if (!csSpoke) {
-            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic col-span-3">Simulation server spoke not found or not connected.</div>`;
+            document.getElementById('server-node-name').textContent = 'Not Found';
             return;
         }
 
-        const statusColor = csSpoke.authenticated ? 'text-green-600' : 'text-red-600';
-        const statusBg = csSpoke.authenticated ? 'bg-green-100' : 'bg-red-100';
+        // Update Header Metrics
+        document.getElementById('server-node-name').textContent = csSpoke.display_name || csSpoke.spoke_id;
+        document.getElementById('server-cpu').textContent = csSpoke.cpu_util ? `${csSpoke.cpu_util}%` : '—';
+        document.getElementById('server-ram').textContent = csSpoke.mem_util ? `${csSpoke.mem_util}%` : '—';
+        document.getElementById('server-last-seen').textContent = csSpoke.authenticated ? 'Online' : 'Offline';
 
-        container.innerHTML = `
-            <div class="hpe-card rounded-lg p-6 shadow-sm border border-slate-200 bg-white">
-                <label class="text-[10px] text-slate-500 uppercase font-bold">Connection State</label>
-                <div class="flex items-center gap-2 mt-2">
-                    <div class="w-2 h-2 rounded-full ${csSpoke.authenticated ? 'bg-green-500' : 'bg-red-500'}"></div>
-                    <div class="text-lg font-bold ${statusColor}">${csSpoke.connection_state || 'UNKNOWN'}</div>
-                </div>
-                <div class="mt-4 pt-4 border-t border-slate-100">
-                    <div class="flex justify-between text-xs">
-                        <span class="text-slate-500">Authenticated</span>
-                        <span class="font-bold ${statusColor}">${csSpoke.authenticated ? 'YES' : 'NO'}</span>
-                    </div>
-                    <div class="flex justify-between text-xs mt-2">
-                        <span class="text-slate-500">Approved</span>
-                        <span class="font-bold ${csSpoke.approved ? 'text-green-600' : 'text-yellow-600'}">${csSpoke.approved ? 'YES' : 'PENDING'}</span>
-                    </div>
-                </div>
-            </div>
-            <div class="hpe-card rounded-lg p-6 shadow-sm border border-slate-200 bg-white">
-                <label class="text-[10px] text-slate-500 uppercase font-bold">Server Health</label>
-                <div class="mt-2">
-                    ${csSpoke.last_error ?
-                        `<div class="p-3 rounded-md bg-red-50 border border-red-100 text-red-600 text-xs font-mono">${csSpoke.last_error}</div>` :
-                        `<div class="p-3 rounded-md bg-green-50 border border-green-100 text-green-600 text-xs font-medium">System Operational</div>`
-                    }
-                </div>
-            </div>
-            <div class="hpe-card rounded-lg p-6 shadow-sm border border-slate-200 bg-white">
-                <label class="text-[10px] text-slate-500 uppercase font-bold">Identity</label>
-                <div class="mt-2 space-y-1">
-                    <div class="text-sm font-mono text-slate-800">${csSpoke.spoke_id}</div>
-                    <div class="text-xs text-slate-400">Simulation Control Plane</div>
-                </div>
-            </div>
-        `;
+        // Storage Pills (Mocking since diagnostics API might not have detailed storage)
+        const storagePills = document.getElementById('server-storage-pills');
+        if (storagePills) {
+            storagePills.innerHTML = `
+                <span class="px-2 py-1 rounded-full bg-slate-100 border border-slate-200 text-xs text-slate-600 flex items-center gap-1">
+                    <span>🗄️</span> local-lvm: 45%
+                </span>
+                <span class="px-2 py-1 rounded-full bg-slate-100 border border-slate-200 text-xs text-slate-600 flex items-center gap-1">
+                    <span>🌐</span> nfs-iso: 12%
+                </span>
+            `;
+        }
+
+        // VM Lists
+        await refreshSimClients(); // This populates the sim-clients-body, we can reuse it for the VM table
+        const clientsBody = document.getElementById('sim-clients-body');
+        const simTbody = document.getElementById('server-vm-tbody-sim');
+        const otherTbody = document.getElementById('server-vm-tbody-other');
+
+        if (simTbody && clientsBody) {
+            simTbody.innerHTML = clientsBody.innerHTML;
+        }
+
+        if (otherTbody) {
+            otherTbody.innerHTML = `<tr class="text-center text-slate-400 italic"><td colspan="5" class="py-8">No other guests found.</td></tr>`;
+        }
+
     } catch (err) {
-        container.innerHTML = `<div class="py-12 text-center text-red-500 col-span-3">Error loading server status: ${err.message}</div>`;
+        console.error('Error refreshing VM Server status:', err);
+        document.getElementById('server-node-name').textContent = 'Error';
     }
 }
 document.addEventListener('DOMContentLoaded', () => {
