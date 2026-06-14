@@ -11,8 +11,22 @@ from core.src.messaging.control_plane import BaseControlPlane
 from core.src.base_spoke import BaseSpoke
 
 # Setup logging to both console and file
-log_file = "/var/log/lm/generic-agent.log"
-os.makedirs(os.path.dirname(log_file), exist_ok=True)
+def get_log_path():
+    primary = "/var/log/lm/generic-agent.log"
+    try:
+        # Try to see if we can write to /var/log/lm
+        os.makedirs(os.path.dirname(primary), exist_ok=True)
+        with open(primary, "a") as f:
+            pass
+        return primary
+    except Exception:
+        # Fallback to local logs directory
+        local_dir = os.path.join(os.getcwd(), "logs")
+        os.makedirs(local_dir, exist_ok=True)
+        return os.path.join(local_dir, "generic-agent.log")
+
+log_file = get_log_path()
+logger.info(f"Logging to: {log_file}")
 
 logging.basicConfig(
     level=logging.INFO,
