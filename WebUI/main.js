@@ -249,7 +249,7 @@ const VIEWS = {
     cs: {
         name: 'Client Sim',
         className: 'Simulation Control',
-        subMenus: ['Simulation Control', 'Telemetry', 'Configuration'],
+        subMenus: ['Simulation Clients', 'VM Server', 'Simulation Control', 'Telemetry', 'Configuration'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 6h7v8l7-7z"></path></svg>',
         render: (subMenu) => {
             if (subMenu === 'Configuration') {
@@ -276,6 +276,22 @@ const VIEWS = {
                     </div>
                 `;
             }
+            if (subMenu === 'VM Server') {
+                return `
+                    <div class="space-y-6">
+                        <div class="flex justify-between items-center mb-6">
+                            <h2 class="text-2xl font-bold text-[#263040]">VM Server Status</h2>
+                            <button onclick="refreshVMServerStatus()" class="bg-white border border-slate-300 hover:bg-slate-50 text-slate-600 px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 shadow-sm">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 00-15.357-2m15.357 2H15"></path></svg>
+                                Refresh Status
+                            </button>
+                        </div>
+                        <div id="vm-server-status-container" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <div class="py-12 text-center text-slate-400 italic col-span-3">Loading server status...</div>
+                        </div>
+                    </div>
+                `;
+            }
             if (subMenu === 'Simulation Control') {
                 return `
                     <div class="space-y-6">
@@ -294,8 +310,36 @@ const VIEWS = {
                         </div>
                         <div class="hpe-card rounded-lg p-6 shadow-sm">
                             <div id="sim-status-container" class="flex flex-col items-center justify-center py-12 text-slate-400 italic">
-                                <p>No active simulation. Start a profile to see VM state.</p>
+                                <p>No active simulation. Start a profile to see system state.</p>
                             </div>
+                        </div>
+                    </div>
+                `;
+            }
+            if (subMenu === 'Simulation Clients') {
+                return `
+                    <div class="space-y-6">
+                        <div class="flex justify-between items-center mb-6">
+                            <h2 class="text-2xl font-bold text-[#263040]">Simulation Clients</h2>
+                            <button onclick="refreshSimClients()" class="bg-white border border-slate-300 hover:bg-slate-50 text-slate-600 px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 shadow-sm">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 00-15.357-2m15.357 2H15"></path></svg>
+                                Refresh Clients
+                            </button>
+                        </div>
+                        <div class="hpe-card rounded-lg overflow-hidden shadow-sm border border-slate-200">
+                            <table class="w-full text-left text-sm">
+                                <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                                    <tr>
+                                        <th class="px-4 py-3 font-bold">Client ID</th>
+                                        <th class="px-4 py-3 font-bold">IP Address</th>
+                                        <th class="px-4 py-3 font-bold">Status</th>
+                                        <th class="px-4 py-3 font-bold text-right">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="sim-clients-body" class="divide-y divide-slate-200">
+                                    <tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">Loading simulation clients...</td></tr>
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 `;
@@ -3481,7 +3525,101 @@ async function refreshSimTelemetry(vmId) {
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+async function refreshSimClients() {
+    const bodyEl = document.getElementById('sim-clients-body');
+    if (!bodyEl) return;
+
+    try {
+        const response = await fetch('/api/sim/status');
+        if (!response.ok) throw new Error('Failed to fetch simulation status');
+        const data = await response.json();
+        const vms = data.data?.vms || {};
+
+        if (Object.keys(vms).length === 0) {
+            bodyEl.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">No active simulation clients found.</td></tr>`;
+            return;
+        }
+
+        bodyEl.innerHTML = Object.entries(vms).map(([vmId, info]) => `
+            <tr class="hover:bg-slate-50 transition-colors">
+                <td class="px-4 py-3 font-mono text-xs text-slate-700 font-medium">${vmId}</td>
+                <td class="px-4 py-3 text-slate-600 font-mono text-xs">${info.ip || 'Unknown'}</td>
+                <td class="px-4 py-3">
+                    <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${info.status === 'ONLINE' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">
+                        ${info.status || 'UNKNOWN'}
+                    </span>
+                </td>
+                <td class="px-4 py-3 text-right">
+                    <button onclick="refreshSimTelemetry('${vmId}')" class="bg-blue-50 hover:bg-blue-100 text-blue-600 px-3 py-1 rounded text-xs font-bold transition-colors">
+                        Telemetry
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    } catch (err) {
+        bodyEl.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-500">${err.message}</td></tr>`;
+    }
+}
+
+async function refreshVMServerStatus() {
+    const container = document.getElementById('vm-server-status-container');
+    if (!container) return;
+
+    try {
+        const response = await fetch('/setup/diagnostics');
+        if (!response.ok) throw new Error('Failed to fetch diagnostics');
+        const data = await response.json();
+        const spokes = data.spokes || [];
+
+        // Find the simulation spoke
+        const csSpoke = spokes.find(s => s.spoke_id.includes('cs'));
+        if (!csSpoke) {
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic col-span-3">Simulation server spoke not found or not connected.</div>`;
+            return;
+        }
+
+        const statusColor = csSpoke.authenticated ? 'text-green-600' : 'text-red-600';
+        const statusBg = csSpoke.authenticated ? 'bg-green-100' : 'bg-red-100';
+
+        container.innerHTML = `
+            <div class="hpe-card rounded-lg p-6 shadow-sm border border-slate-200 bg-white">
+                <label class="text-[10px] text-slate-500 uppercase font-bold">Connection State</label>
+                <div class="flex items-center gap-2 mt-2">
+                    <div class="w-2 h-2 rounded-full ${csSpoke.authenticated ? 'bg-green-500' : 'bg-red-500'}"></div>
+                    <div class="text-lg font-bold ${statusColor}">${csSpoke.connection_state || 'UNKNOWN'}</div>
+                </div>
+                <div class="mt-4 pt-4 border-t border-slate-100">
+                    <div class="flex justify-between text-xs">
+                        <span class="text-slate-500">Authenticated</span>
+                        <span class="font-bold ${statusColor}">${csSpoke.authenticated ? 'YES' : 'NO'}</span>
+                    </div>
+                    <div class="flex justify-between text-xs mt-2">
+                        <span class="text-slate-500">Approved</span>
+                        <span class="font-bold ${csSpoke.approved ? 'text-green-600' : 'text-yellow-600'}">${csSpoke.approved ? 'YES' : 'PENDING'}</span>
+                    </div>
+                </div>
+            </div>
+            <div class="hpe-card rounded-lg p-6 shadow-sm border border-slate-200 bg-white">
+                <label class="text-[10px] text-slate-500 uppercase font-bold">Server Health</label>
+                <div class="mt-2">
+                    ${csSpoke.last_error ?
+                        `<div class="p-3 rounded-md bg-red-50 border border-red-100 text-red-600 text-xs font-mono">${csSpoke.last_error}</div>` :
+                        `<div class="p-3 rounded-md bg-green-50 border border-green-100 text-green-600 text-xs font-medium">System Operational</div>`
+                    }
+                </div>
+            </div>
+            <div class="hpe-card rounded-lg p-6 shadow-sm border border-slate-200 bg-white">
+                <label class="text-[10px] text-slate-500 uppercase font-bold">Identity</label>
+                <div class="mt-2 space-y-1">
+                    <div class="text-sm font-mono text-slate-800">${csSpoke.spoke_id}</div>
+                    <div class="text-xs text-slate-400">Simulation Control Plane</div>
+                </div>
+            </div>
+        `;
+    } catch (err) {
+        container.innerHTML = `<div class="py-12 text-center text-red-500 col-span-3">Error loading server status: ${err.message}</div>`;
+    }
+}
     console.log("Lab Manager UI: Initializing...");
     try {
         currentTenant = localStorage.getItem('lm_tenant') || 'default';
