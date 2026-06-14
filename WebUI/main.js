@@ -248,17 +248,69 @@ const VIEWS = {
     },
     cs: {
         name: 'Client Sim',
-        className: 'Simulation',
-        subMenus: ['Traffic Gen', 'DNS Config', 'Schedules'],
-        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>',
-        render: () => `
-            <div class="space-y-6">
-                <h2 class="text-2xl font-bold mb-6 text-[#263040]">Client Simulator</h2>
-                <div class="hpe-card rounded-lg p-6 text-center py-12">
-                    <div class="text-slate-500">Traffic simulation controls coming soon...</div>
-                </div >
-            </div>
-        `
+        className: 'Simulation Control',
+        subMenus: ['Simulation Control', 'Telemetry', 'Configuration'],
+        icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 6h7v8l7-7z"></path></svg>',
+        render: (subMenu) => {
+            if (subMenu === 'Configuration') {
+                return `
+                    <div class="space-y-6">
+                        <h2 class="text-2xl font-bold mb-6 text-[#263040]">Simulation Configuration</h2>
+                        <div class="hpe-card rounded-lg p-6 space-y-6 shadow-sm">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Aruba Central Host</label>
+                                    <input type="text" id="cs-aruba-host" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">API Key</label>
+                                    <input type="password" id="cs-aruba-key" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                            </div>
+                            <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                <button onclick="saveCSConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                    Save Configuration
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            if (subMenu === 'Simulation Control') {
+                return `
+                    <div class="space-y-6">
+                        <div class="flex justify-between items-center mb-6">
+                            <h2 class="text-2xl font-bold text-[#263040]">Simulation Control</h2>
+                            <div class="flex gap-3">
+                                <button onclick="startSimulation()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm flex items-center gap-2">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.007l-4.5 4.5a1 1 0 01-1.414 0l-4.5-4.5a1 1 0 011.414-1.414l3.5 3.5v-7.5a1 1 0 012 0v7.5l3.5-3.5a1 1 0 011.414 1.414z"></path></svg>
+                                    Start Simulation
+                                </button>
+                                <button onclick="stopSimulation()" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm flex items-center gap-2">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m-8 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z"></path></svg>
+                                    Stop Simulation
+                                </button>
+                            </div>
+                        </div>
+                        <div class="hpe-card rounded-lg p-6 shadow-sm">
+                            <div id="sim-status-container" class="flex flex-col items-center justify-center py-12 text-slate-400 italic">
+                                <p>No active simulation. Start a profile to see VM state.</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            return `
+                <div class="space-y-6">
+                    <h2 class="text-2xl font-bold mb-6 text-[#263040]">Simulation Telemetry</h2>
+                    <div class="hpe-card rounded-lg p-6 shadow-sm">
+                        <div id="sim-telemetry-container" class="space-y-4">
+                            <p class="text-center text-slate-400 italic">Start simulation to view correlated telemetry.</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
     },
     cppm: {
         name: 'Security/NAC',
@@ -1093,10 +1145,10 @@ function loadOpnsenseConfig(config) {
 }
 
 function loadCSConfig(config) {
-    const profilesEl = document.getElementById('cs-profiles');
-    if (profilesEl) {
-        profilesEl.value = JSON.stringify(config.sim_profiles || {}, null, 2);
-    }
+    const hostEl = document.getElementById('cs-aruba-host');
+    const keyEl = document.getElementById('cs-aruba-key');
+    if (hostEl) hostEl.value = config.aruba_host || '';
+    if (keyEl) keyEl.value = config.aruba_api_key || '';
 }
 
 function loadCPPMConfig(config) {
@@ -1153,19 +1205,15 @@ async function saveOpnsenseConfig() {
 }
 
 async function saveCSConfig() {
-    const profilesRaw = document.getElementById('cs-profiles').value;
-    let profiles = {};
-    try {
-        profiles = JSON.parse(profilesRaw);
-    } catch (e) {
-        alert('Invalid JSON in simulation profiles');
-        return;
-    }
+    const config = {
+        aruba_host: document.getElementById('cs-aruba-host').value,
+        aruba_api_key: document.getElementById('cs-aruba-key').value,
+    };
     try {
         const response = await fetch('/setup/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config: { cs: { sim_profiles: profiles } } })
+            body: JSON.stringify({ config: { cs: config } })
         });
         if (response.ok) {
             alert('Client Sim configuration saved successfully!');
@@ -3323,7 +3371,116 @@ async function showHelp(section) {
     }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+async function startSimulation() {
+    try {
+        const response = await fetch('/api/sim/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profile: 'default' })
+        });
+        const data = await response.json();
+        if (response.ok) {
+            alert('Simulation started: ' + data.message);
+            refreshSimStatus();
+        } else {
+            alert('Error starting simulation: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Request failed: ' + err.message);
+    }
+}
+
+async function stopSimulation() {
+    try {
+        const response = await fetch('/api/sim/stop', { method: 'POST' });
+        const data = await response.json();
+        if (response.ok) {
+            alert('Simulation stopped: ' + data.message);
+            refreshSimStatus();
+        } else {
+            alert('Error stopping simulation: ' + (data.detail || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Request failed: ' + err.message);
+    }
+}
+
+async function refreshSimStatus() {
+    const container = document.getElementById('sim-status-container');
+    if (!container) return;
+
+    try {
+        const response = await fetch('/api/sim/status');
+        if (!response.ok) throw new Error('Failed to fetch sim status');
+        const data = await response.json();
+        const status = data.data || {};
+        const vms = status.vms || {};
+
+        if (Object.keys(vms).length === 0) {
+            container.innerHTML = '<p class="text-slate-400 italic">No active simulation VMs found.</p>';
+            return;
+        }
+
+        container.innerHTML = `
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 w-full">
+                ${Object.entries(vms).map(([vmId, info]) => `
+                    <div class="p-4 rounded-md bg-slate-50 border border-slate-200 flex justify-between items-center group">
+                        <div>
+                            <div class="text-sm font-bold text-slate-800">${vmId}</div>
+                            <div class="text-xs text-slate-500 font-mono">${info.ip || 'Unknown IP'}</div>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${info.status === 'ONLINE' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">
+                                ${info.status}
+                            </span>
+                            <button onclick="refreshSimTelemetry('${vmId}')" class="p-1 text-blue-500 hover:text-blue-700 transition-colors" title="View Telemetry">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H3m6 6v-6a2 2 0 00-2-2h-4m12 6v-6a2 2 0 00-2-2h-4M9 9V5a2 2 0 012-2h2a2 2 0 012 2v4"></path></svg>
+                            </button>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+    } catch (err) {
+        container.innerHTML = `<div class="text-red-500 text-sm">Error loading status: ${err.message}</div>`;
+    }
+}
+
+async function refreshSimTelemetry(vmId) {
+    const container = document.getElementById('sim-telemetry-container');
+    if (!container) return;
+
+    try {
+        const response = await fetch(`/api/sim/telemetry?vm_id=${vmId}`);
+        if (!response.ok) throw new Error('Failed to fetch telemetry');
+        const data = await response.json();
+        const telemetry = data.data || {};
+
+        container.innerHTML = `
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-sm font-bold text-slate-700">Telemetry for ${vmId}</h3>
+                <button onclick="setView('cs')" class="text-xs text-slate-400 hover:text-slate-600">Clear</button>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
+                    <label class="text-[10px] text-slate-500 uppercase font-bold">Aruba Status</label>
+                    <div class="text-lg font-bold text-slate-800">${telemetry.aruba_status || 'Unknown'}</div>
+                </div>
+                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
+                    <label class="text-[10px] text-slate-500 uppercase font-bold">Signal Strength</label>
+                    <div class="text-lg font-bold text-slate-800">${telemetry.signal_strength || 'N/A'}</div>
+                </div>
+                <div class="p-4 rounded-md bg-slate-50 border border-slate-200">
+                    <label class="text-[10px] text-slate-500 uppercase font-bold">Last Seen</label>
+                    <div class="text-lg font-bold text-slate-800">${telemetry.last_seen || 'Unknown'}</div>
+                </div>
+            </div>
+        `;
+    } catch (err) {
+        container.innerHTML = `<div class="text-red-500 text-sm">Error loading telemetry: ${err.message}</div>`;
+    }
+}
+
     console.log("Lab Manager UI: Initializing...");
     try {
         currentTenant = localStorage.getItem('lm_tenant') || 'default';

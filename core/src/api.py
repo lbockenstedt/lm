@@ -720,7 +720,7 @@ def create_app(hub):
 
     @app.get("/setup/logs/{module}")
     async def get_module_logs(module: str):
-        try:
+        try_
             # Map short UI module names to actual log filenames
             log_name_map = {
                 "opn": "opnsense"
@@ -742,6 +742,56 @@ def create_app(hub):
         except Exception as e:
             logger.error(f"Error reading logs for {module}: {e}")
             raise HTTPException(status_code=500, detail=f"Permission or I/O error reading {log_path}: {str(e)}")
+
+    # --- Client Simulation API ---
+
+    async def get_cs_spoke(hub):
+        spoke_id = next((sid for sid in hub.active_connections if "cs" in sid), None)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="Client Simulation spoke not connected")
+        return spoke_id
+
+    @app.post("/api/sim/start")
+    async def start_simulation(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            profile = data.get("profile", "default")
+            spoke_id = await get_cs_spoke(hub)
+            result = await hub.request_response(spoke_id, "CS_START_SIMULATION", {"profile": profile})
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/sim/stop")
+    async def stop_simulation():
+        hub = app.state.hub
+        try:
+            spoke_id = await get_cs_spoke(hub)
+            result = await hub.request_response(spoke_id, "CS_STOP_SIMULATION", {})
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/sim/status")
+    async def get_sim_status():
+        hub = app.state.hub
+        try:
+            spoke_id = await get_cs_spoke(hub)
+            result = await hub.request_response(spoke_id, "CS_GET_STATUS", {})
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/sim/telemetry/{vm_id}")
+    async def get_sim_telemetry(vm_id: str):
+        hub = app.state.hub
+        try:
+            spoke_id = await get_cs_spoke(hub)
+            result = await hub.request_response(spoke_id, "CS_GET_TELEMETRY", {"vm_id": vm_id})
+            return result
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/setup/api-probe")
     async def probe_spoke_api(spoke_id: str, path: str):
