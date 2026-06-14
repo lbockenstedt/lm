@@ -2017,6 +2017,7 @@ async function loadUsers() {
                     <td class="px-4 py-3 text-center">${check('security')}</td>
                     <td class="px-4 py-3 text-center bg-slate-50 font-bold">${check('admin')}</td>
                     <td class="px-4 py-3 text-right">
+                        <button onclick="editUser('${userId}')" class="text-blue-400 hover:text-blue-600 text-xs font-bold mr-3">Edit</button>
                         <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold">Delete</button>
                     </td>
                 </tr>
@@ -2040,6 +2041,168 @@ async function deleteUser(userId) {
         }
     } catch (err) {
         alert('Error deleting user: ' + err.message);
+    }
+}
+
+async function editUser(userId) {
+    try {
+        // 1. Fetch user and tenants
+        const [userResp, tenantResp] = await Promise.all([
+            fetch('/setup/users'),
+            fetch('/setup/tenants')
+        ]);
+        if (!userResp.ok || !tenantResp.ok) throw new Error('Failed to load user or tenant data');
+
+        const userData = await userResp.json();
+        const tenantData = await tenantResp.json();
+
+        const users = userData.users || {};
+        const user = users[userId];
+        if (!user) throw new Error('User not found');
+
+        const tenants = tenantData.tenants || [];
+        const userTenants = user.tenants || [];
+
+        // Create Modal
+        const modal = document.createElement('div');
+        modal.id = 'edit-user-modal';
+        modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+
+        // Permissions HTML (Reuse pattern from add user)
+        const perms = user.permissions || {};
+        const permFields = [
+            {id: 'admin', label: 'System Admin'},
+            {id: 'view', label: 'View'},
+            {id: 'edit', label: 'Edit'},
+            {id: 'pxmx', label: 'Hypervisor'},
+            {id: 'firewall', label: 'Firewall'},
+            {id: 'dns', label: 'DNS'},
+            {id: 'dhcp', label: 'DHCP'},
+            {id: 'security', label: 'Security/NAC'},
+        ];
+
+        const permHtml = permFields.map(p => `
+            <div class="space-y-2">
+                <label class="text-xs text-slate-500 uppercase font-bold">${p.label}</label>
+                <div class="flex items-center gap-2 py-2">
+                    <input type="checkbox" id="edit-perm-${p.id}" ${perms[p.id] ? 'checked' : ''} class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                </div>
+            </div>
+        `).join('');
+
+        // Tenants HTML
+        const tenantHtml = tenants.map(t => `
+            <div class="flex items-center gap-3 p-2 hover:bg-slate-100 rounded-md transition-colors cursor-pointer">
+                <input type="checkbox" id="edit-tenant-${t.id}" ${userTenants.includes(t.id) ? 'checked' : ''} value="${t.id}" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                <label for="edit-tenant-${t.id}" class="text-sm text-slate-700 cursor-pointer flex-1">${t.name}</label>
+            </div>
+        `).join('');
+
+        modal.innerHTML = `
+            <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
+                <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                    <h3 class="text-lg font-bold text-[#263040]">Edit User: ${userId}</h3>
+                    <button onclick="closeEditUserModal()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+                <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div class="space-y-6">
+                        <div>
+                            <h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Permissions</h4>
+                            <div class="grid grid-cols-2 gap-4">
+                                ${permHtml}
+                            </div>
+                        </div>
+                    </div>
+                    <div class="space-y-6">
+                        <div>
+                            <h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Tenant Associations</h4>
+                            <div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-64 overflow-y-auto p-2 space-y-1">
+                                ${tenantHtml || '<div class="text-xs text-slate-400 italic p-2">No tenants available.</div>'}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+                    <button onclick="closeEditUserModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+                    <button onclick="saveUserEdits('${userId}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Changes</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+    } catch (err) {
+        alert('Error opening edit modal: ' + err.message);
+    }
+}
+
+function closeEditUserModal() {
+    const modal = document.getElementById('edit-user-modal');
+    if (modal) modal.remove();
+}
+
+async function saveUserEdits(userId) {
+    try {
+        // 1. Collect permissions
+        const permissions = {
+            admin: document.getElementById('edit-perm-admin').checked,
+            view: document.getElementById('edit-perm-view').checked,
+            edit: document.getElementById('edit-perm-edit').checked,
+            pxmx: document.getElementById('edit-perm-pxmx').checked,
+            firewall: document.getElementById('edit-perm-firewall').checked,
+            dns: document.getElementById('edit-perm-dns').checked,
+            dhcp: document.getElementById('edit-perm-dhcp').checked,
+            security: document.getElementById('edit-perm-security').checked,
+        };
+
+        // 2. Collect tenants
+        const tenantCheckboxes = document.querySelectorAll('input[id^="edit-tenant-"]');
+        const selectedTenants = Array.from(tenantCheckboxes)
+            .filter(cb => cb.checked)
+            .map(cb => cb.value);
+
+        // 3. Update basic user info (permissions)
+        const updateResp = await fetch('/setup/users', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId, permissions: permissions })
+        });
+        if (!updateResp.ok) throw new Error('Failed to update user permissions');
+
+        // 4. Handle tenant associations
+        // We need current tenant list to find what to remove
+        const userResp = await fetch('/setup/users');
+        const userData = await userResp.json();
+        const currentTenants = userData.users[userId].tenants || [];
+
+        const tenantsToAssign = selectedTenants.filter(t => !currentTenants.includes(t));
+        const tenantsToRemove = currentTenants.filter(t => !selectedTenants.includes(t));
+
+        const requests = [];
+
+        for (const tId of tenantsToAssign) {
+            requests.push(fetch('/setup/users/assign-tenant', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, tenant_id: tId })
+            }));
+        }
+
+        for (const tId of tenantsToRemove) {
+            requests.push(fetch('/setup/users/remove-tenant', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, tenant_id: tId })
+            }));
+        }
+
+        await Promise.all(requests);
+
+        alert('User updated successfully');
+        closeEditUserModal();
+        await loadUsers();
+    } catch (err) {
+        alert('Error saving user edits: ' + err.message);
     }
 }
 

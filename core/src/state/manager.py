@@ -36,6 +36,7 @@ class StateManager:
             "approved_modules": {},
             "known_modules": [],
             "module_names": {},
+            "module_metadata": {}, # { spoke_id: { "display_name": "...", "description": "..." } }
             "active_sessions": {},
             "active_tenant": "default"
         }
@@ -164,16 +165,36 @@ class StateManager:
         if module_id not in self.system_state["known_modules"]:
             self.system_state["known_modules"].append(module_id)
         self.system_state["approved_modules"][module_id] = approved
+
+        # Initialize metadata
+        if module_id not in self.system_state["module_metadata"]:
+            self.system_state["module_metadata"][module_id] = {
+                "display_name": display_name or module_id,
+                "description": ""
+            }
+
         if display_name:
-            self.system_state["module_names"][module_id] = display_name
-        elif module_id not in self.system_state["module_names"]:
-            self.system_state["module_names"][module_id] = module_id
+            self.system_state["module_metadata"][module_id]["display_name"] = display_name
+
+        # Sync with legacy module_names for compatibility
+        self.system_state["module_names"][module_id] = self.system_state["module_metadata"][module_id]["display_name"]
+
+    def update_module_metadata(self, module_id: str, metadata: Dict[str, Any]):
+        """Updates the display name and description for a spoke."""
+        if module_id not in self.system_state["module_metadata"]:
+            self.system_state["module_metadata"][module_id] = {"display_name": module_id, "description": ""}
+
+        self.system_state["module_metadata"][module_id].update(metadata)
+
+        # Sync with legacy module_names
+        if "display_name" in metadata:
+            self.system_state["module_names"][module_id] = metadata["display_name"]
 
     def set_module_name(self, module_id: str, name: str):
-        self.system_state["module_names"][module_id] = name
+        self.update_module_metadata(module_id, {"display_name": name})
 
     def get_module_name(self, module_id: str) -> str:
-        return self.system_state["module_names"].get(module_id, module_id)
+        return self.system_state["module_metadata"].get(module_id, {}).get("display_name", module_id)
 
     def get_approved_modules(self) -> Dict[str, bool]:
         return self.system_state["approved_modules"]
