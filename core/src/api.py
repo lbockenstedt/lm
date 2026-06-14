@@ -720,7 +720,7 @@ def create_app(hub):
 
     @app.get("/setup/logs/{module}")
     async def get_module_logs(module: str):
-        try_
+        try:
             # Map short UI module names to actual log filenames
             log_name_map = {
                 "opn": "opnsense"
