@@ -3620,6 +3620,7 @@ async function refreshVMServerStatus() {
         container.innerHTML = `<div class="py-12 text-center text-red-500 col-span-3">Error loading server status: ${err.message}</div>`;
     }
 }
+document.addEventListener('DOMContentLoaded', () => {
     console.log("Lab Manager UI: Initializing...");
     try {
         currentTenant = localStorage.getItem('lm_tenant') || 'default';
