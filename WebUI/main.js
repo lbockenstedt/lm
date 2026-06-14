@@ -3481,6 +3481,7 @@ async function refreshSimTelemetry(vmId) {
     }
 }
 
+document.addEventListener('DOMContentLoaded', () => {
     console.log("Lab Manager UI: Initializing...");
     try {
         currentTenant = localStorage.getItem('lm_tenant') || 'default';
