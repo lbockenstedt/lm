@@ -181,27 +181,29 @@ class StateManager:
     # --- Tenant Management ---
 
     def get_tenant(self, tenant_id: str) -> Optional[Dict]:
+        # Standardize the input ID: remove whitespace and treat as string
+        clean_id = str(tenant_id).strip()
+
         # Try exact match first
-        tenant = self.tenant_state["tenants"].get(tenant_id)
+        tenant = self.tenant_state["tenants"].get(clean_id)
         if tenant:
             return tenant
 
-        # Fallback: Try converting to int if the input looks like a number
-        # or try converting existing keys to strings
+        # Try converting to int if the input looks like a number
         try:
-            int_id = int(tenant_id)
+            int_id = int(clean_id)
             tenant = self.tenant_state["tenants"].get(int_id)
             if tenant:
                 return tenant
         except (ValueError, TypeError):
             pass
 
-        # Final fallback: scan for a string match among keys
+        # Final fallback: scan all keys and strip them to find a match
         for key in self.tenant_state["tenants"].keys():
-            if str(key) == str(tenant_id):
+            if str(key).strip() == clean_id:
                 return self.tenant_state["tenants"][key]
 
-        logger.info(f"StateManager: get_tenant requested for id='{tenant_id}'. Available tenants: {list(self.tenant_state['tenants'].keys())}")
+        logger.info(f"StateManager: get_tenant requested for id='{tenant_id}' (cleaned: '{clean_id}'). Available tenants: {list(self.tenant_state['tenants'].keys())}")
         return None
 
     def update_tenant(self, tenant_id: str, data: Dict):
