@@ -2583,7 +2583,11 @@ async function loadOpnsenseManagement() {
         } else if (subMenu === 'Interfaces') {
             // Specialized columns for interfaces to include flags and capabilities
             keys = ['name', 'ip', 'status', 'flags', 'capabilities', 'description'].filter(k => k in firstItem || true);
+        } else if (subMenu === 'NAT Policies') {
+            // Specialized columns for NAT policies
+            keys = ['protocol', 'external_port', 'internal_ip', 'internal_port', 'description'].filter(k => k in firstItem || true);
         }
+
 
 
         const hiddenRules = JSON.parse(localStorage.getItem('lm_hidden_firewall_rules') || '[]');
