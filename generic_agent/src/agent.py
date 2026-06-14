@@ -6,11 +6,22 @@ import websockets
 import logging
 import os
 import subprocess
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Optional
 from core.src.messaging.control_plane import BaseControlPlane
 from core.src.base_spoke import BaseSpoke
 
-logging.basicConfig(level=logging.INFO)
+# Setup logging to both console and file
+log_file = "/var/log/lm/generic-agent.log"
+os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
 logger = logging.getLogger("GenericAgent")
 
 def get_machine_id() -> str:
