@@ -12,10 +12,9 @@ from core.src.base_spoke import BaseSpoke
 
 # Setup logging to both console and file
 def get_log_path():
-    primary = "/var/log/lm/generic-agent.log"
+    primary = "/var/log/generic-agent.log"
     try:
-        # Try to see if we can write to /var/log/lm
-        os.makedirs(os.path.dirname(primary), exist_ok=True)
+        # Try to see if we can write to /var/log
         with open(primary, "a") as f:
             pass
         return primary

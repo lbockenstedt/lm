@@ -13,10 +13,10 @@ HUB_SECRET=""
 CLONE_ONLY=false
 
 # --- Logging Setup ---
-LOG_DIR="/var/log/lm"
+LOG_DIR="/var/log"
 INSTALL_LOG="$LOG_DIR/generic-agent-install.log"
 
-# Create log directory if it doesn't exist
+# Create log directory if it doesn't exist (usually exists for /var/log)
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 chmod 755 "$LOG_DIR" 2>/dev/null || true
 
@@ -100,8 +100,8 @@ User=svc_lm
 WorkingDirectory=$ROOT_DIR/generic-agent
 Environment="PYTHONPATH=$ROOT_DIR"
 ExecStart=$ROOT_DIR/generic-agent/venv/bin/python3 $ROOT_DIR/generic-agent/src/agent.py --id $SPOKE_ID --secret $SPOKE_SECRET --hub-secret $HUB_SECRET --hub $HUB_WS
-StandardOutput=append:/var/log/lm/generic-agent.log
-StandardError=append:/var/log/lm/generic-agent.log
+StandardOutput=append:/var/log/generic-agent.log
+StandardError=append:/var/log/generic-agent.log
 Restart=on-failure
 RestartSec=10
 
