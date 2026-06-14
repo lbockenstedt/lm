@@ -52,10 +52,10 @@ const VIEWS = {
     pxmx: {
         name: 'Proxmox',
         className: 'Virtual Machines',
-        subMenus: ['VM Management', 'Cluster Status', 'Storage', 'Configuration'],
+        subMenus: ['VM Management', 'Cluster Status', 'Storage', 'config'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>',
         render: (subMenu) => {
-            if (subMenu === 'Configuration') {
+            if (subMenu === 'config') {
                 return `
                     <div class="space-y-6">
                         <h2 class="text-2xl font-bold mb-6 text-[#263040]">Proxmox Configuration</h2>
@@ -1471,8 +1471,8 @@ async function setSubView(subMenu) {
             if (currentView === 'ldap') {
                 loadLDAPData(currentSubView);
             }
-            if ((currentView === 'pxmx' && currentSubView === 'Configuration') ||
-                (currentView === 'opnsense' && currentSubView === 'Configuration')) {
+            if ((currentView === 'pxmx' && currentSubView === 'config') ||
+                (currentView === 'opnsense' && currentSubView === 'config')) {
                 loadSetupConfig();
             }
             if (currentView === 'settings' && currentSubView.startsWith('logs-')) {
@@ -1481,7 +1481,7 @@ async function setSubView(subMenu) {
             }
             if (currentView === 'settings' && currentSubView === 'General') updateStatus();
             if (currentView === 'settings' && currentSubView === 'Diagnostics') loadDiagnostics();
-            if (currentView === 'opnsense' && currentSubView !== 'Configuration') {
+            if (currentView === 'opnsense' && currentSubView !== 'config') {
                 loadOpnsenseManagement();
             }
         }
