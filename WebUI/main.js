@@ -1616,6 +1616,13 @@ async function setSubView(subMenu) {
         const viewport = document.getElementById('viewport');
         if (viewport) {
             viewport.innerHTML = await view.render(currentSubView);
+            if (currentView === 'cs') {
+                if (currentSubView === 'Simulation Clients') {
+                    refreshSimClients();
+                } else if (currentSubView === 'Server') {
+                    refreshVMServerStatus();
+                }
+            }
             if (currentView === 'setup') {
 
                 loadSetupConfig();
