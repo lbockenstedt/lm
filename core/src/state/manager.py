@@ -239,6 +239,31 @@ class StateManager:
     def set_quota(self, tenant_id: str, resource_type: str, limit: int):
         self.update_tenant(tenant_id, {"quotas": {resource_type: limit}})
 
+    def assign_user_to_tenant(self, user_id: str, tenant_id: str):
+        """Assigns a user to a specific tenant. Users can belong to multiple tenants."""
+        if user_id not in self.system_state["users"]:
+            self.system_state["users"][user_id] = {"permissions": {}, "updated_at": time.time()}
+
+        user_data = self.system_state["users"][user_id]
+        if "tenants" not in user_data:
+            user_data["tenants"] = []
+
+        if tenant_id not in user_data["tenants"]:
+            user_data["tenants"].append(tenant_id)
+            logger.info(f"User {user_id} assigned to tenant {tenant_id}")
+            self.save_state()
+
+    def remove_user_from_tenant(self, user_id: str, tenant_id: str):
+        """Removes a user from a specific tenant."""
+        if user_id in self.system_state["users"]:
+            user_data = self.system_state["users"][user_id]
+            tenants = user_data.get("tenants", [])
+            if tenant_id in tenants:
+                tenants.remove(tenant_id)
+                user_data["tenants"] = tenants
+                logger.info(f"User {user_id} removed from tenant {tenant_id}")
+                self.save_state()
+
     def check_quota(self, tenant_id: str, resource_type: str, requested_amount: int) -> bool:
         current_usage = sum(
             1 for res in self.system_state["resources"].values()
@@ -246,3 +271,4 @@ class StateManager:
         )
         limit = self.get_quota(tenant_id, resource_type)
         return (current_usage + requested_amount) <= limit
+

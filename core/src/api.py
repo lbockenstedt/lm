@@ -1099,6 +1099,42 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/setup/users/assign-tenant")
+    async def assign_user_tenant(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            user_id = data.get("user_id")
+            tenant_id = data.get("tenant_id")
+
+            if not user_id or not tenant_id:
+                raise HTTPException(status_code=400, detail="Missing user_id or tenant_id")
+
+            # Verify tenant exists
+            if not hub.state.get_tenant(tenant_id):
+                raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
+
+            hub.state.assign_user_to_tenant(user_id, tenant_id)
+            return {"status": "success", "message": f"User {user_id} assigned to tenant {tenant_id}"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/setup/users/remove-tenant")
+    async def remove_user_tenant(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            user_id = data.get("user_id")
+            tenant_id = data.get("tenant_id")
+
+            if not user_id or not tenant_id:
+                raise HTTPException(status_code=400, detail="Missing user_id or tenant_id")
+
+            hub.state.remove_user_from_tenant(user_id, tenant_id)
+            return {"status": "success", "message": f"User {user_id} removed from tenant {tenant_id}"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/users")
     async def get_users():
         hub = app.state.hub

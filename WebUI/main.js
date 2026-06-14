@@ -262,13 +262,46 @@ const VIEWS = {
     cppm: {
         name: 'Security/NAC',
         className: 'Security/NAC',
-        subMenus: ['Access Tracker', 'Devices', 'Roles'],
+        subMenus: ['Access Tracker', 'Devices', 'Roles', 'Configuration'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>',
         render: (subMenu) => {
+            if (subMenu === 'Configuration') {
+                return `
+                    <div class="space-y-6">
+                        <div class="flex justify-between items-center mb-6">
+                            <h2 class="text-2xl font-bold text-[#263040]">CPPM Configuration</h2>
+                        </div>
+                        <div class="hpe-card rounded-lg p-6 space-y-6 shadow-sm">
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">CPPM Host</label>
+                                    <input type="text" id="cppm-host" placeholder="cppm.example.local" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Username</label>
+                                    <input type="text" id="cppm-user" placeholder="admin" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                                <div class="space-y-2">
+                                    <label class="text-xs text-slate-500 uppercase font-bold">Password</label>
+                                    <input type="password" id="cppm-pass" placeholder="••••••••" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                </div>
+                            </div>
+                            <div class="pt-6 border-t border-slate-200 flex justify-end">
+                                <button onclick="saveCPPMConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                                    Save Configuration
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
             return `
                 <div class="space-y-6">
                     <div class="flex justify-between items-center mb-6">
                         <h2 class="text-2xl font-bold text-[#263040]">Security/NAC: ${subMenu}</h2>
+                        <button onclick="setSubView('Configuration')" class="p-2 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all" title="Configuration">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.754 2.924-1.754 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.754.426 1.754 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.754-2.924 1.754-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.754-.426-1.754-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.999.53 2.122.5C10.05 5.047 10.325 4.317 10.325 4.317z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        </button>
                     </div>
                     <div class="hpe-card rounded-lg p-12 text-center">
                         <div class="flex flex-col items-center gap-4">
