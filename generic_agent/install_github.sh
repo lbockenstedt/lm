@@ -12,6 +12,28 @@ SPOKE_SECRET=""
 HUB_SECRET=""
 CLONE_ONLY=false
 
+# --- Logging Setup ---
+LOG_DIR="/var/log/lm"
+INSTALL_LOG="$LOG_DIR/generic-agent-install.log"
+
+# Create log directory if it doesn't exist
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+chmod 755 "$LOG_DIR" 2>/dev/null || true
+
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] INFO: $1" >> "$INSTALL_LOG" 2>/dev/null || true
+}
+
+log_c() {
+    echo "$1"
+    log "$1"
+}
+
+log_e() {
+    echo "❌ $1" >&2
+    log "ERROR: $1"
+}
+
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --hub) HUB_WS="$2"; shift ;;
@@ -31,38 +53,43 @@ if [ "$CLONE_ONLY" = false ] && [ -z "$HUB_WS" ]; then
     exit 1
 fi
 
-echo "🚀 Starting Lab Manager GitHub Bootstrap..."
+log_c "🚀 Starting Lab Manager GitHub Bootstrap..."
 
 # 1. Install System Dependencies
-apt-get update && apt-get install -y python3-pip python3-venv git
+log_c "📦 Installing system dependencies..."
+apt-get update >> "$INSTALL_LOG" 2>&1
+apt-get install -y python3-pip python3-venv git >> "$INSTALL_LOG" 2>&1
 
 # 2. Create service user
 if ! id "svc_lm" &>/dev/null; then
-    echo "👤 Creating service user svc_lm..."
-    useradd -r -s /bin/false svc_lm
+    log_c "👤 Creating service user svc_lm..."
+    useradd -r -s /bin/false svc_lm >> "$INSTALL_LOG" 2>&1
 fi
 
 # 3. Setup Directory Structure
 ROOT_DIR="/opt/lm"
-mkdir -p "$ROOT_DIR/core"
-mkdir -p "$ROOT_DIR/generic-agent"
+log_c "📁 Setting up directories in $ROOT_DIR..."
+mkdir -p "$ROOT_DIR/core" >> "$INSTALL_LOG" 2>&1
+mkdir -p "$ROOT_DIR/generic-agent" >> "$INSTALL_LOG" 2>&1
 
-echo "📦 Cloning Core and Generic Agent from GitHub..."
+log_c "📦 Cloning Core and Generic Agent from GitHub..."
 REPO_URL="https://github.com/lbockenstedt/lm"
 
-git clone --depth 1 "$REPO_URL" "$ROOT_DIR/tmp_repo"
-cp -r "$ROOT_DIR/tmp_repo/core" "$ROOT_DIR/"
-cp -r "$ROOT_DIR/tmp_repo/generic_agent" "$ROOT_DIR/generic-agent"
+# Clone to temporary location
+git clone --depth 1 "$REPO_URL" "$ROOT_DIR/tmp_repo" >> "$INSTALL_LOG" 2>&1
+cp -r "$ROOT_DIR/tmp_repo/core" "$ROOT_DIR/" >> "$INSTALL_LOG" 2>&1
+cp -r "$ROOT_DIR/tmp_repo/generic_agent" "$ROOT_DIR/generic-agent" >> "$INSTALL_LOG" 2>&1
 rm -rf "$ROOT_DIR/tmp_repo"
 
 # 4. Python Environment Setup
+log_c "🐍 Setting up Python environment..."
 cd "$ROOT_DIR/generic-agent"
-python3 -m venv venv
-./venv/bin/python3 -m pip install --upgrade pip -q
-./venv/bin/python3 -m pip install websockets python-dotenv -q
+python3 -m venv venv >> "$INSTALL_LOG" 2>&1
+./venv/bin/python3 -m pip install --upgrade pip -q >> "$INSTALL_LOG" 2>&1
+./venv/bin/python3 -m pip install websockets python-dotenv -q >> "$INSTALL_LOG" 2>&1
 
 # 5. Systemd Service Setup
-# We use a template-like approach or just write the file.
+log_c "⚙️ Configuring systemd service..."
 cat <<EOF > /etc/systemd/system/lm-bootstrap.service
 [Unit]
 Description=Lab Manager Bootstrap Agent
@@ -73,6 +100,8 @@ User=svc_lm
 WorkingDirectory=$ROOT_DIR/generic-agent
 Environment="PYTHONPATH=$ROOT_DIR"
 ExecStart=$ROOT_DIR/generic-agent/venv/bin/python3 $ROOT_DIR/generic-agent/src/agent.py --id $SPOKE_ID --secret $SPOKE_SECRET --hub-secret $HUB_SECRET --hub $HUB_WS
+StandardOutput=append:/var/log/lm/generic-agent.log
+StandardError=append:/var/log/lm/generic-agent.log
 Restart=on-failure
 RestartSec=10
 
@@ -86,11 +115,15 @@ systemctl daemon-reload
 systemctl enable lm-bootstrap
 
 if [ "$CLONE_ONLY" = true ]; then
-    echo "❄️  Clone-only mode active. Files and service enabled, but service is NOT started."
+    log_c "❄️  Clone-only mode active. Files and service enabled, but service is NOT started."
     echo "The agent will start automatically on the next reboot."
     echo "Note: To change the spoke ID manually, edit /etc/systemd/system/lm-bootstrap.service"
 else
+    log_c "🔄 Starting agent service..."
     systemctl restart lm-bootstrap
-    echo "🎉 Bootstrap installation complete! The agent is now calling home to $HUB_WS"
+    log_c "🎉 Bootstrap installation complete! The agent is now calling home to $HUB_WS"
+    echo "--------------------------------------------------------------------------------"
+    echo "Logs are available at: $INSTALL_LOG and $LOG_DIR/generic-agent.log"
     echo "You can now approve this spoke in the Hub WebUI to negotiate its session secret."
+    echo "--------------------------------------------------------------------------------"
 fi
