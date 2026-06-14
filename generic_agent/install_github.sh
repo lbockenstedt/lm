@@ -69,8 +69,7 @@ fi
 # 3. Setup Directory Structure
 ROOT_DIR="/opt/lm"
 log_c "📁 Setting up directories in $ROOT_DIR..."
-mkdir -p "$ROOT_DIR/core" >> "$INSTALL_LOG" 2>&1
-mkdir -p "$ROOT_DIR/generic-agent" >> "$INSTALL_LOG" 2>&1
+rm -rf "$ROOT_DIR/core" "$ROOT_DIR/generic-agent" >> "$INSTALL_LOG" 2>&1
 
 log_c "📦 Cloning Core and Generic Agent from GitHub..."
 REPO_URL="https://github.com/lbockenstedt/lm"
@@ -78,7 +77,7 @@ REPO_URL="https://github.com/lbockenstedt/lm"
 # Clone to temporary location
 git clone --depth 1 "$REPO_URL" "$ROOT_DIR/tmp_repo" >> "$INSTALL_LOG" 2>&1
 cp -r "$ROOT_DIR/tmp_repo/core" "$ROOT_DIR/" >> "$INSTALL_LOG" 2>&1
-cp -r "$ROOT_DIR/tmp_repo/generic_agent" "$ROOT_DIR/generic-agent" >> "$INSTALL_LOG" 2>&1
+cp -r "$ROOT_DIR/tmp_repo/generic_agent" "$ROOT_DIR/" >> "$INSTALL_LOG" 2>&1
 rm -rf "$ROOT_DIR/tmp_repo"
 
 # 4. Python Environment Setup
