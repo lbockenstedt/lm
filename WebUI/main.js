@@ -1699,7 +1699,19 @@ async function updateStatus() {
             return `
                 <div onclick="setView('${className}')" id="nav-${className}" class="nav-item ${isActive} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
                     ${icon}
-                    ${className}
+                    <div class="flex flex-col">
+                        <span>${className}</span>
+                        ${className === 'Simulation' ? `
+                            <div class="flex flex-col gap-1 mt-1">
+                                <div onclick="event.stopPropagation(); setView('cs')" class="text-[10px] text-slate-400 hover:text-green-600 cursor-pointer pl-2 flex items-center gap-1">
+                                    <span class="w-1 h-1 rounded-full bg-slate-300"></span> Simulation Clients
+                                </div>
+                                <div onclick="event.stopPropagation(); setView('cs')" class="text-[10px] text-slate-400 hover:text-green-600 cursor-pointer pl-2 flex items-center gap-1">
+                                    <span class="w-1 h-1 rounded-full bg-slate-300"></span> VM Server
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
                 </div>
             `;
         }).join('');
