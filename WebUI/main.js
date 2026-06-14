@@ -1783,10 +1783,10 @@ async function updateStatus() {
                         <span class="leading-none">${className}</span>
                         ${className === 'Simulation' ? `
                             <div class="flex flex-col gap-1 mt-2">
-                                <div onclick="event.stopPropagation(); setView('cs')" class="text-sm text-slate-400 hover:text-green-600 cursor-pointer pl-1 flex items-center gap-2">
+                                <div onclick="event.stopPropagation(); setView('cs'); setSubView('Simulation Clients')" class="text-sm text-slate-400 hover:text-green-600 cursor-pointer pl-1 flex items-center gap-2">
                                     <span class="w-1 h-1 rounded-full bg-slate-300"></span> Simulation Clients
                                 </div>
-                                <div onclick="event.stopPropagation(); setView('cs')" class="text-sm text-slate-400 hover:text-green-600 cursor-pointer pl-1 flex items-center gap-2">
+                                <div onclick="event.stopPropagation(); setView('cs'); setSubView('Server')" class="text-sm text-slate-400 hover:text-green-600 cursor-pointer pl-1 flex items-center gap-2">
                                     <span class="w-1 h-1 rounded-full bg-slate-300"></span> Server
                                 </div>
                             </div>
