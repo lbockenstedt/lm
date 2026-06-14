@@ -2580,7 +2580,11 @@ async function loadOpnsenseManagement() {
         if (subMenu === 'Firewall Rules') {
             // Use specialized columns for firewall rules to hide ID and ensure Source is present
             keys = ['source', 'destination', 'protocol', 'action', 'description'].filter(k => k in firstItem || true);
+        } else if (subMenu === 'Interfaces') {
+            // Specialized columns for interfaces to include flags and capabilities
+            keys = ['name', 'ip', 'status', 'flags', 'capabilities', 'description'].filter(k => k in firstItem || true);
         }
+
 
         const hiddenRules = JSON.parse(localStorage.getItem('lm_hidden_firewall_rules') || '[]');
         let filteredItems = finalItems;
@@ -2602,6 +2606,12 @@ async function loadOpnsenseManagement() {
                         if (k === 'action' && typeof val === 'string') {
                             const color = val === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600';
                             return `<td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${color}">${val}</span></td>`;
+                        }
+                        if ((k === 'flags' || k === 'capabilities') && typeof val === 'string' && val !== '-') {
+                            const badges = val.split(',').map(v =>
+                                `<span class="inline-block px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200 text-[9px] font-medium mr-1 mb-1">${v.trim()}</span>`
+                            ).join('');
+                            return `<td class="px-4 py-3 text-slate-600 font-mono text-xs">${badges}</td>`;
                         }
                         return `<td class="px-4 py-3 text-slate-600 font-mono text-xs">${val}</td>`;
                     }).join('')}
