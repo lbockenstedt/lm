@@ -2,7 +2,8 @@ const MODULE_CLASSES = {
     'Hypervisors': ['pxmx', 'kvm', 'vmware', 'utm'],
     'Firewalls': ['opnsense', 'pfsense', 'juniper', 'fortigate'],
     'IPAM': ['netbox', 'phpipam'],
-    'Security/NAC': ['cppm', 'ise']
+    'Security/NAC': ['cppm', 'ise'],
+    'Simulation': ['cs']
 };
 
 const PROVISIONABLE_MODULES = {
@@ -2776,7 +2777,7 @@ async function loadPendingSpokes() {
                                         </span>
                                     </td>
                                     <td class="px-4 py-3 text-right flex justify-end gap-2">
-                                        <button onclick="renameSpoke('${sid}', '${name}')" class="text-slate-400 hover:text-slate-600 p-1 transition-colors" title="Rename Spoke">
+                                        <button onclick="openSpokeMetadataModal('${sid}', '${name}')" class="text-slate-400 hover:text-slate-600 p-1 transition-colors" title="Edit Spoke Metadata">
                                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9"></path></svg>
                                         </button>
                                         ${!isApproved ? `
@@ -2802,29 +2803,95 @@ async function loadPendingSpokes() {
     }
 }
 
-async function renameSpoke(spokeId, currentName) {
-    const newName = prompt(`Enter a new display name for spoke ${spokeId}:`, currentName);
-    if (newName === null || newName.trim() === '') return;
+async function openSpokeMetadataModal(spokeId, currentName) {
+    const modal = document.createElement('div');
+    modal.id = 'spoke-metadata-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
 
-    const newHostname = prompt(`Enter a new system hostname for spoke ${spokeId} (optional, leave blank to keep current):`);
+    let description = '';
+    try {
+        const res = await fetch(`/setup/spoke-metadata/${spokeId}`);
+        if (res.ok) {
+            const data = await res.json();
+            description = data.metadata.description || '';
+            currentName = data.metadata.display_name || currentName;
+        }
+    } catch (e) {
+        console.error('Error fetching spoke metadata:', e);
+    }
+
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">Spoke Metadata</h3>
+                <button onclick="this.closest('#spoke-metadata-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="text-xs text-slate-400 font-mono mb-4">ID: ${spokeId}</div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Display Name</label>
+                    <input type="text" id="meta-display-name" value="${currentName}" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Description</label>
+                    <textarea id="meta-description" rows="3" placeholder="Describe the purpose of this spoke..." class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${description}</textarea>
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">System Hostname (Optional)</label>
+                    <input type="text" id="meta-hostname" placeholder="e.g. opnsense-core" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="pt-4 flex justify-end gap-3">
+                    <button onclick="this.closest('#spoke-metadata-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                    <button onclick="saveSpokeMetadata('${spokeId}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
+                        Save Changes
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+async function saveSpokeMetadata(spokeId) {
+    const displayName = document.getElementById('meta-display-name').value;
+    const description = document.getElementById('meta-description').value;
+    const hostname = document.getElementById('meta-hostname').value;
 
     try {
-        const response = await fetch('/setup/spoke-name', {
+        const response = await fetch('/setup/spoke-metadata', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 spoke_id: spokeId,
-                display_name: newName.trim(),
-                hostname: newHostname ? newHostname.trim() : null
+                metadata: {
+                    display_name: displayName,
+                    description: description
+                }
             })
         });
-        if (!response.ok) throw new Error('Rename failed');
+        if (!response.ok) throw new Error('Failed to save metadata');
 
-        alert(`Spoke ${spokeId} renamed to ${newName}${newHostname ? ' with hostname ' + newHostname : ''}.`);
+        // If hostname was provided, we also call the existing renameSpoke endpoint for the system update
+        if (hostname) {
+            await fetch('/setup/spoke-name', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    spoke_id: spokeId,
+                    display_name: displayName,
+                    hostname: hostname
+                })
+            });
+        }
+
+        alert('Spoke metadata updated successfully.');
+        document.getElementById('spoke-metadata-modal').remove();
         await loadPendingSpokes();
         updateStatus();
     } catch (err) {
-        alert('Error renaming spoke: ' + err.message);
+        alert('Error updating metadata: ' + err.message);
     }
 }
 

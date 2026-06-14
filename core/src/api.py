@@ -255,6 +255,41 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/setup/spoke-metadata")
+    async def update_spoke_metadata(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            spoke_id = data.get("spoke_id")
+            metadata = data.get("metadata", {})
+            display_name = metadata.get("display_name")
+            description = metadata.get("description")
+
+            if not spoke_id:
+                raise HTTPException(status_code=400, detail="Missing spoke_id")
+
+            if spoke_id not in hub.state.system_state["known_modules"]:
+                raise HTTPException(status_code=404, detail="Spoke not found")
+
+            hub.state.update_module_metadata(spoke_id, metadata)
+            hub.state.save_state()
+
+            # If display name changed, we can also trigger a hostname update if requested
+            # However, usually hostname is a separate field.
+            # If the user wants to sync display_name to hostname, we do it here.
+
+            return {"status": "success", "message": f"Metadata for spoke {spoke_id} updated."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/setup/spoke-metadata/{spoke_id}")
+    async def get_spoke_metadata(spoke_id: str):
+        hub = app.state.hub
+        metadata = hub.state.system_state.get("module_metadata", {}).get(spoke_id, {})
+        if not metadata:
+            raise HTTPException(status_code=404, detail="Spoke metadata not found")
+        return {"metadata": metadata}
+
     @app.get("/setup/firewalls")
     async def get_firewalls():
         hub = app.state.hub
