@@ -249,7 +249,7 @@ const VIEWS = {
     cs: {
         name: 'Client Sim',
         className: 'Simulation Control',
-        subMenus: ['Simulation Clients', 'VM Server', 'Simulation Control', 'Telemetry', 'Configuration'],
+        subMenus: ['Simulation Clients', 'Server', 'Simulation Control', 'Telemetry', 'Configuration'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 6h7v8l7-7z"></path></svg>',
         render: (subMenu) => {
             if (subMenu === 'Configuration') {
@@ -276,11 +276,11 @@ const VIEWS = {
                     </div>
                 `;
             }
-            if (subMenu === 'VM Server') {
+            if (subMenu === 'Server') {
                 return `
                     <div class="space-y-6">
                         <div class="flex justify-between items-center mb-6">
-                            <h2 class="text-2xl font-bold text-[#263040]">VM Server Status</h2>
+                            <h2 class="text-2xl font-bold text-[#263040]">Server Status</h2>
                             <button onclick="refreshVMServerStatus()" class="bg-white border border-slate-300 hover:bg-slate-50 text-slate-600 px-4 py-2 rounded-md text-sm font-medium transition-all flex items-center gap-2 shadow-sm">
                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 00-15.357-2m15.357 2H15"></path></svg>
                                 Refresh Status
@@ -1707,7 +1707,7 @@ async function updateStatus() {
                                     <span class="w-1 h-1 rounded-full bg-slate-300"></span> Simulation Clients
                                 </div>
                                 <div onclick="event.stopPropagation(); setView('cs')" class="text-sm text-slate-400 hover:text-green-600 cursor-pointer pl-1 flex items-center gap-2">
-                                    <span class="w-1 h-1 rounded-full bg-slate-300"></span> VM Server
+                                    <span class="w-1 h-1 rounded-full bg-slate-300"></span> Server
                                 </div>
                             </div>
                         ` : ''}
