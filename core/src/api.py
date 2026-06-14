@@ -1045,7 +1045,7 @@ def create_app(hub):
         hub = app.state.hub
         logger.info(f"API: Fetching details for tenant {tenant_id}")
         tenant = hub.state.get_tenant(tenant_id)
-        if not tenant:
+        if tenant is None:
             logger.warning(f"API: Tenant {tenant_id} not found in state. Available: {list(hub.state.tenant_state.get('tenants', {}).keys())}")
             raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
         return {"tenant_id": tenant_id, "config": tenant}
