@@ -303,11 +303,9 @@
 
         <div class="flex items-center gap-4">
             <div id="logo-right" class="flex justify-end">
-                <!-- Logo injected here -->
+                <!-- Logo la-text-xs -->
             </div>
-            <div id="spoke-indicators-banner" class="flex items-center gap-3 mr-4">
-                <!-- Spoke indicators injected here -->
-            </div>
+            <!-- Spoke indicators removed from here -->
             <!-- GLOBAL SEARCH -->
             <div class="relative group">
                 <span class="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
@@ -372,8 +370,14 @@
                 <span class="font-bold">Enterprise Edition</span>
             </div>
             <div class="flex items-center gap-3">
-                <span class="text-[10px] uppercase tracking-widest opacity-60">System Status: Online</span>
-                <div class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.6)]"></div>
+                <div id="module-status-container" class="flex items-center gap-2 cursor-pointer group relative" onclick="setView('settings'); setSubView('Diagnostics');">
+                    <div id="module-status-dot" class="w-2 h-2 rounded-full bg-slate-500 shadow-[0_0_5px_rgba(0,0,0,0.6)] transition-all"></div>
+                    <span class="text-[10px] uppercase tracking-widest opacity-60">Module Status</span>
+                    <div id="module-status-tooltip" class="absolute bottom-full right-0 mb-2 hidden group-hover:block bg-slate-800 text-white text-[10px] p-2 rounded shadow-xl z-50 border border-slate-700 min-w-[120px]">
+                        <!-- Status items injected here -->
+                    </div>
+                </div>
+                <span class="text-slate-400">|</span>
                 <span class="text-[10px] uppercase tracking-widest opacity-60 ml-2 border-l border-slate-500 pl-2" id="footer-sys-version">v0.00</span>
             </div>
         </div>

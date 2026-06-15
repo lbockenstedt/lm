@@ -1513,24 +1513,54 @@ function renderTopNav() {
 }
 
 function renderSpokeIndicators() {
-    const bannerEl = document.getElementById('spoke-indicators-banner');
-    if (!bannerEl || !window.spokeHealth) return;
+    const dotEl = document.getElementById('module-status-dot');
+    const tooltipEl = document.getElementById('module-status-tooltip');
+    if (!dotEl || !tooltipEl || !window.spokeHealth) return;
 
-    bannerEl.innerHTML = Object.entries(window.spokeHealth).map(([id, health]) => {
-        let color = 'bg-red-500';
-        if (health.online) {
-            color = health.error ? 'bg-yellow-500' : 'bg-green-500';
+    const statuses = Object.entries(window.spokeHealth);
+    if (statuses.length === 0) {
+        dotEl.className = 'w-2 h-2 rounded-full bg-slate-500 transition-all';
+        tooltipEl.innerHTML = '<div class="text-center italic opacity-60">No spokes connected</div>';
+        return;
+    }
+
+    let allGreen = true;
+    let allRed = true;
+    let tooltipHtml = '';
+
+    statuses.forEach(([id, health]) => {
+        const isOnline = health.online;
+        const hasError = health.error;
+        const isPerfectGreen = isOnline && !hasError;
+        const isRed = !isOnline;
+
+        if (!isPerfectGreen) allGreen = false;
+        if (!isRed) allRed = false;
+
+        let dotColor = 'bg-red-500';
+        let statusText = 'Offline';
+        if (isOnline) {
+            dotColor = hasError ? 'bg-yellow-500' : 'bg-green-500';
+            statusText = hasError ? 'Online (Error)' : 'Online';
         }
-        return `
-            <div class="flex items-center gap-1.5 group relative">
-                <div class="w-2 h-2 rounded-full ${color} shadow-sm transition-all group-hover:scale-125"></div>
-                <span class="text-[10px] font-mono text-slate-400 group-hover:text-slate-600 transition-colors">${id}</span>
-                <div class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-slate-800 text-white text-[10px] px-2 py-1 rounded shadow-lg whitespace-nowrap z-50">
-                    ${id}: ${health.online ? (health.error ? 'Online (Error)' : 'Online') : 'Offline'}
+
+        tooltipHtml += `
+            <div class="flex items-center justify-between gap-4 py-0.5">
+                <span class="font-mono opacity-80">${id}</span>
+                <div class="flex items-center gap-1.5">
+                    <div class="w-1.5 h-1.5 rounded-full ${dotColor}"></div>
+                    <span class="text-[9px]">${statusText}</span>
                 </div>
             </div>
         `;
-    }).join('');
+    });
+
+    let overallColor = 'bg-yellow-500';
+    if (allGreen) overallColor = 'bg-green-500';
+    else if (allRed) overallColor = 'bg-red-500';
+
+    dotEl.className = `w-2 h-2 rounded-full ${overallColor} shadow-[0_0_5px_${overallColor === 'bg-green-500' ? 'rgba(34,197,94,0.6)' : (overallColor === 'bg-red-500' ? 'rgba(239,68,68,0.6)' : 'rgba(234,179,8,0.6)')}] transition-all`;
+    tooltipEl.innerHTML = tooltipHtml;
 }
 
 async function setView(viewId) {
