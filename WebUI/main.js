@@ -1513,20 +1513,47 @@ function renderTopNav() {
 }
 
 function renderSpokeIndicators() {
-    const dotEl = document.getElementById('module-status-dot');
-    const tooltipEl = document.getElementById('module-status-tooltip');
-    if (!dotEl || !tooltipEl || !window.spokeHealth) return;
+    const hubDot = document.getElementById('hub-status-dot');
+    const moduleDot = document.getElementById('module-status-dot');
+    const tooltipEl = document.getElementById('system-status-tooltip');
+    if (!hubDot || !moduleDot || !tooltipEl || !window.spokeHealth) return;
 
+    // Hub Status
+    const isHubOnline = window.hubOnline || false;
+    const hubColor = isHubOnline ? 'bg-green-500' : 'bg-red-500';
+    hubDot.className = `w-2 h-2 rounded-full ${hubColor} shadow-[0_0_5px_${hubColor === 'bg-green-500' ? 'rgba(34,197,94,0.6)' : 'rgba(239,68,68,0.6)'}] transition-all`;
+
+    // Module Status
     const statuses = Object.entries(window.spokeHealth);
     if (statuses.length === 0) {
-        dotEl.className = 'w-2 h-2 rounded-full bg-slate-500 transition-all';
-        tooltipEl.innerHTML = '<div class="text-center italic opacity-60">No spokes connected</div>';
+        moduleDot.className = 'w-2 h-2 rounded-full bg-slate-500 transition-all';
+        tooltipEl.innerHTML = `
+            <div class="flex items-center justify-between gap-4 py-1 border-b border-slate-700 mb-2">
+                <span class="font-bold opacity-60">Hub Status</span>
+                <div class="flex items-center gap-1.5">
+                    <div class="w-1.5 h-1.5 rounded-full ${hubColor}"></div>
+                    <span class="text-[9px]">${isHubOnline ? 'Online' : 'Offline'}</span>
+                </div>
+            </div>
+            <div class="text-center italic opacity-60">No spokes connected</div>
+        `;
         return;
     }
 
     let allGreen = true;
     let allRed = true;
     let tooltipHtml = '';
+
+    // Add Hub status to top of tooltip
+    tooltipHtml += `
+        <div class="flex items-center justify-between gap-4 py-1 border-b border-slate-700 mb-2">
+            <span class="font-bold opacity-60">Hub Status</span>
+            <div class="flex items-center gap-1.5">
+                <div class="w-1.5 h-1.5 rounded-full ${hubColor}"></div>
+                <span class="text-[9px]">${isHubOnline ? 'Online' : 'Offline'}</span>
+            </div>
+        </div>
+    `;
 
     statuses.forEach(([id, health]) => {
         const isOnline = health.online;
@@ -1559,7 +1586,7 @@ function renderSpokeIndicators() {
     if (allGreen) overallColor = 'bg-green-500';
     else if (allRed) overallColor = 'bg-red-500';
 
-    dotEl.className = `w-2 h-2 rounded-full ${overallColor} shadow-[0_0_5px_${overallColor === 'bg-green-500' ? 'rgba(34,197,94,0.6)' : (overallColor === 'bg-red-500' ? 'rgba(239,68,68,0.6)' : 'rgba(234,179,8,0.6)')}] transition-all`;
+    moduleDot.className = `w-2 h-2 rounded-full ${overallColor} shadow-[0_0_5px_${overallColor === 'bg-green-500' ? 'rgba(34,197,94,0.6)' : (overallColor === 'bg-red-500' ? 'rgba(239,68,68,0.6)' : 'rgba(234,179,8,0.6)')}] transition-all`;
     tooltipEl.innerHTML = tooltipHtml;
 }
 
@@ -1753,7 +1780,7 @@ async function updateStatus() {
                 <span class="text-green-600">Hub Online</span>
             `;
         }
-
+        window.hubOnline = true;
         const connections = statusData.active_connections || [];
 
         // Store health for the top nav indicators
