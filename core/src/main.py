@@ -127,6 +127,30 @@ class LabManagerHub:
         else:
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
 
+    async def send_to_agent(self, spoke_id: str, agent_id: str, command_type: str, data: Dict[str, Any]):
+        """
+        Sends a command to a specific agent by relaying it through its parent spoke.
+        """
+        msg_id = str(uuid.uuid4())
+        msg = Message(
+            header=MessageHeader(
+                message_id=msg_id,
+                timestamp=time.time(),
+                sender_id="hub",
+                destination_id=spoke_id
+            ),
+            payload=MessagePayload(
+                type="SPOKE_RELAY",
+                data={
+                    "target_agent_id": agent_id,
+                    "command_type": command_type,
+                    "data": data
+                }
+            )
+        )
+        await self.send_to_spoke(msg)
+        return msg_id
+
     async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
         """
         Sends a command to a spoke and waits for its acknowledgement.

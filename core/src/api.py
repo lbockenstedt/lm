@@ -86,6 +86,52 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/setup/spokes/{spoke_id}/agents")
+    async def get_spoke_agents(spoke_id: str):
+        hub = app.state.hub
+        # In the current state, agents are tracked in the system_state under 'known_modules'
+        # We filter for agents that are associated with this spoke.
+        # Note: This requires the la-manager state to track agent-to-spoke mapping.
+        known_spokes = hub.state.system_state.get("known_modules", [])
+        # For now, we return agents that have 'pxmx' or other patterns if they are linked
+        # In the future, we will have an explicit map in state_manager.
+        agents = [sid for sid in known_spokes if sid != spoke_id] # Placeholder
+        return {"spoke_id": spoke_id, "agents": agents}
+
+    @app.post("/setup/spokes/{spoke_id}/agents/{agent_id}/approve")
+    async def approve_agent_under_spoke(spoke_id: str, agent_id: str):
+        hub = app.state.hub
+        try:
+            # Mark the agent as approved in the state
+            hub.state.register_module(agent_id, approved=True)
+            hub.state.save_state()
+            hub.approved_modules[agent_id] = True
+
+            # Relay the approval to the agent via the spoke
+            if spoke_id in hub.active_connections:
+                msg_id = str(uuid.uuid4())
+                msg = Message(
+                    header=MessageHeader(
+                        message_id=msg_id,
+                        timestamp=time.time(),
+                        sender_id="hub",
+                        destination_id=spoke_id
+                    ),
+                    payload=MessagePayload(
+                        type="SPOKE_RELAY",
+                        data={
+                            "target_agent_id": agent_id,
+                            "command": "APPROVAL_SUCCESS",
+                            "payload": {}
+                        }
+                    )
+                )
+                await hub.send_to_spoke(msg)
+
+            return {"status": "success", "message": f"Agent {agent_id} approved under spoke {spoke_id}"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/pending_spokes")
     async def get_all_spokes_status():
         hub = app.state.hub
