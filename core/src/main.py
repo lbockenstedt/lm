@@ -234,6 +234,38 @@ class LabManagerHub:
         except Exception as e:
             logger.error(f"Failed to push config to {spoke_id}: {e}")
 
+    async def broadcast_log_level(self, enabled: bool):
+        """Broadcasts the desired logging level to all connected spokes."""
+        logger.info(f"Broadcasting debug mode: {'ENABLED' if enabled else 'DISABLED'}")
+        msg_id = str(uuid.uuid4())
+        msg = Message(
+            header=MessageHeader(
+                message_id=msg_id,
+                timestamp=time.time(),
+                sender_id="hub",
+                destination_id="broadcast" # Internal marker for broadcast
+            ),
+            payload=MessagePayload(type="SET_LOG_LEVEL", data={"enabled": enabled})
+        )
+
+        # We iterate over active connections and send to each specifically
+        tasks = []
+        for sid in list(self.active_connections.keys()):
+            # Create a copy of the message for each spoke with the correct destination_id
+            spoke_msg = Message(
+                header=MessageHeader(
+                    message_id=str(uuid.uuid4()),
+                    timestamp=time.time(),
+                    sender_id="hub",
+                    destination_id=sid
+                ),
+                payload=MessagePayload(type="SET_LOG_LEVEL", data={"enabled": enabled})
+            )
+            tasks.append(self.send_to_spoke(spoke_msg))
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def handle_connection(self, websocket):
         """
         Handles the lifecycle of a Spoke connection with authentication.

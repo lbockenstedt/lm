@@ -432,10 +432,10 @@ const VIEWS = {
     cppm: {
         name: 'Security/NAC',
         className: 'Security/NAC',
-        subMenus: ['Access Tracker', 'Devices', 'Roles', 'Configuration'],
+        subMenus: ['Access Tracker', 'Devices', 'Roles', 'config'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>',
         render: (subMenu) => {
-            if (subMenu === 'Configuration') {
+            if (subMenu === 'config') {
                 return `
                     <div class="space-y-6">
                         <div class="flex justify-between items-center mb-6">
@@ -469,7 +469,7 @@ const VIEWS = {
                 <div class="space-y-6">
                     <div class="flex justify-between items-center mb-6">
                         <h2 class="text-2xl font-bold text-[#263040]">Security/NAC: ${subMenu}</h2>
-                        <button onclick="setSubView('Configuration')" class="p-2 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all" title="Configuration">
+                        <button onclick="setSubView('config')" class="p-2 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all" title="Configuration">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.754 2.924-1.754 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.754.426 1.754 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.754-2.924 1.754-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.754-.426-1.754-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.999.53 2.122.5C10.05 5.047 10.325 4.317 10.325 4.317z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
                         </button>
                     </div>
@@ -825,6 +825,7 @@ const VIEWS = {
             if (subMenu.startsWith('logs-')) {
                 const module = subMenu.replace('logs-', '');
                 const logTitle = LOG_NAMES[module] || `${module.toUpperCase()} Logs`;
+                refreshDebugButtonState();
                 return `
                     <div class="space-y-6">
                         <h2 class="text-2xl font-bold mb-6 text-[#263040]">${logTitle}</h2>
@@ -832,6 +833,9 @@ const VIEWS = {
                             <div class="bg-slate-100 px-4 py-2 border-b border-slate-200 flex justify-between items-center">
                                 <span class="text-xs font-bold text-slate-500 uppercase tracking-widest">${logTitle}</span>
                                 <div class="flex gap-2">
+                                    <button id="debug-toggle-btn" onclick="toggleDebugLogging()" class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
+                                        <span id="debug-mode-text">Loading...</span>
+                                    </button>
                                     <button onclick="copyLogs()" class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
                                         <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 012-2h2a2 2 0 012 2M8 5V3m4 2V3"></path></svg>
                                         Copy All
@@ -3719,7 +3723,58 @@ async function refreshVMServerStatus() {
         document.getElementById('server-node-name').textContent = 'Error';
     }
 }
+async function toggleDebugLogging() {
+    try {
+        const statusRes = await fetch('/setup/debug-mode');
+        const statusData = await statusRes.json();
+        const newState = !statusData.enabled;
+
+        const response = await fetch('/setup/debug-mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                enabled: newState
+            })
+        });
+
+        if (!response.ok) throw new Error('Failed to toggle debug mode');
+        const data = await response.json();
+
+        updateDebugButtonUI(data.enabled);
+        alert(`Debug logging has been ${data.enabled ? 'ENABLED' : 'DISABLED'} for all systems.`);
+    } catch (err) {
+        alert('Error toggling debug mode: ' + err.message);
+    }
+}
+
+function updateDebugButtonUI(enabled) {
+    const btn = document.getElementById('debug-toggle-btn');
+    const text = document.getElementById('debug-mode-text');
+    if (!btn || !text) return;
+
+    if (enabled) {
+        btn.className = 'text-[10px] bg-green-600 text-white border border-green-700 px-2 py-1 rounded hover:bg-green-700 transition-colors font-bold flex items-center gap-1';
+        text.textContent = 'Debug Logging: ON';
+    } else {
+        btn.className = 'text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1';
+        text.textContent = 'Debug Logging: OFF';
+    }
+}
+
+async function refreshDebugButtonState() {
+    try {
+        const response = await fetch('/setup/debug-mode');
+        if (response.ok) {
+            const data = await response.json();
+            updateDebugButtonUI(data.enabled);
+        }
+    } catch (err) {
+        console.error('Error refreshing debug button state:', err);
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+
     console.log("Lab Manager UI: Initializing...");
     try {
         currentTenant = localStorage.getItem('lm_tenant') || 'default';

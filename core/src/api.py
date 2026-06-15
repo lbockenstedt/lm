@@ -647,7 +647,34 @@ def create_app(hub):
 
         return {"hosts": results}
 
+    @app.get("/setup/debug-mode")
+    async def get_debug_mode():
+        hub = app.state.hub
+        enabled = hub.state.get_global_config().get("debug_mode", False)
+        return {"enabled": enabled}
+
+    @app.post("/setup/debug-mode")
+    async def toggle_debug_mode(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            enabled = data.get("enabled", False)
+
+            # Update state
+            global_config = hub.state.get_global_config()
+            global_config["debug_mode"] = enabled
+            hub.state.system_state["global_config"] = global_config
+            hub.state.save_state()
+
+            # Broadcast to all spokes
+            await hub.broadcast_log_level(enabled)
+
+            return {"status": "success", "enabled": enabled}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/docs/{section}")
+
     async def get_docs(section: str):
         """
         Extracts a specific help section from the README.md file.

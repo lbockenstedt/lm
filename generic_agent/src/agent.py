@@ -87,6 +87,13 @@ class AgentModule(BaseSpoke):
         super().__init__(spoke_id, config)
 
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        if command_type == "SET_LOG_LEVEL":
+            enabled = data.get("enabled", False)
+            level = logging.DEBUG if enabled else logging.INFO
+            logging.getLogger().setLevel(level)
+            logger.info(f"Log level set to {logging.getLevelName(level)}")
+            return {"status": "SUCCESS", "message": f"Log level set to {logging.getLevelName(level)}"}
+
         if command_type == "EXECUTE_COMMAND":
             cmd = data.get("command")
             if not cmd:
