@@ -68,6 +68,24 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/setup/spokes/{spoke_id}/reset-secret")
+    async def reset_spoke_secret(spoke_id: str):
+        hub = app.state.hub
+        try:
+            hub.key_manager.delete_spoke_key(spoke_id)
+            return {"status": "success", "message": f"Secret for spoke {spoke_id} has been reset. It can now be re-onboarded."}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/setup/spokes/{spoke_id}/rotate-secret")
+    async def rotate_spoke_secret(spoke_id: str):
+        hub = app.state.hub
+        try:
+            new_key = hub.key_manager.rotate_key(spoke_id)
+            return {"status": "success", "new_secret": new_key.secret}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/pending_spokes")
     async def get_all_spokes_status():
         hub = app.state.hub

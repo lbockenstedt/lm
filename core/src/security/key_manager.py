@@ -160,23 +160,6 @@ class KeyManager:
     def rotate_key(self, spoke_id: str) -> ManagedKey:
         """
         Rotates the session key for a specific spoke.
-
-        The system implements a "grace window" for session keys. Only the current
-        key and one previous key are kept valid. This ensures that if a spoke
-        is restored from a VM snapshot, it can still authenticate using its
-        last known key, which the Hub will still recognize.
-
-        Process:
-        1. Move current key to the history list.
-        2. Truncate history to 1 entry (Current + 1 Previous).
-        3. Generate a new secret with a 30-day expiration.
-        4. Update the current key and persist.
-
-        Args:
-            spoke_id: The unique identifier of the spoke whose key is being rotated.
-
-        Returns:
-            The newly generated ManagedKey object.
         """
         if spoke_id in self.keys:
             old_key = self.keys[spoke_id]
@@ -195,6 +178,16 @@ class KeyManager:
         self.keys[spoke_id] = new_key
         self._save_keys()
         return new_key
+
+    def delete_spoke_key(self, spoke_id: str):
+        """
+        Completely removes all keys and history for a spoke.
+        This forces the spoke to undergo a new 'first-secret' onboarding.
+        """
+        self.keys.pop(spoke_id, None)
+        self.history.pop(spoke_id, None)
+        self._save_keys()
+        logger.info(f"Completely wiped keys for spoke {spoke_id}")
 
     def get_valid_key(self, spoke_id: str, secret: str) -> Optional[str]:
         """

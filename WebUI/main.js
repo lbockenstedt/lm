@@ -3105,6 +3105,9 @@ async function loadPendingSpokes() {
                                                 Un-approve
                                             </button>
                                         `}
+                                        <button onclick="resetSpokeSecret('${sid}')" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-4 py-1 rounded text-xs font-bold transition-colors" title="Wipe secret to allow re-onboarding">
+                                            Reset Secret
+                                        </button>
                                         <button onclick="openSpokeMetadataModal('${sid}', '${name}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-1 rounded text-xs font-bold transition-colors" title="Edit Spoke Metadata">
                                             Edit
                                         </button>
@@ -3243,6 +3246,23 @@ async function unapproveSpoke(spokeId) {
         updateStatus();
     } catch (err) {
         alert('Error un-approving spoke: ' + err.message);
+    }
+}
+
+async function resetSpokeSecret(spokeId) {
+    if (!confirm(`Are you sure you want to reset the secret for ${spokeId}? This will wipe all stored keys and force the spoke to re-onboard using a new first-secret.`)) {
+        return;
+    }
+    try {
+        const response = await fetch(`/setup/spokes/${spokeId}/reset-secret`, {
+            method: 'POST'
+        });
+        if (!response.ok) throw new Error('Secret reset failed');
+
+        alert(`Secret for ${spokeId} has been reset. Please restart the agent installation or trigger a new handshake.`);
+        await loadPendingSpokes();
+    } catch (err) {
+        alert('Error resetting secret: ' + err.message);
     }
 }
 
