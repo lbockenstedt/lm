@@ -249,10 +249,10 @@ const VIEWS = {
     cs: {
         name: 'Client Sim',
         className: 'Simulation Control',
-        subMenus: ['Simulation Clients', 'Server', 'Simulation Control', 'Telemetry', 'Configuration'],
+        subMenus: ['Simulation Clients', 'Server', 'Simulation Control', 'Telemetry', 'config'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 6h7v8l7-7z"></path></svg>',
         render: (subMenu) => {
-            if (subMenu === 'Configuration') {
+            if (subMenu === 'config') {
                 return `
                     <div class="space-y-6">
                         <h2 class="text-2xl font-bold mb-6 text-[#263040]">Simulation Configuration</h2>
