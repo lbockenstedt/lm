@@ -2588,8 +2588,8 @@ async function loadOpnsenseManagement() {
             // Use specialized columns for firewall rules to hide ID and ensure Source is present
             keys = ['source', 'destination', 'protocol', 'action', 'description'].filter(k => k in firstItem || true);
         } else if (subMenu === 'Interfaces') {
-            // Specialized columns for interfaces to include flags and capabilities
-            keys = ['name', 'ip', 'status', 'flags', 'capabilities', 'description'].filter(k => k in firstItem || true);
+            // Specialized columns for interfaces to match high-fidelity overview
+            keys = ['name', 'ip', 'status', 'mac', 'mtu', 'media', 'description', 'flags', 'capabilities'].filter(k => k in firstItem || true);
         } else if (subMenu === 'NAT Policies') {
             // Specialized columns for NAT policies
             keys = ['protocol', 'external_ip', 'external_port', 'internal_ip', 'internal_port', 'description'].filter(k => k in firstItem || true);
