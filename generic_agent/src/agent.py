@@ -28,7 +28,7 @@ log_file = get_log_path()
 logger.info(f"Logging to: {log_file}")
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
         logging.FileHandler(log_file),
