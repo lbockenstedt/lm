@@ -218,7 +218,7 @@ class LabManagerHub:
             logger.info(f"Pushed {module_key} config to module {spoke_id}")
 
             # Push the Hub Secret for mutual authentication
-            hub_secret = self.key_manager.hub_secret
+            hub_secret = self.key_manager.hub_secrets[0]
             secret_msg_id = str(uuid.uuid4())
             secret_msg = Message(
                 header=MessageHeader(
@@ -530,6 +530,15 @@ class LabManagerHub:
         hub_updated = False
         if force or local_v != remote_v:
             try:
+                # Dynamically determine hub root
+                hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+
+                # Load update sources and branch
+                config = self.state.get_global_config()
+                sources = config.get("update_sources", {})
+                hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
+                branch = config.get("global_branch", "main")
+
                 # Ensure the directory is marked as safe for git
                 await asyncio.create_subprocess_shell(f"git config --global --add safe.directory {hub_root}")
 
@@ -567,8 +576,9 @@ class LabManagerHub:
         # 2. Trigger updates for all approved modules (connected or offline)
         # We do this even if Hub didn't update, because spokes might have updates
         update_results = []
-        sources = self.state.get_global_config().get("update_sources", {})
-        branch = self.state.get_global_config().get("global_branch", "main")
+        config = self.state.get_global_config()
+        sources = config.get("update_sources", {})
+        branch = config.get("global_branch", "main")
 
         for spoke_id, approved in self.approved_modules.items():
             if not approved:
