@@ -63,6 +63,8 @@ class LabManagerHub:
 
         # --- System Diagnostics ---
         self.logs = deque(maxlen=500)
+        self.agent_logs = {} # { agent_id: deque(logs) }
+        self.max_log_size = 1000
         self.message_count = 0
         self.mps = 0.0
         self.bytes_count = 0 # Total bytes sent/received in the current window
@@ -516,6 +518,16 @@ class LabManagerHub:
                     original_msg = relay_data.get("original_payload", {})
 
                     logger.info(f"Relayed message from Agent {agent_id} via Spoke {spoke_id}: {original_msg.get('payload', {}).get('type')}")
+
+                    # Handle Agent Logs
+                    if original_msg.get("payload", {}).get("type") == "AGENT_LOG":
+                        log_data = original_msg.get("payload", {}).get("data", {})
+                        log_msg = f"[{log_data.get('hostname', 'unknown')}] ({log_data.get('agent_type', 'agent')}) {log_data.get('level', 'INFO')}: {log_data.get('message')}"
+
+                        if agent_id not in self.agent_logs:
+                            self.agent_logs[agent_id] = deque(maxlen=self.max_log_size)
+                        self.agent_logs[agent_id].append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {log_msg}")
+                        continue
 
                     # If the original message was a heartbeat, update heartbeat for that specific agent
                     if original_msg.get("payload", {}).get("type") == "HEARTBEAT":

@@ -856,13 +856,14 @@ const VIEWS = {
                         <h2 class="text-2xl font-bold mb-6 text-[#263040]">System Logs</h2>
                         <p class="text-sm text-slate-500 mb-4">Select a module from the list to view its specific output.</p>
                         <div class="grid grid-cols-1 gap-4">
-                            ${['hub', 'pxmx', 'opn', 'cppm', 'cs'].map(mod => `
+                            ${['hub', 'pxmx', 'opn', 'cppm', 'cs', 'agents'].map(mod => `
                                 <div onclick="setSubView('logs-${mod}')" class="p-4 rounded-md bg-white border border-slate-200 hover:border-green-500 cursor-pointer transition-all flex justify-between items-center group">
-                                    <span class="text-sm font-medium text-slate-700 group-hover:text-green-600">${LOG_NAMES[mod] || mod.toUpperCase() + ' Logs'}</span>
+                                    <span class="text-sm font-medium text-slate-700 group-hover:text-green-600">${LOG_NAMES[mod] || (mod === 'agents' ? 'Leaf Agents' : mod.toUpperCase() + ' Logs')}</span>
                                     <svg class="w-4 h-4 text-slate-400 group-hover:text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
                                 </div>
                             `).join('')}
-                        </div>
+                        </div
+S>
                     </div>
                 `;
             }
@@ -3045,11 +3046,28 @@ async function loadModuleLogs(module, isRefresh = false) {
             return;
         }
 
-        container.innerHTML = logs.map(log => `
-            <div class="px-4 py-1 border-b border-slate-100 text-xs font-mono text-slate-600 hover:bg-slate-50">
-                ${log}
-            </div>
-        `).join('');
+        if (module === 'agents' && !Array.isArray(logs)) {
+            // logs is the agent_logs map: { agent_id: [log_entries] }
+            container.innerHTML = Object.entries(logs).map(([agentId, agentLogs]) => `
+                <div class="mb-6">
+                    <div class="px-4 py-2 bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-500 uppercase tracking-widest flex justify-between">
+                        <span>Agent: ${agentId}</span>
+                        <span class="opacity-60">Count: ${agentLogs.length}</span>
+                    </div>
+                    <div class="divide-y divide-slate-100">
+                        ${agentLogs.map(log => `
+                            <div class="px-4 py-1 text-xs font-mono text-slate-600 hover:bg-slate-50">${log}</div>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('');
+        } else {
+            container.innerHTML = logs.map(log => `
+                <div class="px-4 py-1 border-b border-slate-100 text-xs font-mono text-slate-600 hover:bg-slate-50">
+                    ${log}
+                </div>
+            `).join('');
+        }
 
         container.scrollTop = container.scrollHeight;
     } catch (err) {

@@ -823,7 +823,11 @@ def create_app(hub):
 
     @app.get("/setup/logs/{module}")
     async def get_module_logs(module: str):
+        hub = app.state.hub
         try:
+            if module == "agents":
+                return {"logs": hub.agent_logs}
+
             # Map short UI module names to actual log filenames
             log_name_map = {
                 "opn": "opnsense"
