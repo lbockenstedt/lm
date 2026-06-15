@@ -453,8 +453,6 @@ def create_app(hub):
         return {"status": "success", "message": f"Cache for firewall {firewall_id} refreshed successfully!"}
 
     @app.get("/cppm/refresh")
-
-    @app.get("/cppm/refresh")
     async def refresh_cppm_cache():
         hub = app.state.hub
         logger.info("API: Triggering CPPM cache refresh")
@@ -486,38 +484,52 @@ def create_app(hub):
             logger.error(f"API: Error fetching CPPM health: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/cppm/policies")
-    async def get_cppm_policies():
+    @app.get("/api/cppm/devices")
+    async def get_cppm_devices():
         hub = app.state.hub
-        logger.info("API: Requesting CPPM policies")
+        logger.info("API: Requesting CPPM devices")
         cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected")
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
-            result = await hub.request_response(cppm_spoke, "CPPM_GET_ALL_POLICIES", {})
-            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
-            logger.info(f"API: Received CPPM policies: {data}")
+            result = await hub.request_response(cppm_spoke, "LIST_ENDPOINTS", {})
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             return data
         except Exception as e:
-            logger.error(f"API: Error fetching CPPM policies: {e}", exc_info=True)
+            logger.error(f"API: Error fetching CPPM devices: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/cppm/endpoints")
-    async def get_cppm_endpoints():
+    @app.get("/api/cppm/roles")
+    async def get_cppm_roles():
         hub = app.state.hub
-        logger.info("API: Requesting CPPM endpoints")
+        logger.info("API: Requesting CPPM roles")
         cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected")
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
-            result = await hub.request_response(cppm_spoke, "CPPM_GET_ALL_ENDPOINTS", {})
-            data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
-            logger.info(f"API: Received CPPM endpoints: {data}")
+            result = await hub.request_response(cppm_spoke, "LIST_ROLES", {})
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             return data
         except Exception as e:
-            logger.error(f"API: Error fetching CPPM endpoints: {e}", exc_info=True)
+            logger.error(f"API: Error fetching CPPM roles: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/cppm/logs")
+    async def get_cppm_logs(start: str, end: str):
+        hub = app.state.hub
+        logger.info(f"API: Requesting CPPM logs from {start} to {end}")
+        cppm_spoke = next((sid for sid in hub.active_connections if "cppm" in sid), None)
+        if not cppm_spoke:
+            logger.error("API: No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+        try:
+            result = await hub.request_response(cppm_spoke, "GET_LOGS", {"start": start, "end": end})
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            return data
+        except Exception as e:
+            logger.error(f"API: Error fetching CPPM logs: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/vm/{vm_id}/details")

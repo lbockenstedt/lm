@@ -534,7 +534,7 @@ const VIEWS = {
                                     <input type="text" id="ldap-server-url" placeholder="ldap://localhost:389" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
                                 </div>
                                 <div class="space-y-2">
-                                    <label class la-text-xs text-slate-500 uppercase font-bold flex items-center gap-1">Base DN <span onclick="showHelp('ldap-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
+                                    <label class="text-xs text-slate-500 uppercase font-bold flex items-center gap-1">Base DN <span onclick="showHelp('ldap-config')" class="cursor-pointer inline-block text-slate-400 hover:text-green-500 transition-colors" title="Help">ⓘ</span></label>
                                     <input type="text" id="ldap-base-dn" placeholder="dc=example,dc=org" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500">
                                 </div>
                                 <div class="space-y-2">
@@ -2628,6 +2628,8 @@ async function loadCPPMLogs() {
         container.innerHTML = `<div class la-py-12 text-center text-red-500 font-medium">Error loading logs: ${err.message}</div>`;
     }
 }
+
+async function loadOpnsenseManagement() {
     const container = document.getElementById('opn-table-container');
     if (!container) return;
 
