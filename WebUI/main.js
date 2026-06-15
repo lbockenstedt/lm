@@ -1204,7 +1204,7 @@ async function loadSetupConfig() {
             loadOpnsenseConfig(config.opn || {});
         } else if ((currentView === 'setup' && currentSubView === 'Client Sim') || (currentView === 'cs' && currentSubView === 'Configuration')) {
             loadCSConfig(config.cs || {});
-        } else if ((currentView === 'setup' && currentSubView === 'CPPM') || (currentView === 'cppm' && currentSubView === 'Configuration')) {
+        } else if ((currentView === 'setup' && currentSubView === 'CPPM') || (currentView === 'cppm' && currentSubView === 'config')) {
             loadCPPMConfig(config.cppm || {});
         } else if (currentView === 'setup' && currentSubView === 'LDAP Config') {
             loadLDAPConfig(config.ldap || {});
@@ -1353,10 +1353,10 @@ async function saveCPPMConfig() {
         password: document.getElementById('cppm-pass').value,
     };
     try {
-        const response = await fetch('/setup/config', {
+        const response = await fetch('/setup/cppm-config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config: { cppm: config } })
+            body: JSON.stringify({ config: config })
         });
         if (response.ok) {
             alert('CPPM configuration saved successfully!');
@@ -1651,7 +1651,8 @@ async function setSubView(subMenu) {
                 loadCPPMData();
             }
             if ((currentView === 'pxmx' && currentSubView === 'config') ||
-                (currentView === 'opnsense' && currentSubView === 'config')) {
+                (currentView === 'opnsense' && currentSubView === 'config') ||
+                (currentView === 'cppm' && currentSubView === 'config')) {
                 loadSetupConfig();
             }
             if (currentView === 'settings' && currentSubView.startsWith('logs-')) {
