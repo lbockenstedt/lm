@@ -508,6 +508,30 @@ class LabManagerHub:
 
                 # Handle other messages
                 self.message_count += 1
+
+                # --- Scale-Out Relay Logic ---
+                if payload.get("type") == "AGENT_RELAY_UP":
+                    relay_data = payload.get("data", {})
+                    agent_id = relay_data.get("agent_id")
+                    original_msg = relay_data.get("original_payload", {})
+
+                    logger.info(f"Relayed message from Agent {agent_id} via Spoke {spoke_id}: {original_msg.get('payload', {}).get('type')}")
+
+                    # If the original message was a heartbeat, update heartbeat for that specific agent
+                    if original_msg.get("payload", {}).get("type") == "HEARTBEAT":
+                        # We can track heartbeats per agent if we extend HeartbeatManager
+                        self.heartbeat.update_heartbeat(f"{spoke_id}:{agent_id}")
+                        continue
+
+                    # Otherwise, process the original payload as if it came from the agent
+                    # For telemetry, we might want to store it in a nested map: telemetry[spoke][agent]
+                    if original_msg.get("payload", {}).get("type") == "AGENT_TELEMETRY":
+                        if spoke_id not in self.spoke_telemetry:
+                            self.spoke_telemetry[spoke_id] = {}
+                        self.spoke_telemetry[spoke_id][agent_id] = original_msg.get("payload", {}).get("data")
+                        continue
+                # --- End Relay Logic ---
+
                 logger.info(f"Received verified message from {spoke_id}: {payload.get('type')}")
 
         except websockets.ConnectionClosed:
