@@ -2592,7 +2592,7 @@ async function loadOpnsenseManagement() {
             keys = ['name', 'ip', 'status', 'flags', 'capabilities', 'description'].filter(k => k in firstItem || true);
         } else if (subMenu === 'NAT Policies') {
             // Specialized columns for NAT policies
-            keys = ['protocol', 'external_port', 'internal_ip', 'internal_port', 'description'].filter(k => k in firstItem || true);
+            keys = ['protocol', 'external_ip', 'external_port', 'internal_ip', 'internal_port', 'description'].filter(k => k in firstItem || true);
         }
 
 
