@@ -6,7 +6,7 @@
 
 set -e
 
-HUB_WS=""
+SPOKE_URL=""
 SPOKE_ID=""
 SPOKE_SECRET=""
 HUB_SECRET=""
@@ -36,7 +36,7 @@ log_e() {
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --hub) HUB_WS="$2"; shift ;;
+        --spoke-url) SPOKE_URL="$2"; shift ;;
         --id) SPOKE_ID="$2"; shift ;;
         --secret) SPOKE_SECRET="$2"; shift ;;
         --hub-secret) HUB_SECRET="$2"; shift ;;
@@ -46,10 +46,10 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
-# If not in clone mode, we still need the HUB_WS to configure the service
-if [ "$CLONE_ONLY" = false ] && [ -z "$HUB_WS" ]; then
-    echo "❌ Missing required argument: --hub is required for full installation."
-    echo "Usage: curl -sSL <url> | sudo bash -s -- --hub <hub_ws>"
+# If not in clone mode, we still need the SPOKE_URL to configure the service
+if [ "$CLONE_ONLY" = false ] && [ -z "$SPOKE_URL" ]; then
+    echo "❌ Missing required argument: --spoke-url is required for full installation."
+    echo "Usage: curl -sSL <url> | sudo bash -s -- --spoke-url <spoke_url>"
     exit 1
 fi
 
@@ -89,16 +89,16 @@ python3 -m venv venv >> "$INSTALL_LOG" 2>&1
 
 # 5. Systemd Service Setup
 log_c "⚙️ Configuring systemd service..."
-cat <<EOF > /etc/systemd/system/lm-bootstrap.service
+cat <<EOF > /etc/systemd/system/lm-generic-agent.service
 [Unit]
-Description=Lab Manager Bootstrap Agent
+Description=Lab Manager Generic Leaf Agent
 After=network.target
 
 [Service]
 User=svc_lm
 WorkingDirectory=$ROOT_DIR/generic-agent
 Environment="PYTHONPATH=$ROOT_DIR"
-ExecStart=$ROOT_DIR/generic-agent/venv/bin/python3 $ROOT_DIR/generic-agent/src/agent.py --id $SPOKE_ID --secret $SPOKE_SECRET --hub-secret $HUB_SECRET --hub $HUB_WS
+ExecStart=$ROOT_DIR/generic-agent/venv/bin/python3 $ROOT_DIR/generic-agent/src/agent.py --id $SPOKE_ID --secret $SPOKE_SECRET --spoke-url $SPOKE_URL
 StandardOutput=append:/var/log/generic-agent.log
 StandardError=append:/var/log/generic-agent.log
 Restart=on-failure
@@ -111,7 +111,7 @@ EOF
 systemctl daemon-reload
 
 # Enable the service so it starts on next reboot
-systemctl enable lm-bootstrap
+systemctl enable lm-generic-agent
 
 if [ "$CLONE_ONLY" = true ]; then
     log_c "❄️  Clone-only mode active. Files and service enabled, but service is NOT started."
@@ -119,8 +119,8 @@ if [ "$CLONE_ONLY" = true ]; then
     echo "Note: To change the spoke ID manually, edit /etc/systemd/system/lm-bootstrap.service"
 else
     log_c "🔄 Starting agent service..."
-    systemctl restart lm-bootstrap
-    log_c "🎉 Bootstrap installation complete! The agent is now calling home to $HUB_WS"
+    systemctl restart lm-generic-agent
+    log_c "🎉 Bootstrap installation complete! The agent is now calling home to $SPOKE_URL"
     echo "--------------------------------------------------------------------------------"
     echo "Logs are available at: $INSTALL_LOG and $LOG_DIR/generic-agent.log"
     echo "You can now approve this spoke in the Hub WebUI to negotiate its session secret."

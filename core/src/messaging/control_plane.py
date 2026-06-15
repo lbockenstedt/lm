@@ -146,6 +146,16 @@ class BaseControlPlane:
 
     async def handle_system_command(self, cmd_type: str, data: Dict[str, Any]) -> Any:
         """Handles commands that affect the entire spoke system rather than a specific module."""
+        if cmd_type == "SPOKE_SET_LOG_LEVEL":
+            enabled = data.get("enabled", False)
+            level = logging.DEBUG if enabled else logging.INFO
+            # Update root logger and all active loggers
+            logging.getLogger().setLevel(level)
+            for name in logging.root.manager.loggerDict:
+                logging.getLogger(name).setLevel(level)
+            logger.info(f"Log level set to {logging.getLevelName(level)}")
+            return {"status": "SUCCESS", "message": f"Log level set to {logging.getLevelName(level)}"}
+
         if cmd_type == "SPOKE_UPDATE":
             repo_url = data.get("repo_url")
             if not repo_url:

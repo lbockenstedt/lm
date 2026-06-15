@@ -2,210 +2,186 @@ import asyncio
 import json
 import uuid
 import time
-import websockets
 import logging
+import psutil
+import argparse
 import os
-import subprocess
-from typing import Dict, Any, Optional, Optional
-from core.src.messaging.control_plane import BaseControlPlane
-from core.src.base_spoke import BaseSpoke
+from typing import Dict, Any, Optional
 
 # Setup logging to both console and file
 def get_log_path():
     primary = "/var/log/generic-agent.log"
     try:
-        # Try to see if we can write to /var/log
         with open(primary, "a") as f:
             pass
         return primary
     except Exception:
-        # Fallback to local logs directory
         local_dir = os.path.join(os.getcwd(), "logs")
         os.makedirs(local_dir, exist_ok=True)
         return os.path.join(local_dir, "generic-agent.log")
 
 log_file = get_log_path()
-logger.info(f"Logging to: {log_file}")
-
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger("GenericAgent")
+logger = logging.getLogger("GenericLeafAgent")
 
-def get_machine_id() -> str:
-    """Generates a unique ID for the agent based on the machine ID or a random UUID."""
-    try:
-        if os.path.exists("/etc/machine-id"):
-            with open("/etc/machine-id", "r") as f:
-                mid = f.read().strip()
-                if mid:
-                    return f"hw-{mid[:12]}"
-        if os.path.exists("/var/lib/dbus/machine-id"):
-            with open("/var/lib/dbus/machine-id", "r") as f:
-                mid = f.read().strip()
-                if mid:
-                    return f"hw-{mid[:12]}"
-    except Exception as e:
-        logger.debug(f"Could not read machine-id: {e}")
+class GenericLeafAgent:
+    def __init__(self, spoke_url: str, agent_id: str, secret: Optional[str] = None):
+        self.spoke_url = spoke_url
+        self.agent_id = agent_id
+        self.secret = secret or self._load_secret()
+        if not self.secret:
+            logger.error("Agent secret not provided via CLI and not found in /etc/lm-agent/config.json")
+            raise RuntimeError("Agent secret missing")
 
-    # Fallback to a persisted random ID
-    id_file = "/etc/lm-agent-id"
-    if os.path.exists(id_file):
-        with open(id_file, "r") as f:
-            return f.read().strip()
+        logger.info(f"Initializing GenericLeafAgent [{agent_id}] -> {spoke_url}")
+        self.websocket = None
+        self.config = {}
 
-    new_id = f"agent-{str(uuid.uuid4())[:8]}"
-    try:
-        with open(id_file, "w") as f:
-            f.write(new_id)
-    except Exception as e:
-        logger.warning(f"Could not persist agent ID: {e}")
+    def _load_secret(self) -> Optional[str]:
+        config_path = "/etc/lm-agent/config.json"
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    return json.load(f).get("secret")
+        except Exception as e:
+            logger.error(f"Failed to load secret: {e}")
+        return None
 
-    return new_id
-
-def get_vm_uuid() -> Optional[str]:
-    """Retrieves the SMBIOS UUID, which can be used by the Hub to identify the Proxmox VMID."""
-    try:
-        if os.path.exists("/sys/class/dmi/id/product_uuid"):
-            with open("/sys/class/dmi/id/product_uuid", "r") as f:
-                return f.read().strip()
-    except Exception as e:
-        logger.debug(f"Could not read product_uuid: {e}")
-    return None
-
-class AgentModule(BaseSpoke):
-    """
-    The core module of the generic agent.
-    Provides capabilities to execute shell commands and provision other modules.
-    """
-    def __init__(self, spoke_id: str, config: Dict[str, Any]):
-        super().__init__(spoke_id, config)
-
-    async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        if command_type == "SET_LOG_LEVEL":
-            enabled = data.get("enabled", False)
-            level = logging.DEBUG if enabled else logging.INFO
-            logging.getLogger().setLevel(level)
-            logger.info(f"Log level set to {logging.getLevelName(level)}")
-            return {"status": "SUCCESS", "message": f"Log level set to {logging.getLevelName(level)}"}
-
-        if command_type == "EXECUTE_COMMAND":
-            cmd = data.get("command")
-            if not cmd:
-                return {"status": "ERROR", "message": "Missing command"}
-
-            logger.info(f"Executing command: {cmd}")
-            try:
-                process = await asyncio.create_subprocess_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await process.communicate()
-                return {
-                    "status": "SUCCESS" if process.returncode == 0 else "ERROR",
-                    "stdout": stdout.decode().strip(),
-                    "stderr": stderr.decode().strip(),
-                    "exit_code": process.returncode
-                }
-            except Exception as e:
-                logger.error(f"Command execution failed: {e}")
-                return {"status": "ERROR", "message": str(e)}
-
-        if command_type == "PROVISION_MODULE":
-            module_id = data.get("module_id")
-            repo_url = data.get("repo_url")
-            hub_url = data.get("hub_url")
-            spoke_id = data.get("spoke_id")
-            secret = data.get("secret")
-            hub_secret = data.get("hub_secret")
-
-            if not all([module_id, repo_url]):
-                return {"status": "ERROR", "message": "Missing module_id or repo_url"}
-
-            logger.info(f"Provisioning module {module_id} from {repo_url}...")
-
-            install_dir = f"/opt/lm/{module_id}"
-            try:
-                # 1. Clone the repository
-                if os.path.exists(install_dir):
-                    subprocess.run(["rm", "-rf", install_dir], check=True)
-
-                subprocess.run(["git", "clone", repo_url, install_dir], check=True)
-
-                # 2. Run the installation script
-                install_script = os.path.join(install_dir, "install.sh")
-                if not os.path.exists(install_script):
-                    # Try common variations
-                    potential_scripts = [
-                        os.path.join(install_dir, f"install_{module_id}.sh"),
-                        os.path.join(install_dir, "setup.sh")
-                    ]
-                    for s in potential_scripts:
-                        if os.path.exists(s):
-                            install_script = s
-                            break
-                    else:
-                        return {"status": "ERROR", "message": f"Installation script not found in {install_dir}"}
-
-                subprocess.run(["chmod", "+x", install_script], check=True)
-
-                # Prepare arguments for the install script
-                cmd = [
-                    "bash", install_script,
-                    "--hub", hub_url,
-                    "--id", spoke_id,
-                    "--secret", secret
-                ]
-                if hub_secret:
-                    cmd.extend(["--hub-secret", hub_secret])
-
-                # We run this in the background or wait for it?
-                # Since we want to know it worked, let's run it and wait.
-                result = subprocess.run(cmd, capture_output=True, text=True)
-
-                if result.returncode == 0:
-                    return {"status": "SUCCESS", "message": f"Module {module_id} provisioned successfully", "stdout": result.stdout}
-                else:
-                    return {"status": "ERROR", "message": f"Install script failed: {result.stderr}", "stdout": result.stdout}
-
-            except Exception as e:
-                logger.error(f"Provisioning failed: {e}")
-                return {"status": "ERROR", "message": str(e)}
-
-        return {"status": "ERROR", "message": f"Unknown command: {command_type}"}
-
-    async def get_status(self) -> Dict[str, Any]:
-        return {"status": "ONLINE", "role": "generic-agent"}
-
-class GenericAgentControlPlane(BaseControlPlane):
-    def __init__(self, spoke_id: str, secret: str, hub_secret: str = None, hub_url: str = None):
-        super().__init__(spoke_id, secret, hub_secret, hub_url)
-
-        # The agent is its own module
-        self.register_module("agent", AgentModule(spoke_id, {}))
+    async def collect_metrics(self) -> Dict[str, Any]:
+        return {
+            "cpu_usage": psutil.cpu_percent(interval=1),
+            "memory_usage": psutil.virtual_memory().percent,
+            "disk_usage": psutil.disk_usage('/').percent,
+            "timestamp": time.time()
+        }
 
     async def run(self):
-        logger.info(f"Generic Agent starting... Connected to {self.hub_url}")
-        await super().run()
+        import websockets
+        logger.info(f"Connecting to Spoke Gateway at {self.spoke_url}...")
+
+        async with websockets.connect(self.spoke_url) as websocket:
+            self.websocket = websocket
+
+            # 1. Handshake: Prove Agent identity to Gateway
+            auth_msg = {
+                "agent_id": self.agent_id,
+                "secret": self.secret
+            }
+            await websocket.send(json.dumps(auth_msg))
+            logger.info(f"Handshake sent for agent {self.agent_id}")
+
+            # 2. Mutual Auth: Gateway proves identity to Agent
+            try:
+                hub_proof_json = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                hub_proof = json.loads(hub_proof_json)
+                if hub_proof.get("status") == "HUB_VERIFIED":
+                    logger.info("Gateway identity verified. Sending HUB_OK.")
+                    await websocket.send(json.dumps({"status": "HUB_OK"}))
+                else:
+                    logger.error(f"Gateway failed to prove identity: {hub_proof}")
+                    await websocket.close(1008, "Gateway identity not verified")
+                    return
+            except Exception as e:
+                logger.warning(f"Mutual authentication not performed or failed: {e}")
+
+            # 3. Background Tasks
+            heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            telemetry_task = asyncio.create_task(self._telemetry_loop())
+
+            try:
+                async for message in websocket:
+                    msg_data = json.loads(message)
+                    logger.debug(f"Received message: {msg_data}")
+
+                    # Leaf agents receive SPOKE_COMMAND from the Gateway
+                    if msg_data.get("type") == "SPOKE_COMMAND":
+                        command = msg_data.get("command")
+                        params = msg_data.get("params", {})
+                        corr_id = msg_data.get("correlation_id")
+
+                        logger.info(f"Executing command: {command}")
+                        result = await self.handle_command(command, params)
+
+                        # Response wrapped in AGENT_RESPONSE
+                        resp = {
+                            "header": {
+                                "message_id": str(uuid.uuid4()),
+                                "correlation_id": corr_id,
+                                "timestamp": time.time(),
+                                "sender_id": self.agent_id,
+                                "destination_id": "gateway"
+                            },
+                            "payload": {"type": "AGENT_RESPONSE", "data": result}
+                        }
+                        await websocket.send(json.dumps(resp))
+
+            finally:
+                heartbeat_task.cancel()
+                telemetry_task.cancel()
+
+    async def handle_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        if command == "GET_SYSTEM_STATS":
+            return await self.collect_metrics()
+
+        if command == "SET_LOG_LEVEL":
+            enabled = params.get("enabled", False)
+            level = logging.DEBUG if enabled else logging.INFO
+            logging.getLogger().setLevel(level)
+            return {"status": "SUCCESS", "message": f"Log level set to {logging.getLevelName(level)}"}
+
+        if command == "UPDATE_CONFIG":
+            self.config = params
+            return {"status": "SUCCESS", "message": "Config updated"}
+
+        return {"status": "ERROR", "message": f"Unknown command: {command}"}
+
+    async def _heartbeat_loop(self):
+        while True:
+            try:
+                msg = {
+                    "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
+                               "sender_id": self.agent_id, "destination_id": "gateway"},
+                    "payload": {"type": "AGENT_HEARTBEAT", "data": {}}
+                }
+                await self.websocket.send(json.dumps(msg))
+                await asyncio.sleep(30)
+            except Exception as e:
+                logger.error(f"Heartbeat failed: {e}")
+                await asyncio.sleep(5)
+
+    async def _telemetry_loop(self):
+        while True:
+            try:
+                metrics = await self.collect_metrics()
+                msg = {
+                    "header": {"message_id": str(uuid.uuid4()), "timestamp": time.time(),
+                               "sender_id": self.agent_id, "destination_id": "gateway"},
+                    "payload": {"type": "AGENT_TELEMETRY", "data": {"metrics": metrics}}
+                }
+                await self.websocket.send(json.dumps(msg))
+                await asyncio.sleep(60)
+            except Exception as e:
+                logger.error(f"Telemetry failed: {e}")
+                await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--id") # Now optional
-    parser.add_argument("--secret") # Now optional to support secret-less bootstrap
-    parser.add_argument("--hub-secret")
-    parser.add_argument("--hub", required=True)
+    parser.add_argument("--spoke-url", required=True, help="URL of the Spoke Gateway")
+    parser.add_argument("--id", default="generic-agent-1", help="Agent ID")
+    parser.add_argument("--secret", help="Agent session secret")
     args = parser.parse_args()
 
-    # Use provided ID or generate one automatically
-    spoke_id = args.id or get_machine_id()
-    logger.info(f"Starting agent with spoke_id: {spoke_id}")
-
-    cp = GenericAgentControlPlane(spoke_id, args.secret, args.hub_secret, args.hub)
-    asyncio.run(cp.run())
+    try:
+        agent = GenericLeafAgent(args.spoke_url, args.id, args.secret)
+        asyncio.run(agent.run())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        logger.exception(f"Critical failure: {e}")

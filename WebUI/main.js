@@ -3066,7 +3066,21 @@ async function copyLogs() {
 
     const text = container.innerText;
     try {
-        await navigator.clipboard.writeText(text);
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            // Fallback for non-HTTPS / insecure contexts
+            const textArea = document.createElement('textarea');
+            textArea.value = text;
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+                document.execCommand('copy');
+            } catch (err) {
+                throw new Error('execCommand copy failed');
+            }
+            document.body.removeChild(textArea);
+        }
         alert('Logs copied to clipboard!');
     } catch (err) {
         alert('Failed to copy logs: ' + err.message);
