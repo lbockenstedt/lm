@@ -434,7 +434,7 @@ const VIEWS = {
         className: 'Security/NAC',
         subMenus: ['Access Tracker', 'Devices', 'Roles', 'config'],
         icon: '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>',
-        render: (subMenu) => {
+        render: async (subMenu) => {
             if (subMenu === 'config') {
                 return `
                     <div class="space-y-6">
@@ -454,7 +454,7 @@ const VIEWS = {
                                 <div class="space-y-2">
                                     <label class="text-xs text-slate-500 uppercase font-bold">Password</label>
                                     <input type="password" id="cppm-pass" placeholder="••••••••" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                                </div>
+                                </div
                             </div>
                             <div class="pt-6 border-t border-slate-200 flex justify-end">
                                 <button onclick="saveCPPMConfig()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">
@@ -469,17 +469,17 @@ const VIEWS = {
                 <div class="space-y-6">
                     <div class="flex justify-between items-center mb-6">
                         <h2 class="text-2xl font-bold text-[#263040]">Security/NAC: ${subMenu}</h2>
-                        <button onclick="setSubView('config')" class="p-2 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition-all" title="Configuration">
-                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.754 2.924-1.754 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.754.426 1.754 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.754-2.924 1.754-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.754-.426-1.754-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.999.53 2.122.5C10.05 5.047 10.325 4.317 10.325 4.317z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
-                        </button>
-                    </div>
-                    <div class="hpe-card rounded-lg p-12 text-center">
-                        <div class="flex flex-col items-center gap-4">
-                            <div class="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center text-slate-400">
-                                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+                        ${subMenu === 'Access Tracker' ? `
+                            <div class="flex gap-2">
+                                <input type="text" id="cppm-log-start" placeholder="Start (YYYY-MM-DD)" class="bg-white border border-slate-300 rounded-md px-3 py-1 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                <input type="text" id="cppm-log-end" placeholder="End (YYYY-MM-DD)" class="bg-white border border-slate-300 rounded-md px-3 py-1 text-xs outline-none focus:ring-1 focus:ring-green-500">
+                                <button onclick="loadCPPMLogs()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-3 py-1 rounded-md text-xs font-bold transition-all">Filter</button>
                             </div>
-                            <p class="text-slate-500">The ${subMenu} view is currently under development.</p>
-                            <div class="text-xs text-slate-400 italic">Implementation of CPPM API integration pending.</div>
+                        ` : ''}
+                    </div>
+                    <div class="hpe-card rounded-lg overflow-hidden shadow-sm border border-slate-200 bg-white">
+                        <div id="cppm-data-container" class="divide-y divide-slate-200">
+                            <div class="py-12 text-center text-slate-400 italic">Loading ${subMenu} data...</div>
                         </div>
                     </div>
                 </div>
@@ -1647,6 +1647,9 @@ async function setSubView(subMenu) {
             if (currentView === 'ldap') {
                 loadLDAPData(currentSubView);
             }
+            if (currentView === 'cppm' && currentSubView !== 'config') {
+                loadCPPMData();
+            }
             if ((currentView === 'pxmx' && currentSubView === 'config') ||
                 (currentView === 'opnsense' && currentSubView === 'config')) {
                 loadSetupConfig();
@@ -2513,7 +2516,118 @@ async function saveUser() {
     }
 }
 
-async function loadOpnsenseManagement() {
+async function loadCPPMData() {
+    const subMenu = currentSubView;
+    const container = document.getElementById('cppm-data-container');
+    if (!container) return;
+
+    if (subMenu === 'config') return;
+
+    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${subMenu} data...</div>`;
+
+    try {
+        let endpoint = '';
+        if (subMenu === 'Devices') endpoint = '/api/cppm/devices';
+        else if (subMenu === 'Roles') endpoint = '/api/cppm/roles';
+        else if (subMenu === 'Access Tracker') endpoint = '/api/cppm/logs';
+        else return;
+
+        const response = await fetch(endpoint);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        const items = data.data || data || [];
+
+        if (!Array.isArray(items) || items.length === 0) {
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu.toLowerCase()} found.</div>`;
+            return;
+        }
+
+        const firstItem = items[0];
+        let headers = [];
+        let rows = [];
+
+        if (subMenu === 'Devices') {
+            headers = ['mac', 'ip', 'hostname', 'os', 'vendor', 'status'].filter(k => k in firstItem || true);
+        } else if (subMenu === 'Roles') {
+            headers = ['name', 'description', 'type'].filter(k => k in firstItem || true);
+        } else if (subMenu === 'Access Tracker') {
+            headers = ['timestamp', 'mac', 'username', 'role', 'status', 'nas_ip'].filter(k => k in firstItem || true);
+        }
+
+        const headerHtml = `<div class="bg-slate-100 px-4 py-3 flex text-xs font-bold text-slate-500 uppercase tracking-widest">
+            ${headers.map(h => `<div class="flex-1">${h.replace('_', ' ')}</div>`).join('')}
+        </div>`;
+
+        const rowsHtml = items.map(item => `
+            <div class="px-4 py-3 flex text-xs font-mono text-slate-600 hover:bg-slate-50 transition-colors border-b border-slate-100">
+                ${headers.map(h => {
+                    const val = item[h] !== undefined ? item[h] : '-';
+                    if (h === 'status') {
+                        const color = val === 'SUCCESS' || val === 'Online' ? 'text-green-600 font-bold' : 'text-red-500 font-bold';
+                        return `<div class="flex-1 ${color}">${val}</div>`;
+                    }
+                    return `<div class="flex-1">${val}</div>`;
+                }).join('')}
+            </div>
+        `).join('');
+
+        container.innerHTML = headerHtml + rowsHtml;
+    } catch (err) {
+        console.error(`[CPPM] Error in loadCPPMData:`, err);
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${subMenu}: ${err.message}</div>`;
+    }
+}
+
+async function loadCPPMLogs() {
+    const start = document.getElementById('cppm-log-start')?.value;
+    const end = document.getElementById('cppm-log-end')?.value;
+
+    if (!start || !end) {
+        alert('Please provide both start and end dates (YYYY-MM-DD)');
+        return;
+    }
+
+    const container = document.getElementById('cppm-data-container');
+    if (!container) return;
+    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching logs for ${start} to ${end}...</div>`;
+
+    try {
+        const response = await fetch(`/api/cppm/logs?start=${start}&end=${end}`);
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const data = await response.json();
+        const items = data.data || data || [];
+
+        if (!Array.isArray(items) || items.length === 0) {
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No logs found for the selected range.</div>`;
+            return;
+        }
+
+        const firstItem = items[0];
+        const headers = ['timestamp', 'mac', 'username', 'role', 'status', 'nas_ip'].filter(k => k in firstItem || true);
+
+        const headerHtml = `<div class="bg-slate-100 px-4 py-3 flex text-xs font-bold text-slate-500 uppercase tracking-widest">
+            ${headers.map(h => `<div class="flex-1">${h.replace('_', ' ')}</div>`).join('')}
+        </div>`;
+
+        const rowsHtml = items.map(item => `
+            <div class="px-4 py-3 flex text-xs font-mono text-slate-600 hover:bg-slate-50 transition-colors border-b border-slate-100">
+                ${headers.map(h => {
+                    const val = item[h] !== undefined ? item[h] : '-';
+                    if (h === 'status') {
+                        const color = val === 'SUCCESS' || val === 'Online' ? 'text-green-600 font-bold' : 'text-red-500 font-bold';
+                        return `<div class="flex-1 ${color}">${val}</div>`;
+                    }
+                    return `<div class="flex-1">${val}</div>`;
+                }).join('')}
+            </div>
+        `).join('');
+
+        container.innerHTML = headerHtml + rowsHtml;
+    } catch (err) {
+        console.error(`[CPPM] Error in loadCPPMLogs:`, err);
+        container.innerHTML = `<div class la-py-12 text-center text-red-500 font-medium">Error loading logs: ${err.message}</div>`;
+    }
+}
     const container = document.getElementById('opn-table-container');
     if (!container) return;
 
