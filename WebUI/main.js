@@ -1502,13 +1502,36 @@ function renderTopNav() {
     }
 
     // 2. Render Sub-menus
-    topNavHtml += view.subMenus.map((menu, i) => {
+    const subMenus = view.subMenus.filter(m => m !== 'config');
+    topNavHtml += subMenus.map((menu, i) => {
         return `
-            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === 'config' ? 'ml-auto' : ''} ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+            <div onclick="setSubView('${menu}')" class="sub-nav-item ${menu === currentSubView ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
                 ${menu}
             </div>
         `;
     }).join('');
+
+    // Right-aligned group: Logs and Config
+    let rightGroup = '<div class="flex items-center gap-1 ml-auto">';
+
+    const logKey = (currentProduct === 'opnsense') ? 'opn' : currentProduct;
+    if (logKey && LOG_NAMES[logKey]) {
+        rightGroup += `
+            <div onclick="setView('settings'); setSubView('logs-${logKey}')" class="sub-nav-item ${currentSubView === 'logs-' + logKey ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+                Logs
+            </div>
+        `;
+    }
+
+    if (view.subMenus.includes('config')) {
+        rightGroup += `
+            <div onclick="setSubView('config')" class="sub-nav-item ${currentSubView === 'config' ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer">
+                Config
+            </div>
+        `;
+    }
+    rightGroup += '</div>';
+    topNavHtml += rightGroup;
 
     topNav.innerHTML = topNavHtml;
 }

@@ -813,10 +813,37 @@ def create_app(hub):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/setup/logs")
-    async def get_system_logs():
+    @app.get("/setup/logs/all")
+    async def get_all_logs():
         hub = app.state.hub
-        return {"logs": list(hub.logs)}
+        all_logs = []
+
+        # 1. Hub system logs
+        for log in hub.logs:
+            all_logs.append({"module": "hub", "log": log})
+
+        # 2. Agent logs
+        for agent_id, logs in hub.agent_logs.items():
+            for log in logs:
+                all_logs.append({"module": agent_id, "log": log})
+
+        # 3. Module file logs (/var/log/lm/*.log)
+        try:
+            log_dir = "/var/log/lm"
+            if os.path.exists(log_dir):
+                for filename in os.listdir(log_dir):
+                    if filename.endswith(".log"):
+                        module_name = filename.replace(".log", "")
+                        with open(os.path.join(log_dir, filename), "r") as f:
+                            lines = f.readlines()
+                            for line in lines[-500:]: # Last 500 lines per module
+                                all_logs.append({"module": module_name, "log": line.strip()})
+        except Exception as e:
+            logger.error(f"Error reading module logs from disk: {e}")
+
+        return {"logs": all_logs}
+
+    @app.get("/setup/logs")
 
     @app.get("/setup/logs/{module}")
     async def get_module_logs(module: str):
