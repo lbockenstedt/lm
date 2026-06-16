@@ -144,6 +144,12 @@ class BaseControlPlane:
         # This can be expanded with a registry of commands per module
         return True # Default to true for now, let the module decide
 
+    def get_service_name(self) -> str:
+        """Returns the systemd service name for this spoke."""
+        # Default: lm-module (e.g., pxmx-spoke-1 -> lm-pxmx)
+        module_name = self.spoke_id.split("-")[0]
+        return f"lm-{module_name}"
+
     async def handle_system_command(self, cmd_type: str, data: Dict[str, Any]) -> Any:
         """Handles commands that affect the entire spoke system rather than a specific module."""
         if cmd_type == "SPOKE_SET_LOG_LEVEL":
@@ -178,9 +184,8 @@ class BaseControlPlane:
                 subprocess.run(["git", "pull"], cwd=cwd, check=True)
 
                 # 3. Restart the service
-                # Derive service name from spoke_id (e.g., pxmx-spoke-1 -> lm-pxmx)
-                module_name = self.spoke_id.split("-")[0]
-                service_name = f"lm-{module_name}"
+                # Derive service name from spoke_id
+                service_name = self.get_service_name()
 
                 logger.info(f"Restarting service {service_name}...")
                 subprocess.Popen(["sudo", "systemctl", "restart", service_name])

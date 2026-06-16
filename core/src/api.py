@@ -814,9 +814,6 @@ def create_app(hub):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/setup/logs")
-
-
-    @app.get("/setup/logs")
     async def get_system_logs():
         hub = app.state.hub
         return {"logs": list(hub.logs)}
