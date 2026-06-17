@@ -332,7 +332,9 @@ def create_app(hub):
             if not spoke_id:
                 raise HTTPException(status_code=400, detail="Missing spoke_id")
 
-            if spoke_id not in hub.state.system_state["known_modules"]:
+            # FIX: Ensure known_modules is accessed safely from hub.state.system_state
+            known_modules = hub.state.system_state.get("known_modules", [])
+            if spoke_id not in known_modules:
                 raise HTTPException(status_code=404, detail="Spoke not found")
 
             hub.state.update_module_metadata(spoke_id, metadata)
@@ -344,6 +346,8 @@ def create_app(hub):
 
             return {"status": "success", "message": f"Metadata for spoke {spoke_id} updated."}
         except Exception as e:
+            # Log the exception for easier debugging
+            logger.exception("Error updating spoke metadata")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/setup/spoke-metadata/{spoke_id}")
@@ -773,7 +777,7 @@ def create_app(hub):
                 if header == section:
                     # Return everything until the next marker or end of file
                     # The 'sections' split already handles the boundaries,
-                    # we just need to return the content after the section_id header
+                    # just need to return the content after the section_id header
                     body = '\n'.join(lines[1:]).strip()
                     return {"content": body}
 
@@ -1252,7 +1256,7 @@ def create_app(hub):
 
         # Always include default if not present
         if "default" not in [t["id"] for t in tenant_list]:
-            tenant_list.append({"id": "default", "name": "Default Tenant"})
+            tenant_list.append({"id": "default", "name": "Default Tenant")
 
         return {"tenants": tenant_list}
 
