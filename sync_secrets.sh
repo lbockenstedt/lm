@@ -33,6 +33,10 @@ mkdir -p "$LOG_DIR"
 chown -R root:root "$LOG_DIR"
 chmod 755 "$LOG_DIR"
 
+# FIX: Use the Hub's container/host IP if not running on localhost, 
+# but since it is usually deployed via compose on the same host,
+# localhost is correct. However, the error suggests connectivity issues.
+# We verify the Hub API availability first.
 HUB_API="http://localhost:8000"
 
 # Define modules and their corresponding Spoke IDs
@@ -44,6 +48,20 @@ declare -A SPOKE_IDS=(
 )
 
 log_c "🔑 Starting Secret Synchronization..."
+
+# Wait for API to be reachable
+MAX_RETRIES=5
+COUNT=0
+until curl -s "$HUB_API/status" > /dev/null || [ $COUNT -eq $MAX_RETRIES ]; do
+    log_c "Waiting for Hub API at $HUB_API..."
+    sleep 2
+    ((COUNT++))
+done
+
+if [ $COUNT -eq $MAX_RETRIES ]; then
+    log_e "Hub API is unreachable after $MAX_RETRIES attempts. Aborting."
+    exit 1
+fi
 
 for mod in "${!SPOKE_IDS[@]}"; do
     SPOKE_ID=${SPOKE_IDS[$mod]}
