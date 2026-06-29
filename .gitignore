@@ -1,0 +1,25 @@
+# Git ignore for Lab Manager
+.DS_Store
+hub_logs.txt
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.vscode/
+node_modules/
+dist/
+build/
+*.log
+venv/
+*.pyc
+
+# Secrets & runtime key material (do not commit; regenerate via onboarding)
+keys.json
+core/data/keys.json
+core/data/hub_secret.json
+core/data/
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.json

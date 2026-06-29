@@ -1,0 +1,48 @@
+[
+  {
+    "name": "NetBox - Tenant by Prefix (contains endpoint IP)",
+    "description": "Resolve the tenant that owns the prefix containing the endpoint's IP. GET NetBox /api/ipam/prefixes/?contains=<ip> and extract the owning tenant (slug/id/name) + matching prefix + status into Authorization attributes. Use NetBox_Tenant_Slug in an Enforcement Policy condition for a per-tenant policy decision. Preferred when endpoints are not individually registered in NetBox but their prefix is assigned to a tenant. One HTTP call. Replace NETBOX_HOST and NETBOX_API_TOKEN.",
+    "host_type": "Device",
+    "action_type": "HTTP",
+    "http_method": "GET",
+    "url": "https://NETBOX_HOST/api/ipam/prefixes/?contains=%{Radius:IETF:Framed-IP-Address}&limit=1",
+    "content_type": "application/json",
+    "request_headers": [
+      {"name": "Authorization", "value": "Token NETBOX_API_TOKEN"},
+      {"name": "Accept", "value": "application/json"}
+    ],
+    "request_body": "",
+    "request_timeout": 10,
+    "use_proxy": false,
+    "attributes": [
+      {"name": "NetBox_Tenant_Slug", "value": "$.results[0].tenant.slug",  "type": "string"},
+      {"name": "NetBox_Tenant_Name", "value": "$.results[0].tenant.name",  "type": "string"},
+      {"name": "NetBox_Tenant_ID",   "value": "$.results[0].tenant.id",    "type": "string"},
+      {"name": "NetBox_Prefix",      "value": "$.results[0].prefix",         "type": "string"},
+      {"name": "NetBox_Prefix_Status","value": "$.results[0].status.value","type": "string"}
+    ]
+  },
+  {
+    "name": "NetBox - Tenant by IP (exact address)",
+    "description": "Resolve the tenant directly assigned to the endpoint's IP address object. GET NetBox /api/ipam/ip-addresses/?address=<ip> and extract tenant (slug/id/name) + address + status. Use only when individual IP-address objects are registered in NetBox with a tenant; otherwise prefer the prefix-contains CSA above. One HTTP call. Replace NETBOX_HOST and NETBOX_API_TOKEN. Note: NetBox's address filter is an exact match (incl. mask) — if the framed IP is bare, append /32 (IPv4) or /128 (IPv6).",
+    "host_type": "Device",
+    "action_type": "HTTP",
+    "http_method": "GET",
+    "url": "https://NETBOX_HOST/api/ipam/ip-addresses/?address=%{Radius:IETF:Framed-IP-Address}&limit=1",
+    "content_type": "application/json",
+    "request_headers": [
+      {"name": "Authorization", "value": "Token NETBOX_API_TOKEN"},
+      {"name": "Accept", "value": "application/json"}
+    ],
+    "request_body": "",
+    "request_timeout": 10,
+    "use_proxy": false,
+    "attributes": [
+      {"name": "NetBox_Tenant_Slug", "value": "$.results[0].tenant.slug",  "type": "string"},
+      {"name": "NetBox_Tenant_Name", "value": "$.results[0].tenant.name",  "type": "string"},
+      {"name": "NetBox_Tenant_ID",   "value": "$.results[0].tenant.id",    "type": "string"},
+      {"name": "NetBox_IP_Address",  "value": "$.results[0].address",       "type": "string"},
+      {"name": "NetBox_IP_Status",   "value": "$.results[0].status.value",  "type": "string"}
+    ]
+  }
+]

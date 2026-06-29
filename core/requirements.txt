@@ -1,0 +1,14 @@
+# Pinned: the pxmx spoke self-updater runs `pip install -r requirements.txt`
+# periodically, and an unpinned websockets here lets a manual install_all.sh
+# bump the hub's version out of sync with a spoke's — a version skew that
+# breaks WebSocket interop (see the permessage-deflate crash-loop fixed by
+# websockets.serve(..., compression=None) in main.py). Keep hub and spokes on
+# the same websockets major line. The asyncio server API (websockets.serve with
+# compression=) requires >=13; cap below the next major to avoid an
+# unvalidated jump. Bump the ceiling only after validating interop.
+websockets>=13.0,<17.0
+fastapi
+uvicorn[standard]
+httpx
+psutil
+cryptography

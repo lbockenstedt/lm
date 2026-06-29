@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  hub:
+    build:
+      context: ./hub
+      dockerfile: hub.Dockerfile
+    ports:
+      - "8765:8765" # WebSocket
+      - "8000:8000" # API
+    networks:
+      - lm-net
+
+  cs:
+    build:
+      context: ../cs
+      dockerfile: cs.Dockerfile
+    depends_on:
+      - hub
+    networks:
+      - lm-net
+
+  pxmx:
+    build:
+      context: ../pxmx
+      dockerfile: pxmx.Dockerfile
+    depends_on:
+      - hub
+    networks:
+      - lm-net
+
+  opnsense:
+    build:
+      context: ../opnsense
+      dockerfile: opnsense.Dockerfile
+    depends_on:
+      - hub
+    networks:
+      - lm-net
+
+networks:
+  lm-net:
+    driver: bridge

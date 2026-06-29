@@ -1,0 +1,23 @@
+name: Auto-Merge Owner PRs
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  auto-merge:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    # Only run if the person opening/updating the PR is the repository owner
+    if: github.actor == github.repository_owner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Merge Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Owner detected. Auto-merging PR #${{ github.event.pull_request.number }}..."
+          gh pr merge ${{ github.event.pull_request.number }} --merge --auto
