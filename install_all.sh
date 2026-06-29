@@ -610,7 +610,19 @@ for repo in "${REPOS[@]}"; do
         cd "$repo"
         rm -rf venv
         git checkout .
-        git pull --rebase --autostash
+        # Rebase the local branch onto origin. If the rebase fails (diverged
+        # history, a stale local commit, or an autostash conflict), fall back to
+        # a hard reset to origin's tip instead of letting `set -e` abort the
+        # whole install — a partial install (hub updated, this spoke stranded
+        # mid-pull) is worse than a clean force-sync. Spoke secrets live in
+        # gitignored untracked files (.env, *.key, keys.json, …) which a
+        # `git reset --hard` preserves (it only moves tracked files).
+        if ! git pull --rebase --autostash; then
+            log_e "git pull --rebase failed for $repo; falling back to hard reset to origin"
+            git fetch origin
+            _branch="$(git rev-parse --abbrev-ref HEAD)"
+            git reset --hard "origin/$_branch"
+        fi
         cd ..
     else
         log_c "🌐 Cloning $repo..."
