@@ -5440,14 +5440,13 @@ async function loadNetboxData(subMenu) {
             // allSettled so one spoke-down response degrades just that card to
             // "Unavailable" instead of blanking the whole overview. Each card
             // navigates to its management sub-view on click. Counts mirror the
-            // tenant-filtered fetches each sub-view already makes (Racks has no
-            // tenant param server-side today, matching the Racks sub-view).
+            // tenant-filtered fetches each sub-view already makes.
             const t = encodeURIComponent(currentTenant);
             const get = (url, key) => fetch(url)
                 .then(r => r.json().then(d => ({ ok: r.ok, d, key })));
             const results = await Promise.allSettled([
                 get(`/api/netbox/devices?tenant=${t}`, 'devices'),
-                get('/api/netbox/racks', 'racks'),
+                get(`/api/netbox/racks?tenant=${t}`, 'racks'),
                 get(`/api/netbox/prefixes?tenant=${t}`, 'prefixes'),
                 get(`/api/netbox/ips?tenant=${t}`, 'ip_addresses'),
             ]);
@@ -5460,7 +5459,6 @@ async function loadNetboxData(subMenu) {
                 <div onclick="setSubView('${target}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-[#01A982] hover:shadow-md transition-all">
                     <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${label}</p>
                     <p class="text-3xl font-bold text-[#263040]">${n === null ? '<span class="text-base font-medium text-amber-600">Unavailable</span>' : n}</p>
-                    <p class="text-xs text-slate-400 mt-1">assigned to this tenant · click to manage</p>
                 </div>`;
             container.innerHTML = `
                 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 p-4">
@@ -5502,7 +5500,10 @@ async function loadNetboxData(subMenu) {
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'Racks') {
-            const r = await fetch('/api/netbox/racks');
+            // Tenant-scoped like Devices/Prefixes/IPs: the spoke's get_racks
+            // filters by tenant slug when one is passed, so send currentTenant
+            // to keep racks inside the tenant boundary instead of listing all.
+            const r = await fetch(`/api/netbox/racks?tenant=${encodeURIComponent(currentTenant)}`);
             // 503 {detail} (new) or 200+{status:'ERROR'} (old) — both mean spoke-down.
             const d = await r.json().catch(() => ({}));
             if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p>`; return; }
