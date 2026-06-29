@@ -2400,7 +2400,44 @@ def create_app(hub):
             logger.exception("get_pxmx_vms failed")
             raise HTTPException(status_code=500, detail=str(e))
 
-    async def _compute_tenant_counts(hub, scoping: dict) -> dict:
+    @app.post("/api/pxmx/vm-action")
+    async def pxmx_vm_action(request: Request):
+        """Hypervisors view VM lifecycle: start/stop/reboot/snapshot (ANY vmid).
+
+        Body: ``{unique_id, vmid, node, type, action, snapshot_name?}``. Routes to
+        the pxmx spoke's ``PXMX_VM_ACTION`` (unguarded — the agent's cs_guard sim
+        90000 floor does NOT apply, so real tenant VMs at arbitrary vmids work).
+        Admin-only: VM control is a privileged action. ``timeout=35`` covers a
+        slow ``qm stop``/``snapshot`` (spoke→agent window is 30s)."""
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        action = str((body or {}).get("action", "")).lower()
+        if action not in ("start", "stop", "reboot", "restart", "snapshot"):
+            raise HTTPException(status_code=400, detail=f"unknown action: {action}")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        if not pxmx_spoke:
+            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        payload = {
+            "unique_id": body.get("unique_id", ""),
+            "vmid": body.get("vmid"),
+            "node": body.get("node", ""),
+            "type": body.get("type", "qemu"),
+            "action": action,
+            "snapshot_name": body.get("snapshot_name"),
+        }
+        try:
+            result = await hub.request_response(pxmx_spoke, "PXMX_VM_ACTION", payload, timeout=35.0)
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            return data
+        except Exception as e:
+            logger.exception("pxmx_vm_action failed")
+            raise HTTPException(status_code=500, detail=str(e))
         """Per-tenant aggregate counts across all connected spokes, scoped by
         the tenant's netbox_tenant_slug / proxmox_tag. Returns
         {devices, vms, sessions, prefixes, ips_used}. Shared by the single-tenant
@@ -2755,6 +2792,7 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, "PROBE_API", {"path": path})
             return result
         except Exception as e:
+            logger.exception("probe_api failed (spoke=%s path=%s)", spoke_id, path)
             raise HTTPException(status_code=500, detail=f"Probe failed: {str(e)}")
 
 
@@ -2954,6 +2992,7 @@ def create_app(hub):
             )
             rid = hub._store_bug_report(data)
             if not rid:
+                logger.error("bug-report: _store_bug_report returned no id (data keys=%s)", list(data.keys()))
                 raise HTTPException(status_code=500, detail="Failed to store bug report")
             sev = str(data.get("severity") or "medium")
             ctx = data.get("context") or {}
@@ -3702,10 +3741,12 @@ def create_app(hub):
             elif success.get("status") == "no_update":
                 return {"status": "no_update", "message": success["message"]}
             else:
+                logger.error("update-trigger: perform_update returned unexpected status=%s", success.get("status"))
                 raise HTTPException(status_code=500, detail=success.get("message", "Update failed"))
         elif success:
             return {"status": "success", "message": "Update triggered. The server is restarting..."}
         else:
+            logger.error("update-trigger: perform_update returned falsy success (force=%s)", force)
             raise HTTPException(status_code=500, detail="Update failed. Check Hub logs.")
 
     @app.post("/setup/update/spokes")
