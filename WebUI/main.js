@@ -5264,7 +5264,7 @@ function openVmDetail(uniqueId) {
             <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors">■ Stop</button>
             <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
             <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors">📷 Snapshot</button>
-            <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" disabled title="VNC console — wiring in progress" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982] hover:bg-[#008c6a] text-white transition-colors opacity-50 cursor-not-allowed">🖥 Console</button>
+            <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" title="Open VNC console (noVNC)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982] hover:bg-[#008c6a] text-white transition-colors">🖥 Console</button>
             <span id="pxmx-vm-action-status" class="text-xs text-slate-400"></span>
         </div>`;
 }
@@ -5296,10 +5296,101 @@ async function pxmxVmAction(uniqueId, action) {
     }
 }
 
-// VNC console opener — wired up in the VNC increment (hub-terminates-WSS).
-// Defined now so the Console button's onclick resolves; shows a placeholder.
-function pxmxOpenConsole(_uniqueId) {
-    showToast('VNC console is being wired up — available next increment.', 'info');
+// VNC console opener (agent-terminates-WSS): POST /api/pxmx/console to mint a
+// one-shot session, then open a modal hosting noVNC whose RFB connects to the
+// hub's /ws/console/{session_id}?token=... byte relay. The hub relays browser
+// bytes → agent (VNC_FRAME_DOWN) and Proxmox bytes → browser (VNC_FRAME_UP);
+// the agent owns the Proxmox vncwebsocket (local root-authed token). noVNC is
+// loaded once from CDN and cached on window.__noVNCRFB.
+async function pxmxOpenConsole(uniqueId) {
+    const vm = (window._pxmxVms || []).find(v => v.unique_id === uniqueId);
+    if (!vm) { showToast('VM not found in cache', 'error'); return; }
+    let session;
+    try {
+        const r = await setupFetch('/api/pxmx/console', {
+            method: 'POST',
+            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type || 'qemu' }),
+        });
+        session = await r.json().catch(() => ({}));
+        if (!r.ok || !session || !session.session_id) {
+            showToast('Console start failed: ' + (session && (session.detail || session.message) || r.status), 'error');
+            return;
+        }
+    } catch (e) {
+        showToast('Console start failed: ' + (e.message || e), 'error');
+        return;
+    }
+    const RFB = await pxmxLoadNoVNC();
+    if (!RFB) { showToast('Failed to load noVNC (CDN unreachable)', 'error'); return; }
+    pxmxShowVncModal(vm, RFB, session);
+}
+
+// Load noVNC's RFB from CDN once, cache on window.__noVNCRFB. Mirrors the
+// upstream cs reference (.scratch-shpe/cs-webui/templates/index.html:10).
+let _pxmxNoVncPromise = null;
+function pxmxLoadNoVNC() {
+    if (window.__noVNCRFB) return Promise.resolve(window.__noVNCRFB);
+    if (!_pxmxNoVncPromise) {
+        _pxmxNoVncPromise = import('https://cdn.jsdelivr.net/npm/@novnc/novnc@1.4.0/core/rfb.js')
+            .then(m => { window.__noVNCRFB = m.RFB || m.default; return window.__noVNCRFB; })
+            .catch(e => { console.error('noVNC load failed', e); _pxmxNoVncPromise = null; return null; });
+    }
+    return _pxmxNoVncPromise;
+}
+
+// Build the modal DOM, attach the RFB, wire status + Ctrl+Alt+Del + close.
+// Closing the modal drops the RFB (closes the WS → hub sends VNC_DISCONNECT →
+// agent closes the Proxmox WSS). Returns nothing.
+function pxmxShowVncModal(vm, RFB, session) {
+    let modal = document.getElementById('pxmx-vnc-modal');
+    if (modal) modal.remove();
+    modal = document.createElement('div');
+    modal.id = 'pxmx-vnc-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/70';
+    modal.innerHTML = `
+        <div class="bg-[#1a1a2e] rounded-lg shadow-2xl w-[90vw] max-w-5xl h-[85vh] flex flex-col overflow-hidden">
+            <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
+                <strong class="font-semibold">VM Console — ${escapeHtml(vm.name || vm.vmid)}</strong>
+                <span class="text-xs text-slate-400 font-mono">${escapeHtml(vm.unique_id || '')}</span>
+                <button id="pxmx-vnc-cad" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
+                <button id="pxmx-vnc-fs" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+                <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400">Connecting…</span>
+                <button id="pxmx-vnc-close" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+            </div>
+            <div id="pxmx-vnc-screen" class="flex-1 bg-black"></div>
+        </div>`;
+    document.body.appendChild(modal);
+    const statusEl = modal.querySelector('#pxmx-vnc-status');
+    const setStatus = (msg, cls) => { statusEl.textContent = msg; statusEl.className = 'ml-auto text-xs ' + (cls || 'text-amber-400'); };
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${location.host}/ws/console/${encodeURIComponent(session.session_id)}?token=${encodeURIComponent(session.ws_token)}`;
+    let rfb = null;
+    try {
+        rfb = new RFB(modal.querySelector('#pxmx-vnc-screen'), wsUrl, { credentials: { password: '' } });
+        rfb.scaleViewport = true;
+        rfb.resizeSession = false;
+        rfb.addEventListener('connect', () => setStatus('Connected', 'text-green-400'));
+        rfb.addEventListener('disconnect', (e) => setStatus('Disconnected: ' + ((e.detail && e.detail.reason) || 'closed'), 'text-red-400'));
+        rfb.addEventListener('credentialsrequired', () => {
+            const pass = prompt('VNC Password:') || '';
+            rfb.sendCredentials({ password: pass });
+        });
+        rfb.addEventListener('securityfailure', (e) => setStatus('Security failure: ' + ((e.detail && e.detail.reason) || 'unknown'), 'text-red-400'));
+    } catch (err) {
+        setStatus('Error: ' + (err.message || err), 'text-red-400');
+    }
+    modal.querySelector('#pxmx-vnc-cad').onclick = () => rfb && rfb.sendCtrlAltDel();
+    modal.querySelector('#pxmx-vnc-fs').onclick = () => {
+        const screen = modal.querySelector('#pxmx-vnc-screen');
+        if (document.fullscreenElement) document.exitFullscreen();
+        else screen.requestFullscreen && screen.requestFullscreen().catch(() => {});
+    };
+    const close = () => {
+        try { if (rfb) rfb.disconnect(); } catch (e) {}
+        modal.remove();
+    };
+    modal.querySelector('#pxmx-vnc-close').onclick = close;
+    modal.onclick = (e) => { if (e.target === modal) close(); };
 }
 
 // Render the clickable Nodes table; the selected row is highlighted.

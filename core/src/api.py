@@ -84,6 +84,7 @@ a bare ``raise HTTPException(500, detail=str(e))`` so hub logs capture the trace
 
 import os
 import asyncio
+import base64
 import subprocess
 import json
 import time
@@ -91,9 +92,10 @@ import uuid
 import logging
 import hashlib
 import secrets
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.websockets import WebSocketState
 from typing import Any, Dict
 # NOTE: any typing name used in an annotation on a nested `def` inside
 # create_app() (e.g. ``Dict[str, Any]``) MUST be imported here at module scope.
@@ -2399,6 +2401,150 @@ def create_app(hub):
         except Exception as e:
             logger.exception("get_pxmx_vms failed")
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/console")
+    async def pxmx_create_console(request: Request):
+        """Hypervisors view VNC console — create a console session for a VM.
+
+        Body: ``{unique_id, vmid, node, type}``. Mints a one-shot ``session_id``
+        + ``ws_token`` and tells the pxmx spoke→agent to open a Proxmox
+        vncwebsocket locally (agent-terminates-WSS) and relay frames over the
+        existing WS legs. Admin-only (VM console is privileged). The browser
+        then connects to ``/ws/console/{session_id}?token=<ws_token>`` for the
+        noVNC byte relay. Fire-and-forget VNC_START — the agent emits
+        VNC_READY/VNC_ERROR up, which the browser WS picks up."""
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        unique_id = str((body or {}).get("unique_id", "")).strip()
+        parts = unique_id.split("/")
+        if len(parts) < 3:
+            raise HTTPException(status_code=400, detail="invalid unique_id (expect <cluster>/<node>/<vmid>)")
+        cluster, node, vmid_s = parts[0], parts[1], parts[2]
+        try:
+            vmid = int(vmid_s)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        if not pxmx_spoke:
+            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        session_id = str(uuid.uuid4())
+        ws_token = secrets.token_urlsafe(32)
+        tenant_id = sess.get("tenant_id") or ""
+        hub.register_vnc_session(session_id, {
+            "spoke_id": pxmx_spoke,
+            "tenant_id": tenant_id,
+            "ws_token": ws_token,
+            "vmid": vmid,
+            "node": node,
+            "unique_id": unique_id,
+        })
+        try:
+            await hub.send_to_spoke_command(pxmx_spoke, "VNC_START", {
+                "session_id": session_id,
+                "unique_id": unique_id,
+                "vmid": vmid,
+                "node": node,
+                "type": str((body or {}).get("type", "qemu")),
+            })
+        except Exception as e:
+            hub.unregister_vnc_session(session_id)
+            logger.exception("pxmx_create_console VNC_START failed")
+            raise HTTPException(status_code=502, detail=f"failed to start console: {e}")
+        return {"session_id": session_id, "ws_token": ws_token, "expires_in": 60}
+
+    @app.websocket("/ws/console/{session_id}")
+    async def pxmx_console_ws(websocket: WebSocket, session_id: str):
+        """Browser↔Proxmox VNC byte relay (agent-terminates-WSS).
+
+        Auth: the single-use ``ws_token`` query param must match the session
+        record minted by ``pxmx_create_console``. Two relay tasks:
+        ``browser_to_spoke`` sends raw bytes to the agent as VNC_FRAME_DOWN
+        (fire-and-forget); ``spoke_to_browser`` sends queued Proxmox frames
+        (VNC_FRAME_UP) to the browser as bytes, and handles control tuples
+        (VNC_READY / VNC_ERROR / VNC_DISCONNECT) from _handle_agent_relay_up.
+        On any exit, sends VNC_DISCONNECT down so the agent closes the Proxmox
+        WSS and drops the session."""
+        token = websocket.query_params.get("token") or ""
+        hub = app.state.hub
+        sess = hub.get_vnc_session(session_id)
+        if not sess or sess.get("ws_token") != token:
+            await websocket.accept()
+            await websocket.close(code=4401, reason="invalid or expired console session")
+            return
+        spoke_id = sess["spoke_id"]
+        queue = sess["queue"]
+        await websocket.accept()
+        relay_tasks: list = []
+        try:
+            async def browser_to_spoke():
+                while True:
+                    msg = await websocket.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        raise WebSocketDisconnect(code=msg.get("code", 1000))
+                    raw = msg.get("bytes")
+                    if raw is None:
+                        text = msg.get("text")
+                        if not text:
+                            continue
+                        raw = text.encode()
+                    await hub.send_to_spoke_command(spoke_id, "VNC_FRAME_DOWN", {
+                        "session_id": session_id,
+                        "data": base64.b64encode(raw).decode(),
+                    })
+
+            async def spoke_to_browser():
+                while True:
+                    item = await queue.get()
+                    if isinstance(item, (bytes, bytearray)):
+                        await websocket.send_bytes(bytes(item))
+                    elif isinstance(item, tuple) and item:
+                        kind = item[0]
+                        if kind == "error":
+                            await websocket.close(code=1011, reason=str(item[1]))
+                            return
+                        # "ready" → no-op (RFB just starts); "disconnect" → close
+                        return
+                    else:
+                        return
+
+            relay_tasks = [asyncio.create_task(browser_to_spoke()),
+                           asyncio.create_task(spoke_to_browser())]
+            done, pending = await asyncio.wait(relay_tasks,
+                                               return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*relay_tasks, return_exceptions=True)
+            for task in done:
+                exc = task.exception()
+                if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                    raise exc
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:
+            logger.warning("console ws %s relay failed: %s", session_id, exc)
+        finally:
+            hub.unregister_vnc_session(session_id)
+            try:
+                await hub.send_to_spoke_command(spoke_id, "VNC_DISCONNECT",
+                                                {"session_id": session_id})
+            except Exception:
+                pass
+            for task in relay_tasks:
+                if not task.done():
+                    task.cancel()
+            if relay_tasks:
+                await asyncio.gather(*relay_tasks, return_exceptions=True)
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
 
     @app.post("/api/pxmx/vm-action")
     async def pxmx_vm_action(request: Request):
