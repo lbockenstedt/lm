@@ -62,6 +62,45 @@ _UPDATE_SOURCE_PREFIX_MAP = {
 }
 
 
+def _ver(v: str):
+    """Parse a dotted-numeric VERSION string into a comparable tuple, or
+    ``(0, 0, 0)`` on any parse failure (non-numeric like ``"v.01"``, ``"unknown"``).
+    Module-level so the gate helper and callers share one parser."""
+    try:
+        return tuple(int(x) for x in (v or "").strip().split("."))
+    except Exception:
+        return (0, 0, 0)
+
+
+def _update_available(local_commit, remote_commit, stored_commit,
+                      local_v, remote_v, force=False) -> dict:
+    """Decide whether a hub update is available. Pure (no I/O) → unit-testable,
+    and the gate logic lives in one place instead of inline in ``perform_update``.
+
+    Primary signal is commit-SHA comparison: the v.01 VERSION reset (2026-06-28)
+    made a string VERSION compare always say "up to date" (both ends perpetually
+    ``v.01``), so it can no longer detect an ahead remote. For a **git** install
+    ``local_commit`` is HEAD → compare to ``remote_commit``. For a **non-git**
+    (tarball) install ``local_commit`` is ``"unknown"`` → compare ``remote_commit``
+    to ``stored_commit`` (``global_config["last_update_commit"]``, the last commit
+    recorded as applied). VERSION comparison (``ver_ahead``) is kept as a final
+    fallback for any future deployment that bumps VERSION again.
+
+    Returns ``{"update_available", "commit_ahead", "ver_ahead"}``.
+    """
+    if local_commit != "unknown":
+        commit_ahead = remote_commit != "unknown" and remote_commit != local_commit
+    else:
+        # Non-git install: compare remote tip to the last commit we applied.
+        commit_ahead = remote_commit != "unknown" and remote_commit != stored_commit
+    ver_ahead = _ver(remote_v) > _ver(local_v)
+    return {
+        "update_available": bool(force or commit_ahead or ver_ahead),
+        "commit_ahead": bool(commit_ahead),
+        "ver_ahead": bool(ver_ahead),
+    }
+
+
 class UpdatePipelineMixin:
     """Hub self-update + spoke/agent update methods, extracted from
     ``LabManagerHub``. All methods operate on ``self`` (a fully-initialised Hub
@@ -433,25 +472,14 @@ class UpdatePipelineMixin:
         local_commit = await self.get_local_commit()
         remote_commit = await self.get_remote_commit(hub_repo, branch)
 
-        if local_commit != "unknown":
-            commit_ahead = remote_commit != "unknown" and remote_commit != local_commit
-        else:
-            # Non-git install: compare remote tip to the last commit we applied.
-            commit_ahead = remote_commit != "unknown" and remote_commit != stored_commit
-
-        def _ver(v: str):
-            try:
-                return tuple(int(x) for x in v.strip().split("."))
-            except Exception:
-                return (0, 0, 0)
-
-        ver_ahead = _ver(remote_v) > _ver(local_v)
-        update_available = force or commit_ahead or ver_ahead
+        gate = _update_available(local_commit, remote_commit, stored_commit,
+                                 local_v, remote_v, force)
+        update_available = gate["update_available"]
 
         logger.info(
             f"Update check: local={local_v}@{local_commit[:10] if local_commit != 'unknown' else 'n/a'} "
             f"remote={remote_v}@{remote_commit[:10] if remote_commit != 'unknown' else 'n/a'} "
-            f"commit_ahead={commit_ahead} ver_ahead={ver_ahead} force={force}"
+            f"commit_ahead={gate['commit_ahead']} ver_ahead={gate['ver_ahead']} force={force}"
         )
 
         self.state.update_global_config({"last_update_ts": time.time()})

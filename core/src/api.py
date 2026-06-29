@@ -445,6 +445,23 @@ def _stop_cache_for_tenant(tenant_id: str):
     logger.info(f"[Cache] cleared for tenant '{tenant_id}' — no active sessions")
 
 
+def _spoke_payload_or_raise(data):
+    """Translate a spoke relay result into the API error contract.
+
+    Spokes return ``{status: "SUCCESS", ...}`` or ``{status: "ERROR",
+    message|error}``. The hub relay passes the SUCCESS body through unchanged
+    (so existing field access on the caller side is untouched) but a spoke-side
+    ERROR is translated to HTTP 502 (Bad Gateway) carrying the spoke's message
+    as ``detail`` — the contract every other relay group already follows. A
+    non-dict result (raw list / scalar) is returned as-is. Pure → unit-testable;
+    the in-``create_app`` ``_relay_spoke`` closure calls this after unwrapping.
+    """
+    if isinstance(data, dict) and data.get("status") == "ERROR":
+        msg = data.get("message") or data.get("error") or "Spoke returned an error"
+        raise HTTPException(status_code=502, detail=msg)
+    return data
+
+
 def create_app(hub):
     """Build the FastAPI app for the Hub.
 
@@ -4561,11 +4578,7 @@ def create_app(hub):
         try:
             result = await hub.request_response(spoke_id, command, payload or {})
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            if isinstance(data, dict) and data.get("status") == "ERROR":
-                msg = data.get("message") or data.get("error") or "Spoke returned an error"
-                logger.info("relay %s %s -> spoke ERROR: %s", log_name or command, spoke_id, msg)
-                raise HTTPException(status_code=502, detail=msg)
-            return data
+            return _spoke_payload_or_raise(data)
         except HTTPException:
             raise
         except Exception as e:
