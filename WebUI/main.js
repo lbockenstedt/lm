@@ -811,7 +811,7 @@ const VIEW_SUBMENUS = {
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Generic Nodes', 'Firewalls', 'Security/NAC', 'IPAM', 'LDAP', 'DNS', 'DHCP', 'Simulations'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
-    pxmx: ['Nodes', 'Virtual Machines'],
+    pxmx: ['Overview', 'Virtual Machines'],
     ldap: ['OUs', 'Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'VM Server', 'API Server', 'Config', 'Setup', 'Spoke Management'],
@@ -2088,7 +2088,7 @@ function initView(viewId, subView) {
             loadCPPMNACStatus();
             break;
         case 'pxmx':
-            loadPxmxData(subView || 'Nodes');
+            loadPxmxData(subView || 'Overview');
             break;
         case 'netbox':
             loadNetboxData(subView || 'Overview');
@@ -5229,6 +5229,14 @@ function pxmxVmTableHtml(vms) {
 }
 
 // Render the clickable Nodes table; the selected row is highlighted.
+// Short Proxmox version for table display: 'pve-manager/9.2.3/abc123' -> '9.2.3'.
+// Falls back to the raw string if no N.N.N group is found, or '' when absent.
+function pxmxShortVer(v) {
+    if (v == null || v === '') return '';
+    const m = String(v).match(/(\d+\.\d+\.\d+)/);
+    return m ? m[1] : String(v);
+}
+
 function renderPxmxNodes() {
     const wrap = document.getElementById('pxmx-nodes-wrap');
     if (!wrap) return;
@@ -5251,7 +5259,7 @@ function renderPxmxNodes() {
             <td class="px-4 py-2">${n.cpu_cores ?? '—'}</td>
             <td class="px-4 py-2">${ramUsedGb} GB</td>
             <td class="px-4 py-2">${ramTotalGb} GB</td>
-            <td class="px-4 py-2 text-xs text-slate-400">${n.proxmox_version || '—'}</td>
+            <td class="px-4 py-2 text-xs text-slate-400">${pxmxShortVer(n.proxmox_version) || '—'}</td>
         </tr>`;
     }).join('');
     wrap.innerHTML = pxmxTableWrap(pxmxTh(cols) + `<tbody>${rows}</tbody>`);
@@ -5287,7 +5295,7 @@ function pxmxNodeDetailHtml(node, vms) {
                 <span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${node.status}</span>
                 · CPU ${node.cpu_usage ?? '—'}% (${node.cpu_cores ?? '—'} cores)
                 · RAM ${ramUsedGb} / ${ramTotalGb} GB${ramPct !== null ? ` (${ramPct}%)` : ''}
-                · Proxmox ${node.proxmox_version || '—'}</p>
+                · Proxmox ${pxmxShortVer(node.proxmox_version) || '—'}</p>
         </div>` +
         `<h3 class="text-base font-semibold text-[#263040] mb-3 px-1">Virtual Machines &amp; Containers
             <span class="text-xs text-slate-400 font-normal">(${nodeVms.length} on this node, ${running} running)</span></h3>` +
@@ -5305,7 +5313,7 @@ async function loadPxmxData(subMenu) {
     const tableWrap = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
 
     try {
-        if (subMenu === 'Nodes' || subMenu === 'Virtual Machines') {
+        if (subMenu === 'Overview' || subMenu === 'Virtual Machines') {
             const [vmR, nodesR] = await Promise.all([
                 fetch(`/api/pxmx/vms?tenant=${encodeURIComponent(currentTenant)}`),
                 fetch('/api/pxmx/nodes'),
@@ -5322,8 +5330,8 @@ async function loadPxmxData(subMenu) {
             window._pxmxVms = vms;
             window._pxmxAgentCount = vmData.agent_count || '?';
 
-            // --- 'Nodes' landing: just the clickable nodes table -------------
-            if (subMenu === 'Nodes') {
+            // --- 'Overview' landing: just the clickable nodes table -----------
+            if (subMenu === 'Overview') {
                 if (nodes.length === 0 && vms.length === 0) {
                     container.innerHTML = `<div class="py-10 text-center space-y-3">
                         <p class="text-slate-400 italic text-sm">No Proxmox agents connected.</p>
@@ -5339,7 +5347,7 @@ async function loadPxmxData(subMenu) {
                        </div>`
                     : '';
                 container.innerHTML = staleBanner
-                    + `<h3 class="text-base font-semibold text-[#263040] mb-3 px-1">Nodes
+                    + `<h3 class="text-base font-semibold text-[#263040] mb-3 px-1">Overview
                         <span class="text-xs text-slate-400 font-normal">(${nodes.length}) — click a node to view its VMs</span></h3>`
                     + `<div id="pxmx-nodes-wrap"></div>`;
                 renderPxmxNodes();
@@ -5368,10 +5376,10 @@ async function loadPxmxData(subMenu) {
                    </div>`
                 : '';
 
-            const backBtn = `<button onclick="setSubView('Nodes'); window._pxmxNodeSel = null;"
+            const backBtn = `<button onclick="setSubView('Overview'); window._pxmxNodeSel = null;"
                 class="mb-3 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-[#01A982] font-medium transition-colors">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
-                All nodes
+                Overview
             </button>`;
 
             if (filter) {
