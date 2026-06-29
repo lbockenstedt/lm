@@ -5202,6 +5202,7 @@ function pxmxTh(cols) {
 // VM table — shared by the node-detail view and the no-nodes fallback.
 function pxmxVmTableHtml(vms) {
     const cols = ['Cluster / Host', 'Node', 'VMID', 'Name', 'IP Address', 'Type', 'Status', 'CPU %', 'RAM'];
+    const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const rows = vms.map(vm => {
         const memGb   = ((vm.mem_bytes || 0) / 1073741824).toFixed(1);
         const runCls  = vm.status === 'running' ? 'bg-green-100 text-green-700'
@@ -5213,7 +5214,7 @@ function pxmxVmTableHtml(vms) {
         // or when the guest agent is absent/unresponsive → show '—'.
         const ipList = Array.isArray(vm.ips) ? vm.ips : [];
         const ipCell = ipList.length ? escapeHtml(ipList.join(', ')) : '—';
-        return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+        return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${escJs(vm.unique_id)}')">
             <td class="px-4 py-2 text-xs text-slate-500 font-mono">${vm.cluster || '—'}</td>
             <td class="px-4 py-2 text-xs">${vm.node || '—'}</td>
             <td class="px-4 py-2 font-mono text-xs font-bold">${vm.vmid}</td>
@@ -5226,6 +5227,79 @@ function pxmxVmTableHtml(vms) {
         </tr>`;
     }).join('');
     return pxmxTableWrap(pxmxTh(cols) + `<tbody>${rows}</tbody>`);
+}
+
+// Clicking a VM row opens a details panel with Start/Stop/Restart/Snapshot
+// controls (VNC Console wired up in the VNC increment). Back returns to the
+// cached VM list. Actions POST /api/pxmx/vm-action (admin-only) which routes to
+// the pxmx spoke's PXMX_VM_ACTION (unguarded — any vmid, not just the sim floor).
+function openVmDetail(uniqueId) {
+    const vms = window._pxmxVms || [];
+    const vm = vms.find(v => v.unique_id === uniqueId);
+    const container = document.getElementById('pxmx-content');
+    if (!vm || !container) return;
+    const memGb  = ((vm.mem_bytes || 0) / 1073741824).toFixed(1);
+    const ipList = Array.isArray(vm.ips) ? vm.ips : [];
+    const runCls  = vm.status === 'running' ? 'bg-green-100 text-green-700'
+                 : vm.status === 'stopped' ? 'bg-slate-100 text-slate-500' : 'bg-amber-100 text-amber-700';
+    const typeCls = vm.type === 'lxc' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600';
+    const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const uid = escJs(vm.unique_id);
+    container.innerHTML = `
+        <button onclick="loadPxmxData('Virtual Machines')" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-[#01A982] font-medium transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
+            Back to VM list
+        </button>
+        <div class="rounded-lg border border-slate-200 bg-slate-50/50 p-4 mb-4">
+            <h3 class="text-base font-semibold text-[#263040]">${escapeHtml(vm.name || '—')}
+                <span class="text-xs text-slate-400 font-normal font-mono">VMID ${vm.vmid} · ${escapeHtml((vm.cluster || '') + '/' + (vm.node || ''))}</span></h3>
+            <p class="text-xs text-slate-500 mt-1">Status
+                <span class="px-2 py-0.5 rounded-full text-xs font-medium ${runCls}">${vm.status}</span>
+                · <span class="px-2 py-0.5 rounded-full text-xs font-medium ${typeCls}">${vm.type || 'vm'}</span>
+                · CPU ${vm.cpu ?? '—'}% · RAM ${memGb} GB
+                · IP ${ipList.length ? escapeHtml(ipList.join(', ')) : '—'}</p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 mb-4">
+            <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-green-700 text-white transition-colors">▶ Start</button>
+            <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors">■ Stop</button>
+            <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
+            <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors">📷 Snapshot</button>
+            <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" disabled title="VNC console — wiring in progress" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982] hover:bg-[#008c6a] text-white transition-colors opacity-50 cursor-not-allowed">🖥 Console</button>
+            <span id="pxmx-vm-action-status" class="text-xs text-slate-400"></span>
+        </div>`;
+}
+
+async function pxmxVmAction(uniqueId, action) {
+    const vms = window._pxmxVms || [];
+    const vm = vms.find(v => v.unique_id === uniqueId);
+    if (!vm) { showToast('VM not found in cache', 'error'); return; }
+    const statusEl = document.getElementById('pxmx-vm-action-status');
+    const setStat = (msg) => { if (statusEl) statusEl.textContent = msg; };
+    setStat(`${action}…`);
+    try {
+        const r = await setupFetch('/api/pxmx/vm-action', {
+            method: 'POST',
+            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type, action })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data && data.status === 'SUCCESS') {
+            showToast(`${action} succeeded for ${vm.name || vm.vmid}`, 'success');
+            setStat(`${action} done — refreshing`);
+            setTimeout(() => loadPxmxData('Virtual Machines'), 1500);
+        } else {
+            showToast(`${action} failed: ${data && (data.message || data.detail) || r.status}`, 'error');
+            setStat(`${action} failed`);
+        }
+    } catch (e) {
+        showToast(`${action} failed: ${e.message || e}`, 'error');
+        setStat(`${action} failed`);
+    }
+}
+
+// VNC console opener — wired up in the VNC increment (hub-terminates-WSS).
+// Defined now so the Console button's onclick resolves; shows a placeholder.
+function pxmxOpenConsole(_uniqueId) {
+    showToast('VNC console is being wired up — available next increment.', 'info');
 }
 
 // Render the clickable Nodes table; the selected row is highlighted.
