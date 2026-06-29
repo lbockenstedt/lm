@@ -48,12 +48,12 @@ logger = logging.getLogger("Hub")
 _PREFIX_CACHE_TTL = 300  # seconds — session-prefix cache TTL (was a create_app local)
 
 # Per-module enable map for server-side subnet filtering. Modules whose data
-# carries tenant IP addresses (nac, firewall, netbox, dhcp) default ON; the cs
-# / Simulations module is scoped by tenant ID instead of subnet, so it defaults
-# OFF. Admins can toggle each module in Setup → Simulations.
-_SUBNET_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "cs")
+# carries tenant IP addresses (nac, firewall, netbox, dhcp, hypervisor) default
+# ON; the cs / Simulations module is scoped by tenant ID instead of subnet, so
+# it defaults OFF. Admins can toggle each module in System → General.
+_SUBNET_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "cs", "hypervisor")
 _SUBNET_FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
-                            "dhcp": True, "cs": False}
+                            "dhcp": True, "cs": False, "hypervisor": True}
 
 # Firewall endpoint → filter spec. "rules" uses the strict source/destination
 # check (with OPNsense alias expansion); the field-based endpoints filter on
