@@ -215,6 +215,32 @@ class TokenBucket:
             return True
         return False
 
+
+def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
+    """Trim ``all_logs`` to the newest entries whose ``{"logs": …}`` JSON fits
+    under ``max_bytes``. Used by ``collect_all_logs`` to cap the GET_LOGS payload
+    below the 16 MiB WS frame ceiling.
+
+    Binary-searches the tail length (O(log N) json.dumps passes) instead of the
+    prior `while … pop(0)` loop, which re-serialized the whole list on every pop
+    (O(N²) in log lines — at 100s of spokes × 1000-line deques this stalled the
+    event loop on every BugFixer poll). Keeps the newest entries (drops oldest).
+    """
+    try:
+        if len(json.dumps({"logs": all_logs})) <= max_bytes:
+            return all_logs
+        lo, hi = 0, len(all_logs)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if len(json.dumps({"logs": all_logs[-mid:]})) <= max_bytes:
+                lo = mid
+            else:
+                hi = mid - 1
+        return all_logs[-lo:] if lo else []
+    except Exception as e:
+        logger.warning(f"_fit_log_payload size-cap failed: {e}")
+        return all_logs[-1000:]  # safe fallback
+
 class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
@@ -295,6 +321,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         self.rate_limiters: Dict[str, TokenBucket] = {}
         # { correlation_id: response_data } for request-response bridging
         self.response_cache: Dict[str, Any] = {}
+        # Outstanding request_response msg_ids awaiting an ack. The dispatch
+        # path only stores a response_cache entry while its msg_id is in this
+        # set, and request_response removes it on response OR timeout — so a
+        # late ack that arrives after the waiter already timed out is dropped
+        # instead of leaking an entry that is never popped (unbounded growth at
+        # scale with periodic commands + occasional spoke slowness).
+        self._outstanding_requests: set = set()
         # { spoke_id: latest CS_TELEMETRY payload } — full Client-Sim data
         # (proxmox/clients/simulations/central/reclone) relayed by the combined
         # Client-Sim spoke over the LM websocket. Tenant-scoped at read time via
@@ -304,7 +337,6 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         # Simulations module: tenant-scoped browser broadcast + slim cs-config store.
         self.simulations_broadcaster = SimulationsBroadcaster()
         self.simulations_store = SimulationsStore(self.state.data_dir)
-        self.opnsense_cache: Dict[str, Any] = {}
         self.cache_dir = os.path.join(self.state.data_dir, "cache")
         # File-a-Bug artifact store: each report's console.log / dom.html /
         # screenshot.png / report.json live under data_dir/bugs/<id>/ so the
@@ -394,16 +426,40 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         await self.send_to_spoke(msg)
 
         # Wait for the response in the mailbox
+        self._outstanding_requests.add(msg_id)
         start_time = time.time()
-        while time.time() - start_time < timeout:
-            await asyncio.sleep(0.1)
-            if msg_id in getattr(self, "response_cache", {}):
-                result = self.response_cache.pop(msg_id)
-                logger.info(f"Response: {msg_id} received from {spoke_id}: {_redact(command_type, result)}")
-                return result
+        try:
+            while time.time() - start_time < timeout:
+                await asyncio.sleep(0.1)
+                if msg_id in getattr(self, "response_cache", {}):
+                    result = self.response_cache.pop(msg_id)
+                    logger.info(f"Response: {msg_id} received from {spoke_id}: {_redact(command_type, result)}")
+                    return result
 
-        logger.error(f"Request Timeout: {msg_id} from {spoke_id} after {timeout}s")
-        return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
+            logger.error(f"Request Timeout: {msg_id} from {spoke_id} after {timeout}s")
+            return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
+        finally:
+            # Drop the waiter so a late ack can't leak a response_cache entry.
+            self._outstanding_requests.discard(msg_id)
+
+    def _evict_spoke(self, spoke_id: str) -> None:
+        """Drop ALL per-spoke in-memory state for ``spoke_id``.
+
+        Called when an admin deletes a spoke (api.delete_spoke) so the
+        per-spoke dicts (simulations_cache, spoke_telemetry, rate_limiters,
+        spoke_events, spoke_recovery, agent_logs) don't accumulate entries for
+        ids that no longer exist — unbounded growth as spokes are deleted/recreated
+        over time at scale. NOT called on a transient disconnect: spoke_telemetry
+        must keep its DISCONNECTED status for the WebUI, and spoke_recovery is
+        needed by the watchdog if the spoke is flapping. Reconnect re-creates
+        rate_limiters / re-pushes simulations_cache, so eviction on delete is safe.
+        """
+        self.simulations_cache.pop(spoke_id, None)
+        self.spoke_telemetry.pop(spoke_id, None)
+        self.rate_limiters.pop(spoke_id, None)
+        self.spoke_events.pop(spoke_id, None)
+        self.spoke_recovery.pop(spoke_id, None)
+        self.agent_logs.pop(spoke_id, None)
 
     def get_spoke_by_type(self, module_type: str) -> Optional[str]:
         """Return the first connected, approved spoke that advertised the given module_type."""
@@ -771,6 +827,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         GET_LOGS). Previously SPOKE_LOG had no handler and fell through to the
         catch-all + discard, so spoke logs never reached the WebUI Logs view.
         Called from ``handle_connection``.
+
+        Ephemeral by design: ``agent_logs[spoke_id]`` is an in-memory deque
+        (``maxlen = max_log_size``) that is NOT persisted to disk and is lost on
+        a hub restart (and dropped for a spoke by ``_evict_spoke`` when the spoke
+        is deleted). It is a rolling recent-window view for the WebUI / bugfixer,
+        not an audit log — the spoke's own journal is the durable record. Each
+        entry is stamped with the hub receive time (the spoke's original timestamp
+        is inside the entry text), and the deque caps total volume per spoke so a
+        chatty spoke can't starve memory at 10k-client scale.
         """
         log_data = payload.get("data", {})
         entries = log_data.get("entries") if isinstance(log_data, dict) else None
@@ -1150,8 +1215,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
                         if isinstance(data, dict) and "version" in data:
                             self.spoke_versions[spoke_id] = data["version"]
 
-                    # Store in response cache for API request bridging
-                    if hasattr(self, "response_cache"):
+                    # Store in response cache for API request bridging — but
+                    # only if a waiter is still outstanding for this msg_id, so
+                    # a late ack (after request_response already timed out and
+                    # discarded the waiter) is dropped instead of leaked.
+                    if hasattr(self, "response_cache") and corr_id in self._outstanding_requests:
                         self.response_cache[corr_id] = msg_data
 
                     self.message_count += 1
@@ -1254,24 +1322,27 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
                     if filename.endswith(".log"):
                         module_name = filename.replace(".log", "")
                         with open(os.path.join(log_dir, filename), "r") as f:
-                            lines = f.readlines()
-                            for line in lines[-500:]:
+                            # Stream only the tail (deque maxlen) instead of
+                            # readlines() materialising the whole file — bounds
+                            # memory as spoke count and log size grow.
+                            for line in deque(f, maxlen=500):
                                 all_logs.append({"module": module_name, "log": line.strip()})
         except Exception as e:
             logger.error(f"Error reading module logs from disk: {e}")
 
         # Defense-in-depth against the 16 MiB WS frame ceiling: if the
         # serialized payload would exceed GET_LOGS_MAX_BYTES (default 12 MiB —
-        # safely under the 16 MiB max_size set on websockets.serve), drop the
-        # oldest entries until it fits. This keeps GET_LOGS responsive as
-        # spoke count and per-module heartbeat lines grow, without ever
-        # tripping a 1009 "message too big" close on the bugfixer agent.
+        # safely under the 16 MiB max_size set on websockets.serve), trim to the
+        # newest entries that fit. This keeps GET_LOGS responsive as spoke count
+        # and per-module heartbeat lines grow, without ever tripping a 1009
+        # "message too big" close on the bugfixer agent.
+        #
+        # The trim is a binary search over the tail length (O(log N) json.dumps
+        # passes), NOT the prior `while ... pop(0)` loop which re-serialized the
+        # whole list on every pop — O(N²) in log lines, which at 100s of spokes
+        # × 1000-line deques stalled the event loop on every BugFixer poll.
         max_bytes = getattr(self, "get_logs_max_bytes", lambda: 12 * 1024 * 1024)()
-        try:
-            while len(json.dumps({"logs": all_logs})) > max_bytes and all_logs:
-                all_logs.pop(0)
-        except Exception as e:
-            logger.warning(f"collect_all_logs size-cap loop failed: {e}")
+        all_logs = _fit_log_payload(all_logs, max_bytes)
 
         return {"logs": all_logs}
 
@@ -1303,7 +1374,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
                         module_name = filename.replace(".log", "")
                         try:
                             with open(os.path.join(log_dir, filename), "r") as f:
-                                for line in f.readlines()[-500:]:
+                                for line in deque(f, maxlen=500):
                                     if pat.search(line):
                                         errs.append(f"[{module_name}] {line.strip()}")
                         except Exception:
@@ -1613,16 +1684,32 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
                 return unit
         return ""
 
-    def _recovery_inspect(self, unit: str) -> dict:
-        """Read-only unit state via the root helper. Returns {} on error."""
+    async def _recovery_inspect(self, unit: str) -> dict:
+        """Read-only unit state via the root helper. Returns {} on error.
+
+        Async so the sudo call (up to ~10s) doesn't block the event loop — the
+        watchdog runs alongside live spoke WebSocket traffic, and a blocking
+        subprocess.run would stall heartbeats/relays for every stranded spoke
+        it inspects in a pass.
+        """
         try:
-            out = subprocess.run(
-                ["sudo", "-n", "/usr/local/bin/lm-spoke-recover", "--inspect", unit],
-                capture_output=True, text=True, timeout=10,
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "-n", "/usr/local/bin/lm-spoke-recover", "--inspect", unit,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            if out.returncode != 0 or not out.stdout.strip():
+            try:
+                stdout_b, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                logger.warning(f"[recovery] inspect timed out for {unit}")
                 return {}
-            return json.loads(out.stdout.strip())
+            stdout = (stdout_b or b"").decode(errors="replace")
+            if proc.returncode != 0 or not stdout.strip():
+                return {}
+            return json.loads(stdout.strip())
         except Exception as e:
             logger.warning(f"[recovery] inspect failed for {unit}: {e}")
             return {}
@@ -1684,7 +1771,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
                     if now < st.get("next_retry_ts", 0):
                         continue
 
-                    info = self._recovery_inspect(unit)
+                    info = await self._recovery_inspect(unit)
                     sub = info.get("SubState", "")
                     result = info.get("Result", "")
                     ems = info.get("ExecMainStatus", "")
@@ -1720,11 +1807,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
                         continue
 
                     # --- Recover: reset-failed (if failed) + restart ---
+                    # Async subprocess so the sudo call (up to ~15s) doesn't
+                    # block the event loop while the restart runs.
                     try:
-                        out = subprocess.run(
-                            ["sudo", "-n", "/usr/local/bin/lm-spoke-recover", unit],
-                            capture_output=True, text=True, timeout=15)
-                        rec = json.loads(out.stdout.strip()) if out.stdout.strip() else {}
+                        proc = await asyncio.create_subprocess_exec(
+                            "sudo", "-n", "/usr/local/bin/lm-spoke-recover", unit,
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                        )
+                        try:
+                            stdout_b, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+                        except asyncio.TimeoutError:
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                            stdout_b = b""
+                        stdout = (stdout_b or b"").decode(errors="replace")
+                        rec = json.loads(stdout.strip()) if stdout.strip() else {}
                         reset = bool(rec.get("reset", False))
                     except Exception as e:
                         reset = False
@@ -1995,12 +2094,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
                 logger.warning(f"OPNsense polling returned empty data for {spoke_id}")
                 return False
 
-            if not hasattr(self, "firewall_caches"):
-                self.firewall_caches = {}
-
             cache_key = firewall_id or spoke_id
-            self.firewall_caches[cache_key] = data
 
+            # Forensic on-disk snapshot only — the firewall routes always fetch
+            # live from the spoke (OPNSENSE_GET_RULES_BY_IP), so nothing in the
+            # app reads this back. Kept so an operator can `cat` the last-known
+            # ruleset for a firewall after a spoke goes down. The previous
+            # in-memory `firewall_caches`/`opnsense_cache` dicts were write-only
+            # dead state and have been removed.
             try:
                 if not os.path.exists(self.cache_dir):
                     os.makedirs(self.cache_dir, exist_ok=True)
@@ -2027,23 +2128,34 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         while True:
             try:
                 due_spokes = self.key_manager.get_keys_due_for_rotation(days=30)
+                # Rotate keys (local crypto — fast, sequential) then push the new
+                # secrets to all due spokes concurrently. Sequential sends at
+                # hundreds of spokes made a rotation pass take N round-trips.
+                rotated = []
                 for sid in due_spokes:
                     if sid in self.active_connections:
                         logger.info(f"Rotating session key for spoke {sid} (due for rotation)")
                         new_key = self.key_manager.rotate_key(sid)
-
-                        msg_id = str(uuid.uuid4())
                         msg = Message(
                             header=MessageHeader(
-                                message_id=msg_id,
+                                message_id=str(uuid.uuid4()),
                                 timestamp=time.time(),
                                 sender_id="hub",
                                 destination_id=sid
                             ),
                             payload=MessagePayload(type="SPOKE_UPDATE_SESSION_KEY", data={"secret": new_key.secret})
                         )
+                        rotated.append((sid, msg))
+
+                async def _push_session_key(sid, msg):
+                    try:
                         await self.send_to_spoke(msg)
                         logger.info(f"New session key pushed to {sid}")
+                    except Exception as e:
+                        logger.error(f"Failed to push session key to {sid}: {e}")
+
+                if rotated:
+                    await asyncio.gather(*(_push_session_key(sid, msg) for sid, msg in rotated))
 
                 global_config = self.state.get_global_config()
                 last_root_rot = global_config.get("last_hub_root_rotation", 0)
@@ -2056,22 +2168,27 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
                     self.state.system_state["global_config"] = global_config
                     self.state.save_state()
 
-                    for sid, approved in self.approved_modules.items():
-                        if approved:
-                            msg_id = str(uuid.uuid4())
-                            msg = Message(
-                                header=MessageHeader(
-                                    message_id=msg_id,
-                                    timestamp=time.time(),
-                                    sender_id="hub",
-                                    destination_id=sid
-                                ),
-                                payload=MessagePayload(type="SPOKE_SET_HUB_SECRET", data={"hub_secret": new_root_secret})
-                            )
-                            try:
-                                await self.send_to_spoke(msg)
-                            except Exception as e:
-                                logger.error(f"Failed to push new hub secret to {sid}: {e}")
+                    root_msgs = [
+                        (sid, Message(
+                            header=MessageHeader(
+                                message_id=str(uuid.uuid4()),
+                                timestamp=time.time(),
+                                sender_id="hub",
+                                destination_id=sid
+                            ),
+                            payload=MessagePayload(type="SPOKE_SET_HUB_SECRET", data={"hub_secret": new_root_secret})
+                        ))
+                        for sid, approved in self.approved_modules.items() if approved
+                    ]
+
+                    async def _push_root_secret(sid, msg):
+                        try:
+                            await self.send_to_spoke(msg)
+                        except Exception as e:
+                            logger.error(f"Failed to push new hub secret to {sid}: {e}")
+
+                    if root_msgs:
+                        await asyncio.gather(*(_push_root_secret(sid, msg) for sid, msg in root_msgs))
 
                     logger.info("Hub root secret rotated and pushed to all approved spokes.")
 
@@ -2103,23 +2220,6 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
                 logger.error(f"Error in OPNsense polling loop: {e}")
                 await asyncio.sleep(300) # Retry after 5 mins on error
 
-    async def load_caches(self):
-        """
-        Loads cached data from disk into memory.
-        """
-        logger.info("Loading local caches from disk...")
-        try:
-            if not os.path.exists(self.cache_dir):
-                return
-
-            opn_cache_path = os.path.join(self.cache_dir, "opnsense_rules.json")
-            if os.path.exists(opn_cache_path):
-                with open(opn_cache_path, "r") as f:
-                    self.opnsense_cache = json.load(f)
-                logger.info(f"Loaded OPNsense rules from {opn_cache_path}")
-        except Exception as e:
-            logger.error(f"Error loading local caches: {e}")
-
     async def start(self):
         """
         Starts the WebSocket server and background tasks.
@@ -2137,8 +2237,6 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
 
         api_thread = threading.Thread(target=run_api_server, args=(self,), daemon=True)
         api_thread.start()
-
-        await self.load_caches()
 
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())

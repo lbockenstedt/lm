@@ -660,6 +660,14 @@ def create_app(hub):
             hub.approved_modules.pop(spoke_id, None)
             hub.state.remove_module(spoke_id)
             hub.key_manager.delete_spoke_key(spoke_id)
+            # Drop per-spoke runtime caches (simulations_cache, telemetry,
+            # rate_limiters, events, recovery, agent_logs). The disconnect
+            # handler only clears active_connections/spoke_module_types, so
+            # without this the per-spoke dicts grow unbounded as admins
+            # delete/recreate spokes over time. Safe to evict on permanent
+            # delete (unlike a transient disconnect, which needs telemetry
+            # for the WebUI's DISCONNECTED status + recovery for the watchdog).
+            hub._evict_spoke(spoke_id)
             return {"status": "ok", "message": f"Spoke '{spoke_id}' removed."}
         except Exception as e:
             logger.exception("delete_spoke failed")
@@ -1164,6 +1172,12 @@ def create_app(hub):
             raise HTTPException(status_code=404, detail="Firewall not found")
 
         model = fw.get("model", "opnsense").lower()
+        # Only OPNsense has a spoke that handles these commands. The UI model
+        # dropdown also offers pfsense/juniper/fortigate, but no spokes exist
+        # for those yet, so an unknown model falls back to the OPNsense command
+        # set (parity with the previous behavior for pfsense/fortigate). The
+        # former "juniper" entry mapped to JUNIPER_GET_* commands no spoke
+        # handles — dead, removed.
         command_map = {
             "opnsense": {
                 "rules": "OPNSENSE_GET_ALL_RULES",
@@ -1174,10 +1188,6 @@ def create_app(hub):
                 "dns": "OPNSENSE_GET_DNS_RECORDS",
                 "aliases": "OPNSENSE_GET_ALIASES",
             },
-            "juniper": {
-                "rules": "JUNIPER_GET_RULES",
-                "health": "JUNIPER_GET_HEALTH",
-            }
         }
 
         model_commands = command_map.get(model, command_map.get("opnsense", {}))
@@ -2077,58 +2087,40 @@ def create_app(hub):
         hub = app.state.hub
         opn_spokes = hub.get_all_spokes_by_type("firewall")
 
-        results = []
-        for sid in opn_spokes:
+        async def _one(sid):
             try:
-                health_raw = await hub.request_response(sid, "GET_SYSTEM_HEALTH", {})
-                int_raw = await hub.request_response(sid, "GET_INTERFACE_STATUS", {})
-
+                # Health + interface status are independent — fetch both at once
+                # per spoke, and all spokes run concurrently so the dashboard
+                # latency is one round-trip, not N×2.
+                health_raw, int_raw = await _asyncio.gather(
+                    hub.request_response(sid, "GET_SYSTEM_HEALTH", {}),
+                    hub.request_response(sid, "GET_INTERFACE_STATUS", {}),
+                )
                 health_data = health_raw.get("payload", {}).get("data", {}) if isinstance(health_raw, dict) else {}
                 int_data = int_raw.get("payload", {}).get("data", {}) if isinstance(int_raw, dict) else {}
-
-                results.append({
-                    "spoke_id": sid,
-                    "spoke_online": True,
-                    "health": health_data,
-                    "interfaces": int_data,
-                    "status": "ONLINE"
-                })
+                return {"spoke_id": sid, "spoke_online": True,
+                        "health": health_data, "interfaces": int_data, "status": "ONLINE"}
             except Exception as e:
-                results.append({
-                    "spoke_id": sid,
-                    "spoke_online": False,
-                    "status": "ERROR",
-                    "error": str(e)
-                })
+                return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
 
-        return {"hosts": results}
+        results = await _asyncio.gather(*(_one(sid) for sid in opn_spokes))
+        return {"hosts": list(results)}
 
     @app.get("/api/aggregate/proxmox")
     async def aggregate_proxmox():
         hub = app.state.hub
         pxmx_spokes = hub.get_all_spokes_by_type("hypervisor")
 
-        results = []
-        for sid in pxmx_spokes:
+        async def _one(sid):
             try:
                 res_raw = await hub.request_response(sid, "GET_VM_INFO", {"vm_id": "all"})
                 res_data = res_raw.get("payload", {}).get("data", {}) if isinstance(res_raw, dict) else {}
-
-                results.append({
-                    "spoke_id": sid,
-                    "spoke_online": True,
-                    "data": res_data,
-                    "status": "ONLINE"
-                })
+                return {"spoke_id": sid, "spoke_online": True, "data": res_data, "status": "ONLINE"}
             except Exception as e:
-                results.append({
-                    "spoke_id": sid,
-                    "spoke_online": False,
-                    "status": "ERROR",
-                    "error": str(e)
-                })
+                return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
 
-        return {"hosts": results}
+        results = await _asyncio.gather(*(_one(sid) for sid in pxmx_spokes))
+        return {"hosts": list(results)}
 
     @app.get("/api/pxmx/agent-install-cmd")
     async def get_pxmx_agent_install_cmd(request: Request):

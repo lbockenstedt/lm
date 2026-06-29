@@ -124,6 +124,16 @@ class EndpointSyncMixin:
                 return str(tid)
         return None
 
+    def _endpoint_sync_concurrency(self) -> int:
+        """Max tenants synced in parallel per cycle. Bounded so hundreds of
+        tenants don't stampede the IPAM/CPPM spoke, but enough that a full cycle
+        finishes well within the schedule. Clamp 1..16; default 8."""
+        try:
+            n = int(self._endpoint_sync_cfg().get("concurrency", 8))
+        except (TypeError, ValueError):
+            n = 8
+        return max(1, min(16, n))
+
     def _endpoint_sync_next_delay(self, cfg: Dict[str, Any]) -> float:
         """Seconds to sleep before the next scheduled sync, per the config mode.
 
@@ -269,8 +279,23 @@ class EndpointSyncMixin:
                 if cfg.get("enabled", False) and \
                         self.get_spoke_by_type(se.get("module_type", "ipam")) and \
                         self.get_spoke_by_type("nac"):
-                    for tid in self._endpoint_sync_tenants():
-                        await self.sync_tenant_endpoints(tid)
+                    # Fan tenants out concurrently with a bounded semaphore.
+                    # Sequential await at hundreds of tenants × (30s IPAM + 60s
+                    # CPPM) per tenant made a full cycle take longer than the
+                    # schedule, so late tenants were perpetually stale. Bounded
+                    # (not unbounded gather) so we don't stampede the IPAM/CPPM
+                    # spokes with hundreds of simultaneous requests.
+                    tenants = self._endpoint_sync_tenants()
+                    sem = asyncio.Semaphore(self._endpoint_sync_concurrency())
+
+                    async def _one(tid: str):
+                        async with sem:
+                            try:
+                                await self.sync_tenant_endpoints(tid)
+                            except Exception as e:  # defense in depth — sync_tenant_endpoints already swallows, but never let one task kill the gather
+                                logger.debug("endpoint sync gather tenant=%s: %s", tid, e)
+
+                    await asyncio.gather(*(_one(tid) for tid in tenants))
                 delay = self._endpoint_sync_next_delay(cfg) if cfg.get("enabled", False) else 60
                 await asyncio.sleep(delay)
             except Exception as e:
