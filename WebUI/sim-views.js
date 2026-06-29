@@ -1826,7 +1826,8 @@ function csRenderVmServerTerminal() { return csRenderVmServerConsoleStub('Spoke 
 // those client-side; we mirror that here so the tables render correctly.
 async function csRenderVmServerUsb() {
     csSetToolbar('');
-    try { await csVmLoad(); } catch (e) { console.error('csRenderVmServerUsb: vm load failed', e); csSet(csErrorBox('Could not load USB', e)); return; }
+    let hosts;
+    try { hosts = await csVmLoad(); } catch (e) { console.error('csRenderVmServerUsb: vm load failed', e); csSet(csErrorBox('Could not load USB', e)); return; }
     const h = csVmSelectedHost();
     if (!h) { csSet(csEmpty('No host selected.')); return; }
     const px = h.proxmox || {};
@@ -1870,8 +1871,14 @@ async function csRenderVmServerUsb() {
     const l = present.filter(u => sc(u) === 'local').length;
     const b = present.filter(u => sc(u) === 'global+local').length;
     const total = present.length + unknown.length;
+    // Fleet-wide total across every host on this cs server (the per-host
+    // `total` above is just the selected host). csUsbCount sums present+unknown
+    // per host; usb_state is deliberately excluded (assigned-only subset).
+    const fleetTotal = (hosts || []).reduce((n, hh) => n + csUsbCount(hh), 0);
     const summary = `<div class="mb-3 text-xs text-slate-500 flex flex-wrap items-center gap-x-4 gap-y-1">
-      <span><b class="text-sm text-slate-700">${total}</b> dongles</span>
+      <span><b class="text-sm text-slate-700">${fleetTotal}</b> total on cs server</span>
+      <span class="text-slate-300">|</span>
+      <span><b class="text-sm text-slate-700">${total}</b> on this host</span>
       <span><b class="text-sm text-slate-700">${present.length}</b> certified</span>
       ${g ? `<span><b class="text-sm text-slate-700">${g}</b> global</span>` : ''}
       ${l ? `<span><b class="text-sm text-slate-700">${l}</b> local</span>` : ''}
