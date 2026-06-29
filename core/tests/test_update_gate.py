@@ -16,6 +16,7 @@ from update_pipeline import _update_available, _ver
 def test_ver_parses_dotted_numeric_and_falls_back():
     assert _ver("1.2.3") == (1, 2, 3)
     assert _ver("v.01") == (0, 0, 0)      # non-numeric → fallback (the post-reset state)
+    assert _ver(".01") == (0, 0, 0)       # current sentinel (no leading digit) → also fallback
     assert _ver("unknown") == (0, 0, 0)
     assert _ver("") == (0, 0, 0)
     assert _ver(None) == (0, 0, 0)

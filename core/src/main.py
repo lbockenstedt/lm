@@ -2285,7 +2285,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         # so the serialized payload stays safely under the frame limit.
         async with websockets.serve(self.handle_connection, self.host, self.port, compression=None, max_size=16 * 1024 * 1024) as server:
             self.is_ready = True
-            logger.info(f"Lab Manager Hub v{version} started on ws://{self.host}:{self.port}")
+            logger.info(f"Lab Manager Hub {version} started on ws://{self.host}:{self.port}")
             logger.info(f"Hub API started on port 8000")
             await asyncio.Future()
 

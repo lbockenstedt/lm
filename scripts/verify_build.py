@@ -61,9 +61,10 @@ def check_version_format(file_path):
             content = f.read().strip()
             if not content:
                 return False, "VERSION file is empty"
-            # Check for common version pattern (e.g. 0.24)
-            if not re.match(r'^\d+\.\d+$', content):
-                return False, f"Invalid version format: {content}. Expected 'X.Y'"
+            # Check for common version pattern (e.g. 0.24, or the post-reset
+            # sentinel ".01" which has no leading digit).
+            if not re.match(r'^\d*\.\d+$', content):
+                return False, f"Invalid version format: {content}. Expected 'X.Y' or '.Y'"
         return True, ""
     except Exception as e:
         return False, str(e)
