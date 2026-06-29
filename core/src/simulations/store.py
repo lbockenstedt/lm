@@ -167,6 +167,36 @@ class SimulationsStore:
                 out[tid] = dict(st)
         return out
 
+    # ── Hypervisor → NetBox VM-sync last-run status (Setup → IPAM) ──────────
+    # Per-tenant result of the most recent VM sync cycle (background loop or
+    # on-demand "Sync now"). Persisted so the UI still shows the last run after
+    # a hub restart. Shape: {status, pushed, errors, skipped, deleted, message,
+    # last_sync_ts, tenant_name, vms_total}.
+    async def get_vm_sync_status(self, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's last VM-sync status (empty if never run)."""
+        return dict(self._data.get(tenant_id, {}).get("vm_sync", {}))
+
+    async def set_vm_sync_status(self, tenant_id: str,
+                                 status: Dict[str, Any]) -> None:
+        """Replace the tenant's VM-sync status and persist."""
+        with self._lock:
+            self._tenant(tenant_id)["vm_sync"] = status or {}
+            self._save()
+
+    def get_all_vm_sync_status(self) -> Dict[str, Dict[str, Any]]:
+        """Return {tenant_id: status} for every tenant with a recorded VM sync.
+
+        Synchronous — persistence happened on each ``set_vm_sync_status`` write.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        for tid, t in self._data.items():
+            if tid == self._GLOBAL_KEY:
+                continue
+            st = t.get("vm_sync")
+            if st:
+                out[tid] = dict(st)
+        return out
+
     # ── onboarding PSKs (hub mints; the active one is pushed to the spoke) ──
     async def get_psks(self, tenant_id: str) -> List[str]:
         """Return a copy of the tenant's onboarding PSK list."""
