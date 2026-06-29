@@ -2,11 +2,10 @@ from abc import ABC, abstractmethod
 import logging
 from typing import Any, Dict
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# Root logger is configured once by the process entrypoint (hub main.py, or the
+# spoke's own main). Library modules must not call basicConfig — doing so from
+# an imported module either no-ops (root already configured) or, worse, pre-empts
+# the entrypoint's format/level if imported first. Just grab a named logger.
 logger = logging.getLogger("BaseSpoke")
 
 class BaseSpoke(ABC):

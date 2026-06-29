@@ -3,11 +3,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Awaitable, List, Dict
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# Logging configured by the process entrypoint (hub main.py); see base_spoke.py.
 logger = logging.getLogger("WorkflowEngine")
 
 @dataclass

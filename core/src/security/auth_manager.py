@@ -11,11 +11,7 @@ Audience: Hub developers; see ``docs/security.md`` for the zero-trust model.
 import logging
 from typing import Optional, Dict, Any
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# Logging configured by the process entrypoint (hub main.py); see base_spoke.py.
 logger = logging.getLogger("Auth")
 
 class AuthProvider:

@@ -25,11 +25,7 @@ import time
 from typing import Dict, Any, Optional
 from security.encryption import hub_encryption
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# Logging configured by the process entrypoint (hub main.py); see base_spoke.py.
 logger = logging.getLogger("State")
 
 class StateManager:
