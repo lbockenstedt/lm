@@ -809,7 +809,7 @@ const VIEW_SUBMENUS = {
     ldap: ['OUs', 'Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'VM Server', 'API Server', 'Config', 'Setup', 'Spoke Management'],
-    netbox: ['Devices', 'Racks', 'Prefixes', 'IP Addresses'],
+    netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records'],
     dhcp: ['Subnets', 'Leases', 'Reservations'],
 };
@@ -874,7 +874,20 @@ async function setTenant(tenant) {
         });
         if (response.ok) {
             console.log(`Switched to tenant: ${tenant}`);
-            setView(currentView);
+            // Preserve the active sub-view across a tenant switch. setView()
+            // re-renders the whole view and resets currentSubView to the first
+            // sub-menu (Overview/Devices), so a user on Prefixes who switches
+            // tenant would be bounced back to the default tab. Instead, just
+            // reload the current sub-view's data for the new tenant — the view
+            // layout (nav/header) is unchanged, only the tenant filter moved.
+            // Fall back to setView() only if the recorded sub-view isn't valid
+            // for the current view (e.g. view changed mid-flight).
+            const subs = VIEW_SUBMENUS[currentView] || [];
+            if (subs.includes(currentSubView)) {
+                setSubView(currentSubView);
+            } else {
+                setView(currentView);
+            }
         }
     } catch (err) {
         console.error('Failed to set tenant', err);
@@ -2066,7 +2079,7 @@ function initView(viewId, subView) {
             loadPxmxData(subView || 'Nodes');
             break;
         case 'netbox':
-            loadNetboxData(subView || 'Devices');
+            loadNetboxData(subView || 'Overview');
             break;
         case 'dns':
             loadDNSData(subView || 'Records');
@@ -5421,7 +5434,43 @@ async function loadNetboxData(subMenu) {
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
     try {
-        if (subMenu === 'Devices') {
+        if (subMenu === 'Overview') {
+            // Tenant-scoped summary: fan out to the four IPAM endpoints in
+            // parallel and render a card grid (Hosts, Racks, Subnets, IPs).
+            // allSettled so one spoke-down response degrades just that card to
+            // "Unavailable" instead of blanking the whole overview. Each card
+            // navigates to its management sub-view on click. Counts mirror the
+            // tenant-filtered fetches each sub-view already makes (Racks has no
+            // tenant param server-side today, matching the Racks sub-view).
+            const t = encodeURIComponent(currentTenant);
+            const get = (url, key) => fetch(url)
+                .then(r => r.json().then(d => ({ ok: r.ok, d, key })));
+            const results = await Promise.allSettled([
+                get(`/api/netbox/devices?tenant=${t}`, 'devices'),
+                get('/api/netbox/racks', 'racks'),
+                get(`/api/netbox/prefixes?tenant=${t}`, 'prefixes'),
+                get(`/api/netbox/ips?tenant=${t}`, 'ip_addresses'),
+            ]);
+            const count = i => {
+                const res = results[i];
+                if (res.status !== 'fulfilled' || !res.value.ok || res.value.d.status === 'ERROR') return null;
+                return (res.value.d[res.value.key] || []).length;
+            };
+            const card = (label, n, target) => `
+                <div onclick="setSubView('${target}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-[#01A982] hover:shadow-md transition-all">
+                    <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${label}</p>
+                    <p class="text-3xl font-bold text-[#263040]">${n === null ? '<span class="text-base font-medium text-amber-600">Unavailable</span>' : n}</p>
+                    <p class="text-xs text-slate-400 mt-1">assigned to this tenant · click to manage</p>
+                </div>`;
+            container.innerHTML = `
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 p-4">
+                    ${card('Hosts', count(0), 'Devices')}
+                    ${card('Racks', count(1), 'Racks')}
+                    ${card('Subnets', count(2), 'Prefixes')}
+                    ${card('IPs', count(3), 'IP Addresses')}
+                </div>`;
+
+        } else if (subMenu === 'Devices') {
             const r = await fetch(`/api/netbox/devices?tenant=${encodeURIComponent(currentTenant)}`);
             // Spoke-down is now a 503 with {detail} (see api.py error contract); older
             // builds returned 200+{status:'ERROR',message}. Handle both so the operator
