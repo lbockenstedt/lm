@@ -328,6 +328,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         # instead of leaking an entry that is never popped (unbounded growth at
         # scale with periodic commands + occasional spoke slowness).
         self._outstanding_requests: set = set()
+        # VNC console sessions (agent-terminates-WSS): session_id →
+        # {queue, expires, ws_token, spoke_id, tenant_id, vmid, node, unique_id}.
+        # The browser WS reads Proxmox→browser frames off ``queue`` (bytes) or
+        # control tuples ("ready"/"error"/"disconnect"); VNC_FRAME_DOWN sends
+        # the other way via send_to_spoke_command (fire-and-forget). 60s TTL.
+        self.vnc_sessions: Dict[str, Dict[str, Any]] = {}
         # { spoke_id: latest CS_TELEMETRY payload } — full Client-Sim data
         # (proxmox/clients/simulations/central/reclone) relayed by the combined
         # Client-Sim spoke over the LM websocket. Tenant-scoped at read time via
@@ -441,6 +447,59 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         finally:
             # Drop the waiter so a late ack can't leak a response_cache entry.
             self._outstanding_requests.discard(msg_id)
+
+    async def send_to_spoke_command(self, spoke_id: str, command_type: str,
+                                    data: Dict[str, Any]) -> None:
+        """Fire-and-forget command to a spoke — sends a signed Message via
+        ``send_to_spoke`` WITHOUT registering a pending request, so the spoke's
+        COMMAND_RESULT ack is dropped by ``handle_connection`` (its msg_id is
+        not in ``_outstanding_requests``). Used for VNC down-frames + control
+        (VNC_FRAME_DOWN / VNC_START / VNC_DISCONNECT) where awaiting an ack
+        would stall the browser WS. Never raises — a failed send just logs."""
+        msg_id = str(uuid.uuid4())
+        msg = Message(
+            header=MessageHeader(
+                message_id=msg_id,
+                timestamp=time.time(),
+                sender_id="hub",
+                destination_id=spoke_id,
+            ),
+            payload=MessagePayload(type=command_type, data=data),
+        )
+        try:
+            await self.send_to_spoke(msg)
+        except Exception as e:
+            logger.warning(f"send_to_spoke_command {command_type} -> {spoke_id} failed: {e}")
+
+    # ── VNC console sessions (agent-terminates-WSS) ───────────────────────────
+    # The browser opens /ws/console/{session_id}; Proxmox→browser frames land on
+    # the session queue via _handle_agent_relay_up (VNC_FRAME_UP), and browser→
+    # Proxmox frames go out via send_to_spoke_command (VNC_FRAME_DOWN). 60s TTL
+    # so an unclaimed session (browser never connects) is reaped.
+
+    VNC_SESSION_TTL = 60
+
+    def register_vnc_session(self, session_id: str, meta: Dict[str, Any]) -> None:
+        """Create the session's frame queue and store its metadata."""
+        self.vnc_sessions[session_id] = {
+            "queue": asyncio.Queue(),
+            "expires": time.time() + self.VNC_SESSION_TTL,
+            **meta,
+        }
+
+    def get_vnc_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return a live session dict (queue + meta) or None if absent/expired.
+        Expired sessions are reaped on read."""
+        sess = self.vnc_sessions.get(session_id)
+        if not sess:
+            return None
+        if sess.get("expires", 0) < time.time():
+            self.vnc_sessions.pop(session_id, None)
+            return None
+        return sess
+
+    def unregister_vnc_session(self, session_id: str) -> None:
+        self.vnc_sessions.pop(session_id, None)
 
     def _evict_spoke(self, spoke_id: str) -> None:
         """Drop ALL per-spoke in-memory state for ``spoke_id``.
@@ -911,6 +970,30 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         if _orig_type and _orig_type.startswith("CS_"):
             _cs_data = original_msg.get("payload", {}).get("data", {}) or {}
             await self._relay_cs_event(spoke_id, agent_id, _orig_type, _cs_data)
+            return True
+
+        # --- VNC console relay (agent-terminates-WSS) ---
+        # The agent emits VNC_FRAME_UP (Proxmox→browser bytes, b64), VNC_READY
+        # (WSS open), VNC_ERROR (vncproxy/WSS failed), VNC_DISCONNECT (Proxmox
+        # side closed). Route each to the session's queue; the browser WS reads
+        # bytes off the queue and sends them to the client. Control signals are
+        # tuples so the WS loop can distinguish them from frame bytes.
+        if _orig_type and _orig_type.startswith("VNC_"):
+            _vnc_data = original_msg.get("payload", {}).get("data", {}) or {}
+            _sid = _vnc_data.get("session_id")
+            _sess = self.get_vnc_session(_sid) if _sid else None
+            if _orig_type == "VNC_FRAME_UP" and _sess:
+                try:
+                    raw = base64.b64decode(_vnc_data.get("data") or "")
+                    await _sess["queue"].put(raw)
+                except Exception:
+                    pass
+            elif _orig_type == "VNC_READY" and _sess:
+                await _sess["queue"].put(("ready",))
+            elif _orig_type == "VNC_ERROR" and _sess:
+                await _sess["queue"].put(("error", str(_vnc_data.get("error", "vnc error"))[:300]))
+            elif _orig_type == "VNC_DISCONNECT" and _sess:
+                await _sess["queue"].put(("disconnect",))
             return True
 
         # Unmatched sub-type: return False so handle_connection falls through
