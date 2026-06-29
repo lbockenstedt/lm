@@ -99,6 +99,13 @@ const ROUTES = {
     runEndpointSyncNow:     { m: 'POST', p: '/setup/endpoint-sync/run',   api: 'run_endpoint_sync' },
     saveEndpointSyncConfig: { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
 
+    // ── VM sync (Hypervisor → NetBox) ──
+    loadVmSyncSources:      { m: 'GET',  p: '/setup/vm-sync/sources',     api: 'vm_sync_sources' },
+    loadVmSyncConfig:       { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
+    loadVmSyncStatus:       { m: 'GET',  p: '/setup/vm-sync/status',      api: 'vm_sync_status' },
+    runVmSyncNow:           { m: 'POST', p: '/setup/vm-sync/run',         api: 'run_vm_sync' },
+    saveVmSyncConfig:       { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
+
     // ── Cache / subnet-filter / diagnostics / logs ──
     loadCacheConfig:        { m: 'GET',  p: '/admin/cache/config',        api: 'admin_get_cache_config' },
     saveCacheConfig:        { m: 'PUT',  p: '/admin/cache/config',        api: 'admin_update_cache_config' },
@@ -2579,8 +2586,47 @@ function _renderSetupIpamTile(content) {
                     <button onclick="showAddInstanceModal('ipam')" class="${btnCls}">+ Add Instance</button>
                 </div>
                 <div id="ipam-instances-list" class="space-y-2"></div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hypervisor → NetBox VM Sync</h3>
+                    <button id="vm-sync-run-btn" onclick="runVmSyncNow()" class="${btnCls}">Sync now</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Periodically pulls each tenant's VMs from the selected hypervisor source (Proxmox via the pxmx spoke, scoped by the tenant's proxmox_tag) and mirrors them into NetBox virtualization records — vCPUs / disk / cluster / primary IP4 / NetBox tenant, matched by a <code>proxmox_unique_id</code> custom field. The hypervisor is the source of truth — each sync overwrites the tenant's NetBox VM set to match (stale records are deleted). Also fires automatically after a VM lifecycle action (start/stop/restart/snapshot). Proxmox is registered today; the design is modular so another hypervisor product can be swapped in by adding one entry to the hub's HYPERVISOR_SOURCES registry.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="vm-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sync</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Pull from (hypervisor source)</label>
+                        <select id="vm-sync-source" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="proxmox">Proxmox</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Schedule</label>
+                        <select id="vm-sync-mode" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="interval">Every (interval)</option>
+                            <option value="daily">Daily at time</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Interval (minutes)</label>
+                        <input type="number" id="vm-sync-interval" min="1" value="60" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Daily time (HH:MM, 24h)</label>
+                        <input type="time" id="vm-sync-time" value="03:00" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <button onclick="saveVmSyncConfig()" class="${btnCls}">Save Schedule</button>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
+                    <div id="vm-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
             </div>`;
     loadInstances('ipam');
+    loadVmSyncSources();
+    loadVmSyncConfig();
+    loadVmSyncStatus();
 }
 
 // Setup → LDAP tile. GET /api/instances/ldap (core/src/api.py get_instances).
@@ -3018,6 +3064,122 @@ async function saveEndpointSyncConfig() {
             } } })
         });
         if (r.ok) showToast('Endpoint sync schedule saved.', 'success');
+        else showToast('Failed to save schedule.', 'error');
+    } catch (e) {
+        showToast('Error saving schedule: ' + e.message, 'error');
+    }
+}
+
+// ── Hypervisor → NetBox VM sync (Setup → IPAM) ──────────────────────────
+async function loadVmSyncSources() {
+    // Populate the hypervisor source dropdown from the hub's HYPERVISOR_SOURCES
+    // registry (data-driven) and mark each source's connected state.
+    const sel = document.getElementById('vm-sync-source');
+    if (!sel) return;
+    try {
+        const r = await setupFetch('/setup/vm-sync/sources');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cur = sel.value;
+        sel.innerHTML = (data.sources || []).map(s =>
+            `<option value="${s.name}">${s.label}${s.connected ? '' : ' (not connected)'}</option>`
+        ).join('');
+        if (cur) sel.value = cur;
+    } catch (e) { console.error('loadVmSyncSources failed', e); }
+}
+
+async function loadVmSyncConfig() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const vmSync = (data.global_config || {}).pxmx_netbox_vm_sync || {};
+        const chk = document.getElementById('vm-sync-enabled');
+        const src = document.getElementById('vm-sync-source');
+        const mode = document.getElementById('vm-sync-mode');
+        const intv = document.getElementById('vm-sync-interval');
+        const time = document.getElementById('vm-sync-time');
+        if (chk) chk.checked = vmSync.enabled === true;
+        if (src && vmSync.source) src.value = vmSync.source;
+        if (mode) mode.value = vmSync.mode === 'daily' ? 'daily' : 'interval';
+        if (intv) intv.value = Math.max(1, Math.round((vmSync.interval_seconds || 3600) / 60));
+        if (time) time.value = vmSync.daily_time || '03:00';
+    } catch (e) { console.error('loadVmSyncConfig failed', e); }
+}
+
+async function loadVmSyncStatus() {
+    const wrap = document.getElementById('vm-sync-status');
+    if (!wrap) return;
+    let data;
+    try {
+        const r = await setupFetch('/setup/vm-sync/status');
+        if (!r.ok) throw new Error(`${r.status}`);
+        data = await r.json();
+    } catch (e) {
+        wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
+        return;
+    }
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const rows = data.tenants || [];
+    if (!rows.length) {
+        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
+        return;
+    }
+    wrap.innerHTML = rows.map(t => {
+        const st = String(t.status || '');
+        const pill = st === 'success' ? 'bg-green-100 text-green-700'
+            : st === 'error' ? 'bg-red-100 text-red-700'
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+        const pushed = Number(t.pushed) || 0;
+        const errors = Number(t.errors) || 0;
+        const deleted = Number(t.deleted) || 0;
+        const total = Number(t.vms_total) || 0;
+        return `<div class="border border-slate-200 rounded-md p-3">
+            <div class="flex items-center justify-between mb-1">
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
+            </div>
+            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · vms ${total} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+        </div>`;
+    }).join('');
+}
+
+async function runVmSyncNow() {
+    const btn = document.getElementById('vm-sync-run-btn');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+        const r = await setupFetch('/setup/vm-sync/run', {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        const s = data.summary || {};
+        showToast(`Synced ${s.tenants || 0} tenant(s): ${s.pushed || 0} pushed, ${s.deleted || 0} deleted, ${s.errors || 0} errors.`, (s.errors || 0) ? 'info' : 'success');
+        await loadVmSyncStatus();
+    } catch (e) {
+        showToast('Sync failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+}
+
+async function saveVmSyncConfig() {
+    const enabled = document.getElementById('vm-sync-enabled')?.checked ? true : false;
+    const source = document.getElementById('vm-sync-source')?.value || 'proxmox';
+    const mode = document.getElementById('vm-sync-mode')?.value || 'interval';
+    const intervalMin = Math.max(1, parseInt(document.getElementById('vm-sync-interval')?.value, 10) || 60);
+    const dailyTime = document.getElementById('vm-sync-time')?.value || '03:00';
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { pxmx_netbox_vm_sync: {
+                enabled, source, mode, interval_seconds: intervalMin * 60, daily_time: dailyTime
+            } } })
+        });
+        if (r.ok) showToast('VM sync schedule saved.', 'success');
         else showToast('Failed to save schedule.', 'error');
     } catch (e) {
         showToast('Error saving schedule: ' + e.message, 'error');

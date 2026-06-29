@@ -985,6 +985,101 @@ def create_app(hub):
                             "connected": bool(hub.get_spoke_by_type(se.get("module_type", "")))})
         return {"active": active, "sources": sources}
 
+    # ── Hypervisor → NetBox VM sync (hub-orchestrated) ───────────────────────
+    # On-demand trigger + per-tenant last-sync status for the Setup → IPAM
+    # "Hypervisor → NetBox VM Sync" card. Config (enabled / mode /
+    # interval_seconds / daily_time) is stored under
+    # global_config["pxmx_netbox_vm_sync"] and saved via the generic POST
+    # /setup/config shallow-merge — no dedicated config route needed. The
+    # background loop (main.py run_vm_sync_loop) reads that same key.
+    def _trigger_vm_sync_after_pxmx_edit(hub, request: Request,
+                                         data: Dict[str, Any] = None):
+        """Best-effort: fire a tenant VM sync after a pxmx/hypervisor write.
+
+        Resolves the target tenant from the acting user's session (a VM
+        lifecycle action does not carry a per-tenant scope in its body, unlike
+        an IPAM edit which carries ``tenant``). Never raises — a sync trigger
+        must not break the VM mutation it follows. A superadmin with no tenant
+        is a no-op (the scheduled loop covers unbound tenants).
+        """
+        try:
+            tid = _resolve_tenant(request, None)
+            hub.trigger_vm_sync(tid)
+        except Exception as e:
+            logger.debug("vm-sync trigger after pxmx edit skipped: %s", e)
+
+    @app.post("/setup/vm-sync/run")
+    async def run_vm_sync(request: Request):
+        """On-demand Hypervisor → NetBox VM sync ('Sync now').
+
+        Body optional: ``{"tenant_id": "<id>"}`` to sync one tenant; absent →
+        all tenants bound to a hypervisor source. Returns per-tenant results +
+        a summary.
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if target:
+            results = [await hub.sync_tenant_vms(target)]
+        else:
+            results = [await hub.sync_tenant_vms(tid)
+                       for tid in hub._vm_sync_tenants()]
+        pushed = sum(int(r.get("pushed", 0)) for r in results)
+        errors = sum(int(r.get("errors", 0)) for r in results)
+        deleted = sum(int(r.get("deleted", 0)) for r in results)
+        return {"results": results,
+                "summary": {"pushed": pushed, "errors": errors,
+                            "deleted": deleted, "tenants": len(results)}}
+
+    @app.get("/setup/vm-sync/status")
+    async def vm_sync_status(request: Request):
+        """Per-tenant last-VM-sync status for the Setup → IPAM card."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        statuses = hub.simulations_store.get_all_vm_sync_status()
+        tenants = []
+        for tid, st in statuses.items():
+            tenants.append({
+                "tenant_id": tid,
+                "tenant_name": st.get("tenant_name") or tid,
+                "status": st.get("status"),
+                "pushed": st.get("pushed", 0),
+                "errors": st.get("errors", 0),
+                "skipped": st.get("skipped", 0),
+                "deleted": st.get("deleted", 0),
+                "message": st.get("message", ""),
+                "vms_total": st.get("vms_total", 0),
+                "last_sync_ts": st.get("last_sync_ts"),
+            })
+        return {"tenants": tenants}
+
+    @app.get("/setup/vm-sync/sources")
+    async def vm_sync_sources(request: Request):
+        """List the available hypervisor pull-sources for the sync source selector.
+
+        Driven by Hub.HYPERVISOR_SOURCES so adding a product is a one-entry
+        registry change and the WebUI dropdown picks it up with no client change.
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        active = hub._vm_sync_source().get("module_type")
+        sources = []
+        for name, se in hub.HYPERVISOR_SOURCES.items():
+            sources.append({"name": name, "label": se.get("label", name),
+                            "module_type": se.get("module_type", ""),
+                            "connected": bool(hub.get_spoke_by_type(se.get("module_type", "")))})
+        return {"active": active, "sources": sources}
+
     @app.get("/setup/pxmx-config")
     async def get_pxmx_config():
         hub = app.state.hub
@@ -2580,6 +2675,10 @@ def create_app(hub):
         try:
             result = await hub.request_response(pxmx_spoke, "PXMX_VM_ACTION", payload, timeout=35.0)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            # Best-effort: a VM lifecycle change (start/stop/restart/snapshot)
+            # may change the NetBox VM-record view (status at minimum), so re-sync
+            # the acting tenant's VMs to NetBox when the VM sync is enabled.
+            _trigger_vm_sync_after_pxmx_edit(hub, request, body)
             return data
         except Exception as e:
             logger.exception("pxmx_vm_action failed")

@@ -60,6 +60,7 @@ from update_recovery import (
 )
 from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
+from vm_sync import VmSyncMixin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -241,7 +242,7 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -2337,6 +2338,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
         # Also fired on-demand from the WebUI ("Sync now") and after any NetBox
         # edit via the LM module (trigger_endpoint_sync). See run_endpoint_sync_loop.
         endpoint_sync_task = asyncio.create_task(self.run_endpoint_sync_loop())
+        # Hypervisor → NetBox VM sync: pulls each tenant's VMs from the pxmx
+        # (Proxmox) spoke and pushes them to the NetBox spoke so NetBox's
+        # virtualization records mirror live VMs (vCPUs/disk/cluster/primary_ip4,
+        # tenant-tagged, replace-with-delete). Also fired on-demand from the
+        # WebUI ("Sync now") and after a pxmx VM lifecycle edit
+        # (trigger_vm_sync). See run_vm_sync_loop.
+        vm_sync_task = asyncio.create_task(self.run_vm_sync_loop())
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable
         # [heartbeat] line into self.logs (module="hub" in collect_all_logs)

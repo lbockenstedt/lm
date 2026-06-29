@@ -20,6 +20,10 @@ class FakeState:
         self.system_state = system_state or {}
         self._global_config = global_config or {}
         self._tenants = tenants or {}
+        # The sync mixins read ``self.state.tenant_state["tenants"]``; reflect
+        # the constructor tenants so tests that exercise tenant scoping work
+        # without per-test patching.
+        self.tenant_state = {"tenants": self._tenants}
 
     def get_global_config(self) -> dict:
         return self._global_config
