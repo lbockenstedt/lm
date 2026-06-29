@@ -24,6 +24,14 @@ from .store import SimulationsStore
 logger = logging.getLogger("SimRoutes")
 
 _USB_VIDPID_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{4}$")
+# Allowed dongle classes. The Global USB Approvals UI offers these; the
+# tenant approval surfaces (Per-Tenant USB + per-host Certify) send one of
+# them so a tenant can classify a VID:PID as wired vs wireless etc. Anything
+# outside the set falls back to "wireless" (the historic default). pxmx's
+# _sim_phy_accepts matches dongle type against sim_phy {wireless, ethernet,
+# any}; "wireless" binds to wireless/any sims, the others bind only to
+# sim_phy=any until the pxmx enforcement domain is widened (separate change).
+_USB_TYPES = ("wireless", "wired", "storage", "other")
 
 
 def _normalize_usb_vidpids(raw: Any) -> list:
@@ -1228,10 +1236,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/{tenant}/usb-vidpids")
     async def cs_usb_vidpids(request: Request, tenant: str,
                             tenant_id: str = Depends(get_tenant_id)):
-        """Certify / ignore a USB vid:pid. Body: {vid, pid, action} where action
-        is ``certify`` (→ usb_vidpids) or ``ignore`` (→ usb_ignored_vidpids),
-        or ``remove`` (removes from both). Persists in the hub_config bucket
-        and pushes the updated list to the spoke.
+        """Certify / ignore a USB vid:pid. Body: {vid, pid, action, type?} where
+        action is ``certify`` (→ usb_vidpids) or ``ignore`` (→ usb_ignored_vidpids),
+        or ``remove`` (removes from both). ``type`` (optional, certify only) is the
+        dongle class — one of {_USB_TYPES}; it defaults to "wireless" and, on
+        re-certify of an already-certified vid:pid, updates the stored class.
+        Persists in the hub_config bucket and pushes the updated list to the spoke.
 
         Format matches the cs speak's re-filter (server.py _apply_proxmox_
         telemetry_state): ``usb_vidpids`` is a JSON array of
@@ -1260,8 +1270,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         ign_set = set(_normalize_usb_ignored(cfg.get("usb_ignored_vidpids")))
         cert_by_vid = {e["vidpid"]: e for e in cert_list}
         if action == "certify":
-            if token not in cert_by_vid:
-                cert_by_vid[token] = {"vidpid": token, "type": "wireless", "label": token}
+            dtype = str(body.get("type") or "").strip().lower()
+            if dtype not in _USB_TYPES:
+                dtype = "wireless"
+            existing = cert_by_vid.get(token)
+            if existing:
+                # Re-certify: update the type so a tenant can reclassify a
+                # dongle (e.g. wired ↔ wireless) without removing/re-adding.
+                existing["type"] = dtype
+            else:
+                cert_by_vid[token] = {"vidpid": token, "type": dtype, "label": token}
             ign_set.discard(token)
         elif action == "ignore":
             ign_set.add(token)
