@@ -725,7 +725,13 @@ function itemInTenantPrefixes(item, ipFields) {
 async function loadTenantPrefixes() {
     if (isAdmin()) { _tenantPrefixes = []; return; }
     try {
-        const r = await fetch('/auth/prefixes', { credentials: 'same-origin' });
+        // ?tenant=currentTenant scopes prefixes to the selected tenant so the
+        // client-side filter (NAT/DHCP/DNS/Interfaces) tracks the switcher for
+        // multi-tenant users; without it, switching tenant would leave the
+        // client filtering on the stale session-tenant prefixes. Admins early-
+        // return above (they don't client-filter; the server filters by ?tenant=).
+        const qs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
+        const r = await fetch(`/auth/prefixes${qs}`, { credentials: 'same-origin' });
         if (!r.ok) { _tenantPrefixes = []; return; }
         const d = await r.json();
         _tenantPrefixes = d.prefixes || [];
@@ -874,6 +880,12 @@ async function setTenant(tenant) {
         });
         if (response.ok) {
             console.log(`Switched to tenant: ${tenant}`);
+            // Reload tenant prefixes for the newly-selected tenant BEFORE the
+            // view re-renders, so the client-side subnet filter (NAT/DHCP/DNS/
+            // Interfaces) and the server-side ?tenant= filter on the firewall
+            // fetch agree on the same tenant. Without this, a multi-tenant user
+            // switching tenant would filter on stale session-tenant prefixes.
+            await loadTenantPrefixes();
             // Preserve the active sub-view across a tenant switch. setView()
             // re-renders the whole view and resets currentSubView to the first
             // sub-menu (Overview/Devices), so a user on Prefixes who switches
@@ -5017,8 +5029,13 @@ async function loadOpnsenseManagement() {
 
         // Pull from every configured firewall in parallel and merge into one
         // table, tagging each row with its source firewall (_fwId / firewall).
+        // ?tenant=currentTenant scopes the server-side subnet filter to the
+        // selected tenant — including for admins (via the switcher), who
+        // otherwise bypass the filter. Applies to every tab (rules/nat/dns/
+        // interfaces/dhcp/aliases); aliases filter on their content IPs.
+        const tenantQs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
         const results = await Promise.allSettled(firewalls.map(fw =>
-            fetch(`/api/firewall/${fw.id}/${suffix}`)
+            fetch(`/api/firewall/${fw.id}/${suffix}${tenantQs}`)
                 .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status} ${r.statusText}`)))
                 .then(data => ({ fw, data }))
         ));

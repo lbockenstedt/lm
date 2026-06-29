@@ -40,6 +40,11 @@ reader encounters them in roughly this order:
   * Tenants + users (``/setup/tenants``, ``/setup/users``).
   * Auth routes (``/auth/login``, ``/auth/me``, ``/auth/logout``, ``/auth/setup``,
     ``/auth/prefixes``) — defined LATE, near the end of ``create_app``.
+  * Admin subnet-filter toggle (``/admin/subnet-filter-config``).
+  * Generic Agent API (``/api/agent/*``, ``/api/generic/provision``).
+  * DNS relay (``/api/dns/*``).
+  * DHCP relay (``/api/dhcp/*``).
+  * Cache management (``/admin/cache/*``, ``/auth/cache/*``).
   * Simulations (``/sim/api/*``) — mounted via ``register_simulations_routes``.
 
 Auth (enforced by ``access_control_middleware``): every ``/api/``, ``/setup/``,
@@ -73,7 +78,8 @@ Error-response conventions:
   * Exception: the update-trigger (``/setup/update``) keeps ``"status": "success"``
     because ``webui/update_handler.js`` keys its restart-poll off that literal.
 Match these conventions when adding a route; add ``logger.exception(...)`` before
-any bare ``raise HTTPException(500, detail=str(e))`` so hub logs capture the trace.
+a bare ``raise HTTPException(500, detail=str(e))`` so hub logs capture the trace
+(a handful of older sites still lack it — add it when you touch them).
 """
 
 import os
@@ -716,7 +722,7 @@ def create_app(hub):
                 pushed = False
 
             return {
-                "status":    "success",
+                "status":    "ok",
                 "spoke_id":  spoke_id,
                 "pushed":    pushed,
                 "message":   ("New key pushed to live spoke and persisted." if pushed
@@ -1145,17 +1151,20 @@ def create_app(hub):
     # ── Firewall: data + CRUD (/api/firewall/*) ──────────────────────────────
     # get_firewall_data serves from tenant cache (non-admin) / offline cache /
     # a live spoke round-trip; the CRUD handlers below mutate and refresh.
-    async def get_firewall_data(request: Request, firewall_id: str, endpoint: str):
+    async def get_firewall_data(request: Request, firewall_id: str, endpoint: str, tenant: str = None):
         """Live + cached firewall data (rules/interfaces/services/virtual-ip).
 
         Three return paths: tenant cache hit for non-admins, offline cache when
         the spoke is down, and a live ``request_response`` round-trip. The
         ``endpoint`` arg selects the firewall sub-resource. Results are
-        tenant-prefix-filtered via ``_subnet_filter`` before return."""
+        tenant-prefix-filtered via ``_subnet_filter_fw`` before return. ``?tenant=``
+        scopes the filter to the selected tenant so an admin acting as a tenant
+        (via the switcher) sees only that tenant's subnet data across every tab —
+        without it, admins bypass the filter (see access.subnet_filter_fw)."""
         # see _netbox_list_get (variant: per-model command map + fw_id-scoped cache
         # keys + _subnet_filter_fw filter — enough variation to stay inline).
         hub = app.state.hub
-        logger.debug("relay %s %s firewall=%s endpoint=%s", request.method, request.url.path, firewall_id, endpoint)
+        logger.debug("relay %s %s firewall=%s endpoint=%s tenant=%s", request.method, request.url.path, firewall_id, endpoint, tenant)
 
         # Serve from tenant cache for non-admin users (if module is cached)
         sess = _session_user(request)
@@ -1164,7 +1173,7 @@ def create_app(hub):
             if tenant_id and endpoint in _FW_MODULES:
                 cached = _cache_entry(tenant_id, f"{endpoint}:{firewall_id}")
                 if cached:
-                    return await _subnet_filter_fw(request, cached["data"], endpoint, firewall_id)
+                    return await _subnet_filter_fw(request, cached["data"], endpoint, firewall_id, tenant)
 
         firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
         fw = next((f for f in firewalls if f["id"] == firewall_id), None)
@@ -1203,7 +1212,7 @@ def create_app(hub):
                 if tenant_id:
                     cached = _cache_entry(tenant_id, f"{endpoint}:{firewall_id}")
                     if cached:
-                        return await _subnet_filter_fw(request, cached["data"], endpoint, firewall_id)
+                        return await _subnet_filter_fw(request, cached["data"], endpoint, firewall_id, tenant)
             raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
 
         try:
@@ -1218,7 +1227,7 @@ def create_app(hub):
                     data = result
             else:
                 data = result
-            return await _subnet_filter_fw(request, data, endpoint, firewall_id)
+            return await _subnet_filter_fw(request, data, endpoint, firewall_id, tenant)
         except Exception as e:
             logger.error(f"Error fetching {endpoint} for firewall {firewall_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
@@ -1655,9 +1664,10 @@ def create_app(hub):
         # see _netbox_list_get (variant: admin/multi-tenant live path runs FIRST,
         # then non-admin cache path; _subnet_filter_tenant + tag filter — inline).
         # Relay trace (DEBUG so polled reads don't flood INFO): records the
-        # tenant scope + that we entered the relay. Replicate this one-liner on
-        # other relay routes so a slow/failed spoke round-trip is traceable from
-        # logs even on the happy path (error paths already log).
+        # tenant scope + that we entered the relay. Established convention —
+        # every relay GET (CPPM, NetBox, pxmx, DNS, DHCP, LDAP, firewall
+        # live-fetch) carries this one-liner so a slow/failed spoke round-trip
+        # is traceable from logs even on the happy path (error paths already log).
         logger.debug("relay %s %s tenant=%s", request.method, request.url.path, tenant)
         sess = _session_user(request)
         # Tag-based tenant filter: keep only devices tagged with the effective
@@ -3196,7 +3206,10 @@ def create_app(hub):
         live spoke round-trip with the resolved tenant slug. ``slice_query`` is the
         dict of non-tenant slice params (site/rack/prefix/device); ``subnet_fields``
         is None for raw data or a list like ``["prefix"]`` to apply the subnet
-        filter to both cached and live data. See _cached_or_live for the pattern."""
+        filter to both cached and live data. Handlers that can't share this
+        helper (get_firewall_data, get_cppm_devices/sessions, get_pxmx_vms)
+        inline the same cache→spoke→offline shape with a
+        ``# see _netbox_list_get (variant: …)`` cross-ref."""
         hub = app.state.hub
         logger.debug("relay %s %s tenant=%s %s", request.method, request.url.path, tenant, slice_query)
         sess = _session_user(request)
@@ -4129,8 +4142,8 @@ def create_app(hub):
     async def _subnet_filter(request, data, module, ip_fields):
         return await access.subnet_filter(hub, _sessions, request, data, module, ip_fields)
 
-    async def _subnet_filter_fw(request, data, endpoint, firewall_id=None):
-        return await access.subnet_filter_fw(hub, _sessions, request, data, endpoint, firewall_id)
+    async def _subnet_filter_fw(request, data, endpoint, firewall_id=None, explicit_tenant=None):
+        return await access.subnet_filter_fw(hub, _sessions, request, data, endpoint, firewall_id, explicit_tenant)
 
     async def _subnet_gate_record(request, record, module, ip_fields):
         return await access.subnet_gate_record(hub, _sessions, request, record, module, ip_fields)
@@ -4322,24 +4335,31 @@ def create_app(hub):
     # session-prefix cache TTL is now owned by access.resolve_prefixes.
 
     @app.get("/auth/prefixes")
-    async def get_session_prefixes(request: Request):
+    async def get_session_prefixes(request: Request, tenant: str = None):
         """Return the IP prefixes for the current session user's tenant.
 
         NetBox-derived and session-cached (5 min). Used by the UI to filter all
         module views (firewall rules, NAC sessions, etc.) AND by the server-side
-        subnet filter (``_subnet_filter``) — both share ``_resolve_prefixes`` so
-        the UI and the API enforcement agree.
+        subnet filter — both share prefix resolution so the UI and the API
+        enforcement agree. ``?tenant=`` scopes prefixes to the selected tenant
+        (an admin acting as a tenant via the switcher, or a multi-tenant user
+        switching to an allowed one); without it, the session tenant is used
+        (admins get [] so the client-side filter stays a no-op for them).
         """
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Not authenticated")
         hub = app.state.hub
-        prefixes = await _resolve_prefixes(hub, sess)
+        if tenant:
+            tid = _effective_tenant(request, tenant)
+            prefixes = await _resolve_prefixes_for_tenant(hub, tid) if tid else []
+        else:
+            tid = sess.get("user", {}).get("tenant_id")
+            prefixes = await _resolve_prefixes(hub, sess)
         resp = {"prefixes": prefixes}
         # Surface why a non-admin might have no prefixes (helps debugging the
         # "tenant sees everything" symptom). Admins get [] intentionally.
         if not prefixes and not _is_admin(sess):
-            tid = sess.get("user", {}).get("tenant_id")
             if not tid:
                 resp["warning"] = "No tenant assigned to this user"
             elif not get_tenant_scoping(hub, tid).get("netbox_tenant_slug"):
