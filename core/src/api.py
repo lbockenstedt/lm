@@ -2148,6 +2148,7 @@ def create_app(hub):
             # `agent_config` is the new home; `agent_display_names` is a read fallback.
             agent_cfg = hub.state.system_state.get("agent_config", {})
             names = hub.state.system_state.get("agent_display_names", {})
+            now = time.time()
             for a in data.get("agents", []):
                 aid = a["agent_id"]
                 cfg = agent_cfg.get(aid, {})
@@ -2157,6 +2158,14 @@ def create_app(hub):
                     a["display_name"] = names[aid]
                 if cfg.get("client_simulation"):
                     a["client_simulation"] = cfg["client_simulation"]
+                # Hub-tracked per-agent heartbeat (keyed spoke_id:agent_id, fed
+                # by the pxmx spoke relaying AGENT_HEARTBEAT up). Surfaces in
+                # System → Diagnostics alongside the spoke heartbeats; falls
+                # back to RED/never when the hub has never seen the agent beat.
+                hb_key = f"{pxmx_spoke}:{aid}"
+                hb_last = hub.heartbeat.last_seen.get(hb_key)
+                a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
+                a["heartbeat_status"] = str(hub.heartbeat.get_status(hb_key).value)
             return data
         except Exception as e:
             logger.exception("get_pxmx_agents failed")
