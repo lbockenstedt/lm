@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 from simulations.tenant_filter import (filter_items_by_prefixes,
                                        filter_firewall_rules, filter_record_by_prefixes,
-                                       build_alias_map)
+                                       build_alias_map, _find_list_slot)
 
 if TYPE_CHECKING:  # annotations only — never evaluated at runtime
     from fastapi import Request
@@ -374,10 +374,18 @@ async def subnet_filter_fw(hub, sessions: dict, request: "Request", data, endpoi
         prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
         return data
+    before = _list_len(data)
+    logger.warning("DIAG subnet_filter_fw[%s] tid=%r enabled=%s prefixes=%d "
+                   "items_before=%d mode=%s", endpoint, tid, True, len(prefixes), before, mode)
     if mode == "fw":
         alias_map = await _fw_alias_map(hub, firewall_id) if firewall_id else None
-        return filter_firewall_rules(data, prefixes, alias_map)
-    return filter_items_by_prefixes(data, prefixes, fields)
+        out = filter_firewall_rules(data, prefixes, alias_map)
+        logger.warning("DIAG subnet_filter_fw[%s] filtered %d -> %d alias_map=%s",
+                       endpoint, before, _list_len(out), bool(alias_map))
+        return out
+    out = filter_items_by_prefixes(data, prefixes, fields)
+    logger.warning("DIAG subnet_filter_fw[%s] filtered %d -> %d", endpoint, before, _list_len(out))
+    return out
 
 
 async def subnet_gate_record(hub, sessions: dict, request: "Request", record, module: str, ip_fields):
@@ -395,6 +403,15 @@ async def subnet_gate_record(hub, sessions: dict, request: "Request", record, mo
     return filter_record_by_prefixes(record, prefixes, ip_fields)
 
 
+def _list_len(data) -> int:
+    """Best-effort record count of a spoke envelope (for DIAG logging)."""
+    container, key = _find_list_slot(data)
+    if container is None:
+        return -1
+    lst = container if key is None else container[key]
+    return len(lst) if isinstance(lst, list) else -1
+
+
 async def subnet_filter_tenant(hub, sessions: dict, request: "Request", data, module: str, ip_fields,
                                explicit_tenant: str = None):
     """Tenant-aware subnet filter. When ``explicit_tenant`` resolves to a real
@@ -405,12 +422,22 @@ async def subnet_filter_tenant(hub, sessions: dict, request: "Request", data, mo
     selected, preserving backward compatibility)."""
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
-        if not subnet_filter_enabled(hub, module):
+        enabled = subnet_filter_enabled(hub, module)
+        prefixes = await resolve_prefixes_for_tenant(hub, tid) if enabled else []
+        before = _list_len(data)
+        # DIAG: pinpoints where the admin-switcher filter diverges. Remove once
+        # the cross-tenant leak is resolved.
+        logger.warning("DIAG subnet_filter_tenant[%s] explicit=%r tid=%r enabled=%s "
+                       "prefixes=%d items_before=%d ip_fields=%s", module, explicit_tenant,
+                       tid, enabled, len(prefixes), before, ip_fields)
+        if not enabled or not prefixes:
             return data
-        prefixes = await resolve_prefixes_for_tenant(hub, tid)
-        if not prefixes:
-            return data
-        return filter_items_by_prefixes(data, prefixes, ip_fields)
+        out = filter_items_by_prefixes(data, prefixes, ip_fields)
+        logger.warning("DIAG subnet_filter_tenant[%s] filtered %d -> %d prefixes=%s",
+                       module, before, _list_len(out), prefixes)
+        return out
+    logger.warning("DIAG subnet_filter_tenant[%s] FALLBACK legacy (explicit=%r tid=%r) "
+                   "-> admin-bypass/no-op path", module, explicit_tenant, tid)
     return await subnet_filter(hub, sessions, request, data, module, ip_fields)
 
 
