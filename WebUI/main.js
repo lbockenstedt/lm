@@ -5604,12 +5604,13 @@ async function showCPPMDeviceDetail(mac) {
             : `<table class="w-full text-left text-xs border-collapse">
                 <thead><tr class="border-b border-slate-200 text-slate-400 uppercase text-[10px]">
                     <th class="px-3 py-1.5">Username</th><th class="px-3 py-1.5">IP</th>
-                    <th class="px-3 py-1.5">NAS</th><th class="px-3 py-1.5">Role</th>
+                    <th class="px-3 py-1.5">NAS</th><th class="px-3 py-1.5">Port</th><th class="px-3 py-1.5">Role</th>
                     <th class="px-3 py-1.5">Start</th><th class="px-3 py-1.5">State</th>
                 </tr></thead><tbody>${sessions.map(s => `<tr class="border-b border-slate-100">
                     <td class="px-3 py-1.5">${s.username || '—'}</td>
                     <td class="px-3 py-1.5 font-mono">${s.ip || '—'}</td>
                     <td class="px-3 py-1.5">${s.nas_name || '—'}</td>
+                    <td class="px-3 py-1.5 font-mono" title="${s.nas_port_type || ''}">${s.nas_port || '—'}</td>
                     <td class="px-3 py-1.5">${s.role || '—'}</td>
                     <td class="px-3 py-1.5">${fmtSessionStart(s.start_time)}</td>
                     <td class="px-3 py-1.5">${s.state || '—'}</td>
@@ -6638,13 +6639,14 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
     // client re-filter (its session-tenant prefixes are wrong once a
     // tenant is switched).
     const sessions = d.sessions || [];
-    const cols = ['Username', 'MAC / Station', 'IP', 'Role', 'NAS', 'Service', 'Start Time', 'State'];
+    const cols = ['Username', 'MAC / Station', 'IP', 'Role', 'NAS', 'Port', 'Service', 'Start Time', 'State'];
     const rows = sessions.map(s => `<tr class="border-b border-slate-100 hover:bg-slate-50">
         <td class="px-4 py-2 font-medium">${s.username || '—'}</td>
         <td class="px-4 py-2 font-mono text-xs">${s.calling_station || s.mac || '—'}</td>
         <td class="px-4 py-2 font-mono text-xs">${s.ip || '—'}</td>
         <td class="px-4 py-2">${s.role || '—'}</td>
         <td class="px-4 py-2 text-xs">${s.nas_name || '—'}</td>
+        <td class="px-4 py-2 text-xs font-mono" title="${s.nas_port_type || ''}">${s.nas_port || '—'}</td>
         <td class="px-4 py-2 text-xs">${s.service || '—'}</td>
         <td class="px-4 py-2 text-xs">${fmtSessionStart(s.start_time)}</td>
         <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${s.state === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}">${s.state || '—'}</span></td>
@@ -6660,7 +6662,7 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
     container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
         <h3 class="text-base font-semibold text-[#263040]">Access Tracker <span class="text-xs text-slate-400 font-normal">(${sessions.length} of ${d.total ?? sessions.length})</span></h3>
         <div class="flex items-center gap-2">${limitSel}${sessRefreshBtn}</div>
-    </div>` + tableWrap(th(cols) + `<tbody>${rows || '<tr><td colspan="8" class="px-4 py-6 text-center text-slate-400">No active sessions</td></tr>'}</tbody>`);
+    </div>` + tableWrap(th(cols) + `<tbody>${rows || '<tr><td colspan="9" class="px-4 py-6 text-center text-slate-400">No active sessions</td></tr>'}</tbody>`);
 }
 
 // _renderCppmDevices() — the My Devices / Unknown Devices branch of
