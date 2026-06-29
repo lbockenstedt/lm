@@ -5564,7 +5564,7 @@ async function loadNetboxData(subMenu) {
             if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p>`; return; }
             const ips = d.ip_addresses || [];
             window._nbIPs = ips;
-            const cols = ['Address', 'Status', 'DNS Name', 'Description', 'Assigned To', ''];
+            const cols = ['Address', 'Status', 'DNS Name', 'Description', 'Assigned To', 'Device', ''];
             const rows = ips.map(ip => {
                 const statusCls = ip.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500';
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
@@ -5573,6 +5573,7 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-xs">${ip.dns_name || '—'}</td>
                     <td class="px-4 py-2 text-xs">${ip.description || '—'}</td>
                     <td class="px-4 py-2 text-xs">${ip.assigned_to || '—'}</td>
+                    <td class="px-4 py-2 text-xs">${ip.device || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
                         <button onclick="editNetboxIP(${ip.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
                         <button onclick="releaseNetboxIP(${ip.id})" title="Release" class="p-1 text-slate-300 hover:text-red-500 transition-colors text-xs">Release</button>
