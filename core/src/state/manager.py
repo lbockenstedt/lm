@@ -260,27 +260,37 @@ class StateManager:
         unconditionally, which at scale (hundreds of tenants, large tenants.json)
         meant an encrypt+fsync+backup-copy every 60s forever, even when nothing
         had changed. Now it flushes only when a mutation marked the state dirty,
-        and clears the flag *before* writing so a mutation during the write
-        re-marks dirty and is picked up on the next tick (no loss). On write
-        failure the flag is restored so the next tick retries. ``interval`` is
-        also the max staleness bound for an in-memory-only mutation (the
-        crash-recovery safety net).
+        via ``_flush_if_dirty`` (extracted so the dirty-flag mechanics are unit
+        testable without sleeping a full interval). ``interval`` is also the
+        max staleness bound for an in-memory-only mutation (the crash-recovery
+        safety net).
         """
         while True:
             await asyncio.sleep(interval)
+            await self._flush_if_dirty()
+
+    async def _flush_if_dirty(self) -> bool:
+        """Persist state if dirty; return True if a write happened.
+
+        Clear-before-write: the flag is dropped *before* the write so a mutation
+        during the write re-marks dirty and is picked up on the next tick (no
+        loss). On write failure the flag is restored so the next tick retries.
+        """
+        with self._dirty_lock:
+            if not self._dirty:
+                return False
+            self._dirty = False
+        try:
+            with self._write_lock:
+                self._save_file(self.system_path, self.system_state)
+                self._save_file(self.tenants_path, self.tenant_state)
+            logger.info("State persisted to disk (dirty-flagged flush)")
+            return True
+        except Exception as e:
+            logger.error(f"Persistence loop error: {e}")
             with self._dirty_lock:
-                if not self._dirty:
-                    continue
-                self._dirty = False  # clear-before-write; a racing mutation re-sets it
-            try:
-                with self._write_lock:
-                    self._save_file(self.system_path, self.system_state)
-                    self._save_file(self.tenants_path, self.tenant_state)
-                logger.info("State persisted to disk (dirty-flagged flush)")
-            except Exception as e:
-                logger.error(f"Persistence loop error: {e}")
-                with self._dirty_lock:
-                    self._dirty = True  # retry next tick
+                self._dirty = True  # retry next tick
+            return False
 
     # --- System Management ---
 
