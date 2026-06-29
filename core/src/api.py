@@ -4541,67 +4541,60 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="DNS spoke not connected")
         return spoke_id
 
+    async def _relay_spoke(spoke_id, command, payload=None, log_name=""):
+        """Relay ``command`` to a spoke and return its SUCCESS payload.
+
+        Shared core of every DNS/DHCP relay handler (10 routes were near-
+        identical get-spoke → request_response → unwrap → except→500 blocks).
+        The spoke contract is ``{status: "SUCCESS", ...}`` / ``{status:
+        "ERROR", message|error}``; previously the hub passed an ERROR payload
+        back at HTTP 200, which was the last residual hold-out from the API
+        error-contract migration (every other spoke-relay group raises on
+        spoke-down). An upstream that responded with an error is now translated
+        to HTTP 502 (Bad Gateway) carrying the spoke's message as ``detail``,
+        matching the NetBox/CPPM relay contract. The success body — the spoke's
+        full SUCCESS dict — is returned verbatim so existing field access
+        (``data["records"]`` / ``data["subnets"]`` …) is unchanged. Spoke-down
+        (503) is raised by the ``_get_*_spoke`` caller before we run.
+        """
+        hub = app.state.hub
+        try:
+            result = await hub.request_response(spoke_id, command, payload or {})
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            if isinstance(data, dict) and data.get("status") == "ERROR":
+                msg = data.get("message") or data.get("error") or "Spoke returned an error"
+                logger.info("relay %s %s -> spoke ERROR: %s", log_name or command, spoke_id, msg)
+                raise HTTPException(status_code=502, detail=msg)
+            return data
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("%s relay failed", log_name or command)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/api/dns/records")
     async def dns_list_records():
         """List all DNS records from the Unbound spoke (unfiltered relay)."""
-        hub = app.state.hub
-        spoke_id = _get_dns_spoke(hub)
         logger.debug("relay GET /api/dns/records")
-        try:
-            result = await hub.request_response(spoke_id, "DNS_LIST", {})
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dns_list_records failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_LIST", log_name="dns_list_records")
 
     @app.post("/api/dns/record")
     async def dns_add_record(request: Request):
-        hub = app.state.hub
-        spoke_id = _get_dns_spoke(hub)
-        try:
-            data = await request.json()
-            result = await hub.request_response(spoke_id, "DNS_ADD", data)
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dns_add_record failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_ADD", await request.json(), log_name="dns_add_record")
 
     @app.delete("/api/dns/record")
     async def dns_delete_record(request: Request):
-        hub = app.state.hub
-        spoke_id = _get_dns_spoke(hub)
-        try:
-            data = await request.json()
-            result = await hub.request_response(spoke_id, "DNS_DELETE", data)
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dns_delete_record failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_DELETE", await request.json(), log_name="dns_delete_record")
 
     @app.put("/api/dns/record")
     async def dns_update_record(request: Request):
-        hub = app.state.hub
-        spoke_id = _get_dns_spoke(hub)
-        try:
-            data = await request.json()
-            result = await hub.request_response(spoke_id, "DNS_UPDATE", data)
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dns_update_record failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_UPDATE", await request.json(), log_name="dns_update_record")
 
     @app.get("/api/dns/status")
     async def dns_status():
         """Unbound service status / health from the DNS spoke."""
-        hub = app.state.hub
-        spoke_id = _get_dns_spoke(hub)
         logger.debug("relay GET /api/dns/status")
-        try:
-            result = await hub.request_response(spoke_id, "DNS_STATUS", {})
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dns_status failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_STATUS", log_name="dns_status")
 
     @app.post("/api/dns/sync")
     async def dns_sync_from_netbox():
@@ -4648,91 +4641,39 @@ def create_app(hub):
     @app.get("/api/dhcp/subnets")
     async def dhcp_list_subnets():
         """List DHCP subnets configured on the Kea spoke (unfiltered relay)."""
-        hub = app.state.hub
-        spoke_id = _get_dhcp_spoke(hub)
         logger.debug("relay GET /api/dhcp/subnets")
-        try:
-            result = await hub.request_response(spoke_id, "DHCP_LIST_SUBNETS", {})
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dhcp_list_subnets failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_SUBNETS", log_name="dhcp_list_subnets")
 
     @app.get("/api/dhcp/leases")
     async def dhcp_list_leases(request: Request, subnet: str = None):
         """List DHCP leases (optionally per-subnet); subnet-filtered before return."""
-        hub = app.state.hub
-        spoke_id = _get_dhcp_spoke(hub)
         logger.debug("relay %s %s subnet=%s", request.method, request.url.path, subnet)
-        try:
-            result = await hub.request_response(spoke_id, "DHCP_LIST_LEASES", {"subnet": subnet})
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            return await _subnet_filter(request, data, "dhcp", ["ip", "address"])
-        except Exception as e:
-            logger.exception("dhcp_list_leases failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_LEASES", {"subnet": subnet}, log_name="dhcp_list_leases")
+        return await _subnet_filter(request, data, "dhcp", ["ip", "address"])
 
     @app.post("/api/dhcp/reservation")
     async def dhcp_add_reservation(request: Request):
-        hub = app.state.hub
-        spoke_id = _get_dhcp_spoke(hub)
-        try:
-            data = await request.json()
-            result = await hub.request_response(spoke_id, "DHCP_ADD_RES", data)
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dhcp_add_reservation failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_ADD_RES", await request.json(), log_name="dhcp_add_reservation")
 
     @app.get("/api/dhcp/reservations")
     async def dhcp_list_reservations():
         """List DHCP reservations from the Kea spoke (unfiltered relay)."""
-        hub = app.state.hub
-        spoke_id = _get_dhcp_spoke(hub)
         logger.debug("relay GET /api/dhcp/reservations")
-        try:
-            result = await hub.request_response(spoke_id, "DHCP_LIST_RES", {})
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dhcp_list_reservations failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_RES", log_name="dhcp_list_reservations")
 
     @app.put("/api/dhcp/reservation")
     async def dhcp_update_reservation(request: Request):
-        hub = app.state.hub
-        spoke_id = _get_dhcp_spoke(hub)
-        try:
-            data = await request.json()
-            result = await hub.request_response(spoke_id, "DHCP_UPDATE_RES", data)
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dhcp_update_reservation failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_UPDATE_RES", await request.json(), log_name="dhcp_update_reservation")
 
     @app.delete("/api/dhcp/reservation")
     async def dhcp_delete_reservation(request: Request):
-        hub = app.state.hub
-        spoke_id = _get_dhcp_spoke(hub)
-        try:
-            data = await request.json()
-            result = await hub.request_response(spoke_id, "DHCP_DEL_RES", data)
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dhcp_delete_reservation failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_DEL_RES", await request.json(), log_name="dhcp_delete_reservation")
 
     @app.get("/api/dhcp/status")
     async def dhcp_status():
         """Kea DHCP4 service status / health from the DHCP spoke."""
-        hub = app.state.hub
-        spoke_id = _get_dhcp_spoke(hub)
         logger.debug("relay GET /api/dhcp/status")
-        try:
-            result = await hub.request_response(spoke_id, "DHCP_STATUS", {})
-            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-        except Exception as e:
-            logger.exception("dhcp_status failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_STATUS", log_name="dhcp_status")
 
     @app.post("/api/dhcp/sync")
     async def dhcp_sync_from_netbox():

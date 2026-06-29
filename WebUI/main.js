@@ -6284,6 +6284,28 @@ async function releaseNetboxIP(ipId) {
 
 // ─── DNS (Unbound) ───────────────────────────────────────────────────────────
 
+// _spokeFetch — shared fetch helper for the DNS/DHCP spoke-relay endpoints.
+// The hub relay (`_relay_spoke` in api.py) now translates a spoke-side ERROR
+// into HTTP 502 with {detail} (was: 200 + {status:'ERROR',message}), matching
+// the rest of the API error contract. Success bodies are the spoke's
+// {status:'SUCCESS', ...} payload, unchanged. Returns {ok, status, data,
+// detail}: on success data is the parsed body; on failure data is null and
+// detail carries the spoke's message (or the HTTP status text). Consolidates
+// the 8 near-identical `r.ok ? r.json() : {}` / `if (d.status === 'ERROR')`
+// blocks across the DNS + DHCP consumers — and fixes the prior UX gap where a
+// 503 (spoke down) rendered as "No records found" instead of the real message.
+async function _spokeFetch(url, opts) {
+    const r = await fetch(url, opts);
+    if (r.ok) return { ok: true, status: r.status, data: await r.json().catch(() => ({})), detail: null };
+    const e = await r.json().catch(() => ({}));
+    return { ok: false, status: r.status, data: null, detail: e.detail || e.message || r.statusText };
+}
+
+// Amber error banner used by the DNS/DHCP list views on a spoke failure.
+function _spokeErrorBanner(detail, fallback) {
+    return `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${detail || fallback}</p>`;
+}
+
 async function loadDNSData(subMenu) {
     const container = document.getElementById('dns-content');
     if (!container) return;
@@ -6297,10 +6319,9 @@ async function loadDNSData(subMenu) {
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
     try {
-        const r = await fetch('/api/dns/records');
-        const d = r.ok ? await r.json() : {};
-        if (d.status === 'ERROR') {
-            container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || 'DNS spoke not connected'}</p><p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>`;
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/records');
+        if (!ok) {
+            container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>`;
             if (addBtn) addBtn.classList.add('hidden');
             return;
         }
@@ -6376,28 +6397,26 @@ async function saveDnsRecord() {
     };
     if (!payload.name || !payload.value) { alert('Name and Value are required'); return; }
     try {
-        const r = await fetch('/api/dns/record', {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/record', {
             method: editing ? 'PUT' : 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-        const d = await r.json();
-        if (d.status === 'SUCCESS') { modal.remove(); loadDNSData('Records'); }
-        else alert('Error: ' + (d.message || 'Operation failed'));
+        if (ok && d.status === 'SUCCESS') { modal.remove(); loadDNSData('Records'); }
+        else alert('Error: ' + (detail || d?.message || 'Operation failed'));
     } catch (e) { alert('Error: ' + e.message); }
 }
 
 async function deleteDnsRecord(name, rtype) {
     if (!confirm(`Delete DNS record ${name} (${rtype})?`)) return;
     try {
-        const r = await fetch('/api/dns/record', {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/record', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, type: rtype }),
         });
-        const d = await r.json();
-        if (d.status === 'SUCCESS') loadDNSData('Records');
-        else alert('Error: ' + (d.message || 'Delete failed'));
+        if (ok && d.status === 'SUCCESS') loadDNSData('Records');
+        else alert('Error: ' + (detail || d?.message || 'Delete failed'));
     } catch (e) { alert('Error: ' + e.message); }
 }
 
@@ -6417,9 +6436,8 @@ async function loadDHCPData(subMenu) {
 
     try {
         if (subMenu === 'Subnets') {
-            const r = await fetch('/api/dhcp/subnets');
-            const d = r.ok ? await r.json() : {};
-            if (d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || 'DHCP spoke not connected'}</p>`; return; }
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets');
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             const subnets = d.subnets || [];
             const cols = ['ID', 'Subnet', 'Pools'];
             const rows = subnets.map(s => {
@@ -6435,9 +6453,8 @@ async function loadDHCPData(subMenu) {
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'Leases') {
-            const r = await fetch('/api/dhcp/leases');
-            const d = r.ok ? await r.json() : {};
-            if (d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || 'DHCP spoke not connected'}</p>`; return; }
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/leases');
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             const leases = d.leases || [];
             const cols = ['IP Address', 'MAC', 'Hostname', 'State', 'Valid Until'];
             const rows = leases.map(l => `<tr class="border-b border-slate-100 hover:bg-slate-50">
@@ -6452,9 +6469,8 @@ async function loadDHCPData(subMenu) {
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'Reservations') {
-            const r = await fetch('/api/dhcp/reservations');
-            const d = r.ok ? await r.json() : {};
-            if (d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || 'DHCP spoke not connected'}</p>`; if (addBtn) addBtn.classList.add('hidden'); return; }
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservations');
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); if (addBtn) addBtn.classList.add('hidden'); return; }
             const res = d.reservations || [];
             window._dhcpReservations = res;
             const cols = ['IP Address', 'MAC', 'Hostname', 'Subnet', ''];
@@ -6485,12 +6501,11 @@ async function _loadDhcpSubnetOptions(selId) {
     if (!sel) return;
     sel.innerHTML = '<option value="">Loading…</option>';
     try {
-        const r = await fetch('/api/dhcp/subnets');
-        const d = r.ok ? await r.json() : {};
-        const subnets = d.subnets || [];
+        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets');
+        const subnets = ok ? (d.subnets || []) : [];
         sel.innerHTML = subnets.length
             ? subnets.map(s => `<option value="${s.id}">${s.id} — ${s.subnet}</option>`).join('')
-            : '<option value="">No subnets configured</option>';
+            : `<option value="">${ok ? 'No subnets configured' : (detail || 'Could not load subnets')}</option>`;
     } catch (err) {
         console.error('_loadDhcpSubnetOptions: could not load subnets', err);
         sel.innerHTML = '<option value="">Could not load subnets</option>';
@@ -6549,28 +6564,26 @@ async function saveDhcpReservation() {
     }
     if (editing) payload.old_ip = modal.dataset.editIp;
     try {
-        const r = await fetch('/api/dhcp/reservation', {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation', {
             method: editing ? 'PUT' : 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-        const d = await r.json();
-        if (d.status === 'SUCCESS') { modal.remove(); loadDHCPData('Reservations'); }
-        else alert('Error: ' + (d.message || 'Operation failed'));
+        if (ok && d.status === 'SUCCESS') { modal.remove(); loadDHCPData('Reservations'); }
+        else alert('Error: ' + (detail || d?.message || 'Operation failed'));
     } catch (e) { alert('Error: ' + e.message); }
 }
 
 async function deleteDhcpReservation(ip) {
     if (!confirm(`Delete reservation for ${ip}?`)) return;
     try {
-        const r = await fetch('/api/dhcp/reservation', {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ip }),
         });
-        const d = await r.json();
-        if (d.status === 'SUCCESS') loadDHCPData('Reservations');
-        else alert('Error: ' + (d.message || 'Delete failed'));
+        if (ok && d.status === 'SUCCESS') loadDHCPData('Reservations');
+        else alert('Error: ' + (detail || d?.message || 'Delete failed'));
     } catch (e) { alert('Error: ' + e.message); }
 }
 
