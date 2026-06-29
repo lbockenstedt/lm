@@ -21,6 +21,7 @@ import json
 import os
 import logging
 import asyncio
+import threading
 import time
 from typing import Dict, Any, Optional
 from security.encryption import hub_encryption
@@ -81,6 +82,31 @@ class StateManager:
         }
 
         self.load_state()
+
+        # Write coalescing: the persistence_loop is the backstop for in-memory
+        # mutations that don't explicitly save_state() (update_global_config,
+        # register_module, update_tenant, …). A dirty flag lets the loop skip
+        # the encrypt+fsync+backup rewrite when nothing changed — previously it
+        # rewrote both files every 60s unconditionally, forever, even when idle
+        # (pure write amplification at scale). _dirty_lock guards the flag
+        # (touched on every mutation); _write_lock serializes the file writes
+        # across the api thread (explicit save_state) and the asyncio-loop
+        # thread (persistence_loop), which could otherwise race on the shared
+        # ``<path>.tmp`` and corrupt the atomic write.
+        self._dirty: bool = False
+        self._dirty_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+
+    def _mark_dirty(self) -> None:
+        """Flag that in-memory state changed and needs persisting.
+
+        Set by the in-memory mutators (update_global_config, register_module,
+        update_module_metadata, update_tenant, set_active_tenant,
+        map_tenant_resource). The persistence_loop flushes it within one
+        interval; an explicit save_state() flushes immediately and clears it.
+        """
+        with self._dirty_lock:
+            self._dirty = True
 
     def _load_file(self, path: str) -> Optional[Dict]:
         """Helper to load and decrypt a state file, falling back to plain text."""
@@ -208,23 +234,53 @@ class StateManager:
             logger.info("No valid tenant state found, using defaults.")
 
     def save_state(self):
-        """Saves memory state to dual JSON disk caches with atomic writes."""
+        """Saves memory state to dual JSON disk caches with atomic writes.
+
+        Synchronous + immediate: callers (request handlers, key rotation, the
+        update pipeline) get durability before they return. Clears the dirty
+        flag so the persistence_loop doesn't redundantly rewrite the same
+        state on its next tick. The _write_lock serializes this against a
+        concurrent loop flush.
+        """
         try:
-            self._save_file(self.system_path, self.system_state)
-            self._save_file(self.tenants_path, self.tenant_state)
+            with self._write_lock:
+                self._save_file(self.system_path, self.system_state)
+                self._save_file(self.tenants_path, self.tenant_state)
+            with self._dirty_lock:
+                self._dirty = False
             logger.info("State persisted to disk (system & tenants) atomically")
         except Exception as e:
             logger.error(f"Failed to save state to disk: {e}")
             raise
 
     async def persistence_loop(self, interval=60):
-        """Background task to periodically persist state to disk."""
+        """Background task that persists state to disk — but only when dirty.
+
+        Previously this rewrote both encrypted state files every ``interval``
+        unconditionally, which at scale (hundreds of tenants, large tenants.json)
+        meant an encrypt+fsync+backup-copy every 60s forever, even when nothing
+        had changed. Now it flushes only when a mutation marked the state dirty,
+        and clears the flag *before* writing so a mutation during the write
+        re-marks dirty and is picked up on the next tick (no loss). On write
+        failure the flag is restored so the next tick retries. ``interval`` is
+        also the max staleness bound for an in-memory-only mutation (the
+        crash-recovery safety net).
+        """
         while True:
             await asyncio.sleep(interval)
+            with self._dirty_lock:
+                if not self._dirty:
+                    continue
+                self._dirty = False  # clear-before-write; a racing mutation re-sets it
             try:
-                self.save_state()
+                with self._write_lock:
+                    self._save_file(self.system_path, self.system_state)
+                    self._save_file(self.tenants_path, self.tenant_state)
+                logger.info("State persisted to disk (dirty-flagged flush)")
             except Exception as e:
                 logger.error(f"Persistence loop error: {e}")
+                with self._dirty_lock:
+                    self._dirty = True  # retry next tick
 
     # --- System Management ---
 
@@ -236,6 +292,7 @@ class StateManager:
         """Merge ``config`` into the global config (caller is responsible for saving)."""
         gc = self.system_state.setdefault("global_config", {})
         gc.update(config)
+        self._mark_dirty()
 
     def register_module(self, module_id: str, approved: bool = False, display_name: str = None):
         """Record a module as known, set its approval flag, and seed its metadata."""
@@ -258,6 +315,7 @@ class StateManager:
 
         # Sync with legacy module_names for compatibility
         self.system_state.setdefault("module_names", {})[module_id] = module_metadata[module_id]["display_name"]
+        self._mark_dirty()
 
     def remove_module(self, module_id: str):
         """Symmetric counterpart to register_module: drop a spoke/agent and all
@@ -284,6 +342,7 @@ class StateManager:
         # Sync with legacy module_names
         if "display_name" in metadata:
             self.system_state.setdefault("module_names", {})[module_id] = metadata["display_name"]
+        self._mark_dirty()
 
     def set_module_name(self, module_id: str, name: str):
         self.update_module_metadata(module_id, {"display_name": name})
@@ -349,10 +408,12 @@ class StateManager:
         if tenant_id not in tenants:
             tenants[tenant_id] = {}
         tenants[tenant_id].update(data)
+        self._mark_dirty()
 
     def set_active_tenant(self, tenant_id: str):
         self.system_state["active_tenant"] = tenant_id
         logger.info(f"Active tenant switched to: {tenant_id}")
+        self._mark_dirty()
 
     def map_tenant_resource(self, tenant_id: str, resource_id: str, metadata: Dict):
         """
@@ -367,6 +428,7 @@ class StateManager:
             "tenant_id": tenant_id,
             "metadata": metadata
         })
+        self._mark_dirty()
 
     # --- Quota Management ---
 
