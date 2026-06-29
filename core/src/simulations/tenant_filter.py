@@ -16,7 +16,10 @@ A tenant's allowed prefixes come from NetBox (resolved in ``api.py`` via
     ``*``, empty) contribute no addresses → that field is skipped.
   - If any extracted address falls inside a tenant prefix → show the item.
   - If at least one field had concrete IPs but none matched → hide.
-  - If no field yielded any concrete IP → show (can't filter, err on showing).
+  - If no field yielded any concrete IP → hide (the record can't be attributed
+    to a tenant; err on hiding so an unattributable record — a stopped VM, an
+    empty DHCP/alias row — never leaks across tenants). ``drop_no_ip=False``
+    restores the legacy "can't filter → show" behavior.
 
 Firewall rules use the stricter ``firewall_rule_in_prefixes``: show only when
 both sides are wildcards (global policy) OR either side has a concrete IP in
@@ -129,7 +132,9 @@ def _filter_list(lst: list, keep) -> list:
 
 
 def filter_items_by_prefixes(
-    items: Any, prefixes: Sequence[str], ip_fields: Sequence[str]
+    items: Any, prefixes: Sequence[str], ip_fields: Sequence[str],
+    drop_no_ip: bool = True, tenant_category: Optional[str] = None,
+    category_field: str = "category",
 ) -> Any:
     """Drop items whose concrete IPs all fall outside ``prefixes``.
 
@@ -137,6 +142,19 @@ def filter_items_by_prefixes(
     or a spoke envelope dict; the record list is located via
     ``_find_list_slot`` and filtered in place. Anything without a record list
     is returned unchanged.
+
+    An item that yields no concrete IP from any field is **dropped** by default
+    (``drop_no_ip=True``): it can't be attributed to a tenant, so erring on
+    hiding keeps unattributable records (stopped VMs, empty DHCP/alias rows)
+    from leaking across tenants. Pass ``drop_no_ip=False`` to restore the
+    legacy "can't filter → show" behavior.
+
+    ``tenant_category`` (the tenant's display name) enables an alternate
+    attribution path for modules whose records carry an OPNsense ``category``
+    config field: an item whose ``category_field`` equals ``tenant_category`` is
+    kept regardless of its IPs (the admin explicitly tagged it to this tenant).
+    Only pass ``tenant_category`` for modules that use categories (rules/nat/
+    aliases); ``None`` (default) disables the check.
     """
     if not prefixes:
         return items
@@ -145,6 +163,8 @@ def filter_items_by_prefixes(
         return items
 
     def keep(item: dict) -> bool:
+        if tenant_category and str(item.get(category_field) or "").strip() == tenant_category:
+            return True  # explicitly attributed to this tenant via category
         has_concrete = False
         for f in ip_fields:
             addrs = extract_addrs(item.get(f))
@@ -153,7 +173,9 @@ def filter_items_by_prefixes(
             has_concrete = True
             if any(_addr_in_prefixes(a, nets) for a in addrs):
                 return True
-        return not has_concrete  # no concrete IPs → show (can't filter)
+        if has_concrete:
+            return False  # concrete IPs but none matched → drop
+        return not drop_no_ip  # no concrete IP → drop by default (err on hiding)
 
     container, key = _find_list_slot(items)
     if container is None:
@@ -166,7 +188,9 @@ def filter_items_by_prefixes(
     return items
 
 
-def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = None) -> Any:
+def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = None,
+                          tenant_category: Optional[str] = None,
+                          category_field: str = "category") -> Any:
     """Strict firewall-rule filter applied to the record list inside a spoke
     envelope. Locates the list via ``_find_list_slot`` and keeps each rule for
     which ``firewall_rule_in_prefixes`` is True. Empty prefixes → unchanged.
@@ -174,6 +198,11 @@ def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = N
     ``alias_map`` (from ``build_alias_map``) lets the matcher resolve OPNsense
     alias names in a rule's source/destination to concrete networks before
     matching tenant prefixes; ``None`` → concrete-IP-only behavior (legacy).
+
+    ``tenant_category`` (tenant display name) adds an OR attribution path: a
+    rule whose ``category_field`` equals ``tenant_category`` is kept regardless
+    of its source/destination (the admin explicitly tagged it to this tenant).
+    ``None`` (default) disables the category check.
     """
     if not prefixes:
         return data
@@ -185,7 +214,9 @@ def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = N
         return data
     filtered = _filter_list(
         container if key is None else container[key],
-        lambda r: firewall_rule_in_prefixes(r, prefixes, alias_map),
+        lambda r: firewall_rule_in_prefixes(r, prefixes, alias_map,
+                                             tenant_category=tenant_category,
+                                             category_field=category_field),
     )
     if key is None:
         return filtered
@@ -193,12 +224,14 @@ def filter_firewall_rules(data: Any, prefixes: Sequence[str], alias_map: Any = N
     return data
 
 
-def filter_record_by_prefixes(record: Any, prefixes: Sequence[str], ip_fields: Sequence[str]):
+def filter_record_by_prefixes(record: Any, prefixes: Sequence[str], ip_fields: Sequence[str],
+                              drop_no_ip: bool = True):
     """Single-record gate: return ``record`` if it should be shown, else ``None``.
 
     Same semantics as ``filter_items_by_prefixes`` applied to one item — used to
     gate drill-down endpoints that return a single record (e.g. CPPM
-    device-enrich) rather than a list.
+    device-enrich) rather than a list. A record with no concrete IP is dropped
+    by default (``drop_no_ip=True``); pass ``False`` for the legacy keep behavior.
     """
     if not prefixes or not isinstance(record, dict):
         return record
@@ -213,7 +246,9 @@ def filter_record_by_prefixes(record: Any, prefixes: Sequence[str], ip_fields: S
         has_concrete = True
         if any(_addr_in_prefixes(a, nets) for a in addrs):
             return record
-    return record if not has_concrete else None
+    if has_concrete:
+        return None  # concrete IPs but none matched → drop
+    return None if drop_no_ip else record  # no concrete IP → drop by default
 
 
 def _is_wildcard(val: Any) -> bool:
@@ -317,7 +352,9 @@ def _side_addrs(val: Any, alias_map: Any) -> Optional[List[str]]:
     return out or None
 
 
-def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any = None) -> bool:
+def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any = None,
+                              tenant_category: Optional[str] = None,
+                              category_field: str = "category") -> bool:
     """Strict firewall-rule prefix check (with optional OPNsense alias resolution).
 
     Show when both sides are wildcards / unresolvable (global policy applies to
@@ -325,11 +362,17 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
     overlaps one of the tenant's prefixes. ``alias_map`` (from
     ``build_alias_map``) expands alias names to concrete networks before
     matching; ``None`` → concrete-IP-only behavior (legacy).
+
+    ``tenant_category`` (tenant display name) is an OR attribution path: a rule
+    whose ``category_field`` equals it is shown regardless of source/destination
+    (explicitly tagged to this tenant). ``None`` disables the check.
     """
     if not prefixes:
         return True
     if not isinstance(rule, dict):
         return True
+    if tenant_category and str(rule.get(category_field) or "").strip() == tenant_category:
+        return True  # explicitly attributed to this tenant via category
     nets = _nets(prefixes)
     if not nets:
         return True

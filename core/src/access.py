@@ -69,6 +69,13 @@ _FW_FILTER_SPEC = {
     "aliases":    ("fields", ["content"]),
 }
 
+# OPNsense endpoints whose records carry a `category` config field. When the
+# tenant filter is active, a record whose `category` equals the tenant's display
+# name is shown regardless of subnet match — an alternate attribution path for
+# rules/NAT/aliases the admin explicitly tagged to a tenant (per the user's
+# "category == TenantID" rule). dhcp/dns/interfaces don't use categories.
+_FW_CATEGORY_ENDPOINTS = {"rules", "nat", "aliases"}
+
 
 # ── Leaf helpers ─────────────────────────────────────────────────────────────
 
@@ -374,16 +381,22 @@ async def subnet_filter_fw(hub, sessions: dict, request: "Request", data, endpoi
         prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
         return data
+    # OPNsense category attribution: for rules/nat/aliases, a record whose
+    # `category` equals the tenant's display name is shown regardless of subnet.
+    tenant_cat = None
+    if endpoint in _FW_CATEGORY_ENDPOINTS and tid:
+        tenant_cat = (hub.state.get_tenant(tid) or {}).get("name") or tid
     before = _list_len(data)
     logger.warning("DIAG subnet_filter_fw[%s] tid=%r enabled=%s prefixes=%d "
-                   "items_before=%d mode=%s", endpoint, tid, True, len(prefixes), before, mode)
+                   "items_before=%d mode=%s tenant_cat=%r", endpoint, tid, True,
+                   len(prefixes), before, mode, tenant_cat)
     if mode == "fw":
         alias_map = await _fw_alias_map(hub, firewall_id) if firewall_id else None
-        out = filter_firewall_rules(data, prefixes, alias_map)
+        out = filter_firewall_rules(data, prefixes, alias_map, tenant_category=tenant_cat)
         logger.warning("DIAG subnet_filter_fw[%s] filtered %d -> %d alias_map=%s",
                        endpoint, before, _list_len(out), bool(alias_map))
         return out
-    out = filter_items_by_prefixes(data, prefixes, fields)
+    out = filter_items_by_prefixes(data, prefixes, fields, tenant_category=tenant_cat)
     logger.warning("DIAG subnet_filter_fw[%s] filtered %d -> %d", endpoint, before, _list_len(out))
     return out
 

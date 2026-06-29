@@ -174,6 +174,9 @@ class EndpointSyncMixin:
         ipam = self.get_spoke_by_type(se.get("module_type", "ipam"))
         nac = self.get_spoke_by_type("nac")
         if not ipam or not nac:
+            logger.info("endpoint sync tenant=%s(%s) SKIP tenant: %s or CPPM spoke not connected "
+                        "(ipam=%r nac=%r)", tenant_id, tenant_name, se.get('label', 'IPAM'),
+                        bool(ipam), bool(nac))
             status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
                       "status": "error", "pushed": 0, "errors": 0,
                       "message": f"{se.get('label', 'IPAM')} or CPPM spoke not connected",
@@ -182,6 +185,8 @@ class EndpointSyncMixin:
             return status
         scope = self._ipam_scope_for_tenant(se, tenant_id)
         if not scope:
+            logger.info("endpoint sync tenant=%s(%s) SKIP tenant: not bound to %s "
+                        "(no netbox_tenant_slug)", tenant_id, tenant_name, se.get('label', 'IPAM'))
             status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
                       "status": "skipped", "pushed": 0, "errors": 0,
                       "message": f"tenant not bound to {se.get('label', 'IPAM')}",
@@ -193,6 +198,9 @@ class EndpointSyncMixin:
                                              {"tenant": scope}, timeout=30.0)
             data = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
             if isinstance(data, dict) and data.get("status") == "ERROR":
+                logger.info("endpoint sync tenant=%s(%s) SKIP tenant: %s returned ERROR: %s",
+                            tenant_id, tenant_name, se.get('label', 'IPAM'),
+                            data.get('message', 'error'))
                 status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
                           "status": "error", "pushed": 0, "errors": 0,
                           "message": f"{se.get('label', 'IPAM')}: {data.get('message', 'error')}",
@@ -201,11 +209,16 @@ class EndpointSyncMixin:
                 return status
             resp_key = se.get("response_key", "ip_addresses")
             endpoints: List[Dict[str, Any]] = []
+            hub_skipped = 0  # records dropped hub-side before reaching CPPM
             for ip in (data.get(resp_key, []) if isinstance(data, dict) else []):
                 address = str((ip or {}).get("address") or "").split("/")[0].strip()
                 mac = str(((ip or {}).get("custom_fields") or {}).get("mac_address") or "").strip()
                 hostname = str((ip or {}).get("dns_name") or "").strip()
                 if not address and not mac:
+                    hub_skipped += 1
+                    logger.info("endpoint sync tenant=%s(%s) SKIP record: no address and no mac; "
+                                "hostname=%s (record has neither an IP nor a mac_address custom field)",
+                                tenant_id, tenant_name, hostname or "<empty>")
                     continue  # nothing to sync
                 ep = {"ip": address, "mac": mac, "hostname": hostname}
                 endpoints.append(ep)
@@ -227,11 +240,17 @@ class EndpointSyncMixin:
                     "; ".join(f"ip={s.get('ip') or '<empty>'} mac={s.get('mac') or '<empty>'} "
                               f"hostname={s.get('hostname') or '<empty>'} ({s.get('reason')})"
                               for s in skipped_details))
+            logger.info("endpoint sync tenant=%s(%s) result status=%s sent=%d pushed=%d "
+                        "skipped=%d hub_skipped=%d errors=%d",
+                        tenant_id, tenant_name,
+                        "success" if rstatus != "ERROR" else "error",
+                        len(endpoints), pushed, skipped, hub_skipped, errors)
             status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
                       "status": "success" if rstatus != "ERROR" else "error",
                       "pushed": pushed, "errors": errors, "skipped": skipped,
                       "message": message or (f"{len(endpoints)} endpoint(s) sent" if rstatus != "ERROR" else "CPPM error"),
                       "last_sync_ts": now, "endpoints_total": len(endpoints),
+                      "hub_skipped": hub_skipped,
                       "skipped_details": skipped_details}
         except Exception as e:
             logger.debug("endpoint sync for %s failed: %s", tenant_id, e)

@@ -58,13 +58,17 @@ def test_keeps_in_prefix_hides_outside():
     assert ips == ["10.20.0.1", "192.168.5.10"]
 
 
-def test_alias_field_shown_cant_filter():
-    """A record whose only IP field is an alias name (no concrete IP) is shown
-    — err on showing when you can't filter."""
+def test_alias_field_dropped_cant_filter():
+    """A record whose only IP field is an alias name (no concrete IP) is dropped
+    by default — err on hiding when you can't attribute the record to a tenant.
+    ``drop_no_ip=False`` restores the legacy "can't filter → show" behavior."""
     items = [{"source": "LAN_NET"}, {"source": "8.8.8.8"}]
     out = filter_items_by_prefixes(items, TENANT_PREFIXES, ["source"])
-    # LAN_NET → shown (no concrete addr); 8.8.8.8 → hidden (concrete, not in prefix)
-    assert [r["source"] for r in out] == ["LAN_NET"]
+    # LAN_NET → dropped (no concrete addr, default err-on-hiding); 8.8.8.8 → hidden
+    assert out == []
+    # opt-in to the legacy keep-when-unattributable behavior
+    out2 = filter_items_by_prefixes(items, TENANT_PREFIXES, ["source"], drop_no_ip=False)
+    assert [r["source"] for r in out2] == ["LAN_NET"]
 
 
 def test_envelope_dict_filtered_in_place():

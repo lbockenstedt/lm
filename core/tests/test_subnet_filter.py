@@ -138,7 +138,8 @@ def test_admin_without_explicit_tenant_bypasses():
 def test_aliases_tab_filters_on_content():
     """The aliases tab now filters on its ``content`` IPs (previously skipped as
     "no IP to filter"). An alias whose content is outside the tenant prefixes is
-    hidden; one with content inside is kept; a content-less alias is shown."""
+    hidden; one with content inside is kept; a content-less alias is dropped
+    (no IP to attribute to a tenant — err on hiding)."""
     hub = _PrefixHub(FakeState(system_state={}, tenants={
         "acme": {"netbox_tenant_slug": "acme"},
     }))
@@ -147,14 +148,82 @@ def test_aliases_tab_filters_on_content():
     aliases = {"data": [
         {"name": "TENANT_NET", "type": "network", "content": "10.20.0.0/24"},   # in → keep
         {"name": "EXT",        "type": "network", "content": "8.8.8.8"},         # out → drop
-        {"name": "EMPTY",      "type": "urltable", "content": ""},               # no IP → keep
+        {"name": "EMPTY",      "type": "urltable", "content": ""},               # no IP → drop
     ]}
     out = asyncio.run(subnet_filter_fw(
         hub, sessions, req, aliases, "aliases",
         firewall_id=None, explicit_tenant="acme"))
     names = [a["name"] for a in out["data"]]
-    assert "TENANT_NET" in names and "EMPTY" in names
+    assert "TENANT_NET" in names
     assert "EXT" not in names
+    assert "EMPTY" not in names
+
+
+# ── OPNsense category attribution (rules / nat / aliases) ──────────────────────
+#
+# An OPNsense record whose `category` config field equals the tenant's DISPLAY
+# NAME is shown to that tenant regardless of subnet match — an alternate
+# attribution path the admin sets explicitly (e.g. an alias with no IP content,
+# or a rule whose source/dst are outside the tenant prefix). dhcp/dns/interfaces
+# don't carry categories and don't get this path.
+
+def _named_tenant_hub():
+    """_PrefixHub whose tenant has a display name ('Acme') — the value that must
+    match an OPNsense record's `category` field."""
+    return _PrefixHub(FakeState(system_state={}, tenants={
+        "acme": {"netbox_tenant_slug": "acme", "name": "Acme"},
+    }))
+
+
+def test_firewall_rule_category_overrides_subnet_drop():
+    """An out-of-prefix rule whose category == the tenant display name is kept;
+    the same rule with a different (or absent) category is dropped."""
+    hub = _named_tenant_hub()
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    rules = {"rules": [
+        {"source": "8.8.8.8", "destination": "1.1.1.1", "category": "Acme"},    # cat match → keep
+        {"source": "8.8.8.8", "destination": "1.1.1.1", "category": "Other"},    # drop
+        {"source": "8.8.8.8", "destination": "1.1.1.1"},                          # no category → drop
+    ]}
+    out = asyncio.run(subnet_filter_fw(
+        hub, sessions, req, rules, "rules", firewall_id=None, explicit_tenant="acme"))
+    assert len(out["rules"]) == 1
+    assert out["rules"][0]["category"] == "Acme"
+
+
+def test_alias_category_overrides_no_ip_drop():
+    """An alias with no IP content but category == tenant is kept (category
+    overrides the drop-no-IP rule); a content-less alias with no/other category
+    is dropped; an out-of-prefix alias with the tenant category is kept."""
+    hub = _named_tenant_hub()
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    aliases = {"data": [
+        {"name": "OUT_CAT",  "type": "network", "content": "8.8.8.8", "category": "Acme"},  # keep (cat)
+        {"name": "EMPTY_CAT", "type": "urltable", "content": "", "category": "Acme"},       # keep (cat, no IP)
+        {"name": "NO_CAT",   "type": "urltable", "content": ""},                             # drop (no IP, no cat)
+        {"name": "OTHER_CAT", "type": "network", "content": "8.8.8.8", "category": "Other"}, # drop
+    ]}
+    out = asyncio.run(subnet_filter_fw(
+        hub, sessions, req, aliases, "aliases", firewall_id=None, explicit_tenant="acme"))
+    names = [a["name"] for a in out["data"]]
+    assert "OUT_CAT" in names and "EMPTY_CAT" in names
+    assert "NO_CAT" not in names and "OTHER_CAT" not in names
+
+
+def test_category_does_not_leak_to_other_tenant():
+    """A record categorized for a different tenant must NOT show just because it
+    has a category — only an exact match to THIS tenant's display name keeps it."""
+    hub = _named_tenant_hub()
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    aliases = {"data": [
+        {"name": "RIVAL", "type": "urltable", "content": "", "category": "NotAcme"},  # not ours → drop
+    ]}
+    out = asyncio.run(subnet_filter_fw(
+        hub, sessions, req, aliases, "aliases", firewall_id=None, explicit_tenant="acme"))
+    assert [a["name"] for a in out["data"]] == []
 
 
 # ── Hypervisor VM filter (tenant-aware, admin acting as tenant) ────────────────
@@ -170,14 +239,14 @@ def _vms_env():
     return {"vms": [
         {"name": "in-tenant",   "status": "running", "ips": ["10.20.0.5"]},
         {"name": "out-tenant",  "status": "running", "ips": ["8.8.8.8"]},
-        {"name": "stopped",     "status": "stopped",  "ips": []},           # no IP → kept
+        {"name": "stopped",     "status": "stopped",  "ips": []},           # no IP → dropped
     ]}
 
 
 def test_hypervisor_admin_with_explicit_tenant_is_filtered():
     """An admin selecting a tenant gets that tenant's prefixes applied to VMs
-    (ips field); out-of-tenant VMs are dropped. A stopped VM with no IPs is kept
-    (can't filter — err on showing)."""
+    (ips field); out-of-tenant VMs are dropped. A stopped VM with no IPs is
+    dropped too (can't attribute it to a tenant — err on hiding)."""
     hub = _PrefixHub(FakeState(system_state={}, tenants={
         "acme": {"netbox_tenant_slug": "acme"},
     }))
@@ -186,8 +255,9 @@ def test_hypervisor_admin_with_explicit_tenant_is_filtered():
     out = asyncio.run(subnet_filter_tenant(
         hub, sessions, req, _vms_env(), "hypervisor", ["ips"], explicit_tenant="acme"))
     names = [v["name"] for v in out["vms"]]
-    assert "in-tenant" in names and "stopped" in names
+    assert "in-tenant" in names
     assert "out-tenant" not in names
+    assert "stopped" not in names
 
 
 def test_hypervisor_admin_without_explicit_tenant_bypasses():
