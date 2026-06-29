@@ -1530,7 +1530,7 @@ function _updateMetrics(statusData) {
 
     const versionEl = document.getElementById('footer-sys-version');
     if (versionEl && m.version) {
-        versionEl.textContent = `v${m.version}`;
+        versionEl.textContent = m.version;
         window.__lmHubVersion = m.version;  // for File-a-Bug context
     }
 }

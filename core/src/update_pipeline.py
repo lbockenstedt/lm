@@ -357,7 +357,7 @@ class UpdatePipelineMixin:
             new_local_v = await self.get_local_version()
             remote_v = await self.get_remote_version()
             if new_local_v == remote_v and new_local_v != "unknown":
-                logger.info(f"Hub updated via git to v{new_local_v} (VERSION fallback).")
+                logger.info(f"Hub updated via git to {new_local_v} (VERSION fallback).")
                 return True
             logger.warning(
                 f"Git update verification failed: local={new_local_v} remote={remote_v}."
@@ -620,9 +620,9 @@ class UpdatePipelineMixin:
                 subprocess.Popen(["sudo", "-n", "/usr/local/bin/lm-update-restart"])
             except Exception as _e:
                 logger.warning(f"Could not schedule hub self-restart: {_e}")
-            return {"status": "success", "message": f"Updated Hub to v{remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."}
+            return {"status": "success", "message": f"Updated Hub to {remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."}
 
-        return {"status": "checked", "message": f"Update successful. Hub is current at v{local_v}. {len(update_results)} spoke(s) updating to latest."}
+        return {"status": "checked", "message": f"Update successful. Hub is current at {local_v}. {len(update_results)} spoke(s) updating to latest."}
 
     async def update_spokes_only(self):
         """Send SPOKE_UPDATE to every approved spoke without touching the Hub itself.
