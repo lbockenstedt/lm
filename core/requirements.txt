@@ -7,8 +7,25 @@
 # compression=) requires >=13; cap below the next major to avoid an
 # unvalidated jump. Bump the ceiling only after validating interop.
 websockets>=13.0,<17.0
-fastapi
-uvicorn[standard]
-httpx
-psutil
-cryptography
+
+# ── Remaining core deps: same skew rationale, applied per major line ───────
+# Each dep is pinned "floor at a known-good minimum, cap below the next major"
+# — the same shape as websockets above. The hub and the in-repo spokes
+# (dns/dhcp) plus the sibling spoke repos all import these; an unpinned dep
+# lets a reinstall jump the hub ahead of a spoke within a breaking major
+# change (FastAPI request/API changes, httpx client deprecations, cryptography
+# binding moves). The cap blocks an unvalidated jump to the next major; the
+# floor blocks an ancient version on a fresh install. Bump a ceiling only after
+# validating interop across hub + spokes (run the test suite / a manual spoke
+# connect after upgrading).
+#
+# NOTE (2026-06-28): the sibling spoke repos (netbox/pxmx/cs/opnsense/cppm/ldap)
+# still list these deps UNPINNED in their own requirements.txt, so the skew
+# protection is only half-enforced today — a spoke reinstall could still jump
+# ahead of the hub. Folding matching pins into each spoke's requirements.txt is
+# tracked separately (requires per-repo push authorization).
+fastapi>=0.110,<1.0          # pre-1.0 line; cap at 1.0 (next major)
+uvicorn[standard]>=0.30,<1.0 # [standard] pulls httptool/uvloop for perf
+httpx>=0.27,<1.0             # async client used hub<->spoke<->upstream APIs
+psutil>=6.0,<8.0             # installed 7.2.2 in hub venv; cap <8 next major
+cryptography>=42,<50         # HMAC signing + spoke PSK onboarding; cap <50
