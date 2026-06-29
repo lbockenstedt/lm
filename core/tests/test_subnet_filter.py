@@ -65,7 +65,7 @@ def test_stored_values_are_coerced_to_bool():
 # → admin bypass preserved (regression guard).
 
 import asyncio
-from access import subnet_filter_fw
+from access import subnet_filter_fw, subnet_filter_tenant
 
 
 class _FakeRequest:
@@ -155,3 +155,58 @@ def test_aliases_tab_filters_on_content():
     names = [a["name"] for a in out["data"]]
     assert "TENANT_NET" in names and "EMPTY" in names
     assert "EXT" not in names
+
+
+# ── Hypervisor VM filter (tenant-aware, admin acting as tenant) ────────────────
+#
+# /api/pxmx/vms previously had NO subnet filter at all — an admin saw every
+# tenant's VMs. The route now applies subnet_filter_tenant (module "hypervisor",
+# ip_fields ["ips"]) on all three return paths so an admin selecting a tenant
+# sees only that tenant's VMs. These lock in the admin-as-tenant filter and the
+# legacy admin bypass when no tenant is selected.
+
+def _vms_env():
+    # VM records carry an `ips` list (bare IPv4, no CIDR) — stopped VMs have [].
+    return {"vms": [
+        {"name": "in-tenant",   "status": "running", "ips": ["10.20.0.5"]},
+        {"name": "out-tenant",  "status": "running", "ips": ["8.8.8.8"]},
+        {"name": "stopped",     "status": "stopped",  "ips": []},           # no IP → kept
+    ]}
+
+
+def test_hypervisor_admin_with_explicit_tenant_is_filtered():
+    """An admin selecting a tenant gets that tenant's prefixes applied to VMs
+    (ips field); out-of-tenant VMs are dropped. A stopped VM with no IPs is kept
+    (can't filter — err on showing)."""
+    hub = _PrefixHub(FakeState(system_state={}, tenants={
+        "acme": {"netbox_tenant_slug": "acme"},
+    }))
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    out = asyncio.run(subnet_filter_tenant(
+        hub, sessions, req, _vms_env(), "hypervisor", ["ips"], explicit_tenant="acme"))
+    names = [v["name"] for v in out["vms"]]
+    assert "in-tenant" in names and "stopped" in names
+    assert "out-tenant" not in names
+
+
+def test_hypervisor_admin_without_explicit_tenant_bypasses():
+    """Regression guard: an admin with no selected tenant sees every VM
+    (legacy admin bypass preserved)."""
+    hub = _PrefixHub(FakeState(system_state={}, tenants={
+        "acme": {"netbox_tenant_slug": "acme"},
+    }))
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    env = _vms_env()
+    out = asyncio.run(subnet_filter_tenant(
+        hub, sessions, req, env, "hypervisor", ["ips"]))
+    assert out is env  # unchanged — all 3 VMs visible
+
+
+def test_hypervisor_module_in_toggle_set_and_default_on():
+    """The 'hypervisor' module is registered in the subnet-filter toggle set
+    and defaults ON (VM IPs are tenant-scoped data)."""
+    from access import _SUBNET_FILTER_MODULES, _SUBNET_FILTER_DEFAULTS
+    assert "hypervisor" in _SUBNET_FILTER_MODULES
+    assert _SUBNET_FILTER_DEFAULTS["hypervisor"] is True

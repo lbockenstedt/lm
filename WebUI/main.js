@@ -2821,11 +2821,12 @@ function _renderSetupSection(subMenu, container) {
 // Module subnet-filter toggles + global/per-tenant USB management. Admin-only
 // (the submenu is hidden for non-admins and the backend 403s non-admins).
 const _SUBNET_FILTER_MODULES = [
-    { key: 'nac',      label: 'Security / NAC' },
-    { key: 'firewall', label: 'Firewall' },
-    { key: 'netbox',   label: 'IPAM / NetBox' },
-    { key: 'dhcp',     label: 'DHCP Leases' },
-    { key: 'cs',       label: 'Simulations (tenant-ID scoped)' },
+    { key: 'nac',       label: 'Security / NAC' },
+    { key: 'firewall',   label: 'Firewall' },
+    { key: 'netbox',     label: 'IPAM / NetBox' },
+    { key: 'dhcp',       label: 'DHCP Leases' },
+    { key: 'hypervisor', label: 'Hypervisor / Proxmox' },
+    { key: 'cs',         label: 'Simulations (tenant-ID scoped)' },
 ];
 let _subnetFilterState = {};
 

@@ -2359,7 +2359,13 @@ def create_app(hub):
         Aggregate VM/CT list from all connected pxmx agents.
         Each VM includes unique_id ("<cluster>/<node>/<vmid>"), agent_id, cluster, node, vmid.
         Pass ?agent_id=<id> to scope to a single agent.
-        Pass ?tenant=<id> to filter by that tenant's proxmox_tag setting.
+        Pass ?tenant=<id> to filter by that tenant's proxmox_tag setting AND to
+        subnet-filter the returned VMs by that tenant's NetBox prefixes (each VM
+        carries an ``ips`` list; VMs whose ``ips`` all fall outside the tenant's
+        prefixes are dropped). The subnet filter is applied on all three return
+        paths (tenant cache hit / spoke-down cache / live) via
+        ``_subnet_filter_tenant`` so an admin acting as a tenant sees only that
+        tenant's VMs — the toggle is the ``hypervisor`` subnet-filter module.
         """
         hub = app.state.hub
         # see _netbox_list_get (variant: hypervisor spoke, proxmox_tag payload, and
@@ -2371,13 +2377,14 @@ def create_app(hub):
             if tid:
                 cached = _cache_entry(tid, "pxmx_vms")
                 if cached:
-                    return cached["data"]
+                    return await _subnet_filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
         pxmx_spoke = hub.get_spoke_by_type("hypervisor")
         if not pxmx_spoke:
             if sess:
                 tid = sess.get("user", {}).get("tenant_id")
                 cached = _cache_entry(tid, "pxmx_vms") if tid else None
-                if cached: return cached["data"]
+                if cached:
+                    return await _subnet_filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
             return {"vms": [], "spoke_connected": False}
         try:
             scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
@@ -2388,7 +2395,7 @@ def create_app(hub):
                 payload["tag_filter"] = scoping["proxmox_tag"]
             result = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", payload)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            return data
+            return await _subnet_filter_tenant(request, data, "hypervisor", ["ips"], tenant)
         except Exception as e:
             logger.exception("get_pxmx_vms failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -2430,15 +2437,19 @@ def create_app(hub):
         prefixes = len(prefixes_r.get("prefixes", []))
         ips_used = len(ips_r.get("ip_addresses",  []))
         all_vms  = vms_r.get("vms", [])
-        vms      = sum(1 for v in all_vms if v.get("status") == "running")
         sessions_list = sessions_r.get("sessions", sessions_r.get("data", []))
-        # Scope the active-session count by the tenant's subnets so the
-        # dashboard "NAC Sessions" count matches the (tenant-scoped) Access
-        # Tracker, not the global ClearPass active-session total. No prefixes
-        # (unbound tenant) → global count.
+        # Scope the VM + active-session counts by the tenant's subnets so the
+        # dashboard matches the (tenant-scoped) hypervisor + Access Tracker
+        # views, not the global totals. No prefixes (unbound tenant) or the
+        # module's subnet-filter toggle off → global count. VMs filter on their
+        # ``ips`` list (a VM with no concrete IPs, e.g. stopped, is shown — can't
+        # filter, err on showing).
         sess_prefixes = await _resolve_prefixes_for_tenant(hub, scoping.get("tenant_id"))
+        if sess_prefixes and _subnet_filter_enabled(hub, "hypervisor"):
+            all_vms = filter_items_by_prefixes(all_vms, sess_prefixes, ["ips"])
         if sess_prefixes:
             sessions_list = filter_items_by_prefixes(sessions_list, sess_prefixes, ["ip"])
+        vms      = sum(1 for v in all_vms if v.get("status") == "running")
         sessions = len(sessions_list)
 
         return {
