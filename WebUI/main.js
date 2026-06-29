@@ -4305,19 +4305,18 @@ function _diagRowHtml(s, fns) {
                                                      class="ml-1 text-[10px] ${isPaused ? 'text-green-600' : 'text-slate-400'} hover:underline">${btnLabel}</button>` : ''}`;
     return `
             <tr class="align-top hover:bg-slate-50 transition-colors">
-                <td class="px-4 py-3 font-mono text-xs text-slate-700">
+                <td class="px-4 py-3 font-mono text-xs text-slate-700 whitespace-nowrap">
                     ${s.spoke_id}
-                    <span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase ml-1 ${s.approved ? 'bg-green-100 text-green-600' : 'bg-yellow-100 text-yellow-600'}">${s.approved ? 'ok' : 'pending'}</span>
                     ${s.module_type ? `<span class="block text-[10px] text-slate-400">${escapeHtml(s.module_type)}</span>` : ''}
                 </td>
-                <td class="px-4 py-3">
+                <td class="px-4 py-3 whitespace-nowrap">
                     <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${s.authenticated ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">${s.authenticated ? 'Online' : 'Offline'}</span>
                 </td>
-                <td class="px-4 py-3 text-xs">${hbCell}</td>
-                <td class="px-4 py-3">${verCell}</td>
-                <td class="px-4 py-3 text-xs">${errCell}</td>
+                <td class="px-4 py-3 text-xs whitespace-nowrap">${hbCell}</td>
+                <td class="px-4 py-3 whitespace-nowrap">${verCell}</td>
+                <td class="px-4 py-3 text-xs w-full">${errCell}</td>
                 <td class="px-4 py-3 text-xs whitespace-nowrap">${recCell}</td>
-                <td class="px-4 py-3 text-xs">
+                <td class="px-4 py-3 text-xs whitespace-nowrap">
                     <button onclick="toggleSpokeEvents('${s.spoke_id}')" class="text-blue-500 hover:text-blue-700 font-medium">${evCount} ▾</button>
                 </td>
                 <td class="px-4 py-3 text-xs whitespace-nowrap text-right">
@@ -4490,14 +4489,14 @@ async function loadDiagnostics() {
         const diagHead = (firstCol) => `
                     <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
                         <tr>
-                            <th class="px-4 py-3 font-bold">${firstCol}</th>
-                            <th class="px-4 py-3 font-bold">State</th>
-                            <th class="px-4 py-3 font-bold">Heartbeat</th>
-                            <th class="px-4 py-3 font-bold">Version</th>
-                            <th class="px-4 py-3 font-bold">Status / Last Error</th>
-                            <th class="px-4 py-3 font-bold">Recovery</th>
-                            <th class="px-4 py-3 font-bold">Events</th>
-                            <th class="px-4 py-3 font-bold text-right">Actions</th>
+                            <th class="px-4 py-3 font-bold whitespace-nowrap">${firstCol}</th>
+                            <th class="px-4 py-3 font-bold whitespace-nowrap">State</th>
+                            <th class="px-4 py-3 font-bold whitespace-nowrap">Heartbeat</th>
+                            <th class="px-4 py-3 font-bold whitespace-nowrap">Version</th>
+                            <th class="px-4 py-3 font-bold w-full">Status / Last Error</th>
+                            <th class="px-4 py-3 font-bold whitespace-nowrap">Recovery</th>
+                            <th class="px-4 py-3 font-bold whitespace-nowrap">Events</th>
+                            <th class="px-4 py-3 font-bold whitespace-nowrap text-right">Actions</th>
                         </tr>
                     </thead>`;
         // Generic Hub-direct agents use the spoke-approval endpoints; Proxmox
