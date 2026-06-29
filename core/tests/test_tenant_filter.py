@@ -127,10 +127,41 @@ def test_build_alias_map_resolves_concrete_and_nested():
 
 def test_alias_match_lets_firewall_rule_through():
     """A rule referencing an alias whose content is in the tenant prefix is kept
-    once the alias map resolves it — without the map it would be treated as a
-    non-IP field (wildcard-ish) and shown anyway, so this mainly proves the
-    resolution path doesn't drop it."""
+    once the alias map resolves it. Without the map the alias side is an
+    unresolvable non-wildcard → dropped (err on hiding), so the map is what
+    lets the tenant's own alias-based rule through."""
     aliases = [{"name": "LAN_NET", "type": "network", "content": "10.20.0.0/24"}]
     amap = build_alias_map(aliases)
     rule = {"source": "any", "destination": "LAN_NET"}
     assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES, alias_map=amap) is True
+    # Without the map: dst is an unresolvable alias name (not a wildcard) → drop.
+    # (Previously this leaked: both sides None → "global policy" → shown to all.)
+    assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is False
+
+
+def test_firewall_rule_dropped_when_unresolvable_alias_no_map():
+    """The cross-tenant leak fix: a rule whose non-wildcard side is an alias name
+    we can't expand (no alias map) is NOT treated as global policy — it's
+    dropped, because it can't be attributed to this tenant."""
+    rule = {"source": "SOME_OTHER_TENANT_ALIAS", "destination": "any"}
+    assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is False
+
+
+def test_firewall_rule_dropped_when_both_sides_unresolvable_interfaces():
+    """Interface names (lan/opt1) aren't aliases and can't be expanded to
+    concrete nets — both sides unresolvable non-wildcards → drop, not global."""
+    rule = {"source": "lan", "destination": "opt1"}
+    assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is False
+
+
+def test_firewall_global_rule_shown_both_wildcard_with_port():
+    """any:443 → any is still genuine global policy (both sides wildcards)."""
+    rule = {"source": "any:443", "destination": "any"}
+    assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is True
+
+
+def test_firewall_rule_one_side_wildcard_one_side_off_prefix_drops():
+    """any → concrete-off-prefix: the concrete side is outside the tenant and the
+    other side is a wildcard (not both wildcards) → drop."""
+    rule = {"source": "any", "destination": "8.8.8.8"}
+    assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is False

@@ -357,11 +357,18 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
                               category_field: str = "category") -> bool:
     """Strict firewall-rule prefix check (with optional OPNsense alias resolution).
 
-    Show when both sides are wildcards / unresolvable (global policy applies to
-    all tenants) OR either source/destination references a concrete network that
-    overlaps one of the tenant's prefixes. ``alias_map`` (from
-    ``build_alias_map``) expands alias names to concrete networks before
-    matching; ``None`` → concrete-IP-only behavior (legacy).
+    Show when EITHER source/destination references a concrete network that
+    overlaps one of the tenant's prefixes, OR both sides are genuine wildcards
+    (``any``/``*`` — true global policy that applies to every tenant).
+    ``alias_map`` (from ``build_alias_map``) expands alias names to concrete
+    networks before matching; ``None`` → concrete-IP-only behavior.
+
+    A side that is a non-wildcard but unresolvable — an alias/interface name we
+    can't expand to concrete nets (alias not in the map, interface name, empty
+    alias, or the alias fetch failed) — is **not** treated as "global policy".
+    Such a rule can't be attributed to this tenant, so it is dropped (err on
+    hiding, same principle as ``drop_no_ip``). This closes the cross-tenant leak
+    where unresolvable alias/interface rules were shown to every tenant.
 
     ``tenant_category`` (tenant display name) is an OR attribution path: a rule
     whose ``category_field`` equals it is shown regardless of source/destination
@@ -376,12 +383,18 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
     nets = _nets(prefixes)
     if not nets:
         return True
-    src = _side_addrs(rule.get("source"), alias_map)
-    dst = _side_addrs(rule.get("destination"), alias_map)
-    if src is None and dst is None:
-        return True  # both open / unresolvable → global policy
+    src_raw = rule.get("source")
+    dst_raw = rule.get("destination")
+    src = _side_addrs(src_raw, alias_map)
+    dst = _side_addrs(dst_raw, alias_map)
+    # Either side overlaps a tenant prefix → show.
     if src and any(_addr_in_prefixes(a, nets) for a in src):
         return True
     if dst and any(_addr_in_prefixes(a, nets) for a in dst):
         return True
+    # Both sides genuine wildcards (any/any) → true global policy → show to all.
+    if _is_wildcard(src_raw) and _is_wildcard(dst_raw):
+        return True
+    # Unresolvable non-wildcard side(s) or concrete-but-off-prefix → can't
+    # attribute to this tenant → drop.
     return False
