@@ -56,14 +56,17 @@ _SUBNET_FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
                             "dhcp": True, "cs": False}
 
 # Firewall endpoint → filter spec. "rules" uses the strict source/destination
-# check; the others use field-based filtering; aliases/health carry no IP and
-# are skipped. Mirrors the client field sets in main.js:3928-3952.
+# check (with OPNsense alias expansion); the field-based endpoints filter on
+# their concrete-IP columns; "aliases" filters on its ``content`` (the IPs/CIDRs
+# the alias expands to). "health" carries no IP and is skipped. Field sets
+# mirror the client-side itemInTenantPrefixes calls (main.js ~5078-5084).
 _FW_FILTER_SPEC = {
     "rules":      ("fw", None),
     "nat":        ("fields", ["internal_ip", "external_ip", "destination.network"]),
     "dns":        ("fields", ["ip", "value"]),
     "interfaces": ("fields", ["ip", "ipaddr"]),
     "dhcp":       ("fields", ["ip", "address"]),
+    "aliases":    ("fields", ["content"]),
 }
 
 
@@ -341,20 +344,34 @@ async def _fw_alias_map(hub, firewall_id) -> "dict | None":
 
 
 async def subnet_filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str,
-                           firewall_id=None):
+                           firewall_id=None, explicit_tenant=None):
     """Firewall-specific subnet filter: strict source/destination for ``rules``
     (with OPNsense alias resolution via ``_fw_alias_map``), field-based for
-    nat/dns/interfaces/dhcp, none for aliases."""
+    nat/dns/interfaces/dhcp/aliases.
+
+    Tenant-aware: when ``explicit_tenant`` resolves to a real tenant (an admin
+    selecting a tenant via the switcher, or a multi-tenant user switching to an
+    allowed one), scope by THAT tenant's prefixes — even for admins, who
+    otherwise bypass. No explicit tenant → legacy session-tenant behavior
+    (no-op for admins, session tenant for non-admins). Mirrors
+    ``subnet_filter_tenant``. The ``firewall`` subnet-filter toggle gates both
+    paths; an empty prefix list still means "no filter" (can't filter)."""
     spec = _FW_FILTER_SPEC.get(endpoint)
     if not spec:
-        return data  # aliases / health / unknown → no IP to filter on
+        return data  # health / unknown → no IP to filter on
     mode, fields = spec
-    sess = session_user(sessions, request)
-    if not sess or is_admin(sess):
-        return data
-    if not subnet_filter_enabled(hub, "firewall"):
-        return data
-    prefixes = await resolve_prefixes(hub, sess)
+    tid = effective_tenant(sessions, request, explicit_tenant)
+    if explicit_tenant and tid:
+        if not subnet_filter_enabled(hub, "firewall"):
+            return data
+        prefixes = await resolve_prefixes_for_tenant(hub, tid)
+    else:
+        sess = session_user(sessions, request)
+        if not sess or is_admin(sess):
+            return data
+        if not subnet_filter_enabled(hub, "firewall"):
+            return data
+        prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
         return data
     if mode == "fw":
