@@ -1916,14 +1916,22 @@ async function csRenderVmServerUsb() {
       ${summary}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Certified USB (${present.length})</p>
       ${csTable(['Device', 'VID:PID', 'Type', 'Approved', 'Active VMs', 'Status'], certRows)}
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-5 mb-2">Uncertified / Unknown (${unknown.length})</p>
+      <div class="flex items-center gap-2 mt-5 mb-2">
+        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Uncertified / Unknown (${unknown.length})</p>
+        <select id="cs-usb-cert-type" title="Classify certified dongles as" class="text-[11px] border border-slate-200 rounded px-1 py-0.5"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
+      </div>
       ${csTable(['Device', 'VID:PID', 'Actions'], unRows)}
     </div>`);
 }
 
 window.csUsbVidpid = async function (vid, pid, action) {
     try {
-        await csFetch(`/${csTenant()}/usb-vidpids?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify({ vid, pid, action }) });
+        const body = { vid, pid, action };
+        if (action === 'certify') {
+            const sel = document.getElementById('cs-usb-cert-type');
+            if (sel) body.type = sel.value;
+        }
+        await csFetch(`/${csTenant()}/usb-vidpids?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         csVmFlash(action + ' queued for ' + vid + ':' + pid);
         setTimeout(() => loadCSData('VM Server', currentSubChild, true), 800);
     } catch (e) { console.error('csUsbVidpid: usb action failed', e); alert('USB action failed: ' + (e.message || e)); }

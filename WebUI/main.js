@@ -3079,7 +3079,7 @@ async function loadUsbOverview() {
     const tenants = data.tenants || [];
     if (!tenants.length) { list.innerHTML = '<p class="text-xs text-slate-400 italic">No tenants configured.</p>'; return; }
     list.innerHTML = tenants.map(t => {
-        const cert = (t.certified || []).map(d => _usbChip(d.vidpid, d.vidpid, `tenantUsbRemove('${t.id}','${d.vidpid}')`)).join('') || '<span class="text-xs text-slate-400 italic">none</span>';
+        const cert = (t.certified || []).map(d => _usbChip(d.vidpid, `${d.vidpid} <span class="text-slate-400">${d.type || ''}</span>`, `tenantUsbRemove('${t.id}','${d.vidpid}')`)).join('') || '<span class="text-xs text-slate-400 italic">none</span>';
         const ign = (t.ignored || []).map(vp => _usbChip(vp, vp, `tenantUsbRemove('${t.id}','${vp}')`)).join('') || '<span class="text-xs text-slate-400 italic">none</span>';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-2">
@@ -3091,6 +3091,7 @@ async function loadUsbOverview() {
             </div>
             <div class="flex gap-1 mt-2">
                 <input id="tusbc-${t.id}" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${'w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800'}" onkeydown="if(event.key==='Enter')tenantUsbAdd('${t.id}','certify')">
+                <select id="tusbt-${t.id}" title="Dongle type" class="text-xs ${'w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800'}"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
                 <button onclick="tenantUsbAdd('${t.id}','certify')" class="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">Certify</button>
                 <button onclick="tenantUsbAdd('${t.id}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded text-xs font-bold">Ignore</button>
             </div>
@@ -3270,7 +3271,8 @@ async function tenantUsbAdd(tid, action) {
     const full = (inp?.value || '').trim().toLowerCase();
     if (!_vpValid(full)) { if (typeof showToast === 'function') showToast('VID:PID must be 4-hex:4-hex', 'error'); return; }
     const [vid, pid] = full.split(':');
-    await _tenantUsbPost(tid, vid, pid, action, inp);
+    const type = document.getElementById(`tusbt-${tid}`)?.value || 'wireless';
+    await _tenantUsbPost(tid, vid, pid, action, inp, type);
 }
 
 async function tenantUsbRemove(tid, vp) {
@@ -3278,11 +3280,13 @@ async function tenantUsbRemove(tid, vp) {
     await _tenantUsbPost(tid, vid, pid, 'remove', null);
 }
 
-async function _tenantUsbPost(tid, vid, pid, action, inp) {
+async function _tenantUsbPost(tid, vid, pid, action, inp, type) {
     try {
+        const body = { vid, pid, action };
+        if (action === 'certify' && type) body.type = type;
         const r = await fetch(`/sim/api/${tid}/usb-vidpids?tenant_id=${tid}`, {
             method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ vid, pid, action }),
+            body: JSON.stringify(body),
         });
         if (!r.ok) throw new Error(`${r.status}`);
         if (inp) inp.value = '';
