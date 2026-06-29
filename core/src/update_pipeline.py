@@ -110,6 +110,58 @@ class UpdatePipelineMixin:
             logger.error(f"Error fetching remote version: {e}")
         return "unknown"
 
+    async def get_local_commit(self) -> str:
+        """Return the SHA of the local ``HEAD`` commit, or ``"unknown"`` if the
+        hub install isn't a git repo (tarball install) or git isn't available.
+
+        Primary update-detection signal for git installs since the VERSION
+        reset to ``v.01``: a string VERSION comparison can no longer tell
+        ahead-of-remote from up-to-date, but a commit-SHA comparison can. See
+        ``perform_update`` for how this composes with the remote SHA and the
+        non-git fallback.
+        """
+        try:
+            hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", hub_root, "rev-parse", "HEAD",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out, _ = await proc.communicate()
+            if proc.returncode == 0:
+                return out.decode().strip() or "unknown"
+        except Exception as e:
+            logger.debug(f"get_local_commit: {e}")
+        return "unknown"
+
+    async def get_remote_commit(self, hub_repo: Optional[str] = None, branch: Optional[str] = None) -> str:
+        """Return the SHA of the remote ``refs/heads/<branch>`` tip via
+        ``git ls-remote`` (no object download — lighter than a fetch), or
+        ``"unknown"`` on failure. Works for any git remote (GitHub or not),
+        so it does not depend on the GitHub Raw VERSION URL. ``hub_repo`` /
+        ``branch`` default to the configured ``update_sources.hub`` and
+        ``global_branch``.
+        """
+        try:
+            config = self.state.get_global_config()
+            sources = config.get("update_sources", {})
+            repo = hub_repo or sources.get("hub", "https://github.com/lbockenstedt/lm")
+            ref = branch or config.get("global_branch", "main")
+            proc = await asyncio.create_subprocess_exec(
+                "git", "ls-remote", repo, f"refs/heads/{ref}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            out, err = await proc.communicate()
+            if proc.returncode == 0:
+                # `ls-remote` prints "<sha>\trefs/heads/main"; take the first token.
+                line = out.decode().strip().splitlines()
+                if line and line[0].split():
+                    return line[0].split()[0]
+            else:
+                logger.debug(f"get_remote_commit ls-remote rc={proc.returncode}: {err.decode().strip()}")
+        except Exception as e:
+            logger.debug(f"get_remote_commit: {e}")
+        return "unknown"
+
     def _is_git_repo(self, path: str) -> bool:
         """Check if the given path is a git repository (contains a .git directory or is git rev-parse valid)."""
         git_dir = os.path.join(path, ".git")
@@ -192,18 +244,25 @@ class UpdatePipelineMixin:
                 else:
                     shutil.copy2(src, dst)
 
-            # Verify update actually took effect
-            new_local_v = await self.get_local_version()
-            remote_v = await self.get_remote_version()
-            if new_local_v == remote_v and new_local_v != "unknown":
-                logger.info(f"Hub successfully updated via tarball download to v{new_local_v}.")
-                return True
+            # Verify update actually took effect. A tarball install has no local
+            # git HEAD to compare, and post the v.01 reset a VERSION-equality
+            # check is always true (both ends v.01), so the success signal is
+            # the exception-free merge of a 200 tarball above. Resolve the remote
+            # tip via ls-remote for logging; perform_update() records
+            # ``last_update_commit = remote_commit`` on success, which is how the
+            # *next* advance is detected for a non-git install.
+            remote_commit = await self.get_remote_commit(repo_url, branch)
+            if remote_commit != "unknown":
+                logger.info(
+                    f"Hub tarball update applied from {branch} tip {remote_commit[:10]} "
+                    f"(repo {repo_url})."
+                )
             else:
                 logger.warning(
-                    f"Tarball update applied but local version ({new_local_v}) "
-                    f"does not match remote ({remote_v}). Update verification failed."
+                    f"Tarball merge completed but ls-remote failed; recording "
+                    f"last_update_commit will be skipped this cycle."
                 )
-                return False
+            return True
         except Exception as e:
             logger.error(f"Error during download-based update: {e}", exc_info=True)
             return False
@@ -239,18 +298,32 @@ class UpdatePipelineMixin:
                 logger.error(f"Hub git pull failed (rc={process.returncode}): {err_msg}")
                 return False
 
-            # CRITICAL: verify the version actually changed to confirm success.
+            # CRITICAL: verify the pull actually advanced HEAD to the remote tip.
+            # Post the v.01 VERSION reset a VERSION-equality check is always true
+            # (both ends v.01), so it can no longer confirm a real update —
+            # compare commit SHAs instead, falling back to VERSION only if git
+            # is somehow unavailable on a git install.
+            new_local_commit = await self.get_local_commit()
+            remote_commit = await self.get_remote_commit(hub_repo, branch)
+            if new_local_commit != "unknown" and remote_commit != "unknown":
+                if new_local_commit == remote_commit:
+                    logger.info(f"Hub successfully updated via git to {new_local_commit[:10]}.")
+                    return True
+                logger.warning(
+                    f"Git pull returned success but HEAD {new_local_commit[:10]} "
+                    f"!= remote tip {remote_commit[:10]}. Update verification failed."
+                )
+                return False
+            # Fallback (git unavailable): legacy VERSION equality.
             new_local_v = await self.get_local_version()
             remote_v = await self.get_remote_version()
             if new_local_v == remote_v and new_local_v != "unknown":
-                logger.info(f"Hub successfully updated via git to v{new_local_v}.")
+                logger.info(f"Hub updated via git to v{new_local_v} (VERSION fallback).")
                 return True
-            else:
-                logger.warning(
-                    f"Git update returned success but local version ({new_local_v}) "
-                    f"does not match remote ({remote_v}). Update verification failed."
-                )
-                return False
+            logger.warning(
+                f"Git update verification failed: local={new_local_v} remote={remote_v}."
+            )
+            return False
         except Exception as e:
             logger.error(f"Unexpected error during git-based Hub update: {e}", exc_info=True)
             return False
@@ -340,10 +413,31 @@ class UpdatePipelineMixin:
         local_v = await self.get_local_version()
         remote_v = await self.get_remote_version()
 
-        logger.info(f"Update check: local={local_v}, remote={remote_v}, force={force}")
+        # ── Update detection ─────────────────────────────────────────────────
+        # Since the VERSION reset to ``v.01`` (2026-06-28) a string VERSION
+        # comparison can no longer distinguish ahead-of-remote from up-to-date
+        # — both ends are perpetually ``v.01``. Commit-SHA comparison is now the
+        # primary signal: the hub is "behind" when the remote tip SHA differs
+        # from what it has. For git installs that's local HEAD vs the remote
+        # tip; for non-git (tarball) installs there is no local HEAD, so we
+        # compare the remote tip to the last commit we recorded as applied
+        # (``global_config["last_update_commit"]``, written on a successful
+        # update). The legacy ``_ver`` comparison is kept as a final fallback
+        # for any future deployment that bumps VERSION again.
+        config = self.state.get_global_config()
+        sources = config.get("update_sources", {})
+        hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
+        branch = config.get("global_branch", "main")
+        stored_commit = config.get("last_update_commit")
 
-        self.state.update_global_config({"last_update_ts": time.time()})
-        self.state.save_state()
+        local_commit = await self.get_local_commit()
+        remote_commit = await self.get_remote_commit(hub_repo, branch)
+
+        if local_commit != "unknown":
+            commit_ahead = remote_commit != "unknown" and remote_commit != local_commit
+        else:
+            # Non-git install: compare remote tip to the last commit we applied.
+            commit_ahead = remote_commit != "unknown" and remote_commit != stored_commit
 
         def _ver(v: str):
             try:
@@ -351,15 +445,22 @@ class UpdatePipelineMixin:
             except Exception:
                 return (0, 0, 0)
 
+        ver_ahead = _ver(remote_v) > _ver(local_v)
+        update_available = force or commit_ahead or ver_ahead
+
+        logger.info(
+            f"Update check: local={local_v}@{local_commit[:10] if local_commit != 'unknown' else 'n/a'} "
+            f"remote={remote_v}@{remote_commit[:10] if remote_commit != 'unknown' else 'n/a'} "
+            f"commit_ahead={commit_ahead} ver_ahead={ver_ahead} force={force}"
+        )
+
+        self.state.update_global_config({"last_update_ts": time.time()})
+        self.state.save_state()
+
         hub_updated = False
-        if force or _ver(remote_v) > _ver(local_v):
+        if update_available:
             try:
                 hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
-
-                config = self.state.get_global_config()
-                sources = config.get("update_sources", {})
-                hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
-                branch = config.get("global_branch", "main")
 
                 # ── Recovery prelude ──────────────────────────────────────────
                 # Skip a version that was rolled back after failing to boot. force
@@ -401,7 +502,18 @@ class UpdatePipelineMixin:
                         )
                         hub_updated = await self._download_update(hub_root, hub_repo, branch)
 
-                    if not hub_updated:
+                    if hub_updated:
+                        # Record the commit we just applied so a non-git install
+                        # can detect the *next* remote advance. For a git install
+                        # local HEAD now equals the remote tip; storing it is
+                        # harmless and keeps one code path for both install types.
+                        applied = await self.get_local_commit()
+                        if applied == "unknown":
+                            applied = remote_commit
+                        if applied != "unknown":
+                            self.state.update_global_config({"last_update_commit": applied})
+                            self.state.save_state()
+                    else:
                         # Pull failed — local code is unchanged, so there is
                         # nothing to roll back to. Drop the pending manifest.
                         clear_pending()
