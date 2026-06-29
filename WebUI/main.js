@@ -4341,11 +4341,21 @@ function _diagRowHtml(s, fns) {
 
 // Map a Proxmox node agent (from /api/pxmx/agents) into the same telemetry
 // shape spokes/generic-agents use, so the shared _diagRowHtml renderer works.
-// These agents connect through the pxmx hypervisor spoke — the hub has no
-// direct heartbeat/recovery/events for them, so those fields are empty/neutral
-// and the row renders '—' / 0 events, matching what's actually known.
+// These agents connect through the pxmx hypervisor spoke; the pxmx spoke now
+// relays their AGENT_HEARTBEAT up, so the hub HeartbeatManager tracks them
+// (keyed spoke_id:agent_id) and /api/pxmx/agents carries heartbeat_status +
+// heartbeat_age_s. We fall back to the spoke's own last_seen so a freshly-seen
+// agent still shows a status before the first relayed beat lands. Recovery/
+// events stay empty/neutral (the watchdog is spoke-scoped, not per-agent).
 function _normalizePxmxAgent(a) {
     const connected = a._status === 'connected';
+    let hbStatus = a.heartbeat_status || '';
+    let hbAge = a.heartbeat_age_s;
+    if ((hbAge == null || !hbStatus) && typeof a.last_seen === 'number') {
+        const age = Math.max(0, Math.floor(Date.now() / 1000 - a.last_seen));
+        if (hbAge == null) hbAge = age;
+        if (!hbStatus) hbStatus = age < 120 ? 'GREEN' : age < 300 ? 'YELLOW' : 'RED';
+    }
     return {
         spoke_id: a.agent_id,
         display_name: a.display_name || a.hostname || a.agent_id,
@@ -4355,8 +4365,8 @@ function _normalizePxmxAgent(a) {
         module_type: 'pxmx',
         version: a.version || a.sw_version || 'unknown',
         version_skew: false,
-        heartbeat_status: '',
-        heartbeat_age_s: null,
+        heartbeat_status: hbStatus,
+        heartbeat_age_s: hbAge,
         last_status: connected ? '' : 'PENDING_SECRET',
         last_error: null,
         flapping: false,

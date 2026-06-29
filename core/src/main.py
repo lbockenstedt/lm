@@ -882,8 +882,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin):
             self.agent_logs[agent_id].append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {log_msg}")
             return True
 
-        # If the original message was a heartbeat, update heartbeat for that specific agent
-        if original_msg.get("payload", {}).get("type") == "HEARTBEAT":
+        # If the original message was a heartbeat, update heartbeat for that
+        # specific agent (keyed spoke_id:agent_id). pxmx unified agents emit
+        # "AGENT_HEARTBEAT" (30s); accept the legacy "HEARTBEAT" type too.
+        _orig_type = original_msg.get("payload", {}).get("type")
+        if _orig_type in ("HEARTBEAT", "AGENT_HEARTBEAT"):
             self.heartbeat.update_heartbeat(f"{spoke_id}:{agent_id}")
             return True
 
