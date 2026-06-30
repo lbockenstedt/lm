@@ -215,10 +215,17 @@ class VmSyncMixin:
             return status
         # NetBox tenant slug for VM tenancy in NetBox ('' → VMs created globally)
         netbox_slug = str(tenant_cfg.get("netbox_tenant_slug") or "").strip()
+        # Optional per-agent scoping: when the config pins a specific pxmx agent
+        # (a single Proxmox server/cluster), the list call is scoped to that
+        # agent_id; unset → pull from every connected agent the spoke aggregates.
+        list_payload = {se.get("request_filter_key", "tag_filter"): scope}
+        agent_id = str(self._vm_sync_cfg().get("agent_id") or "").strip()
+        if agent_id:
+            list_payload["agent_id"] = agent_id
         try:
             r = await self.request_response(
                 hyp, se.get("list_command", "PXMX_LIST_VMS"),
-                {se.get("request_filter_key", "tag_filter"): scope}, timeout=30.0)
+                list_payload, timeout=30.0)
             data = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
             if isinstance(data, dict) and data.get("status") == "ERROR":
                 logger.info("vm sync tenant=%s(%s) SKIP: %s returned ERROR: %s",

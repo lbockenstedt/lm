@@ -1067,6 +1067,9 @@ def create_app(hub):
 
         Driven by Hub.HYPERVISOR_SOURCES so adding a product is a one-entry
         registry change and the WebUI dropdown picks it up with no client change.
+        Also returns the connected pxmx agents (the actual Proxmox servers /
+        clusters the sync can be scoped to) so the UI can list them and let the
+        admin pick one instead of just the generic source type.
         """
         hub = app.state.hub
         sess = _session_user(request)
@@ -1078,7 +1081,27 @@ def create_app(hub):
             sources.append({"name": name, "label": se.get("label", name),
                             "module_type": se.get("module_type", ""),
                             "connected": bool(hub.get_spoke_by_type(se.get("module_type", "")))})
-        return {"active": active, "sources": sources}
+        # Connected pxmx agents — the real servers the sync pulls from. Empty
+        # when the hypervisor spoke is down (sources[*].connected already flags
+        # that; agents just enriches with the per-server detail).
+        agents: list = []
+        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        if pxmx_spoke:
+            try:
+                r = await hub.request_response(pxmx_spoke, "GET_AGENTS", {}, timeout=15.0)
+                d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
+                for a in (d or {}).get("agents", []) if isinstance(d, dict) else []:
+                    agents.append({
+                        "agent_id":   a.get("agent_id", ""),
+                        "hostname":   a.get("hostname", ""),
+                        "cluster":    a.get("cluster_name", "") or a.get("hostname", ""),
+                        "nodes":      a.get("nodes", []) or [],
+                        "vm_count":   a.get("vm_count", 0) or 0,
+                        "status":     a.get("status", "connected"),
+                    })
+            except Exception as e:
+                logger.debug("vm_sync_sources: GET_AGENTS failed: %s", e)
+        return {"active": active, "sources": sources, "agents": agents}
 
     @app.get("/setup/pxmx-config")
     async def get_pxmx_config():

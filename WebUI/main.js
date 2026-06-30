@@ -2602,6 +2602,12 @@ function _renderSetupSyncTile(content) {
                         </select>
                     </div>
                     <div class="space-y-1">
+                        <label class="${labelCls}">Sync from server</label>
+                        <select id="vm-sync-agent" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="">All connected servers</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
                         <label class="${labelCls}">Schedule</label>
                         <select id="vm-sync-mode" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                             <option value="interval">Every (interval)</option>
@@ -3093,9 +3099,14 @@ async function saveEndpointSyncConfig() {
 // ── Hypervisor → NetBox VM sync (Setup → Sync) ──────────────────────────
 async function loadVmSyncSources() {
     // Populate the hypervisor source dropdown from the hub's HYPERVISOR_SOURCES
-    // registry (data-driven) and mark each source's connected state.
+    // registry (data-driven) and mark each source's connected state. Also list
+    // the connected pxmx agents (the real Proxmox servers) in the "Sync from
+    // server" dropdown so the admin can scope the sync to one server.
     const sel = document.getElementById('vm-sync-source');
+    const agSel = document.getElementById('vm-sync-agent');
     if (!sel) return;
+    let savedAgent = '';
+    if (agSel) savedAgent = agSel.value;
     try {
         const r = await setupFetch('/setup/vm-sync/sources');
         if (!r.ok) return;
@@ -3105,6 +3116,19 @@ async function loadVmSyncSources() {
             `<option value="${s.name}">${s.label}${s.connected ? '' : ' (not connected)'}</option>`
         ).join('');
         if (cur) sel.value = cur;
+        if (agSel) {
+            const agents = data.agents || [];
+            agSel.innerHTML = '<option value="">All connected servers</option>'
+                + agents.map(a => {
+                    const nodes = (a.nodes || []).join(', ');
+                    const label = `${a.cluster || a.hostname || a.agent_id}${nodes ? ' [' + nodes + ']' : ''} · ${a.vm_count || 0} VMs`;
+                    return `<option value="${escapeHtml(a.agent_id)}">${escapeHtml(label)}</option>`;
+                }).join('');
+            if (!agents.length) {
+                agSel.innerHTML = '<option value="">No servers connected</option>';
+            }
+            if (savedAgent) agSel.value = savedAgent;
+        }
     } catch (e) { console.error('loadVmSyncSources failed', e); }
 }
 
@@ -3119,11 +3143,15 @@ async function loadVmSyncConfig() {
         const mode = document.getElementById('vm-sync-mode');
         const intv = document.getElementById('vm-sync-interval');
         const time = document.getElementById('vm-sync-time');
+        const agSel = document.getElementById('vm-sync-agent');
         if (chk) chk.checked = vmSync.enabled === true;
         if (src && vmSync.source) src.value = vmSync.source;
         if (mode) mode.value = vmSync.mode === 'daily' ? 'daily' : 'interval';
         if (intv) intv.value = Math.max(1, Math.round((vmSync.interval_seconds || 3600) / 60));
         if (time) time.value = vmSync.daily_time || '03:00';
+        // Restore the pinned server (agent_id) — sources may load after config;
+        // re-apply once both have run.
+        if (agSel && vmSync.agent_id) agSel.value = vmSync.agent_id;
     } catch (e) { console.error('loadVmSyncConfig failed', e); }
 }
 
@@ -3192,11 +3220,13 @@ async function saveVmSyncConfig() {
     const mode = document.getElementById('vm-sync-mode')?.value || 'interval';
     const intervalMin = Math.max(1, parseInt(document.getElementById('vm-sync-interval')?.value, 10) || 60);
     const dailyTime = document.getElementById('vm-sync-time')?.value || '03:00';
+    const agentId = document.getElementById('vm-sync-agent')?.value || '';
     try {
         const r = await setupFetch('/setup/config', {
             method: 'POST',
             body: JSON.stringify({ config: { pxmx_netbox_vm_sync: {
-                enabled, source, mode, interval_seconds: intervalMin * 60, daily_time: dailyTime
+                enabled, source, mode, interval_seconds: intervalMin * 60, daily_time: dailyTime,
+                agent_id: agentId
             } } })
         });
         if (r.ok) showToast('VM sync schedule saved.', 'success');
