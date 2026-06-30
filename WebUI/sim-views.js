@@ -1897,21 +1897,55 @@ async function csRenderVmServerUsb() {
         for (const t of std) opts += `<option value="${t}"${cur === t ? ' selected' : ''}>${t}</option>`;
         return opts;
     };
-    const certRows = present.map(u => { const [vid, pid] = splitVp(u); return `<tr>
-      <td class="px-3 py-2 text-sm">${csEscape(u.name || u.product || u.vidpid || '—')}</td>
-      <td class="px-3 py-2 font-mono text-xs">${csEscape(vid)}:${csEscape(pid)}</td>
-      <td class="px-3 py-2"><select onchange="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','certify', this.value)" class="text-[11px] border border-slate-200 rounded px-1 py-0.5 bg-white">${typeOpts(u.type)}</select></td>
-      <td class="px-3 py-2">${scopeBadge(sc(u))}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(activeVms(u).join(', ') || '—')}</td>
-      <td class="px-3 py-2">${csStatusBadge(isMissing(u) ? 'warning' : 'ok')}</td>
-    </tr>`; }).join('');
-    const unRows = unknown.map(u => { const [vid, pid] = splitVp(u); return `<tr>
-      <td class="px-3 py-2 text-sm">${csEscape(u.name || u.product || u.vidpid || '—')}</td>
-      <td class="px-3 py-2 font-mono text-xs">${csEscape(vid)}:${csEscape(pid)}</td>
+    // Group physical dongles by vid:pid — one row per device MODEL with a Count
+    // of how many physical instances exist (10 dongles of obda:c811 → one row,
+    // count 10), not a row per dongle. Type/Approved are per-vid:pid (assigned
+    // at certify time, shared by every instance of that vid:pid); Active-VMs and
+    // Status are merged across the instances of that vid:pid. The summary totals
+    // above stay physical (present.length/unknown.length) so "10 of one type"
+    // still counts as 10 dongles.
+    const groupByVp = arr => {
+        const m = new Map();
+        for (const u of (arr || [])) {
+            const [vid, pid] = splitVp(u);
+            const key = `${vid}:${pid}`;
+            let g = m.get(key);
+            if (!g) {
+                g = { vid, pid, vidpid: key, items: [], name: '', type: u.type || '', scope: '' };
+                m.set(key, g);
+            }
+            g.items.push(u);
+            const nm = u.name || u.product || u.vidpid || '';
+            if (nm && (g.name === '' || g.name === '—')) g.name = nm;
+            const ssc = sc(u);
+            if (ssc && !g.scope) g.scope = ssc;
+            if (!g.type && u.type) g.type = u.type;
+        }
+        return [...m.values()];
+    };
+    const certGroups = groupByVp(present);
+    const unGroups = groupByVp(unknown);
+    const certRows = certGroups.map(g => {
+        const vms = [...new Set(g.items.flatMap(activeVms))].filter(Boolean);
+        const anyMissing = g.items.some(isMissing);
+        return `<tr>
+      <td class="px-3 py-2 text-sm">${csEscape(g.name || '—')}</td>
+      <td class="px-3 py-2 font-mono text-xs">${csEscape(g.vid)}:${csEscape(g.pid)}</td>
+      <td class="px-3 py-2"><select onchange="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','certify', this.value)" class="text-[11px] border border-slate-200 rounded px-1 py-0.5 bg-white">${typeOpts(g.type)}</select></td>
+      <td class="px-3 py-2">${scopeBadge(g.scope)}</td>
+      <td class="px-3 py-2 text-center text-sm font-bold text-slate-700">${g.items.length}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(vms.join(', ') || '—')}</td>
+      <td class="px-3 py-2">${csStatusBadge(anyMissing ? 'warning' : 'ok')}</td>
+    </tr>`;
+    }).join('');
+    const unRows = unGroups.map(g => { return `<tr>
+      <td class="px-3 py-2 text-sm">${csEscape(g.name || '—')}</td>
+      <td class="px-3 py-2 font-mono text-xs">${csEscape(g.vid)}:${csEscape(g.pid)}</td>
+      <td class="px-3 py-2 text-center text-sm font-bold text-slate-700">${g.items.length}</td>
       <td class="px-3 py-2"><div class="flex gap-1 items-center">
         <select class="cs-usb-row-type text-[11px] border border-slate-200 rounded px-1 py-0.5 bg-white"><option value="">—</option><option value="wireless">wireless</option><option value="wired">wired</option></select>
-        <button onclick="csUsbCertifyRow(this, '${csEscape(vid)}','${csEscape(pid)}')" class="bg-green-100 text-green-700 px-2 py-0.5 rounded text-[10px] font-bold">Certify</button>
-        <button onclick="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[10px] font-bold">Ignore</button>
+        <button onclick="csUsbCertifyRow(this, '${csEscape(g.vid)}','${csEscape(g.pid)}')" class="bg-green-100 text-green-700 px-2 py-0.5 rounded text-[10px] font-bold">Certify</button>
+        <button onclick="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[10px] font-bold">Ignore</button>
       </div></td>
     </tr>`; }).join('');
     // Diagnostic: when no dongles are present, show where the cs spoke put
@@ -1927,10 +1961,10 @@ async function csRenderVmServerUsb() {
     csSet(`<div>${csVmHostBanner()}
       ${dbgBox}
       ${summary}
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Certified USB (${present.length})</p>
-      ${csTable(['Device', 'VID:PID', 'Type', 'Approved', 'Active VMs', 'Status'], certRows)}
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-5 mb-2">Uncertified / Unknown (${unknown.length}) — pick a type, then Certify</p>
-      ${csTable(['Device', 'VID:PID', 'Type & Actions'], unRows)}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Certified USB (${certGroups.length} type${certGroups.length === 1 ? '' : 's'} · ${present.length} dongle${present.length === 1 ? '' : 's'})</p>
+      ${csTable(['Device', 'VID:PID', 'Type', 'Approved', 'Count', 'Active VMs', 'Status'], certRows)}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-5 mb-2">Uncertified / Unknown (${unGroups.length} type${unGroups.length === 1 ? '' : 's'} · ${unknown.length} dongle${unknown.length === 1 ? '' : 's'}) — pick a type, then Certify</p>
+      ${csTable(['Device', 'VID:PID', 'Count', 'Type & Actions'], unRows)}
     </div>`);
 }
 
