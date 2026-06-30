@@ -50,7 +50,12 @@ class ClientSimSpoke(BaseSpoke):
         return {"status": "ERROR", "message": f"Command {command_type} not supported by client-sim module"}
 
     def get_version(self) -> str:
-        return "1.0.0"
+        """Returns the current version of the Client Simulation module (from the VERSION file)."""
+        from pathlib import Path
+        try:
+            return (Path(__file__).parent.parent / "VERSION").read_text().strip()
+        except Exception:
+            return "unknown"
 
     async def get_status(self) -> Dict[str, Any]:
         status = await self.engine.get_simulation_status()
