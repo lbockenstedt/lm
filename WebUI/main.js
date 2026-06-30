@@ -2589,7 +2589,7 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hypervisor → NetBox VM Sync</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hypervisor → IPAM Sync</h3>
                     <button id="vm-sync-run-btn" onclick="runVmSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Periodically pulls each tenant's VMs from the selected hypervisor source (Proxmox via the pxmx spoke, scoped by the tenant's proxmox_tag) and mirrors them into NetBox virtualization records — vCPUs / disk / cluster / primary IP4 / NetBox tenant, matched by a <code>proxmox_unique_id</code> custom field. The hypervisor is the source of truth — each sync overwrites the tenant's NetBox VM set to match (stale records are deleted). Also fires automatically after a VM lifecycle action (start/stop/restart/snapshot). Proxmox is registered today; the design is modular so another hypervisor product can be swapped in by adding one entry to the hub's HYPERVISOR_SOURCES registry.</p>
