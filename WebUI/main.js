@@ -92,7 +92,7 @@ const ROUTES = {
     showDeployAgentInfo:    { modal: true, via: null }, // static modal, no fetch
     showAddFirewallModal:   { m: 'POST', p: '/setup/firewalls',           api: 'add_firewall', via: 'saveFirewall' }, // (modal)
 
-    // ── Endpoint sync (IPAM → ClearPass) ──
+    // ── Endpoint sync (IPAM → NAC) ──
     loadEndpointSyncSources:{ m: 'GET',  p: '/setup/endpoint-sync/sources', api: 'endpoint_sync_sources' },
     loadEndpointSyncConfig: { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
     loadEndpointSyncStatus: { m: 'GET',  p: '/setup/endpoint-sync/status',api: 'endpoint_sync_status' },
@@ -2523,7 +2523,7 @@ function _renderSetupFirewallsTile(content) {
 
 // Setup → Security/NAC tile. NAC / ClearPass instances only.
 // GET /api/instances/nac (core/src/api.py get_instances).
-// The IPAM → ClearPass endpoint sync schedule moved to the dedicated
+// The IPAM → NAC endpoint sync schedule moved to the dedicated
 // Setup → Sync tile (_renderSetupSyncTile).
 function _renderSetupNacTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
@@ -2539,7 +2539,7 @@ function _renderSetupNacTile(content) {
 }
 
 // Setup → Sync tile. The unified home for cross-system sync schedules:
-//   1. IPAM → ClearPass endpoint sync (moved here from Setup → Security/NAC)
+//   1. IPAM → NAC endpoint sync (moved here from Setup → Security/NAC)
 //   2. Hypervisor (Proxmox) → NetBox VM sync (moved here from Setup → IPAM)
 // Each card owns its own source dropdown, schedule, Save + Sync-now actions,
 // and per-tenant last-sync status. Loaders / actions (defined below):
@@ -2553,7 +2553,7 @@ function _renderSetupSyncTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM → ClearPass Endpoint Sync</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM → NAC Sync</h3>
                     <button id="ep-sync-run-btn" onclick="runEndpointSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Periodically pulls endpoint records (IP / MAC / tenant) from the selected IPAM source and populates ClearPass Device Inventory via the CPPM spoke. The IPAM source is the source of truth — each sync overwrites the tenant's CPPM endpoint set to match. Also fires automatically after any IPAM edit made through the LM module. NetBox is registered today; the design is modular so another IPAM product can be swapped in by adding one entry to the hub's IPAM_SOURCES registry.</p>
@@ -2977,7 +2977,7 @@ async function loadDhcpServerStatus() {
     }).join('');
 }
 
-// ── IPAM → ClearPass endpoint sync (Setup → Sync) ───────────────────────
+// ── IPAM → NAC endpoint sync (Setup → Sync) ───────────────────────
 async function loadEndpointSyncSources() {
     // Populate the IPAM source dropdown from the hub's IPAM_SOURCES registry
     // (data-driven: a new product added on the hub appears here with no UI
