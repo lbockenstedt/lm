@@ -62,6 +62,7 @@ from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
 from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
+from nw_discovery_sync import NwDiscoverySyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 
 logging.basicConfig(
@@ -134,6 +135,21 @@ _INSTANCE_CONFIG_SOURCES = {
 }
 
 
+def _project_nw_devices(devices):
+    """Project the nw_devices list into the UPDATE_CONFIG payload for a spoke.
+
+    One nw spoke manages a fleet (many devices), unlike the per-instance
+    modules above. Credentials are kept — the spoke needs them to reach the
+    devices, and ``system.json`` (where nw_devices lives) is runtime-only and
+    never committed. This helper is the single place to normalize the device
+    shape on push so the on-connect push and a manual Save push identical
+    payloads (mirrors the _INSTANCE_CONFIG_SOURCES project contract).
+    """
+    if not isinstance(devices, list):
+        return []
+    return [d for d in devices if isinstance(d, dict)]
+
+
 # ── Module-type → key registries ───────────────────────────────────────────
 # There are TWO distinct key spaces the hub maps module_type into, and they are
 # NOT interchangeable. Keeping them as named module-level constants (instead of
@@ -165,6 +181,7 @@ _MODULE_TYPE_PREFIX = {
     "dns":        "dns",
     "dhcp":       "dhcp",
     "agent":      "agent",
+    "nw":         "nw",
 }
 
 # module_type → push_config branch tag (key space #1). NOTE "firewall" → "opn"
@@ -176,6 +193,7 @@ _PUSH_CONFIG_MODULE_KEY = {
     "directory":  "ldap",
     "ipam":       "netbox",
     "simulation": "cs",
+    "nw":         "nw",
 }
 
 # spoke_id substring → push_config branch tag. NOTE: the prefix-fallback loop
@@ -186,7 +204,7 @@ _PUSH_CONFIG_MODULE_KEY = {
 # where "opn" → "opnsense" IS a real, used value).
 _PUSH_CONFIG_PREFIX_MAP = {
     'pxmx': 'pxmx', 'opn': 'opn', 'cs': 'cs',
-    'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap',
+    'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap', 'nw': 'nw',
 }
 
 # _UPDATE_SOURCE_MODULE_KEY / _UPDATE_SOURCE_PREFIX_MAP moved to
@@ -244,7 +262,7 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, RealtimeIpamNacSyncMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, RealtimeIpamNacSyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -682,6 +700,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 else:
                     opn_fws = [f for f in firewalls if f.get("model") == "opnsense"]
                     config = opn_fws[0] if opn_fws else {}
+            elif module_key == 'nw':
+                # Network Devices fleet: one nw spoke manages many devices.
+                # Push the devices bound to this spoke; fall back to unbound
+                # devices (single-product deployments don't bind spoke_id).
+                devices = self.state.get_global_config().get("nw_devices", []) or []
+                mine = [d for d in devices if isinstance(d, dict) and d.get("spoke_id") == spoke_id]
+                if not mine:
+                    mine = [d for d in devices if isinstance(d, dict) and not d.get("spoke_id")]
+                config = {"devices": _project_nw_devices(mine)}
             elif module_key in _INSTANCE_CONFIG_SOURCES:
                 # NAC / IPAM / Directory migrated to multi-instance storage
                 # (nac_instances / ipam_instances / ldap_instances). The legacy
@@ -2382,6 +2409,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # static-IP devices DHCP can't see). Also fired on-demand from the WebUI
         # ("Sync now"). See run_fw_discovery_sync_loop (FwDiscoverySyncMixin).
         fw_discovery_sync_task = asyncio.create_task(self.run_fw_discovery_sync_loop())
+        # Network Devices → NetBox device-discovery sync: per schedule (or
+        # on-demand "Sync now") pull NW_GET_ARP from every device on every
+        # connected nw spoke, attribute IP↔MAC records to tenants by prefix
+        # containment, and push per-tenant to the netbox spoke via
+        # NETBOX_SYNC_DEVICES (source="Network Devices" so the sink tags records
+        # nw-owned). See run_nw_discovery_sync_loop (NwDiscoverySyncMixin).
+        nw_discovery_sync_task = asyncio.create_task(self.run_nw_discovery_sync_loop())
         # Realtime NAC → IPAM reverse sync: every ~1 min pull ClearPass Access
         # Tracker sessions (last 2 min) from the CPPM spoke, attribute by prefix,
         # and add to NetBox the MACs not already present (only-add-missing —

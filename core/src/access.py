@@ -54,9 +54,9 @@ _PREFIX_CACHE_TTL = 300  # seconds — session-prefix cache TTL (was a create_ap
 # carries tenant IP addresses (nac, firewall, netbox, dhcp, hypervisor) default
 # ON; the cs / Simulations module is scoped by tenant ID instead of subnet, so
 # it defaults OFF. Admins can toggle each module in System → General.
-_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "cs", "hypervisor")
+_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "cs", "hypervisor", "nw")
 _FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
-                            "dhcp": True, "cs": False, "hypervisor": True}
+                            "dhcp": True, "cs": False, "hypervisor": True, "nw": True}
 
 # Firewall endpoint → filter spec. "rules" uses the strict source/destination
 # check (with OPNsense alias expansion); the field-based endpoints filter on
@@ -91,6 +91,22 @@ _FW_FILTER_SPEC = {
 _FW_CATEGORY_ENDPOINTS = {"rules", "nat", "aliases"}
 
 
+# Network Devices (nw) endpoint → filter spec. All nw endpoints are field-based
+# (concrete-IP columns): the MAC table + ARP + interfaces views. "info" carries
+# no IP list (single device summary) and is skipped. MAC/ARP are filtered with
+# drop_no_ip=False (a MAC-table row with only a MAC + VLAN — no IP — should not
+# be hidden; it leaks no cross-tenant IP); interfaces keep the strict default
+# (an interface with no IP is still tenant-relevant only if its other fields
+# match, but erring toward showing the tenant's own device interfaces is fine —
+# left strict to match the firewall interfaces behavior). "devices" is the
+# fleet list (no tenant IP filtering — devices are managed infra shown to all).
+_NW_FILTER_SPEC = {
+    "macs":      ("fields", ["ip"]),
+    "arp":       ("fields", ["ip"]),
+    "interfaces": ("fields", ["ip"]),
+}
+
+
 # ── Leaf helpers ─────────────────────────────────────────────────────────────
 
 def unwrap_spoke(result):
@@ -113,6 +129,25 @@ def unwrap_spoke(result):
         if isinstance(payload, dict):
             return payload.get("data", result)
     return result
+
+
+def norm_mac(m) -> str:
+    """Canonical lower-colon MAC (``aa:bb:cc:dd:ee:ff``) for dedup + payload.
+
+    ``""`` for an absent/unknown MAC — the netbox sink tolerates a blank mac
+    (it keys device matching by IP). Non-hex garbage is returned stripped lower
+    so two spellings of the same MAC still dedup. Shared by the firewall and nw
+    discovery syncs (and mirrored in the nw spoke's own ``_norm_mac``) so one
+    canonical form flows hub → NetBox.
+    """
+    import re as _re
+    s = str(m or "").strip().lower()
+    if not s or s in ("unknown", "none", "incomplete"):
+        return ""
+    hexd = _re.sub(r"[^0-9a-f]", "", s)
+    if len(hexd) == 12:
+        return ":".join(hexd[i:i + 2] for i in range(0, 12, 2))
+    return s
 
 
 def filter_config(hub) -> dict:
@@ -494,6 +529,44 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
                                    drop_no_ip=drop_no_ip, tenant_category=tenant_cat)
     logger.warning("DIAG filter_fw[%s] filtered %d -> %d drop_no_ip=%s",
                    endpoint, before, _list_len(out), drop_no_ip)
+    return out
+
+
+async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str,
+                    explicit_tenant=None):
+    """Network Devices subnet filter: field-based on the concrete-IP columns of
+    the MAC-table / ARP / interfaces views. Tenant-aware with the same contract
+    as ``filter_fw`` — an explicit ``?tenant=`` scopes admins to that tenant's
+    prefixes; no explicit tenant → legacy session-tenant behavior (no-op for
+    admins, session tenant for non-admins). The ``nw`` subnet-filter toggle
+    gates both paths; empty prefixes → no filter. ``devices``/``info`` carry no
+    tenant-IP list and pass through unfiltered. MAC/ARP use drop_no_ip=False (a
+    MAC-only row leaks no cross-tenant IP); interfaces keep the strict default.
+    """
+    spec = _NW_FILTER_SPEC.get(endpoint)
+    if not spec:
+        return data  # devices / info / unknown → no IP to filter on
+    mode, fields = spec
+    tid = effective_tenant(sessions, request, explicit_tenant)
+    if explicit_tenant and tid:
+        if not filter_enabled(hub, "nw"):
+            return data
+        prefixes = await resolve_prefixes_for_tenant(hub, tid)
+    else:
+        sess = session_user(sessions, request)
+        if not sess or is_admin(sess):
+            return data
+        if not filter_enabled(hub, "nw"):
+            return data
+        prefixes = await resolve_prefixes(hub, sess)
+    if not prefixes:
+        return data
+    drop_no_ip = endpoint not in ("macs", "arp")
+    before = _list_len(data)
+    out = filter_items_by_prefixes(data, prefixes, fields, drop_no_ip=drop_no_ip)
+    logger.warning("DIAG filter_nw[%s] tid=%r prefixes=%d filtered %d -> %d "
+                   "drop_no_ip=%s", endpoint, tid, len(prefixes), before,
+                   _list_len(out), drop_no_ip)
     return out
 
 
