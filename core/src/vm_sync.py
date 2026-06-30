@@ -152,6 +152,63 @@ class VmSyncMixin:
                 return str(tid)
         return None
 
+    def _vm_sync_tag_to_tid(self, tenants: Dict[str, Any]
+                            ) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
+        """Build the lowercased-tag → tenant-id attribution map + tid → cfg lookup.
+
+        A VM's Proxmox label may be the tenant's display NAME or its NetBox slug,
+        not just the configured ``proxmox_tag`` (clone-from-template stamps the
+        tenant name as the visible label; a manually-labeled VM carries the
+        name). Match a VM tag against any of the three, case-insensitively.
+        ``proxmox_tag`` is the strongest signal so it wins on collision (inserted
+        first); ``netbox_tenant_slug`` / ``name`` only fill keys no proxmox_tag
+        has claimed. Returns ``(tag_to_tid, tid_to_cfg)``.
+        """
+        tag_to_tid: Dict[str, str] = {}
+        tid_to_cfg: Dict[str, Dict[str, Any]] = {}
+        for tid, cfg in (tenants or {}).items():
+            cfg = cfg or {}
+            tid_s = str(tid)
+            tid_to_cfg[tid_s] = cfg
+            tag = str(cfg.get("proxmox_tag") or "").strip().lower()
+            if tag:
+                tag_to_tid[tag] = tid_s
+        for tid, cfg in (tenants or {}).items():
+            cfg = cfg or {}
+            tid_s = str(tid)
+            for k in ("netbox_tenant_slug", "name"):
+                v = str(cfg.get(k) or "").strip().lower()
+                if v and v not in tag_to_tid:
+                    tag_to_tid[v] = tid_s
+        return tag_to_tid, tid_to_cfg
+
+    def _vm_sync_resolve_tenant(self, tags: list,
+                                tag_to_tid: Dict[str, str],
+                                tid_to_cfg: Dict[str, Dict[str, Any]]
+                                ) -> tuple[Optional[str], Optional[str]]:
+        """Resolve a VM's Proxmox tags → (tenant_id, netbox_tenant_slug).
+
+        First tag (case-insensitive) that hits ``tag_to_tid`` wins. The emitted
+        slug is the tenant's configured ``netbox_tenant_slug``; when none is
+        configured the tenant's display ``name`` is passed through instead — the
+        netbox spoke resolves a tenant_slug case-insensitively by slug OR name,
+        so a VM labeled with the tenant name still lands on the right NetBox
+        tenant. No match → (None, None) (NetBox creates the VM unassigned).
+        """
+        tid: Optional[str] = None
+        for t in (tags or []):
+            key = str(t or "").strip().lower()
+            if key and key in tag_to_tid:
+                tid = tag_to_tid[key]
+                break
+        if not tid:
+            return None, None
+        cfg = tid_to_cfg.get(tid) or {}
+        tslug = str(cfg.get("netbox_tenant_slug") or "").strip() or None
+        if tslug is None:
+            tslug = str(cfg.get("name") or "").strip() or None
+        return tid, tslug
+
     def _vm_sync_concurrency(self) -> int:
         """Max tenants synced in parallel per cycle. Bounded so many tenants
         don't stampede the hypervisor/netbox spokes. Clamp 1..8; default 4."""
@@ -225,16 +282,10 @@ class VmSyncMixin:
                     "results": [],
                     "message": f"{label} or NetBox spoke not connected"}
 
-        # Tag → tenant attribution map (lowercased tag → tid) + lookups, built once.
+        # Tag → tenant attribution map (lowercased tag → tid): a VM label may be
+        # the tenant's proxmox_tag, NetBox slug, or display name (case-insensitive).
         tenants = (self.state.tenant_state or {}).get("tenants", {}) or {}
-        tag_to_tid: Dict[str, str] = {}
-        tid_to_cfg: Dict[str, Dict[str, Any]] = {}
-        for tid, cfg in tenants.items():
-            cfg = cfg or {}
-            tag = str(cfg.get("proxmox_tag") or "").strip().lower()
-            if tag:
-                tag_to_tid[tag] = str(tid)
-            tid_to_cfg[str(tid)] = cfg
+        tag_to_tid, tid_to_cfg = self._vm_sync_tag_to_tid(tenants)
 
         # One grab-all pull (no tag_filter — the spoke returns every VM).
         list_payload: Dict[str, Any] = {}
@@ -272,18 +323,7 @@ class VmSyncMixin:
             if not uid:
                 continue  # nothing to match in NetBox by
             tags = vm.get("tags") or []
-            tid: Optional[str] = None
-            for t in tags:
-                key = str(t or "").strip().lower()
-                if key and key in tag_to_tid:
-                    tid = tag_to_tid[key]
-                    break
-            if tid:
-                cfg = tid_to_cfg.get(tid) or {}
-                tslug = str(cfg.get("netbox_tenant_slug") or "").strip() or None
-            else:
-                tid = None
-                tslug = None
+            tid, tslug = self._vm_sync_resolve_tenant(tags, tag_to_tid, tid_to_cfg)
             # Normalise ips (string or {address}/{ip} dict) → bare address list.
             ip_list: List[str] = []
             for ip in (vm.get("ips") or []):
