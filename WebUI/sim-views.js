@@ -1885,10 +1885,22 @@ async function csRenderVmServerUsb() {
       ${b ? `<span><b class="text-sm text-slate-700">${b}</b> global+local</span>` : ''}
       <span><b class="text-sm text-slate-700">${unknown.length}</b> uncertified</span>
     </div>`;
+    // Type options for the per-row dropdown. A certified dongle that hasn't
+    // been classified yet shows a "—" placeholder (selected) so the operator
+    // must pick wired/wireless to assign it; picking it re-certifies (the
+    // backend updates type on re-certify). Non-standard stored types are kept.
+    const typeOpts = cur => {
+        const std = ['wireless', 'wired'];
+        let opts = '';
+        if (!cur) opts += '<option value="" selected>—</option>';
+        if (cur && !std.includes(cur)) opts += `<option value="${csEscape(cur)}" selected>${csEscape(cur)}</option>`;
+        for (const t of std) opts += `<option value="${t}"${cur === t ? ' selected' : ''}>${t}</option>`;
+        return opts;
+    };
     const certRows = present.map(u => { const [vid, pid] = splitVp(u); return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(u.name || u.product || u.vidpid || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(vid)}:${csEscape(pid)}</td>
-      <td class="px-3 py-2">${csEscape(u.type || '—')}</td>
+      <td class="px-3 py-2"><select onchange="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','certify', this.value)" class="text-[11px] border border-slate-200 rounded px-1 py-0.5 bg-white">${typeOpts(u.type)}</select></td>
       <td class="px-3 py-2">${scopeBadge(sc(u))}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(activeVms(u).join(', ') || '—')}</td>
       <td class="px-3 py-2">${csStatusBadge(isMissing(u) ? 'warning' : 'ok')}</td>
@@ -1896,8 +1908,9 @@ async function csRenderVmServerUsb() {
     const unRows = unknown.map(u => { const [vid, pid] = splitVp(u); return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(u.name || u.product || u.vidpid || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(vid)}:${csEscape(pid)}</td>
-      <td class="px-3 py-2"><div class="flex gap-1">
-        <button onclick="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','certify')" class="bg-green-100 text-green-700 px-2 py-0.5 rounded text-[10px] font-bold">Certify</button>
+      <td class="px-3 py-2"><div class="flex gap-1 items-center">
+        <select class="cs-usb-row-type text-[11px] border border-slate-200 rounded px-1 py-0.5 bg-white"><option value="">—</option><option value="wireless">wireless</option><option value="wired">wired</option></select>
+        <button onclick="csUsbCertifyRow(this, '${csEscape(vid)}','${csEscape(pid)}')" class="bg-green-100 text-green-700 px-2 py-0.5 rounded text-[10px] font-bold">Certify</button>
         <button onclick="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[10px] font-bold">Ignore</button>
       </div></td>
     </tr>`; }).join('');
@@ -1916,25 +1929,40 @@ async function csRenderVmServerUsb() {
       ${summary}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Certified USB (${present.length})</p>
       ${csTable(['Device', 'VID:PID', 'Type', 'Approved', 'Active VMs', 'Status'], certRows)}
-      <div class="flex items-center gap-2 mt-5 mb-2">
-        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Uncertified / Unknown (${unknown.length})</p>
-        <select id="cs-usb-cert-type" title="Classify certified dongles as" class="text-[11px] border border-slate-200 rounded px-1 py-0.5"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
-      </div>
-      ${csTable(['Device', 'VID:PID', 'Actions'], unRows)}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-5 mb-2">Uncertified / Unknown (${unknown.length}) — pick a type, then Certify</p>
+      ${csTable(['Device', 'VID:PID', 'Type & Actions'], unRows)}
     </div>`);
 }
 
-window.csUsbVidpid = async function (vid, pid, action) {
+window.csUsbVidpid = async function (vid, pid, action, type) {
     try {
         const body = { vid, pid, action };
         if (action === 'certify') {
-            const sel = document.getElementById('cs-usb-cert-type');
-            if (sel) body.type = sel.value;
+            // Require an explicit wired/wireless (or storage/other) type — the
+            // per-row dropdown's empty "—" must not certify a typeless dongle.
+            // The backend updates type on re-certify, so changing a certified
+            // dongle's dropdown just re-certifies with the new type.
+            const t = String(type || '').trim().toLowerCase();
+            if (t !== 'wireless' && t !== 'wired' && t !== 'storage' && t !== 'other') {
+                alert('Select a type (wired or wireless) before certifying.');
+                return;
+            }
+            body.type = t;
         }
         await csFetch(`/${csTenant()}/usb-vidpids?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         csVmFlash(action + ' queued for ' + vid + ':' + pid);
         setTimeout(() => loadCSData('VM Server', currentSubChild, true), 800);
     } catch (e) { console.error('csUsbVidpid: usb action failed', e); alert('USB action failed: ' + (e.message || e)); }
+};
+
+// Per-row Certify from the Uncertified table: reads the row's type <select>
+// (empty "—" → block with an alert) and forwards to csUsbVidpid.
+window.csUsbCertifyRow = async function (btn, vid, pid) {
+    const cell = btn.closest('td');
+    const sel = cell && cell.querySelector('.cs-usb-row-type');
+    const type = sel ? sel.value : '';
+    if (!type) { alert('Select a type (wired or wireless) before certifying.'); return; }
+    await csUsbVidpid(vid, pid, 'certify', type);
 };
 
 // ── IoT (T3) — faithful "coming soon" placeholder ─────────────────────────────
