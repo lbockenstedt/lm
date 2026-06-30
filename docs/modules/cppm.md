@@ -75,7 +75,7 @@ set `source` in `global_config["netbox_cppm_sync"]`.
   configured schedule (see Configuration below) and syncs every tenant bound to
   the selected IPAM source.
 - **On demand** — `POST /setup/endpoint-sync/run` (the "Sync now" button in
-  Setup → Security/NAC). Optional body `{"tenant_id": "<id>"}` syncs one
+  Setup → Sync). Optional body `{"tenant_id": "<id>"}` syncs one
   tenant; absent → all tenants bound to the selected source.
 - **On IPAM edit** — after any successful IPAM write through the LM module
   (e.g. add/update/delete a NetBox device or IP), the hub fires a background
@@ -84,7 +84,7 @@ set `source` in `global_config["netbox_cppm_sync"]`.
   trigger resolves the tenant by reverse-mapping the request body's `tenant`
   scope value via the selected source's scope field.
 
-### Configuration (Setup → Security/NAC → "IPAM → ClearPass Endpoint Sync")
+### Configuration (Setup → Sync → "IPAM → ClearPass Endpoint Sync")
 Stored under `global_config["netbox_cppm_sync"]` (legacy key name; saved via
 the generic `POST /setup/config` shallow-merge; read fresh each cycle by the
 loop):
