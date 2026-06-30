@@ -2468,21 +2468,32 @@ def create_app(hub):
         # see _netbox_list_get (variant: hypervisor spoke, proxmox_tag payload, and
         # a non-503 spoke-down shape {vms:[], spoke_connected:False} — inline).
         logger.debug("relay %s %s tenant=%s agent_id=%s", request.method, request.url.path, tenant, agent_id)
+        # Template-pool names are advertised to the UI so it can mark which VMs
+        # are clonable templates (clone-from-template). Computed once, merged into
+        # the response envelope on every return path below.
+        template_pools = access._template_pools(hub)
+
+        def _with_tpl(data):
+            if isinstance(data, dict):
+                data = dict(data)
+                data["template_pools"] = template_pools
+            return data
+
         sess = _session_user(request)
         if not agent_id and not tenant and sess and not _is_admin(sess):
             tid = sess.get("user", {}).get("tenant_id")
             if tid:
                 cached = _cache_entry(tid, "pxmx_vms")
                 if cached:
-                    return await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
+                    return _with_tpl(await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant))
         pxmx_spoke = hub.get_spoke_by_type("hypervisor")
         if not pxmx_spoke:
             if sess:
                 tid = sess.get("user", {}).get("tenant_id")
                 cached = _cache_entry(tid, "pxmx_vms") if tid else None
                 if cached:
-                    return await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
-            return {"vms": [], "spoke_connected": False}
+                    return _with_tpl(await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant))
+            return _with_tpl({"vms": [], "spoke_connected": False})
         try:
             scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
             payload: dict = {}
@@ -2492,7 +2503,7 @@ def create_app(hub):
                 payload["tag_filter"] = scoping["proxmox_tag"]
             result = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", payload)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            return await _filter_tenant(request, data, "hypervisor", ["ips"], tenant)
+            return _with_tpl(await _filter_tenant(request, data, "hypervisor", ["ips"], tenant))
         except Exception as e:
             logger.exception("get_pxmx_vms failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -2682,6 +2693,149 @@ def create_app(hub):
             return data
         except Exception as e:
             logger.exception("pxmx_vm_action failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/pxmx/pools")
+    async def get_pxmx_pools(request: Request):
+        """Proxmox resource pool list for the clone/create-VM UI's pool dropdown.
+
+        Aggregates ``/pools`` across every connected pxmx agent (each cluster's
+        pools tagged with its cluster name). Admin-only — pool names are a
+        Proxmox-organizational detail, not tenant-scoped. Returns
+        ``{pools: [{poolid, comment, cluster}], spoke_connected}``."""
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        if not pxmx_spoke:
+            return {"pools": [], "spoke_connected": False}
+        try:
+            result = await hub.request_response(pxmx_spoke, "PXMX_LIST_POOLS", {}, timeout=20.0)
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            pools = (data or {}).get("pools", []) if isinstance(data, dict) else []
+            return {"pools": pools, "spoke_connected": True}
+        except Exception as e:
+            logger.exception("get_pxmx_pools failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/clone")
+    async def pxmx_clone_vm(request: Request):
+        """Hypervisors view clone-from-template: clone a template-pool VM to a
+        new VM tagged for the acting tenant.
+
+        Body: ``{template_unique_id, name, new_vmid?}`` (or ``vmid``/``node``/
+        ``type`` instead of ``template_unique_id``). Templates are shared — any
+        admin acting as a tenant may clone them; the new VM is tagged with the
+        acting tenant's ``proxmox_tag`` so the next VM sync attributes it to that
+        tenant. The template MUST live in a configured template pool (the
+        hub-side guard; the agent clones whatever vmid it's told, so the guard
+        belongs here). A free VMID is auto-assigned by the agent when
+        ``new_vmid`` is omitted. The spoke→agent clone window is 600s (full-disk
+        clones can take minutes). After a successful clone the tenant's VM sync
+        is re-triggered so NetBox picks up the new VM. Admin-only.
+        """
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body or {}
+        template_unique_id = str(body.get("template_unique_id", "")).strip()
+        if not template_unique_id:
+            # Allow explicit vmid/node/type as a fallback to the unique_id form.
+            vmid = body.get("vmid")
+            node = str(body.get("node", "")).strip()
+            if vmid is None or not node:
+                raise HTTPException(status_code=400,
+                                     detail="template_unique_id (or vmid+node) required")
+            template_unique_id = f"unknown/{node}/{vmid}"
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        if not pxmx_spoke:
+            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+
+        # Resolve the acting tenant's labels for the new VM: the tenant display
+        # NAME (the visible "label" the user wants on the VM) AND the
+        # proxmox_tag (the Hypervisor→NetBox VM sync matches on it, so the new
+        # VM must carry it to be attributed to this tenant on the next sync).
+        # Templates are shared across tenants; the cloning tenant owns the new VM.
+        tid = _resolve_tenant(request, None)
+        scoping = get_tenant_scoping(hub, tid) or {}
+        tenant_tag = scoping.get("proxmox_tag") or ""
+        tenant_name = ""
+        try:
+            trec = hub.state.get_tenant(tid) or {}
+            tenant_name = str(trec.get("name") or "").strip()
+        except Exception:
+            pass
+        tenant_tags = []
+        for t in (tenant_name, tenant_tag):
+            if t and t not in tenant_tags:
+                tenant_tags.append(t)
+
+        # Optional destination pool the user selected from the Proxmox pool
+        # dropdown (populated by /api/pxmx/pools). Blank = no pool. The agent
+        # passes it to qm/pct clone --pool.
+        pool = str(body.get("pool", "")).strip()
+
+        # Hub-side guard: only a template that lives in a configured template
+        # pool may be cloned (the agent clones any vmid it's handed, so the
+        # template-pool boundary is enforced here). Look the VM up via the
+        # tenant's cached VM list — the unique_id identifies it uniquely.
+        template_pools = {p.lower() for p in access._template_pools(hub)}
+        template_pool_ok = False
+        try:
+            cached = _cache_entry(tid, "pxmx_vms")
+            vms = (cached["data"] or {}).get("vms", []) if cached else []
+            if not vms:
+                # No cache yet — ask the spoke for the live list (unfiltered is
+                # fine: we only read the template's pool field).
+                r = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", {})
+                d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
+                vms = (d or {}).get("vms", [])
+            for v in vms:
+                if v.get("unique_id") == template_unique_id:
+                    pool = str(v.get("pool", "")).lower()
+                    if pool and pool in template_pools:
+                        template_pool_ok = True
+                    elif not template_pools:
+                        template_pool_ok = True
+                    break
+        except Exception as e:
+            logger.debug("clone: template-pool guard lookup skipped: %s", e)
+        if not template_pool_ok:
+            raise HTTPException(status_code=403,
+                                 detail="template is not in a configured template pool")
+
+        payload = {
+            "unique_id": template_unique_id,        # routing: cluster → agent
+            "template_unique_id": template_unique_id,
+            "name": name,
+            "tenant_tags": tenant_tags,
+            "pool": pool,
+            "type": body.get("type", "qemu"),
+            "node": template_unique_id.split("/")[1] if template_unique_id.count("/") >= 2 else body.get("node", ""),
+            "template_vmid": body.get("vmid"),
+            "new_vmid": body.get("new_vmid"),
+        }
+        try:
+            result = await hub.request_response(pxmx_spoke, "PXMX_CLONE_VM", payload, timeout=605.0)
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            if isinstance(data, dict) and data.get("status") == "ERROR":
+                raise HTTPException(status_code=502, detail=data.get("message", "clone failed"))
+            # Re-sync the acting tenant's VMs to NetBox so the new VM is picked up.
+            _trigger_vm_sync_after_pxmx_edit(hub, request, body)
+            return data
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("pxmx_clone_vm failed")
             raise HTTPException(status_code=500, detail=str(e))
         """Per-tenant aggregate counts across all connected spokes, scoped by
         the tenant's netbox_tenant_slug / proxmox_tag. Returns
