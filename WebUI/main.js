@@ -5534,7 +5534,7 @@ async function loadOpnsenseManagement() {
         else if (subMenu === 'Interfaces') keys = ['firewall', 'description', 'ip', 'status', 'macaddr', 'mtu', 'media'];
         else if (subMenu === 'NAT Policies') keys = ['firewall', 'type', 'protocol', 'source', 'external_ip', 'external_port', 'internal_ip', 'internal_port', 'description'];
         else if (subMenu === 'DNS Records') keys = ['firewall', 'hostname', 'ip', 'type', 'ttl', 'description'];
-        else if (subMenu === 'Aliases') keys = ['firewall', 'name', 'type', 'content', 'description'];
+        else if (subMenu === 'Aliases') keys = ['firewall', 'name', 'type', 'content', 'category', 'description'];
         else keys = ['firewall', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && !k.toLowerCase().includes('hit') && k !== 'firewall' && !k.startsWith('_'))];
 
         const hiddenRules = JSON.parse(localStorage.getItem('lm_hidden_firewall_rules') || '[]');
@@ -7791,6 +7791,7 @@ function showOpnsenseAddModal(subMenu) {
             <div class="space-y-1"><label class="${label}">Name</label><input type="text" id="add-opn-name" placeholder="my_alias" class="${input}"></div>
             <div class="space-y-1"><label class="${label}">Type</label><select id="add-opn-type" class="${input}"><option value="host">Host</option><option value="network">Network</option><option value="port">Port</option><option value="url">URL</option></select></div>
             <div class="space-y-1"><label class="${label}">Content (comma-separated)</label><input type="text" id="add-opn-content" placeholder="192.168.1.10, 192.168.1.20" class="${input}"></div>
+            <div class="space-y-1"><label class="${label}">Category</label><input type="text" id="add-opn-category" placeholder="tenant name (optional, attributes this alias to a tenant)" class="${input}"></div>
             <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" placeholder="Optional description" class="${input}"></div>`;
         submitFn = `submitOpnsenseAdd('${subMenu}')`;
     } else if (subMenu === 'NAT Policies') {
@@ -7858,7 +7859,7 @@ async function submitOpnsenseAdd(subMenu) {
             }};
         } else if (subMenu === 'Aliases') {
             url = `/api/firewall/${fwId}/aliases`;
-            body = { name: g('add-opn-name'), type: g('add-opn-type'), content: g('add-opn-content'), description: g('add-opn-desc') };
+            body = { name: g('add-opn-name'), type: g('add-opn-type'), content: g('add-opn-content'), description: g('add-opn-desc'), category: g('add-opn-category') };
             if (!body.name) { alert('Name is required.'); return; }
         } else if (subMenu === 'NAT Policies') {
             url = `/api/firewall/${fwId}/nat`;
@@ -7918,6 +7919,7 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
             <div class="space-y-1"><label class="${label}">Name</label><input type="text" id="add-opn-name" value="${v('name')}" class="${input}"></div>
             <div class="space-y-1"><label class="${label}">Type</label><select id="add-opn-type" class="${input}"><option value="host" ${item.type==='host'?'selected':''}>Host</option><option value="network" ${item.type==='network'?'selected':''}>Network</option><option value="port" ${item.type==='port'?'selected':''}>Port</option><option value="url" ${item.type==='url'?'selected':''}>URL</option></select></div>
             <div class="space-y-1"><label class="${label}">Content (comma-separated)</label><input type="text" id="add-opn-content" value="${v('content')}" class="${input}"></div>
+            <div class="space-y-1"><label class="${label}">Category</label><input type="text" id="add-opn-category" value="${v('category')}" class="${input}"></div>
             <div class="space-y-1"><label class="${label}">Description</label><input type="text" id="add-opn-desc" value="${v('description')}" class="${input}"></div>`;
     } else if (subMenu === 'NAT Policies') {
         const natType = item.type || 'd_nat';
@@ -7984,7 +7986,7 @@ async function submitOpnsenseEdit(fwId, subMenu, itemId) {
             }};
         } else if (subMenu === 'Aliases') {
             url = `/api/firewall/${fwId}/aliases/${encodedId}`;
-            body = { name: g('add-opn-name'), type: g('add-opn-type'), content: g('add-opn-content'), description: g('add-opn-desc') };
+            body = { name: g('add-opn-name'), type: g('add-opn-type'), content: g('add-opn-content'), description: g('add-opn-desc'), category: g('add-opn-category') };
             if (!body.name) { alert('Name is required.'); return; }
         } else if (subMenu === 'NAT Policies') {
             url = `/api/firewall/${fwId}/nat/${encodedId}`;
