@@ -21,10 +21,15 @@ A tenant's allowed prefixes come from NetBox (resolved in ``api.py`` via
     empty DHCP/alias row — never leaks across tenants). ``drop_no_ip=False``
     restores the legacy "can't filter → show" behavior.
 
-Firewall rules use the stricter ``firewall_rule_in_prefixes``: show only when
-neither side is a wildcard (``any``/``*``) AND at least one side has a concrete
-IP in the tenant's prefixes. A wildcard on either side makes the rule broad/
-global, so it is not attributed to any one tenant.
+Firewall rules use ``firewall_rule_in_prefixes``: a rule is shown when EITHER
+side carries an address that belongs to the tenant — a concrete IP/CIDR inside
+one of the tenant's prefixes, OR a reference to one of the tenant's own aliases
+(an alias whose OPNsense ``category`` field equals the tenant's display name,
+or whose resolved networks overlap a tenant prefix). A wildcard (``any``/``*``)
+on a side contributes no address for that side (it is simply skipped); it does
+not by itself drop the rule — the other side can still qualify it. A rule with
+no tenant address on either side (e.g. ``any → any``, or both sides off-prefix
+and not the tenant's aliases) is dropped.
 """
 
 from __future__ import annotations
@@ -264,19 +269,24 @@ def _is_wildcard(val: Any) -> bool:
     return bool(re.match(r"^any(:\S+)?$", s))
 
 
-def build_alias_map(aliases: Any) -> Dict[str, List[str]]:
-    """Build ``{alias_name_lower: [concrete CIDR/IP strings]}`` from the OPNsense
-    spoke alias list (``OPNSENSE_GET_ALIASES`` → ``[{name, type, content}, ...]``).
+def build_alias_map(aliases: Any) -> Dict[str, "dict"]:
+    """Build ``{alias_name_lower: {"nets": [concrete CIDR/IP strings], "category": str}}``
+    from the OPNsense spoke alias list (``OPNSENSE_GET_ALIASES`` →
+    ``[{name, type, content, category}, ...]``).
 
     Each alias ``content`` is split on whitespace/newlines/commas. Tokens that
     are concrete IPv4/CIDR (matching ``_ADDR_RE``) are kept directly; other tokens
     are treated as nested alias names and resolved recursively (cycle-guarded via
     a ``visited`` set). Aliases that resolve to no concrete networks (mac/url
-    tables, empty content, unresolved nested names) map to ``[]`` — present in
-    the map (so the matcher knows the name *is* a known alias) but with nothing
-    to match. The map is keyed by lowercased name; lookup is case-insensitive.
+    tables, empty content, unresolved nested names) map to ``{"nets": [], ...}`` —
+    present in the map (so the matcher knows the name *is* a known alias and can
+    read its ``category``) but with nothing to overlap. The map is keyed by
+    lowercased name; lookup is case-insensitive. ``category`` is the alias's
+    OPNsense category verbatim (``""`` when absent) — the firewall matcher uses it
+    to decide whether an alias belongs to a given tenant.
     """
     raw: Dict[str, str] = {}
+    cat: Dict[str, str] = {}
     if isinstance(aliases, list):
         for a in aliases:
             if not isinstance(a, dict):
@@ -285,6 +295,7 @@ def build_alias_map(aliases: Any) -> Dict[str, List[str]]:
             if not name:
                 continue
             raw[name.lower()] = str(a.get("content") or "")
+            cat[name.lower()] = str(a.get("category") or "").strip()
 
     def resolve(name_lower: str, visited: set) -> List[str]:
         if name_lower in visited:
@@ -306,7 +317,8 @@ def build_alias_map(aliases: Any) -> Dict[str, List[str]]:
                 out.extend(resolve(tok_l, visited))
         return out
 
-    return {name: resolve(name, set()) for name in raw}
+    return {name: {"nets": resolve(name, set()), "category": cat.get(name, "")}
+            for name in raw}
 
 
 # Strip a trailing ``:port`` so values like ``LAN_net:443`` / ``10.0.5.0/24:443``
@@ -314,90 +326,98 @@ def build_alias_map(aliases: Any) -> Dict[str, List[str]]:
 _PORT_SUFFIX = re.compile(r":(?:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*|any)$")
 
 
-def _side_addrs(val: Any, alias_map: Any) -> Optional[List[str]]:
-    """Concrete networks referenced by a firewall source/destination value.
+def _alias_entry(alias_map: Any, name_lower: str) -> Optional[dict]:
+    """Look up an alias by lowercased name in ``alias_map`` (whole-token first,
+    then any whitespace/comma-separated token). Returns the ``{nets, category}``
+    entry or ``None`` when the name isn't a known alias."""
+    if not isinstance(alias_map, dict):
+        return None
+    e = alias_map.get(name_lower)
+    if e is not None:
+        return e
+    for tok in re.split(r"[\s,]+", name_lower):
+        if tok and tok in alias_map:
+            return alias_map[tok]
+    return None
 
-    Returns ``None`` when the side is a wildcard / an unknown interface or alias
-    name / otherwise unresolvable (the matcher treats ``None`` as "can't filter
-    this side" → pass-through, per the "err on showing" rule). Returns a list
-    (possibly empty) of concrete IPv4/CIDR strings when the side carries or
-    expands to concrete networks — inline IPs plus alias-expanded networks from
-    ``alias_map``.
+
+def _side_qualifies(val: Any, nets: Sequence[ipaddress._BaseNetwork],
+                    alias_map: Any, tenant_category: Optional[str]) -> bool:
+    """True when a firewall source/destination value belongs to the tenant.
+
+    A side belongs to the tenant when it carries a concrete IP/CIDR inside one of
+    the tenant's prefixes, OR it references a known alias that is the tenant's
+    (the alias's ``category`` equals ``tenant_category``) or whose resolved
+    networks overlap a tenant prefix. A wildcard (``any``/``*``), an unknown
+    interface/alias name, or an off-prefix concrete IP all yield ``False`` — the
+    side simply contributes nothing; the *other* side can still qualify the rule.
     """
     if val is None:
-        return None
+        return False
     s = str(val).strip()
     if _is_wildcard(s):
-        return None
+        return False  # wildcard → no address on this side (other side may qualify)
     addr_part = _PORT_SUFFIX.sub("", s).strip()
     if not addr_part or _is_wildcard(addr_part):
-        return None
-    out: List[str] = []
-    # Inline concrete IPs/CIDRs anywhere in the address part.
+        return False
+    # Inline concrete IPs/CIDRs anywhere in the address part → check prefixes.
     inline = _ADDR_RE.findall(addr_part)
-    if inline:
-        out.extend(inline)
-    # Whole-token alias lookup (case-insensitive). If the address part is an
-    # alias name (with optional nesting), expand it.
-    if isinstance(alias_map, dict):
-        ap_l = addr_part.lower()
-        if ap_l in alias_map:
-            out.extend(alias_map.get(ap_l) or [])
-        else:
-            # Also expand any whitespace-separated alias tokens in the part.
-            for tok in re.split(r"[\s,]+", ap_l):
-                if tok and tok in alias_map:
-                    out.extend(alias_map.get(tok) or [])
-    # No concrete nets extracted (unknown interface/alias, empty alias, wildcard)
-    # → None so the matcher treats this side as unfilterable (pass-through).
-    return out or None
+    if inline and any(_addr_in_prefixes(a, nets) for a in inline):
+        return True
+    # Alias reference (whole token, then whitespace/comma-split tokens).
+    e = _alias_entry(alias_map, addr_part.lower())
+    if e is not None:
+        # Tenant-owned alias (category attribution) → qualifies on its own.
+        if tenant_category and e.get("category") == tenant_category:
+            return True
+        # Alias resolved to networks overlapping a tenant prefix → qualifies.
+        for a in e.get("nets") or []:
+            if _addr_in_prefixes(a, nets):
+                return True
+    return False
 
 
 def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any = None,
                               tenant_category: Optional[str] = None,
                               category_field: str = "category") -> bool:
-    """Strict firewall-rule prefix check (with optional OPNsense alias resolution).
+    """Firewall-rule tenant-prefix check (with OPNsense alias + category resolution).
 
-    A rule applies to a tenant only when **both** sides are non-wildcard
-    (neither source nor destination is ``any``/``*``) AND at least one side
-    references a concrete network that overlaps one of the tenant's prefixes.
-    A wildcard on either side makes the rule broad/global rather than specific
-    to this tenant → it is dropped from tenant views.
+    A rule is shown to a tenant when EITHER side carries an address that belongs
+    to that tenant:
 
-    ``alias_map`` (from ``build_alias_map``) expands alias names to concrete
-    networks before matching; ``None`` → concrete-IP-only behavior. A side that
-    is non-wildcard but unresolvable (alias/interface name we can't expand to
-    concrete nets) contributes no addresses; if neither side then overlaps a
-    tenant prefix the rule is dropped (err on hiding, same principle as
-    ``drop_no_ip``).
+      - a concrete IP/CIDR inside one of the tenant's prefixes, or
+      - a reference to one of the tenant's own aliases — an alias whose OPNsense
+        ``category`` equals ``tenant_category`` (the tenant's display name), or
+        whose resolved networks overlap a tenant prefix.
 
-    ``tenant_category`` (tenant display name) is an OR attribution path: a rule
-    whose ``category_field`` equals it is shown regardless of source/destination
-    (explicitly tagged to this tenant by the admin — the one escape hatch from
-    the wildcard/prefix logic). ``None`` disables the check.
+    A wildcard (``any``/``*``) on a side contributes no address for that side; it
+    does not by itself drop the rule (the other side may still qualify it). So
+    ``any → <tenant-ip>`` shows (destination is in the tenant's subnet), while
+    ``any → any`` drops (neither side belongs to the tenant).
+
+    ``alias_map`` (from ``build_alias_map``) resolves alias names to networks and
+    exposes each alias's ``category``; ``None`` → concrete-IP-only behavior.
+
+    ``tenant_category`` (tenant display name) is also an OR attribution path on
+    the rule itself: a rule whose own ``category_field`` equals it is shown
+    regardless of source/destination (explicitly tagged to this tenant by the
+    admin — the escape hatch). ``None`` disables both the alias-category and
+    rule-category checks.
     """
     if not prefixes:
         return True
     if not isinstance(rule, dict):
         return True
     if tenant_category and str(rule.get(category_field) or "").strip() == tenant_category:
-        return True  # explicitly attributed to this tenant via category
+        return True  # rule explicitly attributed to this tenant via its category
     nets = _nets(prefixes)
     if not nets:
         return True
     src_raw = rule.get("source")
     dst_raw = rule.get("destination")
-    # A wildcard on EITHER side → broad/global rule, not specific to this
-    # tenant → drop from tenant views.
-    if _is_wildcard(src_raw) or _is_wildcard(dst_raw):
-        return False
-    src = _side_addrs(src_raw, alias_map)
-    dst = _side_addrs(dst_raw, alias_map)
-    # Either side overlaps a tenant prefix → show.
-    if src and any(_addr_in_prefixes(a, nets) for a in src):
+    # Either side belonging to the tenant → show; otherwise drop.
+    if _side_qualifies(src_raw, nets, alias_map, tenant_category):
         return True
-    if dst and any(_addr_in_prefixes(a, nets) for a in dst):
+    if _side_qualifies(dst_raw, nets, alias_map, tenant_category):
         return True
-    # Both sides non-wildcard but neither overlaps (unresolvable or off-prefix)
-    # → can't attribute to this tenant → drop.
     return False

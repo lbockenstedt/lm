@@ -100,17 +100,17 @@ def _admin_session():
 
 def _rules_env():
     return {"rules": [
-        {"source": "10.20.0.5", "destination": "8.8.8.8"},  # src in prefix, no any → keep
+        {"source": "10.20.0.5", "destination": "8.8.8.8"},  # src in prefix → keep
         {"source": "8.8.8.8", "destination": "1.1.1.1"},    # both outside → drop
-        {"source": "any", "destination": "10.20.0.5"},      # any side → drop
+        {"source": "any", "destination": "10.20.0.5"},      # dst in prefix → keep (any side doesn't drop)
     ]}
 
 
 def test_admin_with_explicit_tenant_is_filtered():
     """An admin selecting a tenant (?tenant=acme) gets that tenant's prefixes
-    applied to firewall rules — the out-of-prefix rule AND the any-side rule are
-    dropped. Without this path the admin bypass at access.subnet_filter_fw left
-    all rules visible."""
+    applied to firewall rules — a rule is kept when EITHER side carries an
+    address in the tenant's subnets; a wildcard on one side no longer drops it
+    (the other side can still qualify it). The both-outside rule drops."""
     hub = _PrefixHub(FakeState(system_state={}, tenants={
         "acme": {"netbox_tenant_slug": "acme"},
     }))
@@ -119,7 +119,7 @@ def test_admin_with_explicit_tenant_is_filtered():
     out = asyncio.run(subnet_filter_fw(
         hub, sessions, req, _rules_env(), "rules",
         firewall_id=None, explicit_tenant="acme"))
-    assert len(out["rules"]) == 1  # only src-in-prefix (no any) kept
+    assert len(out["rules"]) == 2  # src-in-prefix + dst-in-prefix kept; both-outside dropped
 
 
 def test_admin_without_explicit_tenant_bypasses():
