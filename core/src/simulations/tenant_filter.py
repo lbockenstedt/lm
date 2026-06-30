@@ -22,8 +22,9 @@ A tenant's allowed prefixes come from NetBox (resolved in ``api.py`` via
     restores the legacy "can't filter → show" behavior.
 
 Firewall rules use the stricter ``firewall_rule_in_prefixes``: show only when
-both sides are wildcards (global policy) OR either side has a concrete IP in
-the tenant's prefixes.
+neither side is a wildcard (``any``/``*``) AND at least one side has a concrete
+IP in the tenant's prefixes. A wildcard on either side makes the rule broad/
+global, so it is not attributed to any one tenant.
 """
 
 from __future__ import annotations
@@ -357,22 +358,23 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
                               category_field: str = "category") -> bool:
     """Strict firewall-rule prefix check (with optional OPNsense alias resolution).
 
-    Show when EITHER source/destination references a concrete network that
-    overlaps one of the tenant's prefixes, OR both sides are genuine wildcards
-    (``any``/``*`` — true global policy that applies to every tenant).
-    ``alias_map`` (from ``build_alias_map``) expands alias names to concrete
-    networks before matching; ``None`` → concrete-IP-only behavior.
+    A rule applies to a tenant only when **both** sides are non-wildcard
+    (neither source nor destination is ``any``/``*``) AND at least one side
+    references a concrete network that overlaps one of the tenant's prefixes.
+    A wildcard on either side makes the rule broad/global rather than specific
+    to this tenant → it is dropped from tenant views.
 
-    A side that is a non-wildcard but unresolvable — an alias/interface name we
-    can't expand to concrete nets (alias not in the map, interface name, empty
-    alias, or the alias fetch failed) — is **not** treated as "global policy".
-    Such a rule can't be attributed to this tenant, so it is dropped (err on
-    hiding, same principle as ``drop_no_ip``). This closes the cross-tenant leak
-    where unresolvable alias/interface rules were shown to every tenant.
+    ``alias_map`` (from ``build_alias_map``) expands alias names to concrete
+    networks before matching; ``None`` → concrete-IP-only behavior. A side that
+    is non-wildcard but unresolvable (alias/interface name we can't expand to
+    concrete nets) contributes no addresses; if neither side then overlaps a
+    tenant prefix the rule is dropped (err on hiding, same principle as
+    ``drop_no_ip``).
 
     ``tenant_category`` (tenant display name) is an OR attribution path: a rule
     whose ``category_field`` equals it is shown regardless of source/destination
-    (explicitly tagged to this tenant). ``None`` disables the check.
+    (explicitly tagged to this tenant by the admin — the one escape hatch from
+    the wildcard/prefix logic). ``None`` disables the check.
     """
     if not prefixes:
         return True
@@ -385,6 +387,10 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
         return True
     src_raw = rule.get("source")
     dst_raw = rule.get("destination")
+    # A wildcard on EITHER side → broad/global rule, not specific to this
+    # tenant → drop from tenant views.
+    if _is_wildcard(src_raw) or _is_wildcard(dst_raw):
+        return False
     src = _side_addrs(src_raw, alias_map)
     dst = _side_addrs(dst_raw, alias_map)
     # Either side overlaps a tenant prefix → show.
@@ -392,9 +398,6 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
         return True
     if dst and any(_addr_in_prefixes(a, nets) for a in dst):
         return True
-    # Both sides genuine wildcards (any/any) → true global policy → show to all.
-    if _is_wildcard(src_raw) and _is_wildcard(dst_raw):
-        return True
-    # Unresolvable non-wildcard side(s) or concrete-but-off-prefix → can't
-    # attribute to this tenant → drop.
+    # Both sides non-wildcard but neither overlaps (unresolvable or off-prefix)
+    # → can't attribute to this tenant → drop.
     return False
