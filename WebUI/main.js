@@ -5370,7 +5370,7 @@ function pxmxTh(cols) {
 
 // VM table — shared by the node-detail view and the no-nodes fallback.
 function pxmxVmTableHtml(vms) {
-    const cols = ['Cluster / Host', 'Node', 'VMID', 'Name', 'IP Address', 'Type', 'Status', 'CPU %', 'RAM'];
+    const cols = ['Cluster / Host', 'Node', 'VMID', 'Name', 'Pool', 'IP Address', 'Type', 'Status', 'CPU %', 'RAM'];
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const rows = vms.map(vm => {
         const memGb   = ((vm.mem_bytes || 0) / 1073741824).toFixed(1);
@@ -5383,11 +5383,15 @@ function pxmxVmTableHtml(vms) {
         // or when the guest agent is absent/unresponsive → show '—'.
         const ipList = Array.isArray(vm.ips) ? vm.ips : [];
         const ipCell = ipList.length ? escapeHtml(ipList.join(', ')) : '—';
+        // pool: Proxmox resource pool the VM belongs to (best-effort, from the
+        // agent's /pools reverse-map). Blank when the VM is in no pool.
+        const poolCell = vm.pool ? escapeHtml(vm.pool) : '—';
         return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${escJs(vm.unique_id)}')">
             <td class="px-4 py-2 text-xs text-slate-500 font-mono">${vm.cluster || '—'}</td>
             <td class="px-4 py-2 text-xs">${vm.node || '—'}</td>
             <td class="px-4 py-2 font-mono text-xs font-bold">${vm.vmid}</td>
             <td class="px-4 py-2 font-medium">${vm.name || '—'}</td>
+            <td class="px-4 py-2 text-xs text-slate-600">${poolCell}</td>
             <td class="px-4 py-2 font-mono text-xs text-slate-600">${ipCell}</td>
             <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${typeCls}">${vm.type || 'vm'}</span></td>
             <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${runCls}">${vm.status}</span></td>
@@ -5426,7 +5430,8 @@ function openVmDetail(uniqueId) {
                 <span class="px-2 py-0.5 rounded-full text-xs font-medium ${runCls}">${vm.status}</span>
                 · <span class="px-2 py-0.5 rounded-full text-xs font-medium ${typeCls}">${vm.type || 'vm'}</span>
                 · CPU ${vm.cpu ?? '—'}% · RAM ${memGb} GB
-                · IP ${ipList.length ? escapeHtml(ipList.join(', ')) : '—'}</p>
+                · IP ${ipList.length ? escapeHtml(ipList.join(', ')) : '—'}
+                · Pool ${vm.pool ? escapeHtml(vm.pool) : '—'}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2 mb-4">
             <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-green-700 text-white transition-colors">▶ Start</button>
