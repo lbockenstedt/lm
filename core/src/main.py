@@ -61,6 +61,7 @@ from update_recovery import (
 from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
 from vm_sync import VmSyncMixin
+from fw_discovery_sync import FwDiscoverySyncMixin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -242,7 +243,7 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -2345,6 +2346,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin):
         # WebUI ("Sync now") and after a pxmx VM lifecycle edit
         # (trigger_vm_sync). See run_vm_sync_loop.
         vm_sync_task = asyncio.create_task(self.run_vm_sync_loop())
+        # Firewall → NetBox device-discovery sync: pulls DHCP leases + the ARP
+        # table from an OPNsense spoke, attributes each discovered device to a
+        # tenant by prefix containment, and pushes per-tenant to the NetBox spoke
+        # via NETBOX_SYNC_DEVICES (DCIM devices + IP records carrying
+        # custom_fields.mac_address — which feeds the IPAM→CPPM endpoint sync for
+        # static-IP devices DHCP can't see). Also fired on-demand from the WebUI
+        # ("Sync now"). See run_fw_discovery_sync_loop (FwDiscoverySyncMixin).
+        fw_discovery_sync_task = asyncio.create_task(self.run_fw_discovery_sync_loop())
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable
         # [heartbeat] line into self.logs (module="hub" in collect_all_logs)

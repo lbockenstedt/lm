@@ -114,6 +114,7 @@ from simulations.tenant_filter import (filter_items_by_prefixes,
                                        filter_firewall_rules, filter_record_by_prefixes)
 
 import access
+import vmid_alloc
 # Access-control / tenant-scoping / subnet-filter logic lives in the leaf
 # module ``access`` (importable + testable, free of the create_app() nested-def
 # annotation trap). api.py depends on access one-way; access never imports api.
@@ -1012,9 +1013,11 @@ def create_app(hub):
     async def run_vm_sync(request: Request):
         """On-demand Hypervisor → NetBox VM sync ('Sync now').
 
-        Body optional: ``{"tenant_id": "<id>"}`` to sync one tenant; absent →
-        all tenants bound to a hypervisor source. Returns per-tenant results +
-        a summary.
+        The sync is cluster-wide (one grab-all pull + one NetBox push); a body
+        ``{"tenant_id": "<id>"}`` just selects which per-tenant row to return
+        (the pull still grabs everything so the NetBox mirror stays complete).
+        Absent → returns every per-tenant row + an unassigned row. Returns
+        per-tenant results + a summary.
         """
         hub = app.state.hub
         sess = _session_user(request)
@@ -1028,8 +1031,8 @@ def create_app(hub):
         if target:
             results = [await hub.sync_tenant_vms(target)]
         else:
-            results = [await hub.sync_tenant_vms(tid)
-                       for tid in hub._vm_sync_tenants()]
+            agg = await hub.sync_all_vms()
+            results = agg.get("results", []) or []
         pushed = sum(int(r.get("pushed", 0)) for r in results)
         errors = sum(int(r.get("errors", 0)) for r in results)
         deleted = sum(int(r.get("deleted", 0)) for r in results)
@@ -1102,6 +1105,104 @@ def create_app(hub):
             except Exception as e:
                 logger.debug("vm_sync_sources: GET_AGENTS failed: %s", e)
         return {"active": active, "sources": sources, "agents": agents}
+
+    # ── Firewall → NetBox device-discovery sync (Setup → Sync) ──
+    # global_config["opnsense_netbox_device_sync"] and saved via the generic POST
+    # /setup/config shallow-merge — no dedicated config route needed. The
+    # background loop (main.py run_fw_discovery_sync_loop) reads that same key.
+
+    @app.post("/setup/fw-discovery-sync/run")
+    async def run_fw_discovery_sync(request: Request):
+        """On-demand Firewall → NetBox device-discovery sync ('Sync now').
+
+        Body optional: ``{"tenant_id": "<id>"}`` to sync one tenant (pull global,
+        push just that tenant); absent → pull global, push every attributed
+        tenant. Returns per-tenant results + a summary (pushed/errors/deleted/
+        skipped/dropped_unattributed/discovered_total).
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if target:
+            results = [await hub.sync_tenant_devices(target)]
+            dropped = int(results[0].get("dropped_unattributed", 0) or 0)
+            discovered = int(results[0].get("discovered_total_global", 0) or 0)
+        else:
+            agg = await hub.run_fw_discovery_sync_all()
+            results = agg.get("results", [])
+            dropped = int(agg.get("dropped_unattributed", 0) or 0)
+            discovered = int(agg.get("discovered_total", 0) or 0)
+        pushed = sum(int(r.get("pushed", 0)) for r in results)
+        errors = sum(int(r.get("errors", 0)) for r in results)
+        skipped = sum(int(r.get("skipped", 0)) for r in results)
+        deleted = sum(int(r.get("deleted", 0)) for r in results)
+        return {"results": results,
+                "summary": {"pushed": pushed, "errors": errors, "skipped": skipped,
+                            "deleted": deleted, "tenants": len(results),
+                            "dropped_unattributed": dropped, "discovered_total": discovered}}
+
+    @app.get("/setup/fw-discovery-sync/status")
+    async def fw_discovery_sync_status(request: Request):
+        """Per-tenant last firewall-discovery-sync status for the Setup → Sync card."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        statuses = hub.simulations_store.get_all_fw_discovery_sync_status()
+        tenants = []
+        for tid, st in statuses.items():
+            tenants.append({
+                "tenant_id": tid,
+                "tenant_name": st.get("tenant_name") or tid,
+                "status": st.get("status"),
+                "pushed": st.get("pushed", 0),
+                "errors": st.get("errors", 0),
+                "skipped": st.get("skipped", 0),
+                "deleted": st.get("deleted", 0),
+                "message": st.get("message", ""),
+                "discovered_total": st.get("discovered_total", 0),
+                "last_sync_ts": st.get("last_sync_ts"),
+            })
+        return {"tenants": tenants}
+
+    @app.get("/setup/fw-discovery-sync/sources")
+    async def fw_discovery_sync_sources(request: Request):
+        """List the available firewall pull-sources + the firewalls the sync can
+        be scoped to, for the Setup → Sync source selector + firewall picker.
+
+        Driven by Hub.FIREWALL_DISCOVERY_SOURCES so adding a product is a
+        one-entry registry change and the WebUI dropdown picks it up with no
+        client change. ``firewalls`` come from global_config["firewalls"]
+        (each → {id, name, spoke_id, connected}) so the admin can pin the sync
+        to one firewall. ``netbox_connected`` flags whether the sink is up.
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        active = hub._fw_discovery_source().get("module_type")
+        sources = []
+        for name, se in hub.FIREWALL_DISCOVERY_SOURCES.items():
+            sources.append({"name": name, "label": se.get("label", name),
+                            "module_type": se.get("module_type", ""),
+                            "connected": bool(hub.get_all_spokes_by_type(se.get("module_type", "")))})
+        firewalls = []
+        for fw in hub.state.system_state.get("global_config", {}).get("firewalls", []) or []:
+            sid = fw.get("spoke_id") if isinstance(fw, dict) else None
+            firewalls.append({
+                "id": fw.get("id", "") if isinstance(fw, dict) else "",
+                "name": fw.get("name", fw.get("id", "")) if isinstance(fw, dict) else "",
+                "spoke_id": sid or "",
+                "connected": bool(sid and sid in getattr(hub, "active_connections", {})),
+            })
+        return {"active": active, "sources": sources, "firewalls": firewalls,
+                "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}
 
     @app.get("/setup/pxmx-config")
     async def get_pxmx_config():
@@ -2845,6 +2946,17 @@ def create_app(hub):
             if t and t not in tenant_tags:
                 tenant_tags.append(t)
         pool = str(body.get("pool", "")).strip()
+        # Optional VMID auto-allocation: when the knob is ON and the caller did
+        # not supply a new_vmid, pick the next free VMID in the tenant's
+        # [vmid_start, vmid_end] NetBox range (cluster-verified). OFF (default)
+        # or no range → None → the agent falls back to Proxmox /cluster/nextid.
+        new_vmid = body.get("new_vmid")
+        if not new_vmid and vmid_alloc.vmid_alloc_cfg(hub).get("enabled", False):
+            try:
+                new_vmid = await vmid_alloc.allocate_vmid(hub, tid)
+            except Exception as e:
+                logger.debug("vmid-alloc (create) tenant=%s failed: %s", tid, e)
+                new_vmid = None
         payload = {
             "node": node,
             "name": name,
@@ -2856,7 +2968,7 @@ def create_app(hub):
             "bridge": body.get("bridge", "vmbr0"),
             "pool": pool,
             "tenant_tags": tenant_tags,
-            "new_vmid": body.get("new_vmid"),
+            "new_vmid": new_vmid,
         }
         try:
             result = await hub.request_response(pxmx_spoke, "PXMX_CREATE_VM", payload, timeout=130.0)
@@ -2965,6 +3077,17 @@ def create_app(hub):
             raise HTTPException(status_code=403,
                                  detail="template is not in a configured template pool")
 
+        # Optional VMID auto-allocation: when the knob is ON and the caller did
+        # not supply a new_vmid, pick the next free VMID in the tenant's
+        # [vmid_start, vmid_end] NetBox range (cluster-verified). OFF (default)
+        # or no range → None → the agent falls back to Proxmox /cluster/nextid.
+        new_vmid = body.get("new_vmid")
+        if not new_vmid and vmid_alloc.vmid_alloc_cfg(hub).get("enabled", False):
+            try:
+                new_vmid = await vmid_alloc.allocate_vmid(hub, tid)
+            except Exception as e:
+                logger.debug("vmid-alloc (clone) tenant=%s failed: %s", tid, e)
+                new_vmid = None
         payload = {
             "unique_id": template_unique_id,        # routing: cluster → agent
             "template_unique_id": template_unique_id,
@@ -2974,7 +3097,7 @@ def create_app(hub):
             "type": body.get("type", "qemu"),
             "node": template_unique_id.split("/")[1] if template_unique_id.count("/") >= 2 else body.get("node", ""),
             "template_vmid": body.get("vmid"),
-            "new_vmid": body.get("new_vmid"),
+            "new_vmid": new_vmid,
         }
         try:
             result = await hub.request_response(pxmx_spoke, "PXMX_CLONE_VM", payload, timeout=605.0)
