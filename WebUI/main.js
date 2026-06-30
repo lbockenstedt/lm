@@ -5233,7 +5233,7 @@ async function loadOpnsenseManagement() {
         let keys;
         if (subMenu === 'Firewall Rules') keys = ['firewall', 'source', 'destination', 'protocol', 'action', 'description'];
         else if (subMenu === 'Interfaces') keys = ['firewall', 'description', 'ip', 'status', 'macaddr', 'mtu', 'media'];
-        else if (subMenu === 'NAT Policies') keys = ['firewall', 'type', 'protocol', 'external_ip', 'external_port', 'internal_ip', 'internal_port', 'description'];
+        else if (subMenu === 'NAT Policies') keys = ['firewall', 'type', 'protocol', 'source', 'external_ip', 'external_port', 'internal_ip', 'internal_port', 'description'];
         else if (subMenu === 'DNS Records') keys = ['firewall', 'hostname', 'ip', 'type', 'ttl', 'description'];
         else if (subMenu === 'Aliases') keys = ['firewall', 'name', 'type', 'content', 'description'];
         else keys = ['firewall', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && !k.toLowerCase().includes('hit') && k !== 'firewall' && !k.startsWith('_'))];
@@ -5255,7 +5255,14 @@ async function loadOpnsenseManagement() {
                 return showHiddenOnlyFirewallRules ? hiddenRules.includes(ruleId) : !hiddenRules.includes(ruleId);
             });
         } else if (subMenu === 'NAT Policies') {
-            filteredItems = items.filter(item => itemInTenantPrefixes(item, ['internal_ip', 'external_ip', 'destination.network']));
+            // Subnet filtering for NAT is enforced server-side (_subnet_filter_fw →
+            // filter_items_by_prefixes over source/internal_ip/external_ip, plus
+            // the OPNsense category attribution) so the tenant already receives
+            // only their NAT policies. The client-side itemInTenantPrefixes has
+            // no category awareness and would hide category-attributed policies
+            // the server showed, so it is intentionally NOT applied here (mirrors
+            // the Firewall Rules path). Admins see all (server no-op for admins).
+            filteredItems = items;
         } else if (subMenu === 'DHCP Leases') {
             filteredItems = items.filter(item => itemInTenantPrefixes(item, ['ip', 'address']));
         } else if (subMenu === 'DNS Records') {

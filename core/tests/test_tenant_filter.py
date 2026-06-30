@@ -211,3 +211,25 @@ def test_firewall_rule_category_overrides_to_show():
     rule = {"source": "any", "destination": "any", "category": "Acme"}
     assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES,
                                      tenant_category="Acme") is True
+
+
+def test_category_match_accepts_name_slug_id_case_insensitive():
+    """The admin may tag an OPNsense record with the tenant's display name, slug,
+    netbox slug, or id, in any case. The category attribution accepts any of those
+    (passed as an iterable), case-insensitively, so a record categorized 'acme'
+    or 'ACME' still matches a tenant whose name is 'Acme'."""
+    rule_any_any = lambda cat: {"source": "any", "destination": "any", "category": cat}
+    cats = ["Acme", "acme", "ACME", "acme-corp", "acme_corp", "42"]
+    # tenant passes name + slug + netbox slug + id
+    tenant_cats = ["Acme", "acme-corp", "acme_corp", "42"]
+    for c in cats:
+        # only the ones in tenant_cats (case-insensitive) qualify
+        expect = c.lower() in {t.lower() for t in tenant_cats}
+        assert firewall_rule_in_prefixes(rule_any_any(c), TENANT_PREFIXES,
+                                         tenant_category=tenant_cats) is expect, c
+    # a category that isn't any of the tenant's names/slugs/ids → drop
+    assert firewall_rule_in_prefixes(rule_any_any("Other"), TENANT_PREFIXES,
+                                     tenant_category=tenant_cats) is False
+    # string form still works (single category, case-insensitive)
+    assert firewall_rule_in_prefixes(rule_any_any("acme"), TENANT_PREFIXES,
+                                     tenant_category="Acme") is True
