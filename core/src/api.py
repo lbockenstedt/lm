@@ -564,6 +564,20 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Simulations module access required"})
 
+        # /api/nw/* (Network Devices module) requires the ``nw`` right OR admin.
+        # Mirrors the cs gate: frontend hides the Network nav on the same right.
+        if path.startswith("/api/nw/"):
+            if not (_is_admin(sess) or _has_nw_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Network Devices module access required"})
+
+        # /api/netbox/* (IPAM module) requires the ``ipam`` right OR admin.
+        # Mirrors the cs gate: frontend hides the IPAM nav on the same right.
+        if path.startswith("/api/netbox/"):
+            if not (_is_admin(sess) or _has_ipam_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "IPAM module access required"})
+
         # Tenant scoping: block requests for a ?tenant= the user isn't authorised for
         tenant = request.query_params.get("tenant")
         if tenant and not _check_tenant_access(sess, tenant):
@@ -5414,6 +5428,12 @@ def create_app(hub):
 
     def _has_cs_access(sess):
         return access.has_cs_access(sess)
+
+    def _has_nw_access(sess):
+        return access.has_nw_access(sess)
+
+    def _has_ipam_access(sess):
+        return access.has_ipam_access(sess)
 
     def _check_tenant_access(sess, tenant_id):
         return access.check_tenant_access(sess, tenant_id)
