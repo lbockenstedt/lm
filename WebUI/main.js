@@ -4753,8 +4753,8 @@ function _diagRowHtml(s, fns) {
     const hbAge = (s.heartbeat_age_s == null) ? 'never'
                : (s.heartbeat_age_s === 0 ? 'now' : `${s.heartbeat_age_s}s`);
     const hbLabel = s.authenticated ? 'fresh' : hbStatus.toLowerCase();
-    const hbCell = `<span class="font-bold ${hbTone}">${hbStatus || '—'}</span>
-                    <span class="text-slate-400 text-[10px] ml-1">${hbAge}</span>
+    const hbCell = `<span class="block font-bold ${hbTone}">${hbStatus || '—'}</span>
+                    <span class="block text-slate-400 text-[10px]">${hbAge}</span>
                     <span class="block text-slate-400 text-[10px]">${hbLabel}</span>`;
     // Version: module version + skew warning badge.
     const skew = s.version_skew
