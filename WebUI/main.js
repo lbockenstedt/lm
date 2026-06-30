@@ -5567,6 +5567,153 @@ async function pxmxCloneVmSubmit(uniqueId) {
     }
 }
 
+// Build VM from ISO: a modal that lets the admin (acting as a tenant) define a
+// new qemu VM that boots a Proxmox installer ISO. The user picks a node → the
+// ISO list + disk-storage list for that node load (PXMX_LIST_ISOS /
+// PXMX_LIST_STORAGES via /api/pxmx/isos + /api/pxmx/storages), then sets name,
+// memory, cores, disk size, and an optional destination pool (from
+// /api/pxmx/pools). On submit POST /api/pxmx/create-vm; the new VM is tagged
+// with the tenant name (label) + proxmox_tag (VM-sync key) and left stopped —
+// the user boots it and installs via the VNC console.
+function pxmxOpenCreateVm() {
+    const nodes = window._pxmxNodes || [];
+    if (!nodes.length) { showToast('No Proxmox nodes available', 'error'); return; }
+    const nodeOpts = nodes.map(n => `<option value="${escapeHtml(n.node)}">${escapeHtml(n.node)}${n.cluster ? ' (' + escapeHtml(n.cluster) + ')' : ''}</option>`).join('');
+    const tpl = `<div id="pxmx-create-vm-modal" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-lg p-5 space-y-3">
+            <div class="flex items-center justify-between">
+                <h3 class="text-base font-semibold text-[#263040]">Build VM from ISO</h3>
+                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+            </div>
+            <p class="text-xs text-slate-500">Define a new qemu VM that boots an installer ISO. The VM is tagged with the current tenant name and starts stopped — boot it from the Console button, install, then Start.</p>
+            <div class="grid grid-cols-2 gap-3">
+                <label class="block text-xs font-medium text-slate-600">Node
+                    <select id="pxmx-cv-node" onchange="pxmxLoadNodeMedia()" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm">${nodeOpts}</select>
+                </label>
+                <label class="block text-xs font-medium text-slate-600">VM name
+                    <input id="pxmx-cv-name" value="new-vm" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+                </label>
+                <label class="block text-xs font-medium text-slate-600 col-span-2">Installer ISO
+                    <select id="pxmx-cv-iso" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="">Loading ISOs…</option></select>
+                </label>
+                <label class="block text-xs font-medium text-slate-600">Disk storage
+                    <select id="pxmx-cv-storage" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="">Loading…</option></select>
+                </label>
+                <label class="block text-xs font-medium text-slate-600">Disk size (GB)
+                    <input id="pxmx-cv-disk" type="number" min="1" value="32" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" />
+                </label>
+                <label class="block text-xs font-medium text-slate-600">Memory (MB)
+                    <input id="pxmx-cv-mem" type="number" min="128" value="2048" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" />
+                </label>
+                <label class="block text-xs font-medium text-slate-600">CPU cores
+                    <input id="pxmx-cv-cores" type="number" min="1" value="2" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" />
+                </label>
+                <label class="block text-xs font-medium text-slate-600 col-span-2">Destination pool (optional)
+                    <select id="pxmx-cv-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="">— no pool —</option></select>
+                </label>
+            </div>
+            <div class="flex justify-end gap-2 pt-1">
+                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
+                <button id="pxmx-cv-go" onclick="pxmxCreateVmSubmit()" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white">＋ Create VM</button>
+            </div>
+            <p id="pxmx-cv-status" class="text-xs text-slate-400"></p>
+        </div>
+    </div>`;
+    const existing = document.getElementById('pxmx-create-vm-modal');
+    if (existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', tpl);
+    // Load ISOs + storages for the preselected node, and the pool list.
+    pxmxLoadNodeMedia();
+    pxmxLoadCreatePools();
+}
+
+async function pxmxLoadNodeMedia() {
+    const nodeSel = document.getElementById('pxmx-cv-node');
+    const isoSel = document.getElementById('pxmx-cv-iso');
+    const stSel = document.getElementById('pxmx-cv-storage');
+    if (!nodeSel) return;
+    const node = nodeSel.value;
+    if (isoSel) { isoSel.disabled = true; isoSel.innerHTML = '<option value="">Loading ISOs…</option>'; }
+    if (stSel) { stSel.disabled = true; stSel.innerHTML = '<option value="">Loading…</option>'; }
+    try {
+        const [isoR, stR] = await Promise.all([
+            fetch(`/api/pxmx/isos?node=${encodeURIComponent(node)}`),
+            fetch(`/api/pxmx/storages?node=${encodeURIComponent(node)}&content=images`),
+        ]);
+        const isoD = isoR.ok ? await isoR.json() : {};
+        const stD = stR.ok ? await stR.json() : {};
+        const isos = isoD.isos || [];
+        const storages = stD.storages || [];
+        if (isoSel) {
+            isoSel.innerHTML = isos.length
+                ? isos.map(i => `<option value="${escapeHtml(i.volid)}">${escapeHtml(i.name || i.volid)}</option>`).join('')
+                : '<option value="">— no ISOs on this node —</option>';
+            isoSel.disabled = isos.length === 0;
+        }
+        if (stSel) {
+            stSel.innerHTML = storages.length
+                ? storages.map(s => `<option value="${escapeHtml(s.storage)}">${escapeHtml(s.storage)} (${Math.round((s.avail || 0) / 1e9)} GB free)</option>`).join('')
+                : '<option value="">— no image storage —</option>';
+            stSel.disabled = storages.length === 0;
+        }
+    } catch (e) {
+        if (isoSel) { isoSel.innerHTML = '<option value="">Failed to load ISOs</option>'; }
+        if (stSel) { stSel.innerHTML = '<option value="">Failed to load storages</option>'; }
+    }
+}
+
+async function pxmxLoadCreatePools() {
+    const poolSel = document.getElementById('pxmx-cv-pool');
+    if (!poolSel) return;
+    try {
+        const r = await fetch('/api/pxmx/pools');
+        const d = r.ok ? await r.json() : {};
+        const pools = d.pools || [];
+        poolSel.innerHTML = '<option value="">— no pool —</option>'
+            + pools.map(p => `<option value="${escapeHtml(p.poolid)}">${escapeHtml(p.poolid)}${p.cluster ? ' (' + escapeHtml(p.cluster) + ')' : ''}</option>`).join('');
+    } catch (e) { /* leave default */ }
+}
+
+async function pxmxCreateVmSubmit() {
+    const get = id => (document.getElementById(id) || {}).value || '';
+    const body = {
+        node: get('pxmx-cv-node'),
+        name: get('pxmx-cv-name').trim(),
+        volid: get('pxmx-cv-iso'),
+        disk_storage: get('pxmx-cv-storage'),
+        disk_gb: parseInt(get('pxmx-cv-disk'), 10) || 32,
+        memory_mb: parseInt(get('pxmx-cv-mem'), 10) || 2048,
+        cores: parseInt(get('pxmx-cv-cores'), 10) || 2,
+        pool: get('pxmx-cv-pool'),
+    };
+    const statusEl = document.getElementById('pxmx-cv-status');
+    const goBtn = document.getElementById('pxmx-cv-go');
+    if (!body.name) { if (statusEl) statusEl.textContent = 'Name is required'; return; }
+    if (!body.volid) { if (statusEl) statusEl.textContent = 'Pick an ISO'; return; }
+    if (!body.disk_storage) { if (statusEl) statusEl.textContent = 'Pick a disk storage'; return; }
+    if (goBtn) { goBtn.disabled = true; goBtn.textContent = 'Creating…'; }
+    if (statusEl) statusEl.textContent = 'Creating VM (defines + tags)…';
+    try {
+        const r = await setupFetch('/api/pxmx/create-vm', { method: 'POST', body: JSON.stringify(body) });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data && data.status === 'SUCCESS') {
+            showToast(`Created VMID ${data.vmid} (${data.name}) — boot it from Console to install`, 'success');
+            const modal = document.getElementById('pxmx-create-vm-modal');
+            if (modal) modal.remove();
+            setTimeout(() => loadPxmxData('Virtual Machines'), 1200);
+        } else {
+            const msg = data && (data.detail || data.message) || r.status;
+            showToast(`Create failed: ${msg}`, 'error');
+            if (statusEl) statusEl.textContent = `Failed: ${msg}`;
+            if (goBtn) { goBtn.disabled = false; goBtn.textContent = '＋ Create VM'; }
+        }
+    } catch (e) {
+        showToast(`Create failed: ${e.message || e}`, 'error');
+        if (statusEl) statusEl.textContent = `Failed: ${e.message || e}`;
+        if (goBtn) { goBtn.disabled = false; goBtn.textContent = '＋ Create VM'; }
+    }
+}
+
 // VNC console opener (agent-terminates-WSS): POST /api/pxmx/console to mint a
 // one-shot session, then open a modal hosting noVNC whose RFB connects to the
 // hub's /ws/console/{session_id}?token=... byte relay. The hub relays browser
@@ -5835,9 +5982,15 @@ async function loadPxmxData(subMenu) {
             }
 
             // All VMs flat (direct tab click, or no node telemetry yet).
+            const buildBtn = (window._pxmxNodes && window._pxmxNodes.length)
+                ? `<button onclick="pxmxOpenCreateVm()" class="mb-3 ml-2 px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">＋ Build VM from ISO</button>`
+                : '';
             container.innerHTML = staleBanner
-                + `<h3 class="text-base font-semibold text-[#263040] mb-3 px-1">Virtual Machines &amp; Containers
-                    <span class="text-xs text-slate-400 font-normal">(${vms.length} total)</span></h3>`
+                + `<div class="flex items-center justify-between mb-1 px-1">
+                    <h3 class="text-base font-semibold text-[#263040]">Virtual Machines &amp; Containers
+                        <span class="text-xs text-slate-400 font-normal">(${vms.length} total)</span></h3>
+                    ${buildBtn}
+                </div>`
                 + (vms.length > 0 ? pxmxVmTableHtml(vms)
                    : '<p class="p-4 text-slate-400 italic text-sm">No VMs found — waiting for agent telemetry.</p>');
 

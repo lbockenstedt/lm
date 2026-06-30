@@ -2719,6 +2719,135 @@ def create_app(hub):
             logger.exception("get_pxmx_pools failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/api/pxmx/isos")
+    async def get_pxmx_isos(request: Request, node: str = None):
+        """ISO images available on a node for the create-VM-from-ISO flow.
+
+        ``?node=<node>`` required — the spoke resolves the agent that owns the
+        node and lists its ISO storages. Admin-only. Returns
+        ``{isos: [{volid, name, storage, size}], node, spoke_connected}``."""
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        node = (node or "").strip()
+        if not node:
+            raise HTTPException(status_code=400, detail="node query param required")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        if not pxmx_spoke:
+            return {"isos": [], "node": node, "spoke_connected": False}
+        try:
+            result = await hub.request_response(pxmx_spoke, "PXMX_LIST_ISOS",
+                                                {"node": node}, timeout=25.0)
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            isos = (data or {}).get("isos", []) if isinstance(data, dict) else []
+            return {"isos": isos, "node": node, "spoke_connected": True}
+        except Exception as e:
+            logger.exception("get_pxmx_isos failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/pxmx/storages")
+    async def get_pxmx_storages(request: Request, node: str = None,
+                                content: str = "images"):
+        """Storages on a node accepting the given content type (default
+        ``images`` — boot-disk targets for create-VM-from-ISO). Admin-only.
+        Returns ``{storages: [{storage, type, avail, total, shared}], node, spoke_connected}``."""
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        node = (node or "").strip()
+        if not node:
+            raise HTTPException(status_code=400, detail="node query param required")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        if not pxmx_spoke:
+            return {"storages": [], "node": node, "spoke_connected": False}
+        try:
+            result = await hub.request_response(pxmx_spoke, "PXMX_LIST_STORAGES",
+                                                {"node": node, "content": content},
+                                                timeout=25.0)
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            storages = (data or {}).get("storages", []) if isinstance(data, dict) else []
+            return {"storages": storages, "node": node, "spoke_connected": True}
+        except Exception as e:
+            logger.exception("get_pxmx_storages failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/create-vm")
+    async def pxmx_create_vm(request: Request):
+        """Hypervisors view create-VM-from-ISO: define a new qemu VM that boots
+        an installer ISO. The user picks a node, ISO (volid), disk storage +
+        size, memory, cores, and optionally a destination pool. The new VM is
+        tagged with the acting tenant's display NAME (the visible label) and
+        ``proxmox_tag`` (the VM-sync key), placed in the chosen pool, and left
+        stopped — the user boots it and installs via the VNC console. Admin-only
+        (admin acting as a tenant via the switcher, same as clone). Body:
+        ``{node, name, volid, memory_mb?, cores?, disk_storage?, disk_gb?,
+        bridge?, pool?, new_vmid?}``. After success the tenant's VM sync is
+        re-triggered so NetBox picks up the new VM."""
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body or {}
+        node = str(body.get("node", "")).strip()
+        if not node:
+            raise HTTPException(status_code=400, detail="node is required")
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        volid = str(body.get("volid", "")).strip()
+        if not volid:
+            raise HTTPException(status_code=400, detail="volid (ISO) is required")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        if not pxmx_spoke:
+            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        # Resolve the acting tenant's labels (display name + proxmox_tag) —
+        # same model as clone so the new VM is visible to the tenant and synced.
+        tid = _resolve_tenant(request, None)
+        scoping = get_tenant_scoping(hub, tid) or {}
+        tenant_tag = scoping.get("proxmox_tag") or ""
+        tenant_name = ""
+        try:
+            trec = hub.state.get_tenant(tid) or {}
+            tenant_name = str(trec.get("name") or "").strip()
+        except Exception:
+            pass
+        tenant_tags = []
+        for t in (tenant_name, tenant_tag):
+            if t and t not in tenant_tags:
+                tenant_tags.append(t)
+        pool = str(body.get("pool", "")).strip()
+        payload = {
+            "node": node,
+            "name": name,
+            "volid": volid,
+            "memory_mb": body.get("memory_mb", 2048),
+            "cores": body.get("cores", 2),
+            "disk_storage": body.get("disk_storage", ""),
+            "disk_gb": body.get("disk_gb", 32),
+            "bridge": body.get("bridge", "vmbr0"),
+            "pool": pool,
+            "tenant_tags": tenant_tags,
+            "new_vmid": body.get("new_vmid"),
+        }
+        try:
+            result = await hub.request_response(pxmx_spoke, "PXMX_CREATE_VM", payload, timeout=130.0)
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            if isinstance(data, dict) and data.get("status") == "ERROR":
+                raise HTTPException(status_code=502, detail=data.get("message", "create failed"))
+            _trigger_vm_sync_after_pxmx_edit(hub, request, body)
+            return data
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("pxmx_create_vm failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.post("/api/pxmx/clone")
     async def pxmx_clone_vm(request: Request):
         """Hypervisors view clone-from-template: clone a template-pool VM to a
