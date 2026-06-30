@@ -65,7 +65,7 @@ def test_stored_values_are_coerced_to_bool():
 # → admin bypass preserved (regression guard).
 
 import asyncio
-from access import subnet_filter_fw, subnet_filter_tenant
+from access import subnet_filter_fw, filter_tenant
 
 
 class _FakeRequest:
@@ -230,10 +230,13 @@ def test_category_does_not_leak_to_other_tenant():
 # ── Hypervisor VM filter (tenant-aware, admin acting as tenant) ────────────────
 #
 # /api/pxmx/vms previously had NO subnet filter at all — an admin saw every
-# tenant's VMs. The route now applies subnet_filter_tenant (module "hypervisor",
+# tenant's VMs. The route now applies filter_tenant (module "hypervisor",
 # ip_fields ["ips"]) on all three return paths so an admin selecting a tenant
-# sees only that tenant's VMs. These lock in the admin-as-tenant filter and the
-# legacy admin bypass when no tenant is selected.
+# sees only that tenant's VMs. The hypervisor filter adds two overrides on top
+# of the subnet match: VMs in a configured template pool are visible to ALL
+# tenants, and VMs whose Proxmox tag matches the tenant are shown to that
+# tenant regardless of subnet. These lock in the base filter, the overrides,
+# and the legacy admin bypass when no tenant is selected.
 
 def _vms_env():
     # VM records carry an `ips` list (bare IPv4, no CIDR) — stopped VMs have [].
@@ -253,7 +256,7 @@ def test_hypervisor_admin_with_explicit_tenant_is_filtered():
     }))
     sessions = {"admin-cookie": _admin_session()}
     req = _FakeRequest("admin-cookie")
-    out = asyncio.run(subnet_filter_tenant(
+    out = asyncio.run(filter_tenant(
         hub, sessions, req, _vms_env(), "hypervisor", ["ips"], explicit_tenant="acme"))
     names = [v["name"] for v in out["vms"]]
     assert "in-tenant" in names
@@ -270,9 +273,61 @@ def test_hypervisor_admin_without_explicit_tenant_bypasses():
     sessions = {"admin-cookie": _admin_session()}
     req = _FakeRequest("admin-cookie")
     env = _vms_env()
-    out = asyncio.run(subnet_filter_tenant(
+    out = asyncio.run(filter_tenant(
         hub, sessions, req, env, "hypervisor", ["ips"]))
     assert out is env  # unchanged — all 3 VMs visible
+
+
+def _override_vms_env():
+    # in-tenant (IP in prefix), off-prefix template, off-prefix tenant-tagged,
+    # off-prefix other-tenant-tagged, stopped no-IP template.
+    return {"vms": [
+        {"name": "in-tenant",     "ips": ["10.20.0.5"]},
+        {"name": "tmpl",          "ips": ["8.8.8.8"], "pool": "Templates"},          # template pool → all
+        {"name": "tagged-acme",    "ips": ["8.8.8.8"], "tags": ["acme"]},            # tag == tenant → show
+        {"name": "tagged-other",   "ips": ["8.8.8.8"], "tags": ["other"]},          # not this tenant → drop
+        {"name": "tmpl-stopped",   "ips": [],          "pool": "Templates"},        # template, no IP → show
+    ]}
+
+
+def test_hypervisor_template_pool_visible_to_all_tenants():
+    """A VM in a configured template pool is shown to every tenant regardless of
+    its IPs — including a stopped template with no IPs (templates are shared)."""
+    hub = _PrefixHub(FakeState(system_state={}, tenants={
+        "acme": {"netbox_tenant_slug": "acme"},
+    }))
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    out = asyncio.run(filter_tenant(
+        hub, sessions, req, _override_vms_env(), "hypervisor", ["ips"], explicit_tenant="acme"))
+    names = [v["name"] for v in out["vms"]]
+    assert "tmpl" in names            # off-prefix but template pool → show
+    assert "tmpl-stopped" in names    # no-IP template → show
+    assert "in-tenant" in names       # normal subnet match → show
+    assert "tagged-other" not in names
+    assert "out-tenant" not in names
+
+
+def test_hypervisor_tag_match_shows_to_that_tenant():
+    """A VM whose Proxmox tag matches the tenant is shown to that tenant even
+    when its IPs are off the tenant's subnet; a VM tagged for another tenant
+    is not shown."""
+    hub = _PrefixHub(FakeState(system_state={}, tenants={
+        "acme": {"netbox_tenant_slug": "acme", "proxmox_tag": "acme-prod"},
+    }))
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    env = {"vms": [
+        {"name": "tagged-slug",  "ips": ["8.8.8.8"], "tags": ["acme"]},          # == netbox slug / id → show
+        {"name": "tagged-ptag",  "ips": ["8.8.8.8"], "tags": ["acme-prod"]},     # == proxmox_tag → show
+        {"name": "tagged-other", "ips": ["8.8.8.8"], "tags": ["other"]},         # not ours → drop
+    ]}
+    out = asyncio.run(filter_tenant(
+        hub, sessions, req, env, "hypervisor", ["ips"], explicit_tenant="acme"))
+    names = [v["name"] for v in out["vms"]]
+    assert "tagged-slug" in names
+    assert "tagged-ptag" in names
+    assert "tagged-other" not in names
 
 
 def test_hypervisor_module_in_toggle_set_and_default_on():

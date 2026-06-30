@@ -259,6 +259,81 @@ def filter_record_by_prefixes(record: Any, prefixes: Sequence[str], ip_fields: S
     return None if drop_no_ip else record  # no concrete IP → drop by default
 
 
+def _vm_tags(vm: dict) -> set:
+    """Lowercased set of a VM's Proxmox tags (``tags`` is a list from the agent,
+    but tolerate a comma/space-separated string)."""
+    tags = vm.get("tags")
+    if isinstance(tags, list):
+        return {str(t).strip().lower() for t in tags if str(t).strip()}
+    if isinstance(tags, str):
+        return {t.strip().lower() for t in re.split(r"[,\s]+", tags) if t.strip()}
+    return set()
+
+
+def filter_hypervisor_vms(data: Any, prefixes: Sequence[str], *,
+                           template_pools: Optional[Sequence[str]] = None,
+                           tenant_tags: Optional[Sequence[str]] = None,
+                           drop_no_ip: bool = True) -> Any:
+    """Hypervisor-VM tenant filter with template-pool + tag overrides.
+
+    A VM is kept when ANY of these hold:
+
+      - a concrete IP in its ``ips`` list falls inside one of the tenant's
+        prefixes (the normal subnet match), or
+      - its ``pool`` is one of ``template_pools`` — template-pool VMs are shared
+        and visible to ALL tenants regardless of subnet/IP (a stopped template
+        with no IPs still shows), or
+      - one of its Proxmox ``tags`` matches a value in ``tenant_tags`` (the VM is
+        tagged for this tenant regardless of which subnet its IPs are on).
+
+    Otherwise the ``filter_items_by_prefixes`` rules apply: a VM with concrete
+    off-prefix IPs is dropped; a VM with no concrete IP (and no override) is
+    dropped when ``drop_no_ip=True`` (the default — err on hiding). Empty
+    prefixes → unchanged (nothing to filter against; overrides irrelevant).
+    Comparison is case-insensitive and whitespace-trimmed.
+    """
+    if not prefixes:
+        return data
+    nets = _nets(prefixes)
+    if not nets:
+        return data
+    tp = {str(p).strip().lower() for p in (template_pools or []) if str(p).strip()}
+    tt = {str(t).strip().lower() for t in (tenant_tags or []) if str(t).strip()}
+
+    def keep(vm: dict) -> bool:
+        if not isinstance(vm, dict):
+            return True
+        # template-pool override (global — visible to every tenant)
+        if tp and str(vm.get("pool") or "").strip().lower() in tp:
+            return True
+        # tag override (this tenant)
+        if tt and (_vm_tags(vm) & tt):
+            return True
+        # normal subnet match on the ips list
+        ips = vm.get("ips")
+        ip_list = ips if isinstance(ips, list) else []
+        has_concrete = False
+        for ip in ip_list:
+            s = str(ip).strip()
+            if not s:
+                continue
+            has_concrete = True
+            if _addr_in_prefixes(s, nets):
+                return True
+        if has_concrete:
+            return False  # concrete IPs but none matched → drop
+        return not drop_no_ip  # no concrete IP → drop by default
+
+    container, key = _find_list_slot(data)
+    if container is None:
+        return data
+    filtered = _filter_list(container if key is None else container[key], keep)
+    if key is None:
+        return filtered
+    container[key] = filtered
+    return data
+
+
 def _is_wildcard(val: Any) -> bool:
     """True when a firewall source/destination means "any address"."""
     if val is None:
