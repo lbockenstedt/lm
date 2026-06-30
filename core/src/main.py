@@ -350,6 +350,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # instead of leaking an entry that is never popped (unbounded growth at
         # scale with periodic commands + occasional spoke slowness).
         self._outstanding_requests: set = set()
+        # request_response msg_ids whose waiter already returned without a reply
+        # (timeout or cancel), retained briefly (TTL below) so a late ack arriving
+        # after the waiter left can be recognized + logged as "late" (DEBUG) rather
+        # than mislabeled "unknown message ID" (WARNING) by mailbox.acknowledge —
+        # request_response ids are never in mailbox.pending_ack, so the mailbox
+        # can't tell a late request/response reply from a genuinely stray ack.
+        # { msg_id: expire_ts }
+        self._recent_request_timeouts: Dict[str, float] = {}
+        self._RECENT_TIMEOUT_TTL = 60.0
         # VNC console sessions (agent-terminates-WSS): session_id →
         # {queue, expires, ws_token, spoke_id, tenant_id, vmid, node, unique_id}.
         # The browser WS reads Proxmox→browser frames off ``queue`` (bytes) or
@@ -456,12 +465,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Wait for the response in the mailbox
         self._outstanding_requests.add(msg_id)
         start_time = time.time()
+        settled = False
         try:
             while time.time() - start_time < timeout:
                 await asyncio.sleep(0.1)
                 if msg_id in getattr(self, "response_cache", {}):
                     result = self.response_cache.pop(msg_id)
                     logger.info(f"Response: {msg_id} received from {spoke_id}: {_redact(command_type, result)}")
+                    settled = True
                     return result
 
             logger.error(f"Request Timeout: {msg_id} from {spoke_id} after {timeout}s")
@@ -469,6 +480,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         finally:
             # Drop the waiter so a late ack can't leak a response_cache entry.
             self._outstanding_requests.discard(msg_id)
+            if not settled:
+                # Waiter returned without a reply (timeout or cancel). A late ack
+                # may still arrive from the spoke; remember the id briefly so the
+                # receive path can log it as "late" (DEBUG) instead of "unknown".
+                self._recent_request_timeouts[msg_id] = time.time() + self._RECENT_TIMEOUT_TTL
+                self._prune_recent_timeouts()
+
+    def _prune_recent_timeouts(self) -> None:
+        """Drop expired entries from ``_recent_request_timeouts`` (called on each
+        new addition so the dict stays bounded)."""
+        now = time.time()
+        self._recent_request_timeouts = {k: v for k, v in self._recent_request_timeouts.items()
+                                         if v > now}
 
     async def send_to_spoke_command(self, spoke_id: str, command_type: str,
                                     data: Dict[str, Any]) -> None:
@@ -644,7 +668,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return
         payload = {"hostname": hostname, **(data or {})}
         try:
-            await self.request_response(cs_spoke, mapped, payload, timeout=5.0)
+            # 30s (not the 5s default): the cs spoke processes commands inline on
+            # its event loop and CS_INGEST_COMMAND_RESULT does a blocking atomic
+            # disk write (command_queue.ack_command) that can exceed 5s under
+            # load — a too-tight timeout produces late replies the hub then warns
+            # about as "unknown message ID". See request_response / dispatch.
+            await self.request_response(cs_spoke, mapped, payload, timeout=30.0)
             logger.debug("CS_* relay: %s -> %s for %s (tenant=%s)",
                          cs_type, mapped, hostname, tenant_id)
         except Exception as exc:
@@ -1313,19 +1342,47 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # Process Acknowledgement
                 if "correlation_id" in msg_data:
                     corr_id = msg_data["correlation_id"]
-                    ack = Acknowledgement(
-                        correlation_id=corr_id,
-                        status=msg_data.get("status", "FAILED"),
-                        error=msg_data.get("error"),
-                        # Thread the sender's identity + frame type + peer IP
-                        # into the ack so the mailbox "unknown ack" warning can
-                        # name the source of a stray/late ack (the envelope's
-                        # own spoke_id is often None for these).
-                        spoke_id=spoke_id,
-                        message_type=payload.get("type"),
-                        source_ip=remote_ip,
-                    )
-                    await self.mailbox.acknowledge(ack)
+                    # A reply's correlation_id is the hub's original message_id.
+                    # Two send paths share the id space: ``mailbox.push`` (tracked
+                    # in ``mailbox.pending_ack``) and ``request_response`` (tracked
+                    # in ``_outstanding_requests``, or ``_recent_request_timeouts``
+                    # if the waiter already timed out / was cancelled). Route
+                    # accordingly so a late request/response reply is logged as
+                    # "late" (DEBUG) instead of mislabeled "unknown message ID"
+                    # (WARNING) — request_response ids are never in pending_ack,
+                    # so mailbox.acknowledge can't tell a late reply from a stray.
+                    in_flight = corr_id in self._outstanding_requests
+                    late_reply = (not in_flight) and (corr_id in self._recent_request_timeouts)
+                    if in_flight or late_reply:
+                        if late_reply:
+                            self._recent_request_timeouts.pop(corr_id, None)
+                            logger.debug(
+                                "Late reply for %s from %s (request_response already "
+                                "timed out) — dropped (message_type=%s, source_ip=%s)",
+                                corr_id, spoke_id, payload.get("type"), remote_ip)
+                    else:
+                        # mailbox.push reply, or a genuinely unknown ack. Status:
+                        # spoke reply frames carry the real outcome in
+                        # payload.data.status (not a top-level "status" key, which
+                        # the control plane never sets) — read it from there so the
+                        # "unknown ack" warning reflects reality instead of always
+                        # printing the stale "FAILED" default.
+                        _pdata = payload.get("data") if isinstance(payload, dict) else None
+                        _rstatus = str(_pdata.get("status") or "").strip().upper() \
+                            if isinstance(_pdata, dict) else ""
+                        ack = Acknowledgement(
+                            correlation_id=corr_id,
+                            status="SUCCESS" if _rstatus == "SUCCESS" else "FAILED",
+                            error=msg_data.get("error"),
+                            # Thread the sender's identity + frame type + peer IP
+                            # into the ack so the mailbox "unknown ack" warning can
+                            # name the source of a stray/late ack (the envelope's
+                            # own spoke_id is often None for these).
+                            spoke_id=spoke_id,
+                            message_type=payload.get("type"),
+                            source_ip=remote_ip,
+                        )
+                        await self.mailbox.acknowledge(ack)
 
                     # Debug: Log this response is actually expected
                     if corr_id not in self.response_cache:
