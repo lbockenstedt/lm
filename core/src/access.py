@@ -215,6 +215,31 @@ def has_cs_access(sess) -> bool:
     return bool(p.get("cs"))
 
 
+def has_module_access(sess, right: str) -> bool:
+    """True if the session user may use a permission-gated module.
+
+    Admins always pass; otherwise the user's permissions must carry an explicit
+    ``right`` (set in User Management). Shared by the Network Devices (``nw``)
+    and IPAM (``ipam``) module gates — mirrors ``has_cs_access`` so nav-hiding
+    (frontend ``canSeeModule``) and API access agree. ``right`` is the
+    permissions key (``"nw"`` / ``"ipam"`` / ``"cs"`` …), not a display label.
+    """
+    if is_admin(sess):
+        return True
+    p = (sess or {}).get("user", {}).get("permissions", {})
+    return bool(p.get(right))
+
+
+def has_nw_access(sess) -> bool:
+    """Network Devices (``nw``) module access gate (see ``has_module_access``)."""
+    return has_module_access(sess, "nw")
+
+
+def has_ipam_access(sess) -> bool:
+    """IPAM (``ipam``) module access gate (see ``has_module_access``)."""
+    return has_module_access(sess, "ipam")
+
+
 def check_tenant_access(sess, tenant_id: str) -> bool:
     """True if the session user may access ``tenant_id``.
 

@@ -535,7 +535,7 @@ window.fetch = async function lmFetch(input, init) {
 // granted its explicit right. Today only the Simulations (cs) module is gated
 // this way; other modules remain product-driven (visible when their spoke is
 // connected). Add a key here to gate another module the same way.
-const MODULE_RIGHT = { 'Simulations': 'cs' };
+const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam' };
 function canSeeModule(className) {
     const right = MODULE_RIGHT[className];
     if (!right) return true;              // no right defined → product-driven
@@ -2589,8 +2589,8 @@ function _renderSetupUserAccessTile(content) {
                 </div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">User ID</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">Pxmx</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">Security</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3"></th></tr></thead>
-                        <tbody id="user-permissions-body" class="divide-y divide-slate-200"><tr><td colspan="12" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading users…</td></tr></tbody>
+                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">User ID</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">HV</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">NAC</th><th class="px-4 py-3 text-center">NW</th><th class="px-4 py-3 text-center">IPAM</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3"></th></tr></thead>
+                        <tbody id="user-permissions-body" class="divide-y divide-slate-200"><tr><td colspan="14" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading users…</td></tr></tbody>
                     </table>
                 </div>
             </div>`;
@@ -5300,7 +5300,7 @@ async function loadUsers() {
         const users = data.users || {};
 
         if (Object.keys(users).length === 0) {
-            bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-400 italic"><td colspan="12">No users configured.</td></tr>`;
+            bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-400 italic"><td colspan="14">No users configured.</td></tr>`;
             return;
         }
 
@@ -5341,6 +5341,8 @@ async function loadUsers() {
                     <td class="px-4 py-3 text-center">${check('firewall')}</td>
                     <td class="px-4 py-3 text-center">${check('dns')}</td>
                     <td class="px-4 py-3 text-center">${check('security')}</td>
+                    <td class="px-4 py-3 text-center">${check('nw')}</td>
+                    <td class="px-4 py-3 text-center">${check('ipam')}</td>
                     <td class="px-4 py-3 text-center">${check('cs')}</td>
                     <td class="px-4 py-3 text-right whitespace-nowrap">${actions}</td>
                 </tr>
@@ -9298,7 +9300,9 @@ async function showAddUserModal() {
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Firewall</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-firewall" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">DNS</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dns" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">DHCP</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dhcp" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">Security/NAC</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-security" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold">NAC</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-security" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold">Network Devices</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nw" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold">IPAM</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-ipam" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Simulations</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-cs" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                 </div>
             </div>
@@ -9329,6 +9333,8 @@ async function saveUser() {
         dns: document.getElementById('perm-dns').checked,
         dhcp: document.getElementById('perm-dhcp').checked,
         security: document.getElementById('perm-security').checked,
+        nw: document.getElementById('perm-nw').checked,
+        ipam: document.getElementById('perm-ipam').checked,
         cs: document.getElementById('perm-cs').checked,
     };
     const auth_type = document.getElementById('new-user-auth-type')?.value || 'local';
@@ -9385,7 +9391,9 @@ async function editUser(userId) {
             {id: 'firewall', label: 'Firewall'},
             {id: 'dns', label: 'DNS'},
             {id: 'dhcp', label: 'DHCP'},
-            {id: 'security', label: 'Security/NAC'},
+            {id: 'security', label: 'NAC'},
+            {id: 'nw', label: 'Network Devices'},
+            {id: 'ipam', label: 'IPAM'},
             {id: 'cs', label: 'Simulations'},
         ];
 
@@ -9453,6 +9461,8 @@ async function saveUserEdits(userId) {
             dns: document.getElementById('edit-perm-dns').checked,
             dhcp: document.getElementById('edit-perm-dhcp').checked,
             security: document.getElementById('edit-perm-security').checked,
+            nw: document.getElementById('edit-perm-nw').checked,
+            ipam: document.getElementById('edit-perm-ipam').checked,
             cs: document.getElementById('edit-perm-cs').checked,
         };
 
