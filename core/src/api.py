@@ -791,7 +791,7 @@ def create_app(hub):
         _PREFIX_MODULE = {
             "pxmx": "hypervisor", "opn": "firewall", "cppm": "nac",
             "cs": "simulation", "netbox": "ipam", "ldap": "directory",
-            "dns": "dns", "dhcp": "dhcp",
+            "dns": "dns", "dhcp": "dhcp", "nw": "nw",
         }
 
         def _module_type_for(sid: str):

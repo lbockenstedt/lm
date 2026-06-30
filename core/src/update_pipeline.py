@@ -50,7 +50,7 @@ logger = logging.getLogger("Hub")  # same name as main.py — shared log config
 # "opnsense" here, NOT "opn". Used to look up global_config["update_sources"][k].
 _UPDATE_SOURCE_MODULE_KEY = {
     "hypervisor": "pxmx", "firewall": "opnsense", "nac": "cppm",
-    "directory": "ldap", "ipam": "netbox", "simulation": "cs",
+    "directory": "ldap", "ipam": "netbox", "simulation": "cs", "nw": "nw",
 }
 
 # spoke_id substring → update_sources config key. "opn" → "opnsense" (the
@@ -58,7 +58,7 @@ _UPDATE_SOURCE_MODULE_KEY = {
 # update_sources lookup, not a push_config branch.
 _UPDATE_SOURCE_PREFIX_MAP = {
     'pxmx': 'pxmx', 'opn': 'opnsense', 'cs': 'cs',
-    'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap',
+    'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap', 'nw': 'nw',
 }
 
 

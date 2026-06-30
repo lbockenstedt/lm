@@ -597,7 +597,7 @@ rm -rf lm_tmp
 # skip its installer, the venv is never restored and the service crash-loops
 # with status=203/EXEC ("Unable to locate executable .../venv/bin/python3").
 # Excluded modules are left entirely untouched (no venv wipe, no code pull).
-REPOS=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap")
+REPOS=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap" "nw")
 for repo in "${REPOS[@]}"; do
     _excluded=false
     for ex in "${EXCLUDE[@]}"; do [[ "$repo" == "$ex" ]] && _excluded=true; done
@@ -748,6 +748,7 @@ DEFAULTS = {
     "cppm": "https://github.com/lbockenstedt/cppm.git",
     "netbox": "https://github.com/lbockenstedt/netbox.git",
     "ldap": "https://github.com/lbockenstedt/ldap.git",
+    "nw": "https://github.com/lbockenstedt/nw.git",
 }
 
 state_paths = [
@@ -883,7 +884,7 @@ PYEOF
 # connect without a secret. The hub will generate and push their session keys
 # automatically on first connection (zero-touch provisioning).
 log_c "✅ Pre-approving spoke IDs..."
-for sid in cs-spoke-1 pxmx-spoke-1 opn-spoke-1 cppm-spoke-1 netbox-spoke-1 ldap-spoke-1 dns-spoke-1 dhcp-spoke-1; do
+for sid in cs-spoke-1 pxmx-spoke-1 opn-spoke-1 cppm-spoke-1 netbox-spoke-1 ldap-spoke-1 dns-spoke-1 dhcp-spoke-1 nw-spoke-1; do
     # Meaningful: a failed approval means the spoke won't be auto-accepted on
     # first connect (an admin must approve it manually). Surface it so a silent
     # hub-not-ready / 4xx doesn't hide a missing pre-approval from the log.
@@ -893,7 +894,7 @@ for sid in cs-spoke-1 pxmx-spoke-1 opn-spoke-1 cppm-spoke-1 netbox-spoke-1 ldap-
         || log_e "Pre-approval failed for $sid (spoke will need manual approval)"
 done
 
-MODULES_ORDER=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap" "dns" "dhcp")
+MODULES_ORDER=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap" "dns" "dhcp" "nw")
 declare -A MODULES=(
     ["cs"]="install_cs.sh"
     ["pxmx"]="install_pxmx.sh"
@@ -903,6 +904,7 @@ declare -A MODULES=(
     ["ldap"]="install_ldap.sh"
     ["dns"]="install_dns.sh"
     ["dhcp"]="install_dhcp.sh"
+    ["nw"]="install_nw.sh"
 )
 declare -A SPOKE_IDS=(
     ["cs"]="cs-spoke-1"
@@ -913,6 +915,7 @@ declare -A SPOKE_IDS=(
     ["ldap"]="ldap-spoke-1"
     ["dns"]="dns-spoke-1"
     ["dhcp"]="dhcp-spoke-1"
+    ["nw"]="nw-spoke-1"
 )
 
 for mod in "${MODULES_ORDER[@]}"; do
@@ -1035,7 +1038,7 @@ log_c "🔄 Restarting spoke services to connect with hub..."
 # the app is up at the end of a run, even if something earlier stopped them.
 # Guarded by `systemctl is-enabled` so this is a no-op on hosts that use an
 # external NetBox (no local app units present).
-for svc in netbox netbox-rq lm-netbox lm-ldap lm-dns lm-dhcp; do
+for svc in netbox netbox-rq lm-netbox lm-ldap lm-dns lm-dhcp lm-nw; do
     if systemctl is-enabled "$svc" >/dev/null 2>&1; then
         systemctl reset-failed "$svc" 2>/dev/null || true
         # Gate the success log on the actual restart exit code so a failed

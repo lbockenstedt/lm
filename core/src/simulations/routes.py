@@ -809,7 +809,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     _TYPE_PREFIX = {
         "pxmx": "hypervisor", "opn": "firewall", "cppm": "nac",
         "cs": "simulation", "netbox": "ipam", "ldap": "directory",
-        "dns": "dns", "dhcp": "dhcp",
+        "dns": "dns", "dhcp": "dhcp", "nw": "nw",
     }
 
     def _spoke_type(sid: str, live_types: dict, meta: dict) -> str:
