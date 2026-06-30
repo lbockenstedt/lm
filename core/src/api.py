@@ -1759,7 +1759,7 @@ def create_app(hub):
     async def get_cppm_devices(request: Request, tenant: str = None):
         hub = app.state.hub
         # see _netbox_list_get (variant: admin/multi-tenant live path runs FIRST,
-        # then non-admin cache path; _subnet_filter_tenant + tag filter — inline).
+        # then non-admin cache path; _filter_tenant + tag filter — inline).
         # Relay trace (DEBUG so polled reads don't flood INFO): records the
         # tenant scope + that we entered the relay. Established convention —
         # every relay GET (CPPM, NetBox, pxmx, DNS, DHCP, LDAP, firewall
@@ -1788,7 +1788,7 @@ def create_app(hub):
                 raise HTTPException(status_code=503, detail="No CPPM spoke connected")
             try:
                 result = await hub.request_response(cppm_spoke, "LIST_ENDPOINTS", {})
-                return await _subnet_filter_tenant(request, tf(_cppm_unwrap(result)), "nac", ["ip"], tenant)
+                return await _filter_tenant(request, tf(_cppm_unwrap(result)), "nac", ["ip"], tenant)
             except HTTPException:
                 raise
             except Exception as e:
@@ -1836,7 +1836,7 @@ def create_app(hub):
                 data = {**data, "devices": untagged, "total": len(untagged)}
             elif isinstance(data, list):
                 data = [d for d in data if isinstance(d, dict) and not _device_tenant_slug(d)]
-            return await _subnet_filter_tenant(request, data, "nac", ["ip"], tenant)
+            return await _filter_tenant(request, data, "nac", ["ip"], tenant)
         except HTTPException:
             raise
         except Exception as e:
@@ -2013,7 +2013,7 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "GET_DEVICE_SESSIONS", {"mac": mac})
-            return await _subnet_filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant)
+            return await _filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant)
         except HTTPException:
             raise
         except Exception as e:
@@ -2051,7 +2051,7 @@ def create_app(hub):
         try:
             result = await hub.request_response(cppm_spoke, "GET_LOGS", {"start": start, "end": end})
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            return await _subnet_filter_tenant(request, data, "nac", ["ip", "nas_ip_address"], tenant)
+            return await _filter_tenant(request, data, "nac", ["ip", "nas_ip_address"], tenant)
         except Exception as e:
             logger.error(f"API: Error fetching CPPM logs: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
@@ -2072,7 +2072,7 @@ def create_app(hub):
         logger.debug("relay %s %s tenant=%s", request.method, request.url.path, tenant)
         sess = _session_user(request)
         # see _netbox_list_get (variant: admin/multi-tenant live path FIRST, then
-        # non-admin cache; _subnet_filter_tenant — inline, mirrors get_cppm_devices).
+        # non-admin cache; _filter_tenant — inline, mirrors get_cppm_devices).
         # Admin / multi-tenant switch: scope by the selected tenant's prefixes
         # (explicit_tenant). Without a selection, non-admins keep session-tenant
         # scoping via the cache path below.
@@ -2082,7 +2082,7 @@ def create_app(hub):
                 raise HTTPException(status_code=503, detail="No CPPM spoke connected")
             try:
                 result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset})
-                return await _subnet_filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant)
+                return await _filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant)
             except HTTPException:
                 raise
             except Exception as e:
@@ -2461,7 +2461,7 @@ def create_app(hub):
         carries an ``ips`` list; VMs whose ``ips`` all fall outside the tenant's
         prefixes are dropped). The subnet filter is applied on all three return
         paths (tenant cache hit / spoke-down cache / live) via
-        ``_subnet_filter_tenant`` so an admin acting as a tenant sees only that
+        ``_filter_tenant`` so an admin acting as a tenant sees only that
         tenant's VMs — the toggle is the ``hypervisor`` subnet-filter module.
         """
         hub = app.state.hub
@@ -2474,14 +2474,14 @@ def create_app(hub):
             if tid:
                 cached = _cache_entry(tid, "pxmx_vms")
                 if cached:
-                    return await _subnet_filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
+                    return await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
         pxmx_spoke = hub.get_spoke_by_type("hypervisor")
         if not pxmx_spoke:
             if sess:
                 tid = sess.get("user", {}).get("tenant_id")
                 cached = _cache_entry(tid, "pxmx_vms") if tid else None
                 if cached:
-                    return await _subnet_filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
+                    return await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant)
             return {"vms": [], "spoke_connected": False}
         try:
             scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
@@ -2492,7 +2492,7 @@ def create_app(hub):
                 payload["tag_filter"] = scoping["proxmox_tag"]
             result = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", payload)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            return await _subnet_filter_tenant(request, data, "hypervisor", ["ips"], tenant)
+            return await _filter_tenant(request, data, "hypervisor", ["ips"], tenant)
         except Exception as e:
             logger.exception("get_pxmx_vms failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -4445,8 +4445,8 @@ def create_app(hub):
     async def _subnet_gate_record(request, record, module, ip_fields):
         return await access.subnet_gate_record(hub, _sessions, request, record, module, ip_fields)
 
-    async def _subnet_filter_tenant(request, data, module, ip_fields, explicit_tenant=None):
-        return await access.subnet_filter_tenant(hub, _sessions, request, data, module, ip_fields, explicit_tenant)
+    async def _filter_tenant(request, data, module, ip_fields, explicit_tenant=None):
+        return await access.filter_tenant(hub, _sessions, request, data, module, ip_fields, explicit_tenant)
 
     async def _subnet_gate_record_tenant(request, record, module, ip_fields, explicit_tenant=None):
         return await access.subnet_gate_record_tenant(hub, _sessions, request, record, module, ip_fields, explicit_tenant)

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from simulations.tenant_filter import (filter_items_by_prefixes,
                                        filter_firewall_rules, filter_record_by_prefixes,
+                                       filter_hypervisor_vms,
                                        build_alias_map, _find_list_slot)
 
 if TYPE_CHECKING:  # annotations only — never evaluated at runtime
@@ -365,7 +366,7 @@ async def subnet_filter_fw(hub, sessions: dict, request: "Request", data, endpoi
     allowed one), scope by THAT tenant's prefixes — even for admins, who
     otherwise bypass. No explicit tenant → legacy session-tenant behavior
     (no-op for admins, session tenant for non-admins). Mirrors
-    ``subnet_filter_tenant``. The ``firewall`` subnet-filter toggle gates both
+    ``filter_tenant``. The ``firewall`` subnet-filter toggle gates both
     paths; an empty prefix list still means "no filter" (can't filter)."""
     spec = _FW_FILTER_SPEC.get(endpoint)
     if not spec:
@@ -433,14 +434,51 @@ def _list_len(data) -> int:
     return len(lst) if isinstance(lst, list) else -1
 
 
-async def subnet_filter_tenant(hub, sessions: dict, request: "Request", data, module: str, ip_fields,
-                               explicit_tenant: str = None):
-    """Tenant-aware subnet filter. When ``explicit_tenant`` resolves to a real
-    tenant (an admin selecting a tenant, or a multi-tenant user switching to an
-    allowed one), scope by THAT tenant's prefixes — even for admins, who
-    otherwise bypass ``subnet_filter``. No explicit tenant → delegate to the
-    legacy session-tenant ``subnet_filter`` (no-op for admins with nothing
-    selected, preserving backward compatibility)."""
+def _template_pools(hub) -> list:
+    """Configured Proxmox template pool names (VMs in these pools are visible to
+    ALL tenants). Read from ``global_config.pxmx_template_pools`` (list) or
+    ``pxmx_template_pool`` (string / comma-separated). Defaults to
+    ``["Templates", "Template"]`` (case-insensitive match covers 'templates').
+    """
+    gc = hub.state.system_state.get("global_config", {}) or {}
+    pools = gc.get("pxmx_template_pools")
+    if pools is None:
+        pools = gc.get("pxmx_template_pool")
+    if not pools:
+        return ["Templates", "Template"]
+    if isinstance(pools, str):
+        return [p.strip() for p in pools.split(",") if p.strip()]
+    if isinstance(pools, list):
+        return [str(p).strip() for p in pools if str(p).strip()]
+    return []
+
+
+def _tenant_tag_set(hub, tid) -> set:
+    """Lowercased set of identifiers a VM's Proxmox tag can match to count as
+    'tagged for this tenant': the tenant id, display name, slug, netbox slug,
+    and proxmox_tag (the per-tenant hypervisor scope)."""
+    t = hub.state.get_tenant(tid) or {}
+    return {str(x).strip().lower() for x in
+            [tid, t.get("name"), t.get("slug"), t.get("netbox_tenant_slug"), t.get("proxmox_tag")]
+            if x}
+
+
+async def filter_tenant(hub, sessions: dict, request: "Request", data, module: str, ip_fields,
+                         explicit_tenant: str = None):
+    """Tenant-aware filter (renamed from ``subnet_filter_tenant`` — it filters a
+    tenant's data by subnet plus module-specific overrides, not just subnet).
+
+    When ``explicit_tenant`` resolves to a real tenant (an admin selecting a
+    tenant, or a multi-tenant user switching to an allowed one), scope by THAT
+    tenant's prefixes — even for admins, who otherwise bypass the filter. No
+    explicit tenant → delegate to the legacy session-tenant ``subnet_filter``
+    (no-op for admins with nothing selected, preserving backward compatibility).
+
+    The ``hypervisor`` module uses ``filter_hypervisor_vms`` with two overrides
+    on top of the subnet match: VMs in a configured template pool are visible to
+    ALL tenants (shared templates), and VMs whose Proxmox tag matches the tenant
+    are shown to that tenant regardless of subnet.
+    """
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
         enabled = subnet_filter_enabled(hub, module)
@@ -448,16 +486,35 @@ async def subnet_filter_tenant(hub, sessions: dict, request: "Request", data, mo
         before = _list_len(data)
         # DIAG: pinpoints where the admin-switcher filter diverges. Remove once
         # the cross-tenant leak is resolved.
-        logger.warning("DIAG subnet_filter_tenant[%s] explicit=%r tid=%r enabled=%s "
+        logger.warning("DIAG filter_tenant[%s] explicit=%r tid=%r enabled=%s "
                        "prefixes=%d items_before=%d ip_fields=%s", module, explicit_tenant,
                        tid, enabled, len(prefixes), before, ip_fields)
         if not enabled or not prefixes:
             return data
-        out = filter_items_by_prefixes(data, prefixes, ip_fields)
-        logger.warning("DIAG subnet_filter_tenant[%s] filtered %d -> %d prefixes=%s",
+        if module == "hypervisor":
+            out = filter_hypervisor_vms(data, prefixes,
+                                        template_pools=_template_pools(hub),
+                                        tenant_tags=_tenant_tag_set(hub, tid))
+        else:
+            out = filter_items_by_prefixes(data, prefixes, ip_fields)
+        logger.warning("DIAG filter_tenant[%s] filtered %d -> %d prefixes=%s",
                        module, before, _list_len(out), prefixes)
         return out
-    logger.warning("DIAG subnet_filter_tenant[%s] FALLBACK legacy (explicit=%r tid=%r) "
+    # Hypervisor with no explicit tenant: still apply the template-pool + tag
+    # overrides for the session tenant (non-admin). Admins with no selected
+    # tenant bypass (see all); a session tenant scopes by its own prefixes.
+    if module == "hypervisor":
+        sess = session_user(sessions, request)
+        scope_tid = sess.get("user", {}).get("tenant_id") if sess and not is_admin(sess) else None
+        if not scope_tid or not subnet_filter_enabled(hub, "hypervisor"):
+            return data
+        prefixes = await resolve_prefixes_for_tenant(hub, scope_tid)
+        if not prefixes:
+            return data
+        return filter_hypervisor_vms(data, prefixes,
+                                     template_pools=_template_pools(hub),
+                                     tenant_tags=_tenant_tag_set(hub, scope_tid))
+    logger.warning("DIAG filter_tenant[%s] FALLBACK legacy (explicit=%r tid=%r) "
                    "-> admin-bypass/no-op path", module, explicit_tenant, tid)
     return await subnet_filter(hub, sessions, request, data, module, ip_fields)
 
