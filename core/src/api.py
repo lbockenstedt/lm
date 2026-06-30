@@ -853,6 +853,15 @@ def create_app(hub):
 
                 if action != "unapprove":
                     await hub.push_config_to_spoke(spoke_id)
+                    # Query the spoke's version now that it's approved + keyed,
+                    # so a spoke approved AFTER connecting (not via PSK
+                    # self-provision) still reports a version on the
+                    # Diagnostics page without reconnecting. Mirrors the
+                    # connect-time get_version in main.py. Best-effort.
+                    try:
+                        await hub.send_to_spoke(_hub_msg(spoke_id, "get_version", {}))
+                    except Exception as e:
+                        logger.error(f"Failed to request version from {spoke_id}: {e}")
 
             return {"status": "ok", "message": f"Spoke {spoke_id} {'approved' if action != 'unapprove' else 'un-approved'}."}
         except Exception as e:
@@ -3493,6 +3502,14 @@ def create_app(hub):
         hub_version = await hub.get_local_version()
         now = time.time()
 
+        # version_skew now means "not on the per-repo .NN numbering" — see the
+        # per-spoke comment in the loop. Each repo's .NN is an independent
+        # counter, so a spoke .NN ≠ hub .NN is normal; this flags only stale
+        # X.Y.Z / v-tag / pre-reset values.
+        import re as _re
+        def _is_nn(v) -> bool:
+            return bool(_re.match(r"^\.\d+$", str(v).strip()))
+
         for sid in known_spokes:
             ws = hub.active_connections.get(sid)
             telemetry = hub.spoke_telemetry.get(sid, {})
@@ -3526,13 +3543,16 @@ def create_app(hub):
             rec = hub.spoke_recovery.get(sid, {}) or {}
 
             spoke_version = hub.spoke_versions.get(sid, "unknown")
-            # version_skew: True when the spoke is connected AND reports a
-            # version different from the hub. "unknown" / disconnected spokes
-            # are not skewed (we just don't know).
+            # version_skew: True when a connected spoke reports a version that
+            # is NOT in the new per-repo ".NN" numbering (e.g. a stale X.Y.Z /
+            # v-tag / pre-reset value). Each repo has an INDEPENDENT .NN
+            # counter, so a spoke's .NN differing from the hub's .NN is normal
+            # and NOT a mismatch — the flag now points at un-migrated
+            # components. "unknown" / disconnected spokes are not skewed (we
+            # just don't know). _is_nn is defined up-front above the loop.
             version_skew = (
                 spoke_version not in ("unknown", None, "")
-                and hub_version not in ("unknown", None, "")
-                and str(spoke_version) != str(hub_version)
+                and not _is_nn(spoke_version)
             )
 
             diagnostics.append({
@@ -3579,7 +3599,10 @@ def create_app(hub):
 
         webui_version = "unknown"
         try:
-            version_path = os.path.join(os.path.dirname(__file__), "../../ui/VERSION")
+            # The WebUI lives at lm/WebUI (not lm/ui). Resolve from core/src →
+            # lm/WebUI/VERSION; the autobump bumps this in lockstep with the
+            # other lm VERSION files so "WebUI .NN" tracks the hub's .NN.
+            version_path = os.path.join(os.path.dirname(__file__), "../../WebUI/VERSION")
             if not os.path.exists(version_path):
                 version_path = os.path.join(os.path.dirname(__file__), "../../../GitHub/webui/VERSION")
             with open(version_path, "r") as f:
