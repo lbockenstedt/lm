@@ -1213,6 +1213,85 @@ def create_app(hub):
         return {"active": active, "sources": sources, "firewalls": firewalls,
                 "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}
 
+    # ── Realtime NAC → IPAM reverse sync (Setup → Sync, "IPAM ↔ NAC Sync" card) ─
+    # The bidirectional counterpart to the forward endpoint-sync routes above.
+    # Pulls recent ClearPass Access Tracker sessions from the CPPM (NAC) spoke
+    # and adds the MACs NetBox is missing (only-add-missing). See
+    # RealtimeIpamNacSyncMixin (core/src/realtime_ipam_nac_sync.py). Config
+    # toggle persists via POST /setup/config into
+    # global_config["realtime_ipam_nac_sync"].
+    @app.post("/setup/realtime-nac-sync/run")
+    async def run_realtime_nac_sync(request: Request):
+        """On-demand realtime NAC → IPAM reverse sync ('Sync now').
+
+        Body optional: ``{"tenant_id": "<id>"}`` to sync one tenant (pull global,
+        push just that tenant); absent → pull global, push every attributed
+        tenant. Returns per-tenant results + a summary (pushed/errors/skipped/
+        deleted/dropped_unattributed/sessions_total).
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if target:
+            results = [await hub.sync_tenant_realtime(target)]
+            dropped = int(results[0].get("dropped_unattributed", 0) or 0)
+            sessions_total = int(results[0].get("sessions_total_global", 0) or 0)
+        else:
+            agg = await hub.run_realtime_nac_sync_all()
+            results = agg.get("results", [])
+            dropped = int(agg.get("dropped_unattributed", 0) or 0)
+            sessions_total = int(agg.get("sessions_total", 0) or 0)
+        pushed = sum(int(r.get("pushed", 0)) for r in results)
+        errors = sum(int(r.get("errors", 0)) for r in results)
+        skipped = sum(int(r.get("skipped", 0)) for r in results)
+        deleted = sum(int(r.get("deleted", 0)) for r in results)
+        return {"results": results,
+                "summary": {"pushed": pushed, "errors": errors, "skipped": skipped,
+                            "deleted": deleted, "tenants": len(results),
+                            "dropped_unattributed": dropped,
+                            "sessions_total": sessions_total}}
+
+    @app.get("/setup/realtime-nac-sync/status")
+    async def realtime_nac_sync_status(request: Request):
+        """Per-tenant last realtime-NAC-sync status for the Setup → Sync card."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        statuses = hub.simulations_store.get_all_realtime_nac_sync_status()
+        tenants = []
+        for tid, st in statuses.items():
+            tenants.append({
+                "tenant_id": tid,
+                "tenant_name": st.get("tenant_name") or tid,
+                "status": st.get("status"),
+                "pushed": st.get("pushed", 0),
+                "errors": st.get("errors", 0),
+                "skipped": st.get("skipped", 0),
+                "deleted": st.get("deleted", 0),
+                "message": st.get("message", ""),
+                "sessions_total": st.get("sessions_total", 0),
+                "last_sync_ts": st.get("last_sync_ts"),
+            })
+        return {"tenants": tenants}
+
+    @app.get("/setup/realtime-nac-sync/sources")
+    async def realtime_nac_sync_sources(request: Request):
+        """Connection state for the realtime reverse-sync card: whether the NAC
+        (CPPM) pull source and the IPAM (netbox) push sink are connected."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        return {"nac_connected": bool(hub.get_spoke_by_type("nac")),
+                "ipam_connected": bool(hub.get_spoke_by_type("ipam"))}
+
     @app.get("/setup/pxmx-config")
     async def get_pxmx_config():
         hub = app.state.hub

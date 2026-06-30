@@ -62,6 +62,7 @@ from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
 from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
+from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -243,7 +244,7 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, RealtimeIpamNacSyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -2381,6 +2382,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # static-IP devices DHCP can't see). Also fired on-demand from the WebUI
         # ("Sync now"). See run_fw_discovery_sync_loop (FwDiscoverySyncMixin).
         fw_discovery_sync_task = asyncio.create_task(self.run_fw_discovery_sync_loop())
+        # Realtime NAC → IPAM reverse sync: every ~1 min pull ClearPass Access
+        # Tracker sessions (last 2 min) from the CPPM spoke, attribute by prefix,
+        # and add to NetBox the MACs not already present (only-add-missing —
+        # NetBox stays source of truth). The bidirectional counterpart to the
+        # forward endpoint-sync loop above. See run_realtime_nac_sync_loop
+        # (RealtimeIpamNacSyncMixin). Also fired on-demand from the WebUI.
+        realtime_nac_sync_task = asyncio.create_task(self.run_realtime_nac_sync_loop())
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable
         # [heartbeat] line into self.logs (module="hub" in collect_all_logs)
