@@ -26,7 +26,7 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
-import time
+import datetime as _dt
 import asyncio
 import logging
 from typing import Any, Dict
@@ -88,7 +88,7 @@ class StalenessSweepMixin:
         outage yields an 'error' status, never an unhandled exception (the
         background loop depends on this).
         """
-        now = time.time()
+        now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         ipam = self.get_spoke_by_type("ipam")
         if not ipam:
             logger.info("staleness sweep SKIP: NetBox (IPAM) spoke not connected")

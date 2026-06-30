@@ -1132,9 +1132,9 @@ function loadLDAPConfig(config) {
 
 function fmtDate(val) {
     if (!val) return '—';
-    // Unix timestamp (integer seconds)
+    // Unix timestamp (integer seconds, or fractional seconds — time.time() floats)
     const num = Number(val);
-    if (!isNaN(num) && String(val).trim().match(/^\d+$/)) return new Date(num * 1000).toLocaleString();
+    if (!isNaN(num) && String(val).trim().match(/^\d+(\.\d+)?$/)) return new Date(num * 1000).toLocaleString();
     // Normalize: replace space separator with T so Safari parses it
     const s = String(val).trim().replace(' ', 'T');
     const d = new Date(s);

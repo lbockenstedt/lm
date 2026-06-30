@@ -29,7 +29,6 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
-import time
 import asyncio
 import datetime as _dt
 import logging
@@ -213,7 +212,7 @@ class VmSyncMixin:
         best-effort: a hypervisor/netbox outage yields an error result, never
         an unhandled exception (the background loop depends on this).
         """
-        now = time.time()
+        now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         se = self._vm_sync_source()
         label = se.get('label', 'Hypervisor')
         hyp = self.get_spoke_by_type(se.get("module_type", "hypervisor"))
@@ -437,7 +436,9 @@ class VmSyncMixin:
         return {"tenant_id": tid, "tenant_name": cfg.get("name") or tid,
                 "status": agg.get("status", "success"),
                 "pushed": 0, "errors": 0, "skipped": 0, "deleted": 0,
-                "message": msg, "last_sync_ts": time.time(), "vms_total": 0}
+                "message": msg,
+                "last_sync_ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "vms_total": 0}
 
     def trigger_vm_sync(self, tenant_id: str) -> None:
         """Fire-and-forget a VM sync for one tenant after a pxmx/hypervisor edit.

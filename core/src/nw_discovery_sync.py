@@ -37,7 +37,6 @@ Audience: Hub developers.
 from __future__ import annotations
 
 import asyncio
-import time
 import datetime as _dt
 import logging
 from typing import Any, Dict, List, Tuple
@@ -228,7 +227,7 @@ class NwDiscoverySyncMixin:
         carries ``replace=True`` + ``source="Network Devices"`` (the netbox
         sink tags records nw-owned and replace-deletes only nw-owned records).
         Best-effort: never raises."""
-        now = time.time()
+        now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         tenant_cfg = self.state.get_tenant(tenant_id) or {}
         tenant_name = tenant_cfg.get("name") or tenant_id
         netbox_slug = str(tenant_cfg.get("netbox_tenant_slug") or "").strip()

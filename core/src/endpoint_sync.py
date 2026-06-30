@@ -21,7 +21,6 @@ Audience: Hub developers.
 
 from __future__ import annotations
 
-import time
 import asyncio
 import datetime as _dt
 import logging
@@ -168,7 +167,7 @@ class EndpointSyncMixin:
         outage or a missing scoping yields a per-tenant error/skipped status,
         never an unhandled exception (the background loop depends on this).
         """
-        now = time.time()
+        now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
         se = self._endpoint_sync_source()
         ipam = self.get_spoke_by_type(se.get("module_type", "ipam"))
