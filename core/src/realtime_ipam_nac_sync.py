@@ -212,9 +212,18 @@ class RealtimeIpamNacSyncMixin:
             await self.simulations_store.set_realtime_nac_sync_status(tenant_id, status)
             return status
         defaults = self._rt_nac_cfg().get("defaults", {}) or {}
+        # access_tracker is only-add-missing by design (NetBox is source of
+        # truth). source_of_truth is relayed for parity; "netbox" is the only
+        # mode exposed in v1 (an "external" overwrite mode isn't wired up). An
+        # unknown/blank value falls back to netbox.
+        sot_raw = str((self.state.system_state.get("global_config", {}) or {})
+                     .get("source_of_truth", {}).get("access_tracker", "netbox")
+                     ).strip().lower()
+        sot = sot_raw if sot_raw in ("external", "netbox") else "netbox"
         payload = {"tenant_id": tenant_id, "tenant_slug": netbox_slug,
                    "tenant_name": tenant_name, "replace": False,
-                   "sessions": sessions, "defaults": defaults}
+                   "sessions": sessions, "defaults": defaults,
+                   "source_of_truth": sot}
         try:
             rr = await self.request_response(netbox, self._RT_NAC_PUSH_COMMAND,
                                              payload, timeout=120.0)

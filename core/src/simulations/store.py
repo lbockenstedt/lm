@@ -385,3 +385,19 @@ class SimulationsStore:
                     norm.append(vp)
             g["usb_ignored_vidpids"] = norm
             self._save()
+
+    # ── staleness sweep last-run status (Setup → Sync, cluster-wide) ──────────
+    # Result of the most recent NetBox staleness sweep (background loop or
+    # on-demand "Sweep now"). Cluster-wide (not per-tenant), so it lives under
+    # the reserved __global__ key. Shape: {status, scanned, decommissioned,
+    # deleted, ip_freed, errors, message, per_tenant, last_sync_ts}.
+    async def get_staleness_sweep_status(self) -> Dict[str, Any]:
+        """Return the last cluster-wide staleness-sweep status (empty if never run)."""
+        return dict(self._global().get("staleness_sweep", {}))
+
+    async def set_staleness_sweep_status(self, status: Dict[str, Any]) -> None:
+        """Replace the cluster-wide staleness-sweep status and persist."""
+        with self._lock:
+            g = self._global()
+            g["staleness_sweep"] = status or {}
+            self._save()

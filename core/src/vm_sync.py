@@ -99,6 +99,17 @@ class VmSyncMixin:
         name = str(self._vm_sync_cfg().get("source", "proxmox")).strip().lower()
         return self.HYPERVISOR_SOURCES.get(name) or self.HYPERVISOR_SOURCES["proxmox"]
 
+    def _vm_sync_sot(self) -> str:
+        """Source of truth for VMs: "external" (Proxmox owns → overwrite, the
+        default) or "netbox" (NetBox owns → only-add-missing). Read from
+        ``global_config.source_of_truth.vm_sync``. An unknown/blank value falls
+        back to the default so a config typo never sends a garbage owner to the
+        spoke."""
+        raw = str((self.state.system_state.get("global_config", {}) or {})
+                 .get("source_of_truth", {}).get("vm_sync", "external")
+                 ).strip().lower()
+        return raw if raw in ("external", "netbox") else "external"
+
     def _vm_scope_for_tenant(self, source_entry: Dict[str, str],
                              tenant_id: str) -> str:
         """The per-tenant hypervisor scope value for the active source ('' if unbound).
@@ -284,6 +295,20 @@ class VmSyncMixin:
                 if s:
                     ip_list.append(s)
             mem_bytes = int(vm.get("mem_bytes") or 0)
+            # Per-interface network records from the pxmx agent (QGA/LXC
+            # hardware-address + guest IPs, with a qm/pct config MAC fallback).
+            # Relayed so the netbox spoke builds vminterfaces with MACs + all
+            # IPs (not just primary_ip4). Flat ``ips`` kept for back-compat.
+            interfaces = []
+            for ifc in (vm.get("interfaces") or []):
+                if not isinstance(ifc, dict):
+                    continue
+                interfaces.append({
+                    "name": str(ifc.get("name") or "").strip(),
+                    "mac":  str(ifc.get("mac") or "").strip(),
+                    "ips":  [str(x).split("/")[0].strip()
+                             for x in (ifc.get("ips") or []) if str(x or "").strip()],
+                })
             vms.append({
                 "unique_id": uid,
                 "name":      str(vm.get("name") or "").strip(),
@@ -296,14 +321,19 @@ class VmSyncMixin:
                 "disk_gb":   round(float(vm.get("disk_gb") or 0), 1),
                 "mem_mb":    int(mem_bytes / (1024 * 1024)) if mem_bytes else 0,
                 "ips":       ip_list,
+                "interfaces": interfaces,
                 "tags":      tags,
                 "tenant_slug": tslug,
             })
             bkey = tid or UNASSIGNED
             attr_counts[bkey] = attr_counts.get(bkey, 0) + 1
 
+        # Source of truth for VMs: "external" (Proxmox owns → overwrite) or
+        # "netbox" (NetBox owns → only-add-missing). Default external (Proxmox).
+        sot = self._vm_sync_sot()
         payload = {"source": se.get("label", "Hypervisor"),
-                   "replace": True, "vms": vms}
+                   "replace": True, "vms": vms,
+                   "source_of_truth": sot}
         try:
             rr = await self.request_response(netbox, self._VM_SYNC_PUSH_COMMAND,
                                              payload, timeout=180.0)

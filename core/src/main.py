@@ -64,6 +64,7 @@ from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
 from nw_discovery_sync import NwDiscoverySyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
+from staleness_sweep import StalenessSweepMixin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -262,7 +263,7 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, RealtimeIpamNacSyncMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -2423,6 +2424,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # forward endpoint-sync loop above. See run_realtime_nac_sync_loop
         # (RealtimeIpamNacSyncMixin). Also fired on-demand from the WebUI.
         realtime_nac_sync_task = asyncio.create_task(self.run_realtime_nac_sync_loop())
+        # NetBox staleness sweep (cluster-wide): ages out sync-owned devices/VMs
+        # not seen for stale_days → offline, and offline + decommissioned_at older
+        # than delete_days → deleted (IPs free automatically). The lifecycle
+        # counterpart to the last_seen custom field every sync stamps on each
+        # detection. See run_staleness_sweep_loop (StalenessSweepMixin). Also
+        # fired on-demand from the WebUI ("Sweep now").
+        staleness_sweep_task = asyncio.create_task(self.run_staleness_sweep_loop())
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable
         # [heartbeat] line into self.logs (module="hub" in collect_all_logs)

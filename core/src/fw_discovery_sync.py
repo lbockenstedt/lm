@@ -315,10 +315,22 @@ class FwDiscoverySyncMixin:
             await self.simulations_store.set_fw_discovery_sync_status(tenant_id, status)
             return status
         defaults = self._fw_discovery_cfg().get("defaults", {}) or {}
+        # Source of truth for discovered devices: "external" (the discovery feed
+        # owns the device → overwrite IP mac/dns_name + rename, populating the
+        # MAC the NetBox→CPPM endpoint sync keys on) or "netbox" (NetBox owns the
+        # device → only-add-missing: refresh last_seen only, never overwrite a
+        # hand-managed device). Default netbox (a source of truth cannot be
+        # overwritten); flip to external in the WebUI to repopulate MACs. An
+        # unknown/blank value falls back to the default.
+        sot_raw = str((self.state.system_state.get("global_config", {}) or {})
+                     .get("source_of_truth", {}).get("device_sync", "netbox")
+                     ).strip().lower()
+        sot = sot_raw if sot_raw in ("external", "netbox") else "netbox"
         payload = {"tenant_id": tenant_id, "tenant_slug": netbox_slug,
                    "tenant_name": tenant_name,
                    "source": self._fw_discovery_source().get("label", "OPNsense"),
-                   "replace": True, "devices": devices, "defaults": defaults}
+                   "replace": True, "devices": devices, "defaults": defaults,
+                   "source_of_truth": sot}
         try:
             rr = await self.request_response(netbox, self._FW_DISCOVERY_PUSH_COMMAND,
                                              payload, timeout=120.0)
