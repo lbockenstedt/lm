@@ -58,11 +58,14 @@ _SUBNET_FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
 # Firewall endpoint → filter spec. "rules" uses the strict source/destination
 # check (with OPNsense alias expansion); the field-based endpoints filter on
 # their concrete-IP columns; "aliases" filters on its ``content`` (the IPs/CIDRs
-# the alias expands to). "health" carries no IP and is skipped. Field sets
-# mirror the client-side itemInTenantPrefixes calls (main.js ~5078-5084).
+# the alias expands to). "nat" now also matches on its ``source`` (the opnsense
+# spoke serializes source on NAT records) so a NAT policy whose source is in
+# the tenant's subnet shows even when its target/destination aren't.
+# "health" carries no IP and is skipped. Field sets mirror the client-side
+# itemInTenantPrefixes calls (main.js ~5078-5084).
 _FW_FILTER_SPEC = {
     "rules":      ("fw", None),
-    "nat":        ("fields", ["internal_ip", "external_ip", "destination.network"]),
+    "nat":        ("fields", ["source", "internal_ip", "external_ip", "destination.network"]),
     "dns":        ("fields", ["ip", "value"]),
     "interfaces": ("fields", ["ip", "ipaddr"]),
     "dhcp":       ("fields", ["ip", "address"]),
@@ -70,10 +73,11 @@ _FW_FILTER_SPEC = {
 }
 
 # OPNsense endpoints whose records carry a `category` config field. When the
-# tenant filter is active, a record whose `category` equals the tenant's display
-# name is shown regardless of subnet match — an alternate attribution path for
-# rules/NAT/aliases the admin explicitly tagged to a tenant (per the user's
-# "category == TenantID" rule). dhcp/dns/interfaces don't use categories.
+# tenant filter is active, a record whose `category` belongs to the tenant
+# (display name / slug / netbox slug / id, case-insensitive) is shown regardless
+# of subnet match — an alternate attribution path for rules/NAT/aliases the
+# admin explicitly tagged to a tenant (per the "category == tenant" rule).
+# dhcp/dns/interfaces don't use categories.
 _FW_CATEGORY_ENDPOINTS = {"rules", "nat", "aliases"}
 
 
@@ -382,10 +386,14 @@ async def subnet_filter_fw(hub, sessions: dict, request: "Request", data, endpoi
     if not prefixes:
         return data
     # OPNsense category attribution: for rules/nat/aliases, a record whose
-    # `category` equals the tenant's display name is shown regardless of subnet.
+    # `category` belongs to the tenant is shown regardless of subnet. The admin
+    # may tag a record with the tenant's display name, slug, netbox slug, or id,
+    # so accept any of those, case-insensitively.
     tenant_cat = None
     if endpoint in _FW_CATEGORY_ENDPOINTS and tid:
-        tenant_cat = (hub.state.get_tenant(tid) or {}).get("name") or tid
+        t = hub.state.get_tenant(tid) or {}
+        cats = [t.get("name"), t.get("slug"), t.get("netbox_tenant_slug"), tid]
+        tenant_cat = sorted({str(c).strip() for c in cats if c}) or None
     before = _list_len(data)
     logger.warning("DIAG subnet_filter_fw[%s] tid=%r enabled=%s prefixes=%d "
                    "items_before=%d mode=%s tenant_cat=%r", endpoint, tid, True,

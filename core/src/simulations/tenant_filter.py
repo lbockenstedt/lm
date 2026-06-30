@@ -155,12 +155,14 @@ def filter_items_by_prefixes(
     from leaking across tenants. Pass ``drop_no_ip=False`` to restore the
     legacy "can't filter → show" behavior.
 
-    ``tenant_category`` (the tenant's display name) enables an alternate
-    attribution path for modules whose records carry an OPNsense ``category``
-    config field: an item whose ``category_field`` equals ``tenant_category`` is
-    kept regardless of its IPs (the admin explicitly tagged it to this tenant).
-    Only pass ``tenant_category`` for modules that use categories (rules/nat/
-    aliases); ``None`` (default) disables the check.
+    ``tenant_category`` enables an alternate attribution path for modules whose
+    records carry an OPNsense ``category`` config field: an item whose
+    ``category_field`` belongs to the tenant (matches case-insensitively) is kept
+    regardless of its IPs (the admin explicitly tagged it to this tenant).
+    ``tenant_category`` may be a single string or an iterable of acceptable
+    categories (the tenant's display name, slug, netbox slug, id — the caller
+    passes whichever apply). Only pass it for modules that use categories
+    (rules/nat/aliases); ``None`` (default) disables the check.
     """
     if not prefixes:
         return items
@@ -169,7 +171,7 @@ def filter_items_by_prefixes(
         return items
 
     def keep(item: dict) -> bool:
-        if tenant_category and str(item.get(category_field) or "").strip() == tenant_category:
+        if tenant_category and _category_matches(item.get(category_field), tenant_category):
             return True  # explicitly attributed to this tenant via category
         has_concrete = False
         for f in ip_fields:
@@ -267,6 +269,29 @@ def _is_wildcard(val: Any) -> bool:
     if s == "0.0.0.0/0":
         return True
     return bool(re.match(r"^any(:\S+)?$", s))
+
+
+def _category_matches(val: Any, tenant_category: Any) -> bool:
+    """True when a record's ``category`` value belongs to the tenant.
+
+    ``tenant_category`` may be a single string or any iterable of acceptable
+    category strings (the caller passes the tenant's display name, slug,
+    netbox slug, and id together so the admin can tag an OPNsense record with any
+    of them). Comparison is case-insensitive and whitespace-trimmed, so 'Acme',
+    'acme', and 'ACME ' all match a tenant named 'Acme'. ``None``/empty disables
+    the check (returns ``False``).
+    """
+    if not tenant_category:
+        return False
+    s = str(val or "").strip().lower()
+    if not s:
+        return False
+    if isinstance(tenant_category, (str, bytes)):
+        return s == str(tenant_category).strip().lower()
+    try:
+        return any(s == str(c).strip().lower() for c in tenant_category if c)
+    except TypeError:
+        return s == str(tenant_category).strip().lower()
 
 
 def build_alias_map(aliases: Any) -> Dict[str, "dict"]:
@@ -368,7 +393,7 @@ def _side_qualifies(val: Any, nets: Sequence[ipaddress._BaseNetwork],
     e = _alias_entry(alias_map, addr_part.lower())
     if e is not None:
         # Tenant-owned alias (category attribution) → qualifies on its own.
-        if tenant_category and e.get("category") == tenant_category:
+        if tenant_category and _category_matches(e.get("category"), tenant_category):
             return True
         # Alias resolved to networks overlapping a tenant prefix → qualifies.
         for a in e.get("nets") or []:
@@ -398,17 +423,18 @@ def firewall_rule_in_prefixes(rule: Any, prefixes: Sequence[str], alias_map: Any
     ``alias_map`` (from ``build_alias_map``) resolves alias names to networks and
     exposes each alias's ``category``; ``None`` → concrete-IP-only behavior.
 
-    ``tenant_category`` (tenant display name) is also an OR attribution path on
-    the rule itself: a rule whose own ``category_field`` equals it is shown
-    regardless of source/destination (explicitly tagged to this tenant by the
-    admin — the escape hatch). ``None`` disables both the alias-category and
-    rule-category checks.
+    ``tenant_category`` is also an OR attribution path on the rule itself: a
+    rule whose own ``category_field`` belongs to the tenant (matches
+    case-insensitively) is shown regardless of source/destination (explicitly
+    tagged to this tenant by the admin — the escape hatch). It may be a single
+    string or an iterable of acceptable categories. ``None`` disables both the
+    alias-category and rule-category checks.
     """
     if not prefixes:
         return True
     if not isinstance(rule, dict):
         return True
-    if tenant_category and str(rule.get(category_field) or "").strip() == tenant_category:
+    if tenant_category and _category_matches(rule.get(category_field), tenant_category):
         return True  # rule explicitly attributed to this tenant via its category
     nets = _nets(prefixes)
     if not nets:
