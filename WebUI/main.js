@@ -126,13 +126,13 @@ const ROUTES = {
     runNwDiscoveryNow:      { m: 'POST', p: '/setup/nw-discovery-sync/run', api: 'run_nw_discovery_sync' },
     saveNwDiscoveryConfig:  { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
 
-    // ── NetBox staleness sweep (cluster-wide; Setup → Sync) ──
+    // ── NetBox staleness sweep (cluster-wide; System → Sync) ──
     loadStalenessSweepConfig: { m: 'GET',  p: '/setup/config',                  api: 'get_global_config' },
     loadStalenessSweepStatus: { m: 'GET',  p: '/setup/staleness-sweep/status',  api: 'staleness_sweep_status' },
     runStalenessSweepNow:     { m: 'POST', p: '/setup/staleness-sweep/run',     api: 'run_staleness_sweep' },
     saveStalenessSweepConfig: { m: 'POST', p: '/setup/config',                  api: 'update_global_config' },
 
-    // ── Source-of-truth per module (Setup → Sync; saved via /setup/config) ──
+    // ── Source-of-truth per module (System → Sync; saved via /setup/config) ──
     loadSourceOfTruthConfig:  { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
     saveSourceOfTruthConfig:  { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
 
@@ -852,9 +852,9 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Tenant Config', 'Hub Status', 'Active Sessions', 'Diagnostics'],
+    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions', 'Diagnostics'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
-    setup: ['Spokes & Agents', 'Generic Nodes', 'Firewalls', 'Network Devices', 'Security/NAC', 'Sync', 'IPAM', 'LDAP', 'DNS', 'DHCP', 'Simulations'],
+    setup: ['Spokes & Agents', 'Generic Nodes', 'Firewalls', 'Network Devices', 'Security/NAC', 'IPAM', 'LDAP', 'DNS', 'DHCP', 'Simulations'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines'],
     ldap: ['OUs', 'Users', 'Groups'],
@@ -1088,7 +1088,7 @@ async function loadSetupConfig() {
             if (el) el.value = sources[key] || '';
         }
 
-        // IPAM → CPPM endpoint sync schedule (Setup → Sync).
+        // IPAM → CPPM endpoint sync schedule (System → Sync).
         // The source dropdown is populated by loadEndpointSyncSources; here we
         // only set its value if the element already exists.
         const epSync = config.netbox_cppm_sync || {};
@@ -2395,6 +2395,15 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
+    // Sync moved here from Setup — the unified cross-system sync-schedule tile
+    // (IPAM↔NAC, VM sync, firewall/NW discovery→IPAM, staleness, source-of-truth).
+    // _renderSetupSyncTile renders into the passed container and self-loads its
+    // source/config/status data, so it works unchanged from the System view.
+    if (subMenu === 'Sync') {
+        _renderSetupSyncTile(content);
+        return;
+    }
+
     if (subMenu === 'Hub Status') {
         content.innerHTML = `
             <div class="space-y-4">
@@ -2591,7 +2600,7 @@ function _renderSetupNwTile(content) {
 }
 // GET /api/instances/nac (core/src/api.py get_instances).
 // The IPAM → NAC endpoint sync schedule moved to the dedicated
-// Setup → Sync tile (_renderSetupSyncTile).
+// System → Sync tile (_renderSetupSyncTile).
 function _renderSetupNacTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
@@ -2605,7 +2614,7 @@ function _renderSetupNacTile(content) {
     loadInstances('nac');
 }
 
-// Setup → Sync tile. The unified home for cross-system sync schedules:
+// System → Sync tile. The unified home for cross-system sync schedules:
 //   1. IPAM → NAC endpoint sync (moved here from Setup → Security/NAC)
 //   2. Hypervisor (Proxmox) → NetBox VM sync (moved here from Setup → IPAM)
 // Each card owns its own source dropdown, schedule, Save + Sync-now actions,
@@ -2925,7 +2934,7 @@ function _renderSetupSyncTile(content) {
 // Setup → IPAM tile. IPAM / NetBox instances only.
 // GET /api/instances/ipam (core/src/api.py get_instances).
 // The Hypervisor → NetBox VM sync schedule moved to the dedicated
-// Setup → Sync tile (_renderSetupSyncTile).
+// System → Sync tile (_renderSetupSyncTile).
 function _renderSetupIpamTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
@@ -3151,7 +3160,6 @@ const SETUP_TILES = {
     'Firewalls':        _renderSetupFirewallsTile,
     'Network Devices':  _renderSetupNwTile,
     'Security/NAC':     _renderSetupNacTile,
-    'Sync':             _renderSetupSyncTile,
     'IPAM':             _renderSetupIpamTile,
     'LDAP':             _renderSetupLdapTile,
     'DNS':              _renderSetupDnsTile,
@@ -3263,7 +3271,7 @@ async function loadDhcpServerStatus() {
     }).join('');
 }
 
-// ── IPAM → NAC endpoint sync (Setup → Sync) ───────────────────────
+// ── IPAM → NAC endpoint sync (System → Sync) ───────────────────────
 async function loadEndpointSyncSources() {
     // Populate the IPAM source dropdown from the hub's IPAM_SOURCES registry
     // (data-driven: a new product added on the hub appears here with no UI
@@ -3398,7 +3406,7 @@ async function saveEndpointSyncConfig() {
     }
 }
 
-// ── Realtime NAC → IPAM reverse sync (Setup → Sync, same "IPAM ↔ NAC" card) ──
+// ── Realtime NAC → IPAM reverse sync (System → Sync, same "IPAM ↔ NAC" card) ──
 async function loadRealtimeNacSyncConfig() {
     // Populate the enable/interval/lookback inputs from global_config.
     try {
@@ -3493,7 +3501,7 @@ async function saveRealtimeNacSyncConfig() {
     }
 }
 
-// ── NetBox staleness sweep (Setup → Sync, cluster-wide) ────────────────
+// ── NetBox staleness sweep (System → Sync, cluster-wide) ────────────────
 async function loadStalenessSweepConfig() {
     // Populate enable/interval/stale-days/delete-days from global_config.
     try {
@@ -3584,7 +3592,7 @@ async function saveStalenessSweepConfig() {
     }
 }
 
-// ── Source of Truth per module (Setup → Sync; saved via /setup/config) ──
+// ── Source of Truth per module (System → Sync; saved via /setup/config) ──
 const _SOT_DEFAULTS = { vm_sync: 'external', device_sync: 'netbox',
                         access_tracker: 'netbox', endpoint_sync: 'netbox' };
 
@@ -3619,7 +3627,7 @@ async function saveSourceOfTruthConfig() {
     }
 }
 
-// ── Hypervisor → NetBox VM sync (Setup → Sync) ──────────────────────────
+// ── Hypervisor → NetBox VM sync (System → Sync) ──────────────────────────
 async function loadVmSyncSources() {
     // Populate the hypervisor source dropdown from the hub's HYPERVISOR_SOURCES
     // registry (data-driven) and mark each source's connected state. Also list
@@ -3763,7 +3771,7 @@ async function saveVmSyncConfig() {
     }
 }
 
-// ── Firewall → IPAM device-discovery sync (Setup → Sync third card) ──
+// ── Firewall → IPAM device-discovery sync (System → Sync third card) ──
 // Backing routes: /setup/fw-discovery-sync/{sources,status,run} + shared
 // /setup/config (saved under global_config.opnsense_netbox_device_sync).
 async function loadFwDiscoverySources() {
@@ -3908,7 +3916,7 @@ async function saveFwDiscoveryConfig() {
     }
 }
 
-// Network Devices → IPAM discovery sync (Setup → Sync, 4th card).
+// Network Devices → IPAM discovery sync (System → Sync, 4th card).
 // Backing routes: /setup/nw-discovery-sync/{sources,status,run} + shared
 // /setup/config (saved under global_config.nw_netbox_device_sync). Mirrors the
 // firewall-discovery card; the nw source pulls ARP from switches + gateways.
