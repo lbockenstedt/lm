@@ -71,6 +71,21 @@ def test_cfg_key_and_target_are_fixed():
     assert VmSyncMixin._VM_SYNC_PUSH_COMMAND == "NETBOX_SYNC_VMS"
 
 
+def test_vm_sync_sot_defaults_external_and_reads_config():
+    # Default source of truth for VMs is "external" (Proxmox owns → overwrite).
+    m = VmSyncMixin()
+    m.state = FakeState(global_config={})
+    assert m._vm_sync_sot() == "external"
+    # Configured netbox → only-add-missing.
+    m.state = FakeState(system_state={"global_config":
+        {"source_of_truth": {"vm_sync": "netbox"}}})
+    assert m._vm_sync_sot() == "netbox"
+    # Unknown / blank falls back to external.
+    m.state = FakeState(system_state={"global_config":
+        {"source_of_truth": {"vm_sync": "  ???  "}}})
+    assert m._vm_sync_sot() == "external"
+
+
 def test_vm_sync_tenants_filters_by_proxmox_tag():
     """Only tenants carrying the source's scope field (proxmox_tag) sync."""
     m = VmSyncMixin()

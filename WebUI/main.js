@@ -126,6 +126,16 @@ const ROUTES = {
     runNwDiscoveryNow:      { m: 'POST', p: '/setup/nw-discovery-sync/run', api: 'run_nw_discovery_sync' },
     saveNwDiscoveryConfig:  { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
 
+    // ── NetBox staleness sweep (cluster-wide; Setup → Sync) ──
+    loadStalenessSweepConfig: { m: 'GET',  p: '/setup/config',                  api: 'get_global_config' },
+    loadStalenessSweepStatus: { m: 'GET',  p: '/setup/staleness-sweep/status',  api: 'staleness_sweep_status' },
+    runStalenessSweepNow:     { m: 'POST', p: '/setup/staleness-sweep/run',     api: 'run_staleness_sweep' },
+    saveStalenessSweepConfig: { m: 'POST', p: '/setup/config',                  api: 'update_global_config' },
+
+    // ── Source-of-truth per module (Setup → Sync; saved via /setup/config) ──
+    loadSourceOfTruthConfig:  { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
+    saveSourceOfTruthConfig:  { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
+
     // ── Network Devices management ──
     loadNwDevices:          { m: 'GET',  p: '/setup/nw-devices',          api: 'get_nw_devices' },
     loadNwData:             { m: 'GET',  p: '/api/nw/{devices|info|macs|arp|interfaces}', api: 'nw_list_devices/nw_get_device_data' },
@@ -2828,6 +2838,70 @@ function _renderSetupSyncTile(content) {
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
                     <div id="nw-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                 </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Staleness Sweep</h3>
+                    <button id="staleness-sweep-run-btn" onclick="runStalenessSweepNow()" class="${btnCls}">Sweep now</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Cluster-wide NetBox age-out of sync-owned objects. A device / VM / IP the syncs stop seeing ages out: not seen for <em>stale days</em> → status <strong>offline</strong> (a <code>decommissioned_at</code> clock starts); offline + decommissioned for <em>delete days</em> → <strong>deleted</strong> (its IPs free automatically); an unassigned stale IP → freed. Objects with no <code>last_seen</code> custom field (hand-managed inventory the syncs never touched) are <strong>never swept</strong>. Each detection stamps <code>last_seen</code>, so an object the syncs keep seeing is never swept.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="staleness-sweep-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sweep</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Interval (minutes)</label>
+                        <input type="number" id="staleness-sweep-interval" min="1" value="60" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Stale after (days)</label>
+                        <input type="number" id="staleness-sweep-stale-days" min="1" value="7" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Delete after (days)</label>
+                        <input type="number" id="staleness-sweep-delete-days" min="1" value="30" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <button onclick="saveStalenessSweepConfig()" class="${btnCls}">Save</button>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sweep</div>
+                    <div id="staleness-sweep-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth</h3>
+                    <button onclick="saveSourceOfTruthConfig()" class="${btnCls}">Save</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Per-module owner: a module's source of truth is never overwritten by a sync that disagrees. <strong>External</strong> = the feed owns the object (the sync overwrites NetBox to match — e.g. Proxmox owns VMs, the discovery feed owns device MAC/IP). <strong>NetBox</strong> = NetBox owns the object (only-add-missing — existing records are refreshed but never clobbered, protecting hand-managed inventory). Defaults: VMs = Proxmox (external), Devices = NetBox, Access Tracker = NetBox, Endpoint sync = NetBox.</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="space-y-1">
+                        <label class="${labelCls}">VMs (Hypervisor → IPAM)</label>
+                        <select id="sot-vm-sync" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="external">Proxmox (external — overwrite)</option>
+                            <option value="netbox">NetBox (only-add-missing)</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Devices (Firewall → IPAM)</label>
+                        <select id="sot-device-sync" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="external">OPNsense (external — overwrite)</option>
+                            <option value="netbox">NetBox (only-add-missing)</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Access Tracker (NAC → IPAM)</label>
+                        <select id="sot-access-tracker" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="netbox">NetBox (only-add-missing)</option>
+                            <option value="external">External (overwrite)</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Endpoint sync (IPAM → NAC)</label>
+                        <select id="sot-endpoint-sync" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="netbox">NetBox (only-add-missing)</option>
+                            <option value="external">External (overwrite)</option>
+                        </select>
+                    </div>
+                </div>
             </div>`;
     loadEndpointSyncSources();
     loadEndpointSyncConfig();
@@ -2843,6 +2917,9 @@ function _renderSetupSyncTile(content) {
     loadNwDiscoverySources();
     loadNwDiscoveryConfig();
     loadNwDiscoveryStatus();
+    loadStalenessSweepConfig();
+    loadStalenessSweepStatus();
+    loadSourceOfTruthConfig();
 }
 
 // Setup → IPAM tile. IPAM / NetBox instances only.
@@ -3410,6 +3487,132 @@ async function saveRealtimeNacSyncConfig() {
             } } })
         });
         if (r.ok) showToast('Realtime reverse sync saved.', 'success');
+        else showToast('Failed to save.', 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    }
+}
+
+// ── NetBox staleness sweep (Setup → Sync, cluster-wide) ────────────────
+async function loadStalenessSweepConfig() {
+    // Populate enable/interval/stale-days/delete-days from global_config.
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cfg = (data.global_config || {}).staleness_sweep || {};
+        const en = document.getElementById('staleness-sweep-enabled');
+        const intv = document.getElementById('staleness-sweep-interval');
+        const sd = document.getElementById('staleness-sweep-stale-days');
+        const dd = document.getElementById('staleness-sweep-delete-days');
+        if (en) en.checked = cfg.enabled === true;
+        if (intv) intv.value = Math.max(1, Math.round((cfg.interval_seconds || 3600) / 60));
+        if (sd) sd.value = Math.max(1, cfg.stale_days || 7);
+        if (dd) dd.value = Math.max(1, cfg.delete_days || 30);
+    } catch (e) { console.error('loadStalenessSweepConfig failed', e); }
+}
+
+async function loadStalenessSweepStatus() {
+    const wrap = document.getElementById('staleness-sweep-status');
+    if (!wrap) return;
+    let data;
+    try {
+        const r = await setupFetch('/setup/staleness-sweep/status');
+        if (!r.ok) throw new Error(`${r.status}`);
+        data = await r.json();
+    } catch (e) {
+        wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
+        return;
+    }
+    if (!data || !data.last_sync_ts) {
+        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No sweep recorded yet. Click “Sweep now” to run one.</p>';
+        return;
+    }
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const st = String(data.status || '');
+    const pill = st === 'success' ? 'bg-green-100 text-green-700'
+        : st === 'error' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500';
+    wrap.innerHTML = `<div class="border border-slate-200 rounded-md p-3">
+        <div class="flex items-center justify-between mb-1">
+            <span class="text-sm font-bold text-slate-700">Cluster-wide</span>
+            <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
+        </div>
+        <p class="text-xs text-slate-500">scanned ${Number(data.scanned) || 0} · decommissioned ${Number(data.decommissioned) || 0} · deleted ${Number(data.deleted) || 0} · IPs freed ${Number(data.ip_freed) || 0} · errors ${Number(data.errors) || 0} <span class="text-slate-400">· last ${fmtDate(data.last_sync_ts)}</span></p>
+        ${data.message ? `<p class="text-xs text-slate-400 mt-1">${esc(data.message)}</p>` : ''}
+    </div>`;
+}
+
+async function runStalenessSweepNow() {
+    const btn = document.getElementById('staleness-sweep-run-btn');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Sweeping…'; }
+    try {
+        const r = await setupFetch('/setup/staleness-sweep/run', {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        const s = data.summary || {};
+        showToast(`Sweep: ${s.decommissioned || 0} decommissioned, ${s.deleted || 0} deleted, ${s.ip_freed || 0} IPs freed${(s.errors || 0) ? `, ${s.errors} errors` : ''}.`,
+                  (s.errors || 0) ? 'info' : 'success');
+        await loadStalenessSweepStatus();
+    } catch (e) {
+        showToast('Sweep failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+}
+
+async function saveStalenessSweepConfig() {
+    const enabled = document.getElementById('staleness-sweep-enabled')?.checked ? true : false;
+    const intervalMin = Math.max(1, parseInt(document.getElementById('staleness-sweep-interval')?.value, 10) || 60);
+    const staleDays = Math.max(1, parseInt(document.getElementById('staleness-sweep-stale-days')?.value, 10) || 7);
+    const deleteDays = Math.max(1, parseInt(document.getElementById('staleness-sweep-delete-days')?.value, 10) || 30);
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { staleness_sweep: {
+                enabled, interval_seconds: intervalMin * 60,
+                stale_days: staleDays, delete_days: deleteDays
+            } } })
+        });
+        if (r.ok) showToast('Staleness sweep saved.', 'success');
+        else showToast('Failed to save.', 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    }
+}
+
+// ── Source of Truth per module (Setup → Sync; saved via /setup/config) ──
+const _SOT_DEFAULTS = { vm_sync: 'external', device_sync: 'netbox',
+                        access_tracker: 'netbox', endpoint_sync: 'netbox' };
+
+async function loadSourceOfTruthConfig() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const sot = (data.global_config || {}).source_of_truth || {};
+        for (const k of Object.keys(_SOT_DEFAULTS)) {
+            const el = document.getElementById('sot-' + k.replace(/_/g, '-'));
+            if (el) el.value = sot[k] || _SOT_DEFAULTS[k];
+        }
+    } catch (e) { console.error('loadSourceOfTruthConfig failed', e); }
+}
+
+async function saveSourceOfTruthConfig() {
+    const sot = {};
+    for (const k of Object.keys(_SOT_DEFAULTS)) {
+        const el = document.getElementById('sot-' + k.replace(/_/g, '-'));
+        sot[k] = el ? (el.value || _SOT_DEFAULTS[k]) : _SOT_DEFAULTS[k];
+    }
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { source_of_truth: sot } })
+        });
+        if (r.ok) showToast('Source-of-truth saved.', 'success');
         else showToast('Failed to save.', 'error');
     } catch (e) {
         showToast('Error saving: ' + e.message, 'error');

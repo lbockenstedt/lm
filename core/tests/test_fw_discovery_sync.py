@@ -236,8 +236,31 @@ async def test_sync_tenant_devices_pushes_replace_true_with_defaults():
     assert push["source"] == "OPNsense"
     assert push["defaults"]["role"] == "discovered"
     assert len(push["devices"]) == 2
+    # source_of_truth relayed (default netbox → only-add-missing on the spoke).
+    assert push["source_of_truth"] == "netbox"
     # Per-tenant status persisted to the store.
     assert h.simulations_store.recorded["acme"]["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_sync_tenant_devices_relays_configured_source_of_truth():
+    # device_sync=external in global_config → the spoke receives "external"
+    # (overwrite) instead of the default netbox.
+    h = _SyncHub(
+        global_config={"opnsense_netbox_device_sync": {
+            "defaults": {"role": "discovered", "device_type": "discovered", "site": "main"},
+        }, "source_of_truth": {"device_sync": "external"}},
+        responses={
+            ("opn-fw1", "OPNSENSE_GET_DHCP_LEASES"): _dhcp_payload(),
+            ("opn-fw1", "OPNSENSE_GET_ARP_TABLE"): _arp_payload(),
+            ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+            ("netbox-spoke-1", "NETBOX_SYNC_DEVICES"): _sync_devices_ok(2),
+        },
+    )
+    await h.sync_tenant_devices("acme")
+    push = next(p for sid, cmd, p in h.request_log
+                if cmd == "NETBOX_SYNC_DEVICES" and sid == "netbox-spoke-1")
+    assert push["source_of_truth"] == "external"
 
 
 @pytest.mark.asyncio

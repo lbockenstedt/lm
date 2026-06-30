@@ -1292,6 +1292,41 @@ def create_app(hub):
         return {"nac_connected": bool(hub.get_spoke_by_type("nac")),
                 "ipam_connected": bool(hub.get_spoke_by_type("ipam"))}
 
+    # ── NetBox staleness sweep (Setup → Sync, cluster-wide) ──────────────
+    # global_config["staleness_sweep"] is saved via the generic POST /setup/config
+    # shallow-merge — no dedicated config route needed. The background loop
+    # (main.py run_staleness_sweep_loop) reads that same key.
+    @app.post("/setup/staleness-sweep/run")
+    async def run_staleness_sweep(request: Request):
+        """On-demand NetBox staleness sweep ('Sweep now').
+
+        Runs one cluster-wide sweep on the IPAM (netbox) spoke: devices/VMs not
+        seen for ``stale_days`` → offline + decommissioned_at; offline + aged past
+        ``delete_days`` → deleted (IPs free automatically); unassigned stale IPs →
+        freed. Returns the spoke's result + a summary.
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        result = await hub.run_staleness_sweep_all()
+        return {"result": result,
+                "summary": {"scanned": result.get("scanned", 0),
+                            "decommissioned": result.get("decommissioned", 0),
+                            "deleted": result.get("deleted", 0),
+                            "ip_freed": result.get("ip_freed", 0),
+                            "errors": result.get("errors", 0),
+                            "status": result.get("status")}}
+
+    @app.get("/setup/staleness-sweep/status")
+    async def staleness_sweep_status(request: Request):
+        """Last cluster-wide staleness-sweep status for the Setup → Sync card."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        return await hub.simulations_store.get_staleness_sweep_status()
+
     # ── Network Devices → NetBox device-discovery sync (Setup → Sync) ──
     # global_config["nw_netbox_device_sync"] is saved via the generic POST
     # /setup/config shallow-merge — no dedicated config route needed. The
