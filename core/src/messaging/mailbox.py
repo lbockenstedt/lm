@@ -64,6 +64,7 @@ class Mailbox:
                 f"Received acknowledgement for unknown message ID: {ack.correlation_id} "
                 f"(spoke_id={getattr(ack, 'spoke_id', None)}, "
                 f"message_type={getattr(ack, 'message_type', None)}, "
+                f"source_ip={getattr(ack, 'source_ip', None)}, "
                 f"status={ack.status})"
             )
 

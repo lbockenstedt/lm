@@ -1287,7 +1287,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     ack = Acknowledgement(
                         correlation_id=corr_id,
                         status=msg_data.get("status", "FAILED"),
-                        error=msg_data.get("error")
+                        error=msg_data.get("error"),
+                        # Thread the sender's identity + frame type + peer IP
+                        # into the ack so the mailbox "unknown ack" warning can
+                        # name the source of a stray/late ack (the envelope's
+                        # own spoke_id is often None for these).
+                        spoke_id=spoke_id,
+                        message_type=payload.get("type"),
+                        source_ip=remote_ip,
                     )
                     await self.mailbox.acknowledge(ack)
 

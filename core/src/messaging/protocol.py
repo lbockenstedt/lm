@@ -60,4 +60,8 @@ class Acknowledgement:
     # remain compatible.
     spoke_id: Optional[str] = None
     message_type: Optional[str] = None
+    # WebSocket peer address of the sender (captured by the receive path) so the
+    # mailbox "unknown ack" warning can name the source even when the ack envelope
+    # itself carries no spoke_id (e.g. a late/duplicate response from a spoke).
+    source_ip: Optional[str] = None
     timestamp: float = field(default_factory=time.time)
