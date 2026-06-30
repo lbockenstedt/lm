@@ -225,7 +225,11 @@ class EndpointSyncMixin:
             payload = {"tenant_id": tenant_id, "tenant_slug": scope,
                        "tenant_name": tenant_name, "source": se.get("label", "IPAM"),
                        "replace": True, "endpoints": endpoints}
-            rr = await self.request_response(nac, "CPPM_SYNC_ENDPOINTS", payload, timeout=60.0)
+            # 185+ sequential endpoint PUTs to ClearPass can exceed the old 60s
+            # ceiling → "Timed out waiting for spoke response" (the sync had
+            # sent=185 pushed=185 but reported status=error). 180s matches the
+            # vm-sync push budget (vm_sync.py) so a full tenant batch completes.
+            rr = await self.request_response(nac, "CPPM_SYNC_ENDPOINTS", payload, timeout=180.0)
             rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", len(endpoints)) or 0)
