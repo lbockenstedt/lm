@@ -371,18 +371,29 @@ class FwDiscoverySyncMixin:
             skipped = int((rd or {}).get("skipped", 0) or 0)
             deleted = int((rd or {}).get("deleted", 0) or 0)
             message = (rd or {}).get("message", "")
-            logger.info("fw discovery sync tenant=%s(%s) result status=%s sent=%d "
-                        "pushed=%d skipped=%d deleted=%d errors=%d",
-                        tenant_id, tenant_name,
-                        "success" if rstatus != "ERROR" else "error",
-                        len(devices), pushed, skipped, deleted, errors)
-            status = {**base, "status": "success" if rstatus != "ERROR" else "error",
+            rstate = "success" if rstatus != "ERROR" else "error"
+            # Hub-authoritative sync log: on a clean push keep the INFO summary,
+            # but on any errors/failure emit a [sync-error] WARNING carrying the
+            # sink's message (the first-error text) so the cause lands in the hub
+            # log + GET_ERROR_LOGS (bugfixer) — one place to go, no spoke-log dig.
+            if errors > 0 or rstatus == "ERROR":
+                logger.warning("[sync-error] fw-discovery tenant=%s(%s) status=%s "
+                               "sent=%d pushed=%d skipped=%d deleted=%d errors=%d — %s",
+                               tenant_id, tenant_name, rstate, len(devices),
+                               pushed, skipped, deleted, errors, message or "NetBox error")
+            else:
+                logger.info("fw discovery sync tenant=%s(%s) result status=%s sent=%d "
+                            "pushed=%d skipped=%d deleted=%d errors=%d",
+                            tenant_id, tenant_name, rstate,
+                            len(devices), pushed, skipped, deleted, errors)
+            status = {**base, "status": rstate,
                       "pushed": pushed, "errors": errors, "skipped": skipped,
                       "deleted": deleted,
                       "message": message or (f"{len(devices)} device(s) sent"
                                               if rstatus != "ERROR" else "NetBox error")}
         except Exception as e:
-            logger.debug("fw discovery push for %s failed: %s", tenant_id, e)
+            logger.warning("[sync-error] fw-discovery tenant=%s push failed: %s",
+                           tenant_id, e)
             status = {**base, "status": "error", "pushed": 0, "errors": 0,
                       "skipped": 0, "deleted": 0, "message": str(e)}
         await self.simulations_store.set_fw_discovery_sync_status(tenant_id, status)
@@ -436,8 +447,14 @@ class FwDiscoverySyncMixin:
         results = await asyncio.gather(*(_one(tid) for tid in tids))
         out = [r for r in results if r]
         pushed = sum(int(r.get("pushed", 0)) for r in out)
-        logger.info("fw discovery sync cycle: %d records, %d tenants, %d pushed, "
-                    "%d dropped unattributed", len(records), len(out), pushed, dropped)
+        errs = sum(int(r.get("errors", 0)) for r in out)
+        if errs > 0:
+            logger.warning("[sync-error] fw-discovery cycle: %d records, %d tenants, "
+                           "%d pushed, %d errors, %d dropped unattributed",
+                           len(records), len(out), pushed, errs, dropped)
+        else:
+            logger.info("fw discovery sync cycle: %d records, %d tenants, %d pushed, "
+                        "%d dropped unattributed", len(records), len(out), pushed, dropped)
         return {"results": out, "dropped_unattributed": dropped,
                 "discovered_total": len(records)}
 
@@ -463,5 +480,5 @@ class FwDiscoverySyncMixin:
                 delay = self._fw_discovery_next_delay(cfg) if cfg.get("enabled", False) else 60
                 await asyncio.sleep(delay)
             except Exception as e:
-                logger.debug("fw discovery sync loop: %s", e)
+                logger.warning("[sync-error] fw-discovery loop cycle failed: %s", e)
                 await asyncio.sleep(60)

@@ -9,6 +9,8 @@ right pushed/errors counts. Also covers the spoke-offline (503-ish) and
 tenant-unbound (skipped) branches.
 """
 
+import logging
+
 import pytest
 
 from endpoint_sync import EndpointSyncMixin
@@ -133,3 +135,27 @@ async def test_sync_propagates_cppm_error_counts():
     assert status["status"] == "error"
     assert status["errors"] == 3
     assert status["endpoints_total"] == 2  # still extracted from IPAM
+
+
+@pytest.mark.asyncio
+async def test_sync_error_emits_sync_error_marker_with_message(caplog):
+    """A per-tenant push with errors must emit a [sync-error] WARNING carrying
+    the sink's message — so the cause lands in the hub log + GET_ERROR_LOGS
+    (bugfixer) instead of an opaque "errors=N" INFO line."""
+    with caplog.at_level(logging.WARNING, logger="Hub"):
+        hub = _SyncHub(responses={
+            ("netbox-spoke-1", "NETBOX_GET_IPS"): _netbox_ips_payload(),
+            ("cppm-spoke-1", "CPPM_SYNC_ENDPOINTS"):
+                {"payload": {"data": {"status": "SUCCESS", "pushed": 1, "errors": 180,
+                                      "skipped": 0, "skipped_details": [],
+                                      "message": "1 upserted, 180 errors — first error: mac required"}}},
+        })
+        status = await hub.sync_tenant_endpoints("acme")
+    # batch SUCCESS with per-record errors is exactly the case that used to slip
+    # past collect_error_logs (errors=180 doesn't match \berror\b).
+    assert status["status"] == "success"
+    assert status["errors"] == 180
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("[sync-error]" in r.getMessage() and "first error: mac required" in r.getMessage()
+               and "tenant=acme" in r.getMessage() for r in warns), \
+        "expected a [sync-error] WARNING with the sink's first-error message"

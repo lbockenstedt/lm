@@ -10,6 +10,8 @@ NetBox NETBOX_GET_PREFIXES / NETBOX_SYNC_DEVICES payloads. Mirrors
 ``test_vm_sync.py`` (registry) + ``test_endpoint_sync_flow.py`` (canned relay).
 """
 
+import logging
+
 import pytest
 
 import fw_discovery_sync
@@ -261,3 +263,30 @@ async def test_run_all_returns_summary_with_dropped():
     assert len(agg["results"]) == 1
     assert agg["results"][0]["tenant_id"] == "acme"
     assert agg["results"][0]["pushed"] == 2
+
+
+@pytest.mark.asyncio
+async def test_push_with_errors_emits_sync_error_marker_with_message(caplog):
+    """A per-tenant push that returns batch SUCCESS with per-record errors must
+    emit a [sync-error] WARNING carrying the sink's first-error message — so the
+    cause reaches the hub log + GET_ERROR_LOGS (bugfixer). This is the LRB case
+    (pushed 1, 180 errors) that previously slipped past collect_error_logs
+    because ``errors=180`` doesn't match ``\\berror\\b``."""
+    with caplog.at_level(logging.WARNING, logger="Hub"):
+        h = _SyncHub(responses={
+            ("opn-fw1", "OPNSENSE_GET_DHCP_LEASES"): _dhcp_payload(),
+            ("opn-fw1", "OPNSENSE_GET_ARP_TABLE"): _arp_payload(),
+            ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+            ("netbox-spoke-1", "NETBOX_SYNC_DEVICES"):
+                {"payload": {"data": {"status": "SUCCESS", "pushed": 1, "errors": 180,
+                                      "skipped": 0, "deleted": 0,
+                                      "message": "1 upserted, 180 errors — first error: device_type required"}}},
+        })
+        status = await h.sync_tenant_devices("acme")
+    assert status["status"] == "success"
+    assert status["errors"] == 180
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("[sync-error]" in r.getMessage()
+               and "first error: device_type required" in r.getMessage()
+               and "tenant=acme" in r.getMessage() for r in warns), \
+        "expected a [sync-error] WARNING with the sink's first-error message"

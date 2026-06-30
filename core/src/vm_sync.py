@@ -316,7 +316,7 @@ class VmSyncMixin:
             message = (rd or {}).get("message", "")
             per_tenant = (rd or {}).get("per_tenant", {}) or {}
         except Exception as e:
-            logger.debug("vm sync ALL push failed: %s", e)
+            logger.warning("[sync-error] vm-sync push failed: %s", e)
             return {"status": "error", "pushed": 0, "errors": 0, "skipped": 0,
                     "deleted": 0, "vms_total": len(vms), "per_tenant": {},
                     "results": [], "message": str(e)}
@@ -365,10 +365,19 @@ class VmSyncMixin:
             results.append(st)
             await self.simulations_store.set_vm_sync_status(UNASSIGNED, st)
 
-        logger.info("vm sync ALL result status=%s sent=%d pushed=%d skipped=%d "
-                    "deleted=%d errors=%d rows=%d",
-                    overall, len(vms), pushed, skipped, deleted, errors,
-                    len(results))
+        # Hub-authoritative sync log: clean run → INFO; any errors/failure →
+        # [sync-error] WARNING carrying the sink's message (first-error text) so
+        # the cause lands in the hub log + GET_ERROR_LOGS (bugfixer).
+        if errors > 0 or overall == "error":
+            logger.warning("[sync-error] vm-sync result status=%s sent=%d pushed=%d "
+                           "skipped=%d deleted=%d errors=%d rows=%d — %s",
+                           overall, len(vms), pushed, skipped, deleted, errors,
+                           len(results), message or "NetBox error")
+        else:
+            logger.info("vm sync ALL result status=%s sent=%d pushed=%d skipped=%d "
+                        "deleted=%d errors=%d rows=%d",
+                        overall, len(vms), pushed, skipped, deleted, errors,
+                        len(results))
         return {"status": overall, "pushed": pushed, "errors": errors,
                 "skipped": skipped, "deleted": deleted, "vms_total": len(vms),
                 "per_tenant": per_tenant, "results": results,
@@ -446,9 +455,9 @@ class VmSyncMixin:
                     try:
                         await self.sync_all_vms()
                     except Exception as e:  # sync_all_vms already swallows; never let one cycle kill the loop
-                        logger.debug("vm sync loop cycle: %s", e)
+                        logger.warning("[sync-error] vm-sync loop cycle failed: %s", e)
                 delay = self._vm_sync_next_delay(cfg) if cfg.get("enabled", False) else 60
                 await asyncio.sleep(delay)
             except Exception as e:
-                logger.debug("vm sync loop: %s", e)
+                logger.warning("[sync-error] vm-sync loop failed: %s", e)
                 await asyncio.sleep(60)
