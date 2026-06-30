@@ -5242,7 +5242,7 @@ async function loadOpnsenseManagement() {
         let filteredItems = items;
         if (subMenu === 'Firewall Rules') {
             // Subnet filtering for rules is enforced server-side
-            // (_subnet_filter_fw → filter_firewall_rules, with OPNsense alias
+            // (_filter_fw → filter_firewall_rules, with OPNsense alias
             // expansion) so the tenant already receives only their in-prefix
             // rules. The client-side firewallRuleInTenantPrefixes can't resolve
             // alias/interface names and would wrongly hide rules the server
@@ -5255,7 +5255,7 @@ async function loadOpnsenseManagement() {
                 return showHiddenOnlyFirewallRules ? hiddenRules.includes(ruleId) : !hiddenRules.includes(ruleId);
             });
         } else if (subMenu === 'NAT Policies') {
-            // Subnet filtering for NAT is enforced server-side (_subnet_filter_fw →
+            // Subnet filtering for NAT is enforced server-side (_filter_fw →
             // filter_items_by_prefixes over source/internal_ip/external_ip, plus
             // the OPNsense category attribution) so the tenant already receives
             // only their NAT policies. The client-side itemInTenantPrefixes has

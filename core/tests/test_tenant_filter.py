@@ -1,13 +1,16 @@
 """Integration test — prefix-matching (the actual tenant-isolation logic).
 
-``access.subnet_filter_enabled`` (covered by ``test_subnet_filter.py``) is only
+``access.filter_enabled`` (covered by ``test_subnet_filter.py``) is only
 the *gate*; ``simulations/tenant_filter.py`` is the matching engine that
 enforces per-tenant subnet isolation server-side. These tests lock in the
 documented semantics: empty prefixes → show all, concrete-IP-in-prefix → show,
-concrete-IP-not-in-prefix → hide, no-concrete-IP (alias/any) → show, and the
-stricter firewall two-sided rule. ``build_alias_map`` resolves OPNsense alias
-names so a rule referencing ``LAN_NET`` is matched against the alias's concrete
-networks.
+concrete-IP-not-in-prefix → hide, no-concrete-IP → drop by default (err on
+hiding; ``drop_no_ip=False`` restores the legacy keep behavior), and the
+firewall either-side-qualifies rule (a rule shows when either side carries a
+tenant address — concrete IP in prefix OR a tenant-owned alias; a wildcard
+side is simply skipped, not a drop). ``build_alias_map`` resolves OPNsense
+alias names so a rule referencing ``LAN_NET`` is matched against the alias's
+concrete networks, and carries each alias's ``category`` for tenant attribution.
 """
 
 import pytest
