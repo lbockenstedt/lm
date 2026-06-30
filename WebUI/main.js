@@ -4138,6 +4138,40 @@ async function runNwDiscoveryNow() {
     }
 }
 
+async function pollNwDevice(deviceId, name, btn) {
+    // POLL NOW: full probe+info+interfaces+arp+mac poll on the spoke, then upsert
+    // the device + interfaces into NetBox. Admin-only route. Refreshes the active
+    // nw sub-view afterward so live data appears.
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Polling…'; }
+    try {
+        const r = await setupFetch(`/api/nw/${encodeURIComponent(deviceId)}/poll`, {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const d = await r.json();
+        const up = d.reachable ? 'up' : 'down';
+        const nif = Array.isArray(d.interfaces) ? d.interfaces.length : 0;
+        const narp = Array.isArray(d.arp) ? d.arp.length : 0;
+        const nmac = Array.isArray(d.mac_table) ? d.mac_table.length : 0;
+        const push = d.netbox_push || {};
+        const pushTxt = push && push.status
+            ? ` · NetBox: ${push.status === 'ERROR' ? 'errors=' + (push.errors || 0) : 'pushed=' + (push.pushed || 0) + ', ifaces=' + (push.interfaces_total || 0)}`
+            : '';
+        const errs = Array.isArray(d.errors) ? d.errors.length : 0;
+        showToast(`Poll ${name}: reachable ${up} · ${nif} iface(s) · ${narp} arp · ${nmac} mac${pushTxt}${errs ? ` · ${errs} error(s)` : ''}`,
+            d.reachable ? 'success' : 'error');
+        // Refresh whatever nw sub-view is active (Devices shows new reachability;
+        // ARP/Interfaces/MAC reload the live rows).
+        await loadNwData(currentSubView);
+    } catch (e) {
+        showToast('Poll failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+}
+
 async function saveNwDiscoveryConfig() {
     const enabled = document.getElementById('nw-sync-enabled')?.checked ? true : false;
     const source = document.getElementById('nw-sync-source')?.value || 'nw';
@@ -6458,7 +6492,8 @@ async function loadNwData(subMenu) {
                         ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
                         : `<span class="text-slate-400 text-xs">—</span>`;
                 const cfg = isAdmin()
-                    ? `<button onclick="showNwConfigModal('${escapeHtml(it.id)}','${escapeHtml(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
+                    ? `<button onclick="pollNwDevice('${escapeHtml(it.id)}','${escapeHtml(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>` +
+                      `<button onclick="showNwConfigModal('${escapeHtml(it.id)}','${escapeHtml(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
                     : '';
                 return `<tr class="hover:bg-slate-50 transition-colors">
                     <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>

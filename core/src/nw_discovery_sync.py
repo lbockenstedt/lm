@@ -87,6 +87,12 @@ class NwDiscoverySyncMixin:
     _NW_DISCOVERY_PUSH_COMMAND = "NETBOX_SYNC_DEVICES"
     _NW_DISCOVERY_CFG_KEY = "nw_netbox_device_sync"
 
+    # POLL NOW: per-device full poll (probe+info+interfaces+arp+mac) + push the
+    # device + its interfaces to NetBox as a dcim.device inventory record (a
+    # different sink from the ARP-neighbor→endpoint NETBOX_SYNC_DEVICES flow).
+    _NW_POLL_COMMAND = "NW_POLL"
+    _NW_DEVICE_PUSH_COMMAND = "NETBOX_SYNC_NW_DEVICE"
+
     # ── config helpers ──────────────────────────────────────────────────────
 
     def _nw_discovery_cfg(self) -> Dict[str, Any]:
@@ -285,6 +291,148 @@ class NwDiscoverySyncMixin:
         return status
 
     # ── entry points ────────────────────────────────────────────────────────
+
+    async def poll_nw_device(self, device_id: str) -> Dict[str, Any]:
+        """POLL NOW for one network device: send ``NW_POLL`` to the owning nw
+        spoke, then push the device + its interfaces to NetBox via
+        ``NETBOX_SYNC_NW_DEVICE`` (a dcim.device inventory upsert — distinct
+        from the ARP-neighbor→endpoint ``NETBOX_SYNC_DEVICES`` flow).
+
+        Tenant attribution is by the device's **management address** prefix
+        containment (same ``attribute_by_prefix`` helper the discovery sync
+        uses, applied to a one-record set). Unattributed → empty tenant_slug
+        (global/unassigned in NetBox).
+
+        Returns ``{status, reachable, latency_ms, device_info, interfaces, arp,
+        mac_table, netbox_push, tenant_slug, errors, message}``. Best-effort:
+        a NetBox push failure doesn't mask the poll results.
+        """
+        errors: List[str] = []
+        cfg = (self.state.system_state.get("global_config", {})
+               .get("nw_devices", []) or [])
+        device_cfg = next((d for d in cfg if isinstance(d, dict)
+                           and d.get("id") == device_id), None)
+        if not device_cfg:
+            return {"status": "ERROR", "reachable": False, "errors":
+                    [f"device {device_id} not in nw_devices config"],
+                    "message": f"device {device_id} not configured"}
+
+        # Resolve the owning connected nw spoke (prefer the device's bound
+        # spoke_id; else any connected nw spoke).
+        spoke_id = ""
+        bound = str(device_cfg.get("spoke_id") or "").strip()
+        nw_spokes = list(self.get_all_spokes_by_type("nw") or [])
+        if bound and bound in nw_spokes:
+            spoke_id = bound
+        elif nw_spokes:
+            spoke_id = nw_spokes[0]
+        if not spoke_id:
+            return {"status": "ERROR", "reachable": False, "errors":
+                    ["no nw spoke connected"], "message": "no nw spoke connected"}
+
+        # 1) Poll.
+        poll_res: Dict[str, Any] = {}
+        try:
+            rr = await self.request_response(spoke_id, self._NW_POLL_COMMAND,
+                                             {"device_id": device_id}, timeout=60.0)
+            poll_res = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            if isinstance(poll_res, dict) and poll_res.get("status") == "ERROR":
+                errors.append(f"poll: {poll_res.get('message', 'error')}")
+                poll_res = {"data": {}}
+        except Exception as e:
+            errors.append(f"poll: {e}")
+            poll_res = {"data": {}}
+
+        pdata = poll_res.get("data") if isinstance(poll_res, dict) else None
+        if not isinstance(pdata, dict):
+            pdata = {}
+        reachable = bool(pdata.get("reachable"))
+        latency_ms = pdata.get("latency_ms")
+        device_info = pdata.get("device_info") or {}
+        interfaces = pdata.get("interfaces") or []
+        arp = pdata.get("arp") or []
+        mac_table = pdata.get("mac_table") or []
+        poll_errors = poll_res.get("errors") if isinstance(poll_res, dict) else None
+        if isinstance(poll_errors, list):
+            errors.extend(poll_errors)
+
+        # 2) Attribute tenant by the device's mgmt-address prefix containment.
+        tenant_slug = ""
+        if device_cfg.get("address") and attribute_by_prefix is not None:
+            try:
+                buckets, _dropped = await attribute_by_prefix(
+                    self, [{"ip": str(device_cfg.get("address")), "mac": "",
+                            "hostname": ""}])
+                tid = next(iter(buckets), None)
+                if tid:
+                    tcfg = self.state.get_tenant(tid) or {}
+                    tenant_slug = str(tcfg.get("netbox_tenant_slug") or "").strip()
+            except Exception as e:
+                logger.debug("nw poll tenant attribution for %s: %s", device_id, e)
+
+        # 3) Push the device + interfaces to NetBox (best-effort).
+        netbox = self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE)
+        netbox_push: Dict[str, Any] = {}
+        if not netbox:
+            errors.append("NetBox spoke not connected — poll only (no push)")
+        else:
+            payload = {
+                "device": {
+                    "id": device_cfg.get("id", device_id),
+                    "name": device_cfg.get("name", "") or device_id,
+                    "address": device_cfg.get("address", ""),
+                    "object_type": device_cfg.get("object_type", ""),
+                    "model": str(device_info.get("model", "") or ""),
+                    "serial": str(device_info.get("serial", "") or ""),
+                    "firmware": str(device_info.get("firmware", "") or ""),
+                },
+                "interfaces": interfaces or [],
+                "tenant_slug": tenant_slug,
+                "defaults": self._nw_discovery_cfg().get("defaults", {}) or {},
+                "source": self._nw_discovery_source().get("label", "Network Devices"),
+            }
+            try:
+                rr = await self.request_response(netbox,
+                                                 self._NW_DEVICE_PUSH_COMMAND,
+                                                 payload, timeout=120.0)
+                rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+                netbox_push = {
+                    "status": str((rd or {}).get("status") or "").upper(),
+                    "pushed": int((rd or {}).get("pushed", 0) or 0),
+                    "errors": int((rd or {}).get("errors", 0) or 0),
+                    "skipped": int((rd or {}).get("skipped", 0) or 0),
+                    "deleted": int((rd or {}).get("deleted", 0) or 0),
+                    "interfaces_total": int((rd or {}).get("interfaces_total", 0) or 0),
+                    "message": (rd or {}).get("message", ""),
+                }
+                if netbox_push["status"] == "ERROR" or netbox_push["errors"]:
+                    errors.append(f"netbox: {netbox_push['message'] or 'error'}")
+            except Exception as e:
+                netbox_push = {"status": "ERROR", "message": str(e)}
+                errors.append(f"netbox push: {e}")
+
+        status = "SUCCESS" if (reachable and not errors) else (
+            "PARTIAL" if reachable else "ERROR")
+        return {
+            "status": status,
+            "reachable": reachable,
+            "latency_ms": latency_ms,
+            "device_info": device_info,
+            "interfaces": interfaces,
+            "arp": arp,
+            "mac_table": mac_table,
+            "netbox_push": netbox_push,
+            "tenant_slug": tenant_slug,
+            "errors": errors,
+            "message": (f"reachable={reachable}, "
+                        f"{len(interfaces) if isinstance(interfaces, list) else 0} "
+                        f"interface(s), "
+                        f"{len(arp) if isinstance(arp, list) else 0} arp, "
+                        f"{len(mac_table) if isinstance(mac_table, list) else 0} mac"
+                        + (f", NetBox={netbox_push.get('status','n/a')}"
+                           if netbox_push else "")
+                        + (f", errors={len(errors)}" if errors else "")),
+        }
 
     async def sync_tenant_nw_devices(self, tenant_id: str) -> Dict[str, Any]:
         """On-demand single-tenant NW → NetBox sync ('Sync now' for one tenant).
