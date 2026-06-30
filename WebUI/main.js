@@ -5530,7 +5530,7 @@ async function loadOpnsenseManagement() {
         }
 
         let keys;
-        if (subMenu === 'Firewall Rules') keys = ['firewall', 'source', 'destination', 'protocol', 'action', 'description'];
+        if (subMenu === 'Firewall Rules') keys = ['firewall', 'source', 'destination', 'protocol', 'action', 'category', 'description'];
         else if (subMenu === 'Interfaces') keys = ['firewall', 'description', 'ip', 'status', 'macaddr', 'mtu', 'media'];
         else if (subMenu === 'NAT Policies') keys = ['firewall', 'type', 'protocol', 'source', 'external_ip', 'external_port', 'internal_ip', 'internal_port', 'description'];
         else if (subMenu === 'DNS Records') keys = ['firewall', 'hostname', 'ip', 'type', 'ttl', 'description'];
