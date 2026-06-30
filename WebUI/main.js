@@ -9684,6 +9684,18 @@ function showAddInstanceModal(productKey, editItem) {
         const type = f.type || 'text';
         return `                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">${f.label}</label><input type="${type}" id="inst-${f.id}" placeholder="${f.placeholder || ''}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>`;
     }).join('\n');
+    // IPAM-only: an "Apply schema changes" button that provisions the Lab
+    // Manager custom fields (Proxmox / OPNsense / ClearPass sync) on the
+    // connected NetBox via POST /setup/ipam/apply-schema. Idempotent + safe to
+    // re-run — the engine get-or-creates + verifies every attachment, so it
+    // never errors when the fields already exist (existing installs pick up
+    // newly-added fields without a reinstall). Hidden for non-IPAM products.
+    const schemaBtnHtml = productKey === 'ipam'
+        ? `<div class="pt-3 mt-2 border-t border-slate-100 space-y-1">
+                <button onclick="applyIpamSchema()" class="w-full px-4 py-2 rounded-md text-sm font-semibold text-[#01A982] border border-[#01A982] hover:bg-[#01A982] hover:text-white transition-all">Apply schema changes</button>
+                <p class="text-[11px] text-slate-400 leading-snug">Provisions the Lab Manager custom fields used by the Proxmox, OPNsense, and ClearPass syncs on the connected NetBox. Idempotent — safe to run as many times as needed; existing fields are left in place.</p>
+            </div>`
+        : '';
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -9694,6 +9706,7 @@ function showAddInstanceModal(productKey, editItem) {
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Instance Name</label><input type="text" id="inst-name" placeholder="e.g. Primary ${p.title.replace(' Instance', '')}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="inst-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
 ${fieldHtml}
+${schemaBtnHtml}
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeInstanceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
@@ -9773,6 +9786,40 @@ async function deleteInstance(productKey, id) {
         loadInstances(productKey);
     } catch (e) {
         alert('Error: ' + e.message);
+    }
+}
+
+// "Apply schema changes" button on the IPAM/NetBox instance modal →
+// POST /setup/ipam/apply-schema → the connected NetBox spoke runs its
+// idempotent _ensure_custom_fields(force=True) over the shared
+// CUSTOM_FIELDS_SPEC (the same spec install.sh provisions on a fresh
+// install). Shows a readable summary of the report so the user can see what
+// was already present vs. created/attached. Never errors if the schema is
+// already up to date.
+async function applyIpamSchema() {
+    if (!confirm('Apply the Lab Manager custom-field schema to the connected NetBox? This is idempotent and safe to re-run.')) return;
+    try {
+        const r = await setupFetch('/setup/ipam/apply-schema', { method: 'POST' });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            alert('Apply schema failed: ' + (body.detail || r.status));
+            return;
+        }
+        const total = body.total ?? '?';
+        const present = body.present ?? 0;
+        const created = body.created ?? 0;
+        const attached = body.attached ?? 0;
+        const already = body.already_attached ?? 0;
+        const warns = Array.isArray(body.warnings) ? body.warnings : [];
+        let msg = `Schema apply ${body.status === 'SUCCESS' ? 'complete' : 'partial'}.\n` +
+                  `${total} field(s) in spec · ${already} already attached · ${created} created · ${attached} newly attached · ${present} present.`;
+        if (warns.length) {
+            msg += `\n\nWarnings (${warns.length}):\n` + warns.slice(0, 8).join('\n');
+            if (warns.length > 8) msg += `\n… and ${warns.length - 8} more`;
+        }
+        alert(msg);
+    } catch (e) {
+        alert('Error applying schema: ' + e.message);
     }
 }
 

@@ -232,6 +232,22 @@ _FW_CMD_MAP = {
     "dns":        "OPNSENSE_GET_DNS_RECORDS",
     "interfaces": "GET_INTERFACE_STATUS",
 }
+# Per-endpoint hub→spoke timeout (seconds) for live firewall fetches. Generous
+# because spokes are distributed and may be reached over WAN (~300ms latency):
+# the opnsense spoke answers each API call via a curl subprocess with
+# --max-time 15, and NAT policies probe 3 endpoints sequentially (up to ~45s
+# cold). The 5s request_response default timed out cold-cache NAT and returned
+# an empty error dict — "NAT Policies showing nothing" (admin too, since
+# filter_fw is a no-op for admins). NAT gets 60s; single-endpoint modules get
+# 30s (15s curl + network slack).
+_FW_FETCH_TIMEOUTS = {
+    "nat": 60.0,
+}
+_FW_FETCH_TIMEOUT_DEFAULT = 30.0
+# Firewall CRUD (add/edit/delete rule/alias/nat/dns) does an action call + an
+# apply/reconfigure call sequentially (2× curl --max-time 15 → up to ~30s) →
+# 45s covers it with WAN slack. The 5s default was timing out writes too.
+_FW_WRITE_TIMEOUT = 45.0
 
 # ── Tenant subnet filtering ────────────────────────────────────────────────
 # Constants (_FILTER_MODULES / _DEFAULTS), _FW_FILTER_SPEC, and
@@ -1658,7 +1674,9 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
 
         try:
-            result = await hub.request_response(spoke_id, spoke_cmd, {})
+            result = await hub.request_response(
+                spoke_id, spoke_cmd, {},
+                timeout=_FW_FETCH_TIMEOUTS.get(endpoint, _FW_FETCH_TIMEOUT_DEFAULT))
             data = {}
             if isinstance(result, dict):
                 if "data" in result:
@@ -1684,7 +1702,7 @@ def create_app(hub):
         if not spoke_id or spoke_id not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
         try:
-            result = await hub.request_response(spoke_id, command, data)
+            result = await hub.request_response(spoke_id, command, data, timeout=_FW_WRITE_TIMEOUT)
             if isinstance(result, dict):
                 payload = result.get("payload", result)
                 if isinstance(payload, dict) and "data" in payload:
@@ -2202,6 +2220,38 @@ def create_app(hub):
             "api_token": c.get("api_token") or c.get("token"),
         },
     )
+
+    @app.post("/setup/ipam/apply-schema", operation_id="ipam_apply_schema")
+    async def ipam_apply_schema():
+        """Apply the Lab Manager custom-field schema to the connected NetBox.
+
+        Backs the "Apply schema changes" button on the Setup/IPAM NetBox
+        instance modal. Sends NETBOX_PROVISION_CUSTOM_FIELDS to the connected
+        ipam spoke, which runs the engine's idempotent _ensure_custom_fields
+        (force=True) over the shared CUSTOM_FIELDS_SPEC — the same spec
+        install.sh provisions on a fresh install, so a manual apply and a
+        reinstall produce identical schemas. Re-runnable: never errors when the
+        fields are already present (the engine get-or-creates + verifies each
+        attachment). Returns the spoke's report
+        (status/total/present/created/attached/already_attached/warnings).
+        """
+        hub = app.state.hub
+        spoke_id = hub.get_spoke_by_type("ipam")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            result = await hub.request_response(spoke_id,
+                                                "NETBOX_PROVISION_CUSTOM_FIELDS", {})
+            data = _unwrap_spoke(result)
+            if data.get("status") not in ("SUCCESS", "PARTIAL"):
+                raise HTTPException(status_code=502,
+                                    detail=data.get("message", "NetBox provisioning error"))
+            return data
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("ipam_apply_schema failed")
+            raise HTTPException(status_code=500, detail=str(e))
     _instance_crud(
         "ldap-instances", "ldap_instances",
         lambda inst: {
