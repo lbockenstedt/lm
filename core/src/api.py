@@ -3997,7 +3997,38 @@ def create_app(hub):
         def _is_nn(v) -> bool:
             return bool(_re.match(r"^\.\d+$", str(v).strip()))
 
+        # Relayed node agents (pxmx) connect THROUGH their hypervisor spoke, not
+        # directly to the hub, so the hub has no WebSocket for the bare agent
+        # id. The old approve flow leaked agent ids into known_modules /
+        # approved_modules; a leaked id renders here as a bogus OFFLINE spoke
+        # row (the footer module-status then shows it offline while the
+        # Diagnostics → Agents table — fed by /api/pxmx/agents — shows it
+        # online), AND the recovery watchdog would resolve the leaked id to the
+        # parent spoke's unit (pxmx-cs-svr-02 -> lm-pxmx) and restart a healthy
+        # pxmx spoke every cycle. Identify relayed agent ids from the composite
+        # heartbeat keys ("{spoke}:{agent}") plus the agent_config registry, skip
+        # them below, and self-heal the persisted registries so the watchdog
+        # stops considering them. Mirrors the client-side filter in
+        # loadDiagnostics (WebUI/main.js).
+        agent_cfg_keys = set((hub.state.system_state.get("agent_config", {}) or {}).keys())
+        relay_ids = {k.split(":", 1)[1] for k in hub.heartbeat.last_seen if ":" in k}
+        relay_ids |= agent_cfg_keys
+        if relay_ids:
+            known = list(hub.state.system_state.get("known_modules", []))
+            leaked = [m for m in known if m in relay_ids]
+            if leaked:
+                cleaned = [m for m in known if m not in relay_ids]
+                hub.state.system_state["known_modules"] = cleaned
+                hub.known_modules = cleaned
+                for aid in leaked:
+                    hub.approved_modules.pop(aid, None)
+                hub.state.save_state()
+                logger.info("[diag] removed leaked relay-agent id(s) from "
+                            "known_modules/approved_modules: %s", leaked)
+
         for sid in known_spokes:
+            if sid in relay_ids:
+                continue  # relayed node agent — surfaced via /api/pxmx/agents, not here
             ws = hub.active_connections.get(sid)
             telemetry = hub.spoke_telemetry.get(sid, {})
             events = hub.get_spoke_events(sid, limit=50)
