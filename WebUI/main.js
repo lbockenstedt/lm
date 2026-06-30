@@ -5370,8 +5370,10 @@ function pxmxTh(cols) {
 
 // VM table — shared by the node-detail view and the no-nodes fallback.
 function pxmxVmTableHtml(vms) {
-    const cols = ['Cluster / Host', 'Node', 'VMID', 'Name', 'Pool', 'IP Address', 'Type', 'Status', 'CPU %', 'RAM'];
+    const cols = ['Cluster / Host', 'Node', 'VMID', 'Name', 'Pool', 'IP Address', 'Type', 'Status', 'CPU %', 'RAM', ''];
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const tplPools = window._pxmxTemplatePools || [];
+    const isTemplate = vm => !!(vm.pool && tplPools.includes(String(vm.pool).toLowerCase()));
     const rows = vms.map(vm => {
         const memGb   = ((vm.mem_bytes || 0) / 1073741824).toFixed(1);
         const runCls  = vm.status === 'running' ? 'bg-green-100 text-green-700'
@@ -5386,6 +5388,9 @@ function pxmxVmTableHtml(vms) {
         // pool: Proxmox resource pool the VM belongs to (best-effort, from the
         // agent's /pools reverse-map). Blank when the VM is in no pool.
         const poolCell = vm.pool ? escapeHtml(vm.pool) : '—';
+        const cloneBtn = isTemplate(vm)
+            ? `<button onclick="event.stopPropagation(); pxmxCloneVm('${escJs(vm.unique_id)}')" title="Clone this template to a new VM" class="px-2 py-1 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>`
+            : '';
         return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${escJs(vm.unique_id)}')">
             <td class="px-4 py-2 text-xs text-slate-500 font-mono">${vm.cluster || '—'}</td>
             <td class="px-4 py-2 text-xs">${vm.node || '—'}</td>
@@ -5397,6 +5402,7 @@ function pxmxVmTableHtml(vms) {
             <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${runCls}">${vm.status}</span></td>
             <td class="px-4 py-2 text-xs">${vm.cpu ?? '—'}%</td>
             <td class="px-4 py-2 text-xs">${memGb} GB</td>
+            <td class="px-4 py-2">${cloneBtn}</td>
         </tr>`;
     }).join('');
     return pxmxTableWrap(pxmxTh(cols) + `<tbody>${rows}</tbody>`);
@@ -5439,6 +5445,7 @@ function openVmDetail(uniqueId) {
             <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
             <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors">📷 Snapshot</button>
             <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" title="Open VNC console (noVNC)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982] hover:bg-[#008c6a] text-white transition-colors">🖥 Console</button>
+            ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>` : ''; })()}
             <span id="pxmx-vm-action-status" class="text-xs text-slate-400"></span>
         </div>`;
 }
@@ -5467,6 +5474,96 @@ async function pxmxVmAction(uniqueId, action) {
     } catch (e) {
         showToast(`${action} failed: ${e.message || e}`, 'error');
         setStat(`${action} failed`);
+    }
+}
+
+// Clone-from-template: opens a small modal prompting for the new VM's name (a
+// free VMID is auto-assigned by the agent when left blank), then POSTs
+// /api/pxmx/clone with the template unique_id. Templates are shared — any admin
+// acting as a tenant may clone; the new VM is tagged with the acting tenant's
+// proxmox_tag and shows up after the list refresh + VM sync. The hub enforces
+// the template-pool membership server-side (UI affordance mirrors it).
+async function pxmxCloneVm(uniqueId) {
+    const vm = (window._pxmxVms || []).find(v => v.unique_id === uniqueId);
+    if (!vm) { showToast('Template not found in cache', 'error'); return; }
+    const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const baseName = `${(vm.name || 'vm').replace(/[^a-zA-Z0-9-]/g, '').toLowerCase().slice(0, 12) || 'vm'}-clone`;
+    // Fetch the Proxmox resource pools so the user can place the new VM in one.
+    let pools = [];
+    try {
+        const r = await fetch('/api/pxmx/pools');
+        const d = r.ok ? await r.json() : {};
+        pools = d.pools || [];
+    } catch (e) { /* dropdown just stays empty */ }
+    const poolOpts = ['<option value="">— no pool —</option>']
+        .concat(pools.map(p => `<option value="${escapeHtml(p.poolid)}">${escapeHtml(p.poolid)}${p.cluster ? ' (' + escapeHtml(p.cluster) + ')' : ''}</option>`))
+        .join('');
+    const tpl = `<div id="pxmx-clone-modal" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-md p-5 space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-base font-semibold text-[#263040]">Clone template</h3>
+                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+            </div>
+            <p class="text-xs text-slate-500">Cloning <span class="font-mono">${escapeHtml(vm.name || '')}</span> (VMID ${vm.vmid}, pool ${escapeHtml(vm.pool || '—')}). The new VM is tagged with the current tenant name and starts stopped.</p>
+            <label class="block text-xs font-medium text-slate-600">New VM name
+                <input id="pxmx-clone-name" value="${escapeHtml(baseName)}" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+            </label>
+            <label class="block text-xs font-medium text-slate-600">New VMID (optional — blank = auto-assign)
+                <input id="pxmx-clone-vmid" placeholder="auto" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+            </label>
+            <label class="block text-xs font-medium text-slate-600">Destination pool (optional)
+                <select id="pxmx-clone-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm">${poolOpts}</select>
+            </label>
+            <div class="flex justify-end gap-2 pt-1">
+                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
+                <button id="pxmx-clone-go" onclick="pxmxCloneVmSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white">⧉ Clone</button>
+            </div>
+            <p id="pxmx-clone-status" class="text-xs text-slate-400"></p>
+        </div>
+    </div>`;
+    // Remove any stale modal first, then mount at the document root so it
+    // survives the pxmx-content re-render that openVmDetail replaced.
+    const existing = document.getElementById('pxmx-clone-modal');
+    if (existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', tpl);
+    const nameInput = document.getElementById('pxmx-clone-name');
+    if (nameInput) { nameInput.focus(); nameInput.select(); }
+}
+
+async function pxmxCloneVmSubmit(uniqueId) {
+    const vm = (window._pxmxVms || []).find(v => v.unique_id === uniqueId);
+    if (!vm) { showToast('Template not found in cache', 'error'); return; }
+    const name = (document.getElementById('pxmx-clone-name') || {}).value || '';
+    const vmidRaw = (document.getElementById('pxmx-clone-vmid') || {}).value || '';
+    const pool = (document.getElementById('pxmx-clone-pool') || {}).value || '';
+    const statusEl = document.getElementById('pxmx-clone-status');
+    const goBtn = document.getElementById('pxmx-clone-go');
+    const cleanName = name.trim();
+    if (!cleanName) { if (statusEl) statusEl.textContent = 'Name is required'; return; }
+    if (goBtn) { goBtn.disabled = true; goBtn.textContent = 'Cloning…'; }
+    if (statusEl) statusEl.textContent = 'Cloning — a full-disk clone can take a minute…';
+    const body = { template_unique_id: vm.unique_id, name: cleanName, type: vm.type || 'qemu' };
+    const nvid = parseInt(vmidRaw, 10);
+    if (vmidRaw.trim() && !isNaN(nvid)) body.new_vmid = nvid;
+    if (pool) body.pool = pool;
+    try {
+        const r = await setupFetch('/api/pxmx/clone', { method: 'POST', body: JSON.stringify(body) });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data && data.status === 'SUCCESS') {
+            showToast(`Cloned to VMID ${data.vmid} (${data.name})`, 'success');
+            const modal = document.getElementById('pxmx-clone-modal');
+            if (modal) modal.remove();
+            setTimeout(() => loadPxmxData('Virtual Machines'), 1200);
+        } else {
+            const msg = data && (data.detail || data.message) || r.status;
+            showToast(`Clone failed: ${msg}`, 'error');
+            if (statusEl) statusEl.textContent = `Failed: ${msg}`;
+            if (goBtn) { goBtn.disabled = false; goBtn.textContent = '⧉ Clone'; }
+        }
+    } catch (e) {
+        showToast(`Clone failed: ${e.message || e}`, 'error');
+        if (statusEl) statusEl.textContent = `Failed: ${e.message || e}`;
+        if (goBtn) { goBtn.disabled = false; goBtn.textContent = '⧉ Clone'; }
     }
 }
 
@@ -5668,6 +5765,10 @@ async function loadPxmxData(subMenu) {
             window._pxmxNodes = nodes;
             window._pxmxVms = vms;
             window._pxmxAgentCount = vmData.agent_count || '?';
+            // Template-pool names from the hub: VMs whose pool is in this set are
+            // shared templates any tenant may clone (clone-from-template). The
+            // hub enforces this server-side too — this is just the UI affordance.
+            window._pxmxTemplatePools = (vmData.template_pools || []).map(p => String(p).toLowerCase());
 
             // --- 'Overview' landing: just the clickable nodes table -----------
             if (subMenu === 'Overview') {
