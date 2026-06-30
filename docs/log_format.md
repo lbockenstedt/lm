@@ -75,6 +75,21 @@ Expected log location per service (all file-backed logs live under `/var/log/lm/
 
 Agent logs (AGENT_LOG messages from agents to spokes) are relayed to the hub and forwarded to BugFixer via the hub's log relay endpoint.
 
+## Hub log marker lines
+
+The hub log carries short greppable marker tokens at the start of a line so
+BugFixer's `GET_LOGS` scan can enumerate specific event classes without parsing
+free text. A marker line is logged at `WARNING`/`ERROR` (so it is prominent and
+matches the `GET_ERROR_LOGS` error regex `\b(error|exception|traceback|critical)\b`)
+and carries only the ids/counts needed to triage — full artifacts live elsewhere.
+
+| Marker | Emitted by | Meaning |
+|--------|-----------|---------|
+| `[bug-report]` | "File a Bug" flow | A bug report was filed; full artifacts on disk, index in memory. BugFixer enumerates via `GET_BUG_REPORTS`. |
+| `[recovery]` | spoke recovery watchdog | Spoke update/recovery state change (retry, give-up, escalation to BugFixer). |
+| `[usb-telemetry]` | USB telemetry relay | USB dongle telemetry event relayed hub-side for the WebUI + BugFixer. |
+| `[sync-error]` | hub-orchestrated sync loops | A per-tenant sync push had errors or failed. Emitted by the three Setup→Sync loops — Firewall→IPAM (`fw_discovery_sync.py`), Hypervisor→IPAM (`vm_sync.py`), and IPAM→CPPM (`endpoint_sync.py`) — when `errors > 0` or the sink returned `status=ERROR`. The line carries the sink's first-error `message` (e.g. `… errors=180 — first error: device_type: This field is required.`), so the cause is in the hub log — one place to go — and is captured by `GET_ERROR_LOGS` for BugFixer. Clean cycles log a plain INFO summary (no marker). |
+
 ## Rules
 
 - Do not change the format — BugFixer's regex is pinned to this pattern.

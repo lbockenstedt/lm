@@ -240,11 +240,21 @@ class EndpointSyncMixin:
                     "; ".join(f"ip={s.get('ip') or '<empty>'} mac={s.get('mac') or '<empty>'} "
                               f"hostname={s.get('hostname') or '<empty>'} ({s.get('reason')})"
                               for s in skipped_details))
-            logger.info("endpoint sync tenant=%s(%s) result status=%s sent=%d pushed=%d "
-                        "skipped=%d hub_skipped=%d errors=%d",
-                        tenant_id, tenant_name,
-                        "success" if rstatus != "ERROR" else "error",
-                        len(endpoints), pushed, skipped, hub_skipped, errors)
+            rstate = "success" if rstatus != "ERROR" else "error"
+            # Hub-authoritative sync log: clean → INFO; errors/failure →
+            # [sync-error] WARNING carrying the sink's message (first-error text)
+            # so the cause lands in the hub log + GET_ERROR_LOGS (bugfixer).
+            if errors > 0 or rstatus == "ERROR":
+                logger.warning("[sync-error] endpoint-sync tenant=%s(%s) status=%s "
+                               "sent=%d pushed=%d skipped=%d hub_skipped=%d errors=%d — %s",
+                               tenant_id, tenant_name, rstate, len(endpoints),
+                               pushed, skipped, hub_skipped, errors,
+                               message or "CPPM error")
+            else:
+                logger.info("endpoint sync tenant=%s(%s) result status=%s sent=%d pushed=%d "
+                            "skipped=%d hub_skipped=%d errors=%d",
+                            tenant_id, tenant_name, rstate,
+                            len(endpoints), pushed, skipped, hub_skipped, errors)
             status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
                       "status": "success" if rstatus != "ERROR" else "error",
                       "pushed": pushed, "errors": errors, "skipped": skipped,
@@ -253,7 +263,8 @@ class EndpointSyncMixin:
                       "hub_skipped": hub_skipped,
                       "skipped_details": skipped_details}
         except Exception as e:
-            logger.debug("endpoint sync for %s failed: %s", tenant_id, e)
+            logger.warning("[sync-error] endpoint-sync tenant=%s failed: %s",
+                           tenant_id, e)
             status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
                       "status": "error", "pushed": 0, "errors": 0,
                       "message": str(e),
@@ -318,5 +329,5 @@ class EndpointSyncMixin:
                 delay = self._endpoint_sync_next_delay(cfg) if cfg.get("enabled", False) else 60
                 await asyncio.sleep(delay)
             except Exception as e:
-                logger.debug("endpoint sync loop: %s", e)
+                logger.warning("[sync-error] endpoint-sync loop failed: %s", e)
                 await asyncio.sleep(60)
