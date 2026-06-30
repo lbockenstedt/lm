@@ -1292,6 +1292,104 @@ def create_app(hub):
         return {"nac_connected": bool(hub.get_spoke_by_type("nac")),
                 "ipam_connected": bool(hub.get_spoke_by_type("ipam"))}
 
+    # ── Network Devices → NetBox device-discovery sync (Setup → Sync) ──
+    # global_config["nw_netbox_device_sync"] is saved via the generic POST
+    # /setup/config shallow-merge — no dedicated config route needed. The
+    # background loop (main.py run_nw_discovery_sync_loop) reads that same key.
+    @app.post("/setup/nw-discovery-sync/run")
+    async def run_nw_discovery_sync(request: Request):
+        """On-demand Network Devices → NetBox device-discovery sync ('Sync now').
+
+        Body optional: ``{"tenant_id": "<id>"}`` to sync one tenant (pull global,
+        push just that tenant); absent → pull global, push every attributed
+        tenant. Returns per-tenant results + a summary (pushed/errors/skipped/
+        deleted/dropped_unattributed/discovered_total).
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if target:
+            results = [await hub.sync_tenant_nw_devices(target)]
+            dropped = int(results[0].get("dropped_unattributed", 0) or 0)
+            discovered = int(results[0].get("discovered_total_global", 0) or 0)
+        else:
+            agg = await hub.run_nw_discovery_sync_all()
+            results = agg.get("results", [])
+            dropped = int(agg.get("dropped_unattributed", 0) or 0)
+            discovered = int(agg.get("discovered_total", 0) or 0)
+        pushed = sum(int(r.get("pushed", 0)) for r in results)
+        errors = sum(int(r.get("errors", 0)) for r in results)
+        skipped = sum(int(r.get("skipped", 0)) for r in results)
+        deleted = sum(int(r.get("deleted", 0)) for r in results)
+        return {"results": results,
+                "summary": {"pushed": pushed, "errors": errors, "skipped": skipped,
+                            "deleted": deleted, "tenants": len(results),
+                            "dropped_unattributed": dropped,
+                            "discovered_total": discovered}}
+
+    @app.get("/setup/nw-discovery-sync/status")
+    async def nw_discovery_sync_status(request: Request):
+        """Per-tenant last nw-discovery-sync status for the Setup → Sync card."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        statuses = hub.simulations_store.get_all_nw_discovery_sync_status()
+        tenants = []
+        for tid, st in statuses.items():
+            tenants.append({
+                "tenant_id": tid,
+                "tenant_name": st.get("tenant_name") or tid,
+                "status": st.get("status"),
+                "pushed": st.get("pushed", 0),
+                "errors": st.get("errors", 0),
+                "skipped": st.get("skipped", 0),
+                "deleted": st.get("deleted", 0),
+                "message": st.get("message", ""),
+                "discovered_total": st.get("discovered_total", 0),
+                "last_sync_ts": st.get("last_sync_ts"),
+            })
+        return {"tenants": tenants}
+
+    @app.get("/setup/nw-discovery-sync/sources")
+    async def nw_discovery_sync_sources(request: Request):
+        """Available nw pull-sources + the network devices the sync can be scoped
+        to, for the Setup → Sync source selector + device picker.
+
+        Driven by ``hub.NW_DISCOVERY_SOURCES`` so adding a network-device product
+        is a one-entry registry change and the WebUI dropdown picks it up with no
+        client change. ``devices`` come from ``global_config["nw_devices"]``
+        (each → {id, name, spoke_id, connected}) so the admin can pin the sync.
+        ``netbox_connected`` flags whether the IPAM sink is up.
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        active = hub._nw_discovery_source().get("module_type")
+        sources = []
+        for name, se in hub.NW_DISCOVERY_SOURCES.items():
+            sources.append({"name": name, "label": se.get("label", name),
+                            "module_type": se.get("module_type", ""),
+                            "connected": bool(hub.get_all_spokes_by_type(se.get("module_type", "")))})
+        devices = []
+        for d in hub.state.system_state.get("global_config", {}).get("nw_devices", []) or []:
+            sid = d.get("spoke_id") if isinstance(d, dict) else None
+            devices.append({
+                "id": d.get("id", "") if isinstance(d, dict) else "",
+                "name": d.get("name", d.get("id", "")) if isinstance(d, dict) else "",
+                "spoke_id": sid or "",
+                "connected": bool(sid and sid in getattr(hub, "active_connections", {})),
+            })
+        return {"active": active, "sources": sources, "devices": devices,
+                "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}
+
     @app.get("/setup/pxmx-config")
     async def get_pxmx_config():
         hub = app.state.hub
@@ -1706,6 +1804,210 @@ def create_app(hub):
         hub.state.system_state["global_config"] = global_config
         hub.state.save_state()
         return {"status": "ok", "message": f"Firewall {firewall_id} deleted."}
+
+    # ── Network Devices: data + CRUD (/api/nw/*, /setup/nw-devices) ───────────
+    # A single nw spoke manages a FLEET of switches + gateways (AOS-S / AOS-CX /
+    # Juniper EX / Aruba-HPE gateway). global_config["nw_devices"] is the
+    # hub-owned fleet list; each device binds to a spoke via spoke_id (unbound
+    # devices fall to whatever nw spoke is connected — single-product deploy).
+    # On edit/delete the bound spoke is re-pushed UPDATE_CONFIG with its
+    # projected device slice (no creds stripped — system.json is runtime-only,
+    # never committed). See access.filter_nw for the subnet filter contract.
+    def _get_nw_spoke(hub):
+        """The connected nw spoke id, or raise 503 (single-instance resolver)."""
+        spoke_id = hub.get_spoke_by_type("nw")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="Network Devices spoke not connected")
+        return spoke_id
+
+    def _nw_devices_for_spoke(hub, spoke_id: str):
+        """The device slice a spoke should receive (bound-to-it, else unbound)."""
+        devices = (hub.state.system_state.get("global_config", {})
+                   .get("nw_devices", []) or [])
+        mine = [d for d in devices if isinstance(d, dict) and d.get("spoke_id") == spoke_id]
+        if not mine:
+            mine = [d for d in devices if isinstance(d, dict) and not d.get("spoke_id")]
+        return mine
+
+    def _project_nw_devices_for_push(devices):
+        """Copy device dicts for the spoke payload (creds retained — runtime
+        only). Mirrors main.py ``_project_nw_devices``."""
+        import copy
+        return [copy.deepcopy(d) for d in devices if isinstance(d, dict)]
+
+    async def _nw_push_fleet(hub, spoke_id: str):
+        """Re-push the bound device slice to a connected nw spoke."""
+        if not spoke_id or spoke_id not in hub.active_connections:
+            return False
+        payload = {"devices": _project_nw_devices_for_push(_nw_devices_for_spoke(hub, spoke_id))}
+        msg = _hub_msg(spoke_id, "UPDATE_CONFIG", payload)
+        await hub.send_to_spoke(msg)
+        return True
+
+    @app.get("/api/nw/devices")
+    async def nw_list_devices(request: Request, tenant: str = None):
+        """List the nw fleet from the spoke (admin) — unfiltered (devices are
+        managed infra shown to all). Tenant scoping has no IP to filter on."""
+        logger.debug("relay GET /api/nw/devices tenant=%s", tenant)
+        hub = app.state.hub
+        spoke_id = _get_nw_spoke(hub)
+        try:
+            result = await hub.request_response(spoke_id, "NW_LIST_DEVICES", {})
+            data = access.unwrap_spoke(result)
+            return data
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("nw_list_devices failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/nw/{device_id}/{endpoint}")
+    async def nw_get_device_data(request: Request, device_id: str, endpoint: str,
+                                 tenant: str = None):
+        """Live per-device nw data (info|macs|arp|interfaces).
+
+        ``endpoint`` selects the device sub-resource → the NW_GET_<X> command.
+        Results are tenant-prefix-filtered via ``_filter_nw`` before return
+        (MAC/ARP/interfaces carry IPs; info does not). ``?tenant=`` scopes the
+        filter to the selected tenant so an admin acting as a tenant sees only
+        that tenant's subnet data — without it, admins bypass the filter (see
+        access.filter_nw)."""
+        hub = app.state.hub
+        command_map = {
+            "info":       "NW_GET_DEVICE_INFO",
+            "macs":       "NW_GET_MAC_TABLE",
+            "arp":        "NW_GET_ARP",
+            "interfaces": "NW_GET_INTERFACES",
+        }
+        spoke_cmd = command_map.get(endpoint)
+        if not spoke_cmd:
+            raise HTTPException(status_code=400, detail=f"Endpoint {endpoint} not supported by nw module")
+        logger.debug("relay GET /api/nw/%s/%s tenant=%s", device_id, endpoint, tenant)
+        spoke_id = _get_nw_spoke(hub)
+        try:
+            result = await hub.request_response(spoke_id, spoke_cmd, {"device_id": device_id})
+            data = access.unwrap_spoke(result)
+            return await _filter_nw(request, data, endpoint, tenant)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("nw_get_device_data failed (%s/%s)", device_id, endpoint)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/nw/{device_id}/config")
+    async def nw_run_config(device_id: str, request: Request):
+        """Apply a CLI/REST config snippet to a device (admin-only). Body:
+        ``{"commands": ["...", ...]}``. Returns the spoke's applied/errors lists."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        commands = (data or {}).get("commands", []) if isinstance(data, dict) else []
+        if not isinstance(commands, list):
+            raise HTTPException(status_code=400, detail="commands must be a list")
+        spoke_id = _get_nw_spoke(hub)
+        try:
+            result = await hub.request_response(spoke_id, "NW_RUN_CONFIG",
+                                                {"device_id": device_id, "commands": commands})
+            return access.unwrap_spoke(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("nw_run_config failed (%s)", device_id)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/setup/nw-devices")
+    async def get_nw_devices():
+        hub = app.state.hub
+        devices = hub.state.system_state.get("global_config", {}).get("nw_devices", [])
+        return {"nw_devices": devices}
+
+    @app.post("/setup/nw-devices")
+    async def add_nw_device(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            new_dev = data.get("device", {})
+            if not new_dev.get("name") or not new_dev.get("object_type"):
+                raise HTTPException(status_code=400, detail="Missing device name or object_type")
+            if new_dev.get("object_type") not in ("aos_switch", "cx_switch",
+                                                   "ex_switch", "gateway"):
+                raise HTTPException(status_code=400, detail="Invalid object_type")
+            if "id" not in new_dev:
+                new_dev["id"] = str(uuid.uuid4())
+
+            global_config = hub.state.system_state.get("global_config", {})
+            devices = global_config.get("nw_devices", [])
+            devices.append(new_dev)
+            global_config["nw_devices"] = devices
+            hub.state.system_state["global_config"] = global_config
+            hub.state.save_state()
+
+            # New device → push the bound slice so the spoke knows about it now.
+            spoke_id = new_dev.get("spoke_id")
+            pushed = await _nw_push_fleet(hub, spoke_id) if spoke_id else False
+            return {"status": "ok", "device": new_dev, "pushed": pushed}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("add_nw_device failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.put("/setup/nw-devices/{device_id}")
+    async def update_nw_device(device_id: str, request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            update_data = data.get("config", {})
+
+            global_config = hub.state.system_state.get("global_config", {})
+            devices = global_config.get("nw_devices", [])
+            idx = next((i for i, d in enumerate(devices)
+                        if isinstance(d, dict) and d.get("id") == device_id), None)
+            if idx is None:
+                raise HTTPException(status_code=404, detail="Network device not found")
+
+            devices[idx].update(update_data)
+            hub.state.system_state["global_config"] = global_config
+            hub.state.save_state()
+
+            spoke_id = devices[idx].get("spoke_id")
+            pushed = await _nw_push_fleet(hub, spoke_id) if spoke_id else False
+            if pushed:
+                return {"status": "ok",
+                        "message": "Network device updated and pushed to spoke.",
+                        "pushed": True}
+            return {"status": "partial_success",
+                    "message": "Configuration saved, but associated spoke is not connected.",
+                    "pushed": False}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("update_nw_device failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/setup/nw-devices/{device_id}")
+    async def delete_nw_device(device_id: str):
+        hub = app.state.hub
+        global_config = hub.state.system_state.get("global_config", {})
+        devices = global_config.get("nw_devices", [])
+        victim = next((d for d in devices if isinstance(d, dict) and d.get("id") == device_id), None)
+        original_len = len(devices)
+        devices[:] = [d for d in devices if not (isinstance(d, dict) and d.get("id") == device_id)]
+        if len(devices) == original_len:
+            raise HTTPException(status_code=404, detail="Network device not found")
+
+        hub.state.system_state["global_config"] = global_config
+        hub.state.save_state()
+        # Re-push so the spoke drops the deleted device from its fleet.
+        spoke_id = victim.get("spoke_id") if isinstance(victim, dict) else None
+        pushed = await _nw_push_fleet(hub, spoke_id) if spoke_id else False
+        return {"status": "ok", "message": f"Network device {device_id} deleted.",
+                "pushed": pushed}
 
     # ─── Multi-instance product connections (mirror firewalls) ────────────────
     # NAC / IPAM / LDAP / DNS / DHCP each manage a LIST of connection instances
@@ -4974,6 +5276,9 @@ def create_app(hub):
 
     async def _filter_fw(request, data, endpoint, firewall_id=None, explicit_tenant=None):
         return await access.filter_fw(hub, _sessions, request, data, endpoint, firewall_id, explicit_tenant)
+
+    async def _filter_nw(request, data, endpoint, explicit_tenant=None):
+        return await access.filter_nw(hub, _sessions, request, data, endpoint, explicit_tenant)
 
     async def _gate_record(request, record, module, ip_fields):
         return await access.gate_record(hub, _sessions, request, record, module, ip_fields)

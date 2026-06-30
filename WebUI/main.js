@@ -119,6 +119,19 @@ const ROUTES = {
     runFwDiscoveryNow:      { m: 'POST', p: '/setup/fw-discovery-sync/run', api: 'run_fw_discovery_sync' },
     saveFwDiscoveryConfig:  { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
 
+    // ── Network Devices discovery sync (NW → NetBox devices) ──
+    loadNwDiscoverySources: { m: 'GET',  p: '/setup/nw-discovery-sync/sources', api: 'nw_discovery_sync_sources' },
+    loadNwDiscoveryConfig:  { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
+    loadNwDiscoveryStatus:  { m: 'GET',  p: '/setup/nw-discovery-sync/status', api: 'nw_discovery_sync_status' },
+    runNwDiscoveryNow:      { m: 'POST', p: '/setup/nw-discovery-sync/run', api: 'run_nw_discovery_sync' },
+    saveNwDiscoveryConfig:  { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
+
+    // ── Network Devices management ──
+    loadNwDevices:          { m: 'GET',  p: '/setup/nw-devices',          api: 'get_nw_devices' },
+    loadNwData:             { m: 'GET',  p: '/api/nw/{devices|info|macs|arp|interfaces}', api: 'nw_list_devices/nw_get_device_data' },
+    submitNwConfig:         { m: 'POST', p: '/api/nw/{deviceId}/config',  api: 'nw_run_config' },
+    showAddNwDeviceModal:   { m: 'POST', p: '/setup/nw-devices',          api: 'add_nw_device', via: 'saveNwDevice' },
+
     // ── Cache / subnet-filter / diagnostics / logs ──
     loadCacheConfig:        { m: 'GET',  p: '/admin/cache/config',        api: 'admin_get_cache_config' },
     saveCacheConfig:        { m: 'PUT',  p: '/admin/cache/config',        api: 'admin_update_cache_config' },
@@ -346,6 +359,7 @@ const MODULE_CLASSES = {
     'Security/NAC': ['cppm', 'ise'],
     'DNS': ['dns'],
     'DHCP': ['dhcp'],
+    'Network': ['nw'],
     'Simulations': ['cs']
 };
 
@@ -408,6 +422,7 @@ const PRODUCT_MAP = {
     'netbox': 'netbox',
     'dns': 'dns',
     'dhcp': 'dhcp',
+    'nw': 'nw',
 };
 
 const LOG_NAMES = {
@@ -829,7 +844,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Tenant Config', 'Hub Status', 'Active Sessions', 'Diagnostics'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
-    setup: ['Spokes & Agents', 'Generic Nodes', 'Firewalls', 'Security/NAC', 'Sync', 'IPAM', 'LDAP', 'DNS', 'DHCP', 'Simulations'],
+    setup: ['Spokes & Agents', 'Generic Nodes', 'Firewalls', 'Network Devices', 'Security/NAC', 'Sync', 'IPAM', 'LDAP', 'DNS', 'DHCP', 'Simulations'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines'],
     ldap: ['OUs', 'Users', 'Groups'],
@@ -838,6 +853,7 @@ const VIEW_SUBMENUS = {
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records'],
     dhcp: ['Subnets', 'Leases', 'Reservations'],
+    nw: ['Devices', 'MAC Table', 'ARP', 'Interfaces'],
 };
 
 // Two-tier horizontal nav: child tabs that appear in #top-nav-secondary under
@@ -1649,6 +1665,8 @@ function _rebuildMainNav(allSpokes, connections) {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18"></path></svg>';
         } else if (className === 'DHCP') {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12.5a7 7 0 0114 0M8.5 12.5a3.5 3.5 0 017 0M2 12.5h2M20 12.5h2M12 19.5v2"></path></svg>';
+        } else if (className === 'Network') {
+            icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18M12 21a9 9 0 110-18 9 9 0 010 18z"></path></svg>';
         } else if (firstProduct && window.VIEWS && window.VIEWS[firstProduct]) {
             icon = window.VIEWS[firstProduct].icon || '';
         }
@@ -1874,6 +1892,7 @@ const VIEW_LOADERS = {
     netbox:   loadNetboxData,
     dns:      loadDNSData,
     dhcp:     loadDHCPData,
+    nw:       loadNwData,
     cs:       (subMenu) => loadCSData(subMenu, currentSubChild),
     setup:    _renderSetupSection,
     settings: _renderSettingsSection,
@@ -1994,6 +2013,13 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-4">
   <div id="opn-table-container" class="${card}">
     <div class="py-12 text-center text-slate-400 italic">Loading firewalls…</div>
+  </div>
+</div>`;
+
+        case 'nw':
+            return `<div class="space-y-4">
+  <div id="nw-table-container" class="${card}">
+    <div class="py-12 text-center text-slate-400 italic">Loading network devices…</div>
   </div>
 </div>`;
 
@@ -2118,6 +2144,9 @@ function initView(viewId, subView) {
             break;
         case 'dhcp':
             loadDHCPData(subView || 'Subnets');
+            break;
+        case 'nw':
+            loadNwData(subView || 'Devices');
             break;
         case 'cs':
             loadCSData(subView || 'Dashboard', currentSubChild);
@@ -2534,7 +2563,22 @@ function _renderSetupFirewallsTile(content) {
     loadFirewallsList();
 }
 
-// Setup → Security/NAC tile. NAC / ClearPass instances only.
+// Setup → Network Devices tile. GET /setup/nw-devices (core/src/api.py
+// get_nw_devices). Mirrors the Firewalls tile: a fleet of switches + gateways
+// (AOS-S / AOS-CX / Juniper EX / Aruba-HPE gateway) with per-row Edit/Delete
+// and an "+ Add Device" modal. Creds live in runtime system.json only.
+function _renderSetupNwTile(content) {
+    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Network Devices</h3>
+                    <button onclick="showAddNwDeviceModal()" class="${btnCls}">+ Add Device</button>
+                </div>
+                <div id="nw-devices-list" class="space-y-2"></div>
+            </div>`;
+    loadNwDevicesList();
+}
 // GET /api/instances/nac (core/src/api.py get_instances).
 // The IPAM → NAC endpoint sync schedule moved to the dedicated
 // Setup → Sync tile (_renderSetupSyncTile).
@@ -2731,6 +2775,59 @@ function _renderSetupSyncTile(content) {
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
                     <div id="fw-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                 </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Network Devices → IPAM Sync</h3>
+                    <button id="nw-sync-run-btn" onclick="runNwDiscoveryNow()" class="${btnCls}">Sync now</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Pulls the ARP table from every device on the selected network-device source (switches + gateways via the nw spoke, attributed to the tenant by prefix containment), and mirrors each discovered IP↔MAC into NetBox DCIM devices + IP records — tenant-tagged <code>Network Devices</code>, with the MAC written onto the IP's <code>mac_address</code> custom field (which feeds the IPAM → NAC endpoint sync). The network devices are the source of truth — each sync overwrites the tenant's nw-discovered device set to match (stale nw-owned records are deleted; firewall-discovered records are never touched). Devices whose IP matches no tenant prefix are dropped + counted. Switch/gateway products are registered in the hub's NW_DISCOVERY_SOURCES registry.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="nw-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sync</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Pull from (network source)</label>
+                        <select id="nw-sync-source" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="nw">Network Devices</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Schedule</label>
+                        <select id="nw-sync-mode" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="interval">Every (interval)</option>
+                            <option value="daily">Daily at time</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Interval (minutes)</label>
+                        <input type="number" id="nw-sync-interval" min="1" value="60" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Daily time (HH:MM, 24h)</label>
+                        <input type="time" id="nw-sync-time" value="02:30" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                </div>
+                <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div class="space-y-1">
+                        <label class="${labelCls}">NetBox device role (slug)</label>
+                        <input id="nw-sync-role" placeholder="discovered" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">NetBox device type (slug)</label>
+                        <input id="nw-sync-type" placeholder="discovered" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">NetBox site (slug, optional)</label>
+                        <input id="nw-sync-site" placeholder="" class="${inputCls}">
+                    </div>
+                </div>
+                <div class="mt-4 flex items-center gap-3">
+                    <button onclick="saveNwDiscoveryConfig()" class="${btnCls}">Save Schedule</button>
+                    <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
+                    <div id="nw-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
             </div>`;
     loadEndpointSyncSources();
     loadEndpointSyncConfig();
@@ -2743,6 +2840,9 @@ function _renderSetupSyncTile(content) {
     loadFwDiscoverySources();
     loadFwDiscoveryConfig();
     loadFwDiscoveryStatus();
+    loadNwDiscoverySources();
+    loadNwDiscoveryConfig();
+    loadNwDiscoveryStatus();
 }
 
 // Setup → IPAM tile. IPAM / NetBox instances only.
@@ -2972,6 +3072,7 @@ const SETUP_TILES = {
     'Tenant Config':    _renderSetupTenantTile,
     'User Access':      _renderSetupUserAccessTile,
     'Firewalls':        _renderSetupFirewallsTile,
+    'Network Devices':  _renderSetupNwTile,
     'Security/NAC':     _renderSetupNacTile,
     'Sync':             _renderSetupSyncTile,
     'IPAM':             _renderSetupIpamTile,
@@ -3604,6 +3705,132 @@ async function saveFwDiscoveryConfig() {
     }
 }
 
+// Network Devices → IPAM discovery sync (Setup → Sync, 4th card).
+// Backing routes: /setup/nw-discovery-sync/{sources,status,run} + shared
+// /setup/config (saved under global_config.nw_netbox_device_sync). Mirrors the
+// firewall-discovery card; the nw source pulls ARP from switches + gateways.
+async function loadNwDiscoverySources() {
+    const sel = document.getElementById('nw-sync-source');
+    if (!sel) return;
+    try {
+        const r = await setupFetch('/setup/nw-discovery-sync/sources');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cur = sel.value;
+        sel.innerHTML = (data.sources || []).map(s =>
+            `<option value="${s.name}">${s.label}${s.connected ? '' : ' (not connected)'}</option>`
+        ).join('');
+        if (cur) sel.value = cur;
+    } catch (e) { console.error('loadNwDiscoverySources failed', e); }
+}
+
+async function loadNwDiscoveryConfig() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cfg = (data.global_config || {}).nw_netbox_device_sync || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        const chk = document.getElementById('nw-sync-enabled');
+        if (chk) chk.checked = cfg.enabled === true;
+        set('nw-sync-source', cfg.source || 'nw');
+        set('nw-sync-mode', cfg.mode === 'daily' ? 'daily' : 'interval');
+        set('nw-sync-interval', Math.max(1, Math.round((cfg.interval_seconds || 3600) / 60)));
+        set('nw-sync-time', cfg.daily_time || '02:30');
+        const d = cfg.defaults || {};
+        set('nw-sync-role', d.role || '');
+        set('nw-sync-type', d.device_type || '');
+        set('nw-sync-site', d.site || '');
+    } catch (e) { console.error('loadNwDiscoveryConfig failed', e); }
+}
+
+async function loadNwDiscoveryStatus() {
+    const wrap = document.getElementById('nw-sync-status');
+    if (!wrap) return;
+    let data;
+    try {
+        const r = await setupFetch('/setup/nw-discovery-sync/status');
+        if (!r.ok) throw new Error(`${r.status}`);
+        data = await r.json();
+    } catch (e) {
+        wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
+        return;
+    }
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const rows = data.tenants || [];
+    if (!rows.length) {
+        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
+        return;
+    }
+    wrap.innerHTML = rows.map(t => {
+        const st = String(t.status || '');
+        const pill = st === 'success' ? 'bg-green-100 text-green-700'
+            : st === 'error' ? 'bg-red-100 text-red-700'
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+        const pushed = Number(t.pushed) || 0;
+        const errors = Number(t.errors) || 0;
+        const deleted = Number(t.deleted) || 0;
+        const skipped = Number(t.skipped) || 0;
+        const total = Number(t.discovered_total) || 0;
+        const skipLine = skipped > 0 ? ` · <span class="text-amber-600">skipped ${skipped}</span>` : '';
+        return `<div class="border border-slate-200 rounded-md p-3">
+            <div class="flex items-center justify-between mb-1">
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
+            </div>
+            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · discovered ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+        </div>`;
+    }).join('');
+}
+
+async function runNwDiscoveryNow() {
+    const btn = document.getElementById('nw-sync-run-btn');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+        const r = await setupFetch('/setup/nw-discovery-sync/run', {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        const s = data.summary || {};
+        showToast(`Synced ${s.tenants || 0} tenant(s): ${s.pushed || 0} pushed, ${s.deleted || 0} deleted, ${s.dropped_unattributed || 0} dropped, ${s.errors || 0} errors.`, (s.errors || 0) ? 'info' : 'success');
+        await loadNwDiscoveryStatus();
+    } catch (e) {
+        showToast('Sync failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+}
+
+async function saveNwDiscoveryConfig() {
+    const enabled = document.getElementById('nw-sync-enabled')?.checked ? true : false;
+    const source = document.getElementById('nw-sync-source')?.value || 'nw';
+    const mode = document.getElementById('nw-sync-mode')?.value || 'interval';
+    const intervalMin = Math.max(1, parseInt(document.getElementById('nw-sync-interval')?.value, 10) || 60);
+    const dailyTime = document.getElementById('nw-sync-time')?.value || '02:30';
+    const defaults = {
+        role: (document.getElementById('nw-sync-role')?.value || '').trim(),
+        device_type: (document.getElementById('nw-sync-type')?.value || '').trim(),
+        site: (document.getElementById('nw-sync-site')?.value || '').trim(),
+    };
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { nw_netbox_device_sync: {
+                enabled, source, mode, interval_seconds: intervalMin * 60,
+                daily_time: dailyTime, defaults
+            } } })
+        });
+        if (r.ok) showToast('Network Devices discovery sync schedule saved.', 'success');
+        else showToast('Failed to save schedule.', 'error');
+    } catch (e) {
+        showToast('Error saving schedule: ' + e.message, 'error');
+    }
+}
+
 async function loadSubnetFilterToggles() {
     const wrap = document.getElementById('subnet-filter-toggles');
     if (!wrap) return;
@@ -3976,6 +4203,67 @@ async function deleteFirewallEntry(id) {
         if (!r.ok) throw new Error(await r.text());
         loadFirewallsList();
         loadFirewalls();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+// Network Devices fleet list (Setup → Network Devices). Mirrors loadFirewallsList
+// but reads /setup/nw-devices. Cache so the add/edit modal's editNwDevice can
+// resolve a device without a second fetch.
+let _nwDevicesCache = [];
+async function loadNwDevices() {
+    try {
+        const r = await setupFetch('/setup/nw-devices');
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        _nwDevicesCache = Array.isArray(data.nw_devices) ? data.nw_devices : [];
+        return _nwDevicesCache;
+    } catch (e) {
+        _nwDevicesCache = [];
+        return [];
+    }
+}
+
+const _NW_OBJECT_TYPES = {
+    aos_switch: 'AOS Switch',
+    cx_switch:  'CX Switch',
+    ex_switch:  'EX Switch',
+    gateway:    'Gateway',
+};
+const _NW_TRANSPORTS = { ssh: 'SSH/CLI', rest: 'REST API', snmp: 'SNMP', auto: 'Auto' };
+
+async function loadNwDevicesList() {
+    const listEl = document.getElementById('nw-devices-list');
+    if (!listEl) return;
+    try {
+        const devices = await loadNwDevices();
+        if (devices.length === 0) {
+            listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No network devices configured.</p>';
+            return;
+        }
+        listEl.innerHTML = devices.map(d => {
+            const typeLabel = _NW_OBJECT_TYPES[d.object_type] || d.object_type || '—';
+            const transport = _NW_TRANSPORTS[d.transport] || d.transport || 'auto';
+            return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(d.name || d.id)}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(typeLabel)} · ${escapeHtml(transport)} · ${escapeHtml(d.address || '')}${d.port ? ':' + escapeHtml(String(d.port)) : ''}</span></div>
+                <div class="flex gap-2">
+                    <button onclick="editNwDevice('${escapeHtml(d.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
+                    <button onclick="deleteNwDeviceEntry('${escapeHtml(d.id)}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
+                </div>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        listEl.innerHTML = `<p class="text-xs text-red-500">Error loading network devices: ${e.message}</p>`;
+    }
+}
+
+async function deleteNwDeviceEntry(id) {
+    if (!confirm(`Delete network device ${id}?`)) return;
+    try {
+        const r = await setupFetch(`/setup/nw-devices/${id}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error(await r.text());
+        loadNwDevicesList();
     } catch (e) {
         alert('Error: ' + e.message);
     }
@@ -5775,6 +6063,226 @@ async function loadOpnsenseManagement() {
         console.error(`[OPNsense] Error in loadOpnsenseManagement:`, err);
         container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${subMenu}: ${err.message}</div>`;
     }
+}
+
+// Network Devices management view (mirrors loadOpnsenseManagement).
+// Devices → fleet list (/api/nw/devices); MAC Table / ARP / Interfaces →
+// per-device fetch merged across the fleet (/api/nw/{id}/{macs|arp|interfaces}),
+// each row tagged with its source device (_deviceId / device). ?tenant=
+// scopes the server-side subnet filter to the selected tenant (incl. admins
+// via the switcher); without it admins bypass the filter (see access.filter_nw).
+async function loadNwData(subMenu) {
+    const container = document.getElementById('nw-table-container');
+    if (!container) return;
+    subMenu = subMenu || currentSubView;
+    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${subMenu} data…</div>`;
+
+    // Suppress the per-view "+ Add" action strip for nw (no add-from-view flow;
+    // devices are managed on Setup → Network Devices).
+    const actions = document.getElementById('top-nav-actions');
+    if (actions) actions.innerHTML = '';
+
+    const tenantQs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
+
+    try {
+        if (subMenu === 'Devices') {
+            let r;
+            try {
+                r = await fetch(`/api/nw/devices${tenantQs}`);
+            } catch (e) {
+                container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Network Devices spoke not connected. Approve one in Setup → Spokes & Agents.</div>`;
+                return;
+            }
+            if (!r.ok) {
+                container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Network Devices spoke not connected (HTTP ${r.status}).</div>`;
+                return;
+            }
+            const data = await r.json();
+            const items = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+            if (!items.length) {
+                container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No network devices configured. Add one in Setup → Network Devices.</div>`;
+                return;
+            }
+            const keys = ['device', 'object_type', 'transport', 'address', 'reachable'];
+            const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
+            const rows = items.map((it, idx) => {
+                const typeLabel = _NW_OBJECT_TYPES[it.object_type] || it.object_type || '—';
+                const transport = _NW_TRANSPORTS[it.transport] || it.transport || 'auto';
+                const reachable = it.reachable;
+                const rcell = reachable === true || reachable === 'up'
+                    ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+                    : reachable === false || reachable === 'down'
+                        ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
+                        : `<span class="text-slate-400 text-xs">—</span>`;
+                const cfg = isAdmin()
+                    ? `<button onclick="showNwConfigModal('${escapeHtml(it.id)}','${escapeHtml(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
+                    : '';
+                return `<tr class="hover:bg-slate-50 transition-colors">
+                    <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
+                    <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
+                    <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(transport)}</td>
+                    <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(it.address || '—')}</td>
+                    <td class="px-4 py-3">${rcell}</td>
+                    <td class="px-4 py-3 text-right">${cfg}</td>
+                </tr>`;
+            }).join('');
+            container.innerHTML = `
+                <div class="space-y-4">
+                    <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
+                            <tbody class="divide-y divide-slate-200">${rows}</tbody>
+                        </table>
+                    </div>
+                </div>`;
+            return;
+        }
+
+        const suffixFor = sm => {
+            if (sm === 'MAC Table') return 'macs';
+            if (sm === 'ARP') return 'arp';
+            if (sm === 'Interfaces') return 'interfaces';
+            return null;
+        };
+        const suffix = suffixFor(subMenu);
+        if (!suffix) return;
+
+        // List the fleet first, then fetch the per-device sub-resource in
+        // parallel and merge into one table tagged with _deviceId.
+        let devList = [];
+        try {
+            const dr = await fetch(`/api/nw/devices`);
+            if (dr.ok) {
+                const dd = await dr.json();
+                devList = Array.isArray(dd) ? dd : (Array.isArray(dd?.data) ? dd.data : []);
+            }
+        } catch (e) { /* spoke down handled below */ }
+        if (!devList.length) {
+            container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Network Devices spoke not connected or no devices configured.</div>`;
+            return;
+        }
+
+        const results = await Promise.allSettled(devList.map(d =>
+            fetch(`/api/nw/${d.id}/${suffix}${tenantQs}`)
+                .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status} ${r.statusText}`)))
+                .then(data => ({ dev: d, data }))
+        ));
+        const extractItems = data => {
+            if (Array.isArray(data)) return data;
+            if (data && typeof data === 'object') {
+                if (Array.isArray(data.data)) return data.data;
+                if (Array.isArray(data.payload?.data)) return data.payload.data;
+            }
+            return [];
+        };
+        let items = [];
+        const errors = [];
+        results.forEach(res => {
+            if (res.status === 'fulfilled') {
+                items = items.concat(extractItems(res.value.data).map(it => ({
+                    ...it, _deviceId: res.value.dev.id, device: res.value.dev.name || res.value.dev.id
+                })));
+            } else {
+                errors.push(String((res.reason && res.reason.message) || res.reason));
+            }
+        });
+
+        if (!items.length) {
+            const errNote = errors.length ? `<div class="text-xs text-amber-600 mt-2">${errors.length} device(s) unreachable.</div>` : '';
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.${errNote}</div>`;
+            return;
+        }
+
+        let keys;
+        if (subMenu === 'MAC Table') keys = ['device', 'mac', 'vlan', 'interface'];
+        else if (subMenu === 'ARP') keys = ['device', 'ip', 'mac', 'interface'];
+        else if (subMenu === 'Interfaces') keys = ['device', 'name', 'ip', 'mac', 'vlan', 'status', 'speed'];
+        else keys = ['device', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && k !== 'device' && !k.startsWith('_'))];
+
+        const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
+        const rows = items.map(item => {
+            const cells = keys.map(k => {
+                const val = item[k] !== undefined && item[k] !== null && item[k] !== '' ? String(item[k]) : '-';
+                if (k === 'device') return `<td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(val)}</td>`;
+                if (k === 'status') {
+                    const color = val === 'up' ? 'text-green-600' : 'text-slate-400';
+                    return `<td class="px-4 py-3 font-mono text-xs ${color}">${escapeHtml(val)}</td>`;
+                }
+                return `<td class="px-4 py-3 text-slate-600 font-mono text-xs max-w-[200px] truncate" title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
+            }).join('');
+            return `<tr class="hover:bg-slate-50 transition-colors">${cells}</tr>`;
+        }).join('');
+
+        const errBanner = errors.length ? `<div class="text-xs text-amber-600">${errors.length} of ${devList.length} device(s) unreachable.</div>` : '';
+        container.innerHTML = `
+            <div class="space-y-4">
+                ${errBanner}
+                <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+                        <tbody class="divide-y divide-slate-200">${rows}</tbody>
+                    </table>
+                </div>
+            </div>`;
+    } catch (err) {
+        console.error(`[Network] Error in loadNwData:`, err);
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${subMenu}: ${err.message}</div>`;
+    }
+}
+
+// Admin: apply a CLI/REST config snippet to a device (POST /api/nw/{id}/config).
+function showNwConfigModal(deviceId, deviceName) {
+    const modal = document.createElement('div');
+    modal.id = 'nw-config-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">Configure ${escapeHtml(deviceName)}</h3>
+                <button onclick="closeNwConfigModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+            </div>
+            <div class="p-6 space-y-3">
+                <p class="text-xs text-slate-400">One command per line. Applied via the device's transport (SSH/CLI or REST) by the nw spoke.</p>
+                <textarea id="nw-config-commands" rows="8" placeholder="show version\nshow running-config" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500"></textarea>
+                <div id="nw-config-result" class="text-xs text-slate-500"></div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+                <button onclick="closeNwConfigModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+                <button onclick="submitNwConfig('${escapeHtml(deviceId)}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Apply</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    modal.dataset.deviceId = deviceId;
+}
+
+async function submitNwConfig(deviceId) {
+    const ta = document.getElementById('nw-config-commands');
+    const out = document.getElementById('nw-config-result');
+    const commands = (ta?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+    if (!commands.length) { if (out) out.textContent = 'Enter at least one command.'; return; }
+    if (out) out.textContent = 'Applying…';
+    try {
+        const r = await setupFetch(`/api/nw/${deviceId}/config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ commands })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data?.status === 'SUCCESS') {
+            const applied = Array.isArray(data.applied) ? data.applied.length : 0;
+            const errs = Array.isArray(data.errors) ? data.errors.length : 0;
+            if (out) out.innerHTML = `<span class="text-green-600">Applied ${applied} command(s)${errs ? `, ${errs} error(s)` : ''}.</span>`;
+        } else {
+            if (out) out.innerHTML = `<span class="text-red-600">Failed: ${escapeHtml(data?.message || r.status)}</span>`;
+        }
+    } catch (e) {
+        if (out) out.innerHTML = `<span class="text-red-600">Error: ${escapeHtml(e.message)}</span>`;
+    }
+}
+
+function closeNwConfigModal() {
+    const modal = document.getElementById('nw-config-modal');
+    if (modal) modal.remove();
 }
 
 // ─── PXMX / Proxmox ──────────────────────────────────────────────────────────
@@ -8728,6 +9236,136 @@ async function saveFirewall() {
 
 function closeFirewallModal() {
     const modal = document.getElementById('firewall-modal');
+    if (modal) modal.remove();
+}
+
+// ─── Network Devices: add/edit modal (mirrors the firewall modal) ───────────
+// Fields: name, object_type (AOS/CX/EX/Gateway), transport (ssh/rest/snmp/auto),
+// address, port, username, password, enable_secret, api_token, snmp_community,
+// spoke (filtered to nw spokes). Creds are stored in runtime system.json only.
+function showAddNwDeviceModal() {
+    const modal = document.createElement('div');
+    modal.id = 'nw-device-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
+                <h3 class="text-lg font-bold text-[#263040]" id="nw-modal-title">Add Network Device</h3>
+                <button onclick="closeNwDeviceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Device Name</label><input type="text" id="nw-name" placeholder="e.g. Core Switch" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Object Type</label><select id="nw-object-type" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="aos_switch">AOS Switch</option><option value="cx_switch">CX Switch</option><option value="ex_switch">EX Switch</option><option value="gateway">Gateway</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Transport</label><select id="nw-transport" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="auto">Auto</option><option value="ssh">SSH/CLI</option><option value="rest">REST API</option><option value="snmp">SNMP</option></select></div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="nw-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Port</label><input type="text" id="nw-port" placeholder="22 / 443" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                </div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Address / Host IP</label><input type="text" id="nw-address" placeholder="10.0.0.1" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Username</label><input type="text" id="nw-username" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Password</label><input type="password" id="nw-password" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Enable Secret</label><input type="password" id="nw-enable-secret" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Token</label><input type="password" id="nw-api-token" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                </div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">SNMP Community</label><input type="text" id="nw-snmp-community" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
+                <button onclick="closeNwDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+                <button onclick="saveNwDevice()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Device</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+
+    loadApprovedSpokes().then(spokes => {
+        const selector = document.getElementById('nw-spoke');
+        if (selector) {
+            const nwSpokes = spokes.filter(s =>
+                s.module_type === 'nw' || /^(nw|network)/.test(s.spoke_id)
+            );
+            selector.innerHTML = nwSpokes.length > 0
+                ? '<option value="">— select spoke —</option>' + nwSpokes.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('')
+                : '<option value="">No network spokes found</option>';
+        }
+    });
+}
+
+async function editNwDevice(id) {
+    const devices = _nwDevicesCache.length ? _nwDevicesCache : await loadNwDevices();
+    const d = devices.find(x => x.id === id);
+    if (!d) return;
+
+    showAddNwDeviceModal();
+    document.getElementById('nw-modal-title').textContent = 'Edit Network Device';
+    document.getElementById('nw-name').value = d.name || '';
+    document.getElementById('nw-object-type').value = d.object_type || 'aos_switch';
+    document.getElementById('nw-transport').value = d.transport || 'auto';
+    document.getElementById('nw-address').value = d.address || '';
+    document.getElementById('nw-port').value = d.port || '';
+    document.getElementById('nw-username').value = d.username || '';
+    document.getElementById('nw-password').value = d.password || '';
+    document.getElementById('nw-enable-secret').value = d.enable_secret || '';
+    document.getElementById('nw-api-token').value = d.api_token || '';
+    document.getElementById('nw-snmp-community').value = d.snmp_community || '';
+
+    setTimeout(() => {
+        const selector = document.getElementById('nw-spoke');
+        if (selector) selector.value = d.spoke_id || '';
+    }, 100);
+
+    document.getElementById('nw-device-modal').dataset.deviceId = id;
+}
+
+async function saveNwDevice() {
+    const modal = document.getElementById('nw-device-modal');
+    const id = modal.dataset.deviceId;
+    const config = {
+        name: document.getElementById('nw-name').value.trim(),
+        object_type: document.getElementById('nw-object-type').value,
+        transport: document.getElementById('nw-transport').value,
+        spoke_id: document.getElementById('nw-spoke').value,
+        address: document.getElementById('nw-address').value.trim(),
+        port: parseInt(document.getElementById('nw-port').value, 10) || null,
+        username: document.getElementById('nw-username').value,
+        password: document.getElementById('nw-password').value,
+        enable_secret: document.getElementById('nw-enable-secret').value,
+        api_token: document.getElementById('nw-api-token').value,
+        snmp_community: document.getElementById('nw-snmp-community').value,
+    };
+    if (!config.name || !config.object_type) {
+        alert('Device name and object type are required.');
+        return;
+    }
+
+    try {
+        const method = id ? 'PUT' : 'POST';
+        const url = id ? `/setup/nw-devices/${id}` : '/setup/nw-devices';
+        const payload = id ? { config } : { device: config };
+        const response = await setupFetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (response.ok) {
+            alert(`Network device ${id ? 'updated' : 'added'} successfully!`);
+            closeNwDeviceModal();
+            loadNwDevicesList();
+        } else {
+            const err = await response.json().catch(() => ({}));
+            alert('Failed to save network device: ' + (err.detail || response.status));
+        }
+    } catch (err) {
+        alert('Error saving network device: ' + err.message);
+    }
+}
+
+function closeNwDeviceModal() {
+    const modal = document.getElementById('nw-device-modal');
     if (modal) modal.remove();
 }
 
