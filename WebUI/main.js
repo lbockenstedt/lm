@@ -4758,7 +4758,7 @@ function _diagRowHtml(s, fns) {
                     <span class="block text-slate-400 text-[10px]">${hbLabel}</span>`;
     // Version: module version + skew warning badge.
     const skew = s.version_skew
-        ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase" title="Version differs from hub ${s.hub_version || ''}">skew</span>`
+        ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase" title="Not on the current .NN numbering">skew</span>`
         : '';
     const verCell = `<span class="font-mono text-xs text-slate-600">${s.version || 'unknown'}</span>${skew}`;
     // Status + last error stacked.
@@ -4813,6 +4813,12 @@ function _diagRowHtml(s, fns) {
 // heartbeat_age_s. We fall back to the spoke's own last_seen so a freshly-seen
 // agent still shows a status before the first relayed beat lands. Recovery/
 // events stay empty/neutral (the watchdog is spoke-scoped, not per-agent).
+// True when v is a bare per-repo ".NN" version (e.g. ".33"). Each repo's .NN
+// is an independent bump counter, so a component .NN differing from the hub's
+// .NN is normal; SKEW now flags only versions NOT in this shape (stale X.Y.Z /
+// v-tag / pre-reset). Mirrors the backend _is_nn check in api.py get_diagnostics.
+function _isNN(v) { return /^\.\d+$/.test(String(v == null ? '' : v).trim()); }
+
 function _normalizePxmxAgent(a) {
     const connected = a._status === 'connected';
     let hbStatus = a.heartbeat_status || '';
@@ -4822,6 +4828,7 @@ function _normalizePxmxAgent(a) {
         if (hbAge == null) hbAge = age;
         if (!hbStatus) hbStatus = age < 120 ? 'GREEN' : age < 300 ? 'YELLOW' : 'RED';
     }
+    const ver = a.version || a.sw_version || 'unknown';
     return {
         spoke_id: a.agent_id,
         display_name: a.display_name || a.hostname || a.agent_id,
@@ -4829,8 +4836,8 @@ function _normalizePxmxAgent(a) {
         authenticated: connected,
         connection_state: connected ? 'CONNECTED' : 'PENDING',
         module_type: 'pxmx',
-        version: a.version || a.sw_version || 'unknown',
-        version_skew: false,
+        version: ver,
+        version_skew: ver !== 'unknown' && !_isNN(ver),
         heartbeat_status: hbStatus,
         heartbeat_age_s: hbAge,
         last_status: connected ? '' : 'PENDING_SECRET',
@@ -4992,7 +4999,7 @@ async function loadDiagnostics() {
                 ${recovering ? `<span class="px-2 py-1 rounded-md bg-amber-100 text-amber-700 font-medium">Recovering: ${recovering}</span>` : ''}
                 ${gaveUp ? `<span class="px-2 py-1 rounded-md bg-red-100 text-red-700 font-medium">Gave up: ${gaveUp}</span>` : ''}
                 ${paused ? `<span class="px-2 py-1 rounded-md bg-slate-200 text-slate-600 font-medium">Paused: ${paused}</span>` : ''}
-                <span class="text-slate-400">A version mismatch between a spoke and the hub is flagged in the Version column.</span>
+                <span class="text-slate-400">A component not on the current .NN numbering is flagged in the Version column.</span>
             </div>
             <h3 class="mb-2 text-sm font-bold text-slate-700 uppercase tracking-wider">Spokes</h3>
             <div class="overflow-x-auto rounded-md border border-slate-200 bg-white">
