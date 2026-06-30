@@ -132,6 +132,11 @@ const ROUTES = {
     runStalenessSweepNow:     { m: 'POST', p: '/setup/staleness-sweep/run',     api: 'run_staleness_sweep' },
     saveStalenessSweepConfig: { m: 'POST', p: '/setup/config',                  api: 'update_global_config' },
 
+    // ── Spoke out-of-contact alerts (System → Sync; saved via /setup/config) ──
+    loadSpokeAlertConfig:     { m: 'GET',  p: '/setup/config',                  api: 'get_global_config' },
+    loadSpokeAlerts:          { m: 'GET',  p: '/setup/spoke-alerts',            api: 'spoke_alerts' },
+    saveSpokeAlertConfig:     { m: 'POST', p: '/setup/config',                  api: 'update_global_config' },
+
     // ── Source-of-truth per module (System → Sync; saved via /setup/config) ──
     loadSourceOfTruthConfig:  { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
     saveSourceOfTruthConfig:  { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
@@ -1591,6 +1596,12 @@ function _updateMetrics(statusData) {
         versionEl.textContent = m.version;
         window.__lmHubVersion = m.version;  // for File-a-Bug context
     }
+
+    // Out-of-contact alerts (SpokeAlertMixin) — surfaced on the already-polled
+    // /status fetch so the header status tooltip can show a count with no extra
+    // polling. renderSpokeIndicators() reads window.activeAlerts.
+    window.activeAlerts = Array.isArray(statusData.active_alerts) ? statusData.active_alerts : [];
+    window.activeAlertCount = Number(statusData.active_alert_count) || 0;
 }
 
 // Mark the hub online + build the spoke-health map (from /setup/diagnostics)
@@ -1826,7 +1837,25 @@ function renderSpokeIndicators() {
     else if (allRed) overallColor = 'bg-red-500';
 
     moduleDot.className = `w-2 h-2 rounded-full ${overallColor} transition-all`;
-    tooltipEl.innerHTML = tooltipHtml;
+
+    // Append a forgiving out-of-contact alert summary (SpokeAlertMixin) to the
+    // tooltip. Distinct from the realtime dots above — these fire only after a
+    // spoke has been out of contact >=5m (warning) / >=30m (error). An active
+    // error alert also turns the module dot red so an operator scanning the
+    // header notices a sustained outage.
+    const alerts = Array.isArray(window.activeAlerts) ? window.activeAlerts : [];
+    let alertHtml = '';
+    if (alerts.length) {
+        const hasErr = alerts.some(a => String(a.tier) === 'error');
+        if (hasErr) overallColor = 'bg-red-500';
+        moduleDot.className = `w-2 h-2 rounded-full ${overallColor} transition-all`;
+        const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        alertHtml = `<div class="mt-2 pt-2 border-t border-white/15">
+            <div class="text-[9px] uppercase opacity-60 mb-1">Out-of-contact alerts</div>
+            ${alerts.map(a => `<div class="flex items-center justify-between gap-4 py-0.5"><span class="font-mono opacity-80">${esc(a.spoke_id)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${a.tier === 'error' ? 'bg-red-400' : 'bg-amber-400'}"></div><span class="text-[9px]">${a.tier}</span></div></div>`).join('')}
+        </div>`;
+    }
+    tooltipEl.innerHTML = tooltipHtml + alertHtml;
 }
 
 async function setView(viewId) {
@@ -2877,6 +2906,28 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Out-of-Contact Alerts</h3>
+                    <button onclick="saveSpokeAlertConfig()" class="${btnCls}">Save</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Forgiving liveness alerting, separate from the realtime heartbeat traffic-light. A spoke that blips for a few seconds (restart, WAN jitter) stays quiet; only once an approved spoke has been <strong>out of contact</strong> for <em>warn minutes</em> does a <strong>warning</strong> fire, and after <em>error minutes</em> it escalates to <strong>error</strong> (which also lands in the Error Log / bugfixer feed). Decoupled from the 300s recovery watchdog — that still restarts stranded spokes on its own schedule.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="spoke-alert-enabled" class="w-4 h-4 text-green-600 rounded">Enable out-of-contact alerts</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Warn after (minutes)</label>
+                        <input type="number" id="spoke-alert-warn-min" min="1" value="5" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Error after (minutes)</label>
+                        <input type="number" id="spoke-alert-error-min" min="1" value="30" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Active alerts</div>
+                    <div id="spoke-alerts-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth</h3>
                     <button onclick="saveSourceOfTruthConfig()" class="${btnCls}">Save</button>
                 </div>
@@ -2929,6 +2980,8 @@ function _renderSetupSyncTile(content) {
     loadStalenessSweepConfig();
     loadStalenessSweepStatus();
     loadSourceOfTruthConfig();
+    loadSpokeAlertConfig();
+    loadSpokeAlerts();
 }
 
 // Setup → IPAM tile. IPAM / NetBox instances only.
@@ -3625,6 +3678,75 @@ async function saveSourceOfTruthConfig() {
     } catch (e) {
         showToast('Error saving: ' + e.message, 'error');
     }
+}
+
+// ── Spoke out-of-contact alerts (System → Sync; saved via /setup/config) ──
+// global_config["spoke_alert"] = {enabled, warn_s, error_s}. The loop
+// (core/src/spoke_alert_sync.py run_spoke_alert_loop) reads it fresh each cycle.
+async function loadSpokeAlertConfig() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cfg = (data.global_config || {}).spoke_alert || {};
+        const en = document.getElementById('spoke-alert-enabled');
+        const wmin = document.getElementById('spoke-alert-warn-min');
+        const emin = document.getElementById('spoke-alert-error-min');
+        if (en) en.checked = cfg.enabled === true;
+        if (wmin) wmin.value = Math.max(1, Math.round((cfg.warn_s || 300) / 60));
+        if (emin) emin.value = Math.max(1, Math.round((cfg.error_s || 1800) / 60));
+    } catch (e) { console.error('loadSpokeAlertConfig failed', e); }
+}
+
+async function saveSpokeAlertConfig() {
+    const enabled = document.getElementById('spoke-alert-enabled')?.checked ? true : false;
+    const warnMin = Math.max(1, parseInt(document.getElementById('spoke-alert-warn-min')?.value, 10) || 5);
+    const errorMin = Math.max(1, parseInt(document.getElementById('spoke-alert-error-min')?.value, 10) || 30);
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { spoke_alert: {
+                enabled, warn_s: warnMin * 60, error_s: errorMin * 60
+            } } })
+        });
+        if (r.ok) showToast('Spoke alert config saved.', 'success');
+        else showToast('Failed to save.', 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    }
+}
+
+async function loadSpokeAlerts() {
+    const wrap = document.getElementById('spoke-alerts-status');
+    if (!wrap) return;
+    let data;
+    try {
+        const r = await setupFetch('/setup/spoke-alerts');
+        if (!r.ok) throw new Error(`${r.status}`);
+        data = await r.json();
+    } catch (e) {
+        wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
+        return;
+    }
+    const alerts = (data && data.active_alerts) || [];
+    if (!alerts.length) {
+        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No active alerts — every approved spoke is in contact.</p>';
+        return;
+    }
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    wrap.innerHTML = alerts.map(a => {
+        const isErr = String(a.tier) === 'error';
+        const pill = isErr ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700';
+        const mins = Math.max(0, Math.round((a.duration_s || 0) / 60));
+        return `<div class="border border-slate-200 rounded-md p-3">
+            <div class="flex items-center justify-between mb-1">
+                <span class="text-sm font-mono text-slate-700">${esc(a.spoke_id)}</span>
+                <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(a.tier)}</span>
+            </div>
+            <p class="text-xs text-slate-500">out of contact ${mins}m <span class="text-slate-400">· since ${fmtDate(a.since_ts)}</span></p>
+            ${a.detail ? `<p class="text-xs text-slate-400 mt-1">${esc(a.detail)}</p>` : ''}
+        </div>`;
+    }).join('');
 }
 
 // ── Hypervisor → NetBox VM sync (System → Sync) ──────────────────────────
@@ -5279,6 +5401,8 @@ const SPOKE_EVENT_LABELS = {
     pending_approval:     { label: 'Pending approval',      tone: 'text-amber-600' },
     connection_closed:    { label: 'Connection closed',     tone: 'text-amber-600' },
     connection_error:     { label: 'Connection error',       tone: 'text-red-600' },
+    spoke_out_of_contact: { label: 'Out of contact (alert)', tone: 'text-amber-600' },
+    spoke_back_in_contact:{ label: 'Back in contact',        tone: 'text-green-600' },
 };
 
 // Map a spoke's last_status + authenticated + flapping flags to a single
@@ -5378,9 +5502,16 @@ function _diagRowHtml(s, fns) {
     const hbAge = (s.heartbeat_age_s == null) ? 'never'
                : (s.heartbeat_age_s === 0 ? 'now' : `${s.heartbeat_age_s}s`);
     const hbLabel = s.authenticated ? 'fresh' : hbStatus.toLowerCase();
+    // Out-of-contact alert badge (SpokeAlertMixin) — separate, forgiving tier
+    // (warning >=5m / error >=30m) distinct from the realtime heartbeat light.
+    const aTier = String(s.alert_tier || '');
+    const alertBadge = (aTier === 'error' || aTier === 'warning')
+        ? `<span class="block mt-1 text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase ${aTier === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}" title="Out of contact ${Math.round((s.alert_duration_s || 0) / 60)}m — forgiving alert tier (separate from the heartbeat light)">alert · ${aTier}</span>`
+        : '';
     const hbCell = `<span class="block font-bold ${hbTone}">${hbStatus || '—'}</span>
                     <span class="block text-slate-400 text-[10px]">${hbAge}</span>
-                    <span class="block text-slate-400 text-[10px]">${hbLabel}</span>`;
+                    <span class="block text-slate-400 text-[10px]">${hbLabel}</span>
+                    ${alertBadge}`;
     // Version: module version + skew warning badge.
     const skew = s.version_skew
         ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase" title="Not on the current .NN numbering">skew</span>`
@@ -5640,6 +5771,7 @@ async function loadDiagnostics() {
                 <strong>Heartbeat</strong> is the time since the last inbound heartbeat frame (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s/never).
                 <strong>Recovery</strong> shows the hub watchdog's auto-restart state: <em>Recovering n/3</em> = restarting with backoff,
                 <em>Gave up</em> = a restart can't fix it (e.g. missing venv — re-run the spoke installer), <em>Paused</em> = admin halted recovery.
+                An <strong>alert · warning/error</strong> badge is the separate, forgiving out-of-contact tier (warning ≥5 min, error ≥30 min) — distinct from the realtime heartbeat light above; configure it under System → Sync.
                 Click an events count to expand that module's connection timeline. Full raw logs: System → Logs → hub (filter <code>[recovery]</code>).
             </p>
         `;

@@ -623,6 +623,10 @@ def create_app(hub):
             "active_connections": list(hub.active_connections.keys()),
             "spoke_module_types": dict(hub.spoke_module_types),
             "heartbeats": {sid: str(s) for sid, s in hub.heartbeat.get_all_statuses().items()},
+            # Out-of-contact alerts (SpokeAlertMixin) — drives the WebUI header
+            # badge (count + list) off the already-polled /status fetch.
+            "active_alert_count": len(getattr(hub, "_spoke_alerts", {}) or {}),
+            "active_alerts": hub.get_active_spoke_alerts(),
             "state": hub.state.system_state,
             "metrics": metrics
         }
@@ -1342,6 +1346,23 @@ def create_app(hub):
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
         return await hub.simulations_store.get_staleness_sweep_status()
+
+    # ── Spoke out-of-contact alerts (Setup → Sync) ───────────────────────
+    # global_config["spoke_alert"] is saved via the generic POST /setup/config
+    # shallow-merge — no dedicated config route needed. The background loop
+    # (main.py run_spoke_alert_loop) reads that same key. This route exposes the
+    # live active-alert list for the Sync sub-block; /status also carries the
+    # count + list for the header badge (no extra polling).
+    @app.get("/setup/spoke-alerts")
+    async def spoke_alerts(request: Request):
+        """Active spoke out-of-contact alerts (warning/error tiers) for the
+        Setup → Sync card. Each entry: {spoke_id, tier, since_ts, duration_s,
+        detail}."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        return {"active_alerts": hub.get_active_spoke_alerts()}
 
     # ── Network Devices → NetBox device-discovery sync (Setup → Sync) ──
     # global_config["nw_netbox_device_sync"] is saved via the generic POST
@@ -4008,6 +4029,12 @@ def create_app(hub):
             # also reads it via GET_SPOKE_STATUS to suppress/escalate.
             rec = hub.spoke_recovery.get(sid, {}) or {}
 
+            # Out-of-contact alert (SpokeAlertMixin) — separate from the realtime
+            # heartbeat_status traffic-light above. tier is "warning" (>=5 min out
+            # of contact) or "error" (>=30 min); absent when the spoke is in
+            # contact. Drives the diagnostics badge.
+            alert = (getattr(hub, "_spoke_alerts", {}) or {}).get(sid, {}) or {}
+
             spoke_version = hub.spoke_versions.get(sid, "unknown")
             # version_skew: True when a connected spoke reports a version that
             # is NOT in the new per-repo ".NN" numbering (e.g. a stale X.Y.Z /
@@ -4028,6 +4055,11 @@ def create_app(hub):
                 "approved": hub.approved_modules.get(sid, False),
                 "heartbeat_status": hub.heartbeat.get_status(sid),
                 "heartbeat_age_s": heartbeat_age_s,
+                # Forgiving out-of-contact alert (separate from heartbeat_status):
+                # warning >=5 min, error >=30 min. None when in contact.
+                "alert_tier": alert.get("tier"),
+                "alert_since": alert.get("since_ts"),
+                "alert_duration_s": int(alert.get("duration_s", 0) or 0) if alert else 0,
                 "connection_state": ws.state if ws else "OFFLINE",
                 "version": spoke_version,
                 "version_skew": version_skew,
