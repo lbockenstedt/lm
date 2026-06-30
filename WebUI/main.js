@@ -2735,6 +2735,8 @@ function _renderSetupSyncTile(content) {
     loadEndpointSyncSources();
     loadEndpointSyncConfig();
     loadEndpointSyncStatus();
+    loadRealtimeNacSyncConfig();
+    loadRealtimeNacSyncStatus();
     loadVmSyncSources();
     loadVmSyncConfig();
     loadVmSyncStatus();

@@ -48,14 +48,14 @@ import re
 import time
 import asyncio
 import datetime as _dt
-import ipaddress
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from access import fetch_tenant_prefixes  # sibling leaf (no main/api back-import)
+    from access import fetch_tenant_prefixes, attribute_by_prefix  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     fetch_tenant_prefixes = None  # type: ignore
+    attribute_by_prefix = None  # type: ignore
 
 logger = logging.getLogger("Hub")
 
@@ -271,61 +271,19 @@ class FwDiscoverySyncMixin:
                             ) -> Tuple[Dict[str, List[Dict[str, str]]], int]:
         """Bucket discovered records by tenant via prefix containment.
 
-        Builds the tenant→networks map once per cycle (concurrent prefix fetch,
-        bounded so hundreds of tenants don't stampede the netbox spoke), then
-        assigns each record to the first tenant whose prefix contains its IP.
-        Records with no IP, an unparseable IP, or an IP no tenant owns are
-        ``dropped`` (counted) — keeps NetBox tenant-authoritative, no orphans.
-        Returns ``({tenant_id: [records]}, dropped_count)``.
+        Thin delegate to the shared ``access.attribute_by_prefix`` helper
+        (extracted so the firewall-discovery sync and the realtime NAC→IPAM
+        reverse sync share one attribution path). Builds the tenant→networks map
+        once per cycle (concurrent prefix fetch, bounded so hundreds of tenants
+        don't stampede the netbox spoke), then assigns each record to the first
+        tenant whose prefix contains its IP. Records with no IP, an unparseable
+        IP, or an IP no tenant owns are ``dropped`` (counted) — keeps NetBox
+        tenant-authoritative, no orphans. Returns ``({tenant_id: [records]},
+        dropped_count)``.
         """
-        tenants = (self.state.tenant_state or {}).get("tenants", {}) or {}
-        tids = [str(tid) for tid in tenants.keys()]
-        nets_by_tid: Dict[str, List[Any]] = {}
-        if fetch_tenant_prefixes is not None and tids:
-            sem = asyncio.Semaphore(8)
-
-            async def _nets_for(tid: str):
-                async with sem:
-                    try:
-                        prefs = await fetch_tenant_prefixes(self, tid)
-                    except Exception:
-                        prefs = []
-                    nets: List[Any] = []
-                    for p in prefs or []:
-                        try:
-                            nets.append(ipaddress.ip_network(str(p), strict=False))
-                        except Exception:
-                            pass
-                    return tid, nets
-
-            for tid, nets in await asyncio.gather(*(_nets_for(tid) for tid in tids)):
-                nets_by_tid[tid] = nets
-
-        buckets: Dict[str, List[Dict[str, str]]] = {}
-        dropped = 0
-        for rec in records:
-            ip_s = (rec.get("ip") or "").split("/")[0].strip()
-            if not ip_s:
-                dropped += 1
-                continue
-            try:
-                addr = ipaddress.ip_address(ip_s)
-            except Exception:
-                dropped += 1
-                continue
-            matched: Optional[str] = None
-            for tid in tids:
-                for net in nets_by_tid.get(tid) or []:
-                    if addr in net:
-                        matched = tid
-                        break
-                if matched:
-                    break
-            if matched:
-                buckets.setdefault(matched, []).append(rec)
-            else:
-                dropped += 1
-        return buckets, dropped
+        if attribute_by_prefix is None:  # pragma: no cover - access importable in-app
+            return {}, len(records)
+        return await attribute_by_prefix(self, records)
 
     async def _fw_push_tenant(self, tenant_id: str,
                               devices: List[Dict[str, str]]) -> Dict[str, Any]:
