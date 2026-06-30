@@ -1469,6 +1469,26 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                             continue
         except Exception as e:
             logger.error(f"Error reading module logs from disk: {e}")
+        # Globally newest-first in the WebUI Error Log tab. The WebUI does
+        # `.slice().reverse()` on whatever we return (main.js), and the three
+        # sources above are each oldest-first, so reversing alone only flips
+        # each source independently — a newer hub line ends up below an older
+        # disk line because the sources are concatenated, not interleaved. Sort
+        # ascending by timestamp here so the WebUI reverse yields a globally
+        # chronological-descending list across all sources. Lines are prefixed
+        # "[source] <raw line>"; strip that prefix to reach the leading
+        # "YYYY-MM-DD HH:MM:SS" timestamp. Lines with no parseable timestamp
+        # (traceback continuations, agent relay preambles) sort first ascending
+        # → land at the BOTTOM after the WebUI reverse, so they don't crowd the
+        # top of the error log.
+        ts_re = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+        def _ts_key(line: str):
+            body = line.split("] ", 1)[1] if line.startswith("[") else line
+            m = ts_re.search(body[:40])
+            return (0, "") if not m else (1, m.group(1))
+
+        errs.sort(key=_ts_key)
         return {"logs": errs}
 
     async def handle_hub_request(self, spoke_id: str, req: Dict[str, Any]) -> Dict[str, Any]:
