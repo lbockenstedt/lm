@@ -3044,13 +3044,29 @@ async function loadEndpointSyncStatus() {
         const pushed = Number(t.pushed) || 0;
         const errors = Number(t.errors) || 0;
         const total = Number(t.endpoints_total) || 0;
+        const skipped = Number(t.skipped) || 0;
+        const skipDetails = Array.isArray(t.skipped_details) ? t.skipped_details : [];
+        // Dedupe the CPPM spoke's per-record skip reasons into reason→count so
+        // the operator sees WHY records were dropped, not just that they were.
+        const skipReasons = {};
+        for (const s of skipDetails) {
+            const r = s && s.reason ? String(s.reason) : 'skipped';
+            skipReasons[r] = (skipReasons[r] || 0) + 1;
+        }
+        const skipLine = skipped > 0
+            ? ` · <span class="text-amber-600">skipped ${skipped}</span>`
+            : '';
+        const skipReasonHtml = Object.keys(skipReasons).length
+            ? `<p class="text-xs text-amber-600 mt-1">Skipped: ${esc(Object.entries(skipReasons).map(([r, c]) => `${r} (${c})`).join('; '))}</p>`
+            : '';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-1">
                 <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
             </div>
-            <p class="text-xs text-slate-500">pushed ${pushed} · errors ${errors} · endpoints ${total} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            <p class="text-xs text-slate-500">pushed ${pushed} · errors ${errors} · endpoints ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
             ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+            ${skipReasonHtml}
         </div>`;
     }).join('');
 }
@@ -3182,12 +3198,16 @@ async function loadVmSyncStatus() {
         const errors = Number(t.errors) || 0;
         const deleted = Number(t.deleted) || 0;
         const total = Number(t.vms_total) || 0;
+        const skipped = Number(t.skipped) || 0;
+        const skipLine = skipped > 0
+            ? ` · <span class="text-amber-600">skipped ${skipped}</span>`
+            : '';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-1">
                 <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
             </div>
-            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · vms ${total} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · vms ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
             ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
         </div>`;
     }).join('');
