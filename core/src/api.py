@@ -58,7 +58,7 @@ non-admin user can only request tenants they're authorised for
 
 The auth/tenant helper closures (``_session_user``, ``_is_admin``,
 ``_has_cs_access``, ``_check_tenant_access``, ``_resolve_tenant``,
-``_effective_tenant*``, ``_subnet_filter*``) are defined LATE in ``create_app``
+``_effective_tenant*``, ``_filter_session*``) are defined LATE in ``create_app``
 (search for ``def _session_user``) but used by routes ~3,500 lines earlier.
 Python resolves them at call time, so this works — but a top-down reader hits the
 first use long before the definition. Jump to ``def _session_user`` to find them.
@@ -119,13 +119,13 @@ import access
 # annotation trap). api.py depends on access one-way; access never imports api.
 # Re-exports keep the ~26 routes calling ``_unwrap_spoke(result)`` and the
 # subnet-filter-config routes working with zero call-site churn. The closures
-# ``_session_user``/``_is_admin``/``_subnet_filter*``/``get_netbox_spoke``/
+# ``_session_user``/``_is_admin``/``_filter_session*``/``get_netbox_spoke``/
 # ``get_tenant_scoping`` are thin shims defined inside create_app() that delegate
 # to access.* (search for ``def _session_user``).
 _unwrap_spoke = access.unwrap_spoke
-_subnet_filter_config = access.subnet_filter_config
-_SUBNET_FILTER_MODULES = access._SUBNET_FILTER_MODULES
-_SUBNET_FILTER_DEFAULTS = access._SUBNET_FILTER_DEFAULTS
+_filter_config = access.filter_config
+_FILTER_MODULES = access._FILTER_MODULES
+_FILTER_DEFAULTS = access._FILTER_DEFAULTS
 
 _SESSION_TTL = 8 * 3600  # 8 hours
 _sessions: dict = {}  # token → {user_id, expires, user}
@@ -233,8 +233,8 @@ _FW_CMD_MAP = {
 }
 
 # ── Tenant subnet filtering ────────────────────────────────────────────────
-# Constants (_SUBNET_FILTER_MODULES / _DEFAULTS), _FW_FILTER_SPEC, and
-# _subnet_filter_config live in access.py now; re-exported above for the routes
+# Constants (_FILTER_MODULES / _DEFAULTS), _FW_FILTER_SPEC, and
+# _filter_config live in access.py now; re-exported above for the routes
 # that read/toggle them (Setup → Simulations). See access.py for the logic.
 
 
@@ -1254,12 +1254,12 @@ def create_app(hub):
         Three return paths: tenant cache hit for non-admins, offline cache when
         the spoke is down, and a live ``request_response`` round-trip. The
         ``endpoint`` arg selects the firewall sub-resource. Results are
-        tenant-prefix-filtered via ``_subnet_filter_fw`` before return. ``?tenant=``
+        tenant-prefix-filtered via ``_filter_fw`` before return. ``?tenant=``
         scopes the filter to the selected tenant so an admin acting as a tenant
         (via the switcher) sees only that tenant's subnet data across every tab —
-        without it, admins bypass the filter (see access.subnet_filter_fw)."""
+        without it, admins bypass the filter (see access.filter_fw)."""
         # see _netbox_list_get (variant: per-model command map + fw_id-scoped cache
-        # keys + _subnet_filter_fw filter — enough variation to stay inline).
+        # keys + _filter_fw filter — enough variation to stay inline).
         hub = app.state.hub
         logger.debug("relay %s %s firewall=%s endpoint=%s tenant=%s", request.method, request.url.path, firewall_id, endpoint, tenant)
 
@@ -1270,7 +1270,7 @@ def create_app(hub):
             if tenant_id and endpoint in _FW_MODULES:
                 cached = _cache_entry(tenant_id, f"{endpoint}:{firewall_id}")
                 if cached:
-                    return await _subnet_filter_fw(request, cached["data"], endpoint, firewall_id, tenant)
+                    return await _filter_fw(request, cached["data"], endpoint, firewall_id, tenant)
 
         firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
         fw = next((f for f in firewalls if f["id"] == firewall_id), None)
@@ -1309,7 +1309,7 @@ def create_app(hub):
                 if tenant_id:
                     cached = _cache_entry(tenant_id, f"{endpoint}:{firewall_id}")
                     if cached:
-                        return await _subnet_filter_fw(request, cached["data"], endpoint, firewall_id, tenant)
+                        return await _filter_fw(request, cached["data"], endpoint, firewall_id, tenant)
             raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
 
         try:
@@ -1324,7 +1324,7 @@ def create_app(hub):
                     data = result
             else:
                 data = result
-            return await _subnet_filter_fw(request, data, endpoint, firewall_id, tenant)
+            return await _filter_fw(request, data, endpoint, firewall_id, tenant)
         except Exception as e:
             logger.error(f"Error fetching {endpoint} for firewall {firewall_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
@@ -1799,18 +1799,18 @@ def create_app(hub):
             if tenant_id:
                 cached = _cache_entry(tenant_id, "cppm_devices")
                 if cached:
-                    return await _subnet_filter(request, tf(cached["data"]), "nac", ["ip"])
+                    return await _filter_session(request, tf(cached["data"]), "nac", ["ip"])
         cppm_spoke = hub.get_spoke_by_type("nac")
         if not cppm_spoke:
             if sess:
                 tenant_id = sess.get("user", {}).get("tenant_id")
                 cached = _cache_entry(tenant_id, "cppm_devices") if tenant_id else None
                 if cached:
-                    return await _subnet_filter(request, tf(cached["data"]), "nac", ["ip"])
+                    return await _filter_session(request, tf(cached["data"]), "nac", ["ip"])
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "LIST_ENDPOINTS", {})
-            return await _subnet_filter(request, tf(_cppm_unwrap(result)), "nac", ["ip"])
+            return await _filter_session(request, tf(_cppm_unwrap(result)), "nac", ["ip"])
         except HTTPException:
             raise
         except Exception as e:
@@ -2003,7 +2003,7 @@ def create_app(hub):
         # Gate the single endpoint record by tenant subnet (returns {} if the
         # resolved IP is concrete and off the tenant's prefixes). Honors the
         # selected tenant for admins / multi-tenant switches.
-        return await _subnet_gate_record_tenant(request, ep, "nac", ["ip"], tenant) or {}
+        return await _gate_record_tenant(request, ep, "nac", ["ip"], tenant) or {}
 
     @app.get("/api/cppm/device-sessions")
     async def get_cppm_device_sessions(request: Request, mac: str, tenant: str = None):
@@ -2093,18 +2093,18 @@ def create_app(hub):
             if tenant_id:
                 cached = _cache_entry(tenant_id, "cppm_sessions")
                 if cached:
-                    return await _subnet_filter(request, cached["data"], "nac", ["ip"])
+                    return await _filter_session(request, cached["data"], "nac", ["ip"])
         cppm_spoke = hub.get_spoke_by_type("nac")
         if not cppm_spoke:
             if sess:
                 tenant_id = sess.get("user", {}).get("tenant_id")
                 cached = _cache_entry(tenant_id, "cppm_sessions") if tenant_id else None
                 if cached:
-                    return await _subnet_filter(request, cached["data"], "nac", ["ip"])
+                    return await _filter_session(request, cached["data"], "nac", ["ip"])
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset})
-            return await _subnet_filter(request, _cppm_unwrap(result), "nac", ["ip"])
+            return await _filter_session(request, _cppm_unwrap(result), "nac", ["ip"])
         except HTTPException:
             raise
         except Exception as e:
@@ -2727,7 +2727,7 @@ def create_app(hub):
         # ``ips`` list (a VM with no concrete IPs, e.g. stopped, is shown — can't
         # filter, err on showing).
         sess_prefixes = await _resolve_prefixes_for_tenant(hub, scoping.get("tenant_id"))
-        if sess_prefixes and _subnet_filter_enabled(hub, "hypervisor"):
+        if sess_prefixes and _filter_enabled(hub, "hypervisor"):
             all_vms = filter_items_by_prefixes(all_vms, sess_prefixes, ["ips"])
         if sess_prefixes:
             sessions_list = filter_items_by_prefixes(sessions_list, sess_prefixes, ["ip"])
@@ -3516,7 +3516,7 @@ def create_app(hub):
                 if cached:
                     data = cached["data"]
                     if subnet_fields:
-                        return await _subnet_filter(request, data, "netbox", subnet_fields)
+                        return await _filter_session(request, data, "netbox", subnet_fields)
                     return data
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
@@ -3526,7 +3526,7 @@ def create_app(hub):
                 if cached:
                     data = cached["data"]
                     if subnet_fields:
-                        return await _subnet_filter(request, data, "netbox", subnet_fields)
+                        return await _filter_session(request, data, "netbox", subnet_fields)
                     return data
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
         try:
@@ -3536,7 +3536,7 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, cmd, payload)
             data = _unwrap_spoke(result)
             if subnet_fields:
-                return await _subnet_filter(request, data, "netbox", subnet_fields)
+                return await _filter_session(request, data, "netbox", subnet_fields)
             return data
         except Exception as e:
             logger.exception(route_name + " failed")
@@ -4396,7 +4396,7 @@ def create_app(hub):
     # (importable, testable, free of the nested-def annotation trap that caused
     # the .117→.121 startup regression). Kept as closures so the ~185 routes
     # keep calling the same bare names — _session_user(req), _is_admin(sess),
-    # _subnet_filter(req, data, "nac", ["ip"]), … — with zero call-site churn.
+    # _filter_session(req, data, "nac", ["ip"]), … — with zero call-site churn.
     # They capture the live _sessions module global and the hub arg; everything
     # else flows from access. Shim signatures intentionally carry NO annotations
     # (trivial delegators) so no typing name can ever be evaluated at def-time;
@@ -4433,23 +4433,23 @@ def create_app(hub):
     async def _resolve_prefixes_for_tenant(hub, tenant_id):
         return await access.resolve_prefixes_for_tenant(hub, tenant_id)
 
-    def _subnet_filter_enabled(hub, module):
-        return access.subnet_filter_enabled(hub, module)
+    def _filter_enabled(hub, module):
+        return access.filter_enabled(hub, module)
 
-    async def _subnet_filter(request, data, module, ip_fields):
-        return await access.subnet_filter(hub, _sessions, request, data, module, ip_fields)
+    async def _filter_session(request, data, module, ip_fields):
+        return await access.filter_session(hub, _sessions, request, data, module, ip_fields)
 
-    async def _subnet_filter_fw(request, data, endpoint, firewall_id=None, explicit_tenant=None):
-        return await access.subnet_filter_fw(hub, _sessions, request, data, endpoint, firewall_id, explicit_tenant)
+    async def _filter_fw(request, data, endpoint, firewall_id=None, explicit_tenant=None):
+        return await access.filter_fw(hub, _sessions, request, data, endpoint, firewall_id, explicit_tenant)
 
-    async def _subnet_gate_record(request, record, module, ip_fields):
-        return await access.subnet_gate_record(hub, _sessions, request, record, module, ip_fields)
+    async def _gate_record(request, record, module, ip_fields):
+        return await access.gate_record(hub, _sessions, request, record, module, ip_fields)
 
     async def _filter_tenant(request, data, module, ip_fields, explicit_tenant=None):
         return await access.filter_tenant(hub, _sessions, request, data, module, ip_fields, explicit_tenant)
 
-    async def _subnet_gate_record_tenant(request, record, module, ip_fields, explicit_tenant=None):
-        return await access.subnet_gate_record_tenant(hub, _sessions, request, record, module, ip_fields, explicit_tenant)
+    async def _gate_record_tenant(request, record, module, ip_fields, explicit_tenant=None):
+        return await access.gate_record_tenant(hub, _sessions, request, record, module, ip_fields, explicit_tenant)
 
     # ── Simulations module (ported Client-Sim UI) ───────────────────────────
     # Registered after the auth helpers above so the /sim routes can reuse them.
@@ -4669,28 +4669,28 @@ def create_app(hub):
     # Middleware already 403s non-admins on /admin/* (api.py:274); the explicit
     # _is_admin check is defense-in-depth and matches the other /admin routes.
     @app.get("/admin/subnet-filter-config")
-    async def get_subnet_filter_config(request: Request):
+    async def get_filter_config(request: Request):
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="Admin only")
-        return {"modules": _subnet_filter_config(app.state.hub),
-                "defaults": dict(zip(_SUBNET_FILTER_MODULES,
-                                     (_SUBNET_FILTER_DEFAULTS.get(m, False) for m in _SUBNET_FILTER_MODULES)))}
+        return {"modules": _filter_config(app.state.hub),
+                "defaults": dict(zip(_FILTER_MODULES,
+                                     (_FILTER_DEFAULTS.get(m, False) for m in _FILTER_MODULES)))}
 
     @app.put("/admin/subnet-filter-config")
-    async def set_subnet_filter_config(request: Request):
+    async def set_filter_config(request: Request):
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="Admin only")
         data = await request.json()
         incoming = data.get("modules") or {}
         stored = {}
-        for m in _SUBNET_FILTER_MODULES:
+        for m in _FILTER_MODULES:
             if m in incoming:
                 stored[m] = bool(incoming[m])
         app.state.hub.state.system_state["subnet_filter_modules"] = stored
         app.state.hub.state.save_state()
-        return {"status": "ok", "modules": _subnet_filter_config(app.state.hub)}
+        return {"status": "ok", "modules": _filter_config(app.state.hub)}
 
     @app.delete("/setup/users/{user_id}")
     async def delete_user(user_id: str):
@@ -4980,7 +4980,7 @@ def create_app(hub):
         """List DHCP leases (optionally per-subnet); subnet-filtered before return."""
         logger.debug("relay %s %s subnet=%s", request.method, request.url.path, subnet)
         data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_LEASES", {"subnet": subnet}, log_name="dhcp_list_leases")
-        return await _subnet_filter(request, data, "dhcp", ["ip", "address"])
+        return await _filter_session(request, data, "dhcp", ["ip", "address"])
 
     @app.post("/api/dhcp/reservation")
     async def dhcp_add_reservation(request: Request):

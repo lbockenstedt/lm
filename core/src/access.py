@@ -2,9 +2,9 @@
 
 These were previously nested closures defined late inside ``api.create_app()``
 (``_session_user``, ``_is_admin``, ``_has_cs_access``, ``_check_tenant_access``,
-``_resolve_tenant``, ``_effective_tenant*``, ``_subnet_filter*``,
+``_resolve_tenant``, ``_effective_tenant*``, ``_filter_session*``,
 ``get_netbox_spoke``, ``get_tenant_scoping``) plus the shared leaf helpers
-``_unwrap_spoke`` and ``_subnet_filter_config``. They are gathered here as
+``_unwrap_spoke`` and ``_filter_config``. They are gathered here as
 **module-level functions taking their dependencies explicitly** (the live
 ``_sessions`` dict, the ``hub`` handle) so the logic is importable, testable,
 and — critically — no longer lives in a 5,000-line ``create_app()`` closure where
@@ -14,7 +14,7 @@ annotations`` here, annotations are strings and never evaluated at import.
 
 ``api.create_app()`` keeps thin delegating closures (``def _session_user(req):
 return access.session_user(_sessions, req)``) so the ~185 routes keep calling
-the same bare names (``_is_admin(sess)``, ``_subnet_filter(req, data, "nac",
+the same bare names (``_is_admin(sess)``, ``_filter_session(req, data, "nac",
 ["ip"])``, …) with zero call-site churn. The closures capture the live
 ``_sessions`` module global and the ``hub`` arg; everything else flows from
 ``access``.
@@ -52,8 +52,8 @@ _PREFIX_CACHE_TTL = 300  # seconds — session-prefix cache TTL (was a create_ap
 # carries tenant IP addresses (nac, firewall, netbox, dhcp, hypervisor) default
 # ON; the cs / Simulations module is scoped by tenant ID instead of subnet, so
 # it defaults OFF. Admins can toggle each module in System → General.
-_SUBNET_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "cs", "hypervisor")
-_SUBNET_FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
+_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "cs", "hypervisor")
+_FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
                             "dhcp": True, "cs": False, "hypervisor": True}
 
 # Firewall endpoint → filter spec. "rules" uses the strict source/destination
@@ -106,11 +106,11 @@ def unwrap_spoke(result):
     return result
 
 
-def subnet_filter_config(hub) -> dict:
+def filter_config(hub) -> dict:
     """Resolved per-module subnet-filter toggles (stored overrides defaults)."""
     stored = hub.state.system_state.get("subnet_filter_modules", {}) or {}
-    return {m: bool(stored.get(m, _SUBNET_FILTER_DEFAULTS.get(m, False)))
-            for m in _SUBNET_FILTER_MODULES}
+    return {m: bool(stored.get(m, _FILTER_DEFAULTS.get(m, False)))
+            for m in _FILTER_MODULES}
 
 
 # ── Spoke / tenant scoping ────────────────────────────────────────────────────
@@ -286,11 +286,11 @@ async def resolve_prefixes_for_tenant(hub, tenant_id) -> list:
 
 # ── Subnet filtering ──────────────────────────────────────────────────────────
 
-def subnet_filter_enabled(hub, module: str) -> bool:
-    return subnet_filter_config(hub).get(module, False)
+def filter_enabled(hub, module: str) -> bool:
+    return filter_config(hub).get(module, False)
 
 
-async def subnet_filter(hub, sessions: dict, request: "Request", data, module: str, ip_fields):
+async def filter_session(hub, sessions: dict, request: "Request", data, module: str, ip_fields):
     """Apply server-side subnet filtering to ``data`` for ``module``.
 
     No-op for admins, for disabled modules, or when the tenant has no prefixes
@@ -300,7 +300,7 @@ async def subnet_filter(hub, sessions: dict, request: "Request", data, module: s
     sess = session_user(sessions, request)
     if not sess or is_admin(sess):
         return data
-    if not subnet_filter_enabled(hub, module):
+    if not filter_enabled(hub, module):
         return data
     prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
@@ -355,7 +355,7 @@ async def _fw_alias_map(hub, firewall_id) -> "dict | None":
         return None
 
 
-async def subnet_filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str,
+async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str,
                            firewall_id=None, explicit_tenant=None):
     """Firewall-specific subnet filter: strict source/destination for ``rules``
     (with OPNsense alias resolution via ``_fw_alias_map``), field-based for
@@ -374,14 +374,14 @@ async def subnet_filter_fw(hub, sessions: dict, request: "Request", data, endpoi
     mode, fields = spec
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
-        if not subnet_filter_enabled(hub, "firewall"):
+        if not filter_enabled(hub, "firewall"):
             return data
         prefixes = await resolve_prefixes_for_tenant(hub, tid)
     else:
         sess = session_user(sessions, request)
         if not sess or is_admin(sess):
             return data
-        if not subnet_filter_enabled(hub, "firewall"):
+        if not filter_enabled(hub, "firewall"):
             return data
         prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
@@ -396,28 +396,28 @@ async def subnet_filter_fw(hub, sessions: dict, request: "Request", data, endpoi
         cats = [t.get("name"), t.get("slug"), t.get("netbox_tenant_slug"), tid]
         tenant_cat = sorted({str(c).strip() for c in cats if c}) or None
     before = _list_len(data)
-    logger.warning("DIAG subnet_filter_fw[%s] tid=%r enabled=%s prefixes=%d "
+    logger.warning("DIAG filter_fw[%s] tid=%r enabled=%s prefixes=%d "
                    "items_before=%d mode=%s tenant_cat=%r", endpoint, tid, True,
                    len(prefixes), before, mode, tenant_cat)
     if mode == "fw":
         alias_map = await _fw_alias_map(hub, firewall_id) if firewall_id else None
         out = filter_firewall_rules(data, prefixes, alias_map, tenant_category=tenant_cat)
-        logger.warning("DIAG subnet_filter_fw[%s] filtered %d -> %d alias_map=%s",
+        logger.warning("DIAG filter_fw[%s] filtered %d -> %d alias_map=%s",
                        endpoint, before, _list_len(out), bool(alias_map))
         return out
     out = filter_items_by_prefixes(data, prefixes, fields, tenant_category=tenant_cat)
-    logger.warning("DIAG subnet_filter_fw[%s] filtered %d -> %d", endpoint, before, _list_len(out))
+    logger.warning("DIAG filter_fw[%s] filtered %d -> %d", endpoint, before, _list_len(out))
     return out
 
 
-async def subnet_gate_record(hub, sessions: dict, request: "Request", record, module: str, ip_fields):
+async def gate_record(hub, sessions: dict, request: "Request", record, module: str, ip_fields):
     """Gate a single-record endpoint (e.g. CPPM device-enrich): return the record
     if it may be shown, else ``None``. No-op for admins / disabled modules /
     tenants without prefixes."""
     sess = session_user(sessions, request)
     if not sess or is_admin(sess):
         return record
-    if not subnet_filter_enabled(hub, module):
+    if not filter_enabled(hub, module):
         return record
     prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
@@ -465,13 +465,13 @@ def _tenant_tag_set(hub, tid) -> set:
 
 async def filter_tenant(hub, sessions: dict, request: "Request", data, module: str, ip_fields,
                          explicit_tenant: str = None):
-    """Tenant-aware filter (renamed from ``subnet_filter_tenant`` — it filters a
+    """Tenant-aware filter (renamed from ``filter_session_tenant`` — it filters a
     tenant's data by subnet plus module-specific overrides, not just subnet).
 
     When ``explicit_tenant`` resolves to a real tenant (an admin selecting a
     tenant, or a multi-tenant user switching to an allowed one), scope by THAT
     tenant's prefixes — even for admins, who otherwise bypass the filter. No
-    explicit tenant → delegate to the legacy session-tenant ``subnet_filter``
+    explicit tenant → delegate to the legacy session-tenant ``filter_session``
     (no-op for admins with nothing selected, preserving backward compatibility).
 
     The ``hypervisor`` module uses ``filter_hypervisor_vms`` with two overrides
@@ -481,7 +481,7 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
     """
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
-        enabled = subnet_filter_enabled(hub, module)
+        enabled = filter_enabled(hub, module)
         prefixes = await resolve_prefixes_for_tenant(hub, tid) if enabled else []
         before = _list_len(data)
         # DIAG: pinpoints where the admin-switcher filter diverges. Remove once
@@ -506,7 +506,7 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
     if module == "hypervisor":
         sess = session_user(sessions, request)
         scope_tid = sess.get("user", {}).get("tenant_id") if sess and not is_admin(sess) else None
-        if not scope_tid or not subnet_filter_enabled(hub, "hypervisor"):
+        if not scope_tid or not filter_enabled(hub, "hypervisor"):
             return data
         prefixes = await resolve_prefixes_for_tenant(hub, scope_tid)
         if not prefixes:
@@ -516,20 +516,20 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
                                      tenant_tags=_tenant_tag_set(hub, scope_tid))
     logger.warning("DIAG filter_tenant[%s] FALLBACK legacy (explicit=%r tid=%r) "
                    "-> admin-bypass/no-op path", module, explicit_tenant, tid)
-    return await subnet_filter(hub, sessions, request, data, module, ip_fields)
+    return await filter_session(hub, sessions, request, data, module, ip_fields)
 
 
-async def subnet_gate_record_tenant(hub, sessions: dict, request: "Request", record, module: str, ip_fields,
+async def gate_record_tenant(hub, sessions: dict, request: "Request", record, module: str, ip_fields,
                                     explicit_tenant: str = None):
     """Tenant-aware single-record gate (device-enrich). Returns ``record`` if its
     IP is in the selected tenant's prefixes, else ``None``; no explicit tenant →
-    legacy ``subnet_gate_record`` (no-op for admins)."""
+    legacy ``gate_record`` (no-op for admins)."""
     tid = effective_tenant(sessions, request, explicit_tenant)
     if explicit_tenant and tid:
-        if not subnet_filter_enabled(hub, module):
+        if not filter_enabled(hub, module):
             return record
         prefixes = await resolve_prefixes_for_tenant(hub, tid)
         if not prefixes:
             return record
         return filter_record_by_prefixes(record, prefixes, ip_fields)
-    return await subnet_gate_record(hub, sessions, request, record, module, ip_fields)
+    return await gate_record(hub, sessions, request, record, module, ip_fields)

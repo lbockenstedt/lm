@@ -18,7 +18,7 @@ holds minimal `FakeHub` / `FakeState` stand-ins.
 
 | Path | File | What's locked in |
 |---|---|---|
-| 1. Tenant subnet filter | `test_subnet_filter.py` | `subnet_filter_config` / `subnet_filter_enabled` resolution (defaults, overrides, coercion) — the server-side isolation gate |
+| 1. Tenant subnet filter | `test_subnet_filter.py` | `filter_config` / `filter_enabled` resolution (defaults, overrides, coercion) — the server-side isolation gate |
 | 2. Hub self-update gate | `test_update_gate.py` | `_update_available` commit-SHA decision (git vs non-git, unknown-remote safe fallback, force, VERSION fallback) |
 | 3. Spoke relay contract | `test_relay_contract.py` | `_spoke_payload_or_raise` — spoke ERROR → HTTP 502, SUCCESS passthrough |
 | 4. Endpoint sync source registry | `test_endpoint_sync.py` | `IPAM_SOURCES` registry shape + `_endpoint_sync_source` fallback (modular source swap) |

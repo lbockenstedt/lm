@@ -2,18 +2,18 @@
 
 The toggle ↔ backend ↔ filter read-path wiring is the security boundary that
 stops one tenant seeing another's subnet-scoped data. These tests lock in the
-resolution semantics of ``access.subnet_filter_config`` / ``subnet_filter_enabled``
+resolution semantics of ``access.filter_config`` / ``filter_enabled``
 — the single source of truth every server-side filter reads
-(``subnet_filter_enabled`` → ``subnet_filter_config`` → ``system_state["subnet_filter_modules"]``
+(``filter_enabled`` → ``filter_config`` → ``system_state["subnet_filter_modules"]``
 merged with the defaults). The actual prefix-matching lives in
 ``simulations/tenant_filter.py`` and is exercised by an integration test (TODO).
 """
 
 from access import (
-    subnet_filter_config,
-    subnet_filter_enabled,
-    _SUBNET_FILTER_MODULES,
-    _SUBNET_FILTER_DEFAULTS,
+    filter_config,
+    filter_enabled,
+    _FILTER_MODULES,
+    _FILTER_DEFAULTS,
 )
 from _fakes import FakeHub, FakeState
 
@@ -22,50 +22,50 @@ def test_defaults_when_no_stored_state():
     """No stored overrides → every module resolves to its documented default
     (nac/firewall/netbox/dhcp ON, cs OFF — cs is tenant-ID-scoped, not subnet)."""
     hub = FakeHub(FakeState(system_state={}))
-    cfg = subnet_filter_config(hub)
-    assert set(cfg) == set(_SUBNET_FILTER_MODULES)
-    for m in _SUBNET_FILTER_MODULES:
-        assert cfg[m] == _SUBNET_FILTER_DEFAULTS[m]
+    cfg = filter_config(hub)
+    assert set(cfg) == set(_FILTER_MODULES)
+    for m in _FILTER_MODULES:
+        assert cfg[m] == _FILTER_DEFAULTS[m]
 
 
 def test_stored_override_flips_a_module():
     hub = FakeHub(FakeState(system_state={"subnet_filter_modules": {"cs": True, "firewall": False}}))
-    cfg = subnet_filter_config(hub)
+    cfg = filter_config(hub)
     assert cfg["cs"] is True           # override ON (default OFF)
     assert cfg["firewall"] is False    # override OFF (default ON)
     # untouched modules keep their defaults
-    assert cfg["nac"] is _SUBNET_FILTER_DEFAULTS["nac"]
-    assert cfg["netbox"] is _SUBNET_FILTER_DEFAULTS["netbox"]
-    assert cfg["dhcp"] is _SUBNET_FILTER_DEFAULTS["dhcp"]
+    assert cfg["nac"] is _FILTER_DEFAULTS["nac"]
+    assert cfg["netbox"] is _FILTER_DEFAULTS["netbox"]
+    assert cfg["dhcp"] is _FILTER_DEFAULTS["dhcp"]
 
 
-def test_subnet_filter_enabled_per_module_and_unknown():
+def test_filter_enabled_per_module_and_unknown():
     hub = FakeHub(FakeState(system_state={"subnet_filter_modules": {"dhcp": False}}))
-    assert subnet_filter_enabled(hub, "dhcp") is False   # overridden off
-    assert subnet_filter_enabled(hub, "nac") is True      # default on
-    assert subnet_filter_enabled(hub, "cs") is False      # default off
-    assert subnet_filter_enabled(hub, "nonexistent") is False  # unknown module → False
+    assert filter_enabled(hub, "dhcp") is False   # overridden off
+    assert filter_enabled(hub, "nac") is True      # default on
+    assert filter_enabled(hub, "cs") is False      # default off
+    assert filter_enabled(hub, "nonexistent") is False  # unknown module → False
 
 
 def test_stored_values_are_coerced_to_bool():
-    """``subnet_filter_config`` bool-coerces stored values (the PUT handler
+    """``filter_config`` bool-coerces stored values (the PUT handler
     stores real bools, but the reader must tolerate any JSON-ish value)."""
     hub = FakeHub(FakeState(system_state={"subnet_filter_modules": {"nac": 0, "firewall": 1}}))
-    cfg = subnet_filter_config(hub)
+    cfg = filter_config(hub)
     assert cfg["nac"] is False
     assert cfg["firewall"] is True
 
 
 # ── Tenant-aware firewall filter (admin acting as tenant) ─────────────────────
 #
-# subnet_filter_fw is tenant-aware: an admin selecting a tenant via the switcher
+# filter_fw is tenant-aware: an admin selecting a tenant via the switcher
 # (explicit_tenant) is filtered by THAT tenant's prefixes — previously admins
 # bypassed the filter entirely and saw every tenant's firewall data. These lock
 # in both halves: explicit tenant → filter (even for admin); no explicit tenant
 # → admin bypass preserved (regression guard).
 
 import asyncio
-from access import subnet_filter_fw, filter_tenant
+from access import filter_fw, filter_tenant
 
 
 class _FakeRequest:
@@ -116,7 +116,7 @@ def test_admin_with_explicit_tenant_is_filtered():
     }))
     sessions = {"admin-cookie": _admin_session()}
     req = _FakeRequest("admin-cookie")
-    out = asyncio.run(subnet_filter_fw(
+    out = asyncio.run(filter_fw(
         hub, sessions, req, _rules_env(), "rules",
         firewall_id=None, explicit_tenant="acme"))
     assert len(out["rules"]) == 2  # src-in-prefix + dst-in-prefix kept; both-outside dropped
@@ -131,7 +131,7 @@ def test_admin_without_explicit_tenant_bypasses():
     sessions = {"admin-cookie": _admin_session()}
     req = _FakeRequest("admin-cookie")
     env = _rules_env()
-    out = asyncio.run(subnet_filter_fw(
+    out = asyncio.run(filter_fw(
         hub, sessions, req, env, "rules", firewall_id=None))
     assert out is env  # unchanged — all 3 rules visible
 
@@ -151,7 +151,7 @@ def test_aliases_tab_filters_on_content():
         {"name": "EXT",        "type": "network", "content": "8.8.8.8"},         # out → drop
         {"name": "EMPTY",      "type": "urltable", "content": ""},               # no IP → drop
     ]}
-    out = asyncio.run(subnet_filter_fw(
+    out = asyncio.run(filter_fw(
         hub, sessions, req, aliases, "aliases",
         firewall_id=None, explicit_tenant="acme"))
     names = [a["name"] for a in out["data"]]
@@ -187,7 +187,7 @@ def test_firewall_rule_category_overrides_subnet_drop():
         {"source": "8.8.8.8", "destination": "1.1.1.1", "category": "Other"},    # drop
         {"source": "8.8.8.8", "destination": "1.1.1.1"},                          # no category → drop
     ]}
-    out = asyncio.run(subnet_filter_fw(
+    out = asyncio.run(filter_fw(
         hub, sessions, req, rules, "rules", firewall_id=None, explicit_tenant="acme"))
     assert len(out["rules"]) == 1
     assert out["rules"][0]["category"] == "Acme"
@@ -206,7 +206,7 @@ def test_alias_category_overrides_no_ip_drop():
         {"name": "NO_CAT",   "type": "urltable", "content": ""},                             # drop (no IP, no cat)
         {"name": "OTHER_CAT", "type": "network", "content": "8.8.8.8", "category": "Other"}, # drop
     ]}
-    out = asyncio.run(subnet_filter_fw(
+    out = asyncio.run(filter_fw(
         hub, sessions, req, aliases, "aliases", firewall_id=None, explicit_tenant="acme"))
     names = [a["name"] for a in out["data"]]
     assert "OUT_CAT" in names and "EMPTY_CAT" in names
@@ -222,7 +222,7 @@ def test_category_does_not_leak_to_other_tenant():
     aliases = {"data": [
         {"name": "RIVAL", "type": "urltable", "content": "", "category": "NotAcme"},  # not ours → drop
     ]}
-    out = asyncio.run(subnet_filter_fw(
+    out = asyncio.run(filter_fw(
         hub, sessions, req, aliases, "aliases", firewall_id=None, explicit_tenant="acme"))
     assert [a["name"] for a in out["data"]] == []
 
@@ -333,6 +333,6 @@ def test_hypervisor_tag_match_shows_to_that_tenant():
 def test_hypervisor_module_in_toggle_set_and_default_on():
     """The 'hypervisor' module is registered in the subnet-filter toggle set
     and defaults ON (VM IPs are tenant-scoped data)."""
-    from access import _SUBNET_FILTER_MODULES, _SUBNET_FILTER_DEFAULTS
-    assert "hypervisor" in _SUBNET_FILTER_MODULES
-    assert _SUBNET_FILTER_DEFAULTS["hypervisor"] is True
+    from access import _FILTER_MODULES, _FILTER_DEFAULTS
+    assert "hypervisor" in _FILTER_MODULES
+    assert _FILTER_DEFAULTS["hypervisor"] is True
