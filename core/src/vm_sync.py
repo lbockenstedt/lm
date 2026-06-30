@@ -177,51 +177,57 @@ class VmSyncMixin:
             interval = 3600
         return max(60.0, float(interval))
 
-    async def sync_tenant_vms(self, tenant_id: str) -> Dict[str, Any]:
-        """Pull this tenant's VMs from the configured hypervisor source, push to NetBox.
+    # Synthetic tenant-id key for the untagged/no-tenant bucket. Mirrors the
+    # netbox spoke's NetBoxEngine._VM_SYNC_UNASSIGNED_KEY so per-tenant status
+    # from the grab-all sync round-trips unchanged.
+    _VM_SYNC_UNASSIGNED_KEY = "__unassigned__"
 
-        Returns a status dict {tenant_id, status, pushed, errors, skipped,
-        deleted, message, last_sync_ts, vms_total}. Idempotent + best-effort: a
-        hypervisor/netbox outage or a missing scoping yields a per-tenant
-        error/skipped status, never an unhandled exception (the background loop
-        depends on this). The NetBox tenant assignment uses the tenant's
-        ``netbox_tenant_slug`` (VMs are created without a NetBox tenant when
-        unbound — global records).
+    async def sync_all_vms(self) -> Dict[str, Any]:
+        """Pull ALL VMs from the configured hypervisor source once, attribute
+        each to a tenant by matching its Proxmox ``tags`` against tenants'
+        ``proxmox_tag`` (first match wins; no match → unassigned), and push the
+        full set to NetBox in one ``NETBOX_SYNC_VMS`` call with ``replace=True``.
+
+        NetBox becomes a complete mirror of the cluster: tagged VMs → their
+        NetBox tenant; untagged VMs (or a tag matching no tenant) → created with
+        no NetBox tenant (a global/unassigned record). Every VM carries all
+        attributes every sync. Replace-delete removes NetBox VMs destroyed in
+        Proxmox (cluster-wide, proxmox-sourced only).
+
+        Returns ``{status, pushed, errors, skipped, deleted, vms_total,
+        per_tenant, results, message}`` where ``results`` is a per-tenant
+        status list (one row per bound tenant + an unassigned row) suitable for
+        the on-demand run route, and ``per_tenant`` mirrors the netbox
+        breakdown keyed by tenant-slug / ``__unassigned__``. Idempotent +
+        best-effort: a hypervisor/netbox outage yields an error result, never
+        an unhandled exception (the background loop depends on this).
         """
         now = time.time()
-        tenant_cfg = self.state.get_tenant(tenant_id) or {}
-        tenant_name = tenant_cfg.get("name") or tenant_id
         se = self._vm_sync_source()
+        label = se.get('label', 'Hypervisor')
         hyp = self.get_spoke_by_type(se.get("module_type", "hypervisor"))
         netbox = self.get_spoke_by_type(self._VM_SYNC_TARGET_MODULE)
         if not hyp or not netbox:
-            logger.info("vm sync tenant=%s(%s) SKIP: %s or NetBox spoke not connected "
-                        "(hyp=%r netbox=%r)", tenant_id, tenant_name,
-                        se.get('label', 'Hypervisor'), bool(hyp), bool(netbox))
-            status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
-                      "status": "error", "pushed": 0, "errors": 0, "skipped": 0,
-                      "deleted": 0,
-                      "message": f"{se.get('label', 'Hypervisor')} or NetBox spoke not connected",
-                      "last_sync_ts": now, "vms_total": 0}
-            await self.simulations_store.set_vm_sync_status(tenant_id, status)
-            return status
-        scope = self._vm_scope_for_tenant(se, tenant_id)
-        if not scope:
-            logger.info("vm sync tenant=%s(%s) SKIP: not bound to %s (no proxmox_tag)",
-                        tenant_id, tenant_name, se.get('label', 'Hypervisor'))
-            status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
-                      "status": "skipped", "pushed": 0, "errors": 0, "skipped": 0,
-                      "deleted": 0,
-                      "message": f"tenant not bound to {se.get('label', 'Hypervisor')}",
-                      "last_sync_ts": now, "vms_total": 0}
-            await self.simulations_store.set_vm_sync_status(tenant_id, status)
-            return status
-        # NetBox tenant slug for VM tenancy in NetBox ('' → VMs created globally)
-        netbox_slug = str(tenant_cfg.get("netbox_tenant_slug") or "").strip()
-        # Optional per-agent scoping: when the config pins a specific pxmx agent
-        # (a single Proxmox server/cluster), the list call is scoped to that
-        # agent_id; unset → pull from every connected agent the spoke aggregates.
-        list_payload = {se.get("request_filter_key", "tag_filter"): scope}
+            logger.info("vm sync ALL SKIP: %s or NetBox spoke not connected "
+                        "(hyp=%r netbox=%r)", label, bool(hyp), bool(netbox))
+            return {"status": "error", "pushed": 0, "errors": 0, "skipped": 0,
+                    "deleted": 0, "vms_total": 0, "per_tenant": {},
+                    "results": [],
+                    "message": f"{label} or NetBox spoke not connected"}
+
+        # Tag → tenant attribution map (lowercased tag → tid) + lookups, built once.
+        tenants = (self.state.tenant_state or {}).get("tenants", {}) or {}
+        tag_to_tid: Dict[str, str] = {}
+        tid_to_cfg: Dict[str, Dict[str, Any]] = {}
+        for tid, cfg in tenants.items():
+            cfg = cfg or {}
+            tag = str(cfg.get("proxmox_tag") or "").strip().lower()
+            if tag:
+                tag_to_tid[tag] = str(tid)
+            tid_to_cfg[str(tid)] = cfg
+
+        # One grab-all pull (no tag_filter — the spoke returns every VM).
+        list_payload: Dict[str, Any] = {}
         agent_id = str(self._vm_sync_cfg().get("agent_id") or "").strip()
         if agent_id:
             list_payload["agent_id"] = agent_id
@@ -231,52 +237,76 @@ class VmSyncMixin:
                 list_payload, timeout=30.0)
             data = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
             if isinstance(data, dict) and data.get("status") == "ERROR":
-                logger.info("vm sync tenant=%s(%s) SKIP: %s returned ERROR: %s",
-                            tenant_id, tenant_name, se.get('label', 'Hypervisor'),
-                            data.get('message', 'error'))
-                status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
-                          "status": "error", "pushed": 0, "errors": 0, "skipped": 0,
-                          "deleted": 0,
-                          "message": f"{se.get('label', 'Hypervisor')}: {data.get('message', 'error')}",
-                          "last_sync_ts": now, "vms_total": 0}
-                await self.simulations_store.set_vm_sync_status(tenant_id, status)
-                return status
+                msg = f"{label}: {data.get('message', 'error')}"
+                logger.info("vm sync ALL SKIP: %s returned ERROR: %s",
+                            label, data.get('message', 'error'))
+                return {"status": "error", "pushed": 0, "errors": 0, "skipped": 0,
+                        "deleted": 0, "vms_total": 0, "per_tenant": {},
+                        "results": [], "message": msg}
             resp_key = se.get("response_key", "vms")
-            vms: List[Dict[str, Any]] = []
-            for vm in (data.get(resp_key, []) if isinstance(data, dict) else []) or []:
-                vm = vm or {}
-                uid = str(vm.get("unique_id") or "").strip()
-                if not uid:
-                    continue  # nothing to match in NetBox by
-                # Normalise ips (string or {address}/{ip} dict) → bare address list.
-                ip_list: List[str] = []
-                for ip in (vm.get("ips") or []):
-                    if isinstance(ip, dict):
-                        s = str(ip.get("address") or ip.get("ip") or "").split("/")[0].strip()
-                    else:
-                        s = str(ip or "").split("/")[0].strip()
-                    if s:
-                        ip_list.append(s)
-                mem_bytes = int(vm.get("mem_bytes") or 0)
-                vms.append({
-                    "unique_id": uid,
-                    "name":      str(vm.get("name") or "").strip(),
-                    "cluster":   str(vm.get("cluster") or "").strip(),
-                    "node":      str(vm.get("node") or "").strip(),
-                    "vmid":      vm.get("vmid"),
-                    "type":      str(vm.get("type") or "qemu"),
-                    "status":    str(vm.get("status") or "unknown"),
-                    "vcpus":     int(vm.get("vcpus") or 0),
-                    "disk_gb":   round(float(vm.get("disk_gb") or 0), 1),
-                    "mem_mb":    int(mem_bytes / (1024 * 1024)) if mem_bytes else 0,
-                    "ips":       ip_list,
-                    "tags":      vm.get("tags") or [],
-                })
-            payload = {"tenant_id": tenant_id, "tenant_slug": netbox_slug,
-                       "tenant_name": tenant_name, "source": se.get("label", "Hypervisor"),
-                       "replace": True, "vms": vms}
+            raw_vms = (data.get(resp_key, []) if isinstance(data, dict) else []) or []
+        except Exception as e:
+            logger.debug("vm sync ALL pull failed: %s", e)
+            return {"status": "error", "pushed": 0, "errors": 0, "skipped": 0,
+                    "deleted": 0, "vms_total": 0, "per_tenant": {},
+                    "results": [], "message": str(e)}
+
+        # Attribute + normalize each VM. tagged → that tenant's netbox slug;
+        # untagged/no-match → tenant_slug None (NetBox creates it unassigned).
+        vms: List[Dict[str, Any]] = []
+        attr_counts: Dict[str, int] = {}  # tid | __unassigned__ → VMs attributed
+        UNASSIGNED = self._VM_SYNC_UNASSIGNED_KEY
+        for vm in raw_vms:
+            vm = vm or {}
+            uid = str(vm.get("unique_id") or "").strip()
+            if not uid:
+                continue  # nothing to match in NetBox by
+            tags = vm.get("tags") or []
+            tid: Optional[str] = None
+            for t in tags:
+                key = str(t or "").strip().lower()
+                if key and key in tag_to_tid:
+                    tid = tag_to_tid[key]
+                    break
+            if tid:
+                cfg = tid_to_cfg.get(tid) or {}
+                tslug = str(cfg.get("netbox_tenant_slug") or "").strip() or None
+            else:
+                tid = None
+                tslug = None
+            # Normalise ips (string or {address}/{ip} dict) → bare address list.
+            ip_list: List[str] = []
+            for ip in (vm.get("ips") or []):
+                if isinstance(ip, dict):
+                    s = str(ip.get("address") or ip.get("ip") or "").split("/")[0].strip()
+                else:
+                    s = str(ip or "").split("/")[0].strip()
+                if s:
+                    ip_list.append(s)
+            mem_bytes = int(vm.get("mem_bytes") or 0)
+            vms.append({
+                "unique_id": uid,
+                "name":      str(vm.get("name") or "").strip(),
+                "cluster":   str(vm.get("cluster") or "").strip(),
+                "node":      str(vm.get("node") or "").strip(),
+                "vmid":      vm.get("vmid"),
+                "type":      str(vm.get("type") or "qemu"),
+                "status":    str(vm.get("status") or "unknown"),
+                "vcpus":     int(vm.get("vcpus") or 0),
+                "disk_gb":   round(float(vm.get("disk_gb") or 0), 1),
+                "mem_mb":    int(mem_bytes / (1024 * 1024)) if mem_bytes else 0,
+                "ips":       ip_list,
+                "tags":      tags,
+                "tenant_slug": tslug,
+            })
+            bkey = tid or UNASSIGNED
+            attr_counts[bkey] = attr_counts.get(bkey, 0) + 1
+
+        payload = {"source": se.get("label", "Hypervisor"),
+                   "replace": True, "vms": vms}
+        try:
             rr = await self.request_response(netbox, self._VM_SYNC_PUSH_COMMAND,
-                                             payload, timeout=120.0)
+                                             payload, timeout=180.0)
             rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", len(vms)) or 0)
@@ -284,25 +314,91 @@ class VmSyncMixin:
             skipped = int((rd or {}).get("skipped", 0) or 0)
             deleted = int((rd or {}).get("deleted", 0) or 0)
             message = (rd or {}).get("message", "")
-            logger.info("vm sync tenant=%s(%s) result status=%s sent=%d pushed=%d "
-                        "skipped=%d deleted=%d errors=%d",
-                        tenant_id, tenant_name,
-                        "success" if rstatus != "ERROR" else "error",
-                        len(vms), pushed, skipped, deleted, errors)
-            status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
-                      "status": "success" if rstatus != "ERROR" else "error",
-                      "pushed": pushed, "errors": errors, "skipped": skipped,
-                      "deleted": deleted,
-                      "message": message or (f"{len(vms)} VM(s) sent" if rstatus != "ERROR" else "NetBox error"),
-                      "last_sync_ts": now, "vms_total": len(vms)}
+            per_tenant = (rd or {}).get("per_tenant", {}) or {}
         except Exception as e:
-            logger.debug("vm sync for %s failed: %s", tenant_id, e)
-            status = {"tenant_id": tenant_id, "tenant_name": tenant_name,
-                      "status": "error", "pushed": 0, "errors": 0, "skipped": 0,
-                      "deleted": 0, "message": str(e),
-                      "last_sync_ts": now, "vms_total": 0}
-        await self.simulations_store.set_vm_sync_status(tenant_id, status)
-        return status
+            logger.debug("vm sync ALL push failed: %s", e)
+            return {"status": "error", "pushed": 0, "errors": 0, "skipped": 0,
+                    "deleted": 0, "vms_total": len(vms), "per_tenant": {},
+                    "results": [], "message": str(e)}
+
+        overall = "success" if rstatus != "ERROR" else "error"
+
+        # Per-tenant status rows. Every bound tenant (has a proxmox_tag) gets a
+        # row even with zero matched VMs, so the UI shows a fresh "0 sent"
+        # instead of a stale last-run; the unassigned bucket is a synthetic row.
+        results: List[Dict[str, Any]] = []
+
+        def _row(key: str, tid: str, name: str, total: int,
+                 note: str = "") -> Dict[str, Any]:
+            b = per_tenant.get(key, {}) or {}
+            msg = message or (f"{total} VM(s) sent"
+                              if overall != "error" else "NetBox error")
+            if note:
+                msg = f"{msg} — {note}" if msg else note
+            return {"tenant_id": tid, "tenant_name": name, "status": overall,
+                    "pushed": int(b.get("pushed", 0) or 0),
+                    "errors": int(b.get("errors", 0) or 0),
+                    "skipped": int(b.get("skipped", 0) or 0),
+                    "deleted": int(b.get("deleted", 0) or 0),
+                    "message": msg, "last_sync_ts": now, "vms_total": total}
+
+        for tid, cfg in tid_to_cfg.items():
+            cfg = cfg or {}
+            if not str(cfg.get("proxmox_tag") or "").strip():
+                continue  # not bound → no row (the scheduled loop ignores these too)
+            slug = str(cfg.get("netbox_tenant_slug") or "").strip()
+            name = cfg.get("name") or tid
+            if slug:
+                st = _row(slug, tid, name, int(per_tenant.get(slug, {}).get("vms_total", 0) or 0))
+            else:
+                # Attributed to this tenant but no NetBox slug → netbox wrote the
+                # VMs as unassigned. Surface the count we attributed honestly.
+                st = _row(UNASSIGNED, tid, name, attr_counts.get(tid, 0),
+                          note="no NetBox tenant slug; VMs synced as unassigned")
+            results.append(st)
+            await self.simulations_store.set_vm_sync_status(tid, st)
+
+        # Unassigned bucket (untagged VMs + tenants-without-slug) — synthetic row.
+        un_total = int(per_tenant.get(UNASSIGNED, {}).get("vms_total", 0) or 0)
+        if un_total or attr_counts.get(UNASSIGNED):
+            st = _row(UNASSIGNED, UNASSIGNED, "Unassigned (no tenant tag)", un_total)
+            results.append(st)
+            await self.simulations_store.set_vm_sync_status(UNASSIGNED, st)
+
+        logger.info("vm sync ALL result status=%s sent=%d pushed=%d skipped=%d "
+                    "deleted=%d errors=%d rows=%d",
+                    overall, len(vms), pushed, skipped, deleted, errors,
+                    len(results))
+        return {"status": overall, "pushed": pushed, "errors": errors,
+                "skipped": skipped, "deleted": deleted, "vms_total": len(vms),
+                "per_tenant": per_tenant, "results": results,
+                "message": message or (f"{len(vms)} VM(s) sent"
+                                        if overall != "error" else "NetBox error")}
+
+    async def sync_tenant_vms(self, tenant_id: str) -> Dict[str, Any]:
+        """Sync all VMs, then return the status row for one tenant (grab-all model).
+
+        The pull is cluster-wide (one ``PXMX_LIST_VMS``, no ``tag_filter``) so
+        the NetBox mirror stays complete; ``tenant_id`` only selects which
+        per-tenant row to return — for the on-demand 'Sync now' route and the
+        pxmx-edit trigger. A blank ``tenant_id`` returns the unassigned row.
+        Every bound tenant's status is refreshed each call (one pull, one push).
+        """
+        agg = await self.sync_all_vms()
+        tid = tenant_id or self._VM_SYNC_UNASSIGNED_KEY
+        for st in agg.get("results", []):
+            if st.get("tenant_id") == tid:
+                return st
+        # Tenant not in the results (not bound / no matched VMs) — synthesize a
+        # row so the caller gets a well-formed status dict either way.
+        cfg = self.state.get_tenant(tid) or {}
+        msg = ("no VMs matched tenant tag"
+               if tid != self._VM_SYNC_UNASSIGNED_KEY
+               else (agg.get("message") or "no untagged VMs"))
+        return {"tenant_id": tid, "tenant_name": cfg.get("name") or tid,
+                "status": agg.get("status", "success"),
+                "pushed": 0, "errors": 0, "skipped": 0, "deleted": 0,
+                "message": msg, "last_sync_ts": time.time(), "vms_total": 0}
 
     def trigger_vm_sync(self, tenant_id: str) -> None:
         """Fire-and-forget a VM sync for one tenant after a pxmx/hypervisor edit.
@@ -328,14 +424,16 @@ class VmSyncMixin:
             pass  # no running event loop — nothing to do
 
     async def run_vm_sync_loop(self):
-        """Periodically sync hypervisor VMs → NetBox per the configured schedule.
+        """Periodically sync ALL hypervisor VMs → NetBox per the configured schedule.
 
         Reads the config fresh each cycle (enabled / source / mode / interval /
         daily time) so a WebUI change takes effect without a restart. Disabled
         → short sleep + re-check. Skips a cycle entirely if the configured
-        hypervisor source or NetBox is offline (the per-tenant sync records an
-        'error' status for it). Staggered 45s after the endpoint sync loop so
-        the two heavy syncs don't simultaneous-fire on startup.
+        hypervisor source or NetBox is offline. One ``sync_all_vms()`` per cycle
+        (a single grab-all pull + single NetBox push) replaces the old
+        per-tenant fan-out — the sync is cluster-wide now, so there's nothing to
+        parallelize. Staggered 45s after the endpoint sync loop so the two heavy
+        syncs don't simultaneous-fire on startup.
         """
         await asyncio.sleep(45)  # let spokes connect; stagger after endpoint sync
         while True:
@@ -345,17 +443,10 @@ class VmSyncMixin:
                 if cfg.get("enabled", False) and \
                         self.get_spoke_by_type(se.get("module_type", "hypervisor")) and \
                         self.get_spoke_by_type(self._VM_SYNC_TARGET_MODULE):
-                    tenants = self._vm_sync_tenants()
-                    sem = asyncio.Semaphore(self._vm_sync_concurrency())
-
-                    async def _one(tid: str):
-                        async with sem:
-                            try:
-                                await self.sync_tenant_vms(tid)
-                            except Exception as e:  # sync_tenant_vms already swallows; never let one task kill the gather
-                                logger.debug("vm sync gather tenant=%s: %s", tid, e)
-
-                    await asyncio.gather(*(_one(tid) for tid in tenants))
+                    try:
+                        await self.sync_all_vms()
+                    except Exception as e:  # sync_all_vms already swallows; never let one cycle kill the loop
+                        logger.debug("vm sync loop cycle: %s", e)
                 delay = self._vm_sync_next_delay(cfg) if cfg.get("enabled", False) else 60
                 await asyncio.sleep(delay)
             except Exception as e:
