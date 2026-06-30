@@ -61,9 +61,13 @@ _FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
 # their concrete-IP columns; "aliases" filters on its ``content`` (the IPs/CIDRs
 # the alias expands to). "nat" now also matches on its ``source`` (the opnsense
 # spoke serializes source on NAT records) so a NAT policy whose source is in
-# the tenant's subnet shows even when its target/destination aren't.
-# "health" carries no IP and is skipped. Field sets mirror the client-side
-# itemInTenantPrefixes calls (main.js ~5078-5084).
+# the tenant's subnet shows even when its target/destination aren't. NAT is
+# filtered with drop_no_ip=False at the call site (see filter_fw): a typical
+# port forward is source=any with an alias/hostname target, so it yields no
+# concrete IP and would otherwise be dropped entirely — keeping unattributable
+# NAT rules restores visibility without weakening isolation for concretely
+# attributed ones. "health" carries no IP and is skipped. Field sets mirror the
+# client-side itemInTenantPrefixes calls (main.js ~5078-5084).
 _FW_FILTER_SPEC = {
     "rules":      ("fw", None),
     "nat":        ("fields", ["source", "internal_ip", "external_ip", "destination.network"]),
@@ -405,8 +409,20 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
         logger.warning("DIAG filter_fw[%s] filtered %d -> %d alias_map=%s",
                        endpoint, before, _list_len(out), bool(alias_map))
         return out
-    out = filter_items_by_prefixes(data, prefixes, fields, tenant_category=tenant_cat)
-    logger.warning("DIAG filter_fw[%s] filtered %d -> %d", endpoint, before, _list_len(out))
+    # NAT port forwards are normally public-facing (source=any) with a target
+    # that may be an alias/hostname rather than a bare IP, so a typical record
+    # yields no concrete IP from any field. Under the default drop_no_ip=True
+    # that collapsed the whole NAT tab to empty for tenant-scoped views
+    # (regression from the 2026-06-29 NAT filter extension). Keep unattributable
+    # NAT rules (drop_no_ip=False): an unresolved target leaks no internal IP,
+    # and a rule whose concrete IP belongs to a *different* tenant is still
+    # dropped by the has_concrete branch below. dhcp/dns/interfaces keep the
+    # strict default (empty/stopped rows shouldn't leak across tenants).
+    drop_no_ip = endpoint != "nat"
+    out = filter_items_by_prefixes(data, prefixes, fields,
+                                   drop_no_ip=drop_no_ip, tenant_category=tenant_cat)
+    logger.warning("DIAG filter_fw[%s] filtered %d -> %d drop_no_ip=%s",
+                   endpoint, before, _list_len(out), drop_no_ip)
     return out
 
 
