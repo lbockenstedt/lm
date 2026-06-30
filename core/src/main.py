@@ -65,6 +65,7 @@ from fw_discovery_sync import FwDiscoverySyncMixin
 from nw_discovery_sync import NwDiscoverySyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 from staleness_sweep import StalenessSweepMixin
+from spoke_alert_sync import SpokeAlertMixin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -263,7 +264,7 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -309,6 +310,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         #              in_progress} }. Surfaced via GET_SPOKE_STATUS + the
         # /setup/diagnostics route so the WebUI and bugfixer see recovery state.
         self.spoke_recovery: Dict[str, Dict[str, Any]] = {}
+        # Spoke out-of-contact alerting (SpokeAlertMixin). Transient runtime state —
+        # never persisted/committed; re-derives within one loop cycle after a hub
+        # restart. _spoke_alerts is the active-alert store surfaced via /status +
+        # /setup/diagnostics + /setup/spoke-alerts; _spoke_alert_tier tracks the last
+        # emitted tier so alerts fire on TRANSITION only (no per-cycle log spam);
+        # _spoke_absent_since seeds a clock for approved-but-never-seen spokes so
+        # they still alert at 5/30 min. Decoupled from the recovery watchdog's 300s
+        # RED — see spoke_alert_sync.py.
+        self._spoke_alerts: Dict[str, Dict[str, Any]] = {}
+        self._spoke_alert_tier: Dict[str, str] = {}
+        self._spoke_absent_since: Dict[str, float] = {}
         # "File a Bug" reports from the WebUI footer button. The WebUI POSTs an
         # explanation + browser console + raw HTML + html2canvas screenshot to
         # /api/bug-report; the hub stores the full artifacts under data_dir/bugs/
@@ -1332,6 +1344,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 if payload.get("type") == "HEARTBEAT":
                     self.message_count += 1
                     self.heartbeat.update_heartbeat(spoke_id)
+                    # A heartbeat means the spoke is in contact — clear any
+                    # never-seen absent clock so the alert loop doesn't keep a
+                    # stale _spoke_absent_since entry around after first contact.
+                    self._spoke_absent_since.pop(spoke_id, None)
                     continue
 
                 # If the module is not approved, ignore all other messages
@@ -2499,6 +2515,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # restarts their unit (reset-failed + restart via the root helper), with
         # backoff + give-up/escalation to bugfixer. See run_spoke_recovery_loop.
         recovery_task = asyncio.create_task(self.run_spoke_recovery_loop())
+        # Spoke out-of-contact alerting: forgiving 5 min → warning / 30 min → error
+        # tiers, decoupled from the recovery watchdog above (which still acts at
+        # 300s RED). Emits on transition only; ERROR tier surfaces in GET_ERROR_LOGS.
+        # See run_spoke_alert_loop (SpokeAlertMixin).
+        spoke_alert_task = asyncio.create_task(self.run_spoke_alert_loop())
         # CS bridge: polls the cs (Client-Simulation) spoke's command inbox for
         # every CS-enabled connected pxmx agent and relays commands to the agent
         # as CS_COMMAND (one-socket invariant — the agent never talks to the cs
