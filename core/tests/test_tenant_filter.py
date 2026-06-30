@@ -82,14 +82,22 @@ def test_envelope_dict_filtered_in_place():
 
 # ── firewall rules (strict two-sided) ──────────────────────────────────────
 
-def test_firewall_global_rule_shown_both_wildcard():
-    """any→any is a global policy; always shown."""
-    rule = {"source": "any", "destination": "any"}
-    assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is True
+def test_firewall_rule_dropped_when_either_side_wildcard():
+    """A wildcard on either side makes the rule broad/global → not this tenant.
+    Even any→<tenant-ip> is dropped, because 'any' on source means the rule
+    isn't specific to this tenant."""
+    assert firewall_rule_in_prefixes(
+        {"source": "any", "destination": "any"}, TENANT_PREFIXES) is False
+    assert firewall_rule_in_prefixes(
+        {"source": "any", "destination": "10.20.0.5"}, TENANT_PREFIXES) is False
+    assert firewall_rule_in_prefixes(
+        {"source": "10.20.0.5", "destination": "any"}, TENANT_PREFIXES) is False
+    assert firewall_rule_in_prefixes(
+        {"source": "any:443", "destination": "any"}, TENANT_PREFIXES) is False
 
 
-def test_firewall_rule_shown_when_dst_in_prefix():
-    rule = {"source": "any", "destination": "10.20.0.5"}
+def test_firewall_rule_shown_when_both_sides_non_wildcard_and_one_in_prefix():
+    rule = {"source": "10.20.0.5", "destination": "8.8.8.8"}
     assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is True
 
 
@@ -100,12 +108,12 @@ def test_firewall_rule_hidden_when_both_sides_outside():
 
 def test_firewall_filter_rules_envelope():
     env = {"rules": [
-        {"source": "any", "destination": "any"},          # global → keep
-        {"source": "8.8.8.8", "destination": "1.1.1.1"},   # both outside → drop
-        {"source": "any", "destination": "10.20.0.5"},     # dst in prefix → keep
+        {"source": "any", "destination": "any"},          # wildcard side → drop
+        {"source": "8.8.8.8", "destination": "1.1.1.1"},    # both outside → drop
+        {"source": "10.20.0.5", "destination": "8.8.8.8"},  # src in prefix, no any → keep
     ]}
     out = filter_firewall_rules(env, TENANT_PREFIXES)
-    assert len(out["rules"]) == 2
+    assert len(out["rules"]) == 1
 
 
 # ── alias resolution ────────────────────────────────────────────────────────
@@ -126,42 +134,37 @@ def test_build_alias_map_resolves_concrete_and_nested():
 
 
 def test_alias_match_lets_firewall_rule_through():
-    """A rule referencing an alias whose content is in the tenant prefix is kept
-    once the alias map resolves it. Without the map the alias side is an
-    unresolvable non-wildcard → dropped (err on hiding), so the map is what
-    lets the tenant's own alias-based rule through."""
+    """A rule whose non-wildcard side is an alias resolving into the tenant
+    prefix is kept once the alias map resolves it. Without the map that side is
+    an unresolvable non-wildcard → dropped (err on hiding). Neither side is
+    'any', so the wildcard drop doesn't interfere."""
     aliases = [{"name": "LAN_NET", "type": "network", "content": "10.20.0.0/24"}]
     amap = build_alias_map(aliases)
-    rule = {"source": "any", "destination": "LAN_NET"}
+    rule = {"source": "LAN_NET", "destination": "8.8.8.8"}
     assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES, alias_map=amap) is True
-    # Without the map: dst is an unresolvable alias name (not a wildcard) → drop.
-    # (Previously this leaked: both sides None → "global policy" → shown to all.)
+    # Without the map: src is an unresolvable alias name (not a wildcard), dst is
+    # off-prefix → drop. (Previously this leaked: both sides None → "global
+    # policy" → shown to all.)
     assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is False
 
 
 def test_firewall_rule_dropped_when_unresolvable_alias_no_map():
-    """The cross-tenant leak fix: a rule whose non-wildcard side is an alias name
-    we can't expand (no alias map) is NOT treated as global policy — it's
-    dropped, because it can't be attributed to this tenant."""
-    rule = {"source": "SOME_OTHER_TENANT_ALIAS", "destination": "any"}
+    """A rule whose non-wildcard side is an alias name we can't expand (no alias
+    map) is dropped — it can't be attributed to this tenant."""
+    rule = {"source": "SOME_OTHER_TENANT_ALIAS", "destination": "8.8.8.8"}
     assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is False
 
 
 def test_firewall_rule_dropped_when_both_sides_unresolvable_interfaces():
     """Interface names (lan/opt1) aren't aliases and can't be expanded to
-    concrete nets — both sides unresolvable non-wildcards → drop, not global."""
+    concrete nets — both sides unresolvable non-wildcards → drop."""
     rule = {"source": "lan", "destination": "opt1"}
     assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is False
 
 
-def test_firewall_global_rule_shown_both_wildcard_with_port():
-    """any:443 → any is still genuine global policy (both sides wildcards)."""
-    rule = {"source": "any:443", "destination": "any"}
-    assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is True
-
-
-def test_firewall_rule_one_side_wildcard_one_side_off_prefix_drops():
-    """any → concrete-off-prefix: the concrete side is outside the tenant and the
-    other side is a wildcard (not both wildcards) → drop."""
-    rule = {"source": "any", "destination": "8.8.8.8"}
-    assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES) is False
+def test_firewall_category_overrides_wildcard_drop():
+    """A rule explicitly tagged with the tenant's display-name category is shown
+    even if a side is a wildcard — the admin attribution is the escape hatch."""
+    rule = {"source": "any", "destination": "any", "category": "Acme"}
+    assert firewall_rule_in_prefixes(rule, TENANT_PREFIXES,
+                                     tenant_category="Acme") is True
