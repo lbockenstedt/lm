@@ -130,12 +130,15 @@ class VmSyncMixin:
         """
         se = self._vm_sync_source()
         field = se.get("tenant_scope_field", "")
-        val = str(scope_value or "").strip()
+        val = str(scope_value or "").strip().lower()
         if not val or not field:
             return None
+        # Case-insensitive: Proxmox tags are free-form, so a VM carrying the
+        # tenant's proxmox_tag in a different case must still attribute to it
+        # (mirrors the spoke's tag_filter lowercasing in PXMX_LIST_VMS).
         tenants = (self.state.tenant_state or {}).get("tenants", {}) or {}
         for tid, cfg in tenants.items():
-            if str((cfg or {}).get(field) or "").strip() == val:
+            if str((cfg or {}).get(field) or "").strip().lower() == val:
                 return str(tid)
         return None
 
