@@ -2989,6 +2989,8 @@ def create_app(hub):
         except Exception as e:
             logger.exception("pxmx_clone_vm failed")
             raise HTTPException(status_code=500, detail=str(e))
+
+    async def _compute_tenant_counts(hub, scoping: dict) -> dict:
         """Per-tenant aggregate counts across all connected spokes, scoped by
         the tenant's netbox_tenant_slug / proxmox_tag. Returns
         {devices, vms, sessions, prefixes, ips_used}. Shared by the single-tenant
