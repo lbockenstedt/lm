@@ -129,17 +129,29 @@ def _reclassify_host_usb(host: dict, ign: set, g_cert: set, t_cert: set) -> dict
                 px[key] = [d for d in v if _usb_dev_vidpid(d) not in ign]
         if cert:
             present = list(px.get("present_usb")) if isinstance(px.get("present_usb"), list) else []
-            present_vp = {_usb_dev_vidpid(d) for d in present}
+            # present_usb / unknown_usb are PER PHYSICAL DONGLE (keyed by
+            # bus_path), so multiple instances of the same vid:pid are legitimate
+            # — 10 dongles of one type must count as 10, not collapse to 1.
+            # Dedup only by bus_path (a true duplicate: the same physical device
+            # already represented in present).
+            present_paths = {(d.get("bus_path") if isinstance(d, dict) else None)
+                             for d in present}
             unknown = px.get("unknown_usb")
             if isinstance(unknown, list):
                 leftover = []
                 for d in unknown:
                     vp = _usb_dev_vidpid(d)
                     if vp in cert:
-                        # Certified (global or local) → never keep in unknown.
-                        if vp not in present_vp:
-                            present.append(d)
-                            present_vp.add(vp)
+                        # Certified (global or local) → move EVERY physical
+                        # instance to present_usb. The old vidpid-dedup dropped
+                        # all but the first, undercounting duplicate dongles (the
+                        # "10 of one type → counted as 1" bug).
+                        bp = d.get("bus_path") if isinstance(d, dict) else None
+                        if bp and bp in present_paths:
+                            continue  # same physical device already in present
+                        present.append(d)
+                        if bp:
+                            present_paths.add(bp)
                     else:
                         leftover.append(d)
                 px["unknown_usb"] = leftover
