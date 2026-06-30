@@ -35,7 +35,7 @@ Audience: Hub developers.
 from __future__ import annotations
 
 import re
-import time
+import datetime as _dt
 import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -193,7 +193,7 @@ class RealtimeIpamNacSyncMixin:
         Idempotent + best-effort: a netbox outage or an unbound tenant yields an
         error/skipped status, never an unhandled exception (the loop depends on this).
         """
-        now = time.time()
+        now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         tenant_cfg = self.state.get_tenant(tenant_id) or {}
         tenant_name = tenant_cfg.get("name") or tenant_id
         netbox_slug = str(tenant_cfg.get("netbox_tenant_slug") or "").strip()
