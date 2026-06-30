@@ -105,19 +105,26 @@ def _usb_dev_vidpid(dev: Any) -> str:
     return str(dev.get("vidpid") or "").strip().lower()
 
 
-def _reclassify_host_usb(host: dict, ign: set, g_cert: set, t_cert: set) -> dict:
+def _reclassify_host_usb(host: dict, ign: set, g_cert: dict, t_cert: dict) -> dict:
     """Apply the hub's effective USB certified/ignored sets to a proxmox host
     payload so the tenant UI reflects admin/tenant decisions even before the
     spoke re-filters its telemetry. Works on copies so the cached telemetry is
     never mutated.
+
+    ``g_cert`` / ``t_cert`` are ``{vidpid: type}`` maps (global / tenant-local
+    certified dongle class); tenant-local wins on overlap.
       * ignored vid:pids are dropped from present_usb / unknown_usb /
         usb_state / usb_devices and usb_count is recomputed to match;
       * any certified vid:pid (global or local) is removed from unknown_usb so
         a dongle already approved never still shows as "to be certified", and is
         added to present_usb if not already there;
       * each certified device is tagged with approval_scope (global / local /
-        global+local) so the UI can show how it was approved."""
-    cert = g_cert | t_cert
+        global+local) so the UI can show how it was approved, and its saved
+        ``type`` (wired/wireless/...) is written onto the device dict so the
+        UI's Wired/Wireless dropdown reflects the operator's choice immediately
+        instead of reverting to stale spoke telemetry on the post-save
+        re-render."""
+    cert = {**g_cert, **t_cert}  # tenant-local type wins on overlap
     if not ign and not cert:
         return host
     px = host.get("proxmox")
@@ -166,6 +173,14 @@ def _reclassify_host_usb(host: dict, ign: set, g_cert: set, t_cert: set) -> dict
                     d["approval_scope"] = ("global+local" if (in_g and in_t)
                                             else "global" if in_g
                                             else "local" if in_t else "")
+                    # Stamp the hub's saved dongle class onto the device so the
+                    # UI's Wired/Wireless dropdown reflects the operator's
+                    # choice immediately. Without this the post-save re-render
+                    # rebuilds the dropdown from stale spoke telemetry
+                    # (present_usb[].type) and the selection appears to revert.
+                    saved_type = cert.get(vp)
+                    if saved_type:
+                        d["type"] = saved_type
                 tagged.append(d)
             px["present_usb"] = tagged
         host["proxmox"] = px
@@ -688,10 +703,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # hidden, certified devices no longer show as "to be certified", and each
         # certified device is tagged with its approval scope (global/local).
         ign = set(await _effective_usb_ignored(tenant_id))
-        g_cert = {str(d.get("vidpid", "")).strip().lower()
+        g_cert = {str(d.get("vidpid", "")).strip().lower(): str(d.get("type") or "wireless")
                   for d in await store.get_global_usb_vidpids() if d.get("vidpid")}
         hc = await store.get_hub_config(tenant_id)
-        t_cert = {d["vidpid"] for d in
+        t_cert = {e["vidpid"]: str(e.get("type") or "wireless") for e in
                   _normalize_usb_vidpids((hc.get("hub_config") or {}).get("usb_vidpids"))}
         if ign or g_cert or t_cert:
             data["hosts"] = [_reclassify_host_usb(h, ign, g_cert, t_cert)
