@@ -1994,6 +1994,26 @@ def create_app(hub):
             logger.exception("nw_run_config failed (%s)", device_id)
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/api/nw/{device_id}/poll")
+    async def nw_poll_device(device_id: str, request: Request):
+        """POLL NOW for one network device (admin-only): run a full
+        probe+info+interfaces+arp+mac poll on the spoke, then upsert the device
+        + its interfaces into NetBox via ``NETBOX_SYNC_NW_DEVICE``. Returns the
+        poll results + a NetBox push summary. Driven by the WebUI "Poll Now"
+        button on the Devices table."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            result = await hub.poll_nw_device(device_id)
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("nw_poll_device failed (%s)", device_id)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/nw-devices")
     async def get_nw_devices():
         hub = app.state.hub
