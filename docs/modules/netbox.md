@@ -19,6 +19,25 @@ tree, but the path actually invoked by the installer is the cloned one.
    trigger model, per-tenant status) is documented in
    [cppm.md](cppm.md) §"IPAM → ClearPass Endpoint Sync (`CPPM_SYNC_ENDPOINTS`)"
    and the `Hub.IPAM_SOURCES` registry is defined in `core/src/main.py`.
+3. **Sink for the Hypervisor → IPAM VM sync** — `NETBOX_SYNC_VMS` writes
+   tenant-tagged virtualization records mirroring live Proxmox VMs (`replace:
+   true`, matched by a `proxmox_unique_id` custom field). Driven by
+   `Hub.HYPERVISOR_SOURCES` / `FwDiscoverySyncMixin`'s sibling `VmSyncMixin`
+   (`core/src/vm_sync.py`); surfaced as the Setup → Sync "Hypervisor → IPAM
+   Sync" card.
+4. **Sink for the Firewall → IPAM device-discovery sync** — `NETBOX_SYNC_DEVICES`
+   writes tenant-tagged DCIM devices + IP records for what the firewall
+   (OPNsense) sees on the network (DHCP leases + ARP table, attributed to the
+   tenant by prefix containment). Each created device carries
+   `custom_fields.discovered_from = "opnsense"` (the replace-delete ownership
+   marker) and its `mgmt` IP carries `custom_fields.mac_address` — which feeds
+   the IPAM→CPPM endpoint sync so static-IP devices DHCP can't see reach
+   ClearPass. `replace: true` + a tenant slug → the spoke overwrites that
+   tenant's discovered-device set (stale ones deleted); global/unscoped sync
+   skips delete. Driven by `Hub.FIREWALL_DISCOVERY_SOURCES` /
+   `FwDiscoverySyncMixin` (`core/src/fw_discovery_sync.py`); surfaced as the
+   Setup → Sync "Firewall → IPAM Sync" card. See
+   [opnsense.md](opnsense.md) §"Firewall → NetBox Device Discovery Sync".
 
 ## 2. Commands
 

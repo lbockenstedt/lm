@@ -106,6 +106,13 @@ const ROUTES = {
     runVmSyncNow:           { m: 'POST', p: '/setup/vm-sync/run',         api: 'run_vm_sync' },
     saveVmSyncConfig:       { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
 
+    // ── Firewall discovery sync (Firewall → NetBox devices) ──
+    loadFwDiscoverySources: { m: 'GET',  p: '/setup/fw-discovery-sync/sources', api: 'fw_discovery_sync_sources' },
+    loadFwDiscoveryConfig:  { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
+    loadFwDiscoveryStatus:  { m: 'GET',  p: '/setup/fw-discovery-sync/status', api: 'fw_discovery_sync_status' },
+    runFwDiscoveryNow:      { m: 'POST', p: '/setup/fw-discovery-sync/run', api: 'run_fw_discovery_sync' },
+    saveFwDiscoveryConfig:  { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
+
     // ── Cache / subnet-filter / diagnostics / logs ──
     loadCacheConfig:        { m: 'GET',  p: '/admin/cache/config',        api: 'admin_get_cache_config' },
     saveCacheConfig:        { m: 'PUT',  p: '/admin/cache/config',        api: 'admin_update_cache_config' },
@@ -2628,6 +2635,73 @@ function _renderSetupSyncTile(content) {
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
                     <div id="vm-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                 </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Firewall → IPAM Sync</h3>
+                    <button id="fw-sync-run-btn" onclick="runFwDiscoveryNow()" class="${btnCls}">Sync now</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Pulls DHCP leases + the ARP table from the selected firewall (OPNsense via the firewall spoke), attributes each discovered device to a tenant by prefix containment (the device IP must sit inside one of the tenant's NetBox prefixes), and mirrors them into NetBox DCIM devices + IP records — tenant-tagged, with the MAC written onto the IP's <code>mac_address</code> custom field (which feeds the IPAM → NAC endpoint sync, so static-IP devices DHCP can't see reach ClearPass). The firewall is the source of truth — each sync overwrites the tenant's discovered-device set to match (stale records are deleted). Devices whose IP matches no tenant prefix are dropped + counted. OPNsense is registered today; the design is modular so another firewall product can be swapped in by adding one entry to the hub's FIREWALL_DISCOVERY_SOURCES registry.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="fw-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sync</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Pull from (firewall source)</label>
+                        <select id="fw-sync-source" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="opnsense">OPNsense</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Data to pull</label>
+                        <select id="fw-sync-data" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="both">DHCP + ARP</option>
+                            <option value="dhcp">DHCP leases only</option>
+                            <option value="arp">ARP table only</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Firewall</label>
+                        <select id="fw-sync-firewall" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="">All connected firewalls</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Schedule</label>
+                        <select id="fw-sync-mode" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="interval">Every (interval)</option>
+                            <option value="daily">Daily at time</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Interval (minutes)</label>
+                        <input type="number" id="fw-sync-interval" min="1" value="60" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Daily time (HH:MM, 24h)</label>
+                        <input type="time" id="fw-sync-time" value="02:00" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                </div>
+                <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div class="space-y-1">
+                        <label class="${labelCls}">NetBox device role (slug)</label>
+                        <input id="fw-sync-role" placeholder="discovered" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">NetBox device type (slug)</label>
+                        <input id="fw-sync-type" placeholder="discovered" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">NetBox site (slug, optional)</label>
+                        <input id="fw-sync-site" placeholder="" class="${inputCls}">
+                    </div>
+                </div>
+                <div class="mt-4 flex items-center gap-3">
+                    <button onclick="saveFwDiscoveryConfig()" class="${btnCls}">Save Schedule</button>
+                    <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
+                    <div id="fw-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
             </div>`;
     loadEndpointSyncSources();
     loadEndpointSyncConfig();
@@ -2635,6 +2709,9 @@ function _renderSetupSyncTile(content) {
     loadVmSyncSources();
     loadVmSyncConfig();
     loadVmSyncStatus();
+    loadFwDiscoverySources();
+    loadFwDiscoveryConfig();
+    loadFwDiscoveryStatus();
 }
 
 // Setup → IPAM tile. IPAM / NetBox instances only.
@@ -3250,6 +3327,151 @@ async function saveVmSyncConfig() {
             } } })
         });
         if (r.ok) showToast('VM sync schedule saved.', 'success');
+        else showToast('Failed to save schedule.', 'error');
+    } catch (e) {
+        showToast('Error saving schedule: ' + e.message, 'error');
+    }
+}
+
+// ── Firewall → IPAM device-discovery sync (Setup → Sync third card) ──
+// Backing routes: /setup/fw-discovery-sync/{sources,status,run} + shared
+// /setup/config (saved under global_config.opnsense_netbox_device_sync).
+async function loadFwDiscoverySources() {
+    // Populate the firewall-source dropdown from FIREWALL_DISCOVERY_SOURCES and
+    // the firewall picker from global_config["firewalls"] (each marked with its
+    // connected state). NetBox-down is flagged separately by the status card.
+    const sel = document.getElementById('fw-sync-source');
+    const fwSel = document.getElementById('fw-sync-firewall');
+    if (!sel) return;
+    let savedFw = '';
+    if (fwSel) savedFw = fwSel.value;
+    try {
+        const r = await setupFetch('/setup/fw-discovery-sync/sources');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cur = sel.value;
+        sel.innerHTML = (data.sources || []).map(s =>
+            `<option value="${s.name}">${s.label}${s.connected ? '' : ' (not connected)'}</option>`
+        ).join('');
+        if (cur) sel.value = cur;
+        if (fwSel) {
+            const fws = data.firewalls || [];
+            fwSel.innerHTML = '<option value="">All connected firewalls</option>'
+                + fws.map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name)}${f.connected ? '' : ' (not connected)'}</option>`).join('');
+            if (!fws.length) {
+                fwSel.innerHTML = '<option value="">No firewalls configured</option>';
+            }
+            if (savedFw) fwSel.value = savedFw;
+        }
+    } catch (e) { console.error('loadFwDiscoverySources failed', e); }
+}
+
+async function loadFwDiscoveryConfig() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cfg = (data.global_config || {}).opnsense_netbox_device_sync || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        const chk = document.getElementById('fw-sync-enabled');
+        if (chk) chk.checked = cfg.enabled === true;
+        set('fw-sync-source', cfg.source || 'opnsense');
+        set('fw-sync-data', cfg.source_data || 'both');
+        set('fw-sync-firewall', cfg.firewall_id || '');
+        set('fw-sync-mode', cfg.mode === 'daily' ? 'daily' : 'interval');
+        set('fw-sync-interval', Math.max(1, Math.round((cfg.interval_seconds || 3600) / 60)));
+        set('fw-sync-time', cfg.daily_time || '02:00');
+        const d = cfg.defaults || {};
+        set('fw-sync-role', d.role || '');
+        set('fw-sync-type', d.device_type || '');
+        set('fw-sync-site', d.site || '');
+    } catch (e) { console.error('loadFwDiscoveryConfig failed', e); }
+}
+
+async function loadFwDiscoveryStatus() {
+    const wrap = document.getElementById('fw-sync-status');
+    if (!wrap) return;
+    let data;
+    try {
+        const r = await setupFetch('/setup/fw-discovery-sync/status');
+        if (!r.ok) throw new Error(`${r.status}`);
+        data = await r.json();
+    } catch (e) {
+        wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
+        return;
+    }
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const rows = data.tenants || [];
+    if (!rows.length) {
+        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
+        return;
+    }
+    wrap.innerHTML = rows.map(t => {
+        const st = String(t.status || '');
+        const pill = st === 'success' ? 'bg-green-100 text-green-700'
+            : st === 'error' ? 'bg-red-100 text-red-700'
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+        const pushed = Number(t.pushed) || 0;
+        const errors = Number(t.errors) || 0;
+        const deleted = Number(t.deleted) || 0;
+        const skipped = Number(t.skipped) || 0;
+        const total = Number(t.discovered_total) || 0;
+        const skipLine = skipped > 0 ? ` · <span class="text-amber-600">skipped ${skipped}</span>` : '';
+        return `<div class="border border-slate-200 rounded-md p-3">
+            <div class="flex items-center justify-between mb-1">
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
+            </div>
+            <p class="text-xs text-slate-500">pushed ${pushed} · deleted ${deleted} · errors ${errors} · discovered ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+        </div>`;
+    }).join('');
+}
+
+async function runFwDiscoveryNow() {
+    const btn = document.getElementById('fw-sync-run-btn');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+        const r = await setupFetch('/setup/fw-discovery-sync/run', {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        const s = data.summary || {};
+        showToast(`Synced ${s.tenants || 0} tenant(s): ${s.pushed || 0} pushed, ${s.deleted || 0} deleted, ${s.dropped_unattributed || 0} dropped, ${s.errors || 0} errors.`, (s.errors || 0) ? 'info' : 'success');
+        await loadFwDiscoveryStatus();
+    } catch (e) {
+        showToast('Sync failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+}
+
+async function saveFwDiscoveryConfig() {
+    const enabled = document.getElementById('fw-sync-enabled')?.checked ? true : false;
+    const source = document.getElementById('fw-sync-source')?.value || 'opnsense';
+    const sourceData = document.getElementById('fw-sync-data')?.value || 'both';
+    const firewallId = document.getElementById('fw-sync-firewall')?.value || '';
+    const mode = document.getElementById('fw-sync-mode')?.value || 'interval';
+    const intervalMin = Math.max(1, parseInt(document.getElementById('fw-sync-interval')?.value, 10) || 60);
+    const dailyTime = document.getElementById('fw-sync-time')?.value || '02:00';
+    const defaults = {
+        role: (document.getElementById('fw-sync-role')?.value || '').trim(),
+        device_type: (document.getElementById('fw-sync-type')?.value || '').trim(),
+        site: (document.getElementById('fw-sync-site')?.value || '').trim(),
+    };
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { opnsense_netbox_device_sync: {
+                enabled, source, source_data: sourceData, firewall_id: firewallId,
+                mode, interval_seconds: intervalMin * 60, daily_time: dailyTime,
+                defaults
+            } } })
+        });
+        if (r.ok) showToast('Firewall discovery sync schedule saved.', 'success');
         else showToast('Failed to save schedule.', 'error');
     } catch (e) {
         showToast('Error saving schedule: ' + e.message, 'error');

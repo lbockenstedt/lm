@@ -197,6 +197,36 @@ class SimulationsStore:
                 out[tid] = dict(st)
         return out
 
+    # ── Firewall → NetBox device-discovery sync last-run status (Setup → Sync) ─
+    # Per-tenant result of the most recent firewall-discovery sync cycle
+    # (background loop or on-demand "Sync now"). Persisted so the UI still shows
+    # the last run after a hub restart. Shape: {status, pushed, errors, skipped,
+    # deleted, discovered_total, message, last_sync_ts, tenant_name}.
+    async def get_fw_discovery_sync_status(self, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's last firewall-discovery-sync status (empty if never run)."""
+        return dict(self._data.get(tenant_id, {}).get("fw_discovery_sync", {}))
+
+    async def set_fw_discovery_sync_status(self, tenant_id: str,
+                                            status: Dict[str, Any]) -> None:
+        """Replace the tenant's firewall-discovery-sync status and persist."""
+        with self._lock:
+            self._tenant(tenant_id)["fw_discovery_sync"] = status or {}
+            self._save()
+
+    def get_all_fw_discovery_sync_status(self) -> Dict[str, Dict[str, Any]]:
+        """Return {tenant_id: status} for every tenant with a recorded firewall-discovery sync.
+
+        Synchronous — persistence happened on each ``set_fw_discovery_sync_status`` write.
+        """
+        out: Dict[str, Dict[str, Any]] = {}
+        for tid, t in self._data.items():
+            if tid == self._GLOBAL_KEY:
+                continue
+            st = t.get("fw_discovery_sync")
+            if st:
+                out[tid] = dict(st)
+        return out
+
     # ── onboarding PSKs (hub mints; the active one is pushed to the spoke) ──
     async def get_psks(self, tenant_id: str) -> List[str]:
         """Return a copy of the tenant's onboarding PSK list."""
