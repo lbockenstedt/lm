@@ -166,10 +166,8 @@ const SIM_ROUTES = {
     // ── Settings / troubleshooting ──
     csRenderSetupTroubleshooting:{ m: 'GET',    p: '/{tenant}/troubleshooting',                  api: 'get_troubleshooting' },
 
-    // ── PSK (onboarding-psk; used by Setup + Spoke Mgmt cards) ──
-    csPskCard:                   { m: 'GET',    p: '/tenant/{tenant}/onboarding-psk',            api: 'get_psks' },
-    csGenPsk:                    { m: 'POST',   p: '/tenant/{tenant}/onboarding-psk',            api: 'gen_psk' },
-    csRevokePsk:                 { m: 'DELETE', p: '/tenant/{tenant}/onboarding-psk',            api: 'revoke_psk' },
+    // ── PSK (onboarding-psk; used by the Spoke Mgmt card — Setup/General's
+    //    duplicate copy was removed since Spoke Management already owns PSKs) ──
     csSpokeMgmtPskCard:          { m: 'GET',    p: '/tenant/{tenant}/onboarding-psk',            api: 'get_psks' },
     csSpokeMgmtGenPsk:           { m: 'POST',   p: '/tenant/{tenant}/onboarding-psk',            api: 'gen_psk' },
     csSpokeMgmtRevokePsk:        { m: 'DELETE', p: '/tenant/{tenant}/onboarding-psk',            api: 'revoke_psk' },
@@ -1077,46 +1075,17 @@ window.csSaveHubConfig = async function () {
 };
 
 /* ===========================================================================
- * 6. Setup — onboarding PSK + hub-config + processing-modes + notifications
+ * 6. Setup — hub-config + processing-modes + notifications
+ *    (Onboarding PSK lives in Spoke Management now — removed from here to
+ *    avoid the duplicate copy.)
  * ========================================================================= */
 
 async function csRenderSetup() {
     csSetToolbar('');
-    let pskCard = '';
-    try { pskCard = await csPskCard(); } catch (e) { console.error('csRenderSetup: psk card load failed', e); pskCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('Onboarding PSK', e).replace('py-10', 'py-6')}</div>`; }
     let modesCard = '';
     try { modesCard = await csProcessingModesCard(); } catch (e) { console.error('csRenderSetup: processing-modes card load failed', e); modesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('Processing Modes', e).replace('py-10', 'py-6')}</div>`; }
-    csSet(`<div class="space-y-4">${pskCard}${modesCard}</div>`);
+    csSet(`<div class="space-y-4">${modesCard}</div>`);
 }
-
-async function csPskCard() {
-    const data = await csFetch('/tenant/' + csTenant() + '/onboarding-psk');
-    const psks = (data && data.psks) || [];
-    const rows = psks.map(p => `<tr>
-      <td class="px-3 py-2 font-mono text-xs">${csEscape(p)}</td>
-      <td class="px-3 py-2 text-right"><button onclick="csRevokePsk('${csEscape(p)}')" class="text-xs text-red-500 hover:underline">Revoke</button></td>
-    </tr>`).join('');
-    return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <div class="flex justify-between items-center mb-3">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding PSK</h3>
-        <button onclick="csGenPsk()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-1.5 rounded-md text-xs font-bold shadow-sm">+ Generate</button>
-      </div>
-      ${psks.length ? csTable(['PSK', ''], rows) : '<p class="text-xs text-slate-400 italic py-4 text-center">No PSKs issued.</p>'}
-      <span id="cs-psk-msg" class="text-xs"></span>
-    </div>`;
-}
-
-window.csGenPsk = async function () {
-    const msg = csEl('cs-psk-msg');
-    try { await csFetch('/tenant/' + csTenant() + '/onboarding-psk', { method: 'POST', body: '{}' }); await csRenderSetup(); }
-    catch (e) { console.error('csGenPsk: psk generate failed', e); if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; } }
-};
-
-window.csRevokePsk = async function (psk) {
-    const msg = csEl('cs-psk-msg');
-    try { await csFetch('/tenant/' + csTenant() + '/onboarding-psk', { method: 'DELETE', body: JSON.stringify({ psk }) }); await csRenderSetup(); }
-    catch (e) { console.error('csRevokePsk: psk revoke failed', e); if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; } }
-};
 
 async function csProcessingModesCard() {
     const data = await csFetch('/' + csTenant() + '/settings');
