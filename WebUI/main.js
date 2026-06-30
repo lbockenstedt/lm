@@ -99,6 +99,12 @@ const ROUTES = {
     runEndpointSyncNow:     { m: 'POST', p: '/setup/endpoint-sync/run',   api: 'run_endpoint_sync' },
     saveEndpointSyncConfig: { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
 
+    // ── Realtime NAC → IPAM reverse sync (the bidirectional counterpart) ──
+    loadRealtimeNacSyncConfig: { m: 'GET',  p: '/setup/config',                    api: 'get_global_config' },
+    loadRealtimeNacSyncStatus: { m: 'GET',  p: '/setup/realtime-nac-sync/status',  api: 'realtime_nac_sync_status' },
+    runRealtimeNacNow:         { m: 'POST', p: '/setup/realtime-nac-sync/run',     api: 'run_realtime_nac_sync' },
+    saveRealtimeNacSyncConfig: { m: 'POST', p: '/setup/config',                    api: 'update_global_config' },
+
     // ── VM sync (Hypervisor → NetBox) ──
     loadVmSyncSources:      { m: 'GET',  p: '/setup/vm-sync/sources',     api: 'vm_sync_sources' },
     loadVmSyncConfig:       { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
@@ -2560,10 +2566,10 @@ function _renderSetupSyncTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM → NAC Sync</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM ↔ NAC Sync</h3>
                     <button id="ep-sync-run-btn" onclick="runEndpointSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Periodically pulls endpoint records (IP / MAC / tenant) from the selected IPAM source and populates ClearPass Device Inventory via the CPPM spoke. The IPAM source is the source of truth — each sync overwrites the tenant's CPPM endpoint set to match. Also fires automatically after any IPAM edit made through the LM module. NetBox is registered today; the design is modular so another IPAM product can be swapped in by adding one entry to the hub's IPAM_SOURCES registry.</p>
+                <p class="text-xs text-slate-400 mb-3">Bidirectional. <strong>Forward (IPAM → NAC):</strong> periodically pulls endpoint records (IP / MAC / tenant) from the selected IPAM source and populates ClearPass Device Inventory via the CPPM spoke. The IPAM source is the source of truth — each sync overwrites the tenant's CPPM endpoint set to match. Also fires automatically after any IPAM edit made through the LM module. <strong>Reverse (NAC → IPAM, realtime):</strong> the sub-block below pulls ClearPass Access Tracker / session data (MAC, IP, switch IP/port) every ~1 min and adds to NetBox the devices not already present (only-add-missing — NetBox stays source of truth). NetBox is registered today; the design is modular so another IPAM product can be swapped in by adding one entry to the hub's IPAM_SOURCES registry.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="ep-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled sync</label>
                     <div class="space-y-1">
@@ -2592,6 +2598,29 @@ function _renderSetupSyncTile(content) {
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
                     <div id="endpoint-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
+                <div class="mt-5 pt-4 border-t border-slate-200">
+                    <div class="flex items-center justify-between mb-3">
+                        <div class="text-xs font-bold text-slate-500 uppercase tracking-wider">Realtime NAC → IPAM (reverse)</div>
+                        <button id="rt-nac-sync-run-btn" onclick="runRealtimeNacNow()" class="${btnCls}">Sync now</button>
+                    </div>
+                    <p class="text-xs text-slate-400 mb-3">Pulls ClearPass Access Tracker sessions started in the last <em>lookback</em> minutes every <em>interval</em> minutes and adds to NetBox the MACs not already present — each with a NIC interface (native MAC) + framed IP + a cable to a switch device's port interface. Only-add-missing: existing MACs are skipped (never duplicated, never deleted). Tenant attribution by IP prefix containment.</p>
+                    <div class="flex flex-wrap items-end gap-4">
+                        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="rt-nac-sync-enabled" class="w-4 h-4 text-green-600 rounded">Enable realtime reverse sync</label>
+                        <div class="space-y-1">
+                            <label class="${labelCls}">Interval (minutes)</label>
+                            <input type="number" id="rt-nac-sync-interval" min="1" value="1" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="${labelCls}">Lookback (minutes)</label>
+                            <input type="number" id="rt-nac-sync-lookback" min="1" value="2" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        </div>
+                        <button onclick="saveRealtimeNacSyncConfig()" class="${btnCls}">Save</button>
+                    </div>
+                    <div class="mt-4">
+                        <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last reverse sync per tenant</div>
+                        <div id="rt-nac-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                    </div>
                 </div>
             </div>
             <div class="${card}">
@@ -3186,6 +3215,101 @@ async function saveEndpointSyncConfig() {
         else showToast('Failed to save schedule.', 'error');
     } catch (e) {
         showToast('Error saving schedule: ' + e.message, 'error');
+    }
+}
+
+// ── Realtime NAC → IPAM reverse sync (Setup → Sync, same "IPAM ↔ NAC" card) ──
+async function loadRealtimeNacSyncConfig() {
+    // Populate the enable/interval/lookback inputs from global_config.
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cfg = (data.global_config || {}).realtime_ipam_nac_sync || {};
+        const en = document.getElementById('rt-nac-sync-enabled');
+        const intv = document.getElementById('rt-nac-sync-interval');
+        const lb = document.getElementById('rt-nac-sync-lookback');
+        if (en) en.checked = cfg.enabled === true;
+        if (intv) intv.value = Math.max(1, Math.round((cfg.interval_seconds || 60) / 60));
+        if (lb) lb.value = Math.max(1, cfg.lookback_minutes || 2);
+    } catch (e) { console.error('loadRealtimeNacSyncConfig failed', e); }
+}
+
+async function loadRealtimeNacSyncStatus() {
+    const wrap = document.getElementById('rt-nac-sync-status');
+    if (!wrap) return;
+    let data;
+    try {
+        const r = await setupFetch('/setup/realtime-nac-sync/status');
+        if (!r.ok) throw new Error(`${r.status}`);
+        data = await r.json();
+    } catch (e) {
+        wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
+        return;
+    }
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const rows = data.tenants || [];
+    if (!rows.length) {
+        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
+        return;
+    }
+    wrap.innerHTML = rows.map(t => {
+        const st = String(t.status || '');
+        const pill = st === 'success' ? 'bg-green-100 text-green-700'
+            : st === 'error' ? 'bg-red-100 text-red-700'
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+        const pushed = Number(t.pushed) || 0;
+        const errors = Number(t.errors) || 0;
+        const skipped = Number(t.skipped) || 0;
+        const total = Number(t.sessions_total) || 0;
+        const skipLine = skipped > 0 ? ` · <span class="text-amber-600">skipped ${skipped}</span>` : '';
+        return `<div class="border border-slate-200 rounded-md p-3">
+            <div class="flex items-center justify-between mb-1">
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
+            </div>
+            <p class="text-xs text-slate-500">added ${pushed} · already-present ${skipped} · errors ${errors} · sessions ${total}${skipLine} <span class="text-slate-400">· last ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+        </div>`;
+    }).join('');
+}
+
+async function runRealtimeNacNow() {
+    const btn = document.getElementById('rt-nac-sync-run-btn');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+        const r = await setupFetch('/setup/realtime-nac-sync/run', {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        const s = data.summary || {};
+        showToast(`Synced ${s.tenants || 0} tenant(s): ${s.pushed || 0} added, ${s.errors || 0} errors.`, (s.errors || 0) ? 'info' : 'success');
+        await loadRealtimeNacSyncStatus();
+    } catch (e) {
+        showToast('Sync failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+}
+
+async function saveRealtimeNacSyncConfig() {
+    const enabled = document.getElementById('rt-nac-sync-enabled')?.checked ? true : false;
+    const intervalMin = Math.max(1, parseInt(document.getElementById('rt-nac-sync-interval')?.value, 10) || 1);
+    const lookback = Math.max(1, parseInt(document.getElementById('rt-nac-sync-lookback')?.value, 10) || 2);
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { realtime_ipam_nac_sync: {
+                enabled, interval_seconds: intervalMin * 60, lookback_minutes: lookback
+            } } })
+        });
+        if (r.ok) showToast('Realtime reverse sync saved.', 'success');
+        else showToast('Failed to save.', 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
     }
 }
 
@@ -5530,7 +5654,7 @@ async function loadOpnsenseManagement() {
         }
 
         let keys;
-        if (subMenu === 'Firewall Rules') keys = ['firewall', 'source', 'destination', 'protocol', 'action', 'category', 'description'];
+        if (subMenu === 'Firewall Rules') keys = ['firewall', 'source', 'destination', 'protocol', 'action', 'description'];
         else if (subMenu === 'Interfaces') keys = ['firewall', 'description', 'ip', 'status', 'macaddr', 'mtu', 'media'];
         else if (subMenu === 'NAT Policies') keys = ['firewall', 'type', 'protocol', 'source', 'external_ip', 'external_port', 'internal_ip', 'internal_port', 'description'];
         else if (subMenu === 'DNS Records') keys = ['firewall', 'hostname', 'ip', 'type', 'ttl', 'description'];

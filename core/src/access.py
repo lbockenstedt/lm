@@ -31,8 +31,10 @@ Audience: Hub developers.
 from __future__ import annotations
 
 import time
+import asyncio
+import ipaddress
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from simulations.tenant_filter import (filter_items_by_prefixes,
                                        filter_firewall_rules, filter_record_by_prefixes,
@@ -77,12 +79,15 @@ _FW_FILTER_SPEC = {
     "aliases":    ("fields", ["content"]),
 }
 
-# OPNsense endpoints whose records carry a `category` config field. When the
-# tenant filter is active, a record whose `category` belongs to the tenant
-# (display name / slug / netbox slug / id, case-insensitive) is shown regardless
-# of subnet match — an alternate attribution path for rules/NAT/aliases the
-# admin explicitly tagged to a tenant (per the "category == tenant" rule).
-# dhcp/dns/interfaces don't use categories.
+# OPNsense endpoints that participate in category-based tenant attribution.
+# In OPNsense only ALIASES carry a `category` config field, so the record's-own
+# `category` check is meaningful only for aliases. `rules` is included so the
+# firewall-rule matcher still receives `tenant_category` and can attribute a
+# rule that REFERENCES one of the tenant's own aliases (alias category or
+# subnet overlap) — the alias categories come from the alias map
+# (`build_alias_map`), not the rule record. `nat` is included for symmetry but
+# NAT records carry no category, so it's a no-op there. dhcp/dns/interfaces
+# don't use categories.
 _FW_CATEGORY_ENDPOINTS = {"rules", "nat", "aliases"}
 
 
@@ -257,6 +262,72 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
     except Exception as e:
         logger.warning(f"Failed to fetch prefixes for tenant '{tenant_id}': {e}")
         return []
+
+
+async def attribute_by_prefix(hub, records: List[Dict[str, Any]]
+                             ) -> Tuple[Dict[str, List[Dict[str, Any]]], int]:
+    """Bucket records by tenant via IP prefix containment.
+
+    Builds the tenant→networks map once per call (concurrent prefix fetch via
+    ``fetch_tenant_prefixes``, bounded so hundreds of tenants don't stampede the
+    netbox spoke), then assigns each record to the first tenant whose prefix
+    contains its IP. Records with no IP, an unparseable IP, or an IP no tenant
+    owns are ``dropped`` (counted) — keeps NetBox tenant-authoritative, no
+    orphans. Returns ``({tenant_id: [records]}, dropped_count)``.
+
+    Extracted from ``FwDiscoverySyncMixin._fw_attribute`` so the firewall-
+    discovery sync and the realtime NAC→IPAM reverse sync share one attribution
+    path. ``records`` carry an ``ip`` field (anything else is opaque to this
+    helper); the caller normalizes MACs etc.
+    """
+    tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
+    tids = [str(tid) for tid in tenants.keys()]
+    nets_by_tid: Dict[str, List[Any]] = {}
+    if fetch_tenant_prefixes is not None and tids:
+        sem = asyncio.Semaphore(8)
+
+        async def _nets_for(tid: str):
+            async with sem:
+                try:
+                    prefs = await fetch_tenant_prefixes(hub, tid)
+                except Exception:
+                    prefs = []
+                nets: List[Any] = []
+                for p in prefs or []:
+                    try:
+                        nets.append(ipaddress.ip_network(str(p), strict=False))
+                    except Exception:
+                        pass
+                return tid, nets
+
+        for tid, nets in await asyncio.gather(*(_nets_for(tid) for tid in tids)):
+            nets_by_tid[tid] = nets
+
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    dropped = 0
+    for rec in records:
+        ip_s = (rec.get("ip") or "").split("/")[0].strip()
+        if not ip_s:
+            dropped += 1
+            continue
+        try:
+            addr = ipaddress.ip_address(ip_s)
+        except Exception:
+            dropped += 1
+            continue
+        matched: Optional[str] = None
+        for tid in tids:
+            for net in nets_by_tid.get(tid) or []:
+                if addr in net:
+                    matched = tid
+                    break
+            if matched:
+                break
+        if matched:
+            buckets.setdefault(matched, []).append(rec)
+        else:
+            dropped += 1
+    return buckets, dropped
 
 
 async def resolve_prefixes(hub, sess) -> list:
