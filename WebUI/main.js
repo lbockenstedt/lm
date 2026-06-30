@@ -816,7 +816,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Tenant Config', 'Hub Status', 'Active Sessions', 'Diagnostics'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
-    setup: ['Spokes & Agents', 'Generic Nodes', 'Firewalls', 'Security/NAC', 'IPAM', 'LDAP', 'DNS', 'DHCP', 'Simulations'],
+    setup: ['Spokes & Agents', 'Generic Nodes', 'Firewalls', 'Security/NAC', 'Sync', 'IPAM', 'LDAP', 'DNS', 'DHCP', 'Simulations'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines'],
     ldap: ['OUs', 'Users', 'Groups'],
@@ -1049,7 +1049,7 @@ async function loadSetupConfig() {
             if (el) el.value = sources[key] || '';
         }
 
-        // IPAM → CPPM endpoint sync schedule (Setup → Security/NAC).
+        // IPAM → CPPM endpoint sync schedule (Setup → Sync).
         // The source dropdown is populated by loadEndpointSyncSources; here we
         // only set its value if the element already exists.
         const epSync = config.netbox_cppm_sync || {};
@@ -2521,9 +2521,10 @@ function _renderSetupFirewallsTile(content) {
     loadFirewallsList();
 }
 
-// Setup → Security/NAC tile. NAC instances + IPAM→ClearPass endpoint sync.
-// GET /api/instances/nac + /api/endpoint-sync/{sources,config,status}
-// (core/src/api.py get_instances / get_endpoint_sync_*).
+// Setup → Security/NAC tile. NAC / ClearPass instances only.
+// GET /api/instances/nac (core/src/api.py get_instances).
+// The IPAM → ClearPass endpoint sync schedule moved to the dedicated
+// Setup → Sync tile (_renderSetupSyncTile).
 function _renderSetupNacTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
@@ -2533,7 +2534,23 @@ function _renderSetupNacTile(content) {
                     <button onclick="showAddInstanceModal('nac')" class="${btnCls}">+ Add Instance</button>
                 </div>
                 <div id="nac-instances-list" class="space-y-2"></div>
-            </div>
+            </div>`;
+    loadInstances('nac');
+}
+
+// Setup → Sync tile. The unified home for cross-system sync schedules:
+//   1. IPAM → ClearPass endpoint sync (moved here from Setup → Security/NAC)
+//   2. Hypervisor (Proxmox) → NetBox VM sync (moved here from Setup → IPAM)
+// Each card owns its own source dropdown, schedule, Save + Sync-now actions,
+// and per-tenant last-sync status. Loaders / actions (defined below):
+//   loadEndpointSyncSources/Config/Status + runEndpointSyncNow/saveEndpointSyncConfig
+//   loadVmSyncSources/Config/Status       + runVmSyncNow/saveVmSyncConfig
+// Backing routes: /setup/endpoint-sync/{sources,status,run} and
+// /setup/vm-sync/{sources,status,run}, plus the shared /setup/config
+// schedule read/write (core/src/api.py get_endpoint_sync_* / vm_sync_*).
+function _renderSetupSyncTile(content) {
+    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM → ClearPass Endpoint Sync</h3>
@@ -2569,23 +2586,6 @@ function _renderSetupNacTile(content) {
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
                     <div id="endpoint-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                 </div>
-            </div>`;
-    loadInstances('nac');
-    loadEndpointSyncSources();
-    loadEndpointSyncConfig();
-    loadEndpointSyncStatus();
-}
-
-// Setup → IPAM tile. GET /api/instances/ipam (core/src/api.py get_instances).
-function _renderSetupIpamTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
-            <div class="${card}">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM / NetBox Instances</h3>
-                    <button onclick="showAddInstanceModal('ipam')" class="${btnCls}">+ Add Instance</button>
-                </div>
-                <div id="ipam-instances-list" class="space-y-2"></div>
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
@@ -2623,10 +2623,29 @@ function _renderSetupIpamTile(content) {
                     <div id="vm-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                 </div>
             </div>`;
-    loadInstances('ipam');
+    loadEndpointSyncSources();
+    loadEndpointSyncConfig();
+    loadEndpointSyncStatus();
     loadVmSyncSources();
     loadVmSyncConfig();
     loadVmSyncStatus();
+}
+
+// Setup → IPAM tile. IPAM / NetBox instances only.
+// GET /api/instances/ipam (core/src/api.py get_instances).
+// The Hypervisor → NetBox VM sync schedule moved to the dedicated
+// Setup → Sync tile (_renderSetupSyncTile).
+function _renderSetupIpamTile(content) {
+    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM / NetBox Instances</h3>
+                    <button onclick="showAddInstanceModal('ipam')" class="${btnCls}">+ Add Instance</button>
+                </div>
+                <div id="ipam-instances-list" class="space-y-2"></div>
+            </div>`;
+    loadInstances('ipam');
 }
 
 // Setup → LDAP tile. GET /api/instances/ldap (core/src/api.py get_instances).
@@ -2840,6 +2859,7 @@ const SETUP_TILES = {
     'User Access':      _renderSetupUserAccessTile,
     'Firewalls':        _renderSetupFirewallsTile,
     'Security/NAC':     _renderSetupNacTile,
+    'Sync':             _renderSetupSyncTile,
     'IPAM':             _renderSetupIpamTile,
     'LDAP':             _renderSetupLdapTile,
     'DNS':              _renderSetupDnsTile,
@@ -2853,7 +2873,7 @@ const SETUP_TILES = {
 // and triggers the matching load* fetch(es). Shared card/input/button class
 // strings live in _SETUP_CLS so every tile uses identical styling. Endpoints
 // cross-ref core/src/api.py (get_pending_spokes, get_tenants, get_users,
-// get_firewalls, get_instances, get_endpoint_sync_*, get_generic_agents,
+// get_firewalls, get_instances, get_endpoint_sync_*, get_vm_sync_*, get_generic_agents,
 // get_setup_config, get_cache_config, get_appearance) and the Simulations
 // sub-module under /sim/api/* (core/src/simulations/routes.py).
 function _renderSetupSection(subMenu, container) {
@@ -2951,7 +2971,7 @@ async function loadDhcpServerStatus() {
     }).join('');
 }
 
-// ── IPAM → ClearPass endpoint sync (Setup → Security/NAC) ───────────────
+// ── IPAM → ClearPass endpoint sync (Setup → Sync) ───────────────────────
 async function loadEndpointSyncSources() {
     // Populate the IPAM source dropdown from the hub's IPAM_SOURCES registry
     // (data-driven: a new product added on the hub appears here with no UI
@@ -2973,7 +2993,7 @@ async function loadEndpointSyncSources() {
 async function loadEndpointSyncConfig() {
     // Populate the enable/source/mode/interval/time inputs from global_config.
     // (loadSetupConfig runs once at setup init, before this card exists, so
-    // we fetch fresh when the Security/NAC card renders.)
+    // we fetch fresh when the Sync card renders.)
     try {
         const r = await setupFetch('/setup/config');
         if (!r.ok) return;
@@ -3070,7 +3090,7 @@ async function saveEndpointSyncConfig() {
     }
 }
 
-// ── Hypervisor → NetBox VM sync (Setup → IPAM) ──────────────────────────
+// ── Hypervisor → NetBox VM sync (Setup → Sync) ──────────────────────────
 async function loadVmSyncSources() {
     // Populate the hypervisor source dropdown from the hub's HYPERVISOR_SOURCES
     // registry (data-driven) and mark each source's connected state.
