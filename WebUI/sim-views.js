@@ -1598,7 +1598,7 @@ async function csRenderVmServer() {
           <input id="cs-autoprov-toggle" type="checkbox" onchange="csToggleAutoProvision(this.checked)" class="rounded"/>
           Provision unassigned dongles automatically
         </label>
-        <p class="text-[10px] text-slate-400 mt-2" id="cs-autoprov-status">Status: loading…</p>
+        <div id="cs-autoprov-status" class="mt-2 text-[10px] text-slate-500 space-y-1">Status: loading…</div>
       </div>
     </div>`;
 
@@ -1634,13 +1634,40 @@ async function csRenderVmServer() {
 }
 
 async function csRefreshAutoProvStatus() {
+    const st = csEl('cs-autoprov-status');
     try {
         const s = await csFetch(`/${csTenant()}/usb-provisioning-status?tenant_id=${csTenant()}`);
         const on = String(s.usb_auto_provision || 'off').toLowerCase() === 'on';
         const el = csEl('cs-autoprov-toggle'); if (el) el.checked = on;
-        const st = csEl('cs-autoprov-status');
-        if (st) st.textContent = `Status: ${on ? 'enabled' : 'disabled'} · ${csEscape(s.usb_auto_provision || 'off')}`;
-    } catch (e) { console.error('csRefreshAutoProvStatus: usb-provisioning-status fetch failed (best-effort)', e); }
+        if (!st) return;
+        const csCount = Number(s.cs_enabled_agent_count || 0);
+        // Primary (freshest host) provision diagnostic — WHY the last pass
+        // provisioned nothing (or did), plus the loop liveness heartbeat and the
+        // config snapshot so a missing certification/template is visible at a
+        // glance instead of grepping the pxmx agent log.
+        const sp = (s.spokes || [])[0] || {};
+        const prov = (sp && sp.provision) || {};
+        const reason = prov.reason ? csEscape(String(prov.reason)) : '—';
+        const loopOn = !!prov.loop_running;
+        const cfg = prov.config || {};
+        const vidpids = (cfg.dongle_vidpids != null) ? cfg.dongle_vidpids : '—';
+        const img1 = cfg.image1_template_id ? 'yes' : 'no';
+        const img2 = cfg.image2_template_id ? 'yes' : 'no';
+        let html = `<div><b>Status:</b> ${on ? 'enabled' : 'disabled'} · ${csEscape(s.usb_auto_provision || 'off')}</div>`;
+        html += `<div><b>CS-enabled agents:</b> ${csCount}</div>`;
+        // Most common cause of "I enabled Auto-Provisioning but nothing happens":
+        // the per-agent Client Simulation flag was never set, so the provision
+        // loop never spawns. Surface it explicitly.
+        if (on && csCount === 0) {
+            html += `<div class="text-amber-600 font-semibold">⚠ Auto-Provisioning is on but no hypervisor agent has Client Simulation mode enabled — enable it on the Hypervisors page (host → "Enable Client Simulation mode on this host").</div>`;
+        }
+        html += `<div><b>Last pass:</b> ${reason}${loopOn ? '' : ' <span class="text-amber-600">(provision loop not running — check the pxmx agent log)</span>'}</div>`;
+        html += `<div><b>Config:</b> dongle_vidpids=${csEscape(String(vidpids))} · image1=${img1} · image2=${img2}</div>`;
+        st.innerHTML = html;
+    } catch (e) {
+        console.error('csRefreshAutoProvStatus: usb-provisioning-status fetch failed (best-effort)', e);
+        if (st) st.textContent = 'Status: unavailable';
+    }
 }
 
 window.csVmSelectHost = function (spokeId, child) {
