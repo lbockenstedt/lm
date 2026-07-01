@@ -1104,9 +1104,20 @@ const CS_HUB_CONFIG_FIELDS = [
     { key: 'usb_auto_provision',          label: 'USB Auto Provision',         type: 'onoff' },
     { key: 'usb_missing_timeout',         label: 'USB Missing Timeout (s)',    type: 'number', ph: '60' },
     { key: 'usb_max_slots',               label: 'USB Max Slots',              type: 'number', ph: '8' },
+    { key: 'use_all_dongles',             label: 'Use All Dongles',            type: 'onoff' },
     { key: 'vm_silent_timeout',           label: 'VM Silent Timeout (h)',      type: 'number', ph: '24' },
     { key: 'l1_vlan_start',               label: 'L1 VLAN Start',              type: 'text',   ph: '100' },
     { key: 'l1_vlan_end',                 label: 'L1 VLAN End',                type: 'text',   ph: '199' },
+    // ── Guest-agent watchdog (hub-owned; cs spoke → agent usb_config). Ported
+    // from the original solutions-hpe/client-sim Setup/Proxmox (HUB_CONFIG_OWNED_KEYS:
+    // guest_agent_* + watchdog_reboot_enabled). The agent (watchdogs.py) reads
+    // these from the cs-speak usb_config blob; env vars still override.
+    { key: 'guest_agent_watchdog_enabled',          label: 'Guest-Agent Watchdog',     type: 'onoff' },
+    { key: 'guest_agent_grace_minutes',             label: 'GA Grace (min)',          type: 'number', ph: '20', min: 1 },
+    { key: 'guest_agent_check_interval_minutes',    label: 'GA Check Interval (min)', type: 'number', ph: '10', min: 1 },
+    { key: 'guest_agent_reboot_after_minutes',      label: 'GA Reboot After (min)',   type: 'number', ph: '10', min: 1 },
+    { key: 'guest_agent_reclone_after_minutes',     label: 'GA Reclone After (min)',  type: 'number', ph: '30', min: 1 },
+    { key: 'watchdog_reboot_enabled',               label: 'Watchdog Reboot',         type: 'onoff' },
     { key: 'usb_vidpids',                 label: 'USB Certified VID:PIDs (JSON array of {vidpid,type,label})',  type: 'json',   ph: '[{"vidpid":"1a2b:3c4d","type":"wireless","label":"1a2b:3c4d"}]', full: true },
     { key: 'usb_ignored_vidpids',         label: 'USB Ignored VID:PIDs (JSON array of "vid:pid")', type: 'json', ph: '["1a2b:3c4d"]', full: true },
     { key: 'ignored_hostnames',           label: 'Ignored Hostnames (JSON array)', type: 'json', ph: '["sim-rpi-0000"]', full: true },
