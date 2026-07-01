@@ -848,6 +848,34 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             tenant_id = None
         if not tenant_id:
             return
+        # Re-push hub-managed sim/user config overrides (the Sim Config editor
+        # saves these as sim_conf_override / user_conf_override INI text → the
+        # spoke writes configs/hub-*-overrides.conf, merged on top of the repo
+        # base files by sim_config.load_configs). Without this re-push a spoke
+        # that restarts (hourly self-update, reboot, fresh-install base_spoke
+        # crash) drops the override until an admin re-saves the Sim Config tab.
+        # Independent of hub_config_enabled — overrides are their own bucket.
+        try:
+            sim_override = await self.simulations_store.get_sim_conf_content(tenant_id)
+            user_override = await self.simulations_store.get_user_overrides_content(tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("push_cs_hub_config: override read for %s failed: %s",
+                         spoke_id, exc)
+            sim_override = user_override = ""
+        override_cfg: dict = {}
+        if sim_override:
+            override_cfg["sim_conf_override"] = sim_override
+        if user_override:
+            override_cfg["user_conf_override"] = user_override
+        if override_cfg:
+            try:
+                await self.request_response(spoke_id, "CS_CONFIG_UPDATE",
+                                             override_cfg, timeout=5.0)
+                logger.info("Re-pushed CS sim/user overrides to %s (tenant %s)",
+                            spoke_id, tenant_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("CS override re-push to %s failed: %s",
+                               spoke_id, exc)
         try:
             hc = await self.simulations_store.get_hub_config(tenant_id)
         except Exception as exc:  # noqa: BLE001

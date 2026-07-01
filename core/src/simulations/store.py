@@ -75,6 +75,25 @@ class SimulationsStore:
             self._tenant(tenant_id)["sim_conf_content"] = content
             self._save()
 
+    async def get_sim_conf_content(self, tenant_id: str) -> str:
+        """Return the stored raw simulation.conf override INI ('' if unset)."""
+        return self._data.get(tenant_id, {}).get("sim_conf_content", "") or ""
+
+    # ── user-overrides.conf override content (raw INI pushed as user_conf_override) ──
+    # Parallel to sim_conf_content: the raw user-overrides.conf override INI the
+    # Sim Config editor saves. Pushed to the spoke as ``user_conf_override``
+    # (CS_CONFIG_UPDATE → configs/hub-user-overrides.conf, merged on top of the
+    # repo's user-overrides.conf by sim_config.load_configs).
+    async def set_user_overrides_content(self, tenant_id: str, content: str) -> None:
+        """Store the raw user-overrides.conf override INI for the tenant and persist."""
+        with self._lock:
+            self._tenant(tenant_id)["user_overrides_content"] = content
+            self._save()
+
+    async def get_user_overrides_content(self, tenant_id: str) -> str:
+        """Return the stored raw user-overrides.conf override INI ('' if unset)."""
+        return self._data.get(tenant_id, {}).get("user_overrides_content", "") or ""
+
     # ── hub-config (usb provisioning / vm images / reclone knobs) ──────────
     async def get_hub_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return ``{hub_config_enabled, hub_config}`` for the tenant."""
