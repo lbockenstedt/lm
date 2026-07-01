@@ -565,6 +565,18 @@ function csUsbCount(h) {
     return (Array.isArray(px.present_usb) ? px.present_usb.length : 0)
          + (Array.isArray(px.unknown_usb) ? px.unknown_usb.length : 0);
 }
+// Present/unknown components of csUsbCount — same source (proxmox.present_usb /
+// proxmox.unknown_usb arrays), split out so Setup/Proxmox "Present USB" and
+// "Unknown USB" match the Overview/USB-view totals instead of reading the stale
+// proxmox.usb_count field (the assigned-dongle subset) or a different endpoint.
+function csPresentUsbCount(h) {
+    const px = (h && h.proxmox) || {};
+    return Array.isArray(px.present_usb) ? px.present_usb.length : 0;
+}
+function csUnknownUsbCount(h) {
+    const px = (h && h.proxmox) || {};
+    return Array.isArray(px.unknown_usb) ? px.unknown_usb.length : 0;
+}
 
 // Trim a Proxmox version string to just the version number (e.g. "8.1.4"),
 // dropping the "pve-manager" prefix and the build id the cs spoke appends
@@ -1211,9 +1223,17 @@ async function csSetupAutoProvCard() {
     try {
         const s = await csFetch(`/${csTenant()}/usb-provisioning-status?tenant_id=${csTenant()}`);
         on = String(s.usb_auto_provision || 'off').toLowerCase() === 'on';
-        const sp = (s.spokes || [])[0] || {};
-        present = sp.present_usb || 0; unknown = sp.unknown_usb || 0;
-    } catch (e) { console.error('csSetupAutoProvCard: usb-provisioning-status fetch failed, defaulting to off/0', e); }
+    } catch (e) { console.error('csSetupAutoProvCard: usb-provisioning-status fetch failed, defaulting to off', e); }
+    // Present/Unknown USB come from the SAME source the VM Server Overview and
+    // USB views use (csVmLoad → per-host proxmox.present_usb/unknown_usb arrays,
+    // summed across the fleet), so the Setup counts always match Overview/USB
+    // instead of reading 0 from a separate endpoint's spoke-level field when the
+    // shape differs or a spoke isn't relaying.
+    try {
+        const hosts = await csVmLoad();
+        present = (hosts || []).reduce((n, h) => n + csPresentUsbCount(h), 0);
+        unknown = (hosts || []).reduce((n, h) => n + csUnknownUsbCount(h), 0);
+    } catch (e) { console.error('csSetupAutoProvCard: vm load for USB counts failed, defaulting to 0', e); }
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Dongle / Auto-Provisioning</h3>
       <div class="grid grid-cols-3 gap-3 mb-3">${csStat('Auto-Provision', on ? 'On' : 'Off')}${csStat('Present USB', present)}${csStat('Unknown USB', unknown)}</div>
@@ -2135,7 +2155,11 @@ async function csRenderVmServerDetails() {
     if (!h) { csSet(csEmpty('No host selected.')); return; }
     const px = h.proxmox || {};
     const node = px.node || {};
-    const skip = ['vms','usb_state','present_usb','unknown_usb','node'];
+    // usb_count is the ASSIGNED-dongle subset (len(usb_state)) — it undercounts
+    // and reads 0 when no dongle is assigned, so hide it from the telemetry grid.
+    // The headline USB stat below uses csUsbCount (present+unknown = physical
+    // dongles), the same source as the Overview per-host row + USB view.
+    const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count'];
     const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
     // Pretty-print a few well-known keys instead of their raw form: pve_version
     // arrives as "pve-manager/9.2.3/abc123" (strip to 9.2.3 via csPveVersion) and
@@ -2147,9 +2171,10 @@ async function csRenderVmServerDetails() {
     };
     const tiles = entries.map(([k, v]) => fmt(k, v)).join('');
     csSet(`<div>${csVmHostBanner()}
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        ${csStat('Node', node.hostname || '—')}${csStat('CPU 1h', px.cpu_1h_avg || '—')}
-        ${csStat('Mem 1h', px.mem_1h_avg || '—')}${csStat('Agent', px.agent_version || '—')}
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+        ${csStat('Node', node.hostname || '—')}${csStat('USB', csUsbCount(h))}
+        ${csStat('CPU 1h', px.cpu_1h_avg || '—')}${csStat('Mem 1h', px.mem_1h_avg || '—')}
+        ${csStat('Agent', px.agent_version || '—')}
       </div>
       <div class="flex items-center justify-between mb-2">
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Telemetry</p>
