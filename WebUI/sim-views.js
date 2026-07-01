@@ -529,6 +529,22 @@ function csStat(label, value) {
     </div>`;
 }
 
+// Compact key/value tile for the Details telemetry grid. Replaces the old
+// full-width 2-column csTable whose Value column stretched across the entire
+// content width and left a huge empty band on wide screens — tiling the
+// entries into a responsive grid (csRenderVmServerDetails) packs the data
+// across the available width instead. Object values are stringified; long
+// values wrap (break-all) and are scroll-capped so one giant blob can't blow
+// out a single tile's height.
+function csKvTile(k, v) {
+    const raw = (v !== null && typeof v === 'object') ? JSON.stringify(v) : String(v === null ? '' : v);
+    const long = raw.length > 64;
+    return `<div class="bg-slate-50 rounded-lg p-3">
+      <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest break-all">${csEscape(k)}</p>
+      <div class="text-sm text-slate-700 mt-1 font-mono break-all${long ? ' max-h-28 overflow-auto' : ''}">${csEscape(raw)}</div>
+    </div>`;
+}
+
 // USB dongle count for a host — the number of physical dongles, NOT the number
 // of distinct VID:PID types. The pxmx agent's cs_usb_telemetry scans
 // /sys/bus/usb/devices and emits one entry PER PHYSICAL DEVICE under
@@ -2082,7 +2098,7 @@ window.csClearCommands = async function () {
     } catch (e) { console.error('csClearCommands: clear failed', e); alert('Clear failed: ' + (e.message || e)); }
 };
 
-// ── Details (node header + telemetry table + raw dump) ─────────────────────
+// ── Details (node header + headline stats + telemetry tile grid + raw dump) ─
 async function csRenderVmServerDetails() {
     csSetToolbar('');
     try { await csVmLoad(); } catch (e) { console.error('csRenderVmServerDetails: vm load failed', e); csSet(csErrorBox('Could not load details', e)); return; }
@@ -2090,15 +2106,19 @@ async function csRenderVmServerDetails() {
     if (!h) { csSet(csEmpty('No host selected.')); return; }
     const px = h.proxmox || {};
     const node = px.node || {};
-    const kv = Object.entries(px).filter(([k]) => !['vms','usb_state','present_usb','unknown_usb','node'].includes(k))
-        .map(([k, v]) => `<tr><td class="px-3 py-2 font-mono text-xs text-slate-500">${csEscape(k)}</td><td class="px-3 py-2 text-sm">${csEscape(typeof v === 'object' ? JSON.stringify(v) : v)}</td></tr>`).join('');
+    const skip = ['vms','usb_state','present_usb','unknown_usb','node'];
+    const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
+    const tiles = entries.map(([k, v]) => csKvTile(k, v)).join('');
     csSet(`<div>${csVmHostBanner()}
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         ${csStat('Node', node.hostname || '—')}${csStat('CPU 1h', px.cpu_1h_avg || '—')}
         ${csStat('Mem 1h', px.mem_1h_avg || '—')}${csStat('Agent', px.agent_version || '—')}
       </div>
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Telemetry</p>
-      ${csTable(['Key', 'Value'], kv)}
+      <div class="flex items-center justify-between mb-2">
+        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Telemetry</p>
+        <span class="text-[10px] text-slate-400">${entries.length} field${entries.length === 1 ? '' : 's'}</span>
+      </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">${tiles}</div>
       <details class="mt-4 text-xs"><summary class="cursor-pointer text-slate-400">Raw payload</summary>${csJsonDump(h)}</details>
     </div>`);
 }
