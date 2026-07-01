@@ -132,6 +132,12 @@ const ROUTES = {
     runStalenessSweepNow:     { m: 'POST', p: '/setup/staleness-sweep/run',     api: 'run_staleness_sweep' },
     saveStalenessSweepConfig: { m: 'POST', p: '/setup/config',                  api: 'update_global_config' },
 
+    // ── GitHub repo sync (System → Sync; replaces the old auto-update loop) ──
+    loadRepoSyncConfig: { m: 'GET',  p: '/setup/config',            api: 'get_global_config' },
+    loadRepoSyncStatus: { m: 'GET',  p: '/setup/repo-sync/status',  api: 'repo_sync_status' },
+    runRepoSyncNow:     { m: 'POST', p: '/setup/repo-sync/run',     api: 'run_repo_sync' },
+    saveRepoSyncConfig: { m: 'POST', p: '/setup/config',            api: 'update_global_config' },
+
     // ── Spoke out-of-contact alerts (System → Sync; saved via /setup/config) ──
     loadSpokeAlertConfig:     { m: 'GET',  p: '/setup/config',                  api: 'get_global_config' },
     loadSpokeAlerts:          { m: 'GET',  p: '/setup/spoke-alerts',            api: 'spoke_alerts' },
@@ -993,6 +999,7 @@ async function scanGitHubRepos() {
             'update-source-cppm':   ['cppm', 'clearpass'],
             'update-source-netbox': ['netbox'],
             'update-source-ldap':   ['ldap'],
+            'update-source-nw':     ['nw'],
         };
 
         const repoByName = Object.fromEntries(repos.map(r => [r.name.toLowerCase(), r]));
@@ -1031,6 +1038,7 @@ async function saveUpdateSources() {
         cppm: document.getElementById('update-source-cppm').value,
         netbox: document.getElementById('update-source-netbox').value,
         ldap: document.getElementById('update-source-ldap').value,
+        nw: document.getElementById('update-source-nw').value,
     };
     const globalBranch = document.getElementById('global-branch').value;
 
@@ -1058,11 +1066,8 @@ async function loadSetupConfig() {
         const data = await response.json();
         const config = data.global_config || {};
 
-        const chk = document.getElementById('auto-update-chk');
-        const int = document.getElementById('auto-update-int');
-
-        if (chk) chk.checked = config.autoupdate !== false;
-        if (int) int.value = config.update_interval || 1;
+        // Auto-update checkbox/interval removed — the System → Sync "GitHub
+        // Repo Sync" card now owns the schedule (global_config.repo_sync).
 
         const tsEl = document.getElementById('last-update-ts');
         if (tsEl && config.last_update_ts) {
@@ -1086,7 +1091,8 @@ async function loadSetupConfig() {
             'cs': 'update-source-cs',
             'cppm': 'update-source-cppm',
             'netbox': 'update-source-netbox',
-            'ldap': 'update-source-ldap'
+            'ldap': 'update-source-ldap',
+            'nw': 'update-source-nw'
         };
         for (const [key, id] of Object.entries(sourceFields)) {
             const el = document.getElementById(id);
@@ -2906,6 +2912,25 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub Repo Sync</h3>
+                    <button id="repo-sync-run-btn" onclick="runRepoSyncNow()" class="${btnCls}">Sync now</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Scheduled replication of <strong>all repos</strong>: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes <code>SPOKE_UPDATE</code> to every approved spoke (pxmx / opnsense / cs / cppm / netbox / ldap / nw) every <em>interval</em> (default 15 min). The hub self-restarts only when its own code changed (rolled back if it fails to boot); each spoke self-pulls and restarts only on its own version change. Replaces the old 1-hour auto-update loop — this is the single scheduled sync.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="repo-sync-enabled" class="w-4 h-4 text-green-600 rounded" checked>Enable scheduled sync</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Interval (minutes)</label>
+                        <input type="number" id="repo-sync-interval" min="1" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync</div>
+                    <div id="repo-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Out-of-Contact Alerts</h3>
                     <button onclick="saveSpokeAlertConfig()" class="${btnCls}">Save</button>
                 </div>
@@ -2979,6 +3004,8 @@ function _renderSetupSyncTile(content) {
     loadNwDiscoveryStatus();
     loadStalenessSweepConfig();
     loadStalenessSweepStatus();
+    loadRepoSyncConfig();
+    loadRepoSyncStatus();
     loadSourceOfTruthConfig();
     loadSpokeAlertConfig();
     loadSpokeAlerts();
@@ -3171,10 +3198,9 @@ function _renderSetupGeneralTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">CPPM Repo</label><input type="text" id="update-source-cppm" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">NetBox Repo</label><input type="text" id="update-source-netbox" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">LDAP Repo</label><input type="text" id="update-source-ldap" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Network Devices Repo</label><input type="text" id="update-source-nw" class="${inputCls}"></div>
             </div>
             <div class="flex items-center gap-4 pt-2">
-                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="auto-update-chk" class="w-4 h-4 text-green-600 rounded">Auto-update</label>
-                <div class="space-y-0"><label class="${labelCls}">Interval (hours)</label><input type="number" id="auto-update-int" min="1" max="168" value="24" class="ml-2 w-20 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <span id="last-update-ts" class="text-xs text-slate-400"></span>
             </div>
             <div class="flex gap-2 pt-2">
@@ -3639,6 +3665,111 @@ async function saveStalenessSweepConfig() {
             } } })
         });
         if (r.ok) showToast('Staleness sweep saved.', 'success');
+        else showToast('Failed to save.', 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    }
+}
+
+// ── GitHub repo sync (System → Sync; replaces the old auto-update loop) ───
+// Pulls the hub tree + provisioning_repos/* locally and fans SPOKE_UPDATE out
+// to every approved spoke every interval (default 15 min). Saved via /setup/config
+// under global_config.repo_sync. Status from GET /setup/repo-sync/status,
+// on-demand run from POST /setup/repo-sync/run.
+async function loadRepoSyncConfig() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const cfg = (data.global_config || {}).repo_sync || {};
+        const en = document.getElementById('repo-sync-enabled');
+        const intv = document.getElementById('repo-sync-interval');
+        // Default: enabled, 15-minute interval.
+        if (en) en.checked = cfg.enabled !== false;
+        if (intv) intv.value = Math.max(1, Math.round((cfg.interval_seconds || 900) / 60));
+    } catch (e) { console.error('loadRepoSyncConfig failed', e); }
+}
+
+async function loadRepoSyncStatus() {
+    const wrap = document.getElementById('repo-sync-status');
+    if (!wrap) return;
+    let data;
+    try {
+        const r = await setupFetch('/setup/repo-sync/status');
+        if (!r.ok) throw new Error(`${r.status}`);
+        data = await r.json();
+    } catch (e) {
+        wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
+        return;
+    }
+    if (!data || !data.last_sync_ts) {
+        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No sync recorded yet. Click “Sync now” to run one.</p>';
+        return;
+    }
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const hub = data.hub || {};
+    const hs = String(hub.status || '');
+    const pill = hs === 'success' ? 'bg-green-100 text-green-700'
+        : hs === 'error' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500';
+    const prov = Array.isArray(data.provisioning_repos) ? data.provisioning_repos : [];
+    const okN = prov.filter(r => r.status === 'ok').length;
+    const errN = prov.filter(r => r.status === 'error').length;
+    const skipN = prov.filter(r => r.status === 'skipped').length;
+    const changed = prov.filter(r => r.changed).map(r => r.name);
+    const provRows = prov.length ? prov.map(r => {
+        const dot = r.status === 'ok' ? 'bg-green-500'
+            : r.status === 'error' ? 'bg-red-500' : 'bg-slate-300';
+        return `<div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full ${dot}"></span>
+            <span class="text-xs text-slate-600">${esc(r.name)}</span>
+            <span class="text-xs text-slate-400">${esc(r.message || r.status)}</span></div>`;
+    }).join('') : '<p class="text-xs text-slate-400 italic">No provisioning_repos present.</p>';
+    wrap.innerHTML = `<div class="border border-slate-200 rounded-md p-3">
+        <div class="flex items-center justify-between mb-1">
+            <span class="text-sm font-bold text-slate-700">Hub update</span>
+            <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(hs || '—')}</span>
+        </div>
+        <p class="text-xs text-slate-500">provisioning_repos: ${okN} ok · ${errN} error · ${skipN} skipped <span class="text-slate-400">· last ${fmtDate(data.last_sync_ts)}</span></p>
+        ${changed.length ? `<p class="text-xs text-slate-500 mt-1">changed: ${esc(changed.join(', '))}</p>` : ''}
+        ${data.message ? `<p class="text-xs text-slate-400 mt-1">${esc(data.message)}</p>` : ''}
+        ${hub.message ? `<p class="text-xs text-slate-400 mt-1">${esc(hub.message)}</p>` : ''}
+        <div class="mt-2 space-y-1">${provRows}</div>
+    </div>`;
+}
+
+async function runRepoSyncNow() {
+    const btn = document.getElementById('repo-sync-run-btn');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+    try {
+        const r = await setupFetch('/setup/repo-sync/run', {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        const s = data.summary || {};
+        const restarting = /restart/i.test(String((data.result || {}).message || ''));
+        showToast(`Repo sync: ${s.provisioning_repos_ok || 0} repos ok, ${s.provisioning_repos_error || 0} errors${restarting ? ' — hub restarting' : ''}.`,
+                  (s.provisioning_repos_error || 0) ? 'info' : 'success');
+        await loadRepoSyncStatus();
+    } catch (e) {
+        showToast('Repo sync failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+}
+
+async function saveRepoSyncConfig() {
+    const enabled = document.getElementById('repo-sync-enabled')?.checked ? true : false;
+    const intervalMin = Math.max(1, parseInt(document.getElementById('repo-sync-interval')?.value, 10) || 15);
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { repo_sync: {
+                enabled, interval_seconds: intervalMin * 60
+            } } })
+        });
+        if (r.ok) showToast('Repo sync schedule saved.', 'success');
         else showToast('Failed to save.', 'error');
     } catch (e) {
         showToast('Error saving: ' + e.message, 'error');

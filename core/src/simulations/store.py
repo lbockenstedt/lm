@@ -401,3 +401,20 @@ class SimulationsStore:
             g = self._global()
             g["staleness_sweep"] = status or {}
             self._save()
+
+    # ── repo sync last-run status (Setup → Sync) ───────────────────────────
+    # Result of the most recent GitHub repo sync (background loop or on-demand
+    # "Sync now"). Pulls the hub tree + provisioning_repos/* locally and fans
+    # SPOKE_UPDATE out to every approved spoke. Cluster-wide, so under __global__.
+    # Shape: {last_sync_ts, hub: {status,message}, provisioning_repos: [...],
+    # message}.
+    async def get_repo_sync_status(self) -> Dict[str, Any]:
+        """Return the last GitHub repo-sync status (empty if never run)."""
+        return dict(self._global().get("repo_sync", {}))
+
+    async def set_repo_sync_status(self, status: Dict[str, Any]) -> None:
+        """Replace the GitHub repo-sync status and persist."""
+        with self._lock:
+            g = self._global()
+            g["repo_sync"] = status or {}
+            self._save()
