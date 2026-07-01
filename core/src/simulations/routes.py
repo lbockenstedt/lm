@@ -267,11 +267,28 @@ def _usb_provisioning_status_payload(cfg: Dict[str, Any],
                 "hostname": h.get("hostname") or h.get("spoke_name") or sid,
                 "provision": hp.get("provision") or {} if isinstance(hp, dict) else {},
             })
+        # present_usb / unknown_usb are PER PHYSICAL DONGLE and, in the
+        # multi-host shape the cs spoke emits, live on each Proxmox host's OWN
+        # proxmox block (data.proxmox_hosts[].proxmox) — the spoke-level
+        # data.proxmox is empty there. Sum across hosts (mirroring
+        # service.get_proxmox_data, which expands proxmox_hosts into the VM
+        # Server rows) so the Setup "Present USB" count matches the USB view
+        # instead of reading 0; fall back to the spoke-level block for the
+        # legacy single-host shape.
+        host_list = data.get("proxmox_hosts") or []
+        if isinstance(host_list, list) and host_list:
+            present = sum(len((h.get("proxmox") or {}).get("present_usb") or [])
+                          for h in host_list if isinstance(h, dict))
+            unknown = sum(len((h.get("proxmox") or {}).get("unknown_usb") or [])
+                         for h in host_list if isinstance(h, dict))
+        else:
+            present = len(px.get("present_usb") or []) if isinstance(px, dict) else 0
+            unknown = len(px.get("unknown_usb") or []) if isinstance(px, dict) else 0
         spokes.append({
             "spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
             "usb_auto_provision": px.get("usb_auto_provision") if isinstance(px, dict) else None,
-            "present_usb": len(px.get("present_usb") or []) if isinstance(px, dict) else 0,
-            "unknown_usb": len(px.get("unknown_usb") or []) if isinstance(px, dict) else 0,
+            "present_usb": present,
+            "unknown_usb": unknown,
             "provision": px_prov or {},
             "hosts": hosts,
         })

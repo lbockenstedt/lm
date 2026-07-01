@@ -289,6 +289,12 @@ function disconnectCSWebSocket() {
 
 function csWsRefresh() {
     if (typeof currentView === 'undefined' || currentView !== 'cs') return;
+    // Setup pages hold forms/inputs — a WS-driven re-render on every telemetry
+    // frame (~10s) wipes any in-progress edit (e.g. a half-typed GitHub token
+    // or Proxmox field). Skip auto-refresh there; the user hits Refresh
+    // manually. Live data pages (Dashboard / VM Server / Clients / etc.) still
+    // auto-refresh as before.
+    if (typeof currentSubView !== 'undefined' && currentSubView === 'Setup') return;
     if (csWsRefreshTimer) return; // debounce
     csWsRefreshTimer = setTimeout(() => {
         csWsRefreshTimer = null;
