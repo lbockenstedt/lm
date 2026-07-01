@@ -1029,61 +1029,431 @@ function csIniSplit(content) {
     return blocks;
 }
 
+// ── Simulations Config tab (legacy solutions-hpe/client-sim port) ─────────────
+// Structured editor for configs/simulation.conf + configs/user-overrides.conf.
+// The hub is the source of truth for hub-owned config: edits save as the
+// hub-managed override (sim_conf_override / user_conf_override INI text →
+// CS_CONFIG_UPDATE → spoke writes configs/hub-*-overrides.conf, merged on top
+// of the repo base files by sim_config.load_configs). The spoke's CS_GET_CONFIG
+// returns the MERGED effective config, which is what the editor loads on Refresh
+// (so the UI shows what's actually in effect). Mirrors the legacy "Hub-managed
+// override (no GitHub API key)" tab.
+
+// Keys whose value is an on/off flag → rendered as a toggle select (on/off).
+// (allow_offline and l1 use yes/no in the canon; they stay text inputs so the
+// exact value is preserved losslessly.)
+const CS_ONOFF_KEYS = new Set([
+    'kill_switch', 'rapid_update', 'github_repo', 'smb_repo', 'site_based_ssid',
+    'ssidpw_fail', 'auth_fail', 'syslog', 'web_server',
+    'dhcp_fail', 'dns_fail', 'assoc_fail', 'port_flap', 'ping_test',
+    'download', 'www_traffic', 'iperf',
+]);
+
+// Ordered field schema per section → [{key, label}]. Drives the labeled-input
+// editor (the legacy tab showed named fields, not raw INI). Keys not in the
+// schema for a section are still rendered as generic key=value rows so edits
+// are never lost (and any extra section falls back to a raw textarea).
+const CS_SIM_SECTION_FIELDS = {
+    simulation: [
+        ['sim_load', 'Sim Load'], ['repo_location', 'Repo Location'],
+        ['repo_branch', 'Repo Branch'], ['reboot_schedule', 'Reboot Schedule'],
+        ['dot1x_password', 'Dot1x Password'], ['dot1x_eap', 'Dot1x Eap'],
+        ['iperf_bw', 'Iperf Bw'], ['kill_switch', 'Kill Switch'],
+        ['rapid_update', 'Rapid Update'], ['github_repo', 'Github Repo'],
+        ['smb_repo', 'Smb Repo'], ['site_based_ssid', 'Site Based Ssid'],
+        ['allow_offline', 'Allow Offline'], ['ssidpw_fail', 'Ssidpw Fail'],
+        ['auth_fail', 'Auth Fail'], ['syslog', 'Syslog'],
+        ['web_server', 'Web Server'],
+    ],
+    server: [['server_url', 'Server Url']],
+    address: [
+        ['smb_address', 'Smb Address'], ['ping_address', 'Ping Address'],
+        ['dns_latency_1', 'Dns Latency 1'], ['dns_latency_2', 'Dns Latency 2'],
+        ['dns_latency_3', 'Dns Latency 3'],
+        ['dns_bad_ip_1', 'Dns Bad Ip 1'], ['dns_bad_ip_2', 'Dns Bad Ip 2'],
+        ['dns_bad_ip_3', 'Dns Bad Ip 3'],
+        ['dns_bad_record_1', 'Dns Bad Record 1'], ['dns_bad_record_2', 'Dns Bad Record 2'],
+        ['dns_bad_record_3', 'Dns Bad Record 3'],
+        ['iperf_server', 'Iperf Server'], ['syslog_server', 'Syslog Server'],
+    ],
+};
+// Per-bucket [s0]–[s9] field schema (identical for each bucket).
+const CS_SIM_BUCKET_FIELDS = [
+    ['wsite', 'Wsite'], ['ssid', 'Ssid'], ['ssidpw', 'Ssidpw'],
+    ['dhcp_fail', 'Dhcp Fail'], ['dns_fail', 'Dns Fail'],
+    ['assoc_fail', 'Assoc Fail'], ['port_flap', 'Port Flap'],
+    ['ping_test', 'Ping Test'], ['download', 'Download'],
+    ['www_traffic', 'Www Traffic'], ['iperf', 'Iperf'],
+    ['sim_phy', 'Sim Phy'], ['l1', 'L1'],
+];
+const CS_SIM_BUCKETS = ['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9'];
+
+// Parse raw INI text → {section: {key: value}}. Lines before the first [section]
+// are dropped (the canon has none). Comments (#/;) and blank lines are skipped.
+// Used client-side for the user-overrides editor (the sim-conf editor uses the
+// server's parsed view, but user-overrides round-trips as raw text).
+function csParseIni(text) {
+    const out = {};
+    let cur = null;
+    for (const ln of String(text || '').split('\n')) {
+        const sm = /^\s*\[([^\]]*)\]\s*$/.exec(ln);
+        if (sm) { cur = sm[1]; out[cur] = {}; continue; }
+        if (cur === null) continue;  // preamble — skip
+        const km = /^\s*([^=#;\s][^=]*?)\s*=\s*(.*)$/.exec(ln);
+        if (km) out[cur][km[1].trim()] = km[2].trim();
+    }
+    return out;
+}
+
+// Render one labeled field for a section. on/off keys → a select; others → text
+// input. Each input carries data-cs-section + data-cs-key so the serializer can
+// walk them regardless of which section card they live in.
+function csSimField(section, key, label, value) {
+    const id = `cs-sim-${csEscape(section)}-${csEscape(key)}`;
+    const v = (value === undefined || value === null) ? '' : String(value);
+    if (CS_ONOFF_KEYS.has(key)) {
+        const on = v.toLowerCase() === 'on';
+        return `<div class="flex flex-col gap-1">
+          <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+          <select id="${id}" data-cs-section="${csEscape(section)}" data-cs-key="${csEscape(key)}"
+                  class="border border-slate-200 rounded-md px-2 py-1.5 text-sm ${on ? 'text-emerald-700 font-semibold' : 'text-slate-600'}">
+            <option value="on" ${on ? 'selected' : ''}>on</option>
+            <option value="off" ${!on ? 'selected' : ''}>off</option>
+          </select></div>`;
+    }
+    return `<div class="flex flex-col gap-1">
+      <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+      <input id="${id}" data-cs-section="${csEscape(section)}" data-cs-key="${csEscape(key)}"
+             value="${csEscape(v)}" class="border border-slate-200 rounded-md px-2 py-1.5 text-sm font-mono">
+    </div>`;
+}
+
+// Generic key=value row for keys the schema doesn't name (so an extra key a fork
+// added isn't silently dropped on save). Rendered as a labeled text input.
+function csSimExtraField(section, key, value) {
+    return csSimField(section, key, key, value);
+}
+
+// Render a section's fields from its schema + any extra keys present in `kv`.
+function csSimSectionFields(section, schema, kv) {
+    kv = kv || {};
+    const seen = new Set();
+    const fields = schema.map(([key, label]) => {
+        seen.add(key);
+        return csSimField(section, key, label, kv[key]);
+    }).join('');
+    // Extra keys not in the schema → generic rows so they survive a save.
+    const extras = Object.keys(kv).filter(k => !seen.has(k))
+        .map(k => csSimExtraField(section, k, kv[k])).join('');
+    return fields + extras;
+}
+
 async function csRenderConfigSimulation() {
     csSetToolbar('');
-    let simCard = '';
-    try {
-        const sc = await csFetch(`/${csTenant()}/config/simulation-conf`);
-        const content = (sc && sc.content) || '';
-        const blocks = csIniSplit(content);
-        const sections = blocks.map((b, i) => {
-            const label = b.section ? `[${csEscape(b.section)}]` : '(preamble)';
-            const body = b.body.join('\n');
-            return `<details class="border border-slate-200 rounded-md mb-2" ${i === 0 ? 'open' : ''}>
-              <summary class="px-3 py-2 cursor-pointer bg-slate-50 font-mono text-xs text-slate-600">${label} <span class="text-slate-400">(${b.body.length} lines)</span></summary>
-              <textarea data-cs-ini-section="${csEscape(b.section)}" rows="${Math.min(12, Math.max(3, b.body.length + 1))}" class="w-full bg-white border-0 px-3 py-2 text-xs font-mono outline-none focus:ring-1 focus:ring-green-400">${csEscape(body)}</textarea>
+    // Load the MERGED effective simulation.conf (parsed) + user-overrides.conf
+    // (raw) from the spoke via the hub. source='spoke' when the spoke is online;
+    // 'stored-override' when it fell back to the hub's stored override text.
+    let sim = null, uo = null, simErr = null, uoErr = null;
+    try { sim = await csFetch(`/${csTenant()}/config/simulation-conf-parsed`); }
+    catch (e) { console.error('csRenderConfigSimulation: simulation-conf-parsed load failed', e); simErr = e; }
+    try { uo = await csFetch(`/${csTenant()}/config/user-overrides-conf`); }
+    catch (e) { console.error('csRenderConfigSimulation: user-overrides-conf load failed', e); uoErr = e; }
+
+    const fetchedSim = (sim && sim.fetched_at) ? csFmtFetched(sim.fetched_at) : '—';
+    const simSource = (sim && sim.source) || 'spoke';
+    const sections = (sim && sim.sections) || {};
+    const raw = (sim && sim.raw) || '';
+
+    // ── Simulation Config card ──────────────────────────────────────────────
+    let simBody;
+    if (simErr) {
+        simBody = csErrorBox('Simulation Config', simErr).replace('py-10', 'py-6');
+    } else {
+        // Known sections rendered as labeled field grids; unknown sections fall
+        // back to raw textareas so a fork's extra sections aren't dropped.
+        const simFields = csSimSectionFields('simulation', CS_SIM_SECTION_FIELDS.simulation, sections.simulation);
+        const serverFields = csSimSectionFields('server', CS_SIM_SECTION_FIELDS.server, sections.server);
+        const addressFields = csSimSectionFields('address', CS_SIM_SECTION_FIELDS.address, sections.address);
+        const known = new Set(['simulation', 'server', 'address', ...CS_SIM_BUCKETS]);
+        const extras = Object.keys(sections).filter(s => !known.has(s));
+        const extraBlocks = extras.map(s => {
+            // Re-emit the extra section's key=value lines as a raw textarea.
+            const body = Object.entries(sections[s]).map(([k, v]) => `${k}=${v}`).join('\n');
+            return `<details class="border border-slate-200 rounded-md mb-2">
+              <summary class="px-3 py-2 cursor-pointer bg-slate-50 font-mono text-xs text-slate-600">[${csEscape(s)}] <span class="text-slate-400">(extra)</span></summary>
+              <textarea data-cs-ini-section="${csEscape(s)}" rows="6" class="w-full bg-white border-0 px-3 py-2 text-xs font-mono outline-none focus:ring-1 focus:ring-green-400">${csEscape(body)}</textarea>
             </details>`;
         }).join('');
-        simCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-          <div class="flex justify-between items-center mb-2">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Config (structured)</h3>
-            <span class="text-[10px] text-slate-400 font-mono">${csEscape((sc && sc.sha) || '')}</span>
+        // [s0]–[s9] buckets — collapsible, s0 open by default.
+        const bucketCards = CS_SIM_BUCKETS.map((b, i) => {
+            const fields = csSimSectionFields(b, CS_SIM_BUCKET_FIELDS, sections[b]);
+            return `<details class="border border-slate-200 rounded-md mb-2" ${i === 0 ? 'open' : ''}>
+              <summary class="px-3 py-2 cursor-pointer bg-slate-50 font-mono text-xs text-slate-600">Simulation ${b.toUpperCase()} <span class="text-slate-400">(${Object.keys(sections[b] || {}).length})</span></summary>
+              <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 p-3">${fields || '<p class="text-xs text-slate-400 italic col-span-full">No values set.</p>'}</div>
+            </details>`;
+        }).join('');
+        simBody = `
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+            <div class="border border-slate-200 rounded-lg p-3">
+              <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest mb-2">[simulation]</p>
+              <div class="grid grid-cols-2 md:grid-cols-3 gap-3">${simFields}</div>
+            </div>
+            <div class="border border-slate-200 rounded-lg p-3">
+              <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest mb-2">[server] / [address]</p>
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">${serverFields}${addressFields}</div>
+            </div>
           </div>
-          <p class="text-xs text-slate-400 mb-3">Edit each [section] independently. Saved as <code>sim_conf_override</code> INI and pushed to the spoke.</p>
-          <div id="cs-ini-sections">${sections || '<p class="text-xs text-slate-400 italic">No simulation.conf relayed yet.</p>'}</div>
-          <button onclick="csSaveSimConfStructured()" class="mt-3 bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Simulation Config</button>
-          <span id="cs-simconf-msg" class="ml-3 text-xs"></span>
-        </div>`;
-    } catch (e) {
-        console.error('csRenderConfigSimulation: simulation-conf load failed', e);
-        simCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('Simulation Config', e).replace('py-10', 'py-6')}</div>`;
+          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Per-bucket profiles [s0]–[s9]</p>
+          ${bucketCards}
+          ${extras.length ? `<p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-3 mb-2">Extra sections</p>${extraBlocks}` : ''}
+          <details class="mt-3 text-xs"><summary class="cursor-pointer text-slate-400">Raw merged simulation.conf</summary><pre class="mt-2 p-2 bg-slate-50 rounded font-mono text-[11px] whitespace-pre-wrap break-all">${csEscape(raw)}</pre></details>`;
     }
+    const simCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
+        <div class="flex items-center gap-2">
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Config</h3>
+          <span class="inline-block bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 text-[10px] font-bold">Hub-managed override (no GitHub API key)</span>
+          ${simSource === 'spoke' ? '' : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke offline — showing stored override</span>'}
+        </div>
+        <span class="text-[10px] text-slate-400">Last fetched: ${csEscape(fetchedSim)}</span>
+      </div>
+      <p class="text-xs text-slate-400 mb-3">Edit the labeled fields. Saved as the hub-managed <code>sim_conf_override</code> INI and pushed to the spoke (merged on top of the repo's simulation.conf). Clearing a field reverts it to the repo default.</p>
+      <div id="cs-ini-sections">${simBody}</div>
+      <div class="flex items-center gap-3 mt-4">
+        <button onclick="csSaveSimConfStructured()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
+        <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Refresh</button>
+        <span id="cs-simconf-msg" class="text-xs"></span>
+      </div>
+    </div>`;
+
+    // ── User overrides card ─────────────────────────────────────────────────
+    const uoCard = csRenderUserOverridesCard(uo, uoErr);
+
+    // ── Hub config card (kept at the bottom) ────────────────────────────────
     let hubCard = '';
     try { hubCard = await csHubConfigCard('/tenant/' + csTenant() + '/hub-config'); }
     catch (e) { console.error('csRenderConfigSimulation: hub-config load failed', e); hubCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('Hub Config', e).replace('py-10', 'py-6')}</div>`; }
-    csSet(`<div class="space-y-4">${simCard}${hubCard}</div>`);
+    csSet(`<div class="space-y-4">${simCard}${uoCard}${hubCard}</div>`);
+}
+
+// Serialize the labeled sim-conf inputs (+ extra-section textareas) back into
+// INI text. Walk [data-cs-section]/[data-cs-key] inputs; empty values are
+// skipped so clearing a field drops it from the override (revert to repo base).
+// Then [data-cs-ini-section] raw textareas (extra sections) are appended verbatim.
+function csSerializeSimConf() {
+    const bySection = {};
+    document.querySelectorAll('[data-cs-section][data-cs-key]').forEach(el => {
+        const s = el.getAttribute('data-cs-section');
+        const k = el.getAttribute('data-cs-key');
+        const v = el.value;
+        if (v === '' || v === null || v === undefined) return;  // empty → revert
+        bySection[s] = bySection[s] || {};
+        bySection[s][k] = v;
+    });
+    const extras = [];
+    document.querySelectorAll('[data-cs-ini-section]').forEach(ta => {
+        const s = ta.getAttribute('data-cs-ini-section');
+        if (!s) return;
+        extras.push([s, ta.value]);
+    });
+    const order = ['simulation', 'server', 'address', ...CS_SIM_BUCKETS];
+    const emitted = new Set();
+    let out = '';
+    for (const s of order) {
+        if (bySection[s] && Object.keys(bySection[s]).length) {
+            emitted.add(s);
+            out += `[${s}]\n`;
+            for (const [k, v] of Object.entries(bySection[s])) out += `${k}=${v}\n`;
+            out += '\n';
+        }
+    }
+    for (const s of Object.keys(bySection)) {
+        if (emitted.has(s) || order.includes(s)) continue;
+        out += `[${s}]\n`;
+        for (const [k, v] of Object.entries(bySection[s])) out += `${k}=${v}\n`;
+        out += '\n';
+    }
+    for (const [s, body] of extras) {
+        out += `[${s}]\n${String(body).replace(/^\s*\n+/, '').replace(/\s+$/, '')}\n\n`;
+    }
+    return out.trim();
 }
 
 window.csSaveSimConfStructured = async function () {
     const msg = csEl('cs-simconf-msg');
-    // Re-serialize: walk the section textareas in DOM order, emitting [section]
-    // headers (skipping the preamble) before each body.
-    const tas = Array.from(document.querySelectorAll('[data-cs-ini-section]'));
-    let out = '';
-    for (const ta of tas) {
-        const section = ta.getAttribute('data-cs-ini-section');
-        const body = ta.value.replace(/^\s*\n+/, '').replace(/\s+$/,'');
-        if (section) out += `\n[${section}]\n`;
-        if (body) out += body + '\n';
-    }
+    if (msg) { msg.textContent = 'Saving…'; msg.className = 'ml-3 text-xs text-slate-400'; }
     try {
-        const r = await csFetch(`/${csTenant()}/config/simulation-conf`, { method: 'PUT', body: JSON.stringify({ content: out.trim() }) });
-        if (msg) { msg.textContent = 'Saved (' + ((r && r.synced_spokes) != null ? r.synced_spokes + ' spokes' : 'ok') + ').'; msg.className = 'ml-3 text-xs text-green-600'; }
+        const content = csSerializeSimConf();
+        const r = await csFetch(`/${csTenant()}/config/simulation-conf`,
+            { method: 'PUT', body: JSON.stringify({ content }) });
+        if (msg) { msg.textContent = 'Saved (' + ((r && r.synced_spokes) != null ? r.synced_spokes + ' spokes' : 'ok') + ').'; msg.className = 'text-xs text-green-600'; }
+        // Re-load the merged view so the UI reflects the now-effective config.
+        csRenderConfigSimulation();
     } catch (e) {
         console.error('csSaveSimConfStructured: save failed', e);
-        if (msg) { msg.textContent = e.message; msg.className = 'ml-3 text-xs text-red-500'; }
+        if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; }
     }
 };
+
+// ── User overrides editor ────────────────────────────────────────────────────
+// Per-user simulation override sections ([username] in user-overrides.conf).
+// State is the source of truth (csUserOverridesState = {user: {key: value}});
+// field inputs update it live, add/remove re-render from it, save serializes it.
+let csUserOverridesState = {};
+let csUserOverridesFetched = '—';
+
+// Label map for known sim keys (so user-override fields get the same labels as
+// the sim-conf editor). Built once from the section + bucket schemas.
+const CS_SIM_LABELS = (() => {
+    const m = {};
+    for (const fields of Object.values(CS_SIM_SECTION_FIELDS))
+        for (const [k, lbl] of fields) m[k] = lbl;
+    for (const [k, lbl] of CS_SIM_BUCKET_FIELDS) m[k] = lbl;
+    return m;
+})();
+
+function csUOField(user, key, value) {
+    const label = CS_SIM_LABELS[key] || key;
+    const v = (value === undefined || value === null) ? '' : String(value);
+    const attrs = `data-cs-uo-user="${csEscape(user)}" data-cs-uo-key="${csEscape(key)}"`;
+    if (CS_ONOFF_KEYS.has(key)) {
+        const on = v.toLowerCase() === 'on';
+        return `<div class="flex flex-col gap-1">
+          <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+          <select ${attrs} onchange="csUOSet(this)"
+                  class="border border-slate-200 rounded-md px-2 py-1.5 text-sm ${on ? 'text-emerald-700 font-semibold' : 'text-slate-600'}">
+            <option value="on" ${on ? 'selected' : ''}>on</option>
+            <option value="off" ${!on ? 'selected' : ''}>off</option>
+          </select></div>`;
+    }
+    return `<div class="flex flex-col gap-1">
+      <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+      <input ${attrs} value="${csEscape(v)}" oninput="csUOSet(this)"
+             class="border border-slate-200 rounded-md px-2 py-1.5 text-sm font-mono">
+    </div>`;
+}
+
+// Render all per-user cards from csUserOverridesState.
+function csUORenderCards() {
+    const users = Object.keys(csUserOverridesState);
+    if (!users.length) {
+        return '<p class="text-xs text-slate-400 italic">No per-user overrides. Click ＋ Add User to pin a hostname to a custom sim profile.</p>';
+    }
+    return users.map(u => {
+        const kv = csUserOverridesState[u] || {};
+        const fields = Object.keys(kv).map(k => csUOField(u, k, kv[k])).join('');
+        const cnt = Object.keys(kv).length;
+        return `<div class="border border-slate-200 rounded-lg p-3 mb-3">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-sm font-bold text-slate-700">👤 ${csEscape(u)}</span>
+            <div class="flex gap-2">
+              <button data-uo-user="${csEscape(u)}" onclick="csUODownload(this)"
+                      class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-1 rounded-md text-[11px] font-bold">Download</button>
+              <button data-uo-user="${csEscape(u)}" onclick="csUORemove(this)"
+                      class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-[11px] font-bold">✕ Remove</button>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">${fields || '<p class="text-xs text-slate-400 italic col-span-full">No fields found in this override.</p>'}</div>
+        </div>`;
+    }).join('');
+}
+
+function csRenderUserOverridesCard(uo, uoErr) {
+    if (uoErr) {
+        return `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('User Overrides', uoErr).replace('py-10', 'py-6')}</div>`;
+    }
+    const content = (uo && uo.content) || '';
+    csUserOverridesState = csParseIni(content);
+    csUserOverridesFetched = (uo && uo.fetched_at) ? csFmtFetched(uo.fetched_at) : '—';
+    return `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <div class="flex flex-wrap justify-between items-center mb-2 gap-2">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">User Overrides</h3>
+        <span class="text-[10px] text-slate-400">Last fetched: ${csEscape(csUserOverridesFetched)}</span>
+      </div>
+      <p class="text-xs text-slate-400 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the bucket profile for that user).</p>
+      <div class="flex items-center gap-3 mb-3">
+        <button onclick="csUOAdd()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
+        <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-md text-sm font-bold">Refresh</button>
+        <button onclick="csUOSave()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
+        <span id="cs-uo-msg" class="text-xs"></span>
+      </div>
+      <div id="cs-uo-cards">${csUORenderCards()}</div>
+    </div>`;
+}
+
+window.csUOSet = function (el) {
+    const u = el.dataset.csUoUser, k = el.dataset.csUoKey;
+    if (!u || !k) return;
+    csUserOverridesState[u] = csUserOverridesState[u] || {};
+    csUserOverridesState[u][k] = el.value;
+};
+
+window.csUOAdd = function () {
+    const u = prompt('Username to pin (hostname prefix, e.g. jsmith):');
+    if (!u) return;
+    const user = u.trim();
+    if (!user || /[\r\n\[\]]/.test(user)) { alert('Invalid username.'); return; }
+    if (csUserOverridesState[user]) { alert('User already exists.'); return; }
+    csUserOverridesState[user] = {};
+    const c = csEl('cs-uo-cards');
+    if (c) c.innerHTML = csUORenderCards();
+};
+
+window.csUORemove = function (btn) {
+    const u = btn.dataset.uoUser;
+    if (!u) return;
+    if (!confirm(`Remove override for ${u}?`)) return;
+    delete csUserOverridesState[u];
+    const c = csEl('cs-uo-cards');
+    if (c) c.innerHTML = csUORenderCards();
+};
+
+window.csUODownload = function (btn) {
+    const u = btn.dataset.uoUser;
+    const kv = csUserOverridesState[u] || {};
+    let text = `[${u}]\n`;
+    for (const [k, v] of Object.entries(kv)) text += `${k}=${v}\n`;
+    const blob = new Blob([text], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${u}.conf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+};
+
+window.csUOSave = async function () {
+    const msg = csEl('cs-uo-msg');
+    if (msg) { msg.textContent = 'Saving…'; msg.className = 'text-xs text-slate-400'; }
+    let text = '';
+    for (const [u, kv] of Object.entries(csUserOverridesState)) {
+        text += `[${u}]\n`;
+        for (const [k, v] of Object.entries(kv)) {
+            if (v === '' || v === null || v === undefined) continue;  // empty → drop
+            text += `${k}=${v}\n`;
+        }
+        text += '\n';
+    }
+    try {
+        const r = await csFetch(`/${csTenant()}/config/user-overrides-conf`,
+            { method: 'PUT', body: JSON.stringify({ content: text.trim() }) });
+        if (msg) { msg.textContent = 'Saved (' + ((r && r.synced_spokes) != null ? r.synced_spokes + ' spokes' : 'ok') + ').'; msg.className = 'text-xs text-green-600'; }
+    } catch (e) {
+        console.error('csUOSave: save failed', e);
+        if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; }
+    }
+};
+
+// Human-readable "Last fetched" stamp from the hub's ISO-8601 fetched_at.
+function csFmtFetched(iso) {
+    if (!iso) return '—';
+    try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        return d.toLocaleString();
+    } catch (e) { return iso; }
+}
 
 window.CS_CHILD_RENDERERS['Config::API'] = csRenderConfig;
 window.CS_CHILD_RENDERERS['Config::Simulation'] = csRenderConfigSimulation;
