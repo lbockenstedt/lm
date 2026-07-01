@@ -551,6 +551,51 @@ function csKvTile(k, v) {
     </div>`;
 }
 
+// Full-width Auto-Provisioning card for the Details view. The ``provision``
+// block (px.provision) is a nested object — rendering it through csKvTile
+// stringifies the whole thing into one tile with heavy word-wrapping and no
+// structure. Instead this formats the diagnostic fields readably (mirrors
+// csRefreshAutoProvStatus) and spans the full content width so the reason
+// string and config snapshot have room. Rendered LAST in the Details layout
+// (after the telemetry grid), full-width via col-span-all.
+function csProvisionCard(px) {
+    const prov = (px && px.provision) || {};
+    if (!Object.keys(prov).length) {
+        return `<div class="bg-slate-50 rounded-lg p-3 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
+      <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest mb-1">Auto-Provisioning</p>
+      <div class="text-sm text-slate-500">No provision diagnostic reported by this host's agent.</div>
+    </div>`;
+    }
+    const cfg = prov.config || {};
+    const reason = prov.reason ? csEscape(String(prov.reason)) : '—';
+    const loopOn = !!prov.loop_running;
+    const csOn = !!prov.cs_enabled;
+    const autoOn = !!prov.auto_provision_on;
+    const vidpids = (cfg.dongle_vidpids != null) ? csEscape(String(cfg.dongle_vidpids)) : '—';
+    const img1 = cfg.image1_template_id ? 'yes' : (cfg.image1_template_id === false ? 'no' : '—');
+    const img2 = cfg.image2_template_id ? 'yes' : (cfg.image2_template_id === false ? 'no' : '—');
+    const maxSlots = (cfg.max_slots != null) ? csEscape(String(cfg.max_slots)) : '—';
+    const vr = cfg.vmid_range || {};
+    const vrStr = (vr && (vr.start || vr.end)) ? `${csEscape(String(vr.start))}–${csEscape(String(vr.end))}` : '—';
+    const active = (cfg.active_usb_vms != null) ? csEscape(String(cfg.active_usb_vms)) : '—';
+    const halt = prov.halt ? csEscape(String(prov.halt)) : '';
+    // Status chips: CS-enabled, loop-running, auto-provision-on. Amber when a
+    // gate is closed (the most common "enabled but nothing provisions" causes).
+    const chip = (label, ok) => `<span class="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${csEscape(label)}</span>`;
+    let html = `<div class="bg-slate-50 rounded-lg p-3 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
+      <div class="flex items-center gap-2 mb-2">
+        <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Auto-Provisioning</p>
+        ${chip('CS-enabled', csOn)}${chip('loop running', loopOn)}${chip('auto-provision on', autoOn)}
+      </div>
+      <div class="text-sm text-slate-700 space-y-1">
+        <div><b>Last pass:</b> ${reason}${loopOn ? '' : ' <span class="text-amber-600">(provision loop not running — check the pxmx agent log)</span>'}</div>
+        ${halt ? `<div class="text-amber-600"><b>Halt:</b> ${halt}</div>` : ''}
+        <div><b>Config:</b> dongle_vidpids=${vidpids} · image1=${img1} · image2=${img2} · max_slots=${maxSlots} · vmid_range=${vrStr} · active_usb_vms=${active}</div>
+      </div>
+    </div>`;
+    return html;
+}
+
 // USB dongle count for a host — the number of physical dongles, NOT the number
 // of distinct VID:PID types. The pxmx agent's cs_usb_telemetry scans
 // /sys/bus/usb/devices and emits one entry PER PHYSICAL DEVICE under
@@ -2159,7 +2204,10 @@ async function csRenderVmServerDetails() {
     // and reads 0 when no dongle is assigned, so hide it from the telemetry grid.
     // The headline USB stat below uses csUsbCount (present+unknown = physical
     // dongles), the same source as the Overview per-host row + USB view.
-    const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count'];
+    // `provision` is pulled out of the generic grid and rendered LAST as its
+    // own full-width card (csProvisionCard) — it's a nested object that wraps
+    // badly as a raw csKvTile and deserves a readable layout.
+    const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count','provision'];
     const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
     // Pretty-print a few well-known keys instead of their raw form: pve_version
     // arrives as "pve-manager/9.2.3/abc123" (strip to 9.2.3 via csPveVersion) and
@@ -2181,6 +2229,8 @@ async function csRenderVmServerDetails() {
         <span class="text-[10px] text-slate-400">${entries.length} field${entries.length === 1 ? '' : 's'}</span>
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">${tiles}</div>
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-2">Auto-Provisioning</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">${csProvisionCard(px)}</div>
       <details class="mt-4 text-xs"><summary class="cursor-pointer text-slate-400">Raw payload</summary>${csJsonDump(h)}</details>
     </div>`);
 }
