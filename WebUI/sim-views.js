@@ -570,6 +570,29 @@ function csPveVersion(v) {
     return m ? m[0] : s;
 }
 
+// Human-readable formatter for last_seen values. The Clients table (and any
+// last_seen telemetry tile) receives a fractional epoch-seconds float
+// (heartbeat.py time.time()) or occasionally an ISO string; rendering it raw
+// shows "1751400000.123", which is unreadable. This normalizes either form to a
+// local "YYYY-MM-DD HH:MM:SS" string. Values >= 1e11 are treated as already-ms.
+// Returns a RAW (unescaped) string — callers wrap in csEscape / csKvTile, the
+// same convention as csPveVersion. Unknown formats fall back to String(v).
+function csLastSeen(v) {
+    if (v == null || v === '' || v === '—') return '—';
+    let ms = NaN;
+    if (typeof v === 'number') ms = v;
+    else {
+        const s = String(v).trim();
+        ms = /^[\d.]+$/.test(s) ? Number(s) : Date.parse(s);
+    }
+    if (isNaN(ms)) return String(v);
+    if (ms < 1e11) ms *= 1000;            // epoch seconds → ms
+    const d = new Date(ms);
+    if (isNaN(d.getTime())) return String(v);
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 // Compact inline stat row — "<b>N</b> Label <b>N</b> Label …" — the overview
 // header style used by VM Server, Spoke Management, Clients, and the Simulations
 // sub-views. `items` is a list of [value, label] pairs.
@@ -717,7 +740,7 @@ function csRenderClientRows(rows) {
           <td class="px-4 py-2"><span class="text-[10px] font-bold px-2 py-0.5 rounded ${t === 't2' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'}">${t.toUpperCase()}</span></td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.connected_ssid || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(sims)}</td>
-          <td class="px-4 py-2 text-slate-500">${csEscape(c.last_seen || '—')}</td>
+          <td class="px-4 py-2 text-slate-500">${csEscape(csLastSeen(c.last_seen))}</td>
           <td class="px-4 py-2 ${c.error_count > 0 ? 'text-amber-600 font-bold' : 'text-slate-400'}">${csEscape(c.error_count || 0)}</td>
         </tr>`;
     }).join('');
@@ -2108,7 +2131,15 @@ async function csRenderVmServerDetails() {
     const node = px.node || {};
     const skip = ['vms','usb_state','present_usb','unknown_usb','node'];
     const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
-    const tiles = entries.map(([k, v]) => csKvTile(k, v)).join('');
+    // Pretty-print a few well-known keys instead of their raw form: pve_version
+    // arrives as "pve-manager/9.2.3/abc123" (strip to 9.2.3 via csPveVersion) and
+    // last_seen as a fractional epoch (→ local datetime via csLastSeen).
+    const fmt = (k, v) => {
+        if (k === 'pve_version') return csKvTile(k, csPveVersion(v));
+        if (k === 'last_seen') return csKvTile(k, csLastSeen(v));
+        return csKvTile(k, v);
+    };
+    const tiles = entries.map(([k, v]) => fmt(k, v)).join('');
     csSet(`<div>${csVmHostBanner()}
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         ${csStat('Node', node.hostname || '—')}${csStat('CPU 1h', px.cpu_1h_avg || '—')}
