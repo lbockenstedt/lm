@@ -734,6 +734,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             if not module_key:
                 return
 
+            if module_key == 'cs':
+                # CS provisioning config (usb_vidpids, usb_ignored_vidpids,
+                # usb_auto_provision, image1/image2 template ids, VLAN ranges,
+                # watchdog knobs) is TENANT-scoped and delivered via
+                # CS_CONFIG_UPDATE — NOT the UPDATE_CONFIG/global_config["cs"]
+                # path below (the cs speak's UPDATE_CONFIG handler only writes
+                # simulation.conf INI and ignores usb_vidpids). Re-push it on
+                # every (re)connect so a cs speak that restarts — hourly
+                # self-update, reboot, or the fresh-install base_spoke crash —
+                # recovers its certified vidpids + templates instead of coming up
+                # with usb_vidpids="[]" (→ the pxmx agent's _dongle_vidpids
+                # reads 0 → "no dongle_vidpids configured" and auto-provision
+                # never fires until an admin re-saves Setup/Proxmox). Mirrors
+                # the NAC/IPAM reconnect re-push (multi-instance-spoke-config-
+                # push), which was never extended to cs.
+                await self.push_cs_hub_config(spoke_id)
+                return
+
             # Handle Firewall multi-instance config
             if module_key == 'opn':
                 firewalls = self.state.get_global_config().get("firewalls", [])
@@ -800,6 +818,84 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             logger.info(f"Pushed {module_key} config to {spoke_id}")
         except Exception as e:
             logger.error(f"Failed to push config to {spoke_id}: {e}")
+
+    async def push_cs_hub_config(self, spoke_id: str) -> None:
+        """Re-push the tenant's hub-owned CS provisioning config
+        (``usb_vidpids``/``usb_ignored_vidpids``/``usb_auto_provision``,
+        image1/image2 template ids, VLAN ranges, watchdog knobs, ...) to a
+        (re)connecting Client-Sim spoke as a ``CS_CONFIG_UPDATE``.
+
+        The cs speak applies these via ``_apply_hub_config``
+        (``CS_CONFIG_UPDATE``), NOT its ``UPDATE_CONFIG`` handler (which only
+        writes ``simulation.conf`` INI and ignores ``usb_vidpids``). Without this
+        re-push a cs speak that restarts comes up with ``usb_vidpids="[]"`` and
+        no templates until an admin re-saves Setup/Proxmox, so the pxmx agent's
+        ``_dongle_vidpids`` reads 0 and auto-provision never fires ("no
+        dongle_vidpids configured"). Called from ``push_config_to_spoke`` on
+        every cs (re)connect.
+
+        USB certified/ignored are the EFFECTIVE (global + tenant) lists so a
+        globally-certified vid:pid reaches the spoke even when the tenant's own
+        ``usb_vidpids`` is empty; the remaining keys come straight from the
+        tenant ``hub_config`` (mirrors ``PUT /sim/api/tenant/{t}/hub-config``).
+        No-op when the spoke has no tenant binding or the tenant's hub_config
+        isn't enabled, so an unbound/non-cs spoke is left untouched. Best-effort:
+        a transport failure is logged, not raised (the spoke retries on the next
+        reconnect and the cs_bridge still re-syncs usb_config every cycle)."""
+        try:
+            tenant_id = self.state.get_spoke_tenant(spoke_id)
+        except Exception:
+            tenant_id = None
+        if not tenant_id:
+            return
+        try:
+            hc = await self.simulations_store.get_hub_config(tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("push_cs_hub_config: hub_config read for %s failed: %s",
+                         spoke_id, exc)
+            return
+        if not isinstance(hc, dict) or not hc.get("hub_config_enabled"):
+            return
+        cfg = dict(hc.get("hub_config") or {})
+        # Effective USB lists (global + tenant, deduped) — the cs speak
+        # re-filters dongles on these, so a global-only certification still
+        # reaches a spoke whose tenant hub_config.usb_vidpids is empty.
+        try:
+            from simulations.routes import (_normalize_usb_vidpids,
+                                            _normalize_usb_ignored)
+        except Exception:  # noqa: BLE001  (lazy import; routes pulls FastAPI)
+            _normalize_usb_vidpids = None
+            _normalize_usb_ignored = None
+        if _normalize_usb_vidpids is not None:
+            try:
+                g_cert = await self.simulations_store.get_global_usb_vidpids()
+            except Exception:  # noqa: BLE001
+                g_cert = []
+            try:
+                g_ign = await self.simulations_store.get_global_usb_ignored_vidpids()
+            except Exception:  # noqa: BLE001
+                g_ign = []
+            seen: set = set()
+            cert: list = []
+            for d in (_normalize_usb_vidpids(g_cert)
+                      + _normalize_usb_vidpids(cfg.get("usb_vidpids"))):
+                vp = d.get("vidpid", "") if isinstance(d, dict) else ""
+                if vp and vp not in seen:
+                    seen.add(vp)
+                    cert.append(d)
+            ign = sorted(set(_normalize_usb_ignored(g_ign))
+                        | set(_normalize_usb_ignored(cfg.get("usb_ignored_vidpids"))))
+            cfg["usb_vidpids"] = json.dumps(cert)
+            cfg["usb_ignored_vidpids"] = json.dumps(ign)
+        if not cfg:
+            return
+        try:
+            await self.request_response(spoke_id, "CS_CONFIG_UPDATE", cfg, timeout=5.0)
+            logger.info("Re-pushed CS hub config to %s (tenant %s)",
+                        spoke_id, tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CS_CONFIG_UPDATE re-push to %s failed: %s",
+                           spoke_id, exc)
 
     async def broadcast_log_level(self, enabled: bool):
         """Broadcasts the desired logging level to all connected spokes."""
