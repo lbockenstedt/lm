@@ -463,6 +463,7 @@ const MODULE_LABELS = {
     firewall:   'OPNsense',
     nac:        'ClearPass',
     simulation: 'Client Simulator',
+    nw:         'Network',
     dhcp:       'DHCP',
     dns:        'DNS',
     directory:  'LDAP',
