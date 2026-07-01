@@ -23,17 +23,21 @@ def _prov(reason="no dongle_vidpids configured", loop_running=True, on=True):
 
 
 def _tenant_cache():
+    # Multi-host shape the cs spoke actually emits: present_usb / unknown_usb
+    # live on each Proxmox host's OWN proxmox block, NOT the spoke-level one
+    # (which is empty in this shape). host-a: 1 certified + 0 unknown;
+    # host-b: 2 certified + 2 unknown → 3 present / 2 unknown summed.
     return {
         "cs-spoke-1": {
             "spoke_name": "CS Spoke 1",
-            "proxmox": {
-                "present_usb": [{"vidpid": "1234:5678"}],
-                "unknown_usb": [{"vidpid": "abcd:ef01"}, {"vidpid": "0000:0001"}],
-                "provision": _prov(),
-            },
+            "proxmox": {"provision": _prov()},
             "proxmox_hosts": [
-                {"hostname": "host-a", "proxmox": {"provision": _prov()}},
-                {"hostname": "host-b", "proxmox": {"provision": _prov("provisioning: attempted 3, provisioned 1")}},
+                {"hostname": "host-a", "proxmox": {"present_usb": [{"vidpid": "1234:5678"}],
+                                                   "unknown_usb": [],
+                                                   "provision": _prov()}},
+                {"hostname": "host-b", "proxmox": {"present_usb": [{"vidpid": "1111:2222"}, {"vidpid": "3333:4444"}],
+                                                   "unknown_usb": [{"vidpid": "abcd:ef01"}, {"vidpid": "0000:0001"}],
+                                                   "provision": _prov("provisioning: attempted 3, provisioned 1")}},
             ],
         },
     }
@@ -55,13 +59,27 @@ def test_provision_threaded_into_spoke_and_hosts():
     spoke = out["spokes"][0]
     # Primary-host provision block surfaced on the spoke row.
     assert spoke["provision"]["reason"] == "no dongle_vidpids configured"
-    assert spoke["present_usb"] == 1
+    # present_usb / unknown_usb are summed across proxmox_hosts (3 / 2), not
+    # read from the empty spoke-level proxmox block.
+    assert spoke["present_usb"] == 3
     assert spoke["unknown_usb"] == 2
     # Per-host rows carry their own provision diagnostic.
     hosts = spoke["hosts"]
     assert [h["hostname"] for h in hosts] == ["host-a", "host-b"]
     assert hosts[0]["provision"]["loop_running"] is True
     assert hosts[1]["provision"]["reason"] == "provisioning: attempted 3, provisioned 1"
+
+
+def test_present_usb_legacy_single_host_shape():
+    # No proxmox_hosts → fall back to the spoke-level proxmox block (the legacy
+    # single-host shape) so the count isn't lost there.
+    cache = {"cs-spoke-1": {"spoke_name": "CS Spoke 1",
+                           "proxmox": {"present_usb": [{"vidpid": "1234:5678"}],
+                                       "unknown_usb": [{"vidpid": "abcd:ef01"}, {"vidpid": "0000:0001"}],
+                                       "provision": _prov()}}}
+    out = _usb_provisioning_status_payload({}, cache, {}, "10")
+    assert out["spokes"][0]["present_usb"] == 1
+    assert out["spokes"][0]["unknown_usb"] == 2
 
 
 def test_cs_enabled_agent_count_is_tenant_scoped():
