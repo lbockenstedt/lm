@@ -1703,6 +1703,10 @@ window.csUpdateAll = async function () {
 
 // ── VMs (per-host) ──────────────────────────────────────────────────────────
 function csVmCategory(v) {
+    // The agent stamps is_template (Proxmox ``template: 1`` flag / name / tag
+    // heuristics) on every VM; a template's ``type`` is still ``qemu``, so
+    // checking type alone misfiles templates as 'Other'. Honor the flag first.
+    if (v.is_template) return 'Templates';
     const t = String(v.type || '').toLowerCase();
     const name = String(v.name || '').toLowerCase();
     if (t === 'template' || name.includes('template')) return 'Templates';
@@ -1746,7 +1750,7 @@ function csVmRow(v) {
     return `<tr>
       <td class="px-3 py-2 font-mono text-xs"><input type="checkbox" class="cs-vm-sel" data-vmid="${vid}"/> ${vid}</td>
       <td class="px-3 py-2 text-sm">${csEscape(v.name || '—')}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(v.type || '—')}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(v.is_template ? 'template' : (v.type || '—'))}</td>
       <td class="px-3 py-2">${csStatusBadge(v.status || (v.pending_checkin ? 'pending' : 'unknown'))}</td>
       <td class="px-3 py-2"><div class="flex flex-wrap gap-1">
         ${act('Start','start_vm','bg-green-100 text-green-700')}
