@@ -21,10 +21,13 @@ class _State:
 
 class _Store:
     """Async stub of the bits of SimulationsStore push_cs_hub_config reads."""
-    def __init__(self, hub_config, global_cert=None, global_ign=None):
+    def __init__(self, hub_config, global_cert=None, global_ign=None,
+                 sim_override="", user_override=""):
         self._hc = hub_config
         self._g_cert = global_cert or []
         self._g_ign = global_ign or []
+        self._sim_override = sim_override
+        self._user_override = user_override
 
     async def get_hub_config(self, tenant_id):
         return self._hc
@@ -34,6 +37,12 @@ class _Store:
 
     async def get_global_usb_ignored_vidpids(self):
         return self._g_ign
+
+    async def get_sim_conf_content(self, tenant_id):
+        return self._sim_override
+
+    async def get_user_overrides_content(self, tenant_id):
+        return self._user_override
 
 
 class _Hub:
@@ -113,3 +122,49 @@ async def test_repush_dedupes_overlap_between_global_and_tenant():
     await main.LabManagerHub.push_cs_hub_config(hub, "cs-spoke-1")
     cert = json.loads(hub.sent[0][1]["usb_vidpids"])
     assert [d["vidpid"] for d in cert] == ["1111:2222"]
+
+
+async def test_repush_sim_and_user_overrides_recover_after_restart():
+    # The Sim Config editor saves sim_conf_override / user_conf_override INI
+    # text; a restarting spoke must recover them. They're re-pushed as a
+    # CS_CONFIG_UPDATE independent of hub_config_enabled.
+    hub_config = {"hub_config_enabled": True,
+                  "hub_config": {"usb_vidpids": json.dumps([_vidpid("1111:2222")])}}
+    hub = _Hub(_State("10"),
+               _Store(hub_config,
+                      sim_override="[simulation]\nkill_switch=on\n",
+                      user_override="[amoran]\nwsite=LAX\n"))
+    await main.LabManagerHub.push_cs_hub_config(hub, "cs-spoke-1")
+    # Two pushes: one for overrides, one for hub_config (usb/templates).
+    assert len(hub.sent) == 2
+    cmds = [c for c, _ in hub.sent]
+    assert cmds == ["CS_CONFIG_UPDATE", "CS_CONFIG_UPDATE"]
+    override_payload = hub.sent[0][1]
+    assert override_payload["sim_conf_override"] == "[simulation]\nkill_switch=on\n"
+    assert override_payload["user_conf_override"] == "[amoran]\nwsite=LAX\n"
+    # hub_config push still carries usb_vidpids separately.
+    assert "usb_vidpids" in hub.sent[1][1]
+
+
+async def test_repush_overrides_even_when_hub_config_disabled():
+    # Overrides are their own bucket — they must re-push even if hub_config
+    # isn't enabled (the gate only suppresses the usb/template push).
+    hub = _Hub(_State("10"),
+               _Store({"hub_config_enabled": False, "hub_config": {}},
+                      sim_override="[simulation]\nkill_switch=on\n"))
+    await main.LabManagerHub.push_cs_hub_config(hub, "cs-spoke-1")
+    # Exactly one push: the override. The disabled hub_config suppresses the
+    # second push (no usb/templates).
+    assert len(hub.sent) == 1
+    assert hub.sent[0][0] == "CS_CONFIG_UPDATE"
+    assert hub.sent[0][1]["sim_conf_override"] == "[simulation]\nkill_switch=on\n"
+
+
+async def test_repush_no_overrides_means_no_override_push():
+    # No stored override content → no override push; hub_config still pushes.
+    hub_config = {"hub_config_enabled": True,
+                  "hub_config": {"usb_vidpids": json.dumps([_vidpid("1111:2222")])}}
+    hub = _Hub(_State("10"), _Store(hub_config))  # no overrides
+    await main.LabManagerHub.push_cs_hub_config(hub, "cs-spoke-1")
+    assert len(hub.sent) == 1  # only the hub_config push
+    assert "sim_conf_override" not in hub.sent[0][1]

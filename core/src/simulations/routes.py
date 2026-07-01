@@ -13,6 +13,8 @@ section). This is the LM-side port of the legacy solutions-hpe Client-Sim UI.
 from fastapi import WebSocket, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Any, Dict
+import configparser
+from datetime import datetime, timezone
 import hmac
 import inspect
 import json
@@ -22,6 +24,27 @@ from .service import SimulationsService
 from .store import SimulationsStore
 
 logger = logging.getLogger("SimRoutes")
+
+
+def _parse_ini_sections(text: str) -> Dict[str, Dict[str, str]]:
+    """Parse raw INI ``text`` into ``{section: {key: value}}`` (case-preserving).
+
+    Used by the Sim Config editor's structured view (``GET .../simulation-conf-parsed``).
+    A malformed file degrades to an empty dict (never raises) so a bad override
+    doesn't 500 the editor — the UI shows the raw text fallback instead.
+    """
+    p = configparser.ConfigParser()
+    p.optionxform = str  # preserve key case (matches sim_config._new_parser)
+    try:
+        p.read_string(text or "")
+    except configparser.Error:
+        return {}
+    return {section: dict(p.items(section)) for section in p.sections()}
+
+
+def _now_iso() -> str:
+    """UTC now as an ISO-8601 string (for ``fetched_at`` stamps in config reads)."""
+    return datetime.now(timezone.utc).isoformat()
 
 _USB_VIDPID_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{4}$")
 # Allowed dongle classes. The Global USB Approvals UI offers these; the
@@ -1169,6 +1192,82 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.get("/sim/api/{tenant}/clients/sim-overrides")
     async def get_client_overrides(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         return await store.get_user_overrides(tenant_id)
+
+    # ── Simulations Config tab (legacy solutions-hpe/client-sim port) ──────────
+    # A structured editor for simulation.conf (sections [simulation]/[server]/
+    # [address]/[s0]–[s9]) and user-overrides.conf (per-user sections). The hub
+    # is the source of truth for hub-owned config: edits save as the hub-managed
+    # override (``sim_conf_override`` / ``user_conf_override`` INI text →
+    # CS_CONFIG_UPDATE → spoke writes configs/hub-*-overrides.conf → merged on
+    # top of the repo base files by sim_config.load_configs). The spoke's
+    # CS_GET_CONFIG returns the MERGED effective config, which is what the
+    # editor reads back on Refresh (so the UI shows what's actually in effect,
+    # not just the override layer).
+
+    @app.get("/sim/api/{tenant}/config/simulation-conf-parsed")
+    async def get_sim_conf_parsed(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Structured simulation.conf view — ``{sections: {section: {k:v}}}``.
+
+        Does a spoke round-trip ``CS_GET_CONFIG`` to read the MERGED effective
+        config (base repo file + hub-managed override). Falls back to the stored
+        ``sim_conf_content`` override when the spoke is offline so the editor
+        still renders. ``source`` says which: ``spoke`` | ``stored-override``.
+        """
+        raw = ""
+        source = "stored-override"
+        mode = "local"
+        try:
+            data = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
+            raw = (data or {}).get("simulation_conf", "") if isinstance(data, dict) else ""
+            mode = (data or {}).get("mode", "local") if isinstance(data, dict) else "local"
+            source = "spoke"
+        except HTTPException as exc:
+            # Spoke offline/refused — fall back to the stored override text so
+            # the editor still loads (read-only feel; save will re-push).
+            logger.info("sim-conf-parsed: CS_GET_CONFIG fell back to stored override (%s)", exc.detail)
+            raw = await store.get_sim_conf_content(tenant_id)
+        return {"sections": _parse_ini_sections(raw), "raw": raw,
+                "mode": mode, "source": source,
+                "fetched_at": _now_iso()}
+
+    @app.get("/sim/api/{tenant}/config/user-overrides-conf")
+    async def get_user_overrides_conf(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Raw user-overrides.conf (merged effective) for the per-user editor.
+
+        Spoke round-trip ``CS_GET_CONFIG`` → ``user_overrides`` text (base repo
+        file + hub-user-override merged). Falls back to the stored
+        ``user_overrides_content`` override when the spoke is offline.
+        """
+        content = ""
+        source = "stored-override"
+        mode = "local"
+        try:
+            data = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
+            content = (data or {}).get("user_overrides", "") if isinstance(data, dict) else ""
+            mode = (data or {}).get("mode", "local") if isinstance(data, dict) else "local"
+            source = "spoke"
+        except HTTPException as exc:
+            logger.info("user-overrides-conf: CS_GET_CONFIG fell back to stored override (%s)", exc.detail)
+            content = await store.get_user_overrides_content(tenant_id)
+        return {"content": content, "mode": mode, "source": source,
+                "fetched_at": _now_iso()}
+
+    @app.put("/sim/api/{tenant}/config/user-overrides-conf")
+    async def put_user_overrides_conf(request: Request, tenant: str,
+                                      tenant_id: str = Depends(get_tenant_id)):
+        """Save the full user-overrides.conf override + push to the spoke.
+
+        Validates the INI parses (422 on a malformed file) before persisting or
+        pushing, mirroring the spoke-side ``sim_config.validate_ini_text`` gate.
+        """
+        body = await request.json()
+        content = (body.get("content", "") if isinstance(body, dict) else "") or ""
+        # Validate parse before saving so a bad edit doesn't overwrite the canon.
+        if content.strip() and not _parse_ini_sections(content):
+            raise HTTPException(status_code=422, detail="Invalid INI: could not parse user-overrides.conf")
+        await store.set_user_overrides_content(tenant_id, content)
+        pushed = await _push_config(tenant_id, {"user_conf_override": content})
+        return {"saved": True, "synced_spokes": pushed}
 
     @app.get("/sim/api/{tenant}/settings")
     async def get_settings(tenant: str, tenant_id: str = Depends(get_tenant_id)):
