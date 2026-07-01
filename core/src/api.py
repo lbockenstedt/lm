@@ -1361,6 +1361,44 @@ def create_app(hub):
             raise HTTPException(status_code=403, detail="admin required")
         return await hub.simulations_store.get_staleness_sweep_status()
 
+    # ── GitHub repo sync (Setup → Sync, replaces the old autoupdate loop) ───
+    # global_config["repo_sync"] is saved via the generic POST /setup/config
+    # shallow-merge — no dedicated config route needed. The background loop
+    # (main.py run_repo_sync_loop) reads that same key.
+    @app.post("/setup/repo-sync/run")
+    async def run_repo_sync(request: Request):
+        """On-demand GitHub repo sync ('Sync now').
+
+        Pulls each hub-local ``provisioning_repos/*`` git repo, then runs the
+        version-gated hub pull + ``SPOKE_UPDATE`` fan-out to every approved
+        spoke (``perform_update``). The hub self-restarts only when its own
+        code changed; spokes self-pull and restart on their own version change.
+        Returns the per-repo results + the hub update result.
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        result = await hub.run_repo_sync_all()
+        prov = result.get("provisioning_repos", []) or []
+        return {"result": result,
+                "summary": {"status": (result.get("hub") or {}).get("status"),
+                            "provisioning_repos": len(prov),
+                            "provisioning_repos_ok":
+                                sum(1 for r in prov if r.get("status") == "ok"),
+                            "provisioning_repos_error":
+                                sum(1 for r in prov if r.get("status") == "error"),
+                            "message": result.get("message")}}
+
+    @app.get("/setup/repo-sync/status")
+    async def repo_sync_status(request: Request):
+        """Last GitHub repo-sync status for the Setup → Sync card."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        return await hub.simulations_store.get_repo_sync_status()
+
     # ── Spoke out-of-contact alerts (Setup → Sync) ───────────────────────
     # global_config["spoke_alert"] is saved via the generic POST /setup/config
     # shallow-merge — no dedicated config route needed. The background loop

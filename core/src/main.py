@@ -66,6 +66,7 @@ from nw_discovery_sync import NwDiscoverySyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 from staleness_sweep import StalenessSweepMixin
 from spoke_alert_sync import SpokeAlertMixin
+from repo_sync import RepoSyncMixin
 
 logging.basicConfig(
     level=logging.INFO,
@@ -264,7 +265,7 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin, RepoSyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -2248,28 +2249,6 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "version": "unknown"
             }
 
-    async def run_autoupdate_loop(self):
-        """
-        Background loop that checks for updates based on global configuration.
-        """
-        logger.info("Auto-update loop started.")
-        while True:
-            try:
-                config = self.state.get_global_config()
-                enabled = config.get("autoupdate", True) # Default to enabled
-                interval_hours = config.get("update_interval", 1) # Default to 1 hour
-
-                if enabled:
-                    logger.info(f"Auto-update enabled. Checking for updates every {interval_hours} hours.")
-                    logger.info("Performing scheduled auto-update check...")
-                    await self.perform_update()
-                    await asyncio.sleep(interval_hours * 3600)
-                else:
-                    await asyncio.sleep(300)
-            except Exception as e:
-                logger.error(f"Error in auto-update loop: {e}", exc_info=True)
-                await asyncio.sleep(300)
-
     async def poll_opnsense_rules(self, firewall_id: str = None):
         """
         Polls OPNsense for all firewall rules and caches them locally and in-memory.
@@ -2457,7 +2436,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
-        autoupdate_task = asyncio.create_task(self.run_autoupdate_loop())
+        repo_sync_task = asyncio.create_task(self.run_repo_sync_loop())
         mps_task = asyncio.create_task(self.run_mps_loop())
         opnsense_poll_task = asyncio.create_task(self.run_opnsense_polling_loop())
         rotation_task = asyncio.create_task(self.run_key_rotation_loop())
