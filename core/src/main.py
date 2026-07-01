@@ -2482,6 +2482,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # counterpart to the last_seen custom field every sync stamps on each
         # detection. See run_staleness_sweep_loop (StalenessSweepMixin). Also
         # fired on-demand from the WebUI ("Sweep now").
+        # Seed enabled=True defaults once so the registry's cleanup job actually
+        # runs on a never-configured hub (the loop otherwise defaults disabled).
+        self.seed_staleness_sweep_defaults()
         staleness_sweep_task = asyncio.create_task(self.run_staleness_sweep_loop())
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable

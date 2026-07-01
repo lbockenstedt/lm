@@ -71,6 +71,12 @@ class NwDiscoverySyncMixin:
     #   arp_command   : command to fetch a device's ARP table (request
     #                   {"device_id": <id>}; response {"status":"SUCCESS",
     #                   "data":[{ip, mac, interface}, ...]})
+    #   mac_command   : command to fetch a device's MAC table (same request/
+    #                   response shape; rows are {mac, vlan, interface} — NO ip,
+    #                   so they can't be tenant-attributed and are pushed
+    #                   UNSCOPED so the MAC is still recorded on a global device
+    #                   carrying its source switch/port). Optional — a product
+    #                   with no MAC-table command is ARP-only.
     #   label         : human label for the WebUI source selector + the push
     #                   payload's ``source`` field (used by the netbox sink as
     #                   the discovered_from ownership tag).
@@ -78,6 +84,7 @@ class NwDiscoverySyncMixin:
         "nw": {
             "module_type": "nw",
             "arp_command": "NW_GET_ARP",
+            "mac_command": "NW_GET_MAC_TABLE",
             "label": "Network Devices",
         },
     }
@@ -157,11 +164,21 @@ class NwDiscoverySyncMixin:
     # ── pull / attribute / push ─────────────────────────────────────────────
 
     async def _nw_pull_discovered(self) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
-        """Pull the ARP table from every device on every connected nw spoke,
-        merge + dedup. Returns ``(records, pull_info)`` where each record is
-        ``{ip, mac, hostname}`` (mac normalized; hostname "" — ARP carries no
-        hostname) and ``pull_info`` is ``{"errors": [...]}``. Dedup by MAC
-        (primary) then IP.
+        """Pull the ARP table (and MAC table, when the source provides a
+        ``mac_command``) from every device on every connected nw spoke, merge +
+        dedup. Returns ``(records, pull_info)`` where each record is
+        ``{ip, mac, hostname, source_switch_name, source_switch_ip,
+        source_switch_port}`` (mac normalized; hostname "" — ARP/MAC tables
+        carry no hostname) and ``pull_info`` is ``{"errors": [...]}``.
+
+        The source-switch identity (device name + mgmt IP) + the port the MAC
+        was seen on are attached to EVERY record so NetBox answers "where is
+        this MAC?" — the device's switch_name/switch_ip/switch_port custom
+        fields. MAC-table rows have no IP → they surface here as MAC-only
+        records (``ip == ""``); the entry points split them off and push them
+        UNSCOPED (no tenant) since prefix attribution needs an IP. Dedup by MAC
+        (primary) then IP; a MAC seen on the MAC table that later shows an IP in
+        ARP merges into one IP-bearing record (so the device gets its tenant).
         """
         se = self._nw_discovery_source()
         spokes = self._nw_spokes()
@@ -173,26 +190,44 @@ class NwDiscoverySyncMixin:
         async def _fetch(sid: str, device: Dict[str, Any]) -> None:
             did = device.get("id", "")
             dname = device.get("name", did)
-            try:
-                r = await self.request_response(sid, se.get("arp_command", "NW_GET_ARP"),
-                                                {"device_id": did}, timeout=30.0)
-                d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
-                if isinstance(d, dict) and d.get("status") == "ERROR":
-                    errors.append(f"ARP({dname}@{sid}): {d.get('message', 'error')}")
-                    return
-                rows = (d.get("data") if isinstance(d, dict) else None) or []
-                for row in rows or []:
-                    if not isinstance(row, dict):
+            daddr = str(device.get("address") or "").strip()
+            # Switch identity carried on every record so the NetBox device
+            # records where the MAC was last seen.
+            sw = {"source_switch_name": dname, "source_switch_ip": daddr}
+            cmds = [se.get("arp_command", "NW_GET_ARP")]
+            mac_cmd = se.get("mac_command")
+            if mac_cmd:
+                cmds.append(mac_cmd)
+            for cmd in cmds:
+                if not cmd:
+                    continue
+                try:
+                    r = await self.request_response(sid, cmd, {"device_id": did},
+                                                    timeout=30.0)
+                    d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
+                    if isinstance(d, dict) and d.get("status") == "ERROR":
+                        errors.append(f"{cmd}({dname}@{sid}): "
+                                      f"{d.get('message', 'error')}")
                         continue
-                    ip = str(row.get("ip") or "").strip()
-                    if ip == "unknown":
-                        ip = ""
-                    mac = norm_mac(row.get("mac")) if norm_mac else str(row.get("mac") or "")
-                    if not ip and not mac:
-                        continue
-                    raw.append({"ip": ip, "mac": mac, "hostname": "", "_src": dname})
-            except Exception as e:
-                errors.append(f"ARP({dname}@{sid}): {e}")
+                    rows = (d.get("data") if isinstance(d, dict) else None) or []
+                    for row in rows or []:
+                        if not isinstance(row, dict):
+                            continue
+                        ip = str(row.get("ip") or "").strip()
+                        if ip == "unknown":
+                            ip = ""
+                        mac = norm_mac(row.get("mac")) if norm_mac else \
+                            str(row.get("mac") or "")
+                        port = str(row.get("interface") or row.get("port") or "").strip()
+                        if not ip and not mac:
+                            continue
+                        rec: Dict[str, str] = {"ip": ip, "mac": mac, "hostname": ""}
+                        rec.update(sw)
+                        if port:
+                            rec["source_switch_port"] = port
+                        raw.append(rec)
+                except Exception as e:
+                    errors.append(f"{cmd}({dname}@{sid}): {e}")
 
         fetches = []
         for sid in spokes:
@@ -200,7 +235,9 @@ class NwDiscoverySyncMixin:
                 fetches.append(_fetch(sid, device))
         await asyncio.gather(*fetches, return_exceptions=True)
 
-        # Merge + dedup: key by MAC (primary), else by ip:<ip>.
+        # Merge + dedup: key by MAC (primary), else by ip:<ip>. Preserve the
+        # source-switch fields (fill from whichever sighting carried them) so a
+        # MAC-only sighting later enriched with an IP keeps its switch/port.
         merged: Dict[str, Dict[str, str]] = {}
         for rec in raw:
             mac, ip = rec.get("mac", ""), rec.get("ip", "")
@@ -209,12 +246,16 @@ class NwDiscoverySyncMixin:
                 continue
             ex = merged.get(key)
             if ex is None:
-                merged[key] = {"ip": ip, "mac": mac, "hostname": rec.get("hostname", "")}
+                merged[key] = dict(rec)
             else:
                 if not ex.get("ip") and ip:
                     ex["ip"] = ip
                 if not ex.get("mac") and mac:
                     ex["mac"] = mac
+                for k in ("source_switch_name", "source_switch_ip",
+                          "source_switch_port"):
+                    if not ex.get(k) and rec.get(k):
+                        ex[k] = rec[k]
         return list(merged.values()), {"errors": errors}
 
     async def _nw_attribute(self, records: List[Dict[str, str]]
@@ -225,6 +266,62 @@ class NwDiscoverySyncMixin:
         if attribute_by_prefix is None:  # pragma: no cover - access importable in-app
             return {}, len(records)
         return await attribute_by_prefix(self, records)
+
+    async def _nw_push_unscoped_mac_sightings(self, devices: List[Dict[str, str]]
+                                              ) -> Dict[str, Any]:
+        """Push MAC-only sightings (no IP → no tenant) to NetBox UNSCOPED
+        (``tenant_slug=""``, ``replace=False``) so a MAC seen on a switch MAC
+        table but with no known IP is still recorded in NetBox, carrying its
+        source switch/port (the "where is this MAC" answer).
+
+        Only-add-missing (``replace=False``): a later IP sighting for that MAC
+        adopts the device via the netbox sink's MAC-match tier and assigns the
+        IP + tenant. Best-effort: never raises. Not persisted to the per-tenant
+        store (it is global, not tenant-scoped) — logged + returned only.
+        """
+        now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        netbox = self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE)
+        if not netbox:
+            return {"mac_only_total": len(devices), "last_sync_ts": now,
+                    "status": "error", "pushed": 0, "errors": 0, "skipped": 0,
+                    "deleted": 0, "message": "NetBox spoke not connected"}
+        if not devices:
+            return {"mac_only_total": 0, "last_sync_ts": now, "status": "success",
+                    "pushed": 0, "errors": 0, "skipped": 0, "deleted": 0,
+                    "message": "no MAC-only sightings"}
+        defaults = self._nw_discovery_cfg().get("defaults", {}) or {}
+        payload = {"tenant_id": "", "tenant_slug": "", "tenant_name": "",
+                   "source": self._nw_discovery_source().get("label", "Network Devices"),
+                   "replace": False, "devices": devices, "defaults": defaults}
+        try:
+            rr = await self.request_response(netbox, self._NW_DISCOVERY_PUSH_COMMAND,
+                                             payload, timeout=120.0)
+            rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            rstatus = str((rd or {}).get("status") or "").upper()
+            pushed = int((rd or {}).get("pushed", 0) or 0)
+            errors = int((rd or {}).get("errors", 0) or 0)
+            skipped = int((rd or {}).get("skipped", 0) or 0)
+            deleted = int((rd or {}).get("deleted", 0) or 0)
+            message = (rd or {}).get("message", "")
+            rstate = "success" if rstatus != "ERROR" else "error"
+            if errors > 0 or rstatus == "ERROR":
+                logger.warning("[sync-error] nw-discovery mac-only unscoped "
+                               "sent=%d status=%s pushed=%d skipped=%d errors=%d — %s",
+                               len(devices), rstate, pushed, skipped, errors,
+                               message or "NetBox error")
+            else:
+                logger.info("nw discovery sync mac-only unscoped sent=%d pushed=%d "
+                            "skipped=%d", len(devices), pushed, skipped)
+            return {"mac_only_total": len(devices), "last_sync_ts": now,
+                    "status": rstate, "pushed": pushed, "errors": errors,
+                    "skipped": skipped, "deleted": deleted,
+                    "message": message or (f"{len(devices)} MAC-only sighting(s) sent"
+                                            if rstatus != "ERROR" else "NetBox error")}
+        except Exception as e:
+            logger.warning("[sync-error] nw-discovery mac-only unscoped push failed: %s", e)
+            return {"mac_only_total": len(devices), "last_sync_ts": now,
+                    "status": "error", "pushed": 0, "errors": 0, "skipped": 0,
+                    "deleted": 0, "message": str(e)}
 
     async def _nw_push_tenant(self, tenant_id: str,
                               devices: List[Dict[str, str]]) -> Dict[str, Any]:
@@ -443,7 +540,10 @@ class NwDiscoverySyncMixin:
         attributes by prefix, pushes only ``tenant_id``.
         """
         records, pull = await self._nw_pull_discovered()
-        buckets, dropped = await self._nw_attribute(records)
+        # On-demand single-tenant sync is IP-bearing only — MAC-only sightings
+        # are global (no tenant) and are pushed by the full cycle, not here.
+        ip_records = [r for r in records if r.get("ip")]
+        buckets, dropped = await self._nw_attribute(ip_records)
         status = await self._nw_push_tenant(tenant_id, buckets.get(tenant_id, []))
         status["discovered_total_global"] = len(records)
         status["dropped_unattributed"] = dropped
@@ -455,13 +555,19 @@ class NwDiscoverySyncMixin:
         concurrently (bounded). Returns ``{"results": [...],
         "dropped_unattributed": N, "discovered_total": M}``."""
         records, pull = await self._nw_pull_discovered()
-        buckets, dropped = await self._nw_attribute(records)
+        # Split IP-bearing (tenant-attributable) from MAC-only sightings (no IP
+        # → no tenant). A MAC seen on a switch MAC table with no IP is pushed
+        # unscoped so NetBox still records it with its switch/port; a later IP
+        # sighting for that MAC adopts the device and assigns the tenant.
+        ip_records = [r for r in records if r.get("ip")]
+        mac_only = [r for r in records if not r.get("ip") and r.get("mac")]
+        buckets, dropped = await self._nw_attribute(ip_records)
         tids = list(buckets.keys())
-        if not tids:
+        if not tids and not mac_only:
             logger.info("nw discovery sync cycle: %d records pulled, 0 tenants matched, "
                         "%d dropped unattributed", len(records), dropped)
             return {"results": [], "dropped_unattributed": dropped,
-                    "discovered_total": len(records)}
+                    "discovered_total": len(records), "mac_only_total": 0}
         sem = asyncio.Semaphore(self._nw_discovery_concurrency())
 
         async def _one(tid: str):
@@ -476,15 +582,22 @@ class NwDiscoverySyncMixin:
         out = [r for r in results if r]
         pushed = sum(int(r.get("pushed", 0)) for r in out)
         errs = sum(int(r.get("errors", 0)) for r in out)
-        if errs > 0:
+        # MAC-only sightings pushed unscoped (global, only-add-missing).
+        mac_only_status = await self._nw_push_unscoped_mac_sightings(mac_only)
+        merrs = int(mac_only_status.get("errors", 0) or 0)
+        if errs > 0 or merrs > 0:
             logger.warning("[sync-error] nw-discovery cycle: %d records, %d tenants, "
-                           "%d pushed, %d errors, %d dropped unattributed",
-                           len(records), len(out), pushed, errs, dropped)
+                           "%d pushed, %d errors, %d dropped unattributed, "
+                           "%d mac-only unscoped",
+                           len(records), len(out), pushed, errs, dropped, len(mac_only))
         else:
             logger.info("nw discovery sync cycle: %d records, %d tenants, %d pushed, "
-                        "%d dropped unattributed", len(records), len(out), pushed, dropped)
+                        "%d dropped unattributed, %d mac-only unscoped",
+                        len(records), len(out), pushed, dropped, len(mac_only))
         return {"results": out, "dropped_unattributed": dropped,
-                "discovered_total": len(records)}
+                "discovered_total": len(records),
+                "mac_only_total": len(mac_only),
+                "mac_only_status": mac_only_status}
 
     async def run_nw_discovery_sync_loop(self):
         """Periodically sync nw-discovered devices → NetBox per schedule.

@@ -3829,9 +3829,23 @@ def create_app(hub):
         if not q or not q.strip():
             raise HTTPException(status_code=400, detail="q must not be empty")
 
+        raw_q = q.strip()
+        # Hub-side MAC normalization: a MAC typed in any separator form (colon /
+        # dash / dot / bare 12-hex) is normalized to the canonical lower-colon
+        # form before fan-out, so a spoke that substring-matches on a single form
+        # (the netbox spoke's REST q-search against the colon-form mac_address
+        # custom field) finds it regardless of how it was typed. The CPPM /
+        # OPNsense spokes already match separator-insensitively; this also fixes
+        # the query_type (a bare/dash/dot MAC used to be filed as a "name"
+        # query). See memory `global-device-search-fanout`.
+        _MAC_RE = re.compile(
+            r'^([0-9a-fA-F]{2}[:\-\.]){5}[0-9a-fA-F]{2}$|^[0-9a-fA-F]{12}$')
+        is_mac = bool(_MAC_RE.match(raw_q))
+        q_search = access.norm_mac(raw_q) if is_mac else raw_q
+
         resolved = _resolve_tenant(request, tenant)
         scoping = get_tenant_scoping(hub, resolved)
-        payload = {"q": q.strip(), "tenant": scoping["netbox_tenant_slug"] or resolved}
+        payload = {"q": q_search, "tenant": scoping["netbox_tenant_slug"] or resolved}
 
         async def _call(spoke, cmd):
             if not spoke:
@@ -3860,8 +3874,7 @@ def create_app(hub):
         merged = [item for sublist in all_results for item in sublist]
 
         # Categorise for the UI
-        is_ip  = bool(re.match(r'^[\d:.]+(/\d+)?$', q.strip()))
-        is_mac = bool(re.match(r'^([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}$', q.strip()))
+        is_ip  = bool(re.match(r'^[\d:.]+(/\d+)?$', raw_q))
         return {
             "query":       q,
             "query_type":  "ip" if is_ip else ("mac" if is_mac else "name"),

@@ -58,6 +58,33 @@ class StalenessSweepMixin:
         return (self.state.system_state.get("global_config", {})
                 .get(self._STALENESS_CFG_KEY, {})) or {}
 
+    def seed_staleness_sweep_defaults(self) -> None:
+        """Seed ``global_config["staleness_sweep"]`` defaults ONCE at startup if
+        the key is absent, with ``enabled=True`` so the registry's cleanup job
+        actually runs (the sweep is fully wired but ``enabled`` defaults to
+        False in the loop's ``cfg.get("enabled", False)``). A hub that already
+        has the key set — including an explicit ``enabled=False`` — is NEVER
+        overwritten; only a never-configured hub gets the defaults. Defaults:
+        hourly, 7d unseen → offline + decommissioned_at, 30d → deleted (IP freed).
+        Best-effort: a state/save failure is logged DEBUG and swallowed (a
+        staleness config must never block startup)."""
+        try:
+            sys_state = self.state.system_state
+            if sys_state is None:  # defensive — always a dict in practice
+                sys_state = self.state.system_state = {}
+            gc = sys_state.setdefault("global_config", {})
+            if self._STALENESS_CFG_KEY not in gc:
+                gc[self._STALENESS_CFG_KEY] = {"enabled": True,
+                                              "interval_seconds": 3600,
+                                              "stale_days": 7,
+                                              "delete_days": 30}
+                self.state.save_state()
+                logger.info("staleness_sweep: seeded defaults (enabled=True, "
+                            "hourly, 7d→offline, 30d→delete) — registry cleanup "
+                            "job now active; disable in Setup→Staleness Sweep")
+        except Exception as e:
+            logger.debug("staleness_sweep: seed defaults skipped: %s", e)
+
     def _staleness_interval(self) -> float:
         """Seconds between scheduled sweeps. Clamp >= 60 so a bad config can't
         hot-loop the hub. Default 3600 (hourly)."""

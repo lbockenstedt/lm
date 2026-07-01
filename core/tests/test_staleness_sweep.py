@@ -45,6 +45,35 @@ def test_thresholds_clamp_to_min_1_and_default_7_30():
     assert m._staleness_thresholds() == {"stale_days": 7, "delete_days": 30}  # defaults
 
 
+# ── startup default-seeding (enabled=True on a never-configured hub) ─────────
+
+def test_seed_defaults_when_unset_enables_sweep():
+    m = StalenessSweepMixin()
+    m.state = FakeState(system_state={"global_config": {}})
+    m.seed_staleness_sweep_defaults()
+    gc = m.state.system_state["global_config"]
+    assert gc["staleness_sweep"] == {"enabled": True, "interval_seconds": 3600,
+                                    "stale_days": 7, "delete_days": 30}
+
+
+def test_seed_does_not_overwrite_existing_config():
+    # A hub that explicitly disabled the sweep keeps enabled=False — the seed
+    # only fires when the key is entirely absent.
+    m = StalenessSweepMixin()
+    m.state = FakeState(system_state={"global_config":
+        {"staleness_sweep": {"enabled": False, "stale_days": 14}}})
+    m.seed_staleness_sweep_defaults()
+    assert m.state.system_state["global_config"]["staleness_sweep"] == \
+        {"enabled": False, "stale_days": 14}
+
+
+def test_seed_creates_global_config_when_absent():
+    m = StalenessSweepMixin()
+    m.state = FakeState(system_state={})   # no global_config at all
+    m.seed_staleness_sweep_defaults()
+    assert m.state.system_state["global_config"]["staleness_sweep"]["enabled"] is True
+
+
 # ── canned-relay hub (async) ─────────────────────────────────────────────────
 
 class _FakeSimulationsStore:
