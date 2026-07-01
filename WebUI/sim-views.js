@@ -1101,6 +1101,14 @@ const CS_HUB_CONFIG_FIELDS = [
     { key: 'vm_image_1_template_id',      label: 'VM Image 1 Template ID',     type: 'text',   ph: '100' },
     { key: 'vm_image_2_template_id',      label: 'VM Image 2 Template ID',     type: 'text',   ph: '200' },
     { key: 'vm_image_1_pct',              label: 'VM Image 1 %',               type: 'number', min: 0, max: 100 },
+    // VMID allocation range for NEW sim VMs. The clone-source templates above
+    // (vm_image_1/2_template_id) are excluded from this pool by the agent — keep
+    // them OUTSIDE the range (the agent enforces it regardless, but configuring
+    // them outside avoids wasted scans). Defaults 90000-99999 (Proxmox's high
+    // VMID band), cluster-consistent. The cs speak emits these as usb_config
+    // vmid_start/vmid_end (flat), which the agent reads.
+    { key: 'vmid_start',                  label: 'VMID Range Start',           type: 'number', ph: '90000', min: 100 },
+    { key: 'vmid_end',                    label: 'VMID Range End',             type: 'number', ph: '99999', min: 100 },
     { key: 'usb_auto_provision',          label: 'USB Auto Provision',         type: 'onoff' },
     { key: 'usb_missing_timeout',         label: 'USB Missing Timeout (s)',    type: 'number', ph: '60' },
     { key: 'usb_max_slots',               label: 'USB Max Slots',              type: 'number', ph: '8' },
