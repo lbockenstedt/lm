@@ -1388,13 +1388,51 @@ window.csUOSet = function (el) {
     csUserOverridesState[u][k] = el.value;
 };
 
+// Build the default field template for a newly-added user override, mirroring
+// the legacy getSpokeUserOverrideTemplate: union of keys across existing
+// sections (so a new card shows the same fields siblings already track), with
+// boolean flags defaulted to 'off' and sim_load to '100'. Falls back to a
+// sensible default set when no sections exist yet.
+function csUOTemplate() {
+    const seen = new Set();
+    const order = [];
+    const sample = {};
+    for (const kv of Object.values(csUserOverridesState)) {
+        for (const k of Object.keys(kv)) {
+            if (seen.has(k)) continue;
+            seen.add(k); order.push(k); sample[k] = kv[k];
+        }
+    }
+    if (!order.length) {
+        for (const k of ['wsite', 'ssid', 'ssidpw', 'dhcp_fail', 'kill_switch', 'sim_load']) {
+            seen.add(k); order.push(k);
+        }
+        sample.dhcp_fail = 'off'; sample.kill_switch = 'off'; sample.sim_load = '100';
+    }
+    const values = {};
+    for (const k of order) {
+        const s = sample[k];
+        if (csIsBoolVal(s) || k === 'dhcp_fail' || k === 'kill_switch' || CS_ONOFF_KEYS.has(k)) values[k] = 'off';
+        else if (k === 'sim_load') values[k] = s ? String(s) : '100';
+        else values[k] = '';
+    }
+    return values;
+}
+
+// True for values the legacy treated as boolean toggles (on/off/true/false).
+function csIsBoolVal(v) {
+    if (v === true || v === false) return true;
+    const s = String(v == null ? '' : v).trim().toLowerCase();
+    return s === 'on' || s === 'off';
+}
+
 window.csUOAdd = function () {
     const u = prompt('Username to pin (hostname prefix, e.g. jsmith):');
     if (!u) return;
     const user = u.trim();
     if (!user || /[\r\n\[\]]/.test(user)) { alert('Invalid username.'); return; }
     if (csUserOverridesState[user]) { alert('User already exists.'); return; }
-    csUserOverridesState[user] = {};
+    csUserOverridesState[user] = csUOTemplate();
     const c = csEl('cs-uo-cards');
     if (c) c.innerHTML = csUORenderCards();
 };
