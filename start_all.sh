@@ -150,10 +150,10 @@ for spoke in "${SPOKES[@]}"; do
 
         # Determine the correct spoke ID
         case $spoke in
-            "cs") SPOKE_ID="cs-spoke-1" ;;
-            "pxmx") SPOKE_ID="pxmx-spoke-1" ;;
-            "opnsense") SPOKE_ID="opn-spoke-1" ;;
-            "cppm") SPOKE_ID="cppm-spoke-1" ;;
+            "cs") SPOKE_ID="cs-$(hostname -s)" ;;
+            "pxmx") SPOKE_ID="pxmx-$(hostname -s)" ;;
+            "opnsense") SPOKE_ID="opn-$(hostname -s)" ;;
+            "cppm") SPOKE_ID="cppm-$(hostname -s)" ;;
         esac
 
         # Read SPOKE_SECRET and HUB_SECRET from the spoke's own .env. The grep
