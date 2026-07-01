@@ -235,6 +235,64 @@ def _usb_structure_dump(data: dict) -> dict:
     return entry
 
 
+def _usb_provisioning_status_payload(cfg: Dict[str, Any],
+                                     tenant_cache: Dict[str, Any],
+                                     agent_config: Dict[str, Any],
+                                     tenant_id: Any) -> Dict[str, Any]:
+    """Build the ``/usb-provisioning-status`` response (pure — no hub/store
+    access — so it is unit-testable; the route gathers the inputs and calls
+    this).
+
+    Returns the tenant ``usb_auto_provision`` toggle, per-spoke USB counts plus
+    the ``provision`` diagnostic (primary host + per-host ``hosts``), and the
+    count of hypervisor agents with ``client_simulation.enabled`` for this
+    tenant. ``provision`` carries WHY the last pass provisioned nothing (reason
+    / ``loop_running`` heartbeat / config snapshot) so the WebUI Auto-Provisioning
+    card can surface the silent gates (no dongle_vidpids / no template ids) and
+    the "Auto-Provisioning on but no host has CS enabled" mismatch instead of
+    grepping the pxmx agent log.
+    """
+    spokes: List[Dict[str, Any]] = []
+    for sid, data in (tenant_cache or {}).items():
+        if not isinstance(data, dict):
+            continue
+        px = data.get("proxmox") or {}
+        px_prov = px.get("provision") if isinstance(px, dict) else None
+        hosts: List[Dict[str, Any]] = []
+        for h in (data.get("proxmox_hosts") or []):
+            if not isinstance(h, dict):
+                continue
+            hp = h.get("proxmox") or {}
+            hosts.append({
+                "hostname": h.get("hostname") or h.get("spoke_name") or sid,
+                "provision": hp.get("provision") or {} if isinstance(hp, dict) else {},
+            })
+        spokes.append({
+            "spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
+            "usb_auto_provision": px.get("usb_auto_provision") if isinstance(px, dict) else None,
+            "present_usb": len(px.get("present_usb") or []) if isinstance(px, dict) else 0,
+            "unknown_usb": len(px.get("unknown_usb") or []) if isinstance(px, dict) else 0,
+            "provision": px_prov or {},
+            "hosts": hosts,
+        })
+    # Per-agent ``client_simulation.enabled`` is what actually spawns the provision
+    # loop; the tenant toggle alone provisions nothing without it. Counting it
+    # (tenant-scoped) lets the UI warn about the most common "I enabled it but
+    # nothing happens" cause. ``str()``-coerced so int/str tenant ids both match.
+    tid = str(tenant_id or "")
+    cs_enabled_agent_count = 0
+    for ac in (agent_config or {}).values():
+        if not isinstance(ac, dict):
+            continue
+        cs = ac.get("client_simulation") or {}
+        if isinstance(cs, dict) and cs.get("enabled") \
+                and str(cs.get("tenant_id") or "") == tid:
+            cs_enabled_agent_count += 1
+    return {"usb_auto_provision": (cfg or {}).get("usb_auto_provision", "off"),
+            "spokes": spokes,
+            "cs_enabled_agent_count": cs_enabled_agent_count}
+
+
 def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                   is_admin_fn, check_tenant_access_fn=None, sessions=None,
                                   has_cs_access_fn=None):
@@ -1243,17 +1301,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.get("/sim/api/{tenant}/usb-provisioning-status")
     async def cs_usb_provisioning_status(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         hc = await store.get_hub_config(tenant_id)
-        cfg = hc.get("hub_config") or {}
-        spokes = []
-        for sid, data in _tenant_cache(tenant_id).items():
-            px = data.get("proxmox") or {}
-            spokes.append({
-                "spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
-                "usb_auto_provision": px.get("usb_auto_provision") if isinstance(px, dict) else None,
-                "present_usb": len(px.get("present_usb") or []) if isinstance(px, dict) else 0,
-                "unknown_usb": len(px.get("unknown_usb") or []) if isinstance(px, dict) else 0,
-            })
-        return {"usb_auto_provision": cfg.get("usb_auto_provision", "off"), "spokes": spokes}
+        return _usb_provisioning_status_payload(
+            hc.get("hub_config") or {}, _tenant_cache(tenant_id),
+            hub.state.system_state.get("agent_config", {}) or {}, tenant_id)
 
     @app.delete("/sim/api/{tenant}/proxmx/commands")
     async def cs_clear_commands(tenant: str, target: str = "",
