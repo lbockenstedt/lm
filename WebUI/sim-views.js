@@ -1090,28 +1090,31 @@ window.CS_CHILD_RENDERERS['Config::Simulation'] = csRenderConfigSimulation;
 
 /* Shared hub-config card used by Config → Simulation + Setup → Proxmox.
  * Mirrors webui-hub's HUB_CONFIG_FIELDS panel (app.js:16485 + templates/index.html:954):
- * the hub IS the source of truth, so every owned provisioning knob is exposed
- * here. Saving pushes the full snapshot — the spoke clears any owned key that
- * is absent, so all knobs must be sent (empty fields are omitted, as in webui-hub). */
+ * the hub IS the source of truth, so the remaining owned knobs (schedules, VLANs,
+ * watchdog group, VID/PID lists, VMID range, use_all_dongles) are exposed here.
+ * The provisioning-behavior / template / threshold / protected-VMID knobs live in
+ * the structured VM Auto-Provisioning card (CS_AUTOPROV_FIELDS). Because
+ * store.set_hub_config REPLACES (not merges), csSaveHubConfig does GET-merge-PUT
+ * so saving this card does not wipe the Auto-Provisioning card's keys (and vice
+ * versa). Empty fields are omitted from the collected patch (as in webui-hub). */
 const CS_HUB_CONFIG_FIELDS = [
     { key: 'repo_branch',                 label: 'Repo Branch',                type: 'text' },
     { key: 'reclone_schedule_enabled',    label: 'Reclone Schedule',           type: 'onoff' },
     { key: 'reclone_schedule_cron',       label: 'Reclone Cron',               type: 'text',   ph: 'sunday 02:00' },
-    { key: 'reclone_concurrency',         label: 'Reclone Concurrency',        type: 'number', min: 1, max: 10 },
-    { key: 'vm_image_1_template_id',      label: 'VM Image 1 Template ID',     type: 'text',   ph: '100' },
-    { key: 'vm_image_2_template_id',      label: 'VM Image 2 Template ID',     type: 'text',   ph: '200' },
-    { key: 'vm_image_1_pct',              label: 'VM Image 1 %',               type: 'number', min: 0, max: 100 },
-    // VMID allocation range for NEW sim VMs. The clone-source templates above
-    // (vm_image_1/2_template_id) are excluded from this pool by the agent — keep
-    // them OUTSIDE the range (the agent enforces it regardless, but configuring
-    // them outside avoids wasted scans). Defaults 90000-99999 (Proxmox's high
-    // VMID band), cluster-consistent. The cs speak emits these as usb_config
-    // vmid_start/vmid_end (flat), which the agent reads.
+    // NOTE: the provisioning-behavior knobs (usb_auto_provision, usb_missing_timeout,
+    // usb_max_slots, reclone_concurrency), the clone-source templates
+    // (vm_image_1/2_template_id, vm_image_1_pct), the resource thresholds, and
+    // protected_vmids are owned by the structured "VM Auto-Provisioning" card
+    // (CS_AUTOPROV_FIELDS / csSetupAutoProvConfigCard) — NOT this flat grid — so
+    // they render grouped + with help text and don't collide here.
+    // VMID allocation range for NEW sim VMs. The clone-source templates (owned by
+    // the VM Auto-Provisioning card) are excluded from this pool by the agent —
+    // keep them OUTSIDE the range (the agent enforces it regardless, but
+    // configuring them outside avoids wasted scans). Defaults 90000-99999
+    // (Proxmox's high VMID band), cluster-consistent. The cs speak emits these as
+    // usb_config vmid_start/vmid_end (flat), which the agent reads.
     { key: 'vmid_start',                  label: 'VMID Range Start',           type: 'number', ph: '90000', min: 100 },
     { key: 'vmid_end',                    label: 'VMID Range End',             type: 'number', ph: '99999', min: 100 },
-    { key: 'usb_auto_provision',          label: 'USB Auto Provision',         type: 'onoff' },
-    { key: 'usb_missing_timeout',         label: 'USB Missing Timeout (s)',    type: 'number', ph: '60' },
-    { key: 'usb_max_slots',               label: 'USB Max Slots',              type: 'number', ph: '8' },
     { key: 'use_all_dongles',             label: 'Use All Dongles',            type: 'onoff' },
     { key: 'vm_silent_timeout',           label: 'VM Silent Timeout (h)',      type: 'number', ph: '24' },
     { key: 'l1_vlan_start',               label: 'L1 VLAN Start',              type: 'text',   ph: '100' },
@@ -1131,9 +1134,9 @@ const CS_HUB_CONFIG_FIELDS = [
     { key: 'ignored_hostnames',           label: 'Ignored Hostnames (JSON array)', type: 'json', ph: '["sim-rpi-0000"]', full: true },
 ];
 
-function _csHcOnOff(key, val) {
+function _csHcOnOff(id, val) {
     const on = String(val || 'off').toLowerCase() === 'on' || val === true;
-    return `<select id="cs-hc-${key}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+    return `<select id="${id}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <option value="off" ${!on ? 'selected' : ''}>Off</option>
       <option value="on"  ${on ? 'selected' : ''}>On</option>
     </select>`;
@@ -1149,7 +1152,7 @@ async function csHubConfigCard(path) {
                      : (typeof valRaw === 'object' && valRaw != null) ? JSON.stringify(valRaw) : '';
         const label = `<label class="text-xs text-slate-500 ${col.full ? 'md:col-span-3' : ''}">${csEscape(col.label)}`;
         let input;
-        if (col.type === 'onoff') input = _csHcOnOff(col.key, valRaw);
+        if (col.type === 'onoff') input = _csHcOnOff('cs-hc-' + col.key, valRaw);
         else if (col.type === 'number') input = `<input id="cs-hc-${col.key}" type="number" value="${csEscape(valStr)}" ${col.min != null ? `min="${col.min}"` : ''} ${col.max != null ? `max="${col.max}"` : ''} placeholder="${csEscape(col.ph || '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         else input = `<input id="cs-hc-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         return `${label}${input}</label>`;
@@ -1182,11 +1185,17 @@ window.csSaveHubConfig = async function () {
             config[col.key] = v;
         }
     });
-    const body = {
-        hub_config_enabled: !!(csEl('cs-hc-enabled') && csEl('cs-hc-enabled').checked),
-        hub_config: config
-    };
     try {
+        // store.set_hub_config REPLACES (not merges), so two cards that each own a
+        // subset of hub_config keys would wipe each other on save. GET the current
+        // snapshot, merge our collected fields over it, then PUT the full merged
+        // hub_config — the VM Auto-Provisioning card's keys are preserved.
+        const cur = await csFetch('/tenant/' + csTenant() + '/hub-config');
+        const merged = Object.assign({}, (cur && cur.hub_config) || {}, config);
+        const body = {
+            hub_config_enabled: !!(csEl('cs-hc-enabled') && csEl('cs-hc-enabled').checked),
+            hub_config: merged
+        };
         const r = await csFetch('/tenant/' + csTenant() + '/hub-config', { method: 'PUT', body: JSON.stringify(body) });
         if (msg) { msg.textContent = '✅ Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).'; msg.className = 'ml-3 text-xs text-green-600'; }
     } catch (e) {
@@ -1200,6 +1209,113 @@ window.csSaveHubConfig = async function () {
  *    (Onboarding PSK lives in Spoke Management now — removed from here to
  *    avoid the duplicate copy.)
  * ========================================================================= */
+
+/* Structured "VM Auto-Provisioning" card — the grouped, source-repo-faithful
+ * port of the original solutions-hpe/client-sim Setup/Proxmox panel
+ * (.scratch-shpe/cs-webui/templates/index.html:490, ts-proxmox), extended with
+ * Resource Thresholds + Protected VMIDs (the original card's siblings the user
+ * surfaced). Owns the provisioning-behavior / template / threshold /
+ * protected-VMID knobs; the rest stay in the flat Hub Config card. A `section`
+ * row renders a divider (+ optional help text); every other row is a field.
+ * Element ids use the cs-ap- prefix (distinct from the Hub Config card's
+ * cs-hc-) so the two cards' saves never cross-read. Save is GET-merge-PUT — see
+ * csSaveHubConfig for why (store.set_hub_config REPLACES, not merges). */
+const CS_AUTOPROV_FIELDS = [
+    { section: 'Provisioning Behavior' },
+    { key: 'usb_auto_provision',   label: 'Auto-Provision VMs',            type: 'onoff' },
+    { key: 'usb_missing_timeout',  label: 'Destroy after missing (minutes)', type: 'number', ph: '60', min: 1 },
+    { key: 'usb_max_slots',        label: 'Max VMs per host',              type: 'number', ph: '24', min: 1, max: 256 },
+    // Resource thresholds act on the 1-hour rolling average (pxmx agent records
+    // cpu_samples/mem_samples rings). Above the provision threshold → no new
+    // VMs; above the delete threshold → newest sim VM is removed (one/cycle).
+    // Stored as % (0-100); the cs speak clamps + threads them into usb_config.
+    { section: 'Resource Thresholds (1-hour average)',
+      help: 'When the 1-hour rolling average exceeds the provision threshold no new VMs are spun up. When it exceeds the delete threshold the newest sim VM is removed (one per cycle). Values apply only after a full hour of telemetry data is available.' },
+    { key: 'cpu_provision_threshold', label: 'CPU — Block provisioning above (%)', type: 'number', ph: '80', min: 0, max: 100 },
+    { key: 'cpu_delete_threshold',    label: 'CPU — Delete VM above (%)',        type: 'number', ph: '90', min: 0, max: 100 },
+    { key: 'mem_provision_threshold', label: 'Memory — Block provisioning above (%)', type: 'number', ph: '80', min: 0, max: 100 },
+    { key: 'mem_delete_threshold',    label: 'Memory — Delete VM above (%)',        type: 'number', ph: '90', min: 0, max: 100 },
+    // Clone-source templates (clone FROM these VMIDs). The agent excludes them
+    // from the VMID allocation pool; keep them OUTSIDE vmid_start/vmid_end and
+    // cluster-consistent. Hub key vm_image_* is remapped to image*_template_id
+    // by the cs speak (_HUB_KEY_REMAP) before landing in settings + usb_config.
+    { section: 'VM Templates' },
+    { key: 'vm_image_1_template_id', label: 'VM Image 1 Template VMID', type: 'number', ph: '100', min: 1 },
+    { key: 'vm_image_2_template_id', label: 'VM Image 2 Template VMID', type: 'number', ph: '200', min: 1 },
+    { key: 'vm_image_1_pct',          label: 'VM Image 1 % target',     type: 'number', ph: '50',  min: 0, max: 100 },
+    { section: 'Parallel Provisioning' },
+    { key: 'reclone_concurrency', label: 'Max parallel operations', type: 'number', ph: '1', min: 1, max: 20 },
+    // Comma-separated ints AND ranges ("9000, 9005-9007"). VM 1001 is always
+    // protected regardless — the cs speak merges it into the emitted list.
+    { section: 'Protected VMIDs',
+      help: 'Comma-separated VMIDs that cannot be started, stopped, recloned, or deleted. VM 1001 is always protected.' },
+    { key: 'protected_vmids', label: 'Protected VMIDs', type: 'text', ph: '9000, 9005-9007', full: true },
+];
+
+async function csSetupAutoProvConfigCard() {
+    let hc = {}, enabled = false;
+    try {
+        const data = await csFetch('/tenant/' + csTenant() + '/hub-config');
+        enabled = !!(data && data.hub_config_enabled);
+        hc = (data && data.hub_config) || {};
+    } catch (e) { console.error('csSetupAutoProvConfigCard: hub-config fetch failed', e); }
+    const rows = CS_AUTOPROV_FIELDS.map(col => {
+        if (col.section) {
+            const help = col.help ? `<p class="text-[11px] text-slate-400 mt-1 mb-1 leading-snug">${csEscape(col.help)}</p>` : '';
+            return `<div class="md:col-span-3 mt-2"><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">${csEscape(col.section)}</p>${help}</div>`;
+        }
+        const valRaw = hc[col.key];
+        const valStr = (valRaw != null && typeof valRaw !== 'object') ? String(valRaw)
+                     : (typeof valRaw === 'object' && valRaw != null) ? JSON.stringify(valRaw) : '';
+        const label = `<label class="text-xs text-slate-500 ${col.full ? 'md:col-span-3' : ''}">${csEscape(col.label)}`;
+        let input;
+        if (col.type === 'onoff') input = _csHcOnOff('cs-ap-' + col.key, valRaw);
+        else if (col.type === 'number') input = `<input id="cs-ap-${col.key}" type="number" value="${csEscape(valStr)}" ${col.min != null ? `min="${col.min}"` : ''} ${col.max != null ? `max="${col.max}"` : ''} placeholder="${csEscape(col.ph || '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
+        else input = `<input id="cs-ap-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
+        return `${label}${input}</label>`;
+    }).join('');
+    const note = enabled ? '<span class="text-slate-400">Hub-owned knobs; pushed to every spoke on save.</span>'
+        : '<span class="text-amber-600">Hub config is not enabled — values save but are not pushed to spokes until enabled in the Hub Config card below.</span>';
+    return `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">VM Auto-Provisioning</h3>
+      <p class="text-xs text-slate-400 mb-3">${note}</p>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${rows}</div>
+      <button onclick="csSaveAutoProvConfig()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save &amp; Push to All Spokes</button>
+      <span id="cs-ap-msg" class="ml-3 text-xs"></span>
+    </div>`;
+}
+
+window.csSaveAutoProvConfig = async function () {
+    const msg = csEl('cs-ap-msg');
+    // Collect only this card's fields (cs-ap- prefix). Numbers/scalars are sent
+    // as strings — the cs speak stores + normalizes them (usb_missing_timeout
+    // minutes→seconds, protected_vmids parsed + 1001 merged, thresholds clamped).
+    const config = {};
+    CS_AUTOPROV_FIELDS.forEach(col => {
+        if (col.section) return;
+        const el = csEl('cs-ap-' + col.key);
+        if (!el) return;
+        const v = (el.value || '').trim();
+        if (!v) return;
+        config[col.key] = v;
+    });
+    try {
+        // store.set_hub_config REPLACES (not merges) → GET-merge-PUT so saving
+        // this card does not wipe the Hub Config card's keys (VID/PID lists,
+        // watchdog group, VLANs, VMID range, …).
+        const cur = await csFetch('/tenant/' + csTenant() + '/hub-config');
+        const merged = Object.assign({}, (cur && cur.hub_config) || {}, config);
+        const body = {
+            hub_config_enabled: !!(cur && cur.hub_config_enabled),
+            hub_config: merged
+        };
+        const r = await csFetch('/tenant/' + csTenant() + '/hub-config', { method: 'PUT', body: JSON.stringify(body) });
+        if (msg) { msg.textContent = '✅ Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).'; msg.className = 'ml-3 text-xs text-green-600'; }
+    } catch (e) {
+        console.error('csSaveAutoProvConfig: hub-config push failed', e);
+        if (msg) { msg.textContent = '❌ ' + e.message; msg.className = 'ml-3 text-xs text-red-500'; }
+    }
+};
 
 async function csRenderSetup() {
     csSetToolbar('');
@@ -1512,13 +1628,18 @@ window.csTestCentral = async function () {
 async function csRenderSetupProxmox() {
     csSetToolbar('');
     try {
-        const card = await csHubConfigCard('/tenant/' + csTenant() + '/hub-config');
+        // VM Auto-Provisioning (structured config) → Dongle/Status → Hub Config
+        // (remaining knobs). Both config cards save via GET-merge-PUT against the
+        // same /tenant/{t}/hub-config, so neither wipes the other's keys.
+        let autoProv = '';
+        try { autoProv = await csSetupAutoProvConfigCard(); } catch (e) { console.error('csRenderSetupProxmox: auto-prov card load failed', e); autoProv = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('VM Auto-Provisioning', e).replace('py-10', 'py-6')}</div>`; }
         let dongle = '';
         try { dongle = await csSetupAutoProvCard(); } catch (e) { console.error('csRenderSetupProxmox: dongle card load failed', e); dongle = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('Dongle Allocation', e).replace('py-10', 'py-6')}</div>`; }
+        const card = await csHubConfigCard('/tenant/' + csTenant() + '/hub-config');
         csSet(`<div class="space-y-4"><div class="hpe-card rounded-lg p-5 shadow-sm">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Proxmox / VM Auto-Provisioning</h3>
-          <p class="text-xs text-slate-400 mb-3">Hub-owned provisioning knobs (templates, VLANs, USB timeouts, reclone schedule, USB VID/PID lists). Pushed to the spoke on save.</p>
-        </div>${dongle}${card}</div>`);
+          <p class="text-xs text-slate-400 mb-3">Hub-owned provisioning knobs (templates, thresholds, VLANs, USB timeouts, reclone schedule, USB VID/PID lists). Pushed to the spoke on save.</p>
+        </div>${autoProv}${dongle}${card}</div>`);
     } catch (e) { console.error('csRenderSetupProxmox: proxmox config load failed', e); csSet(csErrorBox('Could not load Proxmox config', e)); }
 }
 
