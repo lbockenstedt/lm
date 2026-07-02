@@ -1750,6 +1750,13 @@ def create_app(hub):
             result = await hub.request_response(
                 spoke_id, spoke_cmd, {},
                 timeout=_FW_FETCH_TIMEOUTS.get(endpoint, _FW_FETCH_TIMEOUT_DEFAULT))
+            # A spoke ERROR (e.g. OPNsense < 26.1 with no NAT MVC API, or an API
+            # key lacking the module scope) must surface to the UI rather than
+            # degrade to an empty list — otherwise the tab silently shows
+            # "No <things> found" with no clue as to why.
+            if isinstance(result, dict) and result.get("status") == "ERROR":
+                raise HTTPException(status_code=502,
+                                    detail=result.get("message", "Firewall spoke error"))
             data = {}
             if isinstance(result, dict):
                 if "data" in result:
@@ -1761,6 +1768,8 @@ def create_app(hub):
             else:
                 data = result
             return await _filter_fw(request, data, endpoint, firewall_id, tenant)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error fetching {endpoint} for firewall {firewall_id}: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))

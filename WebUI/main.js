@@ -6423,7 +6423,12 @@ async function loadOpnsenseManagement() {
         const tenantQs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
         const results = await Promise.allSettled(firewalls.map(fw =>
             fetch(`/api/firewall/${fw.id}/${suffix}${tenantQs}`)
-                .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status} ${r.statusText}`)))
+                .then(r => r.ok ? r.json()
+                    // Non-OK: read the FastAPI error body so we can show *why*
+                    // (e.g. "OPNsense NAT API returned errors … < 26.1") instead
+                    // of a generic "unreachable" count.
+                    : r.json().catch(() => ({})).then(body => Promise.reject(
+                        new Error(body.detail || `${r.status} ${r.statusText}`))))
                 .then(data => ({ fw, data }))
         ));
         const extractItems = data => {
@@ -6449,7 +6454,12 @@ async function loadOpnsenseManagement() {
         });
 
         if (items.length === 0) {
-            const errNote = errors.length ? `<div class="text-xs text-amber-600 mt-2">${errors.length} firewall(s) unreachable.</div>` : '';
+            // Distinguish "legitimately empty" from "the spoke returned an error"
+            // — the latter carries a real reason (version/permissions) the user
+            // needs to see, not a bare "No <things> found."
+            const errNote = errors.length
+                ? `<div class="text-xs text-amber-600 mt-2 max-w-2xl mx-auto">${errors.length} firewall(s) reported an error: ${escapeHtml(errors[0])}</div>`
+                : '';
             container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.${errNote}</div>`;
             return;
         }
