@@ -743,6 +743,25 @@ def create_app(hub):
             logger.exception("rotate_spoke_secret failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/setup/spokes/{spoke_id}/ack-change")
+    async def ack_identity_change(spoke_id: str):
+        """Dismiss the amber "renamed" banner for a spoke/agent.
+
+        Stamps ``change_acked_ts`` into module_metadata so ``_identity_change_for``
+        stops surfencing the latest identity_changed/hostname_changed/reimaged
+        event until a newer one arrives. Idempotent.
+        """
+        hub = app.state.hub
+        try:
+            hub.state.update_module_metadata(
+                spoke_id, {"change_acked_ts": time.time()}
+            )
+            hub.state.save_state()
+            return {"status": "ok", "spoke_id": spoke_id}
+        except Exception as e:
+            logger.exception("ack_identity_change failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.post("/setup/rotate-key/{spoke_id}")
     async def rotate_key_live(spoke_id: str):
         """
@@ -855,15 +874,37 @@ def create_app(hub):
             return None
 
         spokes_status = []
+        module_metadata = hub.state.system_state.get("module_metadata", {})
         for sid in known_spokes:
+            meta = module_metadata.get(sid, {}) or {}
             spokes_status.append({
                 "spoke_id": sid,
                 "display_name": module_names.get(sid, sid),
                 "approved": hub.approved_modules.get(sid, False),
                 "module_type": _module_type_for(sid),
+                # Install-UUID identity tracking: current OS hostname + the latest
+                # unacknowledged rename/hostname-change event (for the UI banner).
+                "hostname": meta.get("hostname", ""),
+                "install_uuid": meta.get("install_uuid", ""),
+                "identity_change": _identity_change_for(hub, sid, meta),
             })
 
         return {"spokes": spokes_status}
+
+    def _identity_change_for(hub, sid: str, meta: dict):
+        """Latest unacknowledged identity_changed/hostname_changed event for a spoke.
+
+        Returns ``None`` when there is no such event newer than the last ack ts
+        (``module_metadata[sid]["change_acked_ts"]``), so the WebUI only shows the
+        amber "renamed" banner until an admin dismisses it. Mirrored for agents
+        via the parent spoke's event timeline.
+        """
+        acked_ts = float(meta.get("change_acked_ts") or 0.0)
+        for ev in hub.get_spoke_events(sid, limit=20):
+            if ev.get("event") in ("identity_changed", "hostname_changed", "reimaged"):
+                if ev.get("ts", 0) > acked_ts:
+                    return ev
+        return None
 
     @app.post("/setup/approve_spoke")
     async def approve_spoke(request: Request):
@@ -3018,6 +3059,22 @@ def create_app(hub):
             agent_cfg = hub.state.system_state.get("agent_config", {})
             names = hub.state.system_state.get("agent_display_names", {})
             now = time.time()
+
+            def _agent_identity_change_for(hub, parent_spoke, aid, cfg):
+                """Latest unacked rename/reimage event for an agent.
+
+                Agent identity events are recorded on the PARENT pxmx spoke's
+                timeline (with ``"agent "`` in the detail), so scan that and
+                return the newest one newer than the agent's ``change_acked_ts``.
+                """
+                acked_ts = float(cfg.get("change_acked_ts") or 0.0)
+                for ev in hub.get_spoke_events(parent_spoke, limit=30):
+                    if ev.get("event") in ("identity_changed", "hostname_changed", "reimaged"):
+                        detail = ev.get("detail", "") or ""
+                        if "agent " in detail and aid in detail and ev.get("ts", 0) > acked_ts:
+                            return ev
+                return None
+
             for a in data.get("agents", []):
                 aid = a["agent_id"]
                 cfg = agent_cfg.get(aid, {})
@@ -3035,6 +3092,12 @@ def create_app(hub):
                 hb_last = hub.heartbeat.last_seen.get(hb_key)
                 a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
                 a["heartbeat_status"] = str(hub.heartbeat.get_status(hb_key).value)
+                # Install-UUID identity tracking: prefer the hub-stored hostname
+                # (captured on connect, survives agent disconnect) over the live
+                # GET_AGENTS value, and surface the latest unacked rename event.
+                a["hostname"] = cfg.get("hostname", "") or a.get("hostname", "") or aid
+                a["install_uuid"] = cfg.get("install_uuid", "")
+                a["identity_change"] = _agent_identity_change_for(hub, pxmx_spoke, aid, cfg)
             return data
         except Exception as e:
             logger.exception("get_pxmx_agents failed")
@@ -3059,6 +3122,20 @@ def create_app(hub):
             raise
         except Exception as e:
             logger.exception("revoke_pxmx_agent failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/agents/{agent_id}/ack-change")
+    async def ack_agent_identity_change(agent_id: str):
+        """Dismiss the amber "renamed" banner for a pxmx node agent (idempotent)."""
+        hub = app.state.hub
+        try:
+            cfg = hub.state.system_state.setdefault("agent_config", {}).setdefault(agent_id, {})
+            cfg["change_acked_ts"] = time.time()
+            hub.state._mark_dirty()
+            hub.state.save_state()
+            return {"status": "ok", "agent_id": agent_id}
+        except Exception as e:
+            logger.exception("ack_agent_identity_change failed")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/pxmx/agents/{agent_id}/rename")

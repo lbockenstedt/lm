@@ -10,6 +10,7 @@ import subprocess
 import threading
 import queue
 import os
+import socket
 from typing import Dict, Any, Type
 from .protocol import Message, MessageHeader, MessagePayload
 from ..security.signer import MessageSigner
@@ -95,6 +96,13 @@ class BaseControlPlane:
         self._loop = None
         # Suppress repeated "Hub secrets not configured" warnings — only warn once per process.
         self._hub_secret_warned = False
+        # Current OS hostname + a stable install UUID reported on every connect so
+        # the hub can detect a clone-and-rename (same UUID, new id/hostname) and
+        # carry over approval/tenant binding instead of treating it as a stranger.
+        # The UUID is generated at FIRST START (not install) and persisted to .env
+        # below; prep-for-imaging strips it so a cloned image mints a fresh one.
+        self.hostname = socket.gethostname()
+        self.install_uuid = self._ensure_install_uuid()
 
 
     # ------------------------------------------------------------------
@@ -370,6 +378,14 @@ class BaseControlPlane:
                 auth_payload["onboarding_psk"] = self.onboarding_psk
             if self.tenant_id_hint:
                 auth_payload["tenant_id_hint"] = self.tenant_id_hint
+            # Stable install UUID + current OS hostname: lets the hub detect a
+            # clone-and-rename (same UUID → carry over approval; new hostname →
+            # report the change) instead of treating the renamed spoke as a
+            # stranger. Empty install_uuid = .env unwritable → hub skips correlation.
+            if self.install_uuid:
+                auth_payload["install_uuid"] = self.install_uuid
+            if self.hostname:
+                auth_payload["hostname"] = self.hostname
 
             await websocket.send(json.dumps(auth_payload, separators=(',', ':')))
             logger.info(f"Connected to Lab Manager Hub as {self.spoke_id}. Performing mutual authentication...")
@@ -824,6 +840,42 @@ class BaseControlPlane:
     def _persist_session_secret(self, new_secret: str) -> None:
         """Writes the rotated session key back to .env so it survives spoke restarts."""
         self._persist_secret_to_env("SPOKE_SECRET", new_secret)
+
+    def _read_env_value(self, key: str) -> str:
+        """Reads a ``key=`` line from the spoke's .env file. Returns '' if absent/unreadable."""
+        try:
+            env_path = os.path.join(self._repo_root(), ".env")
+            if not os.path.exists(env_path):
+                return ""
+            prefix = f"{key}="
+            with open(env_path, "r") as f:
+                for line in f:
+                    if line.startswith(prefix):
+                        return line[len(prefix):].strip()
+            return ""
+        except Exception:
+            return ""
+
+    def _ensure_install_uuid(self) -> str:
+        """Returns this spoke's stable install UUID, minting + persisting it on first start.
+
+        The UUID is created at FIRST START (not at install) so cloning the install
+        tree does NOT copy a UUID — a clone gets its own on its first start. A
+        prep-for-imaging run strips ``INSTALL_UUID`` from .env so a cloned image
+        mints a fresh one here too (intentionally breaking correlation → a clean
+        new identity rather than a rename of the original).
+
+        We trust only what lands on disk: if the write fails we return '' (no
+        UUID) rather than a volatile in-memory UUID, so a write failure never
+        causes a different identity on every boot. The hub treats an empty UUID
+        as "no correlation" and simply records the spoke by id as before.
+        """
+        existing = self._read_env_value("INSTALL_UUID")
+        if existing:
+            return existing
+        new_uuid = str(uuid.uuid4())
+        self._persist_secret_to_env("INSTALL_UUID", new_uuid)
+        return self._read_env_value("INSTALL_UUID")
 
     def _persist_hub_secret(self, new_secret: str) -> None:
         """Writes the hub's identity secret to .env so mutual auth survives spoke restarts."""

@@ -206,6 +206,29 @@ class KeyManager:
         self._save_keys()
         logger.info(f"Completely wiped keys for spoke {spoke_id}")
 
+    def rename_spoke_keys(self, old_id: str, new_id: str) -> None:
+        """Re-key a spoke's current key + history from ``old_id`` → ``new_id``.
+
+        Called when a cloned+renamed spoke reconnects with the same install UUID
+        but a new spoke_id: the renamed spoke still holds the SAME ``SPOKE_SECRET``
+        (cloned from .env), so re-keying its key material to the new id lets
+        :meth:`get_valid_key` authenticate it seamlessly — without this the new id
+        has no key and falls into pending-negotiation, making approval carryover
+        useless. Idempotent. Caller persists via the internal ``_save_keys``.
+        """
+        if old_id == new_id:
+            return
+        moved = False
+        if old_id in self.keys:
+            self.keys[new_id] = self.keys.pop(old_id)
+            moved = True
+        if old_id in self.history:
+            self.history[new_id] = self.history.pop(old_id)
+            moved = True
+        if moved:
+            self._save_keys()
+            logger.info(f"Re-keyed spoke keys {old_id} → {new_id}")
+
     def get_valid_key(self, spoke_id: str, secret: str) -> Optional[str]:
         """
         Validates a secret against the current key or the history of keys.

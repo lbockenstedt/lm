@@ -354,6 +354,51 @@ class StateManager:
             self.system_state.setdefault("module_names", {})[module_id] = metadata["display_name"]
         self._mark_dirty()
 
+    def rename_module(self, old_id: str, new_id: str) -> None:
+        """Re-key a spoke/agent's persisted state from ``old_id`` → ``new_id``.
+
+        Used when a cloned+renamed spoke reconnects with the same install UUID but
+        a new id (derived from its new hostname): we carry over its approval,
+        tenant binding, display name, and install UUID/hostname so it does NOT
+        need re-approval. Moves every module-keyed store. ``agent_config`` (keyed
+        by agent_id) is handled separately by :meth:`rename_agent`. Idempotent if
+        ``old_id == new_id`` or ``old_id`` is unknown.
+        """
+        if old_id == new_id:
+            return
+        ss = self.system_state
+        am = ss.get("approved_modules", {})
+        if old_id in am:
+            am[new_id] = am.pop(old_id)
+        km = ss.get("known_modules", [])
+        if old_id in km:
+            km[km.index(old_id)] = new_id
+        mn = ss.get("module_names", {})
+        if old_id in mn:
+            mn[new_id] = mn.pop(old_id)
+        mm = ss.get("module_metadata", {})
+        if old_id in mm:
+            mm[new_id] = mm.pop(old_id)
+        # Legacy per-agent display-name override (read fallback during migration).
+        adn = ss.get("agent_display_names", {})
+        if old_id in adn:
+            adn[new_id] = adn.pop(old_id)
+        self._mark_dirty()
+
+    def rename_agent(self, old_id: str, new_id: str) -> None:
+        """Re-key an agent's per-agent config (``agent_config``) ``old_id`` → ``new_id``.
+
+        Called when a cloned+renamed Proxmox node reconnects with the same agent
+        install UUID but a new agent id, so its client-simulation/tenant config
+        carries over instead of being lost. Idempotent.
+        """
+        if old_id == new_id:
+            return
+        ac = self.system_state.get("agent_config", {})
+        if old_id in ac:
+            ac[new_id] = ac.pop(old_id)
+            self._mark_dirty()
+
     def set_module_name(self, module_id: str, name: str):
         self.update_module_metadata(module_id, {"display_name": name})
 

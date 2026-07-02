@@ -4792,6 +4792,43 @@ const _SPOKES_TBL_CLS = {
     tdCls:  'px-4 py-3',
 };
 
+// _identityChangeBanner(ic, clickExpr) — renders the amber "renamed/reimaged"
+// banner surfaced when the hub's install-UUID correlation detected that this
+// spoke/agent was cloned+renamed, hostname-renamed (pinned id), or reimaged.
+// `ic` is the raw {event, ts, detail} from the spokes/agents API; `clickExpr`
+// is the JS for the dismiss button's onclick (already escaped), which POSTs to
+// the matching ack-change endpoint so the banner clears once an admin sees it.
+function _identityChangeBanner(ic, clickExpr) {
+    if (!ic || !ic.event) return '';
+    const label = ic.event === 'identity_changed' ? 'Renamed'
+                : ic.event === 'hostname_changed' ? 'Hostname changed'
+                : ic.event === 'reimaged'         ? 'Re-imaged'
+                : ic.event;
+    const detail = (ic.detail || '').replace(/'/g, "\\'");
+    return `<div class="mt-1 flex items-center gap-2 px-2 py-1 rounded bg-amber-50 border border-amber-200 text-amber-700">
+                <span class="text-[10px] font-bold uppercase tracking-wide">${label}</span>
+                ${detail ? `<span class="text-[10px] text-amber-600 truncate" title="${detail}">${detail}</span>` : ''}
+                <button onclick="${clickExpr}" class="ml-auto text-[10px] font-bold text-amber-700 hover:text-amber-900 underline">Dismiss</button>
+            </div>`;
+}
+
+// _ackIdentityChange(endpoint) — POST to a spoke/agent ack-change endpoint and
+// reload the Spokes & Agents tile so the dismissed banner clears. Best-effort:
+// on failure we surface the error but still refresh so the UI doesn't hang.
+async function _ackIdentityChange(endpoint) {
+    try {
+        const res = await fetch(endpoint, { method: 'POST' });
+        if (!res.ok) {
+            const body = await res.text().catch(() => '');
+            console.error('ack-change failed:', res.status, body);
+        }
+    } catch (err) {
+        console.error('ack-change request failed:', err);
+    } finally {
+        if (typeof loadSpokesAndAgents === 'function') loadSpokesAndAgents();
+    }
+}
+
 // _renderSpokesTable() — renders the Spokes half of the Setup → Spokes & Agents
 // admin view. Extracted from loadSpokesAndAgents; the fetch + split preamble
 // stays in the caller. Output HTML and handler names are preserved exactly.
@@ -4813,15 +4850,17 @@ function _renderSpokesTable(spokesWrap, trueSpokes) {
                 <div class="${tblCls}">
                     <table class="w-full text-left text-sm table-fixed">
                         <colgroup>
-                            <col style="width:26%">
-                            <col style="width:12%">
+                            <col style="width:22%">
+                            <col style="width:13%">
                             <col style="width:10%">
-                            <col style="width:12%">
-                            <col style="width:40%">
+                            <col style="width:9%">
+                            <col style="width:11%">
+                            <col style="width:35%">
                         </colgroup>
                         <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
                             <tr>
                                 <th class="${thCls}">Spoke</th>
+                                <th class="${thCls}">Hostname</th>
                                 <th class="${thCls}">Module</th>
                                 <th class="${thCls}">Type</th>
                                 <th class="${thCls}">Status</th>
@@ -4836,8 +4875,11 @@ function _renderSpokesTable(spokesWrap, trueSpokes) {
                                 const mtRaw = String(s.module_type || '').toLowerCase();
                                 const modLabel = moduleLabel(mtRaw);
                                 const kindLabel = spokeKind(mtRaw);
+                                const hostname = s.hostname || '';
+                                const ic = s.identity_change;
                                 const eSid = sid.replace(/'/g, "\\'");
                                 const eName = name.replace(/'/g, "\\'");
+                                const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
                                 return `<tr class="hover:bg-slate-50">
                                     <td class="${tdCls}">
                                         <div class="flex items-center gap-3">
@@ -4845,8 +4887,12 @@ function _renderSpokesTable(spokesWrap, trueSpokes) {
                                             <div>
                                                 <div class="font-medium text-slate-700">${name}</div>
                                                 <div class="text-[10px] font-mono text-slate-400">${sid}</div>
+                                                ${_identityChangeBanner(ic, ackClick)}
                                             </div>
                                         </div>
+                                    </td>
+                                    <td class="${tdCls}">
+                                        <span class="text-xs font-mono text-slate-600">${hostname || '—'}</span>
                                     </td>
                                     <td class="${tdCls}">
                                         <span class="text-xs font-semibold text-slate-700">${modLabel}</span>
@@ -4895,6 +4941,8 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
         return {
             agent_id: sid,
             display_name: dn,
+            hostname: s.hostname || '',
+            identity_change: s.identity_change || null,
             _status: s.approved ? 'connected' : 'pending',
             _kind: 'spoke',
             _module_type: String(s.module_type || '').toLowerCase(),
@@ -4913,15 +4961,17 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
             <div class="${tblCls}">
                 <table class="w-full text-left text-sm table-fixed">
                     <colgroup>
-                        <col style="width:26%">
-                        <col style="width:12%">
+                        <col style="width:22%">
+                        <col style="width:13%">
                         <col style="width:10%">
-                        <col style="width:12%">
-                        <col style="width:40%">
+                        <col style="width:9%">
+                        <col style="width:11%">
+                        <col style="width:35%">
                     </colgroup>
                     <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
                         <tr>
                             <th class="${thCls}">Agent</th>
+                            <th class="${thCls}">Hostname</th>
                             <th class="${thCls}">Module</th>
                             <th class="${thCls}">Type</th>
                             <th class="${thCls}">Status</th>
@@ -4949,6 +4999,14 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                             const editFn = isSpokeKind ? 'openSpokeMetadataModal' : 'openAgentConfigModal';
                             const approveFnName = isSpokeKind ? 'approveSpoke' : 'approveAgent';
                             const unapproveFnName = isSpokeKind ? 'unapproveSpoke' : 'revokeAgent';
+                            // Identity-change banner (cloned+renamed / hostname-changed /
+                            // reimaged, correlated via the install UUID). The pxmx agent
+                            // endpoint surfaces this; the dismiss hits the agent ack route.
+                            const ic = a.identity_change || null;
+                            const ackEndpoint = isSpokeKind
+                                ? `/setup/spokes/${encodeURIComponent(aid)}/ack-change`
+                                : `/api/pxmx/agents/${encodeURIComponent(aid)}/ack-change`;
+                            const ackClick = `_ackIdentityChange('${ackEndpoint}')`;
                             return `<tr class="hover:bg-slate-50">
                                 <td class="${tdCls}">
                                     <div class="flex items-center gap-3">
@@ -4959,8 +5017,12 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                                                 ${a.client_simulation?.enabled ? '<span class="ml-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase bg-green-100 text-green-700 align-middle" title="Client Simulation mode">CS</span>' : ''}
                                             </div>
                                             <div class="text-[10px] font-mono text-slate-400">${aid}</div>
+                                            ${_identityChangeBanner(ic, ackClick)}
                                         </div>
                                     </div>
+                                </td>
+                                <td class="${tdCls}">
+                                    <span class="text-xs font-mono text-slate-600">${a.hostname || '—'}</span>
                                 </td>
                                 <td class="${tdCls}">
                                     <span class="text-xs font-semibold text-slate-700">${moduleLabelCell}</span>
