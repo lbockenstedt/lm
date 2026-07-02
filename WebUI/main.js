@@ -7244,14 +7244,20 @@ function pxmxShowVncModal(vm, RFB, session) {
     const wsUrl = `${proto}//${location.host}/ws/console/${encodeURIComponent(session.session_id)}?token=${encodeURIComponent(session.ws_token)}`;
     let rfb = null;
     try {
-        rfb = new RFB(modal.querySelector('#pxmx-vnc-screen'), wsUrl, { credentials: { password: '' } });
+        // Proxmox's vncwebsocket ticket doubles as the RFB VNC password — the
+        // agent mints it and the hub returns it in the /api/pxmx/console
+        // response. noVNC must present it during the RFB security handshake or
+        // Proxmox drops the session ("Security failure" / blank console).
+        const vncPassword = (session && session.ticket) || '';
+        rfb = new RFB(modal.querySelector('#pxmx-vnc-screen'), wsUrl, { credentials: { password: vncPassword } });
         rfb.scaleViewport = true;
         rfb.resizeSession = false;
         rfb.addEventListener('connect', () => setStatus('Connected', 'text-green-400'));
         rfb.addEventListener('disconnect', (e) => setStatus('Disconnected: ' + ((e.detail && e.detail.reason) || 'closed'), 'text-red-400'));
         rfb.addEventListener('credentialsrequired', () => {
-            const pass = prompt('VNC Password:') || '';
-            rfb.sendCredentials({ password: pass });
+            // Ticket already supplied above; if Proxmox still asks, re-send it
+            // rather than prompting the user for a password they don't have.
+            if (vncPassword) rfb.sendCredentials({ password: vncPassword });
         });
         rfb.addEventListener('securityfailure', (e) => setStatus('Security failure: ' + ((e.detail && e.detail.reason) || 'unknown'), 'text-red-400'));
     } catch (err) {
