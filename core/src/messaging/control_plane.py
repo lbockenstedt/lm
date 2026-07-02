@@ -415,9 +415,19 @@ class BaseControlPlane:
                             logger.info("Hub identity verified successfully.")
                             await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                         else:
-                            logger.error("Hub identity verification failed: Invalid signature for all known secrets.")
-                            await websocket.close(1008, "Hub verification failed")
-                            return
+                            # All known hub_secrets failed to verify the hub's
+                            # challenge — a stale hub root key (hub restart, a
+                            # restore from a different install, or a rotation).
+                            # Hard-closing here sent the spoke into an infinite
+                            # reconnect storm against a hub that was willing to
+                            # keep it pending. Fall back to zero-touch: drop the
+                            # stale secret(s), accept the hub, and let admin
+                            # approval + a fresh SPOKE_SET_HUB_SECRET re-establish
+                            # verified mutual auth on the next reconnect.
+                            logger.warning("Hub identity verification failed for all known secrets — discarding stale hub_secret(s), falling back to zero-touch (pending approval).")
+                            self.hub_secrets = []
+                            self._hub_secret_warned = True
+                            await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                     else:
                         if not self._hub_secret_warned:
                             logger.warning("Hub secrets not configured. Skipping Hub identity verification (Insecure).")

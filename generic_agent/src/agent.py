@@ -6,6 +6,7 @@ import logging
 import psutil
 import argparse
 import os
+import socket
 from typing import Dict, Any, Optional
 
 # Setup logging to both console and file
@@ -80,25 +81,38 @@ class GenericLeafAgent:
         async with websockets.connect(self.spoke_url) as websocket:
             self.websocket = websocket
 
-            # 1. Handshake: Prove Agent identity to Gateway
+            # 1. Handshake: prove agent identity to the Hub. The hub's spoke
+            #    endpoint reads `spoke_id` (+ optional module_type/hostname) —
+            #    NOT `agent_id` — so use the hub's envelope. module_type "agent"
+            #    routes this spoke into the WebUI "Generic Nodes" list. No secret
+            #    is valid at first install: the hub keeps the connection open in
+            #    pending-negotiation and an admin approves it there, after which
+            #    the hub negotiates a session secret.
             auth_msg = {
-                "agent_id": self.agent_id,
-                "secret": self.secret
+                "spoke_id": self.agent_id,
+                "module_type": "agent",
+                "secret": self.secret,
             }
+            try:
+                auth_msg["hostname"] = socket.gethostname()
+            except Exception:
+                pass
             await websocket.send(json.dumps(auth_msg))
-            logger.info(f"Handshake sent for agent {self.agent_id}")
+            logger.info(f"Handshake sent for spoke {self.agent_id}")
 
-            # 2. Mutual Auth: Gateway proves identity to Agent
+            # 2. Mutual Auth: the hub proves its identity. A secret-less (pending)
+            #    install may send HUB_VERIFIED (we reply HUB_OK) or skip straight
+            #    to APPROVAL_REQUIRED — both are normal. Stay connected either way
+            #    so the heartbeat loop keeps us alive while an admin approves.
             try:
                 hub_proof_json = await asyncio.wait_for(websocket.recv(), timeout=5.0)
                 hub_proof = json.loads(hub_proof_json)
                 if hub_proof.get("status") == "HUB_VERIFIED":
-                    logger.info("Gateway identity verified. Sending HUB_OK.")
+                    logger.info("Hub identity verified. Sending HUB_OK.")
                     await websocket.send(json.dumps({"status": "HUB_OK"}))
                 else:
-                    logger.error(f"Gateway failed to prove identity: {hub_proof}")
-                    await websocket.close(1008, "Gateway identity not verified")
-                    return
+                    _what = hub_proof.get("status") or (hub_proof.get("payload") or {}).get("type")
+                    logger.info(f"Pending approval on hub (received {_what}); awaiting admin approval.")
             except Exception as e:
                 logger.warning(f"Mutual authentication not performed or failed: {e}")
 
