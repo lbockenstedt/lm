@@ -6026,9 +6026,9 @@ async function copyLogs() {
             }
             document.body.removeChild(textArea);
         }
-        alert('Logs copied to clipboard!');
+        if (typeof showToast === 'function') showToast('Logs copied to clipboard.', 'success');
     } catch (err) {
-        alert('Failed to copy logs: ' + err.message);
+        if (typeof showToast === 'function') showToast('Failed to copy logs: ' + err.message, 'error');
     }
 }
 
