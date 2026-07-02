@@ -69,11 +69,32 @@ from staleness_sweep import StalenessSweepMixin
 from spoke_alert_sync import SpokeAlertMixin
 from repo_sync import RepoSyncMixin
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+# Shared logging config (lm/core/src/logging_setup.py). Two-tier import +
+# inline fallback keep the hub booting even if /opt/lm/core is briefly stale
+# (same deploy-order class as the base_spoke import). Single source of truth
+# for format/level/destination across every hub/spoke/agent entrypoint.
+try:
+    from logging_setup import configure_logging, set_log_level
+except ImportError:
+    try:
+        from core.src.logging_setup import configure_logging, set_log_level
+    except ImportError:
+        import logging as _logging
+        _FMT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        _DFMT = '%Y-%m-%d %H:%M:%S'
+        def configure_logging(default_level=_logging.INFO, *, log_file=None, **_):
+            handlers = ([_logging.FileHandler(log_file), _logging.StreamHandler()]
+                        if log_file else None)
+            _logging.basicConfig(level=default_level, force=True,
+                                 format=_FMT, datefmt=_DFMT, handlers=handlers)
+        def set_log_level(enabled):
+            lvl = _logging.DEBUG if enabled else _logging.INFO
+            _logging.getLogger().setLevel(lvl)
+            for _n in list(_logging.root.manager.loggerDict):
+                _logging.getLogger(_n).setLevel(lvl)
+            return lvl
+
+configure_logging()
 logger = logging.getLogger("Hub")
 
 # Command types whose request data / response payload may carry a Proxmox API

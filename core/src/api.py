@@ -93,6 +93,23 @@ import logging
 import hashlib
 import secrets
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+
+# Shared logging runtime toggle (lm/core/src/logging_setup.py). Used by the
+# "Enable Debug" button so the hub process itself flips to DEBUG — not just
+# the broadcasted spokes/agents. Two-tier import + fallback for deploy safety.
+try:
+    from logging_setup import set_log_level
+except ImportError:
+    try:
+        from core.src.logging_setup import set_log_level
+    except ImportError:
+        def set_log_level(enabled):  # minimal fallback (hub always has core/src)
+            import logging as _logging
+            lvl = _logging.DEBUG if enabled else _logging.INFO
+            _logging.getLogger().setLevel(lvl)
+            for _n in list(_logging.root.manager.loggerDict):
+                _logging.getLogger(_n).setLevel(lvl)
+            return lvl
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
@@ -3987,6 +4004,9 @@ def create_app(hub):
             hub.state.system_state["global_config"] = global_config
             hub.state.save_state()
 
+            # Flip the HUB's own root + named loggers (not just the broadcast
+            # targets) so the hub's logger.debug(...) lines actually emit.
+            set_log_level(enabled)
             await hub.broadcast_log_level(enabled)
 
             return {"status": "ok", "enabled": enabled}

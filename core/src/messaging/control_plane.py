@@ -14,6 +14,16 @@ from typing import Dict, Any, Type
 from .protocol import Message, MessageHeader, MessagePayload
 from ..security.signer import MessageSigner
 
+try:  # shared helper (lm/core/src); falls back if imported off a stale path
+    from logging_setup import set_log_level
+except ImportError:
+    def set_log_level(enabled):
+        level = logging.DEBUG if enabled else logging.INFO
+        logging.getLogger().setLevel(level)
+        for name in list(logging.root.manager.loggerDict):
+            logging.getLogger(name).setLevel(level)
+        return level
+
 logger = logging.getLogger("BaseControlPlane")
 
 
@@ -635,11 +645,7 @@ class BaseControlPlane:
         """Handles commands that affect the entire spoke system rather than a specific module."""
         if cmd_type in ("SPOKE_SET_LOG_LEVEL", "SET_LOG_LEVEL"):
             enabled = data.get("enabled", False)
-            level = logging.DEBUG if enabled else logging.INFO
-            # Update root logger and all active loggers
-            logging.getLogger().setLevel(level)
-            for name in logging.root.manager.loggerDict:
-                logging.getLogger(name).setLevel(level)
+            level = set_log_level(enabled)
             logger.info(f"Log level set to {logging.getLevelName(level)}")
             return {"status": "SUCCESS", "message": f"Log level set to {logging.getLevelName(level)}"}
 
