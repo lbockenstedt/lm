@@ -137,7 +137,15 @@ snapshot_hub_code() {
         --hub-root "$BASE_DIR" --from-version "$from_v" --to-version "$to_v" \
         --chown-user "$SvcUser" 2>/dev/null)" \
         || log_e "Failed to write pre-update snapshot (rollback may be unavailable)"
-    [ -n "$bdir" ] && log "Pre-update snapshot saved to $bdir (from=$from_v to=$to_v)"
+    if [ -n "$bdir" ]; then
+        log "Pre-update snapshot saved to $bdir (from=$from_v to=$to_v)"
+    fi
+    # Best-effort by design ("rollback may be unavailable"): a snapshot failure
+    # must NEVER abort the install. The `&& log` form above returned 1 when the
+    # snapshot failed (empty $bdir), which under `set -e` aborted the whole
+    # script at the call site — turning a benign "no rollback this update" into
+    # a hard install failure. Always return 0 here.
+    return 0
 }
 
 # recovery_prune_backups <keep>  — keep newest <keep> snapshots, drop the rest.

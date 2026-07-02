@@ -68,6 +68,21 @@ def _ver_tuple(v: str):
 
 
 # ── Pre-swap snapshot ─────────────────────────────────────────────────────
+def _ignore_special(directory: str, names) -> list:
+    """shutil.copytree ignore hook: skip non-regular, non-symlink, non-dir
+    entries (FIFOs / sockets / device files) that would make ``copytree``
+    raise. Broken symlinks are preserved (``symlinks=True`` copies the link,
+    it does not follow it, so a dead target is not a failure).
+    """
+    skip: list = []
+    for n in names:
+        p = os.path.join(directory, n)
+        if os.path.islink(p) or os.path.isdir(p) or os.path.isfile(p):
+            continue
+        skip.append(n)
+    return skip
+
+
 def snapshot_code(hub_root: str, ts: str) -> str:
     """Copy ``core/src`` + ``WebUI`` into ``update-backup/<ts>/``.
 
@@ -75,6 +90,12 @@ def snapshot_code(hub_root: str, ts: str) -> str:
     break the boot (venv/data/state are preserved separately by both paths).
     Returns the backup directory (absolute). The caller stamps ``ts`` (the
     hub process may use the wall clock; workflow scripts must pass one in).
+
+    Best-effort per tree: a ``copytree`` failure on one tree (a broken
+    symlink the old default followed, a socket/fifo in ``core/src``, a
+    permissions oddity) is logged but does NOT raise — a partial snapshot
+    still gives the rollback path whatever it could capture, and the
+    install/update continues instead of aborting.
     """
     os.makedirs(BACKUP_ROOT, exist_ok=True)
     backup_dir = os.path.join(BACKUP_ROOT, str(ts))
@@ -82,10 +103,23 @@ def snapshot_code(hub_root: str, ts: str) -> str:
     os.makedirs(backup_dir, exist_ok=True)
     src = os.path.join(hub_root, "core", "src")
     webui = os.path.join(hub_root, "WebUI")
+    # symlinks=True preserves links as-is (no follow → a broken link in the
+    # existing tree is not a fatal FileNotFoundError); _ignore_special drops
+    # special files copytree can't copy.
     if os.path.isdir(src):
-        shutil.copytree(src, os.path.join(backup_dir, "src"), dirs_exist_ok=True)
+        try:
+            shutil.copytree(src, os.path.join(backup_dir, "src"),
+                            dirs_exist_ok=True, symlinks=True,
+                            ignore=_ignore_special)
+        except Exception as e:  # pragma: no cover - disk/fs errors only
+            logger.warning("snapshot: copytree core/src failed: %s", e)
     if os.path.isdir(webui):
-        shutil.copytree(webui, os.path.join(backup_dir, "WebUI"), dirs_exist_ok=True)
+        try:
+            shutil.copytree(webui, os.path.join(backup_dir, "WebUI"),
+                            dirs_exist_ok=True, symlinks=True,
+                            ignore=_ignore_special)
+        except Exception as e:  # pragma: no cover - disk/fs errors only
+            logger.warning("snapshot: copytree WebUI failed: %s", e)
     logger.info("update snapshot saved to %s", backup_dir)
     return backup_dir
 
