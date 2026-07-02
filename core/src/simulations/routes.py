@@ -1318,6 +1318,38 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return await _cs_forward(tenant_id, "CS_CLEAR_CLIENT_OVERRIDES",
                                  {"hostname": hostname})
 
+    # ── per-host USB VMID overrides ─────────────────────────────────────────
+    # Optional per-host vmid_start/vmid_end/vm_set_override that override the
+    # global VMID range for one proxmox host. The pxmx agent derives each host's
+    # batch from its hostname suffix by default; these let the cs speak pin a
+    # specific host's range instead. Persisted by the cs spoke (cs_settings.json
+    # ``host_usb_overrides``); the hub only forwards. Gated by the cs module
+    # access right via the http access_control_middleware (same as /clients/*).
+    @app.get("/sim/api/{tenant}/cs/host-usb-override")
+    async def cs_get_host_usb_overrides(tenant: str,
+                                        tenant_id: str = Depends(get_tenant_id)):
+        return await _cs_forward(tenant_id, "CS_GET_HOST_USB_OVERRIDES", {})
+
+    @app.post("/sim/api/{tenant}/cs/host-usb-override/{hostname}")
+    async def cs_set_host_usb_override(request: Request, tenant: str, hostname: str,
+                                       tenant_id: str = Depends(get_tenant_id)):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        knobs = body.get("knobs") if isinstance(body, dict) else None
+        if not isinstance(knobs, dict):
+            # Accept the knobs inline ({"vmid_start":91000,"vmid_end":91999}).
+            knobs = {k: v for k, v in (body or {}).items() if isinstance(body, dict)}
+        return await _cs_forward(tenant_id, "CS_SET_HOST_USB_OVERRIDE",
+                                 {"hostname": hostname, "knobs": knobs})
+
+    @app.delete("/sim/api/{tenant}/cs/host-usb-override/{hostname}")
+    async def cs_clear_host_usb_override(tenant: str, hostname: str,
+                                         tenant_id: str = Depends(get_tenant_id)):
+        return await _cs_forward(tenant_id, "CS_CLEAR_HOST_USB_OVERRIDE",
+                                 {"hostname": hostname})
+
     @app.get("/sim/api/{tenant}/config/simulation-conf")
     async def get_sim_conf(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         # The spoke's actual simulation.conf content, relayed in telemetry.
