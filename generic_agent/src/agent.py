@@ -11,7 +11,11 @@ from typing import Dict, Any, Optional
 
 # Setup logging to both console and file
 def get_log_path():
-    primary = "/var/log/generic-agent.log"
+    # Log under /var/log/lm alongside the hub + spokes (the installer creates
+    # /var/log/lm and chowns it to svc_lm so the systemd service can write
+    # here). Falls back to a local logs/ dir if that path isn't writable
+    # (e.g. run by hand as an unprivileged user without the install step).
+    primary = "/var/log/lm/generic-agent.log"
     try:
         with open(primary, "a") as f:
             pass

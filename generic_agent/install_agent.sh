@@ -68,7 +68,21 @@ fi
 cd "$ROOT_DIR/generic-agent"
 python3 -m venv venv
 ./venv/bin/python3 -m pip install --upgrade pip -q
-./venv/bin/python3 -m pip install websockets python-dotenv -q
+# Install from requirements.txt (websockets, python-dotenv, psutil). agent.py
+# imports psutil at module top — a bare `pip install websockets python-dotenv`
+# here previously left the venv without psutil → ModuleNotFoundError crash-loop
+# at boot. requirements.txt is the single source so this can't drift again.
+if [ -f requirements.txt ]; then
+    ./venv/bin/python3 -m pip install -r requirements.txt -q
+else
+    ./venv/bin/python3 -m pip install websockets python-dotenv psutil -q
+fi
+
+# Log directory shared with the hub + spokes; the systemd service runs as
+# svc_lm and agent.py writes /var/log/lm/generic-agent.log directly (no root
+# shell to pre-open the redirect), so svc_lm must own the dir.
+mkdir -p /var/log/lm
+chown -R svc_lm:svc_lm /var/log/lm 2>/dev/null || true
 
 # 5. Systemd Service Setup
 # Note: We add PYTHONPATH=/opt/lm so that 'import core...' works.
