@@ -16,7 +16,10 @@ import sys
 from pathlib import Path
 
 import agent_spoke
+import control_plane as cp_module
 from agent_spoke import GenericAgent, _RoleAdapter, _ROLE_MAP
+from control_plane import AgentControlPlane
+from core.src.messaging.control_plane import BaseControlPlane
 
 
 # ── 1. role map completeness ─────────────────────────────────────────────────
@@ -193,3 +196,129 @@ def test_install_role_requirements_path_for_simulation_subdir(tmp_path, monkeypa
     # pip install --quiet -r <req>; the -r arg must be the lm-spoke requirements.
     assert any(str(req) == arg for c in pip_calls for arg in c), \
         f"pip did not target {req}; calls={pip_calls}"
+
+
+# ── 5. morph: agent can be a spoke or an agent ───────────────────────────────
+
+class _FakeControlPlane:
+    """Records request_morph calls (no real reconnect)."""
+    def __init__(self):
+        self.morphs = []
+    async def request_morph(self, module_type):
+        self.morphs.append(module_type)
+
+
+def test_load_role_calls_request_morph_with_role_module_type(monkeypatch):
+    agent = GenericAgent("agent-1", {})
+    cp = _FakeControlPlane()
+    agent.control_plane = cp
+    # Avoid real install/load: stub _install_role + _load_role_class.
+    async def _fake_install(role_name):
+        return {"status": "SUCCESS"}
+    class _FakeRole:
+        def __init__(self, spoke_id, config):
+            pass
+    monkeypatch.setattr(agent, "_install_role", _fake_install)
+    monkeypatch.setattr(agent, "_load_role_class", lambda rn: _FakeRole)
+    res = asyncio.run(agent.handle_command(
+        "LOAD_ROLE", {"role": "network"}))
+    assert res["status"] == "SUCCESS"
+    assert res["module_type"] == "nw"
+    assert cp.morphs == ["nw"], f"expected request_morph('nw'), got {cp.morphs}"
+
+
+def test_unload_role_morphs_back_to_agent():
+    agent = GenericAgent("agent-1", {})
+    cp = _FakeControlPlane()
+    agent.control_plane = cp
+    agent._role = _FakeControlPlane()   # truthy placeholder
+    agent._role_name = "network"
+    res = asyncio.run(agent.handle_command("UNLOAD_ROLE", {}))
+    assert res["status"] == "SUCCESS"
+    assert agent._role is None and agent._role_name is None
+    assert cp.morphs == ["agent"], f"expected request_morph('agent'), got {cp.morphs}"
+
+
+def test_request_morph_updates_module_type_and_closes_ws(monkeypatch):
+    cp = AgentControlPlane("agent-1", "s", "", "ws://hub:8765", "")
+    assert cp.module_type == "agent"
+    closed = {"yes": False}
+    class _FakeWS:
+        async def close(self):
+            closed["yes"] = True
+    cp._hub_ws = _FakeWS()
+
+    # Speed up the 0.2s reconnect delay without breaking scheduler yields.
+    _real_sleep = asyncio.sleep
+    async def _fast_sleep(*a, **k):
+        await _real_sleep(0)
+    monkeypatch.setattr(cp_module.asyncio, "sleep", _fast_sleep)
+
+    async def _run():
+        await cp.request_morph("firewall")
+        await cp._morph_task       # drain the scheduled reconnect
+    asyncio.run(_run())
+    assert cp.module_type == "firewall"
+    assert closed["yes"] is True, "request_morph did not close the hub WS"
+
+
+def test_spoke_update_for_sibling_role_pulls_sibling_repo(tmp_path, monkeypatch):
+    """Morphed to a sibling role (network) → SPOKE_UPDATE must pull /opt/lm/nw,
+    NOT /opt/lm (the lm repo). Verifies the corruption-prevention override."""
+    cp = AgentControlPlane("agent-1", "s", "", "ws://hub:8765", "")
+    class _Ag:
+        _role_name = "network"
+    cp.modules["agent"] = _Ag()
+    monkeypatch.setattr(cp, "_lm_root", lambda: tmp_path)
+    (tmp_path / "nw").mkdir()       # role repo dir present
+
+    calls = []
+    import subprocess as _sp
+    def _fake_run(cmd, *a, **k):
+        calls.append({"cmd": list(cmd), "cwd": k.get("cwd")})
+        return _sp.CompletedProcess(args=cmd, returncode=0, stdout="abc", stderr="")
+    monkeypatch.setattr(cp_module.subprocess, "run", _fake_run)
+    def _fake_rungit(args, cwd):
+        calls.append({"cmd": ["git"] + list(args), "cwd": cwd})
+        return _sp.CompletedProcess(args=args, returncode=0, stdout="abc", stderr="")
+    monkeypatch.setattr(cp, "_run_git", _fake_rungit)
+
+    res = asyncio.run(cp.handle_system_command(
+        "SPOKE_UPDATE", {"repo_url": "https://github.com/lbockenstedt/nw.git"}))
+    assert res["status"] == "SUCCESS", res
+    # Every git op targeted the sibling dir, never /opt/lm itself.
+    cwds = [str(c["cwd"]) for c in calls if c.get("cwd")]
+    assert cwds, "no git calls recorded"
+    assert all(c.endswith("/nw") for c in cwds), f"pull targeted wrong dir: {cwds}"
+    # remote set-url used the nw repo URL (from _ROLE_MAP, not the payload).
+    seturl = [c for c in calls if "set-url" in c["cmd"]]
+    assert seturl and any("github.com/lbockenstedt/nw.git" in a for a in seturl[0]["cmd"]), \
+        f"set-url did not use the nw URL: {seturl}"
+
+
+def test_spoke_update_unmorphed_delegates_to_base_handler(monkeypatch):
+    """No active role → SPOKE_UPDATE delegates to BaseControlPlane (pulls /opt/lm,
+    the lm repo / agent code) — existing behavior preserved."""
+    cp = AgentControlPlane("agent-1", "s", "", "ws://hub:8765", "")
+    class _Ag:
+        _role_name = None
+    cp.modules["agent"] = _Ag()
+
+    sentinel = {"status": "SUCCESS", "message": "base-handled"}
+    recorded = {}
+    async def _fake_super(self_, cmd_type, data):
+        recorded["called"] = (cmd_type, data)
+        return sentinel
+    monkeypatch.setattr(BaseControlPlane, "handle_system_command", _fake_super)
+
+    res = asyncio.run(cp.handle_system_command(
+        "SPOKE_UPDATE", {"repo_url": "https://github.com/lbockenstedt/lm.git"}))
+    assert res == sentinel
+    assert recorded.get("called")[0] == "SPOKE_UPDATE", "super not invoked"
+
+    # Non-SPOKE_UPDATE system commands also pass through to base.
+    async def _fake_super2(self_, cmd_type, data):
+        return {"status": "SUCCESS", "message": "passthrough"}
+    monkeypatch.setattr(BaseControlPlane, "handle_system_command", _fake_super2)
+    res2 = asyncio.run(cp.handle_system_command("SPOKE_GET_STATUS", {}))
+    assert res2["message"] == "passthrough"

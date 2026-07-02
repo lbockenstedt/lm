@@ -94,6 +94,9 @@ class GenericAgent(BaseSpoke):
         super().__init__(spoke_id, config)
         self._role: Optional[BaseSpoke] = None
         self._role_name: Optional[str] = None
+        # Set by AgentControlPlane after registration so LOAD/UNLOAD_ROLE can
+        # request a module_type morph + reconnect (become a spoke / revert to agent).
+        self.control_plane = None
         # Background deployment state for deploy roles (e.g. bugfixer).
         self._deploy_role: Optional[str] = None
         self._deploy_task: Optional[asyncio.Task] = None
@@ -283,9 +286,13 @@ class GenericAgent(BaseSpoke):
             ok = self._sync_load_role(role_name, role_config)
             if not ok:
                 return {"status": "ERROR", "message": f"Could not load role '{role_name}'"}
-            # The control plane reads self.module_type and sends it on reconnect.
-            # For now return the module_type so the hub can update immediately.
             _, _, mtype, _ = _ROLE_MAP[role_name]
+            # Re-register with the hub under the role's module_type (become a
+            # spoke of that type). request_morph updates control_plane.module_type
+            # and reconnects; the response below is sent before the close fires.
+            cp = getattr(self, "control_plane", None)
+            if cp is not None:
+                await cp.request_morph(mtype)
             return {"status": "SUCCESS", "role": role_name, "module_type": mtype,
                     "message": f"Agent morphed to '{role_name}' ({mtype})"}
 
@@ -298,6 +305,11 @@ class GenericAgent(BaseSpoke):
                 old = self._role_name
                 self._role = None
                 self._role_name = None
+                # Revert to a plain agent (module_type "agent") + reconnect so
+                # the hub re-registers it under Generic Nodes again.
+                cp = getattr(self, "control_plane", None)
+                if cp is not None:
+                    await cp.request_morph("agent")
                 return {"status": "SUCCESS", "message": f"Role '{old}' unloaded"}
             return {"status": "SUCCESS", "message": "No active role"}
 
