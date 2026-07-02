@@ -265,10 +265,20 @@ class KeyManager:
         return MessageSigner(key.secret).sign(message_dict)
 
     def verify_signature(self, spoke_id: str, message_bytes: bytes, signature: str) -> bool:
-        """
-        Verifies the HMAC signature of a message.
+        """Verifies the HMAC signature of a message.
+
+        Accepts the current key OR any key in the rotation history, mirroring
+        ``get_valid_key``'s auth-time acceptance. Without the history window a
+        frame signed with the just-rotated-out key (in flight when
+        ``rotate_key`` pushed the new secret to the spoke) would wrongly fail,
+        creating an auth/verify asymmetry where a spoke authenticates via the
+        history window but every subsequent frame fails verification.
         """
         key = self.keys.get(spoke_id)
-        if not key:
-            return False
-        return MessageSigner(key.secret).verify_bytes(message_bytes, signature)
+        if key and MessageSigner(key.secret).verify_bytes(message_bytes, signature):
+            return True
+        # Rotation window: tolerate frames signed with the previous key.
+        for hist in self.history.get(spoke_id, []):
+            if MessageSigner(hist.secret).verify_bytes(message_bytes, signature):
+                return True
+        return False

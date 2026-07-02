@@ -351,6 +351,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
         # { spoke_id: websocket_connection }
         self.active_connections: Dict[str, websockets.WebSocketServerProtocol] = {}
+        # { spoke_id: key_id last used to authenticate the active connection }
+        # Used to reject a stale (rotated-out) session key reconnecting and
+        # evicting a live current-key connection (zombie-after-outage guard).
+        self.active_connection_key_ids: Dict[str, Optional[str]] = {}
         # { spoke_id: ConnectionTelemetry }
         self.spoke_telemetry: Dict[str, Dict[str, Any]] = {}
         # { spoke_id: TokenBucket } for rate limiting non-heartbeat messages
@@ -1250,6 +1254,58 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception as e:
             logger.error(f"Failed to send HUB_RESPONSE to {spoke_id}: {e}")
 
+    async def _install_active_connection(self, spoke_id: str, websocket, key_id: Optional[str]) -> bool:
+        """Register ``websocket`` as the active connection for ``spoke_id``.
+
+        Evicts a pre-existing connection for the same spoke_id (e.g. a zombie
+        process left over from a prior outage / port-move crash-loop) so its
+        inbound frame loop ends instead of continuing to emit signed frames
+        that fail verification. Key-id aware: a stale (rotated-out, history)
+        session key reconnecting while a *current-key* connection is already
+        live is REJECTED (closed) rather than allowed to evict the live
+        process — this prevents a zombie from displacing the real spoke and
+        avoids reconnect ping-pong.
+
+        Returns True if ``websocket`` is now the active connection, False if it
+        was rejected as a stale-key reconnect (caller should return).
+        """
+        existing = self.active_connections.get(spoke_id)
+        if existing is not None and existing is not websocket:
+            current = self.key_manager.keys.get(spoke_id)
+            current_kid = current.key_id if current else None
+            new_is_current = key_id is not None and key_id == current_kid
+            old_is_current = (
+                current_kid is not None
+                and self.active_connection_key_ids.get(spoke_id) == current_kid
+            )
+            if old_is_current and not new_is_current:
+                # Live current-key connection already active; this socket auth'd
+                # with a stale history key — reject so the zombie can't take over.
+                logger.warning(
+                    f"Spoke {spoke_id} connected with a stale session key while a "
+                    f"current-key connection is active; closing stale connection."
+                )
+                self.record_spoke_event(
+                    spoke_id, "stale_key_rejected",
+                    "history-key connect while current-key connection active",
+                )
+                try:
+                    await websocket.close(1008, "Stale session key — current connection active")
+                except Exception:
+                    pass
+                return False
+            # Newer/current connection wins — close the previous socket so its
+            # frame loop ends (it may be a zombie from a prior outage).
+            logger.warning(f"Spoke {spoke_id} reconnected; closing previous connection.")
+            self.record_spoke_event(spoke_id, "replaced_connection", "newer connection took over")
+            try:
+                await existing.close(1008, "Replaced by newer connection")
+            except Exception:
+                pass
+        self.active_connections[spoke_id] = websocket
+        self.active_connection_key_ids[spoke_id] = key_id
+        return True
+
     async def handle_connection(self, websocket):
         """Handle the full lifecycle of a single Spoke/Agent connection.
 
@@ -1312,7 +1368,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     return
             else:
                 logger.info(f"Spoke {spoke_id} authenticated successfully.")
-                self.active_connections[spoke_id] = websocket
+                # Evict any prior connection for this spoke_id (e.g. a zombie
+                # left over from a prior outage / port-move crash-loop). A stale
+                # (history-key) reconnect that would evict a live current-key
+                # connection is rejected instead — see _install_active_connection.
+                if not await self._install_active_connection(spoke_id, websocket, key_id):
+                    return
                 self.record_spoke_event(spoke_id, "connected", "authenticated with secret")
 
             # --- Mutual Authentication (Hub Identity Proof) ---
@@ -1353,8 +1414,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 await websocket.close(1008, "Mutual authentication failed")
                 return
 
-            # Ensure connection is tracked even if not fully auth'd (for negotiation)
-            self.active_connections[spoke_id] = websocket
+            # Ensure connection is tracked even if not fully auth'd (for negotiation).
+            # Don't clobber an already-live authenticated connection with a
+            # pending/no-secret one (e.g. a stale process reconnecting unauthenticated).
+            if spoke_id not in self.active_connections:
+                self.active_connections[spoke_id] = websocket
+                self.active_connection_key_ids[spoke_id] = None
 
             # Update telemetry — capture remote IP so the UI can auto-fill service URLs
             remote_ip = None
@@ -1632,8 +1697,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 }
             self.record_spoke_event(spoke_id, "connection_error", str(e))
         finally:
-            if spoke_id and spoke_id in self.active_connections:
+            # Only clean up the registry if it still points at THIS websocket.
+            # An evicted/zombie connection's finally must not delete the entry
+            # that now belongs to the live replacement connection.
+            if spoke_id and self.active_connections.get(spoke_id) is websocket:
                 del self.active_connections[spoke_id]
+                self.active_connection_key_ids.pop(spoke_id, None)
             if spoke_id:
                 self.spoke_module_types.pop(spoke_id, None)
 
