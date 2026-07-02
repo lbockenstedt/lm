@@ -84,7 +84,7 @@ After=network.target
 Type=simple
 User=svc_lm
 WorkingDirectory=$INSTALL_DIR/opnsense
-ExecStart=/usr/bin/env PYTHONPATH=$INSTALL_DIR/core/src $INSTALL_DIR/opnsense/venv/bin/python3 -m src.control_plane --id $SPOKE_ID --secret $SPOKE_SECRET --hub $HUB_URL
+ExecStart=/usr/bin/env PYTHONPATH=$INSTALL_DIR/core/src $INSTALL_DIR/opnsense/venv/bin/python3 -m src.control_plane --id $SPOKE_ID --secret=$SPOKE_SECRET --hub $HUB_URL
 Restart=always
 RestartSec=10
 
