@@ -1203,6 +1203,53 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         on = bool(body.get("on")) if isinstance(body, dict) else False
         return await _cs_forward(tenant_id, "CS_KILL_SWITCH", {"on": on})
 
+    # ── Demo scenarios (named per-client failure presets, TTL + auto-expiry) ──
+    # Ports the legacy cs webui-spoke demo system: trigger a named failure
+    # (dns_fail/dhcp_fail/assoc_fail/auth_fail/ssidpw_fail/port_flap) on one
+    # client for 120 min, or ``normal`` to clear. The override is ephemeral +
+    # in-memory on the spoke (layered on top of persisted overrides at config
+    # delivery), so it expires or clears back to the operator's prior setting.
+    @app.post("/sim/api/{tenant}/demo/client/{hostname}/scenario")
+    async def cs_demo_set_scenario(request: Request, tenant: str, hostname: str,
+                                   tenant_id: str = Depends(get_tenant_id)):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        scenario = str(body.get("scenario") or "").strip() if isinstance(body, dict) else ""
+        if not scenario:
+            raise HTTPException(status_code=400, detail="missing 'scenario'")
+        return await _cs_forward(tenant_id, "CS_DEMO_SCENARIO",
+                                 {"hostname": hostname, "scenario": scenario,
+                                  "triggered_by": str(body.get("triggered_by") or "")})
+
+    @app.delete("/sim/api/{tenant}/demo/client/{hostname}/scenario")
+    async def cs_demo_clear_scenario(tenant: str, hostname: str,
+                                     tenant_id: str = Depends(get_tenant_id)):
+        return await _cs_forward(tenant_id, "CS_DEMO_CLEAR", {"hostname": hostname})
+
+    @app.get("/sim/api/{tenant}/demo/active")
+    async def cs_demo_active(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        try:
+            return await _cs_forward(tenant_id, "CS_GET_DEMO_ACTIVE", {})
+        except HTTPException:
+            return {"active": [], "spoke_connected": False}
+
+    @app.get("/sim/api/{tenant}/demo/scenarios")
+    async def cs_demo_scenarios(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        # The scenario catalog is static; fall back to the canon if the spoke is
+        # offline so the UI's dropdown still populates. (Mirrors
+        # cs/lm-spoke/src/demo_scenarios.build_scenarios — kept in sync.)
+        _flags = ("dns_fail", "dhcp_fail", "assoc_fail", "auth_fail",
+                  "ssidpw_fail", "port_flap")
+        _canon = {"normal": {f: "off" for f in _flags}}
+        for f in _flags:
+            _canon[f] = {x: ("on" if x == f else "off") for x in _flags}
+        try:
+            return await _cs_forward(tenant_id, "CS_GET_DEMO_SCENARIOS", {})
+        except HTTPException:
+            return {"status": "SUCCESS", "scenarios": _canon}
+
     @app.get("/sim/api/{tenant}/config/simulation-conf")
     async def get_sim_conf(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         # The spoke's actual simulation.conf content, relayed in telemetry.

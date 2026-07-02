@@ -185,6 +185,10 @@ const SIM_ROUTES = {
     // ── VM actions (per-spoke proxmox-command + proxmx command queue) ──
     csKillSwitchGet:             { m: 'GET',    p: '/{tenant}/kill-switch',                       api: 'cs_get_kill_switch' },
     csKillSwitchSet:             { m: 'POST',   p: '/{tenant}/kill-switch',                       api: 'cs_set_kill_switch' },
+    csDemoActive:                { m: 'GET',    p: '/{tenant}/demo/active',                       api: 'cs_demo_active' },
+    csDemoScenarios:             { m: 'GET',    p: '/{tenant}/demo/scenarios',                    api: 'cs_demo_scenarios' },
+    csDemoTrigger:               { m: 'POST',   p: '/{tenant}/demo/client/{hostname}/scenario',   api: 'cs_demo_set_scenario' },
+    csDemoClear:                 { m: 'DELETE', p: '/{tenant}/demo/client/{hostname}/scenario',   api: 'cs_demo_clear_scenario' },
     csVmAction:                  { m: 'POST',   p: '/{tenant}/spokes/{spoke_id}/proxmox-command',api: 'cs_spoke_proxmox_command' },
     csVmBulk:                    { m: 'POST',   p: '/{tenant}/spokes/{spoke_id}/proxmox-command',api: 'cs_spoke_proxmox_command' },
     csRenderVmServerQueue:       { m: 'GET',    p: '/{tenant}/proxmx/commands',                  api: 'cs_list_commands' },
@@ -827,7 +831,8 @@ async function csRenderClients(tier) {
     const online = rows.filter(c => c.online).length;
     const pills = csSummaryRow([[all, 'Clients'], [t1, 'T1'], [t2, 'T2'], [online, 'Online']]);
     const ksBanner = await csKillSwitchBanner();
-    csSet(`<div class="space-y-4">${ksBanner}${pills}<div id="cs-client-body"></div></div>`);
+    const demoCard = await csDemoCard();
+    csSet(`<div class="space-y-4">${ksBanner}${demoCard}${pills}<div id="cs-client-body"></div></div>`);
     csClientFilter();
 }
 
@@ -849,9 +854,10 @@ function csRenderClientRows(rows) {
     const rowHtml = rows.map(c => {
         const sims = Array.isArray(c.active_simulations) ? c.active_simulations.join(', ') : (c.simulation_id || '—');
         const t = csClassifyClient(c);
+        const host = c.hostname || c.id || '';
         return `<tr>
           <td class="px-4 py-2 text-slate-600">${csEscape(c.spoke_name || c.spoke_id || '—')}</td>
-          <td class="px-4 py-2 font-mono text-xs">${csEscape(c.hostname || c.id || '—')}</td>
+          <td class="px-4 py-2 font-mono text-xs">${csEscape(host || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.platform || c.hw_type || '—')}</td>
           <td class="px-4 py-2">${csOnlineBadge(c.online)}</td>
           <td class="px-4 py-2"><span class="text-[10px] font-bold px-2 py-0.5 rounded ${t === 't2' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'}">${t.toUpperCase()}</span></td>
@@ -859,13 +865,93 @@ function csRenderClientRows(rows) {
           <td class="px-4 py-2 text-slate-500">${csEscape(sims)}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(csLastSeen(c.last_seen))}</td>
           <td class="px-4 py-2 ${c.error_count > 0 ? 'text-amber-600 font-bold' : 'text-slate-400'}">${csEscape(c.error_count || 0)}</td>
+          ${host ? csDemoCell(host) : '<td class="px-4 py-2 text-slate-300">—</td>'}
         </tr>`;
     }).join('');
     body.innerHTML = csTable(
-        ['Spoke', 'Hostname', 'Platform', 'Status', 'Tier', 'SSID', 'Simulations', 'Last Seen', 'Errors'],
+        ['Spoke', 'Hostname', 'Platform', 'Status', 'Tier', 'SSID', 'Simulations', 'Last Seen', 'Errors', 'Demo'],
         rowHtml
     );
 }
+
+// ── Demo scenarios (named per-client failure presets, 120-min TTL) ───────────
+// Ports the legacy cs webui-spoke demo system. Trigger a named failure on one
+// client for 2h, or 'normal' to clear. The override is ephemeral on the spoke
+// (layered on top of persisted overrides at config delivery). The active-demos
+// card + per-row Demo column live on the Clients tab.
+window._csDemoActive = {};      // hostname → {scenario, minutes_remaining, ...}
+window._csDemoScenarios = {};   // scenario name → {flag: on/off}
+
+async function csDemoLoad() {
+    try {
+        const a = await csFetch(`/${csTenant()}/demo/active?tenant_id=${csTenant()}`);
+        const active = (a && a.active) || [];
+        window._csDemoActive = {};
+        active.forEach(d => { window._csDemoActive[d.hostname] = d; });
+    } catch (e) { console.warn('csDemoLoad: active read failed', e); window._csDemoActive = {}; }
+    if (window._csDemoScenarios && Object.keys(window._csDemoScenarios).length) return;
+    try {
+        const s = await csFetch(`/${csTenant()}/demo/scenarios?tenant_id=${csTenant()}`);
+        window._csDemoScenarios = (s && s.scenarios) || {};
+    } catch (e) { console.warn('csDemoLoad: scenarios read failed', e); window._csDemoScenarios = {}; }
+}
+
+function csDemoOptions(activeScenario) {
+    const names = Object.keys(window._csDemoScenarios || {});
+    if (!names.length) names.push('normal', 'dns_fail', 'dhcp_fail', 'assoc_fail', 'auth_fail', 'ssidpw_fail', 'port_flap');
+    return names.map(n => `<option value="${csEscape(n)}" ${n === activeScenario ? 'selected' : ''}>${csEscape(n)}</option>`).join('');
+}
+
+function csDemoCell(hostname) {
+    const a = window._csDemoActive[hostname];
+    const badge = a ? `<span class="inline-block bg-amber-100 text-amber-700 rounded px-1.5 py-0.5 text-[10px] font-bold mr-1">${csEscape(a.scenario)} ${csEscape(a.minutes_remaining != null ? a.minutes_remaining + 'm' : '')}</span>` : '';
+    return `<td class="px-4 py-2 whitespace-nowrap">
+      ${badge}
+      <select id="cs-demo-${csEscape(hostname)}" class="border border-slate-200 rounded-md px-1 py-0.5 text-[11px]">
+        ${csDemoOptions(a ? a.scenario : 'normal')}
+      </select>
+      <button data-cs-demo-host="${csEscape(hostname)}" onclick="csDemoTrigger(this)"
+        class="bg-blue-100 hover:bg-blue-200 text-blue-700 px-1.5 py-0.5 rounded-md text-[11px] font-bold">Go</button>
+    </td>`;
+}
+
+async function csDemoCard() {
+    await csDemoLoad();
+    const active = Object.values(window._csDemoActive || {});
+    if (!active.length) return '';
+    const rows = active.map(a => `<div class="flex items-center justify-between py-1">
+      <span class="text-sm"><span class="font-mono text-xs font-bold">${csEscape(a.hostname)}</span>
+        <span class="ml-2 inline-block bg-amber-100 text-amber-700 rounded px-1.5 py-0.5 text-[10px] font-bold">${csEscape(a.scenario)}</span>
+        <span class="ml-2 text-xs text-slate-400">${csEscape(a.minutes_remaining)}m remaining</span></span>
+      <button data-cs-demo-host="${csEscape(a.hostname)}" onclick="csDemoClear(this)"
+        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-[11px] font-bold">Clear</button>
+    </div>`).join('');
+    return `<div class="hpe-card rounded-lg p-4 shadow-sm">
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Active Demo Scenarios (${active.length})</p>
+      ${rows}
+    </div>`;
+}
+
+window.csDemoTrigger = async function (btn) {
+    const host = btn.dataset.csDemoHost;
+    const sel = csEl('cs-demo-' + host);
+    const scenario = sel ? sel.value : 'normal';
+    try {
+        await csFetch(`/${csTenant()}/demo/client/${encodeURIComponent(host)}/scenario?tenant_id=${csTenant()}`,
+            { method: 'POST', body: JSON.stringify({ scenario }) });
+        if (typeof showToast === 'function') showToast(`Demo '${scenario}' triggered on ${host}`, 'success');
+        loadCSData('Clients', currentSubChild, true);
+    } catch (e) { console.error('csDemoTrigger: trigger failed', e); alert('Demo trigger failed: ' + (e.message || e)); }
+};
+
+window.csDemoClear = async function (btn) {
+    const host = btn.dataset.csDemoHost;
+    try {
+        await csFetch(`/${csTenant()}/demo/client/${encodeURIComponent(host)}/scenario?tenant_id=${csTenant()}`, { method: 'DELETE' });
+        if (typeof showToast === 'function') showToast(`Demo cleared on ${host}`, 'success');
+        loadCSData('Clients', currentSubChild, true);
+    } catch (e) { console.error('csDemoClear: clear failed', e); alert('Demo clear failed: ' + (e.message || e)); }
+};
 
 window.csClientFilter = function () {
     const q = (csEl('cs-client-search') && csEl('cs-client-search').value || '').toLowerCase();
