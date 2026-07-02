@@ -183,6 +183,8 @@ const SIM_ROUTES = {
     csUpdateAll:                 { m: 'POST',   p: '/{tenant}/update-all',                       api: 'cs_update_all' },
 
     // ── VM actions (per-spoke proxmox-command + proxmx command queue) ──
+    csKillSwitchGet:             { m: 'GET',    p: '/{tenant}/kill-switch',                       api: 'cs_get_kill_switch' },
+    csKillSwitchSet:             { m: 'POST',   p: '/{tenant}/kill-switch',                       api: 'cs_set_kill_switch' },
     csVmAction:                  { m: 'POST',   p: '/{tenant}/spokes/{spoke_id}/proxmox-command',api: 'cs_spoke_proxmox_command' },
     csVmBulk:                    { m: 'POST',   p: '/{tenant}/spokes/{spoke_id}/proxmox-command',api: 'cs_spoke_proxmox_command' },
     csRenderVmServerQueue:       { m: 'GET',    p: '/{tenant}/proxmx/commands',                  api: 'cs_list_commands' },
@@ -404,9 +406,58 @@ function csCheckBuckets(st) {
     return 'unknown';
 }
 
+// ── Kill switch (global sim emergency stop) ─────────────────────────────────
+// Ports the legacy cs webui-spoke's prominent always-visible kill-switch
+// banner. The spoke's engine.set_kill_switch persists kill_switch.txt and
+// short-circuits every sim iteration to KILLED. Prepended to the Dashboard +
+// Clients views so the emergency stop is one click away wherever the operator
+// lands. Reads via GET /kill-switch; toggles via POST /kill-switch.
+async function csKillSwitchBanner() {
+    let ks = null, connected = false;
+    try {
+        const r = await csFetch(`/${csTenant()}/kill-switch?tenant_id=${csTenant()}`);
+        ks = r && r.kill_switch; connected = !!(r && r.spoke_connected);
+    } catch (e) { console.warn('csKillSwitchBanner: read failed', e); }
+    if (ks === true) {
+        return `<div class="rounded-lg border-2 border-red-500 bg-red-50 p-3 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-2xl">⛔</span>
+            <div><p class="text-sm font-bold text-red-700">SIMULATIONS HALTED — Kill switch active</p>
+            <p class="text-xs text-red-600">All sim iterations are short-circuited to KILLED on this tenant's cs spoke.</p></div>
+          </div>
+          <button onclick="csToggleKillSwitch(false)" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-bold">▶ Resume Sims</button>
+        </div>`;
+    }
+    if (ks === false) {
+        return `<div class="rounded-lg border border-amber-300 bg-amber-50 p-3 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <span class="text-xl">🟢</span>
+            <p class="text-sm font-bold text-amber-700">Kill switch: OFF — simulations running</p>
+          </div>
+          <button onclick="csToggleKillSwitch(true)" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-bold">⛔ Emergency Stop</button>
+        </div>`;
+    }
+    return `<div class="rounded-lg border border-slate-200 bg-slate-50 p-3 flex items-center justify-between">
+      <div class="flex items-center gap-3"><span class="text-xl">⚪</span>
+      <p class="text-sm text-slate-500">Kill switch: ${connected ? 'unknown' : 'spoke offline'}</p></div>
+      <button disabled class="bg-slate-200 text-slate-400 px-4 py-2 rounded-md text-sm font-bold cursor-not-allowed">Emergency Stop</button>
+    </div>`;
+}
+
+window.csToggleKillSwitch = async function (on) {
+    if (on && !confirm("EMERGENCY STOP: halt all simulations on this tenant's cs spoke?")) return;
+    try {
+        await csFetch(`/${csTenant()}/kill-switch?tenant_id=${csTenant()}`,
+            { method: 'POST', body: JSON.stringify({ on }) });
+        if (typeof showToast === 'function') showToast(on ? 'Kill switch ON — sims halted' : 'Kill switch OFF — sims resumed', on ? 'error' : 'success');
+        loadCSData(currentSubView, currentSubChild, true);
+    } catch (e) { console.error('csToggleKillSwitch: toggle failed', e); alert('Kill-switch toggle failed: ' + (e.message || e)); }
+};
+
 async function csRenderSimulations() {
     // Simulations → Checks child (default).
     csSetToolbar('');
+    const ksBanner = await csKillSwitchBanner();
     const data = await csSimLoadCentral();
     const spokes = csSimSpokes(data);
     if (!spokes) return;
@@ -437,7 +488,7 @@ async function csRenderSimulations() {
             window._csSimCheckRows.push({ spoke: name, site: w, check: c, status: cell && cell.status, detail: cell });
         }));
     });
-    csSet(`<div class="space-y-4">${pills}<div id="cs-sim-checks-body"></div></div>`);
+    csSet(`<div class="space-y-4">${ksBanner}${pills}<div id="cs-sim-checks-body"></div></div>`);
     csSimChecksFilter();
 }
 
@@ -775,7 +826,8 @@ async function csRenderClients(tier) {
     const t2 = rows.filter(c => csClassifyClient(c) === 't2').length;
     const online = rows.filter(c => c.online).length;
     const pills = csSummaryRow([[all, 'Clients'], [t1, 'T1'], [t2, 'T2'], [online, 'Online']]);
-    csSet(`<div class="space-y-4">${pills}<div id="cs-client-body"></div></div>`);
+    const ksBanner = await csKillSwitchBanner();
+    csSet(`<div class="space-y-4">${ksBanner}${pills}<div id="cs-client-body"></div></div>`);
     csClientFilter();
 }
 
