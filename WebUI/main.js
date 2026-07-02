@@ -554,9 +554,14 @@ function canSeeModule(className) {
 function showToast(message, type = 'info') {
     const colors = { success: '#01A982', error: '#e53e3e', info: '#4a5568' };
     const toast = document.createElement('div');
+    toast.className = 'lm-toast';
     toast.textContent = message;
+    // Stack under any toasts already on screen so simultaneous ones (e.g. Apply
+    // Schema's result + warning) don't overlap. Top-right of the viewport.
+    const stack = document.querySelectorAll('.lm-toast').length;
+    const topOffset = 1.5 + stack * 4.0; // rem
     toast.style.cssText = `
-        position:fixed;bottom:1.5rem;right:1.5rem;z-index:9999;
+        position:fixed;top:${topOffset}rem;right:1.5rem;z-index:9999;
         background:${colors[type] || colors.info};color:#fff;
         padding:.75rem 1.25rem;border-radius:.5rem;font-size:.875rem;
         box-shadow:0 4px 12px rgba(0,0,0,.2);opacity:0;

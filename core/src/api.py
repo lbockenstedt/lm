@@ -3360,8 +3360,19 @@ def create_app(hub):
                         if kind == "error":
                             await websocket.close(code=1011, reason=str(item[1]))
                             return
-                        # "ready" → no-op (RFB just starts); "disconnect" → close
-                        return
+                        if kind == "disconnect":
+                            # Proxmox side closed — close the browser WS so noVNC
+                            # surfaces "Disconnected" instead of hanging on a dead
+                            # socket waiting for bytes that will never come.
+                            await websocket.close(code=1000, reason="console closed")
+                            return
+                        # kind == "ready": the Proxmox WSS is open and RFB frames
+                        # are about to flow. No-op — KEEP the relay loop running so
+                        # later VNC_FRAME_UP bytes reach the browser. Returning here
+                        # was the bug: it killed the only queue consumer on
+                        # VNC_READY, so the RFB handshake never reached the browser
+                        # and noVNC timed out → "Disconnected: closed" / blank screen.
+                        continue
                     else:
                         return
 
