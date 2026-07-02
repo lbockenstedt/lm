@@ -3297,18 +3297,33 @@ def create_app(hub):
             "unique_id": unique_id,
         })
         try:
-            await hub.send_to_spoke_command(pxmx_spoke, "VNC_START", {
+            # request_response (NOT send_to_spoke_command): the spoke→agent
+            # opens the Proxmox vncwebsocket synchronously and returns the
+            # Proxmox ticket, which doubles as the RFB VNC password noVNC must
+            # present during the security handshake. We pass it to the browser
+            # so noVNC authenticates with it; without it noVNC sends an empty
+            # password and Proxmox drops the RFB session → "Security failure" /
+            # blank console. 30s covers spoke→agent (25s) + the WSS open.
+            vnc_res = await hub.request_response(pxmx_spoke, "VNC_START", {
                 "session_id": session_id,
                 "unique_id": unique_id,
                 "vmid": vmid,
                 "node": node,
                 "type": str((body or {}).get("type", "qemu")),
-            })
+            }, timeout=30.0)
         except Exception as e:
             hub.unregister_vnc_session(session_id)
             logger.exception("pxmx_create_console VNC_START failed")
             raise HTTPException(status_code=502, detail=f"failed to start console: {e}")
-        return {"session_id": session_id, "ws_token": ws_token, "expires_in": 60}
+        ticket = ""
+        if isinstance(vnc_res, dict):
+            if vnc_res.get("status") not in ("SUCCESS", "OK"):
+                hub.unregister_vnc_session(session_id)
+                detail = vnc_res.get("message") or vnc_res.get("error") or "agent refused VNC_START"
+                raise HTTPException(status_code=502, detail=f"failed to start console: {detail}")
+            ticket = str(vnc_res.get("ticket") or "")
+        return {"session_id": session_id, "ws_token": ws_token,
+                "ticket": ticket, "expires_in": 60}
 
     @app.websocket("/ws/console/{session_id}")
     async def pxmx_console_ws(websocket: WebSocket, session_id: str):
