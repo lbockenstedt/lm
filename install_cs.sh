@@ -85,7 +85,7 @@ Type=simple
 User=svc_lm
 WorkingDirectory=$INSTALL_DIR/cs
 Environment="PYTHONPATH=$INSTALL_DIR/core/src:$INSTALL_DIR/cs/src"
-ExecStart=$INSTALL_DIR/cs/venv/bin/python3 -m src.control_plane --id $SPOKE_ID --secret $SPOKE_SECRET
+ExecStart=$INSTALL_DIR/cs/venv/bin/python3 -m src.control_plane --id $SPOKE_ID --secret=$SPOKE_SECRET
 Restart=always
 RestartSec=10
 
