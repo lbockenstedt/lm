@@ -1973,13 +1973,29 @@ def create_app(hub):
     @app.get("/api/nw/devices")
     async def nw_list_devices(request: Request, tenant: str = None):
         """List the nw fleet from the spoke (admin) — unfiltered (devices are
-        managed infra shown to all). Tenant scoping has no IP to filter on."""
+        managed infra shown to all). Tenant scoping has no IP to filter on.
+
+        Caches the last-known fleet (``nw_cache``) on every live fetch and
+        serves it (marked ``stale``) when the nw spoke is offline, so a hub
+        restart / spoke outage still seeds the Network Devices table."""
         logger.debug("relay GET /api/nw/devices tenant=%s", tenant)
         hub = app.state.hub
-        spoke_id = _get_nw_spoke(hub)
+        spoke_id = hub.get_spoke_by_type("nw")
+        if not spoke_id:
+            cached = hub.nw_cache_get_fleet()
+            if cached:
+                out = dict(cached.get("devices") or {})
+                out["stale"] = True
+                out["fetched_at"] = cached.get("fetched_at")
+                out["message"] = (out.get("message") or
+                                  "Network Devices spoke offline — showing last-known data")
+                return out
+            raise HTTPException(status_code=503,
+                                detail="Network Devices spoke not connected")
         try:
             result = await hub.request_response(spoke_id, "NW_LIST_DEVICES", {})
             data = access.unwrap_spoke(result)
+            await hub.nw_cache_set_fleet(data)
             return data
         except HTTPException:
             raise
@@ -1997,7 +2013,13 @@ def create_app(hub):
         (MAC/ARP/interfaces carry IPs; info does not). ``?tenant=`` scopes the
         filter to the selected tenant so an admin acting as a tenant sees only
         that tenant's subnet data — without it, admins bypass the filter (see
-        access.filter_nw)."""
+        access.filter_nw).
+
+        Caches the raw per-device endpoint envelope (``nw_cache``) on every live
+        fetch and serves it (marked ``stale``, tenant-filtered) when the nw
+        spoke is offline, so a hub restart / spoke outage still seeds the
+        device sub-views. The cache stores the *raw* envelope so the tenant
+        subnet filter is re-applied per-reader from the same cached data."""
         hub = app.state.hub
         command_map = {
             "info":       "NW_GET_DEVICE_INFO",
@@ -2009,10 +2031,21 @@ def create_app(hub):
         if not spoke_cmd:
             raise HTTPException(status_code=400, detail=f"Endpoint {endpoint} not supported by nw module")
         logger.debug("relay GET /api/nw/%s/%s tenant=%s", device_id, endpoint, tenant)
-        spoke_id = _get_nw_spoke(hub)
+        spoke_id = hub.get_spoke_by_type("nw")
+        if not spoke_id:
+            cached = hub.nw_cache_get_device(device_id, endpoint)
+            if cached is not None:
+                filtered = await _filter_nw(request, cached, endpoint, tenant)
+                if isinstance(filtered, dict):
+                    filtered = dict(filtered)
+                    filtered["stale"] = True
+                return filtered
+            raise HTTPException(status_code=503,
+                                detail="Network Devices spoke not connected")
         try:
             result = await hub.request_response(spoke_id, spoke_cmd, {"device_id": device_id})
             data = access.unwrap_spoke(result)
+            await hub.nw_cache_set_device(device_id, endpoint, data)
             return await _filter_nw(request, data, endpoint, tenant)
         except HTTPException:
             raise
@@ -2059,6 +2092,10 @@ def create_app(hub):
             raise HTTPException(status_code=403, detail="admin required")
         try:
             result = await hub.poll_nw_device(device_id)
+            # Fold the poll's rich result into the per-device cache so a later
+            # page load (spoke offline) still reflects the last probe.
+            if isinstance(result, dict):
+                await hub.nw_cache_set_poll(device_id, result)
             return result
         except HTTPException:
             raise
