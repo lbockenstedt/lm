@@ -124,6 +124,26 @@ if [ -f /etc/systemd/system/lm-bootstrap.service ] || \
     rm -f /etc/systemd/system/lm-bootstrap.service
     systemctl daemon-reload 2>/dev/null || true
 fi
+
+# Clone-only: strip the agent's persisted identity so the disk image is
+# clone-ready. The base spoke (agent-spoke) writes its install UUID — the guid
+# the hub uses for clone/rename correlation — plus HUB_SECRET and the negotiated
+# session key to a .env at its repo root (_repo_root/.env). A cloned disk
+# inheriting that .env would replay THIS template's identity: same UUID → the
+# hub treats every clone as a clone-and-rename of the template (carrying its
+# approval) instead of a fresh spoke awaiting admin approval.
+#
+# Line 77's rm -rf already wipes /opt/lm/generic-agent (this installer's dir),
+# but the identity .env can persist at paths that survive that wipe: the legacy
+# install_agent.sh layout /opt/lm/agent/.env, a top-level /opt/lm/.env, and the
+# leaf agent's /etc/lm-agent/config.json (which carries the secret). Strip all
+# of them so the clone generates a fresh install UUID on first start. (Full
+# installs are untouched — they WANT the prompted identity.)
+if [ "$CLONE_ONLY" = true ]; then
+    log_c "🧹 Clone-only: stripping persisted agent identity (.env / config) for clone-readiness…"
+    rm -f "$ROOT_DIR/generic-agent/.env" "$ROOT_DIR/agent/.env" "$ROOT_DIR/.env" 2>/dev/null || true
+    rm -f /etc/lm-agent/config.json 2>/dev/null || true
+fi
 # Build the ExecStart argument list conditionally so an empty --secret (or
 # --id) is OMITTED entirely rather than passed as a blank token. A blank
 # `--secret ` here would otherwise swallow the next flag (`--spoke-url`) and

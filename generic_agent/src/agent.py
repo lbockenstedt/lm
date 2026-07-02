@@ -9,23 +9,14 @@ import os
 import socket
 from typing import Dict, Any, Optional
 
-# Setup logging to both console and file
-def get_log_path():
-    # Log under /var/log/lm alongside the hub + spokes (the installer creates
-    # /var/log/lm and chowns it to svc_lm so the systemd service can write
-    # here). Falls back to a local logs/ dir if that path isn't writable
-    # (e.g. run by hand as an unprivileged user without the install step).
-    primary = "/var/log/lm/agent.log"
-    try:
-        with open(primary, "a") as f:
-            pass
-        return primary
-    except Exception:
-        local_dir = os.path.join(os.getcwd(), "logs")
-        os.makedirs(local_dir, exist_ok=True)
-        return os.path.join(local_dir, "agent.log")
-
-log_file = get_log_path()
+# Logging: write to stderr only — do NOT open a log file from the agent. The
+# systemd unit captures stderr to /var/log/lm/agent.log
+# (StandardOutput/StandardError=append:...), and the systemd manager opens that
+# file as root. This service runs as User=svc_lm, so a svc_lm FileHandler can't
+# append to the root-owned file systemd created (PermissionError → crash-loop).
+# Logging to stderr and letting systemd own the file works for any service
+# User= and keeps a single canonical log under /var/log/lm. A manual run just
+# sees the same output on the console.
 try:
     from logging_setup import configure_logging, set_log_level
 except ImportError:
@@ -46,19 +37,7 @@ except ImportError:
             for _n in list(_logging.root.manager.loggerDict):
                 _logging.getLogger(_n).setLevel(level)
             return level
-configure_logging(log_file=log_file)
-# When writing to the canonical /var/log/lm file, the systemd unit captures
-# stderr into the SAME file (StandardError=append:/var/log/lm/agent.log).
-# configure_logging attaches a stderr StreamHandler alongside the FileHandler,
-# which would write every record twice into that one file. Drop the stderr
-# StreamHandler in that case so each record lands once (the FileHandler writes
-# it; raw interpreter tracebacks still reach the file via systemd's stderr
-# capture). Keep the StreamHandler for the local fallback path so a manual run
-# still shows on the console.
-if log_file == "/var/log/lm/agent.log":
-    for _h in list(logging.getLogger().handlers):
-        if isinstance(_h, logging.StreamHandler) and not isinstance(_h, logging.FileHandler):
-            logging.getLogger().removeHandler(_h)
+configure_logging()
 logger = logging.getLogger("GenericLeafAgent")
 
 class GenericLeafAgent:
