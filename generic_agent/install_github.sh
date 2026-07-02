@@ -36,14 +36,13 @@ log_e() {
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --spoke-url) SPOKE_URL="$2"; shift ;;
-        --id) SPOKE_ID="$2"; shift ;;
-        --secret) SPOKE_SECRET="$2"; shift ;;
-        --hub-secret) HUB_SECRET="$2"; shift ;;
+        --spoke-url) SPOKE_URL="$2"; shift 2 ;;
+        --id) SPOKE_ID="$2"; shift 2 ;;
+        --secret) SPOKE_SECRET="$2"; shift 2 ;;
+        --hub-secret) HUB_SECRET="$2"; shift 2 ;;
         --clone) CLONE_ONLY=true; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
-    shift
 done
 
 # If not in clone mode, we still need the SPOKE_URL to configure the service
