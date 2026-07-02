@@ -63,6 +63,7 @@ from endpoint_sync import EndpointSyncMixin
 from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
 from nw_discovery_sync import NwDiscoverySyncMixin
+from nw_cache import NwCacheMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 from staleness_sweep import StalenessSweepMixin
 from spoke_alert_sync import SpokeAlertMixin
@@ -265,7 +266,7 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin, RepoSyncMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin, RepoSyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -388,6 +389,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.simulations_broadcaster = SimulationsBroadcaster()
         self.simulations_store = SimulationsStore(self.state.data_dir)
         self.cache_dir = os.path.join(self.state.data_dir, "cache")
+        # Network Devices (nw) module: in-memory fleet + per-device cache,
+        # persisted to cache/nw_data.json and reloaded on startup so the
+        # Network Devices UI seeds from last-known data on a restart instead
+        # of 503-ing until the nw spoke reconnects. See nw_cache.NwCacheMixin.
+        self.nw_cache_init()
+        self.nw_cache_load()
         # File-a-Bug artifact store: each report's console.log / dom.html /
         # screenshot.png / report.json live under data_dir/bugs/<id>/ so the
         # large payloads never bloat the 500-line self.logs deque or the hub
