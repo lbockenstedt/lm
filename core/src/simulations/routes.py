@@ -1250,6 +1250,57 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except HTTPException:
             return {"status": "SUCCESS", "scenarios": _canon}
 
+    # ── per-client override Control Panel (ports the legacy cs webui-spoke) ──
+    # Live sim-flag toggles per client + Apply / Clear / Apply-to-ALL, forwarded
+    # to the spoke's CS_GET/SET/CLEAR/SET_ALL_CLIENT_OVERRIDES handlers (which
+    # wrap the persisted ClientRegistry store — sticky across reconnects/reboots,
+    # unlike the ephemeral demo flags). "control-all" is registered BEFORE the
+    # {hostname} route so Starlette doesn't capture it as a hostname.
+    @app.post("/sim/api/{tenant}/clients/control-all")
+    async def cs_control_all(request: Request, tenant: str,
+                             tenant_id: str = Depends(get_tenant_id)):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        overrides = body.get("overrides") if isinstance(body, dict) else None
+        if not isinstance(overrides, dict):
+            overrides = {k: v for k, v in (body or {}).items()
+                         if isinstance(body, dict)}
+        return await _cs_forward(tenant_id, "CS_SET_ALL_CLIENT_OVERRIDES",
+                                 {"overrides": overrides})
+
+    @app.get("/sim/api/{tenant}/clients/{hostname}/control")
+    async def cs_get_client_control(tenant: str, hostname: str,
+                                    tenant_id: str = Depends(get_tenant_id)):
+        try:
+            return await _cs_forward(tenant_id, "CS_GET_CLIENT_OVERRIDES",
+                                     {"hostname": hostname})
+        except HTTPException:
+            return {"status": "SUCCESS", "hostname": hostname, "overrides": {}}
+
+    @app.post("/sim/api/{tenant}/clients/{hostname}/control")
+    async def cs_set_client_control(request: Request, tenant: str, hostname: str,
+                                    tenant_id: str = Depends(get_tenant_id)):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        overrides = body.get("overrides") if isinstance(body, dict) else None
+        if not isinstance(overrides, dict):
+            # Also accept the flags inline ({"dns_fail":"on",...}) for parity with
+            # the spoke's HTTP client_api endpoint.
+            overrides = {k: v for k, v in (body or {}).items()
+                         if isinstance(body, dict)}
+        return await _cs_forward(tenant_id, "CS_SET_CLIENT_OVERRIDES",
+                                 {"hostname": hostname, "overrides": overrides})
+
+    @app.delete("/sim/api/{tenant}/clients/{hostname}/control")
+    async def cs_clear_client_control(tenant: str, hostname: str,
+                                      tenant_id: str = Depends(get_tenant_id)):
+        return await _cs_forward(tenant_id, "CS_CLEAR_CLIENT_OVERRIDES",
+                                 {"hostname": hostname})
+
     @app.get("/sim/api/{tenant}/config/simulation-conf")
     async def get_sim_conf(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         # The spoke's actual simulation.conf content, relayed in telemetry.
