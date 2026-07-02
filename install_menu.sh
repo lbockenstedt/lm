@@ -216,9 +216,11 @@ run_generic_install() {
         echo "  (letters, digits, . _ - only)"
     done
     while true; do
-        read -rp "First secret (from the hub / zero-touch PSK): " SPOKE_SECRET || SPOKE_SECRET=""
-        [ -n "$SPOKE_SECRET" ] && break
-        echo "  (required — the spoke needs a secret to authenticate)"
+        read -rp "First secret [optional — Enter to skip and await admin approval]: " SPOKE_SECRET || SPOKE_SECRET=""
+        # No secret is a valid first-install state: the agent connects
+        # unauthenticated and shows up as pending in the hub WebUI until an
+        # admin approves it (then the hub negotiates its session secret).
+        break
     done
     read -rp "Hub root secret [optional, Enter to skip]: " HUB_SECRET || HUB_SECRET=""
 
@@ -226,14 +228,16 @@ run_generic_install() {
     read -rp "Clone-only mode? (install but don't start the service) [y/N]: " clone_ans || clone_ans=""
     [[ "$clone_ans" =~ ^[Yy]$ ]] && CLONE_ONLY=1 || CLONE_ONLY=0
 
-    local generic_args=(--spoke-url "$SPOKE_URL" --id "$SPOKE_ID" --secret "$SPOKE_SECRET")
-    [ -n "$HUB_SECRET" ] && generic_args+=(--hub-secret "$HUB_SECRET")
+    local generic_args=(--spoke-url "$SPOKE_URL" --id "$SPOKE_ID")
+    [ -n "$SPOKE_SECRET" ] && generic_args+=(--secret "$SPOKE_SECRET")
+    [ -n "$HUB_SECRET" ]  && generic_args+=(--hub-secret "$HUB_SECRET")
     [ "$CLONE_ONLY" -eq 1 ] && generic_args+=(--clone)
 
     echo
     echo "${C_BOLD}Installer source :${C_RESET} $CLONE_SRC"
     echo "${C_BOLD}Spoke URL        :${C_RESET} $SPOKE_URL"
     echo "${C_BOLD}Spoke ID         :${C_RESET} $SPOKE_ID"
+    echo "${C_BOLD}Secret           :${C_RESET} $([ -n "$SPOKE_SECRET" ] && echo provided || echo 'none — will await admin approval')"
     echo "${C_BOLD}Clone-only       :${C_RESET} $([ "$CLONE_ONLY" -eq 1 ] && echo yes || echo no)"
     echo
 

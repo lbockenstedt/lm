@@ -89,6 +89,17 @@ python3 -m venv venv >> "$INSTALL_LOG" 2>&1
 
 # 5. Systemd Service Setup
 log_c "⚙️ Configuring systemd service..."
+# Build the ExecStart argument list conditionally so an empty --secret (or
+# --id) is OMITTED entirely rather than passed as a blank token. A blank
+# `--secret ` here would otherwise swallow the next flag (`--spoke-url`) and
+# make argparse error out at service start. No secret is a valid first-install
+# state: the agent connects unauthenticated and awaits admin approval in the
+# hub WebUI (agent.py treats a None secret as "pending approval").
+EXEC_ARGS=(--spoke-url "\"$SPOKE_URL\"")
+[ -n "$SPOKE_ID" ]     && EXEC_ARGS+=(--id "\"$SPOKE_ID\"")
+[ -n "$SPOKE_SECRET" ] && EXEC_ARGS+=(--secret "\"$SPOKE_SECRET\"")
+EXEC_START="$(printf ' %s' "${EXEC_ARGS[@]}")"
+EXEC_START="${EXEC_START:1}"
 cat <<EOF > /etc/systemd/system/lm-generic-agent.service
 [Unit]
 Description=Lab Manager Generic Leaf Agent
@@ -98,7 +109,7 @@ After=network.target
 User=svc_lm
 WorkingDirectory=$ROOT_DIR/generic-agent
 Environment="PYTHONPATH=$ROOT_DIR"
-ExecStart=$ROOT_DIR/generic-agent/venv/bin/python3 $ROOT_DIR/generic-agent/src/agent.py --id $SPOKE_ID --secret $SPOKE_SECRET --spoke-url $SPOKE_URL
+ExecStart=$ROOT_DIR/generic-agent/venv/bin/python3 $ROOT_DIR/generic-agent/src/agent.py ${EXEC_START}
 StandardOutput=append:/var/log/generic-agent.log
 StandardError=append:/var/log/generic-agent.log
 Restart=always
