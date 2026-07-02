@@ -3336,7 +3336,15 @@ def create_app(hub):
         if isinstance(vnc_res, dict):
             if vnc_res.get("status") not in ("SUCCESS", "OK"):
                 hub.unregister_vnc_session(session_id)
-                detail = vnc_res.get("message") or vnc_res.get("error") or "agent refused VNC_START"
+                # "ACCEPTED" (no ticket) = the agent is on the OLD VNC code that
+                # acked fire-and-forget and never returned the Proxmox ticket —
+                # i.e. the agent hasn't self-updated to match the spoke/hub yet.
+                if vnc_res.get("status") == "ACCEPTED":
+                    detail = ("agent returned ACCEPTED (no ticket) — the pxmx agent "
+                              "on the Proxmox host is still on the old VNC code; "
+                              "wait for its self-update or restart lm-pxmx-agent")
+                else:
+                    detail = vnc_res.get("message") or vnc_res.get("error") or "agent refused VNC_START"
                 raise HTTPException(status_code=502, detail=f"failed to start console: {detail}")
             ticket = str(vnc_res.get("ticket") or "")
         return {"session_id": session_id, "ws_token": ws_token,
