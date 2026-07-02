@@ -1174,6 +1174,35 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def get_spoke_config(tenant: str, spoke_id: str, tenant_id: str = Depends(get_tenant_id)):
         return await service.get_spoke_config(tenant_id, spoke_id)
 
+    # ── Kill switch (global sim emergency stop) ───────────────────────────────
+    # The legacy cs webui-spoke had a prominent kill-switch banner + one-click
+    # toggle; the new arch buried kill_switch as a Sim Config field. These give
+    # the hub a read + toggle that forward to the spoke's CS_GET_KILL_SWITCH /
+    # CS_KILL_SWITCH (engine.set_kill_switch persists kill_switch.txt + short-
+    # circuits every sim iteration to KILLED).
+    @app.get("/sim/api/{tenant}/kill-switch")
+    async def cs_get_kill_switch(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
+        if not sid:
+            return {"kill_switch": None, "spoke_connected": False}
+        try:
+            result = await hub.request_response(sid, "CS_GET_KILL_SWITCH", {}, timeout=4.0)
+        except Exception:
+            return {"kill_switch": None, "spoke_connected": False}
+        data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        ks = data.get("kill_switch") if isinstance(data, dict) else None
+        return {"kill_switch": bool(ks), "spoke_connected": True}
+
+    @app.post("/sim/api/{tenant}/kill-switch")
+    async def cs_set_kill_switch(request: Request, tenant: str,
+                                 tenant_id: str = Depends(get_tenant_id)):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        on = bool(body.get("on")) if isinstance(body, dict) else False
+        return await _cs_forward(tenant_id, "CS_KILL_SWITCH", {"on": on})
+
     @app.get("/sim/api/{tenant}/config/simulation-conf")
     async def get_sim_conf(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         # The spoke's actual simulation.conf content, relayed in telemetry.
