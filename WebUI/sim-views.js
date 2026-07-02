@@ -461,7 +461,7 @@ window.csToggleKillSwitch = async function (on) {
             { method: 'POST', body: JSON.stringify({ on }) });
         if (typeof showToast === 'function') showToast(on ? 'Kill switch ON — sims halted' : 'Kill switch OFF — sims resumed', on ? 'error' : 'success');
         loadCSData(currentSubView, currentSubChild, true);
-    } catch (e) { console.error('csToggleKillSwitch: toggle failed', e); alert('Kill-switch toggle failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csToggleKillSwitch: toggle failed', e); if (typeof showToast === 'function') showToast('Kill-switch toggle failed: ' + (e.message || e), 'error'); }
 };
 
 async function csRenderSimulations() {
@@ -949,7 +949,7 @@ window.csDemoTrigger = async function (btn) {
             { method: 'POST', body: JSON.stringify({ scenario }) });
         if (typeof showToast === 'function') showToast(`Demo '${scenario}' triggered on ${host}`, 'success');
         loadCSData('Clients', currentSubChild, true);
-    } catch (e) { console.error('csDemoTrigger: trigger failed', e); alert('Demo trigger failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csDemoTrigger: trigger failed', e); if (typeof showToast === 'function') showToast('Demo trigger failed: ' + (e.message || e), 'error'); }
 };
 
 window.csDemoClear = async function (btn) {
@@ -958,7 +958,7 @@ window.csDemoClear = async function (btn) {
         await csFetch(`/${csTenant()}/demo/client/${encodeURIComponent(host)}/scenario?tenant_id=${csTenant()}`, { method: 'DELETE' });
         if (typeof showToast === 'function') showToast(`Demo cleared on ${host}`, 'success');
         loadCSData('Clients', currentSubChild, true);
-    } catch (e) { console.error('csDemoClear: clear failed', e); alert('Demo clear failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csDemoClear: clear failed', e); if (typeof showToast === 'function') showToast('Demo clear failed: ' + (e.message || e), 'error'); }
 };
 
 // ── per-client override Control Panel (ports the legacy cs webui-spoke) ──────
@@ -1751,8 +1751,8 @@ window.csUOAdd = function () {
     const u = prompt('Username to pin (hostname prefix, e.g. jsmith):');
     if (!u) return;
     const user = u.trim();
-    if (!user || /[\r\n\[\]]/.test(user)) { alert('Invalid username.'); return; }
-    if (csUserOverridesState[user]) { alert('User already exists.'); return; }
+    if (!user || /[\r\n\[\]]/.test(user)) { if (typeof showToast === 'function') showToast('Invalid username.', 'error'); return; }
+    if (csUserOverridesState[user]) { if (typeof showToast === 'function') showToast('User already exists.', 'error'); return; }
     csUserOverridesState[user] = csUOTemplate();
     const c = csEl('cs-uo-cards');
     if (c) c.innerHTML = csUORenderCards();
@@ -2388,10 +2388,10 @@ window.csResetHubConfig = async function () {
         // + csHubConfigCard reload from /hub-config, which now returns the defaults).
         await csRenderSetupProxmox();
         const n = (r && r.pushed_to_spokes != null) ? r.pushed_to_spokes : 0;
-        alert('Reset to defaults. Pushed to ' + n + ' spoke(s).');
+        if (typeof showToast === 'function') showToast('Reset to defaults — pushed to ' + n + ' spoke(s).', 'success');
     } catch (e) {
         console.error('csResetHubConfig: reset failed', e);
-        alert('Reset failed: ' + (e.message || e));
+        if (typeof showToast === 'function') showToast('Reset failed: ' + (e.message || e), 'error');
     }
 };
 
@@ -2437,7 +2437,7 @@ window.csSaveGithub = async function () {
 window.csClearGithub = async function () {
     if (!confirm('Clear GitHub config (removes repo + token from the spoke)?')) return;
     try { await csFetch(`/${csTenant()}/settings/github?tenant_id=${csTenant()}`, { method: 'DELETE' }); csRenderSetupGithub(); }
-    catch (e) { console.error('csClearGithub: clear failed', e); alert('Clear failed: ' + (e.message || e)); }
+    catch (e) { console.error('csClearGithub: clear failed', e); if (typeof showToast === 'function') showToast('Clear failed: ' + (e.message || e), 'error'); }
 };
 
 // ── Security ─────────────────────────────────────────────────────────────────
@@ -2683,9 +2683,9 @@ window.csFleetReclone = async function () {
     try {
         await csFetch(`/${csTenant()}/fleet-reclone?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify({ concurrency: conc }) });
-        alert('Fleet reclone started.');
+        if (typeof showToast === 'function') showToast('Fleet reclone started.', 'success');
         csRenderVmServer();
-    } catch (e) { console.error('csFleetReclone: fleet reclone failed', e); alert('Fleet reclone failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csFleetReclone: fleet reclone failed', e); if (typeof showToast === 'function') showToast('Fleet reclone failed: ' + (e.message || e), 'error'); }
 };
 
 window.csToggleAutoProvision = async function (enabled) {
@@ -2693,14 +2693,14 @@ window.csToggleAutoProvision = async function (enabled) {
         await csFetch(`/${csTenant()}/toggle-auto-provision?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify({ enabled }) });
         csRefreshAutoProvStatus();
-    } catch (e) { console.error('csToggleAutoProvision: toggle failed', e); alert('Toggle failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csToggleAutoProvision: toggle failed', e); if (typeof showToast === 'function') showToast('Toggle failed: ' + (e.message || e), 'error'); }
 };
 
 window.csUpdateAll = async function () {
     try {
         await csFetch(`/${csTenant()}/update-all?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify({}) });
-        alert('Agent update queued.');
-    } catch (e) { console.error('csUpdateAll: update-all failed', e); alert('Update All failed: ' + (e.message || e)); }
+        if (typeof showToast === 'function') showToast('Agent update queued.', 'success');
+    } catch (e) { console.error('csUpdateAll: update-all failed', e); if (typeof showToast === 'function') showToast('Update All failed: ' + (e.message || e), 'error'); }
 };
 
 // ── VMs (per-host) ──────────────────────────────────────────────────────────
@@ -2788,12 +2788,12 @@ window.csVmAction = async function (vmid, action) {
             { method: 'POST', body: JSON.stringify({ action, args }) });
         csVmFlash(action + ' queued');
         setTimeout(() => loadCSData('VM Server', currentSubChild, true), 800);
-    } catch (e) { console.error('csVmAction: ' + action + ' failed', e); alert(action + ' failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csVmAction: ' + action + ' failed', e); if (typeof showToast === 'function') showToast(action + ' failed: ' + (e.message || e), 'error'); }
 };
 
 window.csVmBulk = async function (action) {
     const ids = Array.from(document.querySelectorAll('.cs-vm-sel:checked')).map(c => c.dataset.vmid);
-    if (!ids.length) { alert('Select one or more VMs first.'); return; }
+    if (!ids.length) { if (typeof showToast === 'function') showToast('Select one or more VMs first.', 'info'); return; }
     if (action === 'delete_vm') await csExpirePendingForTarget();
     try {
         for (const vmid of ids) {
@@ -2805,7 +2805,7 @@ window.csVmBulk = async function (action) {
         }
         csVmFlash(`${action} queued for ${ids.length} VM(s)`);
         setTimeout(() => loadCSData('VM Server', currentSubChild, true), 1000);
-    } catch (e) { console.error('csVmBulk: ' + action + ' bulk failed', e); alert(action + ' bulk failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csVmBulk: ' + action + ' bulk failed', e); if (typeof showToast === 'function') showToast(action + ' bulk failed: ' + (e.message || e), 'error'); }
 };
 
 // Best-effort expiry of in-flight commands for the selected proxmox host before
@@ -2994,7 +2994,7 @@ window.csUsbVidpid = async function (vid, pid, action, type) {
             // dongle's dropdown just re-certifies with the new type.
             const t = String(type || '').trim().toLowerCase();
             if (t !== 'wireless' && t !== 'wired' && t !== 'storage' && t !== 'other') {
-                alert('Select a type (wired or wireless) before certifying.');
+                if (typeof showToast === 'function') showToast('Select a type (wired or wireless) before certifying.', 'info');
                 return;
             }
             body.type = t;
@@ -3002,7 +3002,7 @@ window.csUsbVidpid = async function (vid, pid, action, type) {
         await csFetch(`/${csTenant()}/usb-vidpids?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         csVmFlash(action + ' queued for ' + vid + ':' + pid);
         setTimeout(() => loadCSData('VM Server', currentSubChild, true), 800);
-    } catch (e) { console.error('csUsbVidpid: usb action failed', e); alert('USB action failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csUsbVidpid: usb action failed', e); if (typeof showToast === 'function') showToast('USB action failed: ' + (e.message || e), 'error'); }
 };
 
 // Per-row Certify from the Uncertified table: reads the row's type <select>
@@ -3011,7 +3011,7 @@ window.csUsbCertifyRow = async function (btn, vid, pid) {
     const cell = btn.closest('td');
     const sel = cell && cell.querySelector('.cs-usb-row-type');
     const type = sel ? sel.value : '';
-    if (!type) { alert('Select a type (wired or wireless) before certifying.'); return; }
+    if (!type) { if (typeof showToast === 'function') showToast('Select a type (wired or wireless) before certifying.', 'info'); return; }
     await csUsbVidpid(vid, pid, 'certify', type);
 };
 
@@ -3089,7 +3089,7 @@ window.csSendCommand = async function () {
     try {
         await csFetch(`/${csTenant()}/proxmx/command?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify({ action, target, args, type }) });
         csRenderVmServerQueue();
-    } catch (e) { console.error('csSendCommand: send failed', e); alert('Send failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csSendCommand: send failed', e); if (typeof showToast === 'function') showToast('Send failed: ' + (e.message || e), 'error'); }
 };
 
 window.csClearCommands = async function () {
@@ -3097,7 +3097,7 @@ window.csClearCommands = async function () {
     try {
         await csFetch(`/${csTenant()}/proxmx/commands?tenant_id=${csTenant()}`, { method: 'DELETE' });
         csRenderVmServerQueue();
-    } catch (e) { console.error('csClearCommands: clear failed', e); alert('Clear failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csClearCommands: clear failed', e); if (typeof showToast === 'function') showToast('Clear failed: ' + (e.message || e), 'error'); }
 };
 
 window.csCmdDelete = async function (btn) {
@@ -3107,7 +3107,7 @@ window.csCmdDelete = async function (btn) {
     try {
         await csFetch(`/${csTenant()}/proxmx/commands/${encodeURIComponent(id)}?tenant_id=${csTenant()}`, { method: 'DELETE' });
         csRenderVmServerQueue();
-    } catch (e) { console.error('csCmdDelete: delete failed', e); alert('Delete failed: ' + (e.message || e)); }
+    } catch (e) { console.error('csCmdDelete: delete failed', e); if (typeof showToast === 'function') showToast('Delete failed: ' + (e.message || e), 'error'); }
 };
 
 // ── Details (node header + headline stats + telemetry tile grid + raw dump) ─
@@ -3229,10 +3229,10 @@ window.CS_CHILD_RENDERERS['Clients::T1']  = function () { return csRenderClients
 window.CS_CHILD_RENDERERS['Clients::T2']  = function () { return csRenderClients('t2'); };
 
 window.csOpenVmConsole = function (spokeId) {
-    alert(`VM console for ${spokeId} is wired in Phase 5 (noVNC over /sim/ws/console/{sessionId}).`);
+    if (typeof showToast === 'function') showToast(`VM console for ${spokeId} is wired in Phase 5 (noVNC over /sim/ws/console/{sessionId}).`, 'info');
 };
 window.csOpenSpokeShell = function (spokeId) {
-    alert(`Spoke shell for ${spokeId} is wired in Phase 5 (xterm.js over /sim/api/{tenant}/spokes/{spoke}/shell).`);
+    if (typeof showToast === 'function') showToast(`Spoke shell for ${spokeId} is wired in Phase 5 (xterm.js over /sim/api/{tenant}/spokes/{spoke}/shell).`, 'info');
 };
 
 /* ===========================================================================

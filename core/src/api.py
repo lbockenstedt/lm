@@ -2333,8 +2333,16 @@ def create_app(hub):
         if not spoke_id:
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
         try:
+            # NETBOX_PROVISION_CUSTOM_FIELDS runs _ensure_custom_fields(force=True)
+            # over the full CUSTOM_FIELDS_SPEC — get-or-creating each field then
+            # verifying/attaching content_types. That is many NetBox API calls
+            # (17+ fields × create+attach) and routinely exceeds the 5s default
+            # request_response timeout, surfacing as "Timed out waiting for spoke
+            # response". Give it a generous window; the UI fires-and-forgets with
+            # a "started" toast and shows "completed" when this resolves.
             result = await hub.request_response(spoke_id,
-                                                "NETBOX_PROVISION_CUSTOM_FIELDS", {})
+                                                "NETBOX_PROVISION_CUSTOM_FIELDS", {},
+                                                timeout=120.0)
             data = _unwrap_spoke(result)
             if data.get("status") not in ("SUCCESS", "PARTIAL"):
                 raise HTTPException(status_code=502,
