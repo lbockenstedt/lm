@@ -6829,8 +6829,11 @@ function pxmxTh(cols) {
 }
 
 // VM table — shared by the node-detail view and the no-nodes fallback.
+// Each VM is a 2-line entry: line 1 = identity (Cluster/Host, VMID, Name, IP,
+// Clone action); line 2 = metadata (Type, Status, CPU, Memory, Pool). Cluster
+// and Host(node) are merged into one "Cluster / Host" column as "<cluster>/<node>".
 function pxmxVmTableHtml(vms) {
-    const cols = ['Cluster / Host', 'Node', 'VMID', 'Name', 'Pool', 'IP Address', 'Type', 'Status', 'CPU %', 'RAM', ''];
+    const cols = ['Cluster / Host', 'VMID', 'Name', 'IP Address', ''];
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const tplPools = window._pxmxTemplatePools || [];
     const isTemplate = vm => !!(vm.pool && tplPools.includes(String(vm.pool).toLowerCase()));
@@ -6845,27 +6848,38 @@ function pxmxVmTableHtml(vms) {
         // or when the guest agent is absent/unresponsive → show '—'.
         const ipList = Array.isArray(vm.ips) ? vm.ips : [];
         const ipCell = ipList.length ? escapeHtml(ipList.join(', ')) : '—';
-        // pool: Proxmox resource pool the VM belongs to (best-effort, from the
-        // agent's /pools reverse-map). Blank when the VM is in no pool.
+        // Cluster/Host merged: Proxmox node is the host, shown as "<cluster>/<node>".
+        const clusterHost = escapeHtml(`${vm.cluster || '—'}/${vm.node || '—'}`);
         const poolCell = vm.pool ? escapeHtml(vm.pool) : '—';
+        const uid = escJs(vm.unique_id || '');
         const cloneBtn = isTemplate(vm)
-            ? `<button onclick="event.stopPropagation(); pxmxCloneVm('${escJs(vm.unique_id)}')" title="Clone this template to a new VM" class="px-2 py-1 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>`
+            ? `<button onclick="event.stopPropagation(); pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-2 py-1 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>`
             : '';
-        return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${escJs(vm.unique_id)}')">
-            <td class="px-4 py-2 text-xs text-slate-500 font-mono">${vm.cluster || '—'}</td>
-            <td class="px-4 py-2 text-xs">${vm.node || '—'}</td>
-            <td class="px-4 py-2 font-mono text-xs font-bold">${vm.vmid}</td>
-            <td class="px-4 py-2 font-medium">${vm.name || '—'}</td>
-            <td class="px-4 py-2 text-xs text-slate-600">${poolCell}</td>
-            <td class="px-4 py-2 font-mono text-xs text-slate-600">${ipCell}</td>
-            <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${typeCls}">${vm.type || 'vm'}</span></td>
-            <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${runCls}">${vm.status}</span></td>
-            <td class="px-4 py-2 text-xs">${vm.cpu ?? '—'}%</td>
-            <td class="px-4 py-2 text-xs">${memGb} GB</td>
-            <td class="px-4 py-2">${cloneBtn}</td>
-        </tr>`;
+        // Line 2 metadata: Type + Status keep their colored pill badges; CPU,
+        // Memory and Pool are labeled text. Wrapped so it folds on narrow widths.
+        const line2 = `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+            <span class="px-2 py-0.5 rounded-full font-medium ${typeCls}">${vm.type || 'vm'}</span>
+            <span class="px-2 py-0.5 rounded-full font-medium ${runCls}">${vm.status}</span>
+            <span>CPU ${vm.cpu ?? '—'}%</span>
+            <span>Memory ${memGb} GB</span>
+            <span>Pool ${poolCell}</span>
+        </div>`;
+        // One <tbody class="group"> per VM so both lines highlight together on
+        // hover and read as a single entry; both rows open the VM detail panel.
+        return `<tbody class="group">
+            <tr class="border-b border-slate-50 group-hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${uid}')">
+                <td class="px-4 py-2 text-xs text-slate-500 font-mono">${clusterHost}</td>
+                <td class="px-4 py-2 font-mono text-xs font-bold">${vm.vmid}</td>
+                <td class="px-4 py-2 font-medium">${escapeHtml(vm.name || '—')}</td>
+                <td class="px-4 py-2 font-mono text-xs text-slate-600">${ipCell}</td>
+                <td class="px-4 py-2">${cloneBtn}</td>
+            </tr>
+            <tr class="border-b border-slate-100 group-hover:bg-slate-50 cursor-pointer" onclick="openVmDetail('${uid}')">
+                <td colspan="5" class="px-4 pb-2 pt-0">${line2}</td>
+            </tr>
+        </tbody>`;
     }).join('');
-    return pxmxTableWrap(pxmxTh(cols) + `<tbody>${rows}</tbody>`);
+    return pxmxTableWrap(pxmxTh(cols) + rows);
 }
 
 // Clicking a VM row opens a details panel with Start/Stop/Restart/Snapshot
