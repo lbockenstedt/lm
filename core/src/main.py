@@ -22,6 +22,16 @@ secret (``_redact``, ``_REDACT_COMMANDS``). The HTTP/WS surface itself lives in
 plumbing. Audience: Hub developers.
 """
 
+# ── Dependency self-heal (must run BEFORE the third-party imports below) ──────
+# If a declared requirement is missing from the hub venv (skewed update, partial
+# install, wiped venv), install it now so the `import httpx`/`import psutil`/
+# `import websockets` lines below don't crash at import time. Cheap when all deps
+# are present (no I/O); best-effort never-raises. See dep_guard.py.
+import os as _os
+from dep_guard import ensure_requirements as _ensure_requirements
+_ensure_requirements(_os.path.join(_os.path.dirname(__file__), "..", "requirements.txt"))
+del _os, _ensure_requirements
+
 import asyncio
 import base64
 import datetime as _dt

@@ -11,6 +11,11 @@ import sys
 # works without a real .env. Never use this key in production.
 os.environ.setdefault("LM_FERNET_KEY", "REDACTED_TEST_FERNET_KEY=")
 
+# dep_guard.ensure_requirements runs at main.py import time. A dev test box may
+# be missing optional deps (e.g. zeroconf) — never attempt a real `pip install`
+# into the test interpreter. Production never sets this.
+os.environ.setdefault("LM_DEP_GUARD_DISABLE", "1")
+
 SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
