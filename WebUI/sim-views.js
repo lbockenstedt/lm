@@ -188,6 +188,8 @@ const SIM_ROUTES = {
     csRenderVmServerQueue:       { m: 'GET',    p: '/{tenant}/proxmx/commands',                  api: 'cs_list_commands' },
     csSendCommand:               { m: 'POST',   p: '/{tenant}/proxmx/command',                   api: 'cs_enqueue_command' },
     csClearCommands:             { m: 'DELETE', p: '/{tenant}/proxmx/commands',                  api: 'cs_clear_commands' },
+    csDeleteCommand:             { m: 'DELETE', p: '/{tenant}/proxmx/commands/{cmd_id}',          api: 'cs_delete_command' },
+    csExpirePending:             { m: 'DELETE', p: '/{tenant}/proxmx/commands/pending',           api: 'cs_expire_pending' },
 
     // ── Spoke management ──
     csRenderSpokeManagement:     { m: 'GET',    p: '/spokes',                                    api: 'get_spokes_list' },
@@ -2436,6 +2438,9 @@ window.csVmAction = async function (vmid, action) {
     const args = { vmid: Number(vmid) };
     if (v.type) args.vm_type = v.type;
     const sid = encodeURIComponent(csVmSelectedSpoke);
+    // Before destroying a VM, expire in-flight commands for its host so a
+    // queued start/reclone doesn't fire against a gone VM (best-effort).
+    if (action === 'delete_vm') await csExpirePendingForTarget();
     try {
         await csFetch(`/${csTenant()}/spokes/${sid}/proxmox-command?tenant_id=${csTenant()}`,
             { method: 'POST', body: JSON.stringify({ action, args }) });
@@ -2447,6 +2452,7 @@ window.csVmAction = async function (vmid, action) {
 window.csVmBulk = async function (action) {
     const ids = Array.from(document.querySelectorAll('.cs-vm-sel:checked')).map(c => c.dataset.vmid);
     if (!ids.length) { alert('Select one or more VMs first.'); return; }
+    if (action === 'delete_vm') await csExpirePendingForTarget();
     try {
         for (const vmid of ids) {
             const v = (window._csVmByVmid && window._csVmByVmid[vmid]) || {};
@@ -2459,6 +2465,16 @@ window.csVmBulk = async function (action) {
         setTimeout(() => loadCSData('VM Server', currentSubChild, true), 1000);
     } catch (e) { console.error('csVmBulk: ' + action + ' bulk failed', e); alert(action + ' bulk failed: ' + (e.message || e)); }
 };
+
+// Best-effort expiry of in-flight commands for the selected proxmox host before
+// a VM teardown. Swallowed on failure — the delete still proceeds.
+async function csExpirePendingForTarget() {
+    const host = (typeof csVmSelectedHost === 'function' && csVmSelectedHost()) || 'proxmox';
+    try {
+        await csFetch(`/${csTenant()}/proxmx/commands/pending?target=${encodeURIComponent(host)}&tenant_id=${csTenant()}`,
+            { method: 'DELETE' });
+    } catch (e) { console.warn('csExpirePendingForTarget: best-effort expiry failed', e); }
+}
 
 function csVmFlash(msg) {
     const el = csEl('cs-vm-bulk-msg'); if (el) { el.textContent = msg; setTimeout(() => { if (el) el.textContent = ''; }, 2500); }
@@ -2699,6 +2715,8 @@ async function csRenderVmServerQueue() {
       <td class="px-3 py-2">${csStatusBadge(c.status || 'pending')}</td>
       <td class="px-3 py-2 text-slate-400 text-xs">${csEscape(c.age_secs != null ? c.age_secs + 's' : '—')}</td>
       <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(c.message || '—')}</td>
+      <td class="px-3 py-2"><button data-cs-cmd-id="${csEscape(c.id || '')}" onclick="csCmdDelete(this)"
+        class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-[11px] font-bold">Delete</button></td>
     </tr>`).join('');
     const sendForm = `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Send Proxmox Command</p>
@@ -2716,7 +2734,7 @@ async function csRenderVmServerQueue() {
       </div></div>`;
     csSet(`<div>${sendForm}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Queue (${cmds.length})</p>
-      ${csTable(['ID', 'Action', 'Target', 'Status', 'Age', 'Message'], rows)}
+      ${csTable(['ID', 'Action', 'Target', 'Status', 'Age', 'Message', 'Actions'], rows)}
     </div>`);
 }
 
@@ -2738,6 +2756,16 @@ window.csClearCommands = async function () {
         await csFetch(`/${csTenant()}/proxmx/commands?tenant_id=${csTenant()}`, { method: 'DELETE' });
         csRenderVmServerQueue();
     } catch (e) { console.error('csClearCommands: clear failed', e); alert('Clear failed: ' + (e.message || e)); }
+};
+
+window.csCmdDelete = async function (btn) {
+    const id = btn.dataset.csCmdId;
+    if (!id) return;
+    if (!confirm('Delete this command?')) return;
+    try {
+        await csFetch(`/${csTenant()}/proxmx/commands/${encodeURIComponent(id)}?tenant_id=${csTenant()}`, { method: 'DELETE' });
+        csRenderVmServerQueue();
+    } catch (e) { console.error('csCmdDelete: delete failed', e); alert('Delete failed: ' + (e.message || e)); }
 };
 
 // ── Details (node header + headline stats + telemetry tile grid + raw dump) ─

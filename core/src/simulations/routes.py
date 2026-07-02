@@ -1426,6 +1426,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                 tenant_id: str = Depends(get_tenant_id)):
         return await _cs_forward(tenant_id, "CS_CLEAR_COMMANDS", {"target": target or ""})
 
+    @app.delete("/sim/api/{tenant}/proxmx/commands/pending")
+    async def cs_expire_pending(tenant: str, target: str,
+                                tenant_id: str = Depends(get_tenant_id)):
+        """Expire in-flight commands for one target before VM destroy so they
+        don't fire against a gone VM. Registered BEFORE the ``{cmd_id}`` route so
+        the literal ``pending`` segment isn't captured as a command id."""
+        if not target:
+            raise HTTPException(status_code=400, detail="missing 'target'")
+        return await _cs_forward(tenant_id, "CS_CLEAR_COMMANDS", {"target": target})
+
+    @app.delete("/sim/api/{tenant}/proxmx/commands/{cmd_id}")
+    async def cs_delete_command(tenant: str, cmd_id: str,
+                                tenant_id: str = Depends(get_tenant_id)):
+        """Remove a single queued command (per-row delete)."""
+        return await _cs_forward(tenant_id, "CS_DELETE_COMMAND", {"id": cmd_id})
+
     @app.post("/sim/api/{tenant}/usb-vidpids")
     async def cs_usb_vidpids(request: Request, tenant: str,
                             tenant_id: str = Depends(get_tenant_id)):
