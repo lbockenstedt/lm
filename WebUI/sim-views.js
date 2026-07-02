@@ -2003,8 +2003,8 @@ async function csSetupAutoProvConfigCard() {
         else input = `<input id="cs-ap-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         return `${label}${input}</label>`;
     }).join('');
-    const note = enabled ? '<span class="text-slate-400">Hub-owned knobs; pushed to every spoke on save.</span>'
-        : '<span class="text-amber-600">Hub config is not enabled — values save but are not pushed to spokes until enabled in the Hub Config card below.</span>';
+    const note = enabled ? '<span class="text-slate-400">Hub-owned knobs; pushed to every spoke on save. Turning Auto-Provision VMs On also enables hub config (mirrors the Overview/USB toggle).</span>'
+        : '<span class="text-amber-600">Hub config is not enabled — saving pushes only when Auto-Provision VMs is On (which enables hub config) or after you enable it in the Hub Config card below.</span>';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">VM Auto-Provisioning</h3>
       <p class="text-xs text-slate-400 mb-3">${note}</p>
@@ -2034,12 +2034,24 @@ window.csSaveAutoProvConfig = async function () {
         // watchdog group, VLANs, VMID range, …).
         const cur = await csFetch('/tenant/' + csTenant() + '/hub-config');
         const merged = Object.assign({}, (cur && cur.hub_config) || {}, config);
+        // Mirror the Overview toggle's semantics (POST /toggle-auto-provision,
+        // routes.py): turning Auto-Provision VMs On must also enable hub_config
+        // so the set_hub_config route actually pushes to spokes (it only pushes
+        // `if enabled`, routes.py:996). Without this, saving On here wrote the
+        // key but never pushed it → the Overview checkbox showed On yet the
+        // provision loop never started (the Setup dropdown looked "not linked"
+        // to the real auto-provision the Overview checkbox controls).
+        const autoProvOn = String(merged.usb_auto_provision || '').toLowerCase() === 'on';
+        const hcEnabled = !!(cur && cur.hub_config_enabled) || autoProvOn;
         const body = {
-            hub_config_enabled: !!(cur && cur.hub_config_enabled),
+            hub_config_enabled: hcEnabled,
             hub_config: merged
         };
         const r = await csFetch('/tenant/' + csTenant() + '/hub-config', { method: 'PUT', body: JSON.stringify(body) });
         if (msg) { msg.textContent = '✅ Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).'; msg.className = 'ml-3 text-xs text-green-600'; }
+        // Keep the Overview/USB auto-provision checkbox + status in sync with
+        // this save (same underlying key) so the two controls never drift.
+        try { if (typeof csRefreshAutoProvStatus === 'function') csRefreshAutoProvStatus(); } catch (_) {}
     } catch (e) {
         console.error('csSaveAutoProvConfig: hub-config push failed', e);
         if (msg) { msg.textContent = '❌ ' + e.message; msg.className = 'ml-3 text-xs text-red-500'; }
