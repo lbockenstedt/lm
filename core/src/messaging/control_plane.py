@@ -150,6 +150,118 @@ class BaseControlPlane:
         )
         return True
 
+    # ------------------------------------------------------------------
+    # Failed-update rollback (shared by all spokes — cs + pxmx)
+    # ------------------------------------------------------------------
+    # Mirrors the hub's update_recovery state machine: snapshot the code before
+    # the swap, write a pending-update manifest, schedule an EXTERNAL health-gate
+    # watchdog (lm-component-update-restart), and exit. The watchdog runs outside
+    # our cgroup (via systemd-run), waits for a ``healthy`` marker to re-appear,
+    # and if the new code crashes at boot (no marker within the deadline, or a
+    # systemd crash-loop) rolls back — ``git reset --hard <from_commit>`` for a
+    # spoke (a git repo) — marks the commit bad, and restarts us. Without it a
+    # bad update crash-loops forever under Restart=always.
+    #
+    # State lives in a per-spoke dir (/var/lib/lm/<spoke_id>/) separate from the
+    # hub's /var/lib/lm/state so a co-located cs box never collides. The watchdog
+    # script + sudoers land only on a full installer re-run (bootstrap caveat:
+    # auto-update pulls code but not install-script/systemd changes); until then
+    # the watchdog Popen fails silently and we degrade to the pre-rollback
+    # behavior (restart, no rollback) — never fatal.
+
+    def _spoke_state_dir(self) -> str:
+        """Per-spoke recovery state dir (``/var/lib/lm/<spoke_id>/``)."""
+        return os.path.join("/var/lib/lm", self.spoke_id)
+
+    def _clear_healthy_marker(self) -> None:
+        """Drop a stale ``healthy`` marker on boot so a fresh start must re-prove
+        health (the watchdog treats the marker as the positive health signal)."""
+        try:
+            m = os.path.join(self._spoke_state_dir(), "healthy")
+            if os.path.exists(m):
+                os.remove(m)
+        except Exception:  # pragma: no cover - state dir not writable / missing
+            pass
+
+    def _touch_healthy_marker(self) -> None:
+        """Mark the spoke healthy after the hub mutual-auth succeeds — the
+        watchdog's positive health signal (presence => new code booted + authed)."""
+        try:
+            d = self._spoke_state_dir()
+            os.makedirs(d, exist_ok=True)
+            open(os.path.join(d, "healthy"), "w").close()
+        except Exception as e:  # pragma: no cover - state dir not writable
+            logger.debug("could not write healthy marker: %s", e)
+
+    def _snapshot_for_update(self, head_before: str, repo_root: str):
+        """Pre-swap code snapshot (belt-and-suspenders — ``git reset --hard`` is
+        the primary rollback for a git repo). Returns the backup dir or None."""
+        try:
+            from update_recovery import snapshot_code
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            return snapshot_code(repo_root, ts, tree_list=["src"],
+                                 state_dir=self._spoke_state_dir())
+        except Exception as e:
+            logger.warning("Pre-update snapshot failed (rollback disabled): %s", e)
+            return None
+
+    def _is_known_bad_commit(self, commit: str) -> bool:
+        """True if ``commit`` was rolled back before (skip re-pulling it)."""
+        if not commit:
+            return False
+        try:
+            from update_recovery import is_bad_commit
+            return bool(is_bad_commit(commit, state_dir=self._spoke_state_dir()))
+        except Exception:  # pragma: no cover - update_recovery unavailable
+            return False
+
+    def _clear_pending_update(self) -> None:
+        try:
+            from update_recovery import clear_pending
+            clear_pending(state_dir=self._spoke_state_dir())
+        except Exception:  # pragma: no cover
+            pass
+
+    def _prepare_restart_with_watchdog(self, head_before: str, head_after: str,
+                                       backup_dir, repo_root: str,
+                                       reason: str = "update",
+                                       deadline: int = 90) -> bool:
+        """Write the pending-update manifest, schedule the external health-gate
+        watchdog, and signal a service restart. Returns True; the caller MUST
+        then flush queued logs (sync or async per its context) and
+        ``os._exit(3)``. Best-effort watchdog: a missing script / no sudoers
+        (pre-reinstall box) fails silently — we still restart via os._exit(3)
+        with no rollback, exactly the pre-rollback behavior."""
+        state_dir = self._spoke_state_dir()
+        service_unit = self.get_service_name()
+        recovery_py = None
+        try:
+            from update_recovery import write_pending
+            import update_recovery as _ur
+            recovery_py = getattr(_ur, "__file__", None)
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            write_pending(backup_dir or "", from_version=(head_before or "")[:12],
+                          to_version=(head_after or "")[:12], ts=ts,
+                          state_dir=state_dir,
+                          extra={"from_commit": head_before, "to_commit": head_after,
+                                 "service_unit": service_unit, "deadline": deadline})
+        except Exception as e:
+            logger.warning("write_pending failed (rollback disabled): %s", e)
+        try:
+            cmd = ["sudo", "-n", "/usr/local/bin/lm-component-update-restart",
+                   "--unit", service_unit, "--state-dir", state_dir,
+                   "--repo-root", repo_root, "--deadline", str(deadline)]
+            if recovery_py:
+                cmd += ["--recovery-py", recovery_py]
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:  # pragma: no cover - sudo missing / not permitted
+            logger.debug("could not schedule update watchdog: %s", e)
+        return self._prepare_service_restart(reason=reason)
+
     def perform_self_update_check(self) -> bool:
         try:
             cwd = self._repo_root()
@@ -169,12 +281,32 @@ class BaseControlPlane:
             if behind_count <= 0:
                 logger.debug("Self-update check: already up to date.")
                 return False
+            # Snapshot the current code + capture HEAD BEFORE the pull so the
+            # external watchdog can roll back (git reset --hard head_before) if
+            # the new code crashes at boot. belt-and-suspenders: the file snapshot
+            # of src/ is the fallback if the working tree is dirty/broken.
+            head_before = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+            backup_dir = self._snapshot_for_update(head_before, cwd)
             logger.info("Self-update check: %d new commit(s) upstream; pulling.", behind_count)
             pull = self._run_git(["pull", "--rebase", "--autostash", "origin"], cwd=cwd)
             if pull.returncode != 0:
                 logger.warning("Self-update check failed: git pull error: %s", (pull.stderr or pull.stdout or "").strip())
                 return False
             logger.info("Self-update check: pull completed successfully.")
+            head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+            if head_after == head_before:
+                logger.debug("Self-update: no change after pull.")
+                return False
+            # Skip a known-bad commit (rolled back before): reset to head_before
+            # and stay put rather than crash-looping into the same broken code.
+            if self._is_known_bad_commit(head_after):
+                logger.warning(
+                    "Self-update: new HEAD %s is a known-bad commit (rolled back "
+                    "before); resetting to %s and skipping this update.",
+                    head_after[:8], head_before[:8])
+                self._run_git(["reset", "--hard", head_before], cwd=cwd)
+                self._clear_pending_update()
+                return False
             # Re-install requirements so new deps are available before restart
             req_file = os.path.join(cwd, "requirements.txt")
             venv_pip = os.path.join(cwd, "venv", "bin", "pip")
@@ -185,13 +317,15 @@ class BaseControlPlane:
                     logger.warning("Self-update: pip install failed: %s", (pip_r.stderr or b"").decode())
                 else:
                     logger.info("Self-update: requirements refreshed.")
-            # Restart the service to load new code. _prepare_service_restart no
-            # longer spawns `systemctl restart` (that child died in our own cgroup
-            # mid-restart, stranding the spoke offline — see its docstring). We
-            # flush queued log entries (including the "reloading ..." line) to the
-            # hub, then exit NON-ZERO so systemd's Restart=on-failure reliably
-            # relaunches us. A clean exit (0) would NOT be revived.
-            if not self._prepare_service_restart(reason="self-update"):
+            # Restart the service to load new code. _prepare_restart_with_watchdog
+            # writes the pending manifest + schedules the external health-gate
+            # watchdog (lm-component-update-restart) so a bad update is rolled
+            # back instead of crash-looping forever; then we flush queued log
+            # entries (including the "reloading ..." line) to the hub and exit
+            # NON-ZERO so systemd's Restart=on-failure reliably relaunches us.
+            # A clean exit (0) would NOT be revived.
+            if not self._prepare_restart_with_watchdog(
+                    head_before, head_after, backup_dir, cwd, reason="self-update"):
                 return False
             self._flush_log_relay_sync()
             os._exit(3)
@@ -340,6 +474,11 @@ class BaseControlPlane:
 
     async def run(self):
         """Main loop for the control plane."""
+        # Clear any stale healthy marker from a prior boot — a fresh start must
+        # re-prove health (re-auth with the hub) before the update watchdog treats
+        # it as the "new code booted OK" signal. Without this, a crash-looping new
+        # version could inherit a stale marker and the watchdog would never roll back.
+        self._clear_healthy_marker()
         await self._resolve_hub_url()
         logger.info(f"Starting Control Plane in HUB MODE -> {self.hub_url}")
         self.start_updater_worker()
@@ -443,6 +582,11 @@ class BaseControlPlane:
 
                         if verified:
                             logger.info("Hub identity verified successfully.")
+                            # New code booted AND authed with the hub → mark healthy.
+                            # The external update watchdog treats this marker as the
+                            # "new version is good" signal; its absence past the
+                            # deadline triggers a rollback.
+                            self._touch_healthy_marker()
                             await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                         else:
                             # All known hub_secrets failed to verify the hub's
@@ -457,11 +601,18 @@ class BaseControlPlane:
                             logger.warning("Hub identity verification failed for all known secrets — discarding stale hub_secret(s), falling back to zero-touch (pending approval).")
                             self.hub_secrets = []
                             self._hub_secret_warned = True
+                            # New code booted + reached the auth exchange (pending
+                            # admin approval is NOT a code failure) → mark healthy.
+                            self._touch_healthy_marker()
                             await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                     else:
                         if not self._hub_secret_warned:
                             logger.warning("Hub secrets not configured. Skipping Hub identity verification (Insecure).")
                             self._hub_secret_warned = True
+                        # New code booted + reached the auth exchange → mark healthy
+                        # (the watchdog rolls back on a boot crash-loop, not on the
+                        # admin-approval / hub-secret state).
+                        self._touch_healthy_marker()
                         await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
                 else:
                     logger.error(f"Unexpected response during Hub verification: {hub_proof.get('status')}")
@@ -735,8 +886,11 @@ class BaseControlPlane:
                 # 3. Abort any interrupted rebase before pulling
                 self._run_git(["rebase", "--abort"], cwd=cwd)
 
-                # 4. Snapshot HEAD before pull
+                # 4. Snapshot HEAD + the code tree before pull so the external
+                # watchdog can roll back (git reset --hard head_before) if the new
+                # code crashes at boot. The src/ file snapshot is belt-and-suspenders.
                 head_before = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+                backup_dir = self._snapshot_for_update(head_before, cwd)
 
                 # 5. Fetch + pull; on rebase conflict reset hard to origin
                 subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True)
@@ -749,21 +903,31 @@ class BaseControlPlane:
 
                 head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
 
-                # 5. Only restart if new commits were pulled
-                service_name = self.get_service_name()
+                # 6. Only restart if new commits were pulled
                 if head_after != head_before:
-                    # Reload to run the new code. _prepare_service_restart no
-                    # longer spawns `systemctl restart` — that client ran inside
-                    # this spoke's own cgroup, so systemd's restart stop-phase
-                    # SIGTERM'd the cgroup and killed it mid-transaction (before
-                    # the start-phase committed), leaving the unit deactivated
-                    # with code=killed/signal=TERM which Restart=on-failure does
-                    # NOT revive — stranding the spoke "never connected", the
-                    # recurring outage this fixes. Instead we flush logs and
-                    # exit NON-ZERO (3); systemd sees a failure exit and
-                    # Restart=on-failure reliably relaunches us. No subprocess in
-                    # the cgroup => no race, no sudo dependency.
-                    if self._prepare_service_restart(reason="spoke-update"):
+                    # Skip a known-bad commit (rolled back before): reset to
+                    # head_before and stay put rather than crash-looping into the
+                    # same broken code.
+                    if self._is_known_bad_commit(head_after):
+                        logger.warning(
+                            "SPOKE_UPDATE: new HEAD %s is a known-bad commit "
+                            "(rolled back before); resetting to %s and skipping.",
+                            head_after[:8], head_before[:8])
+                        self._run_git(["reset", "--hard", head_before], cwd=cwd)
+                        self._clear_pending_update()
+                        return {"status": "SUCCESS",
+                                "message": f"Update {head_after[:8]} is marked bad; stayed on {head_before[:8]}"}
+                    # Reload to run the new code. _prepare_restart_with_watchdog
+                    # writes the pending manifest + schedules the external
+                    # health-gate watchdog (lm-component-update-restart) so a bad
+                    # update is rolled back instead of crash-looping forever. We
+                    # then flush logs and exit NON-ZERO (3); systemd sees a
+                    # failure exit and Restart=on-failure reliably relaunches us.
+                    # (The old `systemctl restart` child died in our own cgroup
+                    # mid-restart, stranding the spoke offline — see
+                    # _prepare_service_restart's docstring.)
+                    if self._prepare_restart_with_watchdog(
+                            head_before, head_after, backup_dir, cwd, reason="spoke-update"):
                         await self._flush_log_relay_async()
                         os._exit(3)
                     return {"status": "SUCCESS",

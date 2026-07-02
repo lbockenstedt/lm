@@ -508,9 +508,18 @@ class UpdatePipelineMixin:
                     # helper (lm-update-restart) can roll back if the new version
                     # fails to reach /status. The pending manifest tells it where
                     # the backup lives and which version to mark bad on rollback.
+                    # dns/+dhcp/ are the in-repo spokes the hub restarts itself
+                    # (update_pipeline.py:596 systemctl restart lm-dns/lm-dhcp) —
+                    # include them in the snapshot so a broken spoke code swap is
+                    # captured for recovery too (the automated hub rollback
+                    # restores core/src+WebUI; dns/dhcp are preserved on disk for
+                    # operator/manual restore since their restart path bypasses
+                    # the spoke's own BaseControlPlane rollback).
                     try:
                         ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-                        backup_dir = snapshot_code(hub_root, ts)
+                        backup_dir = snapshot_code(
+                            hub_root, ts,
+                            tree_list=["core/src", "WebUI", "dns", "dhcp"])
                         write_pending(backup_dir, local_v, remote_v, ts)
                     except Exception as _e:
                         logger.warning(
