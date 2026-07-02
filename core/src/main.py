@@ -608,10 +608,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         """Return the approved, connected Client-Sim spoke for a tenant.
 
         Tenant binding lives in module_metadata[spoke_id]["tenant_id"], set by
-        an admin at approval time. Falls back to the first available Client-Sim
-        spoke when there is no binding for the tenant (admin/global view, or a
-        spoke that hasn't been tenant-assigned yet). Returns None if no Client-Sim
-        spoke is connected+approved.
+        an admin at approval time. Returns None if no Client-Sim spoke is
+        connected+approved.
+
+        Tenant isolation (IMPORTANT): the cs speak holds a SINGLE CSSettings
+        store per spoke, so a spoke shared across tenants = one tenant's
+        hub-config push / auto-provision toggle clobbers another's. When a
+        tenant_id is given we therefore return ONLY a spoke bound to that
+        tenant, or — if none is bound — an UNASSIGNED spoke (no tenant_id in its
+        metadata) that the tenant implicitly claims. We NEVER fall back to a
+        spoke bound to a different tenant. When tenant_id is None (admin/global
+        view) any connected spoke is fine.
         """
         # Connected Client-Sim spokes; fall back to legacy "simulation" type for
         # older combined-spoke builds that haven't adopted "Client-Sim" yet.
@@ -625,7 +632,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
             if bound:
                 return bound[0]
-        # Fallback: first available (admin / unassigned).
+            # No spoke bound to this tenant — claim an UNASSIGNED one (no
+            # tenant_id in metadata). Never cands[0] blindly: that may be a
+            # spoke bound to another tenant, whose CSSettings this tenant's
+            # push would overwrite (cross-tenant leak).
+            unassigned = [sid for sid in cands if not md.get(sid, {}).get("tenant_id")]
+            if unassigned:
+                return unassigned[0]
+            return None
+        # tenant_id is None: admin / global view — any connected spoke.
         return cands[0]
 
     # Map unified-agent CS_* events to cs-spoke ingest/store commands. Keys are

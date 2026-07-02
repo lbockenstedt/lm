@@ -16,6 +16,51 @@ from typing import Any, Dict, List
 logger = logging.getLogger("SimulationsStore")
 
 
+# Default hub-config knobs seeded for a tenant that hasn't saved any yet, so a
+# NEW tenant's Setup/Proxmox card shows the details instead of a blank grid.
+# Values mirror the cs speak ``_DEFAULTS`` (command_queue.py) in the HUB/UI key
+# form (vm_image_*; the cs speak remaps to image*_template_id). This is
+# display-only: get_hub_config merges stored values over these defaults but
+# does NOT persist them — the first save's GET-merge-PUT persists the full set.
+# JSON-list fields (usb_vidpids/usb_ignored_vidpids/ignored_hostnames),
+# repo_branch, reclone_schedule_cron, and protected_vmids are deliberately NOT
+# seeded (the card placeholder displays those; protected_vmids always merges
+# 1001 at the cs speak regardless).
+_DEFAULT_HUB_CONFIG: Dict[str, Any] = {
+    # Provisioning Behavior
+    "usb_auto_provision": "off",
+    "usb_missing_timeout": 60,            # minutes (cs speak ×60 → seconds)
+    "usb_max_slots": 24,
+    # Resource Thresholds (% — 1-hour average)
+    "cpu_provision_threshold": 80,
+    "cpu_delete_threshold": 90,
+    "mem_provision_threshold": 80,
+    "mem_delete_threshold": 90,
+    # VM Templates (clone-source VMIDs + image1 mix)
+    "vm_image_1_template_id": 100,
+    "vm_image_2_template_id": 200,
+    "vm_image_1_pct": 50,
+    # Parallel Provisioning
+    "reclone_concurrency": 1,
+    # VMID allocation range for new sim VMs (templates excluded by the agent)
+    "vmid_start": 90000,
+    "vmid_end": 99999,
+    # Remaining hub-owned knobs (the Hub Config card)
+    "use_all_dongles": "off",
+    "vm_silent_timeout": 24,
+    "l1_vlan_start": 100,
+    "l1_vlan_end": 199,
+    "reclone_schedule_enabled": "off",
+    # Guest-agent watchdog group
+    "guest_agent_watchdog_enabled": "on",
+    "guest_agent_grace_minutes": 20,
+    "guest_agent_check_interval_minutes": 10,
+    "guest_agent_reboot_after_minutes": 10,
+    "guest_agent_reclone_after_minutes": 30,
+    "watchdog_reboot_enabled": "on",
+}
+
+
 class SimulationsStore:
     """Per-tenant JSON store for hub-owned Client-Sim config (see module docstring).
 
@@ -96,10 +141,18 @@ class SimulationsStore:
 
     # ── hub-config (usb provisioning / vm images / reclone knobs) ──────────
     async def get_hub_config(self, tenant_id: str) -> Dict[str, Any]:
-        """Return ``{hub_config_enabled, hub_config}`` for the tenant."""
+        """Return ``{hub_config_enabled, hub_config}`` for the tenant.
+
+        Seeds ``_DEFAULT_HUB_CONFIG`` for fields the tenant hasn't stored so a
+        new tenant sees the details (stored values win). Display-only — not
+        persisted here; the first save's GET-merge-PUT persists the full set.
+        """
         t = self._data.get(tenant_id, {})
+        stored = t.get("hub_config") or {}
+        merged = dict(_DEFAULT_HUB_CONFIG)
+        merged.update(stored)
         return {"hub_config_enabled": bool(t.get("hub_config_enabled", False)),
-                "hub_config": t.get("hub_config", {})}
+                "hub_config": merged}
 
     async def set_hub_config(self, tenant_id: str, enabled: bool,
                              hub_config: Dict[str, Any]) -> None:
