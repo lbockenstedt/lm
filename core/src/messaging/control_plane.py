@@ -328,10 +328,14 @@ class BaseControlPlane:
         while True:
             try:
                 await self._connect_and_serve()
+                _delay = 5  # clean return after a successful session → reset
             except (websockets.exceptions.ConnectionClosedError, OSError) as e:
                 logger.warning("Connection lost (%s). Reconnecting in %ds...", e, _delay)
+                _delay = min(_delay * 2, 300)  # cap at 5 min so a long hub outage
+                #                                    doesn't spam ~12 lines/min forever
             except Exception as e:
                 logger.error("Unexpected connection error (%s). Reconnecting in %ds...", e, _delay)
+                _delay = min(_delay * 2, 300)
             await asyncio.sleep(_delay)
 
     async def _connect_and_serve(self):
@@ -416,7 +420,19 @@ class BaseControlPlane:
                 return
             except Exception as e:
                 logger.error(f"Hub verification timed out or failed: {e}")
-                await websocket.close(1008, "Mutual authentication timed out")
+                # Guard the close: when the original failure was a handshake
+                # timeout on an already-broken socket, websocket.close() can
+                # raise ConnectionClosed/OSError. Raising inside this except
+                # chains the new exception onto the old one ("During handling of
+                # the above exception, another exception occurred"), producing
+                # the traceback spam logged by dhcp/dns spokes on a persistently
+                # unreachable hub. The `async with websockets.connect(...)`
+                # already closes on exit, so this manual close is redundant —
+                # best-effort it and never let it raise.
+                try:
+                    await websocket.close(1008, "Mutual authentication timed out")
+                except Exception:
+                    pass
                 return
 
             # Heartbeat loop
