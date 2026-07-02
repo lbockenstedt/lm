@@ -10102,33 +10102,33 @@ async function deleteInstance(productKey, id) {
 // POST /setup/ipam/apply-schema → the connected NetBox spoke runs its
 // idempotent _ensure_custom_fields(force=True) over the shared
 // CUSTOM_FIELDS_SPEC (the same spec install.sh provisions on a fresh
-// install). Shows a readable summary of the report so the user can see what
-// was already present vs. created/attached. Never errors if the schema is
-// already up to date.
+// install). Fire-and-forget: no confirm() dialog — a "started" toast fires on
+// click, and a "completed"/"failed" toast fires when the spoke finishes (the
+// hub holds the request open up to 120s for the heavy provisioning run).
+// Never errors if the schema is already up to date.
 async function applyIpamSchema() {
-    if (!confirm('Apply the Lab Manager custom-field schema to the connected NetBox? This is idempotent and safe to re-run.')) return;
+    showToast('Applying Lab Manager schema to NetBox…', 'info');
     try {
         const r = await setupFetch('/setup/ipam/apply-schema', { method: 'POST' });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
-            alert('Apply schema failed: ' + (body.detail || r.status));
+            showToast('Apply schema failed: ' + (body.detail || r.status), 'error');
             return;
         }
         const total = body.total ?? '?';
-        const present = body.present ?? 0;
         const created = body.created ?? 0;
         const attached = body.attached ?? 0;
         const already = body.already_attached ?? 0;
         const warns = Array.isArray(body.warnings) ? body.warnings : [];
-        let msg = `Schema apply ${body.status === 'SUCCESS' ? 'complete' : 'partial'}.\n` +
-                  `${total} field(s) in spec · ${already} already attached · ${created} created · ${attached} newly attached · ${present} present.`;
+        const ok = body.status === 'SUCCESS';
+        showToast(`Schema apply ${ok ? 'complete' : 'partial'}: ${total} fields · ${created} created · ${attached} attached · ${already} already${warns.length ? ' · ' + warns.length + ' warning(s)' : ''}`,
+                  ok ? 'success' : 'info');
         if (warns.length) {
-            msg += `\n\nWarnings (${warns.length}):\n` + warns.slice(0, 8).join('\n');
-            if (warns.length > 8) msg += `\n… and ${warns.length - 8} more`;
+            // Surface the first warning so a partial result isn't silent.
+            showToast('Warning: ' + warns[0], 'info');
         }
-        alert(msg);
     } catch (e) {
-        alert('Error applying schema: ' + e.message);
+        showToast('Error applying schema: ' + e.message, 'error');
     }
 }
 
