@@ -101,7 +101,7 @@ else
 fi
 
 # Log directory shared with the hub + spokes; the systemd service runs as
-# svc_lm and agent.py writes /var/log/lm/generic-agent.log directly (no root
+# svc_lm and agent.py writes /var/log/lm/agent.log directly (no root
 # shell to pre-open the redirect), so svc_lm must own the dir.
 mkdir -p /var/log/lm >> "$INSTALL_LOG" 2>&1
 chown -R svc_lm:svc_lm /var/log/lm 2>/dev/null || true
@@ -129,8 +129,8 @@ User=svc_lm
 WorkingDirectory=$ROOT_DIR/generic-agent
 Environment="PYTHONPATH=$ROOT_DIR"
 ExecStart=$ROOT_DIR/generic-agent/venv/bin/python3 $ROOT_DIR/generic-agent/src/agent.py ${EXEC_START}
-StandardOutput=append:/var/log/generic-agent.log
-StandardError=append:/var/log/generic-agent.log
+StandardOutput=append:/var/log/lm/agent.log
+StandardError=append:/var/log/lm/agent.log
 Restart=always
 RestartSec=10
 
@@ -152,7 +152,7 @@ else
     systemctl restart lm-generic-agent
     log_c "🎉 Bootstrap installation complete! The agent is now calling home to $SPOKE_URL"
     echo "--------------------------------------------------------------------------------"
-    echo "Logs are available at: $INSTALL_LOG and $LOG_DIR/generic-agent.log"
+    echo "Logs are available at: $INSTALL_LOG and /var/log/lm/agent.log"
     echo "You can now approve this spoke in the Hub WebUI to negotiate its session secret."
     echo "--------------------------------------------------------------------------------"
 fi

@@ -79,7 +79,7 @@ else
 fi
 
 # Log directory shared with the hub + spokes; the systemd service runs as
-# svc_lm and agent.py writes /var/log/lm/generic-agent.log directly (no root
+# svc_lm and agent.py writes /var/log/lm/agent.log directly (no root
 # shell to pre-open the redirect), so svc_lm must own the dir.
 mkdir -p /var/log/lm
 chown -R svc_lm:svc_lm /var/log/lm 2>/dev/null || true

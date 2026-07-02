@@ -15,7 +15,7 @@ def get_log_path():
     # /var/log/lm and chowns it to svc_lm so the systemd service can write
     # here). Falls back to a local logs/ dir if that path isn't writable
     # (e.g. run by hand as an unprivileged user without the install step).
-    primary = "/var/log/lm/generic-agent.log"
+    primary = "/var/log/lm/agent.log"
     try:
         with open(primary, "a") as f:
             pass
@@ -23,7 +23,7 @@ def get_log_path():
     except Exception:
         local_dir = os.path.join(os.getcwd(), "logs")
         os.makedirs(local_dir, exist_ok=True)
-        return os.path.join(local_dir, "generic-agent.log")
+        return os.path.join(local_dir, "agent.log")
 
 log_file = get_log_path()
 try:
@@ -47,6 +47,18 @@ except ImportError:
                 _logging.getLogger(_n).setLevel(level)
             return level
 configure_logging(log_file=log_file)
+# When writing to the canonical /var/log/lm file, the systemd unit captures
+# stderr into the SAME file (StandardError=append:/var/log/lm/agent.log).
+# configure_logging attaches a stderr StreamHandler alongside the FileHandler,
+# which would write every record twice into that one file. Drop the stderr
+# StreamHandler in that case so each record lands once (the FileHandler writes
+# it; raw interpreter tracebacks still reach the file via systemd's stderr
+# capture). Keep the StreamHandler for the local fallback path so a manual run
+# still shows on the console.
+if log_file == "/var/log/lm/agent.log":
+    for _h in list(logging.getLogger().handlers):
+        if isinstance(_h, logging.StreamHandler) and not isinstance(_h, logging.FileHandler):
+            logging.getLogger().removeHandler(_h)
 logger = logging.getLogger("GenericLeafAgent")
 
 class GenericLeafAgent:
