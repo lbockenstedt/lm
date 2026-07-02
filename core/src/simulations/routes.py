@@ -996,6 +996,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         pushed = await _push_config(tenant_id, hc if enabled else {}) if enabled else 0
         return {"saved": True, "pushed_to_spokes": pushed}
 
+    @app.post("/sim/api/tenant/{tenant}/hub-config/reset")
+    async def reset_hub_config(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Reset the tenant's Setup/Proxmox knobs to factory defaults (the
+        ``_DEFAULT_HUB_CONFIG`` the cs speak ``_DEFAULTS`` mirror), preserving
+        certified/ignored USB vidpids + ignored hostnames. Tenant-scoped — only
+        this tenant's hub_config is touched. Pushes the reset config to the
+        tenant's spoke when hub-as-source-of-truth is enabled so the spoke's
+        settings clear to defaults too (the payload carries an explicit value
+        for every owned knob so the spoke's set-present-only apply clears old
+        user values)."""
+        result = await store.reset_hub_config(tenant_id)
+        pushed = await _push_config(tenant_id, result["hub_config"]) \
+            if result["hub_config_enabled"] else 0
+        return {"saved": True, "pushed_to_spokes": pushed,
+                "hub_config_enabled": result["hub_config_enabled"],
+                "hub_config": result["hub_config"]}
+
     @app.get("/sim/api/tenant/{tenant}/onboarding-psk")
     async def get_psks(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         return {"psks": await store.get_psks(tenant_id)}

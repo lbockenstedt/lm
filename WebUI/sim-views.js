@@ -143,6 +143,7 @@ const SIM_ROUTES = {
     // ── Hub-config (Setup → Hub Config card) ──
     csHubConfigCard:             { m: 'GET',    p: '/tenant/{tenant}/hub-config',                api: 'get_hub_config' },
     csSaveHubConfig:             { m: 'PUT',    p: '/tenant/{tenant}/hub-config',                api: 'set_hub_config' },
+    csResetHubConfig:            { m: 'POST',   p: '/tenant/{tenant}/hub-config/reset',          api: 'reset_hub_config' },
 
     // ── Config (simulation-conf editor) ──
     csRenderConfigSimulation:    { m: 'GET',    p: '/{tenant}/config/simulation-conf',           api: 'get_sim_conf' },
@@ -2368,12 +2369,31 @@ async function csRenderSetupProxmox() {
         let autoProv = '';
         try { autoProv = await csSetupAutoProvConfigCard(); } catch (e) { console.error('csRenderSetupProxmox: auto-prov card load failed', e); autoProv = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('VM Auto-Provisioning', e).replace('py-10', 'py-6')}</div>`; }
         const card = await csHubConfigCard('/tenant/' + csTenant() + '/hub-config');
+        const resetBar = `<div class="hpe-card rounded-lg p-4 shadow-sm flex items-center justify-between gap-3">
+          <p class="text-xs text-slate-500">Reset every knob on this page to factory defaults. Certified/ignored USB devices + ignored hostnames are preserved (manage those on the USB page).</p>
+          <button onclick="csResetHubConfig()" class="shrink-0 bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Reset to Default</button>
+        </div>`;
         csSet(`<div class="space-y-4">${autoProv}<div class="hpe-card rounded-lg p-5 shadow-sm">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Hub Config</h3>
           <p class="text-xs text-slate-400 mb-3">Remaining hub-owned knobs (reclone schedule, VMID range, VLANs, USB VID/PID lists, watchdog group). Pushed to the spoke on save.</p>
-        </div>${card}</div>`);
+        </div>${card}${resetBar}</div>`);
     } catch (e) { console.error('csRenderSetupProxmox: proxmox config load failed', e); csSet(csErrorBox('Could not load Proxmox config', e)); }
 }
+
+window.csResetHubConfig = async function () {
+    if (!confirm('Reset all Simulations/Setup/Proxmox knobs to factory defaults for this tenant? Certified/ignored USB devices are preserved. This pushes the reset config to the spoke.')) return;
+    try {
+        const r = await csFetch('/tenant/' + csTenant() + '/hub-config/reset', { method: 'POST', body: JSON.stringify({}) });
+        // Re-render so both cards reflect the reset values (csSetupAutoProvConfigCard
+        // + csHubConfigCard reload from /hub-config, which now returns the defaults).
+        await csRenderSetupProxmox();
+        const n = (r && r.pushed_to_spokes != null) ? r.pushed_to_spokes : 0;
+        alert('Reset to defaults. Pushed to ' + n + ' spoke(s).');
+    } catch (e) {
+        console.error('csResetHubConfig: reset failed', e);
+        alert('Reset failed: ' + (e.message || e));
+    }
+};
 
 // ── GitHub ──────────────────────────────────────────────────────────────────
 async function csRenderSetupGithub() {
