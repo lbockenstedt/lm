@@ -200,7 +200,7 @@ run_generic_install() {
     echo "${C_DIM}morphs into its role (netbox/ldap/dns/…) via hub provisioning.${C_RESET}"
     echo
 
-    local default_id="generic-$(hostname -s 2>/dev/null || echo host)"
+    local default_id="$(hostname -s 2>/dev/null || echo host)"
     local SPOKE_URL SPOKE_ID SPOKE_SECRET HUB_SECRET CLONE_ONLY
 
     while true; do
