@@ -139,6 +139,13 @@ class SimulationsStore:
         """Return the stored raw user-overrides.conf override INI ('' if unset)."""
         return self._data.get(tenant_id, {}).get("user_overrides_content", "") or ""
 
+    # JSON-list fields that hold real certified/ignored data — PRESERVED across
+    # a "reset to default" (resetting the knobs must NOT de-certify the tenant's
+    # dongles or wipe the ignored-host list; those are managed on the USB page).
+    _HUB_CONFIG_PRESERVE_ON_RESET = (
+        "usb_vidpids", "usb_ignored_vidpids", "ignored_hostnames",
+    )
+
     # ── hub-config (usb provisioning / vm images / reclone knobs) ──────────
     async def get_hub_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return ``{hub_config_enabled, hub_config}`` for the tenant.
@@ -162,6 +169,34 @@ class SimulationsStore:
             t["hub_config_enabled"] = bool(enabled)
             t["hub_config"] = hub_config or {}
             self._save()
+
+    async def reset_hub_config(self, tenant_id: str) -> Dict[str, Any]:
+        """Reset the tenant's Setup/Proxmox knobs to ``_DEFAULT_HUB_CONFIG``,
+        preserving the certified/ignored USB vidpid lists + ignored-hostname list
+        (real data managed on the USB page, not factory knobs) and the current
+        ``hub_config_enabled`` flag. The returned ``hub_config`` carries an
+        explicit value for every visible knob (incl. empties for protected_vmids
+        / repo_branch / reclone_schedule_cron) so a push clears the spoke's prior
+        user values too — the spoke's _apply_hub_config only sets present keys,
+        so absent keys would otherwise linger. Returns
+        ``{hub_config_enabled, hub_config}`` for the caller to push."""
+        with self._lock:
+            t = self._tenant(tenant_id)
+            stored = t.get("hub_config") or {}
+            preserved = {k: stored.get(k, "[]") for k in self._HUB_CONFIG_PRESERVE_ON_RESET}
+            new_cfg = dict(_DEFAULT_HUB_CONFIG)
+            # Explicit empties for visible fields not in _DEFAULT_HUB_CONFIG so
+            # the spoke clears any user-set value (placeholder display on reset).
+            new_cfg.update({
+                "protected_vmids": "",
+                "repo_branch": "",
+                "reclone_schedule_cron": "",
+            })
+            new_cfg.update(preserved)
+            t["hub_config"] = new_cfg
+            self._save()
+            return {"hub_config_enabled": bool(t.get("hub_config_enabled", False)),
+                    "hub_config": dict(new_cfg)}
 
     # ── central API config (mode + cluster creds) ──────────────────────────
     async def get_central_config(self, tenant_id: str) -> Dict[str, Any]:
