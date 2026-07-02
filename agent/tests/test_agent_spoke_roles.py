@@ -31,6 +31,7 @@ def test_role_map_has_all_eight_roles_with_correct_module_types():
         "ldap":       "directory",
         "simulation": "simulation",
         "cppm":       "nac",
+        "proxmox":    "hypervisor",
     }
     assert set(_ROLE_MAP.keys()) == set(expected.keys()), \
         f"missing/extra roles: {set(_ROLE_MAP.keys()) ^ set(expected.keys())}"

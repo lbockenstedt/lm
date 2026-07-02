@@ -10,7 +10,7 @@
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \
 #     | sudo bash -s -- --hub ws://HUB_IP:8765 [--role <role>] [--id my-agent-1]
-#   Roles: dns | dhcp | network | netbox | opnsense | ldap | simulation | cppm
+#   Roles: dns | dhcp | network | netbox | opnsense | ldap | simulation | cppm | proxmox
 #   (omit --role for a bare agent that morphs later via LOAD_ROLE from the hub)
 set -euo pipefail
 
@@ -31,7 +31,7 @@ while [[ "$#" -gt 0 ]]; do
     esac; shift
 done
 
-[[ -z "$HUB_URL" ]] && { echo "Usage: $0 --hub <ws://HUB:8765> [--id my-agent-1] [--role dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm]"; exit 1; }
+[[ -z "$HUB_URL" ]] && { echo "Usage: $0 --hub <ws://HUB:8765> [--id my-agent-1] [--role dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox]"; exit 1; }
 SPOKE_ID="${SPOKE_ID:-agent-$(hostname -s)}"
 mkdir -p /var/log/lm
 
@@ -72,7 +72,8 @@ if [[ -n "$STARTUP_ROLE" ]]; then
         ldap)       ROLE_REPO="https://github.com/lbockenstedt/ldap.git";      ROLE_CLONE_DIR="ldap";     ROLE_REQ="$INSTALL_DIR/ldap/requirements.txt" ;;
         simulation) ROLE_REPO="https://github.com/lbockenstedt/cs.git";        ROLE_CLONE_DIR="cs";       ROLE_REQ="$INSTALL_DIR/cs/lm-spoke/requirements.txt" ;;
         cppm)       ROLE_REPO="https://github.com/lbockenstedt/cppm.git";      ROLE_CLONE_DIR="cppm";     ROLE_REQ="$INSTALL_DIR/cppm/requirements.txt" ;;
-        *) echo "❌ Unknown role '$STARTUP_ROLE'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm"; exit 1 ;;
+        proxmox)    ROLE_REPO="https://github.com/lbockenstedt/pxmx.git";      ROLE_CLONE_DIR="pxmx";     ROLE_REQ="$INSTALL_DIR/pxmx/requirements.txt" ;;
+        *) echo "❌ Unknown role '$STARTUP_ROLE'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm proxmox"; exit 1 ;;
     esac
 
     if [[ -n "$ROLE_REPO" ]]; then
