@@ -3000,8 +3000,7 @@ def create_app(hub):
         cmd = (
             f"curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh "
             f"| sudo bash -s -- "
-            f"--spoke-url ws://{host}:8766 "
-            f"--id pxmx-agent-$(hostname)"
+            f"--spoke-url ws://{host}:8766"
         )
         return {"cmd": cmd, "spoke_url": f"ws://{host}:8766"}
 
