@@ -14,11 +14,21 @@ except ImportError:
 
 logger = logging.getLogger("GenericAgent")
 
-# Role directory is at <lm-repo-root>/<role-name>/src/
-# e.g. /opt/lm/dns/src/dns_spoke.py → DNSSpoke
+# Each entry: (rel_path, cls_name, module_type, repo_url_or_None)
+#   rel_path   — spoke file under the lm-root (e.g. dns/src/dns_spoke.py);
+#                the first path segment is also the clone target dir name.
+#   repo_url   — None for roles that ship inside the lm repo (dns, dhcp);
+#                otherwise the GitHub URL the agent shallow-clones on LOAD_ROLE
+#                when the spoke code isn't already present on the node.
 _ROLE_MAP = {
-    "dns":  ("dns/src/dns_spoke.py",   "DNSSpoke",  "dns"),
-    "dhcp": ("dhcp/src/dhcp_spoke.py", "DHCPSpoke", "dhcp"),
+    "dns":        ("dns/src/dns_spoke.py",          "DNSSpoke",  "dns",        None),
+    "dhcp":       ("dhcp/src/dhcp_spoke.py",        "DHCPSpoke", "dhcp",       None),
+    "network":    ("nw/src/nw_spoke.py",            "NwSpoke",   "nw",         "https://github.com/lbockenstedt/nw.git"),
+    "netbox":     ("netbox/src/netbox_spoke.py",    "NetboxSpoke", "ipam",     "https://github.com/lbockenstedt/netbox.git"),
+    "opnsense":   ("opnsense/src/opn_spoke.py",     "OpnSpoke",  "firewall",   "https://github.com/lbockenstedt/opnsense.git"),
+    "ldap":       ("ldap/src/ldap_spoke.py",        "LdapSpoke", "directory",  "https://github.com/lbockenstedt/ldap.git"),
+    "simulation": ("cs/lm-spoke/src/cs_spoke.py",   "CSSpoke",   "simulation", "https://github.com/lbockenstedt/cs.git"),
+    "cppm":       ("cppm/src/spoke.py",             "CPPMSpoke", "nac",        "https://github.com/lbockenstedt/cppm.git"),
 }
 
 # Deploy roles: instead of morphing the agent into a service, these run an
@@ -35,6 +45,35 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
         "module_type": "agent",
     },
 }
+
+
+class _RoleAdapter(BaseSpoke):
+    """Adapter that lets a non-BaseSpoke spoke (e.g. cppm's CPPMSpoke) be loaded
+    as a role. Delegates handle_command/get_version to the inner instance and
+    supplies a get_status fallback when the inner class doesn't implement it,
+    so GenericAgent.get_status() delegation never AttributeErrors."""
+
+    def __init__(self, inner):
+        super().__init__(getattr(inner, "spoke_id", "role"), getattr(inner, "config", {}))
+        self._inner = inner
+
+    async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._inner.handle_command(command_type, data)
+
+    def get_version(self) -> str:
+        return self._inner.get_version()
+
+    async def get_status(self) -> Dict[str, Any]:
+        try:
+            return await self._inner.get_status()
+        except AttributeError:
+            # Inner spoke has no get_status (e.g. CPPMSpoke) — return a minimal
+            # READY status so the hub sees the role as live.
+            return {
+                "spoke_id": getattr(self._inner, "spoke_id", self.spoke_id),
+                "module":   getattr(self._inner, "module_type", "role"),
+                "status":   "READY",
+            }
 
 
 class GenericAgent(BaseSpoke):
@@ -71,35 +110,75 @@ class GenericAgent(BaseSpoke):
     def _load_role_class(self, role_name: str) -> Optional[type]:
         if role_name not in _ROLE_MAP:
             return None
-        rel_path, cls_name, _ = _ROLE_MAP[role_name]
+        rel_path, cls_name, _, _ = _ROLE_MAP[role_name]
         role_file = self._lm_root() / rel_path
         if not role_file.exists():
             logger.error("Role file not found: %s", role_file)
             return None
-        # Add the role's src dir to sys.path so relative imports work
+        # Put the role's src dir on sys.path so FLAT imports resolve (e.g.
+        # cppm's `from queries import CPPMQueries` / `from client import ...`).
         role_src = str(role_file.parent)
         if role_src not in sys.path:
             sys.path.insert(0, role_src)
-        spec = importlib.util.spec_from_file_location(f"lm_role_{role_name}", role_file)
-        mod  = importlib.util.module_from_spec(spec)
+        # Load the spoke as a PACKAGE (submodule_search_locations=[role_src])
+        # so RELATIVE imports resolve even when the role's src/ has no
+        # __init__.py — e.g. ldap's `from .ldap_manager import LdapManager`.
+        # Registering the package in sys.modules BEFORE exec_module is what
+        # lets `from .helper import X` find its sibling during exec.
+        pkg_name = f"lm_role_{role_name}"
+        spec = importlib.util.spec_from_file_location(
+            pkg_name, role_file, submodule_search_locations=[role_src])
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[pkg_name] = mod
         try:
             spec.loader.exec_module(mod)
             return getattr(mod, cls_name)
         except Exception as e:
             logger.error("Failed to load role '%s': %s", role_name, e)
+            sys.modules.pop(pkg_name, None)
             return None
 
     def _sync_load_role(self, role_name: str, role_config: dict) -> bool:
         cls = self._load_role_class(role_name)
         if cls is None:
             return False
-        self._role = cls(self.spoke_id, role_config)
+        inst = cls(self.spoke_id, role_config)
+        # Spokes that aren't BaseSpoke subclasses (cppm's CPPMSpoke) get wrapped
+        # so handle_command/get_status delegation in GenericAgent stays uniform.
+        if not isinstance(inst, BaseSpoke):
+            inst = _RoleAdapter(inst)
+        self._role = inst
         self._role_name = role_name
         logger.info("Role loaded: %s", role_name)
         return True
 
     async def _install_role(self, role_name: str) -> dict:
-        """Install system packages and Python deps required by the role."""
+        """Clone the role repo (if external) and install its system + Python deps."""
+        if role_name not in _ROLE_MAP:
+            return {"status": "ERROR", "message": f"Unknown role '{role_name}'"}
+        rel_path, _, _, repo_url = _ROLE_MAP[role_name]
+        role_file = self._lm_root() / rel_path
+
+        # 1. Sibling repos (dns/dhcp ship inside lm → repo_url None → skip).
+        #    Clone shallowly into <lm-root>/<first-path-segment> on first use so
+        #    the spoke code is present on a bare generic node; idempotent on
+        #    re-load (skips if the dir already exists).
+        if repo_url:
+            clone_dir = self._lm_root() / rel_path.split("/")[0]
+            if not clone_dir.exists():
+                logger.info("Cloning role repo '%s' into %s…", role_name, clone_dir)
+                try:
+                    subprocess.run(
+                        ["git", "clone", "--depth", "1", repo_url, str(clone_dir)],
+                        check=True, timeout=300,
+                    )
+                except subprocess.CalledProcessError as e:
+                    return {"status": "ERROR",
+                            "message": f"git clone for role '{role_name}' failed: {e}"}
+            else:
+                logger.debug("Role repo already present at %s; skipping clone.", clone_dir)
+
+        # 2. System packages (in-repo roles only today; siblings are pip-only).
         install_cmds = {
             "dns":  ["apt-get", "install", "-y", "-qq", "unbound"],
             "dhcp": ["apt-get", "install", "-y", "-qq", "kea-dhcp4-server", "kea-ctrl-agent"],
@@ -112,8 +191,9 @@ class GenericAgent(BaseSpoke):
             except subprocess.CalledProcessError as e:
                 return {"status": "ERROR", "message": f"Package install failed: {e}"}
 
-        # Install Python dependencies from the role's requirements.txt
-        req_file = self._lm_root() / role_name / "requirements.txt"
+        # 3. Python deps. requirements.txt sits at role_file.parent.parent for
+        #    every role (repo root for most; cs/lm-spoke/ for simulation).
+        req_file = role_file.parent.parent / "requirements.txt"
         if req_file.exists():
             logger.info("Installing Python deps for role '%s'…", role_name)
             venv_pip = self._lm_root() / "agent" / "venv" / "bin" / "pip"
@@ -204,7 +284,7 @@ class GenericAgent(BaseSpoke):
                 return {"status": "ERROR", "message": f"Could not load role '{role_name}'"}
             # The control plane reads self.module_type and sends it on reconnect.
             # For now return the module_type so the hub can update immediately.
-            _, _, mtype = _ROLE_MAP[role_name]
+            _, _, mtype, _ = _ROLE_MAP[role_name]
             return {"status": "SUCCESS", "role": role_name, "module_type": mtype,
                     "message": f"Agent morphed to '{role_name}' ({mtype})"}
 

@@ -9,7 +9,9 @@
 #
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \
-#     | sudo bash -s -- --hub ws://HUB_IP:8765 [--role dns] [--id my-agent-1]
+#     | sudo bash -s -- --hub ws://HUB_IP:8765 [--role <role>] [--id my-agent-1]
+#   Roles: dns | dhcp | network | netbox | opnsense | ldap | simulation | cppm
+#   (omit --role for a bare agent that morphs later via LOAD_ROLE from the hub)
 set -euo pipefail
 
 INSTALL_DIR="/opt/lm"
@@ -29,7 +31,7 @@ while [[ "$#" -gt 0 ]]; do
     esac; shift
 done
 
-[[ -z "$HUB_URL" ]] && { echo "Usage: $0 --hub <ws://HUB:8765> [--id my-agent-1] [--role dns]"; exit 1; }
+[[ -z "$HUB_URL" ]] && { echo "Usage: $0 --hub <ws://HUB:8765> [--id my-agent-1] [--role dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm]"; exit 1; }
 SPOKE_ID="${SPOKE_ID:-agent-$(hostname -s)}"
 mkdir -p /var/log/lm
 
@@ -52,9 +54,43 @@ python3 -m venv venv
 ./venv/bin/pip install --upgrade pip -q
 [[ -f requirements.txt ]] && ./venv/bin/pip install -r requirements.txt -q
 
-# Also install role-specific requirements if role is set
-if [[ -n "$STARTUP_ROLE" ]] && [[ -f "$INSTALL_DIR/$STARTUP_ROLE/requirements.txt" ]]; then
-    ./venv/bin/pip install -r "$INSTALL_DIR/$STARTUP_ROLE/requirements.txt" -q
+# Stage the startup role's code + Python deps.
+#   - in-repo roles (dns, dhcp) ship inside the lm clone already.
+#   - sibling roles (network, netbox, opnsense, ldap, simulation, cppm) live in
+#     separate GitHub repos; clone them shallowly into /opt/lm/<dir> so the
+#     boot-time --role load (which does NOT run the agent's _install_role) can
+#     find the spoke code immediately. requirements.txt path mirrors the
+#     agent's role_file.parent.parent derivation (simulation's is under cs/lm-spoke).
+if [[ -n "$STARTUP_ROLE" ]]; then
+    ROLE_REPO=""; ROLE_CLONE_DIR=""; ROLE_REQ=""
+    case "$STARTUP_ROLE" in
+        dns)        ROLE_REQ="$INSTALL_DIR/dns/requirements.txt" ;;
+        dhcp)       ROLE_REQ="$INSTALL_DIR/dhcp/requirements.txt" ;;
+        network)    ROLE_REPO="https://github.com/lbockenstedt/nw.git";        ROLE_CLONE_DIR="nw";       ROLE_REQ="$INSTALL_DIR/nw/requirements.txt" ;;
+        netbox)     ROLE_REPO="https://github.com/lbockenstedt/netbox.git";    ROLE_CLONE_DIR="netbox";   ROLE_REQ="$INSTALL_DIR/netbox/requirements.txt" ;;
+        opnsense)   ROLE_REPO="https://github.com/lbockenstedt/opnsense.git";  ROLE_CLONE_DIR="opnsense"; ROLE_REQ="$INSTALL_DIR/opnsense/requirements.txt" ;;
+        ldap)       ROLE_REPO="https://github.com/lbockenstedt/ldap.git";      ROLE_CLONE_DIR="ldap";     ROLE_REQ="$INSTALL_DIR/ldap/requirements.txt" ;;
+        simulation) ROLE_REPO="https://github.com/lbockenstedt/cs.git";        ROLE_CLONE_DIR="cs";       ROLE_REQ="$INSTALL_DIR/cs/lm-spoke/requirements.txt" ;;
+        cppm)       ROLE_REPO="https://github.com/lbockenstedt/cppm.git";      ROLE_CLONE_DIR="cppm";     ROLE_REQ="$INSTALL_DIR/cppm/requirements.txt" ;;
+        *) echo "❌ Unknown role '$STARTUP_ROLE'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm"; exit 1 ;;
+    esac
+
+    if [[ -n "$ROLE_REPO" ]]; then
+        if [[ -d "$INSTALL_DIR/$ROLE_CLONE_DIR" ]]; then
+            echo "Updating role repo '$ROLE_CLONE_DIR'…"
+            git -C "$INSTALL_DIR/$ROLE_CLONE_DIR" pull --rebase --autostash -q 2>/dev/null || true
+        else
+            echo "Cloning role repo '$ROLE_CLONE_DIR'…"
+            git clone -q --depth 1 "$ROLE_REPO" "$INSTALL_DIR/$ROLE_CLONE_DIR"
+        fi
+    fi
+
+    if [[ -f "$ROLE_REQ" ]]; then
+        echo "Installing Python deps for role '$STARTUP_ROLE'…"
+        ./venv/bin/pip install -r "$ROLE_REQ" -q
+    else
+        echo "⚠️  No requirements.txt found at $ROLE_REQ for role '$STARTUP_ROLE'"
+    fi
 fi
 
 # Preserve an existing secret so re-installs don't break a running agent.
