@@ -189,6 +189,11 @@ const SIM_ROUTES = {
     csDemoScenarios:             { m: 'GET',    p: '/{tenant}/demo/scenarios',                    api: 'cs_demo_scenarios' },
     csDemoTrigger:               { m: 'POST',   p: '/{tenant}/demo/client/{hostname}/scenario',   api: 'cs_demo_set_scenario' },
     csDemoClear:                 { m: 'DELETE', p: '/{tenant}/demo/client/{hostname}/scenario',   api: 'cs_demo_clear_scenario' },
+    // ── per-client override Control Panel (persisted registry overrides) ──
+    csGetClientControl:          { m: 'GET',    p: '/{tenant}/clients/{hostname}/control',        api: 'cs_get_client_control' },
+    csSetClientControl:          { m: 'POST',   p: '/{tenant}/clients/{hostname}/control',        api: 'cs_set_client_control' },
+    csClearClientControl:        { m: 'DELETE', p: '/{tenant}/clients/{hostname}/control',        api: 'cs_clear_client_control' },
+    csControlAll:                { m: 'POST',   p: '/{tenant}/clients/control-all',               api: 'cs_control_all' },
     csVmAction:                  { m: 'POST',   p: '/{tenant}/spokes/{spoke_id}/proxmox-command',api: 'cs_spoke_proxmox_command' },
     csVmBulk:                    { m: 'POST',   p: '/{tenant}/spokes/{spoke_id}/proxmox-command',api: 'cs_spoke_proxmox_command' },
     csRenderVmServerQueue:       { m: 'GET',    p: '/{tenant}/proxmx/commands',                  api: 'cs_list_commands' },
@@ -866,10 +871,12 @@ function csRenderClientRows(rows) {
           <td class="px-4 py-2 text-slate-500">${csEscape(csLastSeen(c.last_seen))}</td>
           <td class="px-4 py-2 ${c.error_count > 0 ? 'text-amber-600 font-bold' : 'text-slate-400'}">${csEscape(c.error_count || 0)}</td>
           ${host ? csDemoCell(host) : '<td class="px-4 py-2 text-slate-300">—</td>'}
-        </tr>`;
+          ${host ? csControlCell(host) : '<td class="px-4 py-2 text-slate-300">—</td>'}
+        </tr>
+        ${host ? csControlPanelRow(host) : ''}`;
     }).join('');
     body.innerHTML = csTable(
-        ['Spoke', 'Hostname', 'Platform', 'Status', 'Tier', 'SSID', 'Simulations', 'Last Seen', 'Errors', 'Demo'],
+        ['Spoke', 'Hostname', 'Platform', 'Status', 'Tier', 'SSID', 'Simulations', 'Last Seen', 'Errors', 'Demo', 'Control'],
         rowHtml
     );
 }
@@ -951,6 +958,179 @@ window.csDemoClear = async function (btn) {
         if (typeof showToast === 'function') showToast(`Demo cleared on ${host}`, 'success');
         loadCSData('Clients', currentSubChild, true);
     } catch (e) { console.error('csDemoClear: clear failed', e); alert('Demo clear failed: ' + (e.message || e)); }
+};
+
+// ── per-client override Control Panel (ports the legacy cs webui-spoke) ──────
+// Live sim-flag toggles per client + Apply / Clear / Apply-to-ALL / Save-to-
+// user-overrides. Unlike the ephemeral demo flags, these write the spoke's
+// PERSISTED registry overrides (sticky across reconnects/reboots). The panel
+// is an expandable row beneath each client; opening it fetches the host's
+// current overrides and seeds the toggles.
+const CS_CONTROL_FLAGS = ['kill_switch', 'dns_fail', 'iperf', 'download',
+    'www_traffic', 'ping_test', 'ssidpw_fail', 'auth_fail', 'dhcp_fail',
+    'port_flap', 'assoc_fail'];
+const CS_CONTROL_COLS = 11;  // Clients-table column count (panel colspan)
+
+function csCtlId(host, flag) {
+    const h = String(host || '').replace(/[^a-zA-Z0-9_-]/g, '_');
+    return `cs-ctl-${h}-${flag}`;
+}
+
+function csControlCell(hostname) {
+    return `<td class="px-4 py-2 whitespace-nowrap">
+      <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlToggle(this)"
+        class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-1 rounded-md text-[11px] font-bold">⚙ Control</button>
+    </td>`;
+}
+
+// The flag toggles + action buttons. Selects default to 'off' and are re-seeded
+// from the spoke's current overrides when the panel is opened (csCtlToggle).
+function csControlPanel(hostname) {
+    const flags = CS_CONTROL_FLAGS.map(f => {
+        const id = csCtlId(hostname, f);
+        return `<label class="flex items-center gap-1 text-xs text-slate-600">
+          <span class="w-24 truncate" title="${csEscape(f)}">${csEscape(f)}</span>
+          <select id="${csEscape(id)}" data-cs-ctl-host="${csEscape(hostname)}" data-cs-ctl-flag="${csEscape(f)}"
+            class="border border-slate-200 rounded-md px-1 py-0.5 text-[11px]">
+            <option value="off">off</option><option value="on">on</option>
+          </select>
+        </label>`;
+    }).join('');
+    return `<div class="bg-slate-50 border border-slate-200 rounded-lg p-3">
+      <div class="flex items-center justify-between mb-2">
+        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Live Overrides — ${csEscape(hostname)}</p>
+        <p class="text-[10px] text-slate-400">Persisted to the spoke registry (survives reconnect/reboot). Demo flags layer on top at delivery.</p>
+      </div>
+      <div class="grid grid-cols-4 gap-2 mb-3">${flags}</div>
+      <div class="flex flex-wrap gap-2">
+        <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlApply(this)"
+          class="bg-[#01A982] hover:bg-[#018a6c] text-white px-3 py-1.5 rounded-md text-xs font-bold">Apply</button>
+        <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlClear(this)"
+          class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1.5 rounded-md text-xs font-bold">Clear Overrides</button>
+        <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlAll(this)"
+          class="bg-amber-100 hover:bg-amber-200 text-amber-700 px-3 py-1.5 rounded-md text-xs font-bold">Apply to ALL</button>
+        <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlSaveUO(this)"
+          class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-md text-xs font-bold">Save to user-overrides</button>
+        <span id="${csEscape(csCtlId(hostname, 'msg'))}" class="text-xs text-slate-400 self-center"></span>
+      </div>
+    </div>`;
+}
+
+function csControlPanelRow(hostname) {
+    // Hidden by default; csCtlToggle shows it + seeds the toggles from the
+    // spoke's current overrides.
+    return `<tr id="${csEscape('cs-ctl-panel-' + String(hostname).replace(/[^a-zA-Z0-9_-]/g, '_'))}" style="display:none">
+      <td colspan="${CS_CONTROL_COLS}" class="px-4 py-2 bg-slate-50">${csControlPanel(hostname)}</td>
+    </tr>`;
+}
+
+// Read the 11 toggles for a host into {flag: on/off}.
+function csCtlCollect(hostname) {
+    const out = {};
+    for (const f of CS_CONTROL_FLAGS) {
+        const el = csEl(csCtlId(hostname, f));
+        out[f] = el ? el.value : 'off';
+    }
+    return out;
+}
+
+function csCtlMsg(hostname, text, ok) {
+    const m = csEl(csCtlId(hostname, 'msg'));
+    if (m) { m.textContent = text; m.className = 'text-xs ' + (ok ? 'text-green-600' : 'text-red-500'); }
+}
+
+window.csCtlToggle = async function (btn) {
+    const host = btn.dataset.csCtlHost;
+    if (!host) return;
+    const panel = csEl('cs-ctl-panel-' + String(host).replace(/[^a-zA-Z0-9_-]/g, '_'));
+    if (!panel) return;
+    if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
+    // Open: seed toggles from the spoke's current persisted overrides.
+    try {
+        const r = await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`);
+        const ov = (r && r.overrides) || {};
+        for (const f of CS_CONTROL_FLAGS) {
+            const el = csEl(csCtlId(host, f));
+            if (el) {
+                const v = String(ov[f] == null ? 'off' : ov[f]).toLowerCase();
+                el.value = (v === 'on' || v === 'true' || v === '1') ? 'on' : 'off';
+            }
+        }
+    } catch (e) { console.warn('csCtlToggle: override read failed, showing defaults', e); }
+    panel.style.display = '';
+};
+
+window.csCtlApply = async function (btn) {
+    const host = btn.dataset.csCtlHost;
+    const flags = csCtlCollect(host);
+    csCtlMsg(host, 'Applying…', true);
+    try {
+        await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
+            { method: 'POST', body: JSON.stringify({ overrides: flags }) });
+        csCtlMsg(host, 'Applied.', true);
+        if (typeof showToast === 'function') showToast(`Overrides applied to ${host}`, 'success');
+    } catch (e) { console.error('csCtlApply: apply failed', e); csCtlMsg(host, e.message || 'failed', false); }
+};
+
+window.csCtlClear = async function (btn) {
+    const host = btn.dataset.csCtlHost;
+    csCtlMsg(host, 'Clearing…', true);
+    try {
+        await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`, { method: 'DELETE' });
+        // Reset toggles to 'off' to reflect the cleared state.
+        for (const f of CS_CONTROL_FLAGS) {
+            const el = csEl(csCtlId(host, f));
+            if (el) el.value = 'off';
+        }
+        csCtlMsg(host, 'Cleared.', true);
+        if (typeof showToast === 'function') showToast(`Overrides cleared on ${host}`, 'success');
+    } catch (e) { console.error('csCtlClear: clear failed', e); csCtlMsg(host, e.message || 'failed', false); }
+};
+
+window.csCtlAll = async function (btn) {
+    const host = btn.dataset.csCtlHost;
+    const flags = csCtlCollect(host);
+    csCtlMsg(host, 'Applying to ALL…', true);
+    try {
+        const r = await csFetch(`/${csTenant()}/clients/control-all?tenant_id=${csTenant()}`,
+            { method: 'POST', body: JSON.stringify({ overrides: flags }) });
+        const n = (r && r.applied != null) ? r.applied : '?';
+        csCtlMsg(host, `Applied to ${n} clients.`, true);
+        if (typeof showToast === 'function') showToast(`Overrides applied to ${n} clients`, 'success');
+    } catch (e) { console.error('csCtlAll: apply-all failed', e); csCtlMsg(host, e.message || 'failed', false); }
+};
+
+// Persist the current toggles into the [username] section of user-overrides.conf
+// (username = hostname prefix, mirroring sim_config.username_for). Merges with
+// any non-flag keys already pinned for that user; never drops other users.
+window.csCtlSaveUO = async function (btn) {
+    const host = btn.dataset.csCtlHost;
+    const flags = csCtlCollect(host);
+    const user = String(host || '').split('-')[0] || host;
+    if (!user) { csCtlMsg(host, 'no username', false); return; }
+    csCtlMsg(host, 'Saving to user-overrides…', true);
+    try {
+        const cur = await csFetch(`/${csTenant()}/config/user-overrides-conf`);
+        const state = csParseIni((cur && cur.content) || '');
+        const existing = state[user] || {};
+        // Merge: keep existing non-flag keys, overwrite the 11 control flags.
+        const merged = Object.assign({}, existing);
+        for (const f of CS_CONTROL_FLAGS) merged[f] = flags[f];
+        state[user] = merged;
+        let text = '';
+        for (const [u, kv] of Object.entries(state)) {
+            text += `[${u}]\n`;
+            for (const [k, v] of Object.entries(kv)) {
+                if (v === '' || v === null || v === undefined) continue;
+                text += `${k}=${v}\n`;
+            }
+            text += '\n';
+        }
+        await csFetch(`/${csTenant()}/config/user-overrides-conf`,
+            { method: 'PUT', body: JSON.stringify({ content: text.trim() }) });
+        csCtlMsg(host, `Saved to [${user}].`, true);
+        if (typeof showToast === 'function') showToast(`Saved to user-overrides [${user}]`, 'success');
+    } catch (e) { console.error('csCtlSaveUO: save failed', e); csCtlMsg(host, e.message || 'failed', false); }
 };
 
 window.csClientFilter = function () {
@@ -2176,18 +2356,22 @@ window.csTestCentral = async function () {
 async function csRenderSetupProxmox() {
     csSetToolbar('');
     try {
-        // VM Auto-Provisioning (structured config) → Dongle/Status → Hub Config
-        // (remaining knobs). Both config cards save via GET-merge-PUT against the
-        // same /tenant/{t}/hub-config, so neither wipes the other's keys.
+        // VM Auto-Provisioning (structured config, at top) → Hub Config (remaining
+        // knobs). The old "Dongle / Auto-Provisioning" status card that used to
+        // sit here was removed — it duplicated the new structured card's
+        // Auto-Provision on/off (now the "Auto-Provision VMs" select, saved with
+        // the rest of the knobs via GET-merge-PUT). Live dongle counts + the
+        // provision-loop status live on the Overview/USB page card
+        // (cs-autoprov-toggle / csRefreshAutoProvStatus), unchanged. Both Setup
+        // cards save via GET-merge-PUT against the same /tenant/{t}/hub-config,
+        // so neither wipes the other's keys.
         let autoProv = '';
         try { autoProv = await csSetupAutoProvConfigCard(); } catch (e) { console.error('csRenderSetupProxmox: auto-prov card load failed', e); autoProv = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('VM Auto-Provisioning', e).replace('py-10', 'py-6')}</div>`; }
-        let dongle = '';
-        try { dongle = await csSetupAutoProvCard(); } catch (e) { console.error('csRenderSetupProxmox: dongle card load failed', e); dongle = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('Dongle Allocation', e).replace('py-10', 'py-6')}</div>`; }
         const card = await csHubConfigCard('/tenant/' + csTenant() + '/hub-config');
-        csSet(`<div class="space-y-4"><div class="hpe-card rounded-lg p-5 shadow-sm">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Proxmox / VM Auto-Provisioning</h3>
-          <p class="text-xs text-slate-400 mb-3">Hub-owned provisioning knobs (templates, thresholds, VLANs, USB timeouts, reclone schedule, USB VID/PID lists). Pushed to the spoke on save.</p>
-        </div>${autoProv}${dongle}${card}</div>`);
+        csSet(`<div class="space-y-4">${autoProv}<div class="hpe-card rounded-lg p-5 shadow-sm">
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Hub Config</h3>
+          <p class="text-xs text-slate-400 mb-3">Remaining hub-owned knobs (reclone schedule, VMID range, VLANs, USB VID/PID lists, watchdog group). Pushed to the spoke on save.</p>
+        </div>${card}</div>`);
     } catch (e) { console.error('csRenderSetupProxmox: proxmox config load failed', e); csSet(csErrorBox('Could not load Proxmox config', e)); }
 }
 
