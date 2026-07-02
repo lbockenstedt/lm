@@ -240,6 +240,12 @@ def has_ipam_access(sess) -> bool:
     return has_module_access(sess, "ipam")
 
 
+def has_le_access(sess) -> bool:
+    """Certificate Management (``le``) module access gate (see
+    ``has_module_access``). Right key is ``"le"`` (set in User Management)."""
+    return has_module_access(sess, "le")
+
+
 def check_tenant_access(sess, tenant_id: str) -> bool:
     """True if the session user may access ``tenant_id``.
 

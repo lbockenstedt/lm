@@ -381,7 +381,8 @@ const MODULE_CLASSES = {
     'DNS': ['dns'],
     'DHCP': ['dhcp'],
     'Network': ['nw'],
-    'Simulations': ['cs']
+    'Simulations': ['cs'],
+    'Certificates': ['le']
 };
 
 // Header module label: maps the active view/product to the nav class name shown
@@ -444,6 +445,7 @@ const PRODUCT_MAP = {
     'dns': 'dns',
     'dhcp': 'dhcp',
     'nw': 'nw',
+    'le': 'le',
 };
 
 const LOG_NAMES = {
@@ -451,7 +453,8 @@ const LOG_NAMES = {
     'opn': 'Firewall Logs',
     'pxmx': 'Hypervisor Logs',
     'cppm': 'Security/NAC Logs',
-    'cs': 'Client Simulator Logs'
+    'cs': 'Client Simulator Logs',
+    'le': 'Certificate Logs'
 };
 
 // Friendly product name per registered module_type (each spoke sets its own on
@@ -470,6 +473,7 @@ const MODULE_LABELS = {
     ipam:       'NetBox',
     agent:      'Agent',
     qa:         'QA',
+    certificates: 'Certificate Management',
 };
 function moduleLabel(mt) {
     mt = String(mt || '').toLowerCase();
@@ -542,7 +546,7 @@ window.fetch = async function lmFetch(input, init) {
 // granted its explicit right. Today only the Simulations (cs) module is gated
 // this way; other modules remain product-driven (visible when their spoke is
 // connected). Add a key here to gate another module the same way.
-const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam' };
+const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le' };
 function canSeeModule(className) {
     const right = MODULE_RIGHT[className];
     if (!right) return true;              // no right defined → product-driven
@@ -1944,6 +1948,7 @@ const VIEW_LOADERS = {
     dns:      loadDNSData,
     dhcp:     loadDHCPData,
     nw:       loadNwData,
+    le:       loadLEData,
     cs:       (subMenu) => loadCSData(subMenu, currentSubChild),
     setup:    _renderSetupSection,
     settings: _renderSettingsSection,
@@ -2154,6 +2159,15 @@ function _viewTemplate(viewId) {
   <div id="dhcp-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
+        case 'le':
+            return `<div class="space-y-6">
+  <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
+  <div class="flex justify-end gap-2">
+    <button onclick="loadLEData()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200">↻ Refresh</button>
+  </div>
+  <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+</div>`;
+
         default:
             return `<div class="hpe-card rounded-lg p-6 shadow-sm"><p class="text-sm text-slate-500 italic">Loading…</p></div>`;
     }
@@ -2198,6 +2212,9 @@ function initView(viewId, subView) {
             break;
         case 'nw':
             loadNwData(subView || 'Devices');
+            break;
+        case 'le':
+            loadLEData(subView || 'Certificates');
             break;
         case 'cs':
             loadCSData(subView || 'Dashboard', currentSubChild);
@@ -6309,7 +6326,11 @@ function showDeployAgentInfo() {
     if (existing) existing.remove();
 
     const hubHost = window.location.hostname;
-    const hubWS   = `ws://${hubHost}:8765`;
+    // Protocol-aware: if the WebUI itself was loaded over HTTPS the hub serves
+    // wss on 443 (port implicit); otherwise fall back to legacy ws://...:8765.
+    const hubWS   = window.location.protocol === "https:"
+        ? `wss://${hubHost}`
+        : `ws://${hubHost}:8765`;
     const cmd = `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n  | sudo bash -s -- \\\n    --hub ${hubWS} \\\n    --id my-agent-1`;
 
     const modal = document.createElement('div');
@@ -8571,6 +8592,61 @@ async function loadDNSData(subMenu) {
         container.innerHTML = records.length === 0
             ? '<p class="p-4 text-slate-400 italic text-sm">No DNS records found.</p>'
             : tw(th(cols) + `<tbody>${rows}</tbody>`);
+    } catch (err) {
+        container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
+    }
+}
+
+// ─── Certificate Management (le) view ──────────────────────────────────────
+// Minimal first-pass render: status bar (version / certbot present / count) +
+// a certificates table. The le spoke's handlers are structured stubs until
+// certbot/acme.sh is wired, so the table is usually empty and the status bar
+// carries the "not yet wired" message from the spoke.
+async function loadLEData(subMenu) {
+    const container = document.getElementById('le-content');
+    if (!container) return;
+    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+
+    const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
+    const tw = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
+
+    // Status bar from /api/le/status (best-effort — falls back to the certs call).
+    try {
+        const s = await _spokeFetch('/api/le/status');
+        const bar = document.getElementById('le-status-bar');
+        if (bar && s.ok && s.data) {
+            const d = s.data;
+            const certbot = d.certbot_present ? 'present' : 'not installed';
+            const certbotColor = d.certbot_present ? 'text-green-600' : 'text-amber-500';
+            bar.innerHTML =
+                `<span><b class="text-sm text-slate-700">v${d.version || '—'}</b> le</span>` +
+                `<span>certbot: <b class="text-sm ${certbotColor}">${certbot}</b></span>` +
+                `<span><b class="text-sm text-slate-700">${d.certs_managed ?? 0}</b> managed</span>`;
+        } else if (bar) {
+            bar.innerHTML = `<span class="text-amber-600">${s.detail || 'le spoke not connected'}</span>`;
+        }
+    } catch (e) { /* status is decorative; the certs call surfaces the real error */ }
+
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/le/certs');
+        if (!ok) {
+            container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>`;
+            return;
+        }
+        const certs = (d && d.certs) || [];
+        window._leCerts = certs;
+        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'State'];
+        const rows = certs.map(c => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                <td class="px-4 py-2 font-mono font-medium">${c.domain || '—'}</td>
+                <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
+                <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${c.challenge || '—'}</span></td>
+                <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
+                <td class="px-4 py-2 text-xs">${c.state || '—'}</td>
+            </tr>`).join('');
+        const note = (d && d.message) ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${d.message}</p>` : '';
+        container.innerHTML = certs.length === 0
+            ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet.</p>`
+            : note + tw(th(cols) + `<tbody>${rows}</tbody>`);
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     }

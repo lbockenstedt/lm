@@ -45,12 +45,14 @@ import httpx
 import psutil
 import os
 import socket
+import ssl
 import uuid
 import secrets
 import tarfile
 import io
 import shutil
 import tempfile
+from contextlib import AsyncExitStack
 from collections import deque
 from typing import Dict, Any, Optional, List
 from dataclasses import asdict
@@ -218,6 +220,7 @@ _MODULE_TYPE_PREFIX = {
     "dhcp":       "dhcp",
     "agent":      "agent",
     "nw":         "nw",
+    "certificates": "le",
 }
 
 # module_type → push_config branch tag (key space #1). NOTE "firewall" → "opn"
@@ -230,6 +233,7 @@ _PUSH_CONFIG_MODULE_KEY = {
     "ipam":       "netbox",
     "simulation": "cs",
     "nw":         "nw",
+    "certificates": "le",
 }
 
 # spoke_id substring → push_config branch tag. NOTE: the prefix-fallback loop
@@ -241,6 +245,7 @@ _PUSH_CONFIG_MODULE_KEY = {
 _PUSH_CONFIG_PREFIX_MAP = {
     'pxmx': 'pxmx', 'opn': 'opn', 'cs': 'cs',
     'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap', 'nw': 'nw',
+    'le': 'le',
 }
 
 # _UPDATE_SOURCE_MODULE_KEY / _UPDATE_SOURCE_PREFIX_MAP moved to
@@ -311,6 +316,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
     def __init__(self, host="0.0.0.0", port=8765):
         self.host = host
         self.port = port
+        # TLS for remote spokes/agents. When a cert is configured the hub serves
+        # plaintext on 127.0.0.1:<port> (loopback-only — co-located spokes stay
+        # plain and a remote host cannot reach it) AND wss on 0.0.0.0:<tls_port>
+        # for off-box callers (discovery returns wss:// via the tls_port TXT).
+        # No cert → legacy single plaintext server on self.host:self.port.
+        self.tls_cert_path = os.environ.get("LM_TLS_CERT", "").strip()
+        self.tls_key_path = os.environ.get("LM_TLS_KEY", "").strip()
+        self.tls_port = int(os.environ.get("LM_TLS_PORT", "443"))
+        # pxmx agent-listener port the hub advertises in mDNS (the pxmx spoke
+        # binds this; 8443 by default so an all-in-one doesn't collide with the
+        # hub's 443; a standalone pxmx spoke sets 443).
+        self.pxmx_agent_port = int(os.environ.get("LM_PXMX_AGENT_PORT", "8443"))
+        self.tls_enabled = bool(self.tls_cert_path and self.tls_key_path)
         self.mailbox = Mailbox()
         self.heartbeat = HeartbeatManager()
         self.key_manager = KeyManager()
@@ -2954,15 +2972,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         import socket as _sock
         ips = self._local_ipv4s()
         addresses = [_sock.inet_aton(ip) for ip in ips]
-        # agent_port TXT lets a future agent read its target port from the
-        # service instead of hardcoding 8766 (kept for forward-compat).
+        # TXT records:
+        #   agent_port — the pxmx agent-listener port the hub box serves (the
+        #     pxmx spoke binds it; 8443 when TLS on, 8766 legacy). Lets a pxmx
+        #     agent discover its target port instead of hardcoding 8766.
+        #   tls_port   — present only when the hub serves wss; a remote caller's
+        #     discovery switches to wss://<ip>:<tls_port>. Absent → plaintext
+        #     (a co-located caller always uses ws://127.0.0.1 regardless).
+        properties = {"version": self._hub_version_str(),
+                      "agent_port": str(getattr(self, "pxmx_agent_port", 8766))}
+        if getattr(self, "tls_enabled", False):
+            properties["tls_port"] = str(self.tls_port)
         return ServiceInfo(
             type_="_lm-hub._tcp.local.",
             name="lm-hub._lm-hub._tcp.local.",
             port=int(self.port),
             addresses=addresses,
             server="lm-hub.local.",
-            properties={"version": self._hub_version_str(), "agent_port": "8766"},
+            properties=properties,
         )
 
     def _start_mdns_broadcast(self) -> None:
@@ -3115,11 +3142,34 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # so the serialized payload stays safely under the frame limit.
         self._start_mdns_broadcast()
         try:
-            async with websockets.serve(self.handle_connection, self.host, self.port, compression=None, max_size=16 * 1024 * 1024) as server:
-                self.is_ready = True
-                logger.info(f"Lab Manager Hub {version} started on ws://{self.host}:{self.port}")
-                logger.info(f"Hub API started on port 8000")
-                await asyncio.Future()
+            if self.tls_enabled:
+                # Dual listener: plaintext loopback (127.0.0.1:<port>) for
+                # co-located spokes + wss (0.0.0.0:<tls_port>) for remote
+                # spokes/agents. The same handle_connection serves both; a
+                # remote host cannot reach the loopback plaintext socket.
+                server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                server_ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
+                async with AsyncExitStack() as stack:
+                    await stack.enter_async_context(websockets.serve(
+                        self.handle_connection, "127.0.0.1", self.port,
+                        compression=None, max_size=16 * 1024 * 1024))
+                    await stack.enter_async_context(websockets.serve(
+                        self.handle_connection, "0.0.0.0", self.tls_port,
+                        compression=None, max_size=16 * 1024 * 1024, ssl=server_ctx))
+                    self.is_ready = True
+                    logger.info(f"Lab Manager Hub {version} started on "
+                                f"ws://127.0.0.1:{self.port} (loopback) + "
+                                f"wss://0.0.0.0:{self.tls_port} (TLS)")
+                    logger.info(f"Hub API started on port 8000")
+                    await asyncio.Future()
+            else:
+                # Legacy: no cert configured → single plaintext server (today's
+                # behavior) so a box that hasn't generated a cert keeps working.
+                async with websockets.serve(self.handle_connection, self.host, self.port, compression=None, max_size=16 * 1024 * 1024) as server:
+                    self.is_ready = True
+                    logger.info(f"Lab Manager Hub {version} started on ws://{self.host}:{self.port}")
+                    logger.info(f"Hub API started on port 8000")
+                    await asyncio.Future()
         finally:
             self._stop_mdns_broadcast()
 

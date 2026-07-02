@@ -605,7 +605,7 @@ rm -rf lm_tmp
 # skip its installer, the venv is never restored and the service crash-loops
 # with status=203/EXEC ("Unable to locate executable .../venv/bin/python3").
 # Excluded modules are left entirely untouched (no venv wipe, no code pull).
-REPOS=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap" "nw")
+REPOS=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap" "nw" "le")
 for repo in "${REPOS[@]}"; do
     _excluded=false
     for ex in "${EXCLUDE[@]}"; do [[ "$repo" == "$ex" ]] && _excluded=true; done
@@ -892,7 +892,7 @@ PYEOF
 # connect without a secret. The hub will generate and push their session keys
 # automatically on first connection (zero-touch provisioning).
 log_c "✅ Pre-approving spoke IDs..."
-for sid in cs-spoke-1 pxmx-spoke-1 opn-spoke-1 cppm-spoke-1 netbox-spoke-1 ldap-spoke-1 dns-spoke-1 dhcp-spoke-1 nw-spoke-1; do
+for sid in cs-spoke-1 pxmx-spoke-1 opn-spoke-1 cppm-spoke-1 netbox-spoke-1 ldap-spoke-1 dns-spoke-1 dhcp-spoke-1 nw-spoke-1 le-spoke-1; do
     # Meaningful: a failed approval means the spoke won't be auto-accepted on
     # first connect (an admin must approve it manually). Surface it so a silent
     # hub-not-ready / 4xx doesn't hide a missing pre-approval from the log.
@@ -902,7 +902,7 @@ for sid in cs-spoke-1 pxmx-spoke-1 opn-spoke-1 cppm-spoke-1 netbox-spoke-1 ldap-
         || log_e "Pre-approval failed for $sid (spoke will need manual approval)"
 done
 
-MODULES_ORDER=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap" "dns" "dhcp" "nw")
+MODULES_ORDER=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap" "dns" "dhcp" "nw" "le")
 declare -A MODULES=(
     ["cs"]="install_cs.sh"
     ["pxmx"]="install_pxmx.sh"
@@ -913,6 +913,7 @@ declare -A MODULES=(
     ["dns"]="install_dns.sh"
     ["dhcp"]="install_dhcp.sh"
     ["nw"]="install_nw.sh"
+    ["le"]="install_le.sh"
 )
 declare -A SPOKE_IDS=(
     ["cs"]="cs-spoke-1"
@@ -924,6 +925,7 @@ declare -A SPOKE_IDS=(
     ["dns"]="dns-spoke-1"
     ["dhcp"]="dhcp-spoke-1"
     ["nw"]="nw-spoke-1"
+    ["le"]="le-spoke-1"
 )
 
 for mod in "${MODULES_ORDER[@]}"; do
@@ -1008,6 +1010,41 @@ chown -R $SvcUser:$SvcUser "$BASE_DIR"
 # If a future change moves these scripts out of the repo root, re-add an explicit
 # copy from the clone source here.
 
+# ── Self-signed TLS cert for the hub's wss listener (remote spokes/agents) ──
+# When present the hub serves plaintext on 127.0.0.1:8765 (loopback, co-located
+# spokes) AND wss on 0.0.0.0:443 (remote). Skip gracefully if openssl is absent
+# — the hub then falls back to legacy single plaintext 0.0.0.0:8765.
+TLS_CERT_DIR="$BASE_DIR/certs"
+TLS_CERT="$TLS_CERT_DIR/hub.crt"
+TLS_KEY="$TLS_CERT_DIR/hub.key"
+mkdir -p "$TLS_CERT_DIR"
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "⚠️  openssl not found — skipping hub TLS cert generation (hub stays plaintext)."
+elif [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ]; then
+    echo "🔒 Hub TLS cert already present at $TLS_CERT — preserving."
+else
+    echo "🔒 Generating self-signed hub TLS cert at $TLS_CERT…"
+    openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$TLS_KEY" -out "$TLS_CERT" -days 3650 \
+        -subj "/CN=lm-hub" \
+        -addext "subjectAltName=IP:127.0.0.1,DNS:lm-hub,DNS:lm-hub.local" \
+        >/dev/null 2>&1 || echo "⚠️  openssl cert generation failed — hub stays plaintext."
+fi
+if [ -f "$TLS_KEY" ]; then
+    chmod 600 "$TLS_KEY"
+    chown "$SvcUser:$SvcUser" "$TLS_KEY" "$TLS_CERT" 2>/dev/null || true
+fi
+# Also surface the TLS knobs in .env so non-unit launches (start_all.sh) see them.
+if ! grep -q "^LM_TLS_CERT=" "$BASE_DIR/.env" 2>/dev/null; then
+    {
+        echo "LM_TLS_CERT=$TLS_CERT"
+        echo "LM_TLS_KEY=$TLS_KEY"
+        echo "LM_TLS_PORT=443"
+        echo "LM_PXMX_AGENT_PORT=8443"
+        echo "LM_HUB_TLS_VERIFY=0"
+    } >> "$BASE_DIR/.env"
+fi
+
 # Create the systemd service unit
 cat <<EOF > /etc/systemd/system/lm.service
 [Unit]
@@ -1020,6 +1057,13 @@ RemainAfterExit=yes
 User=$SvcUser
 WorkingDirectory=$BASE_DIR
 EnvironmentFile=-$BASE_DIR/.env
+# TLS: cert/key for the wss listener (0.0.0.0:443); pxmx agent listener port
+# (8443, avoids colliding with the hub's 443 when co-located); verification off
+# by default (self-signed) — set LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT to verify.
+# AmbientCapabilities lets svc_lm bind the privileged 443 without being root.
+Environment=LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443 LM_HUB_TLS_VERIFY=0
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStart=/bin/bash $BASE_DIR/start_all.sh
 # Stop ONLY the Hub process — never every Python on the host. A bare
 # `pkill -f python` here killed gunicorn, netbox-rq, and every lm-* spoke on

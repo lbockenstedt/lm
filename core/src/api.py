@@ -595,6 +595,14 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "IPAM module access required"})
 
+        # /api/le/* (Certificate Management module) requires the ``le`` right OR
+        # admin. Mirrors the cs/nw/netbox gate; frontend hides the Certificates
+        # nav on the same right.
+        if path.startswith("/api/le/"):
+            if not (_is_admin(sess) or _has_le_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Certificate module access required"})
+
         # Tenant scoping: block requests for a ?tenant= the user isn't authorised for
         tenant = request.query_params.get("tenant")
         if tenant and not _check_tenant_access(sess, tenant):
@@ -3046,12 +3054,21 @@ def create_app(hub):
         """Return a ready-to-paste install command for the pxmx node agent."""
         import socket as _socket
         host = request.headers.get("host", "").split(":")[0] or _socket.gethostbyname(_socket.gethostname())
+        hub = app.state.hub
+        # When the hub has a TLS cert, the pxmx agent listener on the hub box is
+        # wss on LM_PXMX_AGENT_PORT (8443 all-in-one / 443 standalone); omit the
+        # port when it's 443. Without TLS, legacy plaintext :8766.
+        if getattr(hub, "tls_enabled", False):
+            agent_port = int(getattr(hub, "pxmx_agent_port", 8443))
+            spoke_url = f"wss://{host}" if agent_port == 443 else f"wss://{host}:{agent_port}"
+        else:
+            spoke_url = f"ws://{host}:8766"
         cmd = (
             f"curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh "
             f"| sudo bash -s -- "
-            f"--spoke-url ws://{host}:8766"
+            f"--spoke-url {spoke_url}"
         )
-        return {"cmd": cmd, "spoke_url": f"ws://{host}:8766"}
+        return {"cmd": cmd, "spoke_url": spoke_url}
 
     @app.get("/api/pxmx/agents")
     async def get_pxmx_agents():
@@ -5678,6 +5695,9 @@ def create_app(hub):
     def _has_ipam_access(sess):
         return access.has_ipam_access(sess)
 
+    def _has_le_access(sess):
+        return access.has_le_access(sess)
+
     def _check_tenant_access(sess, tenant_id):
         return access.check_tenant_access(sess, tenant_id)
 
@@ -6145,6 +6165,12 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="DNS spoke not connected")
         return spoke_id
 
+    def _get_le_spoke(hub):
+        spoke_id = hub.get_spoke_by_type("certificates")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="Certificate spoke not connected")
+        return spoke_id
+
     async def _relay_spoke(spoke_id, command, payload=None, log_name=""):
         """Relay ``command`` to a spoke and return its SUCCESS payload.
 
@@ -6229,6 +6255,39 @@ def create_app(hub):
         except Exception as e:
             logger.exception("dns_sync_from_netbox failed")
             raise HTTPException(status_code=500, detail=str(e))
+
+    # ─── Certificate Management (le) API ──────────────────────────────────────
+    # Relays LE_* commands to the certificates spoke via _relay_spoke (same
+    # SUCCESS/ERROR contract + 502-on-spoke-error as DNS/DHCP). The spoke's
+    # handlers are structured stubs until certbot/acme.sh is wired.
+    @app.get("/api/le/certs")
+    async def le_list_certs():
+        """List managed certificates from the le spoke."""
+        logger.debug("relay GET /api/le/certs")
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_LIST_CERTS",
+                                  log_name="le_list_certs")
+
+    @app.get("/api/le/status")
+    async def le_status():
+        """le spoke module status (version, certbot present, cert count)."""
+        logger.debug("relay GET /api/le/status")
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_GET_STATUS",
+                                  log_name="le_status")
+
+    @app.post("/api/le/issue")
+    async def le_issue_cert(request: Request):
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_ISSUE_CERT",
+                                  await request.json(), log_name="le_issue_cert")
+
+    @app.post("/api/le/renew")
+    async def le_renew_cert(request: Request):
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_RENEW_CERT",
+                                  await request.json(), log_name="le_renew_cert")
+
+    @app.post("/api/le/revoke")
+    async def le_revoke_cert(request: Request):
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REVOKE_CERT",
+                                  await request.json(), log_name="le_revoke_cert")
 
     # ─── DHCP API ─────────────────────────────────────────────────────────────
 

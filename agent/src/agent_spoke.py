@@ -30,6 +30,7 @@ _ROLE_MAP = {
     "simulation": ("cs/lm-spoke/src/cs_spoke.py",   "CSSpoke",   "simulation", "https://github.com/lbockenstedt/cs.git"),
     "cppm":       ("cppm/src/spoke.py",             "CPPMSpoke", "nac",        "https://github.com/lbockenstedt/cppm.git"),
     "proxmox":    ("pxmx/src/proxmox_spoke.py",     "ProxmoxSpoke", "hypervisor", "https://github.com/lbockenstedt/pxmx.git"),
+    "le":         ("le/src/le_spoke.py",            "LESpoke",   "certificates", "https://github.com/lbockenstedt/le.git"),
 }
 
 # Deploy roles: instead of morphing the agent into a service, these run an
