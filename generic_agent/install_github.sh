@@ -13,10 +13,13 @@ HUB_SECRET=""
 CLONE_ONLY=false
 
 # --- Logging Setup ---
-LOG_DIR="/var/log"
-INSTALL_LOG="$LOG_DIR/generic-agent-install.log"
+LOG_DIR="/var/log/lm"
+INSTALL_LOG="$LOG_DIR/lm-agent-install.log"
 
-# Create log directory if it doesn't exist (usually exists for /var/log)
+# Create the log directory (shared with the hub + spokes; the agent runtime
+# log /var/log/lm/agent.log lives here too). The installer runs as root, so it
+# can create the dir; the chown to svc_lm below (step 4) lets the User=svc_lm
+# service write its own runtime log here.
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 chmod 755 "$LOG_DIR" 2>/dev/null || true
 
@@ -107,6 +110,20 @@ chown -R svc_lm:svc_lm /var/log/lm 2>/dev/null || true
 
 # 5. Systemd Service Setup
 log_c "⚙️ Configuring systemd service..."
+
+# Migrate from the older installer's unit name. install_agent.sh (the legacy
+# generic installer) wrote lm-bootstrap.service for this agent; this installer
+# uses lm-generic-agent.service. A re-install over an old box would otherwise
+# leave BOTH units enabled — the stale lm-bootstrap would crash-loop on boot
+# because its ExecStart uses the retired --hub/--hub-secret args the current
+# agent.py no longer accepts. Disable + remove it so only the new unit remains.
+if [ -f /etc/systemd/system/lm-bootstrap.service ] || \
+   systemctl list-unit-files 2>/dev/null | grep -q '^lm-bootstrap\.service'; then
+    log_c "🧹 Removing stale lm-bootstrap.service (older installer's unit)…"
+    systemctl disable --now lm-bootstrap 2>/dev/null || true
+    rm -f /etc/systemd/system/lm-bootstrap.service
+    systemctl daemon-reload 2>/dev/null || true
+fi
 # Build the ExecStart argument list conditionally so an empty --secret (or
 # --id) is OMITTED entirely rather than passed as a blank token. A blank
 # `--secret ` here would otherwise swallow the next flag (`--spoke-url`) and
