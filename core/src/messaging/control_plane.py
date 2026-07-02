@@ -340,6 +340,7 @@ class BaseControlPlane:
 
     async def run(self):
         """Main loop for the control plane."""
+        await self._resolve_hub_url()
         logger.info(f"Starting Control Plane in HUB MODE -> {self.hub_url}")
         self.start_updater_worker()
         _delay = 5
@@ -354,7 +355,36 @@ class BaseControlPlane:
             except Exception as e:
                 logger.error("Unexpected connection error (%s). Reconnecting in %ds...", e, _delay)
                 _delay = min(_delay * 2, 300)
+            # If the hub URL is the auto-discovery sentinel, re-resolve on each
+            # reconnect so a hub that comes up after this spoke (or moves) is
+            # found without a restart.
+            if self.hub_url in ("", "auto", None):
+                await self._resolve_hub_url()
             await asyncio.sleep(_delay)
+
+    async def _resolve_hub_url(self) -> None:
+        """When ``self.hub_url`` is empty/``auto``/None, auto-discover the hub via
+        DNS (``lm-hub.<suffix>``) then mDNS and set ``self.hub_url`` to the result.
+
+        Lets a spoke install/launch with no ``--hub`` and still find the hub
+        (mirroring the install-script discovery). Best-effort: on no result it
+        leaves ``self.hub_url`` as the sentinel so the next reconnect retries —
+        discovery is never fatal to the spoke."""
+        if self.hub_url not in ("", "auto", None):
+            return
+        try:
+            from .hub_discovery import discover_hub_url
+        except ImportError:
+            logger.warning("hub_discovery module unavailable — cannot auto-discover "
+                           "the hub; pass --hub or set HUB_URL.")
+            return
+        url = discover_hub_url(timeout=5.0)
+        if url:
+            self.hub_url = url
+            logger.info(f"Auto-discovered hub at {url}")
+        else:
+            logger.warning("Hub auto-discovery found no hub (no lm-hub DNS record / "
+                           "mDNS broadcast); will retry on reconnect. Pass --hub to pin.")
 
     async def _connect_and_serve(self):
         # Disable per-message-deflate. A deflate-context desync between this

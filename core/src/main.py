@@ -34,6 +34,7 @@ import subprocess
 import httpx
 import psutil
 import os
+import socket
 import uuid
 import secrets
 import tarfile
@@ -2881,6 +2882,120 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 logger.error(f"Error in OPNsense polling loop: {e}")
                 await asyncio.sleep(300) # Retry after 5 mins on error
 
+    # ── mDNS hub broadcast ──────────────────────────────────────────────────
+    # Advertise _lm-hub._tcp.local. on the spoke-WS port so spokes/agents on the
+    # same LAN auto-locate the hub with zero config (see messaging.hub_discovery).
+    # zeroconf is an optional dep: a missing import or any registration failure
+    # is logged once and skipped — it must never break the hub.
+    _mdns_zconf = None
+    _mdns_info = None
+    _mdns_warned = False
+
+    def _local_ipv4s(self) -> List[str]:
+        """Non-loopback IPv4s of this host, primary LAN IP first.
+
+        Uses the UDP-connect trick to find the primary outbound interface, then
+        adds any other non-loopback IPv4s psutil sees (multi-homed hubs advertise
+        all reachable addresses)."""
+        ips: List[str] = []
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect(("223.255.255.1", 1))  # RFC 5737 — never routed
+                ip = s.getsockname()[0]
+                if ip and not ip.startswith("127.") and ip not in ips:
+                    ips.append(ip)
+            finally:
+                s.close()
+        except Exception:
+            pass
+        try:
+            for _name, addrs in psutil.net_if_addrs().items():
+                for a in addrs:
+                    fam = getattr(a, "family", None)
+                    addr = getattr(a, "address", "")
+                    if fam == socket.AF_INET and addr and not addr.startswith("127.") and addr not in ips:
+                        ips.append(addr)
+        except Exception:
+            pass
+        return ips or ["127.0.0.1"]
+
+    def _hub_version_str(self) -> str:
+        try:
+            version_path = os.path.join(os.path.dirname(__file__), "../../VERSION")
+            if not os.path.exists(version_path):
+                version_path = os.path.join(os.path.dirname(__file__), "../VERSION")
+            with open(version_path, "r") as f:
+                return f.read().strip() or "unknown"
+        except Exception:
+            return "unknown"
+
+    def _build_hub_service_info(self):
+        """Construct the zeroconf ServiceInfo for the hub (or None if zeroconf
+        is unavailable). Caller handles registration on a daemon thread."""
+        try:
+            from zeroconf import ServiceInfo, Zeroconf  # noqa: F401
+        except ImportError:
+            if not LabManagerHub._mdns_warned:
+                LabManagerHub._mdns_warned = True
+                logger.warning("zeroconf not installed — hub will not broadcast "
+                               "mDNS; spokes must use the lm-hub DNS name or --hub.")
+            return None
+        import socket as _sock
+        ips = self._local_ipv4s()
+        addresses = [_sock.inet_aton(ip) for ip in ips]
+        # agent_port TXT lets a future agent read its target port from the
+        # service instead of hardcoding 8766 (kept for forward-compat).
+        return ServiceInfo(
+            type_="_lm-hub._tcp.local.",
+            name="lm-hub._lm-hub._tcp.local.",
+            port=int(self.port),
+            addresses=addresses,
+            server="lm-hub.local.",
+            properties={"version": self._hub_version_str(), "agent_port": "8766"},
+        )
+
+    def _start_mdns_broadcast(self) -> None:
+        """Register the hub's mDNS service on a daemon thread (best-effort)."""
+        try:
+            from zeroconf import Zeroconf
+        except ImportError:
+            self._build_hub_service_info()  # emits the one-time warning
+            return
+        try:
+            info = self._build_hub_service_info()
+            if info is None:
+                return
+            zconf = Zeroconf()
+            zconf.register_service(info)
+            self._mdns_zconf = zconf
+            self._mdns_info = info
+            logger.info(f"mDNS: broadcasting _lm-hub._tcp.local. on port {self.port} "
+                        f"(addresses={self._local_ipv4s()})")
+        except Exception as e:
+            logger.warning(f"mDNS broadcast failed (hub still runs, spokes must use "
+                           f"--hub or the lm-hub DNS name): {e}")
+            # Clean up any half-initialized registrar.
+            self._stop_mdns_broadcast()
+
+    def _stop_mdns_broadcast(self) -> None:
+        """Unregister + close the mDNS broadcaster (best-effort, idempotent)."""
+        zconf = self._mdns_zconf
+        info = self._mdns_info
+        self._mdns_zconf = None
+        self._mdns_info = None
+        if zconf is None:
+            return
+        try:
+            if info is not None:
+                zconf.unregister_service(info)
+        except Exception:
+            pass
+        try:
+            zconf.close()
+        except Exception:
+            pass
+
     async def start(self):
         """
         Starts the WebSocket server and background tasks.
@@ -2988,11 +3103,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # relaying, which closed the bugfixer agent with code 1009 "message too
         # big". 16 MiB ceiling pairs with the total-char cap in collect_all_logs
         # so the serialized payload stays safely under the frame limit.
-        async with websockets.serve(self.handle_connection, self.host, self.port, compression=None, max_size=16 * 1024 * 1024) as server:
-            self.is_ready = True
-            logger.info(f"Lab Manager Hub {version} started on ws://{self.host}:{self.port}")
-            logger.info(f"Hub API started on port 8000")
-            await asyncio.Future()
+        self._start_mdns_broadcast()
+        try:
+            async with websockets.serve(self.handle_connection, self.host, self.port, compression=None, max_size=16 * 1024 * 1024) as server:
+                self.is_ready = True
+                logger.info(f"Lab Manager Hub {version} started on ws://{self.host}:{self.port}")
+                logger.info(f"Hub API started on port 8000")
+                await asyncio.Future()
+        finally:
+            self._stop_mdns_broadcast()
 
 
     async def run_hub_heartbeat_loop(self):
