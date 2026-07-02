@@ -778,6 +778,10 @@ def create_app(hub):
         """
         hub = app.state.hub
         try:
+            # Capture the secret the spoke currently holds BEFORE rotating, so
+            # the key-delivery push is signed with it — the spoke can't verify a
+            # frame signed with the new secret it hasn't installed yet.
+            prev_secret = hub.key_manager.current_session_secret(spoke_id)
             new_key = hub.key_manager.rotate_key(spoke_id)
             new_secret = new_key.secret
 
@@ -785,7 +789,8 @@ def create_app(hub):
             if spoke_conn:
                 try:
                     result = await hub.request_response(
-                        spoke_id, "SPOKE_UPDATE_SESSION_KEY", {"secret": new_secret}
+                        spoke_id, "SPOKE_UPDATE_SESSION_KEY", {"secret": new_secret},
+                        signing_secret=prev_secret,
                     )
                     pushed = result.get("status") == "SUCCESS"
                 except Exception as push_err:
@@ -934,10 +939,13 @@ def create_app(hub):
 
             if spoke_id in hub.active_connections:
                 if action != "unapprove":
-                    # Generate a session secret for the spoke (idempotent — reuses existing key if present)
+                    # Generate a session secret for the spoke (idempotent — reuses existing key if present).
+                    # Sign the key-delivery push with the secret the spoke currently holds (None = pending,
+                    # it accepts anyway) so it can verify and install the new secret.
+                    prev_secret = hub.key_manager.current_session_secret(spoke_id)
                     session_secret = hub.key_manager.generate_first_secret(spoke_id)
                     key_msg = _hub_msg(spoke_id, "SPOKE_UPDATE_SESSION_KEY", {"secret": session_secret})
-                    await hub.send_to_spoke(key_msg)
+                    await hub.send_to_spoke(key_msg, signing_secret=prev_secret)
 
                 msg_type = "APPROVED" if action != "unapprove" else "DENIED"
                 approval_msg = _hub_msg(spoke_id, msg_type, {})

@@ -287,6 +287,29 @@ class KeyManager:
 
         return MessageSigner(key.secret).sign(message_dict)
 
+    def current_session_secret(self, spoke_id: str) -> Optional[str]:
+        """The session secret currently held for a spoke, or None if it has none.
+
+        Callers delivering a NEW session key capture this BEFORE
+        ``generate_first_secret``/``rotate_key`` so they can sign the
+        ``SPOKE_UPDATE_SESSION_KEY`` push with the secret the spoke still holds
+        (it cannot verify a frame signed with the new secret it has not yet
+        installed). None means the spoke is pending (no secret) — it accepts
+        the delivery unauthenticated.
+        """
+        key = self.keys.get(spoke_id)
+        return key.secret if key else None
+
+    def sign_with_secret(self, secret: str, message_dict: Dict[str, Any]) -> str:
+        """Sign a message with an EXPLICIT secret instead of ``keys[spoke_id]``.
+
+        Used only for ``SPOKE_UPDATE_SESSION_KEY`` delivery: the push carries
+        the new session secret but must be signed with the PREVIOUS secret the
+        spoke still holds so it can verify and dispatch it. See
+        ``main.py send_to_spoke(signing_secret=...)``.
+        """
+        return MessageSigner(secret).sign(message_dict)
+
     def verify_signature(self, spoke_id: str, message_bytes: bytes, signature: str) -> bool:
         """Verifies the HMAC signature of a message.
 

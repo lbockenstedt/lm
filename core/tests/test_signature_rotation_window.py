@@ -190,3 +190,50 @@ async def test_install_same_websocket_no_close():
     assert ok is True
     assert ws.closed is False
     assert hub.active_connection_key_ids["s1"] == "cur"
+
+# ── key-delivery signing (sign SPOKE_UPDATE_SESSION_KEY with the PRE-rotation
+#    secret so the spoke can verify it before installing the new key) ──────────
+
+def test_key_delivery_signed_with_prev_secret_verifies_on_spoke():
+    """The SPOKE_UPDATE_SESSION_KEY push must be signed with the PRE-rotation
+    secret the spoke still holds. A spoke holding the OLD secret verifies it
+    (and so dispatches + installs the new secret); a spoke holding the NEW
+    secret does NOT — proving the delivery cannot be signed with the new key
+    (the original desync: the spoke dropped the push before dispatch)."""
+    km = _make_km()
+    old = km.generate_first_secret("s1")                # the secret the spoke holds
+    prev = km.current_session_secret("s1")
+    assert prev == old
+
+    new_key = km.rotate_key("s1")                       # hub flips current -> new
+    new = new_key.secret
+    assert new != old
+    assert km.current_session_secret("s1") == new
+
+    body = {"header": {"sender_id": "hub", "destination_id": "s1"},
+            "payload": {"type": "SPOKE_UPDATE_SESSION_KEY", "data": {"secret": new}}}
+
+    # Hub signs the delivery with the PRE-rotation secret (the fix).
+    sig = km.sign_with_secret(prev, body)
+    frame = {**body, "signature": sig}
+
+    # Spoke still holding the OLD secret verifies -> dispatches -> installs new.
+    assert MessageSigner(old).verify(frame) is True
+    # A spoke that already had the NEW secret would NOT verify a prev-signed
+    # frame (and vice-versa) — the signature is bound to the secret used.
+    assert MessageSigner(new).verify(frame) is False
+
+    # After the spoke installs the new secret, a normal command signed with the
+    # new (current) key verifies on the spoke's new signer.
+    cmd = {"header": {"sender_id": "hub", "destination_id": "s1"},
+           "payload": {"type": "GET_VERSION", "data": {}}}
+    cmd_sig = km.sign_message("s1", cmd)                # signs with current = new
+    assert MessageSigner(new).verify({**cmd, "signature": cmd_sig}) is True
+
+
+def test_current_session_secret_none_for_pending_spoke():
+    """A spoke with no key (pending / zero-touch) has no current secret, so the
+    delivery is signed with None -> send_to_spoke falls back to the current
+    (new) key, which the pending spoke accepts unauthenticated."""
+    km = _make_km()
+    assert km.current_session_secret("never-seen") is None

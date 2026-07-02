@@ -438,9 +438,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.is_ready = False
 
 
-    async def send_to_spoke(self, message: Message):
+    async def send_to_spoke(self, message: Message, signing_secret: Optional[str] = None):
         """
         The low-level send function used by the Mailbox.
+
+        ``signing_secret`` overrides the key used to sign THIS one message. It
+        is used ONLY for ``SPOKE_UPDATE_SESSION_KEY`` delivery, which must be
+        signed with the PRE-rotation secret the spoke still holds — the spoke
+        cannot verify a frame signed with the new secret it has not installed
+        yet, so signing the key-delivery push with the new key makes it drop the
+        push and permanently desync. When None, sign with the spoke's current
+        key as usual.
         """
         spoke_id = message.header.destination_id
         ws = self.active_connections.get(spoke_id)
@@ -454,10 +462,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             payload_dict = asdict(message.payload)
 
             # Sign the structured data (KeyManager now handles canonicalization)
-            message.signature = self.key_manager.sign_message(spoke_id, {
-                "header": header_dict,
-                "payload": payload_dict
-            })
+            body = {"header": header_dict, "payload": payload_dict}
+            if signing_secret is not None:
+                message.signature = self.key_manager.sign_with_secret(signing_secret, body)
+            else:
+                message.signature = self.key_manager.sign_message(spoke_id, body)
 
             payload = {
                 "header": header_dict,
@@ -495,9 +504,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         await self.send_to_spoke(msg)
         return msg_id
 
-    async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
+    async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: float = 5.0, signing_secret: Optional[str] = None) -> Dict[str, Any]:
         """
         Sends a command to a spoke and waits for its acknowledgement.
+
+        ``signing_secret`` is passed through to ``send_to_spoke`` and is used
+        only for ``SPOKE_UPDATE_SESSION_KEY`` delivery (sign with the
+        pre-rotation secret the spoke still holds).
         """
         msg_id = str(uuid.uuid4())
         logger.info(f"Request: {msg_id} -> {spoke_id} [{command_type}] data={_redact(command_type, data)}")
@@ -511,7 +524,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             payload=MessagePayload(type=command_type, data=data)
         )
 
-        await self.send_to_spoke(msg)
+        await self.send_to_spoke(msg, signing_secret=signing_secret)
 
         # Wait for the response in the mailbox
         self._outstanding_requests.add(msg_id)
@@ -1022,6 +1035,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.approved_modules[spoke_id] = True
         self.state.save_state()
         if spoke_id in self.active_connections:
+            # Capture the secret the spoke currently holds BEFORE generating the
+            # new one, then sign the key-delivery push with it — the spoke can't
+            # verify a frame signed with the new secret it hasn't installed yet.
+            prev_secret = self.key_manager.current_session_secret(spoke_id)
             session_secret = self.key_manager.generate_first_secret(spoke_id)
             key_msg = Message(
                 header=MessageHeader(
@@ -1029,7 +1046,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     sender_id="hub", destination_id=spoke_id),
                 payload=MessagePayload(
                     type="SPOKE_UPDATE_SESSION_KEY", data={"secret": session_secret}))
-            await self.send_to_spoke(key_msg)
+            await self.send_to_spoke(key_msg, signing_secret=prev_secret)
             approval_msg = Message(
                 header=MessageHeader(
                     message_id=str(uuid.uuid4()), timestamp=time.time(),
@@ -1544,6 +1561,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # If the spoke connected without a secret (zero-touch, already approved),
                 # generate and push its session key before sending config.
                 if not secret:
+                    # Sign the key-delivery push with the secret the spoke
+                    # currently holds (None here = pending, it accepts anyway)
+                    # so it can verify and install the new secret.
+                    prev_secret = self.key_manager.current_session_secret(spoke_id)
                     session_secret = self.key_manager.generate_first_secret(spoke_id)
                     key_msg = Message(
                         header=MessageHeader(
@@ -1552,7 +1573,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         payload=MessagePayload(
                             type="SPOKE_UPDATE_SESSION_KEY",
                             data={"secret": session_secret}))
-                    await self.send_to_spoke(key_msg)
+                    await self.send_to_spoke(key_msg, signing_secret=prev_secret)
                 await self.push_config_to_spoke(spoke_id)
 
                 # Request version AFTER the session key is established so the spoke
@@ -2770,6 +2791,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 for sid in due_spokes:
                     if sid in self.active_connections:
                         logger.info(f"Rotating session key for spoke {sid} (due for rotation)")
+                        # Capture the secret the spoke currently holds BEFORE
+                        # rotate_key flips current to the new one, so we can
+                        # sign the delivery push with it (the spoke can't verify
+                        # a frame signed with the new secret it hasn't installed).
+                        prev_secret = self.key_manager.current_session_secret(sid)
                         new_key = self.key_manager.rotate_key(sid)
                         msg = Message(
                             header=MessageHeader(
@@ -2780,17 +2806,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                             ),
                             payload=MessagePayload(type="SPOKE_UPDATE_SESSION_KEY", data={"secret": new_key.secret})
                         )
-                        rotated.append((sid, msg))
+                        rotated.append((sid, msg, prev_secret))
 
-                async def _push_session_key(sid, msg):
+                async def _push_session_key(sid, msg, prev_secret):
                     try:
-                        await self.send_to_spoke(msg)
+                        await self.send_to_spoke(msg, signing_secret=prev_secret)
                         logger.info(f"New session key pushed to {sid}")
                     except Exception as e:
                         logger.error(f"Failed to push session key to {sid}: {e}")
 
                 if rotated:
-                    await asyncio.gather(*(_push_session_key(sid, msg) for sid, msg in rotated))
+                    await asyncio.gather(*(_push_session_key(sid, msg, prev) for sid, msg, prev in rotated))
 
                 global_config = self.state.get_global_config()
                 last_root_rot = global_config.get("last_hub_root_rotation", 0)
