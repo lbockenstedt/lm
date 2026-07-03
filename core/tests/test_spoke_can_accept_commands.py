@@ -153,3 +153,40 @@ def test_non_numeric_last_attempt_does_not_crash():
     ok, reason = hub.spoke_can_accept_commands("weird-spoke")
     assert ok is True  # conn_age falls back to 0 -> within grace window
     assert reason == ""
+
+
+# ── _mark_spoke_disconnected: no KeyError after a delete-evicted entry ────────
+#
+# delete_spoke() evicts spoke_telemetry BEFORE the 1008 "Removed by admin"
+# socket close fires the disconnect handler. The handler must not KeyError on
+# the missing entry (regression: traceback in production on admin delete of a
+# connected spoke). Forward to the real LabManagerHub._mark_spoke_disconnected.
+
+class _DisconnectHub:
+    _CMD_NOT_CONNECTED = main.LabManagerHub._CMD_NOT_CONNECTED
+    _CMD_UNAUTHENTICATED = main.LabManagerHub._CMD_UNAUTHENTICATED
+
+    def __init__(self):
+        self.spoke_telemetry = {}
+
+    def _mark_spoke_disconnected(self, spoke_id):
+        return main.LabManagerHub._mark_spoke_disconnected(self, spoke_id)
+
+
+def test_mark_disconnected_updates_existing_entry_in_place():
+    hub = _DisconnectHub()
+    hub.spoke_telemetry["dns-spoke-1"] = {"last_attempt": 1234.0, "status": "CONNECTED"}
+    hub._mark_spoke_disconnected("dns-spoke-1")
+    assert hub.spoke_telemetry["dns-spoke-1"]["status"] == "DISCONNECTED"
+    # A transient disconnect preserves the prior last_attempt (no reseeding).
+    assert hub.spoke_telemetry["dns-spoke-1"]["last_attempt"] == 1234.0
+
+
+def test_mark_disconnected_recreates_stub_after_evict_no_keyerror():
+    # Simulates the delete-then-close order: _evict_spoke already popped the
+    # telemetry entry when the 1008 close fires the disconnect handler.
+    hub = _DisconnectHub()
+    assert "lm-opnsense" not in hub.spoke_telemetry  # evicted
+    hub._mark_spoke_disconnected("lm-opnsense")  # must not raise
+    assert hub.spoke_telemetry["lm-opnsense"]["status"] == "DISCONNECTED"
+    assert "last_attempt" in hub.spoke_telemetry["lm-opnsense"]

@@ -925,7 +925,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions', 'Diagnostics'],
+    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -2701,8 +2701,16 @@ function _renderSetupSpokesTile(content) {
                     <span class="text-xs text-slate-400 italic">idle until a role is loaded</span>
                 </div>
                 <div id="generic-agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
+            <div class="${card}">
+                <div class="flex justify-between items-center mb-3">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Diagnostics</h3>
+                    <button onclick="loadDiagnostics()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
+                </div>
+                <div id="diag-container"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>`;
     loadSpokesAndAgents();
+    loadDiagnostics();
 }
 
 // Setup → Tenant Config tile. GET /api/tenants (core/src/api.py get_tenants).
@@ -5645,12 +5653,17 @@ async function saveSpokeMetadata(spokeId) {
 }
 
 // Reload whichever management surface is active. The spoke approve/un-approve/
-// reset-secret actions are now driven from BOTH the Setup > Spokes & Agents
-// page and the System > Diagnostics page (where the buttons live post-move),
-// so the post-action refresh must target the view the user acted from —
-// otherwise a diagnostics click would silently reload the Setup table.
+// reset-secret actions are driven from the Setup > Spokes & Agents page, which
+// now hosts BOTH the admin tables (loadSpokesAndAgents) and the Diagnostics
+// tile (loadDiagnostics), so the post-action refresh repopulates both — a
+// spoke state change should surface in the telemetry tables too. The legacy
+// System > Diagnostics sub-view (still reachable if setSubView('Diagnostics')
+// is called under settings) refreshes only its own table.
 function _reloadActiveMgmtView() {
-    if (currentView === 'settings' && currentSubView === 'Diagnostics') {
+    if (currentView === 'setup' && currentSubView === 'Spokes & Agents') {
+        loadSpokesAndAgents();
+        loadDiagnostics();
+    } else if (currentView === 'settings' && currentSubView === 'Diagnostics') {
         loadDiagnostics();
     } else {
         loadSpokesAndAgents();

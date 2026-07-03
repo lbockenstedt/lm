@@ -732,6 +732,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.spoke_recovery.pop(spoke_id, None)
         self.agent_logs.pop(spoke_id, None)
 
+    def _mark_spoke_disconnected(self, spoke_id: str) -> None:
+        """Record a clean-WS-close disconnect in ``spoke_telemetry``.
+
+        A spoke deleted via ``DELETE /setup/spokes/{id}`` is evicted
+        (``_evict_spoke`` pops ``spoke_telemetry``) BEFORE that socket's 1008
+        "Removed by admin" close fires the disconnect handler, so the entry
+        may already be gone — re-create a minimal ``DISCONNECTED`` stub rather
+        than ``KeyError`` on the index. A transient disconnect (entry still
+        present) just updates the status in place.
+        """
+        tel = self.spoke_telemetry.get(spoke_id)
+        if tel is None:
+            self.spoke_telemetry[spoke_id] = {
+                "last_attempt": time.time(),
+                "status": "DISCONNECTED",
+            }
+        else:
+            tel["status"] = "DISCONNECTED"
+
     def get_spoke_by_type(self, module_type: str) -> Optional[str]:
         """Return the first connected, approved spoke that advertised the given module_type."""
         for sid, mtype in self.spoke_module_types.items():
@@ -2005,7 +2024,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except (websockets.ConnectionClosed, WebSocketDisconnect):
             logger.info(f"Connection closed for spoke {spoke_id}")
             if spoke_id:
-                self.spoke_telemetry[spoke_id]["status"] = "DISCONNECTED"
+                self._mark_spoke_disconnected(spoke_id)
             self.record_spoke_event(spoke_id, "connection_closed", "clean websocket close")
         except Exception as e:
             logger.error(f"Error handling connection for {spoke_id}: {e}")
