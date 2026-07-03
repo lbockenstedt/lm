@@ -8647,6 +8647,21 @@ async function loadLEData(subMenu) {
             const mark = ok ? '✓' : (t.last_status === 'ERROR' ? '✗' : '·');
             return `<span class="px-1.5 py-0.5 rounded text-xs font-medium ${cls}">${mark} ${t.module_type}${t.identifier ? '/' + t.identifier : ''}</span>`;
         };
+        // Color-coded expiry badge from not_after. The le renewal loop renews
+        // within 30d, so amber (<30d) = renew pending/failed, red (<7d / expired)
+        // = at risk — surfaces a stuck renewal the hourly distribution wouldn't.
+        const leExpiry = na => {
+            if (!na) return { text: '—', cls: 'text-slate-400', days: null };
+            const dt = new Date(na);
+            if (isNaN(dt)) return { text: String(na).slice(0, 10), cls: 'text-slate-500', days: null };
+            const days = Math.floor((dt.getTime() - Date.now()) / 86400000);
+            let cls, label;
+            if (days < 0) { cls = 'bg-red-100 text-red-700'; label = `expired ${-days}d ago`; }
+            else if (days < 7) { cls = 'bg-red-100 text-red-700'; label = `${days}d left`; }
+            else if (days < 30) { cls = 'bg-amber-100 text-amber-700'; label = `${days}d left`; }
+            else { cls = 'bg-green-100 text-green-700'; label = `${days}d left`; }
+            return { text: `${dt.toISOString().slice(0, 10)} · ${label}`, cls, days };
+        };
         const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Targets'];
         const rows = certs.map(c => {
             const dEsc = String(c.domain || '').replace(/'/g, "\\'");
@@ -8654,19 +8669,32 @@ async function loadLEData(subMenu) {
             const tgtCell = tgts.length
                 ? `<div class="flex flex-wrap gap-1">${tgts.map(tgtBadge).join('')}</div>`
                 : `<span class="text-xs text-slate-400 italic">none</span>`;
+            const exp = leExpiry(c.not_after);
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 <td class="px-4 py-2 font-mono font-medium">${c.domain || '—'}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${c.challenge || '—'}</span></td>
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
-                <td class="px-4 py-2 text-xs">${(c.not_after || '—').slice(0, 10)}</td>
+                <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls}">${exp.text}</span></td>
                 <td class="px-4 py-2"><div class="flex items-center gap-2">${tgtCell}<button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium">manage</button></div></td>
             </tr>`;
         }).join('');
+        // Top-of-card banner if any cert is expiring soon / expired / stuck
+        // renewing (the le loop renews <30d, so amber+red here mean a renewal
+        // that didn't land — worth surfacing above the table).
+        const soon = certs.filter(c => { const x = leExpiry(c.not_after); return x.days !== null && x.days < 30; });
+        const expBanner = soon.length === 0 ? '' : (() => {
+            const expired = soon.filter(c => leExpiry(c.not_after).days < 0).length;
+            const cls = expired > 0 ? 'bg-red-50 border-red-200 text-red-700' : 'bg-amber-50 border-amber-200 text-amber-700';
+            const msg = expired > 0
+                ? `${expired} cert(s) EXPIRED, ${soon.length - expired} expiring within 30d — check the le renewal loop / journalctl -u lm-le.`
+                : `${soon.length} cert(s) expiring within 30d — the le renewal loop should renew these; verify with ⚡ Distribute now.`;
+            return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs ${cls}">${msg}</div>`;
+        })();
         const note = body.message ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${body.message}</p>` : '';
         container.innerHTML = certs.length === 0
             ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet. Issue one via POST /api/le/issue (API) — a WebUI issue form is a follow-up.</p>`
-            : note + tw(th(cols) + `<tbody>${rows}</tbody>`);
+            : expBanner + note + tw(th(cols) + `<tbody>${rows}</tbody>`);
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     }
