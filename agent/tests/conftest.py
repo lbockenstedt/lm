@@ -1,6 +1,9 @@
 """pytest bootstrap: make ``agent/src`` and ``core/src`` importable the way the
-agent runs (PYTHONPATH=/opt/lm/core/src:/opt/lm/agent/src, modules imported as
-top-level: ``import agent_spoke``, ``import base_spoke``)."""
+agent runs (PYTHONPATH=/opt/lm:/opt/lm/core/src:/opt/lm/agent/src, modules
+imported as top-level: ``import agent_spoke``, ``import base_spoke``). The lm
+root (/opt/lm) is on the path so ``core.src.messaging.control_plane`` resolves
+as a PEP-420 namespace package chain — mirrors the systemd unit + the
+sys.path bootstrap at the top of agent/src/control_plane.py."""
 
 import os
 import sys

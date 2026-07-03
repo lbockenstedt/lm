@@ -266,7 +266,7 @@ Wants=network-online.target
 Type=simple
 User=root
 EnvironmentFile=$ENV_FILE
-Environment="PYTHONPATH=$INSTALL_DIR/core/src:$INSTALL_DIR/agent/src"
+Environment="PYTHONPATH=$INSTALL_DIR:$INSTALL_DIR/core/src:$INSTALL_DIR/agent/src"
 Environment=$_TLS_ENV
 WorkingDirectory=$INSTALL_DIR/agent/src
 ExecStart=$INSTALL_DIR/agent/venv/bin/python3 control_plane.py $ID_ARG $SECRET_ARG --hub \$HUB_URL $ROLES_ARG

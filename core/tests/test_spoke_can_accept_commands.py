@@ -18,6 +18,7 @@ end-to-end.
 import os
 import sys
 import time
+import logging
 
 _LM_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _LM_ROOT not in sys.path:
@@ -190,3 +191,95 @@ def test_mark_disconnected_recreates_stub_after_evict_no_keyerror():
     hub._mark_spoke_disconnected("lm-opnsense")  # must not raise
     assert hub.spoke_telemetry["lm-opnsense"]["status"] == "DISCONNECTED"
     assert "last_attempt" in hub.spoke_telemetry["lm-opnsense"]
+
+
+# ── _maybe_log_unauthenticated_agent: one-time ERROR diagnosis ────────────────
+#
+# A connected-but-never-authenticated spoke (legacy GenericLeafAgent or an
+# agent-spoke that crashed on startup) emits unsigned non-heartbeat frames
+# that the message loop drops. Past the grace window the hub must surface ONE
+# actionable ERROR via the dedicated GenericAgent logger (not flood WARNING
+# per frame). Forwards to the real LabManagerHub._maybe_log_unauthenticated_agent.
+
+class _DiagHub:
+    """Stand-in exposing exactly what _maybe_log_unauthenticated_agent reads."""
+    _UNAUTH_DIAGNOSIS_THRESHOLD_S = main.LabManagerHub._UNAUTH_DIAGNOSIS_THRESHOLD_S
+
+    def __init__(self):
+        self.spoke_telemetry = {}
+        self._unauth_warned_spokes = set()
+
+    def _maybe_log_unauthenticated_agent(self, spoke_id):
+        return main.LabManagerHub._maybe_log_unauthenticated_agent(self, spoke_id)
+
+
+def _genagent_error_records(caplog):
+    return [r for r in caplog.records
+            if r.name == "GenericAgent" and r.levelno == logging.ERROR]
+
+
+def test_below_threshold_no_error(caplog):
+    hub = _DiagHub()
+    hub.spoke_telemetry["lm-opnsense"] = {"last_attempt": time.time() - 5.0}
+    with caplog.at_level(logging.ERROR, logger="GenericAgent"):
+        hub._maybe_log_unauthenticated_agent("lm-opnsense")
+    assert _genagent_error_records(caplog) == []
+    assert "lm-opnsense" not in hub._unauth_warned_spokes
+
+
+def test_past_threshold_emits_one_error(caplog):
+    hub = _DiagHub()
+    hub.spoke_telemetry["lm-opnsense"] = {"last_attempt": time.time() - 120.0}
+    with caplog.at_level(logging.ERROR, logger="GenericAgent"):
+        hub._maybe_log_unauthenticated_agent("lm-opnsense")
+    recs = _genagent_error_records(caplog)
+    assert len(recs) == 1
+    msg = recs[0].getMessage()
+    # Actionable diagnosis: names the spoke, the symptom, and remediation.
+    assert "lm-opnsense" in msg
+    assert "session key" in msg
+    assert "lm-agent.log" in msg
+    assert "install_menu.sh" in msg
+    assert "lm-opnsense" in hub._unauth_warned_spokes
+
+
+def test_throttled_one_error_per_connection(caplog):
+    # A broken agent emits a frame on every heartbeat tick — all dropped at the
+    # same unauthenticated path. The ERROR must fire ONCE, not per frame.
+    hub = _DiagHub()
+    hub.spoke_telemetry["lm-opnsense"] = {"last_attempt": time.time() - 120.0}
+    with caplog.at_level(logging.ERROR, logger="GenericAgent"):
+        for _ in range(50):
+            hub._maybe_log_unauthenticated_agent("lm-opnsense")
+    assert len(_genagent_error_records(caplog)) == 1
+
+
+def test_authenticate_clears_diagnosis_so_regression_re_triggers(caplog):
+    # Once the spoke adopts its key (first signed frame / secret at connect),
+    # the per-connection diagnosis state is cleared — a future regression on
+    # the SAME connection re-emits a fresh ERROR instead of staying suppressed.
+    hub = _DiagHub()
+    hub.spoke_telemetry["lm-opnsense"] = {"last_attempt": time.time() - 120.0}
+    with caplog.at_level(logging.ERROR, logger="GenericAgent"):
+        hub._maybe_log_unauthenticated_agent("lm-opnsense")
+    assert len(_genagent_error_records(caplog)) == 1
+    # Mirror the connect-time / first-signed-frame discard the hub performs.
+    hub._unauth_warned_spokes.discard("lm-opnsense")
+    with caplog.at_level(logging.ERROR, logger="GenericAgent"):
+        hub._maybe_log_unauthenticated_agent("lm-opnsense")
+    assert len(_genagent_error_records(caplog)) == 2
+
+
+def test_missing_telemetry_no_error_no_crash(caplog):
+    hub = _DiagHub()
+    with caplog.at_level(logging.ERROR, logger="GenericAgent"):
+        hub._maybe_log_unauthenticated_agent("never-seen-spoke")  # no telemetry
+    assert _genagent_error_records(caplog) == []
+
+
+def test_non_numeric_last_attempt_no_crash(caplog):
+    hub = _DiagHub()
+    hub.spoke_telemetry["weird"] = {"last_attempt": "not-a-number"}
+    with caplog.at_level(logging.ERROR, logger="GenericAgent"):
+        hub._maybe_log_unauthenticated_agent("weird")  # must not raise
+    assert _genagent_error_records(caplog) == []

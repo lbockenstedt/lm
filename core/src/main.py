@@ -54,7 +54,7 @@ import shutil
 import tempfile
 from contextlib import AsyncExitStack
 from collections import deque
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Set
 from dataclasses import asdict
 import websockets
 from starlette.websockets import WebSocketDisconnect
@@ -110,6 +110,15 @@ except ImportError:
 
 configure_logging()
 logger = logging.getLogger("Hub")
+
+# Dedicated channel for generic-agent lifecycle diagnostics — the
+# connected-but-never-authenticated signature of a protocol-incompatible
+# legacy GenericLeafAgent or a crashed-on-startup agent-spoke (see
+# LabManagerHub._maybe_log_unauthenticated_agent). Routing these through a
+# named logger keeps them distinguishable from generic hub noise so the
+# WebUI logs view / grep can surface "agent won't adopt its key" events
+# without re-deriving them from Hub WARNING spam.
+genAgentLogger = logging.getLogger("GenericAgent")
 
 # Command types whose request data / response payload may carry a Proxmox API
 # token secret (Phase F: CS_STORE_PROXMOX_TOKEN relays the agent-provisioned
@@ -484,6 +493,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         #   a session key, so LOAD_ROLE/GET_AVAILABLE_ROLES can fail fast instead
         #   of hanging to the request_response timeout. }
         self.spoke_authenticated: Dict[str, bool] = {}
+        # Spokes already diagnosed as connected-but-never-authenticated this
+        # connection cycle (see _maybe_log_unauthenticated_agent). Cleared on
+        # authenticate + disconnect so a re-trigger after a future regression
+        # (or a reconnect that's still broken) emits a fresh ERROR rather than
+        # silently suppressing it after the first one.
+        self._unauth_warned_spokes: Set[str] = set()
         # { spoke_id: ConnectionTelemetry }
         self.spoke_telemetry: Dict[str, Dict[str, Any]] = {}
         # { spoke_id: TokenBucket } for rate limiting non-heartbeat messages
@@ -1271,6 +1286,70 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # and let the request_response timeout handle a genuine failure.
         return True, ""
 
+    # A connected-but-never-authenticated spoke is only diagnosed as a broken
+    # agent after this many seconds — well past the >10s command-grace window
+    # and the normal zero-touch key-push/first-signed-frame round-trip, so a
+    # slow-but-healthy agent isn't falsely flagged. The lm-opnsense saga ran
+    # for hours in this state; 30s catches it on the first diagnostic tick
+    # without racing a legitimate cold start.
+    _UNAUTH_DIAGNOSIS_THRESHOLD_S = 30.0
+
+    def _maybe_log_unauthenticated_agent(self, spoke_id: str) -> None:
+        """Emit a one-time ERROR diagnosing a connected-but-never-authenticated
+        spoke — the legacy/incompatible-agent or crashed-on-startup signature.
+
+        A protocol-compatible agent verifies a signature on its first non-
+        heartbeat frame, setting ``spoke_authenticated``. A spoke that stays
+        unauthenticated past the grace window AND keeps sending unsigned
+        non-heartbeat frames is structurally unable to adopt a session key,
+        so LOAD_ROLE / GET_AVAILABLE_ROLES will 503 (``spoke_can_accept_commands``
+        returns ``_CMD_UNAUTHENTICATED``). Two root causes produce this:
+
+        1. A legacy GenericLeafAgent (``generic_agent/src/agent.py``, service
+           ``lm-generic-agent.service``) — dispatches on top-level ``type``
+           and has no ``SPOKE_UPDATE_SESSION_KEY`` / ``LOAD_ROLE`` handlers, so
+           it ignores the pushed key and can never sign a frame.
+        2. A role-capable agent-spoke (``agent/src/control_plane.py``, service
+           ``lm-agent.service``) that crash-loops on startup — typically a
+           ``ModuleNotFoundError``/relative-import error from a bad PYTHONPATH
+           on a fresh/updated box.
+
+        Fires ONCE per connection (``_unauth_warned_spokes``), cleared on
+        authenticate + disconnect, so the error log surfaces the condition
+        once instead of flooding per-frame (a broken agent emits a frame on
+        every heartbeat tick, all dropped here). Routed through the dedicated
+        ``GenericAgent`` logger (``genAgentLogger``) so it's distinguishable
+        from generic Hub WARNING noise and surfaceable in the WebUI logs view.
+        """
+        if spoke_id in self._unauth_warned_spokes:
+            return
+        tel = self.spoke_telemetry.get(spoke_id) or {}
+        last_attempt = tel.get("last_attempt")
+        if last_attempt is None:
+            return
+        try:
+            conn_age = time.time() - float(last_attempt)
+        except (TypeError, ValueError):
+            return
+        if conn_age < self._UNAUTH_DIAGNOSIS_THRESHOLD_S:
+            return
+        self._unauth_warned_spokes.add(spoke_id)
+        genAgentLogger.error(
+            f"Agent {spoke_id} has been connected for {int(conn_age)}s without "
+            f"adopting its session key — it never verified a signature, so it "
+            f"cannot accept commands (LOAD_ROLE / GET_AVAILABLE_ROLES will 503 "
+            f"with a reinstall hint). This is the signature of either a "
+            f"protocol-incompatible legacy GenericLeafAgent or an agent-spoke "
+            f"that crashed on startup. Remediation: check "
+            f"/var/log/lm/lm-agent.log and /var/log/lm/lm-generic-agent.log "
+            f"for a crash-loop / import error; if both lm-agent and "
+            f"lm-generic-agent services are enabled, disable the legacy "
+            f"lm-generic-agent.service (systemctl disable --now "
+            f"lm-generic-agent) and reinstall the agent via install_menu.sh "
+            f"(agent/install_agent.sh), approve the base generic node, then "
+            f"retry role activation."
+        )
+
     async def _try_psk_self_provision(self, spoke_id: str, tenant_hint: str, psk: str) -> bool:
         """Validate a spoke's onboarding PSK against the tenant's stored PSKs
         and, on a match, auto-approve + auto-bind the spoke to that tenant (PSK
@@ -1625,6 +1704,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 if key_id:
                     is_authenticated = True
                     self.spoke_authenticated[spoke_id] = True
+                    # It adopted its key — clear any prior "never authenticated"
+                    # diagnosis so a future regression re-triggers a fresh ERROR.
+                    self._unauth_warned_spokes.discard(spoke_id)
                     logger.info(f"Spoke {spoke_id} authenticated successfully with secret.")
                     self.record_spoke_event(spoke_id, "auth_ok", "secret verified")
                 else:
@@ -1859,11 +1941,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # (legacy/incompatible agent that can't adopt a key) stays
                     # unauthenticated, so command routes can fail fast.
                     self.spoke_authenticated[spoke_id] = True
+                    # First signed frame clears any prior "never authenticated"
+                    # diagnosis (idempotent with the connect-time discard).
+                    self._unauth_warned_spokes.discard(spoke_id)
                 else:
                     # No signature provided. Allow ONLY heartbeats for unauthenticated spokes.
                     payload = msg_data.get("payload", {})
                     if payload.get("type") != "HEARTBEAT":
-                        logger.warning(f"Unauthenticated message from {spoke_id} (only HEARTBEAT allowed). Dropping.")
+                        # A non-heartbeat frame from a spoke that never adopted
+                        # its session key. If this persists past the grace
+                        # window it's the signature of a legacy/incompatible or
+                        # crashed-on-startup agent — emit ONE actionable ERROR
+                        # via the GenericAgent logger (throttled per-connection)
+                        # instead of flooding WARNING per frame.
+                        self._maybe_log_unauthenticated_agent(spoke_id)
+                        logger.debug(
+                            f"Unauthenticated non-heartbeat from {spoke_id} "
+                            f"(only HEARTBEAT allowed). Dropping.")
                         continue
 
                 # Process Heartbeat (Always allowed for pending spokes to maintain connection)
@@ -2046,6 +2140,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.spoke_module_types.pop(spoke_id, None)
                 self.spoke_parent_map.pop(spoke_id, None)
                 self.spoke_authenticated.pop(spoke_id, None)
+                # Drop the per-connection "never authenticated" diagnosis state
+                # so a reconnect that's still broken re-emits the ERROR once
+                # past the grace window (instead of staying suppressed).
+                self._unauth_warned_spokes.discard(spoke_id)
 
     # ── Update pipeline (extracted) ───────────────────────────────────────
     # get_local_version / get_remote_version / _is_git_repo / _download_update /

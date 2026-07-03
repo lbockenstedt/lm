@@ -3,8 +3,25 @@ import argparse
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import List
+
+# sys.path bootstrap: ``core`` is a PEP-420 namespace package living at the lm
+# repo root (``/opt/lm/core``), and ``messaging.control_plane`` reaches back up
+# to ``core.src.security.signer`` via a parent relative import (``..security``)
+# that only resolves when ``messaging.control_plane`` is imported AS
+# ``core.src.messaging.control_plane``. That requires the lm ROOT (not just
+# core/src) on sys.path. The systemd unit sets PYTHONPATH=/opt/lm:/opt/lm/core/
+# src:/opt/lm/agent/src, but a hand-launch (or a stale unit missing the root)
+# would otherwise hit ``ModuleNotFoundError: No module named 'core'`` → fallback
+# ``ImportError: attempted relative import beyond top-level package`` and the
+# agent crash-loops (the lm-opnsense role-activation saga). Derive the root
+# from this file's location (lm/agent/src/control_plane.py → up three) so the
+# import works regardless of how the process was launched.
+_LM_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+if _LM_ROOT not in sys.path:
+    sys.path.insert(0, _LM_ROOT)
 
 try:
     from core.src.messaging.control_plane import BaseControlPlane
