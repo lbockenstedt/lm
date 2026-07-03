@@ -212,13 +212,21 @@ EOF
 
 systemctl daemon-reload
 
-# Enable the service so it starts on next reboot
-systemctl enable lm-generic-agent
+# Enable the service so a CLONED disk auto-starts on first boot and onboards as
+# a fresh spoke (the clone-only identity strip above ensures a fresh UUID).
+systemctl enable lm-generic-agent 2>/dev/null || true
 
 if [ "$CLONE_ONLY" = true ]; then
-    log_c "❄️  Clone-only mode active. Files and service enabled, but service is NOT started."
-    echo "The agent will start automatically on the next reboot."
-    echo "Note: To change the spoke ID manually, edit /etc/systemd/system/lm-bootstrap.service"
+    # STOP any running instance so the TEMPLATE box does not register with a
+    # stale in-memory identity. The rm -rf above wiped the on-disk files, but a
+    # previously-started service keeps its loaded code + spoke URL/identity in
+    # memory and keeps dialing the hub; daemon-reload + enable do NOT restart
+    # it, and the clone-only path intentionally skips `restart`, so an explicit
+    # stop is required. The unit stays enabled so a cloned disk still auto-starts.
+    systemctl stop lm-generic-agent 2>/dev/null || true
+    log_c "❄️  Clone-only mode active. Files staged + unit enabled, but service STOPPED."
+    echo "The service will start automatically when this disk is cloned and booted (fresh identity)."
+    echo "Note: To change the spoke ID manually, edit /etc/systemd/system/lm-generic-agent.service"
 else
     log_c "🔄 Starting agent service..."
     systemctl restart lm-generic-agent
