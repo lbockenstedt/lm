@@ -8715,8 +8715,9 @@ async function leDistributeNow() {
 // cert to its own device. Wired INSTALL_CERT targets: firewall (OPNsense Trust
 // API) + hypervisor (Proxmox — spoke relays to the per-node agent, which runs
 // `pvenode cert set` on its local pveproxy; the target `identifier` is the node
-// name). Other module types record an ERROR ("does not support cert install
-// yet") until wired.
+// name) + directory (OpenLDAP — spoke writes PEM to /etc/ldap/tls, points
+// slapd's olcTLS* via ldapmodify -Y EXTERNAL over ldapi, restarts slapd). Other
+// module types record an ERROR ("does not support cert install yet") until wired.
 const LE_MODULE_TYPES = [
     ['firewall', 'firewall (OPNsense)'],
     ['ipam', 'ipam (NetBox)'],

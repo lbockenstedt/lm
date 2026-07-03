@@ -23,9 +23,11 @@ logger = logging.getLogger("CertDistribution")
 
 # Module types whose spokes implement INSTALL_CERT. v1: opnsense (firewall) +
 # pxmx (hypervisor — the spoke relays INSTALL_CERT to the per-node agent, which
-# runs `pvenode cert set` on its local pveproxy). Adding a spoke = implement
+# runs `pvenode cert set` on its local pveproxy) + ldap (directory — the spoke
+# writes PEM to /etc/ldap/tls, points slapd's olcTLS* via ldapmodify -Y EXTERNAL
+# over ldapi, restarts slapd; runs as root). Adding a spoke = implement
 # INSTALL_CERT on it + add its module_type here.
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor"}
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory"}
 
 
 def _unwrap(result: Any) -> Dict[str, Any]:
