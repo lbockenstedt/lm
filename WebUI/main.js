@@ -8712,8 +8712,11 @@ async function leDistributeNow() {
 
 // Per-cert target manager modal. The hub brokers cert material from the le
 // spoke to each target spoke (resolved by module_type); each target applies the
-// cert to its own device. v1 install target: firewall (OPNsense). Other module
-// types record an ERROR ("does not support cert install yet") until wired.
+// cert to its own device. Wired INSTALL_CERT targets: firewall (OPNsense Trust
+// API) + hypervisor (Proxmox — spoke relays to the per-node agent, which runs
+// `pvenode cert set` on its local pveproxy; the target `identifier` is the node
+// name). Other module types record an ERROR ("does not support cert install
+// yet") until wired.
 const LE_MODULE_TYPES = [
     ['firewall', 'firewall (OPNsense)'],
     ['ipam', 'ipam (NetBox)'],
