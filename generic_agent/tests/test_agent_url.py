@@ -1,13 +1,16 @@
 """Generic leaf agent hub-URL handling — the two connection-failure gates.
 
-1. ``_normalize_url``: a discovered/pinned ``ws://<host>:443`` is plaintext to the
-   hub's TLS port (443 is the remote wss listener) → ``InvalidMessage: did not
-   receive a valid HTTP response``. The hub's mDNS broadcast can omit the
-   ``tls_port`` TXT (e.g. a reverse-proxy/TLS-termination deployment where the
-   hub behind the proxy doesn't own a cert → ``tls_enabled`` False), so
-   ``discover_hub_url`` returns ``ws://<ip>:443``. Upgrade it to ``wss://`` so the
-   agent connects with TLS. ``ws://`` on any other port (e.g. 8765 loopback) and
-   the ``auto`` sentinel are left untouched.
+1. ``_normalize_url``: under the unified-443 merge the spoke-WS lives at
+   ``/ws/spoke`` on the single :443 listener. Two best-effort migrations so
+   operators don't have to re-edit stale pre-unified pins:
+   - **ws://…:443 → wss://…:443**: port 443 is the TLS (wss) listener; a ``ws://``
+     pin (or a discovery result that missed the ``tls_port`` TXT behind a
+     reverse proxy) is plaintext-to-TLS → ``InvalidMessage``. Upgrade to wss.
+   - **append ``/ws/spoke`` to a pathless :443 pin**: a pre-unified pin like
+     ``wss://host:443`` (no path) hits the WebUI root ``/`` → ``HTTP 403``. A pin
+     that already carries a path is left alone.
+   ``ws://`` on any other port (e.g. 8765 on a not-yet-upgraded hub) and the
+   ``auto`` sentinel are left untouched.
 
 2. ``run()`` sentinel guard: when auto-discovery can't find a hub yet, the loop
    must back off and re-discover — it must NOT call ``websockets.connect("auto")``
@@ -33,16 +36,33 @@ GenericLeafAgent = agent.GenericLeafAgent
 # ── 1. _normalize_url ────────────────────────────────────────────────────────
 
 def test_normalize_upgrades_ws_to_wss_on_443():
-    """Port 443 is the hub's TLS listener; ws://...:443 is a stale/bad pin or a
-    discovery result that missed the tls_port TXT → upgrade to wss://."""
-    assert GenericLeafAgent._normalize_url("ws://172.16.1.30:443") == "wss://172.16.1.30:443"
-    assert GenericLeafAgent._normalize_url("ws://lm-hub.example.com:443") == "wss://lm-hub.example.com:443"
-    assert GenericLeafAgent._normalize_url("wss://172.16.1.30:443") == "wss://172.16.1.30:443"
+    """Port 443 is the hub's TLS listener AND the unified spoke-WS surface. A
+    ws://...:443 pin (stale, or a discovery result that missed the tls_port TXT)
+    is upgraded to wss:// AND gets /ws/spoke appended (pathless :443 → WebUI
+    root → HTTP 403)."""
+    assert GenericLeafAgent._normalize_url("ws://172.16.1.30:443") == "wss://172.16.1.30:443/ws/spoke"
+    assert GenericLeafAgent._normalize_url("ws://lm-hub.example.com:443") == "wss://lm-hub.example.com:443/ws/spoke"
+    # wss:// + no path: scheme is already right, just append the spoke path.
+    assert GenericLeafAgent._normalize_url("wss://172.16.1.30:443") == "wss://172.16.1.30:443/ws/spoke"
+
+
+def test_normalize_appends_spoke_path_to_pathless_443():
+    """A pre-unified wss://host:443 pin (no path) 403s on the unified hub; append
+    /ws/spoke. Covers the operator's stale-pin case."""
+    assert GenericLeafAgent._normalize_url("wss://172.16.1.30:443") == "wss://172.16.1.30:443/ws/spoke"
+    assert GenericLeafAgent._normalize_url("wss://172.16.1.30:443/") == "wss://172.16.1.30:443/ws/spoke"
+
+
+def test_normalize_leaves_explicit_path_alone():
+    """A pin that already carries a path (/ws/spoke, /ws/agent) is NOT rewritten."""
+    assert GenericLeafAgent._normalize_url("wss://172.16.1.30:443/ws/spoke") == "wss://172.16.1.30:443/ws/spoke"
+    assert GenericLeafAgent._normalize_url("wss://172.16.1.30:443/ws/agent") == "wss://172.16.1.30:443/ws/agent"
 
 
 def test_normalize_leaves_loopback_and_non_443_alone():
-    """8765 is the loopback plaintext listener; ws:// there is correct. A portless
-    ws:// and the auto sentinel are untouched."""
+    """8765 is the legacy loopback plaintext listener (a not-yet-upgraded hub may
+    still serve it); ws:// there is correct — don't migrate to 443 mid-transition.
+    A portless ws:// and the auto sentinel are untouched."""
     assert GenericLeafAgent._normalize_url("ws://127.0.0.1:8765") == "ws://127.0.0.1:8765"
     assert GenericLeafAgent._normalize_url("ws://172.16.1.30:8765") == "ws://172.16.1.30:8765"
     assert GenericLeafAgent._normalize_url("ws://172.16.1.30") == "ws://172.16.1.30"
@@ -51,9 +71,10 @@ def test_normalize_leaves_loopback_and_non_443_alone():
 
 
 def test_normalize_applied_in_constructor():
-    """The constructor normalizes the pinned URL so _connect_once arms TLS."""
+    """The constructor normalizes the pinned URL so _connect_once arms TLS and
+    dials /ws/spoke."""
     a = GenericLeafAgent("ws://172.16.1.30:443", "agent-1", secret="s")
-    assert a.spoke_url == "wss://172.16.1.30:443"
+    assert a.spoke_url == "wss://172.16.1.30:443/ws/spoke"
     b = GenericLeafAgent("auto", "agent-2", secret="s")
     assert b.spoke_url == "auto"
 
@@ -103,7 +124,7 @@ def test_run_connects_when_discovery_succeeds(monkeypatch):
     to _connect_once (websockets.connect) rather than spinning on the sentinel."""
     a = GenericLeafAgent("auto", "agent-1", secret="s")
     monkeypatch.setattr(agent, "discover_hub_url",
-                        lambda timeout=5.0: "wss://172.16.1.30:443")
+                        lambda timeout=5.0: "wss://172.16.1.30:443/ws/spoke")
 
     import websockets
     connected = {"yes": False}
@@ -133,4 +154,4 @@ def test_run_connects_when_discovery_succeeds(monkeypatch):
     except _StopLoop:
         pass
     assert connected["yes"], "run() never reached websockets.connect"
-    assert a.spoke_url == "wss://172.16.1.30:443"
+    assert a.spoke_url == "wss://172.16.1.30:443/ws/spoke"

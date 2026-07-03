@@ -79,26 +79,48 @@ class GenericLeafAgent:
 
     @staticmethod
     def _normalize_url(url: str) -> str:
-        """Normalize a pinned spoke URL against the hub's two-listener contract:
-        port 8765 is the loopback *plaintext* listener, port 443 is the remote
-        *TLS* (wss://) listener. A pinned ``ws://<host>:443`` is plaintext to a
-        TLS port — the server does a TLS handshake and the client's plaintext
-        HTTP upgrade reads as gibberish → ``InvalidMessage: did not receive a
-        valid HTTP response``. That pin is a stale pre-TLS-rollout value; upgrade
-        it to ``wss://`` so it works without an operator edit. ``ws://`` on any
-        other port (e.g. 8765 loopback) and the ``auto`` sentinel are untouched.
+        """Normalize a pinned/discovered spoke URL for the unified-443 hub.
+
+        Two best-effort migrations so operators don't have to re-edit stale
+        pre-unified pins:
+
+        1. **ws://…:443 → wss://…:443.** Port 443 is the TLS (wss://) listener;
+           a ``ws://`` pin to it is plaintext-to-TLS → ``InvalidMessage: did not
+           receive a valid HTTP response``. The hub's mDNS broadcast can also
+           omit the ``tls_port`` TXT (reverse-proxy / TLS-termination deployment
+           where the hub behind the proxy doesn't own a cert), so discovery can
+           hand back ``ws://<ip>:443`` — upgrade it so the agent uses TLS.
+           ``ws://`` on any other port (e.g. 8765 on a not-yet-upgraded hub still
+           serving the legacy loopback listener) is left alone.
+
+        2. **Append ``/ws/spoke`` to a pathless :443 pin.** Under the unified-443
+           merge the spoke-WS lives at ``/ws/spoke`` (path-routed on the single
+           :443 uvicorn). A pre-unified pin like ``wss://host:443`` (no path)
+           hits the WebUI root ``/`` and is rejected ``HTTP 403``. Append the
+           path so those pins keep working. A pin that already carries a path
+           (``/ws/spoke``, ``/ws/agent``) is left as-is.
+
+        The ``auto`` sentinel, empty, and non-ws URLs are returned unchanged.
         """
-        if not url or url == "auto" or not url.lower().startswith("ws://"):
+        if not url or url == "auto":
+            return url
+        low = url.lower()
+        if not low.startswith("ws://") and not low.startswith("wss://"):
             return url
         try:
             from urllib.parse import urlparse
-            port = urlparse(url).port
+            parsed = urlparse(url)
         except Exception:
-            port = None
-        if port == 443:
-            upgraded = "wss://" + url[len("ws://"):]
-            logger.info("Upgrading pinned %s → %s (port 443 is the hub's TLS listener)", url, upgraded)
-            return upgraded
+            return url
+        # 1. ws://…:443 → wss://…:443
+        if low.startswith("ws://") and parsed.port == 443:
+            url = "wss://" + url[len("ws://"):]
+            logger.info("Upgrading pinned %s → wss:// (port 443 is the hub TLS listener)", url)
+            parsed = urlparse(url)
+        # 2. pathless :443 pin → append /ws/spoke (else the WebUI root 403s the upgrade)
+        if parsed.port == 443 and parsed.path in ("", "/"):
+            url = url.rstrip("/") + "/ws/spoke"
+            logger.info("Appending /ws/spoke to pinned URL (unified-443 spoke-WS path): %s", url)
         return url
 
     def _load_secret(self) -> Optional[str]:
