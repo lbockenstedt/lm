@@ -163,16 +163,24 @@ echo "🌐 Hub Target: $HUB_URL"
 echo "🆔 Spoke ID: $SPOKE_ID"
 echo "📦 Version: $(cat VERSION 2>/dev/null || echo unknown)"
 
-# Print the agent install command so the admin knows what to run on each Proxmox node
-LM_HOST=$(echo "$HUB_URL" | sed 's|^ws://||' | cut -d: -f1)
+# Print the agent install command so the admin knows what to run on each Proxmox node.
+# Default to mDNS/DNS auto-discovery: the agent reads this hub's _lm-hub._tcp TXT
+# agent_port record (8443 on this all-in-one hub with TLS on, 8766 legacy no-TLS) and
+# picks ws:// vs wss:// automatically — so no --spoke-url / port is needed. Pinning
+# is shown only as an optional fallback.
+LM_HOST=$(echo "$HUB_URL" | sed 's|^wss://||;s|^ws://||' | cut -d: -f1)
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Run this on each Proxmox node to install the pxmx agent:"
 echo ""
 echo "  curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \\"
-echo "    | sudo bash -s -- \\"
-echo "    --spoke-url ws://${LM_HOST}:8766 \\"
-echo "    --id pxmx-agent-\$(hostname)"
+echo "    | sudo bash"
+echo "  (auto-discovers this hub via DNS lm-hub.* / mDNS _lm-hub._tcp — no port needed;"
+echo "   the agent reads the hub's agent_port TXT record, 8443 here with TLS on.)"
+if [ -n "$LM_HOST" ]; then
+    echo "  To pin instead:  --spoke-url wss://${LM_HOST}:8443   (or ws://${LM_HOST}:8766 with TLS off)"
+fi
+echo "  (omitting --id derives <hostname>-agent; clone+rename auto-correlates via install UUID)"
 echo ""
 echo "  The agent will appear as 'Pending' in the LM WebUI (Setup → Spokes & Agents → Agents tile)."
 echo "  Approve it there and the authentication secret will be provisioned automatically."
