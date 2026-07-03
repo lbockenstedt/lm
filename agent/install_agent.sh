@@ -282,23 +282,29 @@ EOF
 systemctl daemon-reload
 
 # Retire the LEGACY Generic Leaf Agent (lm-generic-agent.service) if it's
-# installed on this box. The legacy leaf (generic_agent/install_github.sh) is
-# protocol-INCOMPATIBLE with the hub: it dispatches on top-level `type` and has
-# no SPOKE_UPDATE_SESSION_KEY / LOAD_ROLE / GET_AVAILABLE_ROLES handlers, so it
-# can never adopt a session key. If BOTH this role-capable lm-agent AND the
-# legacy lm-generic-agent run on the same box, both dial the hub as the SAME
-# spoke_id (derived from hostname) and race for the hub's single
-# active_connections slot. Whichever connects first wins; when an admin then
-# approves, approve_and_bind_spoke pushes the session key to THAT ws — if it's
-# the legacy one, it ignores the push, the role-capable agent never adopts its
-# key, and LOAD_ROLE 503s with "connected but not authenticated". Disabling the
-# legacy service on every lm-agent install guarantees only the role-capable
-# agent connects. Non-fatal if the legacy unit isn't present.
+# installed on this box. The legacy leaf (formerly generic_agent/, removed from
+# the lm repo — no longer installable) is protocol-INCOMPATIBLE with the hub:
+# it dispatches on top-level `type` and has no SPOKE_UPDATE_SESSION_KEY /
+# LOAD_ROLE / GET_AVAILABLE_ROLES handlers, so it can never adopt a session
+# key. If BOTH this role-capable lm-agent AND the legacy lm-generic-agent run
+# on the same box, both dial the hub as the SAME spoke_id (derived from
+# hostname) and race for the hub's single active_connections slot. Whichever
+# connects first wins; when an admin then approves, approve_and_bind_spoke
+# pushes the session key to THAT ws — if it's the legacy one, it ignores the
+# push, the role-capable agent never adopts its key, and LOAD_ROLE 503s with
+# "connected but not authenticated". Stop + mask (not just disable) so it
+# can't be started again even by hand, and remove the unit + install dir
+# entirely — this is a full purge, not a temporary disable, since the legacy
+# leaf is no longer shipped or supported. Non-fatal if it isn't present.
 LEGACY_SERVICE="lm-generic-agent"
 if systemctl list-unit-files 2>/dev/null | grep -qE "\\${LEGACY_SERVICE}\\.service"; then
-    systemctl disable "$LEGACY_SERVICE" 2>/dev/null || true
     systemctl stop "$LEGACY_SERVICE" 2>/dev/null || true
-    echo "🧹  Retired legacy ${LEGACY_SERVICE}.service (disabled + stopped)."
+    systemctl disable "$LEGACY_SERVICE" 2>/dev/null || true
+    systemctl mask "$LEGACY_SERVICE" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${LEGACY_SERVICE}.service"
+    rm -rf "/opt/lm/generic-agent"
+    systemctl daemon-reload
+    echo "🧹  Purged legacy ${LEGACY_SERVICE}.service (stopped, masked, unit + install dir removed)."
     echo "    The role-capable ${SERVICE_NAME} now owns this box's spoke connection."
 fi
 

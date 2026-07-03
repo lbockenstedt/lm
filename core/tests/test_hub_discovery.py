@@ -314,7 +314,7 @@ def test_install_scripts_syntax_clean():
     import subprocess
     _here = os.path.dirname(__file__)
     # Sibling repos (cs, pxmx) live 3 levels up (vscode/); lm-internal scripts
-    # (install_menu.sh, generic_agent/) live 2 levels up (lm/).
+    # (install_menu.sh, agent/) live 2 levels up (lm/).
     root = os.path.abspath(os.path.join(_here, "..", "..", ".."))
     lm_root = os.path.abspath(os.path.join(_here, "..", ".."))
     scripts = [
@@ -322,7 +322,7 @@ def test_install_scripts_syntax_clean():
         os.path.join(root, "pxmx", "install_pxmx.sh"),
         os.path.join(root, "pxmx", "agent", "install_agent.sh"),
         os.path.join(lm_root, "install_menu.sh"),
-        os.path.join(lm_root, "generic_agent", "install_github.sh"),
+        os.path.join(lm_root, "agent", "install_agent.sh"),
     ]
     for s in scripts:
         assert os.path.isfile(s), f"missing installer: {s}"
