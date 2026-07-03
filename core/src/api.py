@@ -6303,7 +6303,14 @@ def create_app(hub):
             config = data.get("config", {})
             if not role:
                 raise HTTPException(status_code=400, detail="role is required")
-            result = await hub.request_response(spoke_id, "LOAD_ROLE", {"role": role, "config": config})
+            # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling
+            # repo (e.g. github.com/lbockenstedt/opnsense.git) on first load — a
+            # network git clone that routinely exceeds the 5s request_response
+            # default and surfaced as "Timed out waiting for spoke response".
+            # 120s mirrors the long-op timeout used elsewhere (api.py:2536).
+            result = await hub.request_response(spoke_id, "LOAD_ROLE",
+                                                {"role": role, "config": config},
+                                                timeout=120.0)
             payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             # Multi-role agent: the base stays module_type "agent" and HOSTS the
             # role as a new sub-spoke ({base}-{role}) that registers its own

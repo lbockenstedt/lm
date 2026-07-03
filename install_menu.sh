@@ -8,11 +8,15 @@
 #                   optional checklist of spokes to co-locate. Runs the latest
 #                   install_all.sh with --exclude for the spokes you didn't pick.
 #
-#   2) GENERIC    — a leaf spoke that calls home to a hub and later morphs into
-#                   a role (netbox / ldap / dns / …). Runs the latest
-#                   generic_agent/install_github.sh. Supports --clone-only for
-#                   building container images that shouldn't start the service
-#                   until first boot.
+#   2) GENERIC    — a role-capable agent that calls home to a hub and morphs
+#                   into a role (netbox / ldap / dns / opnsense / …) via the hub
+#                   WebUI (Load Role). Runs the latest agent/install_agent.sh
+#                   (the BaseSpoke-based GenericAgent — the legacy
+#                   generic_agent leaf couldn't adopt a session key or handle
+#                   LOAD_ROLE, so role activation timed out). Supports --clone
+#                   for building template images that shouldn't start the
+#                   service until first boot (each clone's id follows its own
+#                   hostname and inherits the template's PSK).
 #
 # The Hub + WebUI are ALWAYS installed by install_all.sh; the hub menu only
 # chooses which spokes to add alongside them.
@@ -83,7 +87,7 @@ fi
 locate_clone() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || script_dir=""
-    if [ -n "$script_dir" ] && [ -f "$script_dir/install_all.sh" ] && [ -f "$script_dir/generic_agent/install_github.sh" ]; then
+    if [ -n "$script_dir" ] && [ -f "$script_dir/install_all.sh" ] && [ -f "$script_dir/agent/install_agent.sh" ]; then
         CLONE_ROOT="$script_dir"
         CLONE_SRC="local clone ($script_dir)"
         return 0
@@ -191,7 +195,7 @@ run_hub_install() {
 }
 
 #======================================================================
-# Generic path: prompt hub URL / id / secret / clone-only → install_github.sh
+# Generic path: prompt hub URL / id / secret / clone-only → install_agent.sh
 #======================================================================
 run_generic_install() {
     echo
@@ -261,11 +265,17 @@ run_generic_install() {
         [ -z "$TLS_CA_CERT" ] && TLS_CA_CERT="/opt/lm/certs/hub.crt"
     fi
 
-    # Clone-only: omit --id so the agent derives its id from socket.gethostname()
-    # at runtime (each clone → its own hostname). The PSK (--secret) is still
-    # baked so the clone authenticates + auto-approves under its hostname
-    # (carryover). Full install: bake the operator's explicit --id.
-    local generic_args=(--spoke-url "$SPOKE_URL")
+    # Install the role-capable morphable agent (agent/install_agent.sh → the
+    # BaseSpoke-based GenericAgent), NOT the legacy leaf (generic_agent). The
+    # leaf used an incompatible frame format and couldn't adopt a session key,
+    # sign frames, or handle LOAD_ROLE — so role activation on a menu-installed
+    # node always timed out. The agent-spoke handles all of that and morphs
+    # into opnsense/dns/… via LOAD_ROLE from the hub WebUI.
+    #
+    # Map menu prompts → install_agent.sh flags (--spoke-url becomes --hub).
+    # Clone-only omits --id so each cloned disk derives its spoke id from its
+    # own hostname at runtime; the PSK (--secret) is retained (carryover).
+    local generic_args=(--hub "$SPOKE_URL")
     [ "$CLONE_ONLY" -eq 0 ] && generic_args+=(--id "$SPOKE_ID")
     [ -n "$SPOKE_SECRET" ] && generic_args+=(--secret "$SPOKE_SECRET")
     [ -n "$HUB_SECRET" ]  && generic_args+=(--hub-secret "$HUB_SECRET")
@@ -287,9 +297,9 @@ run_generic_install() {
     echo "${C_BOLD}Clone-only       :${C_RESET} $([ "$CLONE_ONLY" -eq 1 ] && echo yes || echo no)"
     echo
 
-    # install_github.sh expects to be run from the clone root (it clones lm
+    # install_agent.sh expects to be run from the clone root (it clones lm
     # itself to /opt/lm; running the cloned copy guarantees the latest version).
-    reexec_root bash "$CLONE_ROOT/generic_agent/install_github.sh" "${generic_args[@]}"
+    reexec_root bash "$CLONE_ROOT/agent/install_agent.sh" "${generic_args[@]}"
 }
 
 #======================================================================

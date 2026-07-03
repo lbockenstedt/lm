@@ -64,7 +64,7 @@ class BaseControlPlane:
         # Fall back to persisted value from .env if no hub_secret was passed at startup
         _hs = hub_secret or os.environ.get("HUB_SECRET", "")
         self.hub_secrets = [_hs] if _hs else []
-        self.hub_url = hub_url
+        self.hub_url = self._normalize_hub_url(hub_url) if hub_url else hub_url
         # PSK self-provisioning: a spoke deployed with the tenant's predefined
         # onboarding PSK (+ a tenant_id_hint) presents both in the WS auth frame
         # so the hub can auto-approve + auto-bind it to that tenant without an
@@ -563,6 +563,50 @@ class BaseControlPlane:
         except Exception as e:
             logger.error("Could not build wss SSL context: %s — connecting without TLS", e)
             return None
+
+    @staticmethod
+    def _normalize_hub_url(url):
+        """Normalize a pinned hub URL for the unified-443 hub (best-effort).
+
+        Two migrations so operators don't have to re-edit stale pre-unified pins
+        (parity with the leaf agent's ``_normalize_url``):
+
+        1. **ws://…:443 → wss://…:443.** Port 443 is the TLS (wss://) listener; a
+           ``ws://`` pin to it is plaintext-to-TLS → ``InvalidMessage: did not
+           receive a valid HTTP response``. The hub's mDNS broadcast can also
+           omit the ``tls_port`` TXT, so discovery can hand back ``ws://<ip>:443``
+           — upgrade it so the agent uses TLS. ``ws://`` on any other port (e.g.
+           8765 loopback on a not-yet-upgraded hub) is left alone.
+
+        2. **Append ``/ws/spoke`` to a pathless :443 pin.** Under the unified-443
+           merge the spoke-WS lives at ``/ws/spoke`` (path-routed on the single
+           :443 uvicorn). A pre-unified pin like ``wss://host:443`` (no path)
+           hits the WebUI root ``/`` and is rejected ``HTTP 403``. A pin that
+           already carries a path is left as-is.
+
+        The ``auto`` sentinel, empty, and non-ws URLs are returned unchanged
+        (``_resolve_hub_url`` handles ``auto``).
+        """
+        if not url or url == "auto":
+            return url
+        low = url.lower()
+        if not low.startswith("ws://") and not low.startswith("wss://"):
+            return url
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+        except Exception:
+            return url
+        # 1. ws://…:443 → wss://…:443
+        if low.startswith("ws://") and parsed.port == 443:
+            url = "wss://" + url[len("ws://"):]
+            logger.info("Upgrading pinned %s → wss:// (port 443 is the hub TLS listener)", url)
+            parsed = urlparse(url)
+        # 2. pathless :443 pin → append /ws/spoke (else the WebUI root 403s)
+        if parsed.port == 443 and parsed.path in ("", "/"):
+            url = url.rstrip("/") + "/ws/spoke"
+            logger.info("Appending /ws/spoke to pinned URL (unified-443 spoke-WS path): %s", url)
+        return url
 
     async def _resolve_hub_url(self) -> None:
         """When ``self.hub_url`` is empty/``auto``/None, auto-discover the hub via

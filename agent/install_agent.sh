@@ -14,6 +14,16 @@
 #   Roles: dns | dhcp | network | netbox | opnsense | ldap | simulation | cppm | proxmox | le
 #   (--roles is a comma-list; --role <one> is accepted as a backward-compat alias.
 #    Omit both for a bare agent that loads roles later via the hub WebUI.)
+#
+#   --hub is optional: omit it (or pass "auto") to let the agent auto-discover the
+#   hub via mDNS/DNS (BaseControlPlane._resolve_hub_url).
+#
+#   --clone        Clone-only: stage files + enable the unit but STOP the service
+#                  so this box can be cloned. --id is NOT pinned, so each cloned
+#                  disk derives its spoke id from its OWN hostname at runtime and
+#                  inherits this template's PSK (carryover).
+#   --tls-verify   Verify the hub TLS cert (default: encrypt without auth).
+#                  Requires --tls-ca-cert <path> (or a co-located /opt/lm/certs/hub.crt).
 set -euo pipefail
 
 INSTALL_DIR="/opt/lm"
@@ -21,22 +31,65 @@ SERVICE_NAME="lm-agent"
 ENV_FILE="$INSTALL_DIR/agent/.env"
 LM_BRANCH="${LM_BRANCH:-main}"
 
-HUB_URL=""; SPOKE_ID=""; SPOKE_SECRET=""; STARTUP_ROLE=""; STARTUP_ROLES=""
+HUB_URL=""; SPOKE_ID=""; SPOKE_SECRET=""; HUB_SECRET=""; STARTUP_ROLE=""; STARTUP_ROLES=""
+CLONE_ONLY=false
+TLS_VERIFY=false
+TLS_CA_CERT=""
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
-        --hub)    HUB_URL="$2";      shift ;;
-        --id)     SPOKE_ID="$2";     shift ;;
-        --secret) SPOKE_SECRET="$2"; shift ;;
-        --role)   STARTUP_ROLE="$2"; shift ;;
-        --roles)  STARTUP_ROLES="$2"; shift ;;
+        --hub)        HUB_URL="$2";      shift ;;
+        --id)         SPOKE_ID="$2";     shift ;;
+        --secret)     SPOKE_SECRET="$2"; shift ;;
+        --hub-secret) HUB_SECRET="$2";   shift ;;
+        --role)       STARTUP_ROLE="$2"; shift ;;
+        --roles)      STARTUP_ROLES="$2"; shift ;;
+        --clone)      CLONE_ONLY=true; shift ;;
+        --tls-verify) TLS_VERIFY=true; shift ;;
+        --tls-ca-cert) TLS_CA_CERT="$2"; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac; shift
 done
 
-[[ -z "$HUB_URL" ]] && { echo "Usage: $0 --hub <wss://HUB:443/ws/spoke> [--id my-agent-1] [--roles dns,dhcp,...]"; exit 1; }
-SPOKE_ID="${SPOKE_ID:-agent-$(hostname -s)}"
+# --hub is optional: omit it (or pass "auto") and the agent auto-discovers the
+# hub (same-box wss://127.0.0.1:443/ws/spoke, remote wss://<hub>:443 via
+# mDNS/DNS) — BaseControlPlane._resolve_hub_url handles the "auto" sentinel.
+# A concrete wss:// URL pins it.
+[[ -z "$HUB_URL" ]] && HUB_URL="auto"
+
+# Clone-only: do NOT pin a spoke id here. The unit omits --id, so each cloned
+# disk derives its spoke id from its OWN hostname at runtime
+# (socket.gethostname() in control_plane.py) — parity with the leaf agent's
+# clone-name fix. The PSK (--secret) is retained (carryover) so the clone
+# authenticates + can be approved under its own hostname. Full install: default
+# the id to agent-<hostname> when the operator didn't pass --id.
+if [ "$CLONE_ONLY" = true ]; then
+    SPOKE_ID="${SPOKE_ID:-}"
+else
+    SPOKE_ID="${SPOKE_ID:-agent-$(hostname -s)}"
+fi
 mkdir -p /var/log/lm
+
+# Resolve the TLS-verify flag into unit env values (mirrors install_github.sh).
+# Verify OFF by default (self-signed hub cert → encrypt without auth). With
+# --tls-verify, LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT verifies against a CA.
+# No --tls-ca-cert → /opt/lm/certs/hub.crt if present (co-located with the hub);
+# a remote agent with no local hub cert must supply --tls-ca-cert <path>.
+if $TLS_VERIFY; then
+    if [ -z "$TLS_CA_CERT" ]; then
+        if [ -f /opt/lm/certs/hub.crt ]; then
+            TLS_CA_CERT=/opt/lm/certs/hub.crt
+        else
+            echo "❌ --tls-verify requires --tls-ca-cert <path> (no /opt/lm/certs/hub.crt on this box — copy the hub CA cert here first)."
+            exit 1
+        fi
+    fi
+    HUB_TLS_VERIFY_ENV=1
+    HUB_TLS_CA_ENV="$TLS_CA_CERT"
+else
+    HUB_TLS_VERIFY_ENV=0
+    HUB_TLS_CA_ENV=""
+fi
 
 # Normalize the startup-role set: --roles (comma-list) + --role (single alias),
 # de-duplicated, order-preserved. Passed to the unit as --roles so the agent
@@ -130,6 +183,10 @@ if [[ -f "$ENV_FILE" ]]; then
         EXISTING=$(grep "^SPOKE_SECRET=" "$ENV_FILE" | cut -d= -f2-)
         [[ -n "$EXISTING" ]] && SPOKE_SECRET="$EXISTING" && echo "Preserving existing spoke secret."
     fi
+    if grep -q "^HUB_SECRET=" "$ENV_FILE"; then
+        EXISTING=$(grep "^HUB_SECRET=" "$ENV_FILE" | cut -d= -f2-)
+        [[ -n "$EXISTING" ]] && HUB_SECRET="$EXISTING" && echo "Preserving existing hub secret."
+    fi
     if [[ -z "$STARTUP_ROLES_CSV" ]] && grep -q "^LOADED_ROLES=" "$ENV_FILE"; then
         STARTUP_ROLES_CSV=$(grep "^LOADED_ROLES=" "$ENV_FILE" | cut -d= -f2-)
         [[ -n "$STARTUP_ROLES_CSV" ]] && echo "Preserving existing LOADED_ROLES: $STARTUP_ROLES_CSV"
@@ -144,6 +201,7 @@ fi
 cat > "$ENV_FILE" <<EOF
 SPOKE_ID=$SPOKE_ID
 SPOKE_SECRET=$SPOKE_SECRET
+HUB_SECRET=$HUB_SECRET
 HUB_URL=$HUB_URL
 STARTUP_ROLES=$STARTUP_ROLES_CSV
 LOADED_ROLES=$STARTUP_ROLES_CSV
@@ -161,9 +219,25 @@ ROLES_ARG=""
 SECRET_ARG=""
 [[ -n "$SPOKE_SECRET" ]] && SECRET_ARG="--secret \$SPOKE_SECRET"
 
+# Only pass --id when pinned. Omitting it (clone-only) lets each cloned disk
+# derive its spoke id from its own hostname at runtime (control_plane.py).
+ID_ARG=""
+[[ -n "$SPOKE_ID" ]] && ID_ARG="--id \$SPOKE_ID"
+
+# TLS-verify Environment fragment (empty when verification is off, the default).
+_TLS_ENV="LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV"
+[ -n "$HUB_TLS_CA_ENV" ] && _TLS_ENV="$_TLS_ENV LM_HUB_CA_CERT=$HUB_TLS_CA_ENV"
+
+# Display id for the unit Description + summary (clone-only has no pinned id).
+if [ -n "$SPOKE_ID" ]; then
+    ID_DISP="$SPOKE_ID"
+else
+    ID_DISP="(derived from each clone's hostname at runtime)"
+fi
+
 cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
-Description=Lab Manager Generic Agent ($SPOKE_ID)
+Description=Lab Manager Generic Agent ($ID_DISP)
 After=network-online.target
 Wants=network-online.target
 
@@ -172,8 +246,9 @@ Type=simple
 User=root
 EnvironmentFile=$ENV_FILE
 Environment="PYTHONPATH=$INSTALL_DIR/core/src:$INSTALL_DIR/agent/src"
+Environment=$_TLS_ENV
 WorkingDirectory=$INSTALL_DIR/agent/src
-ExecStart=$INSTALL_DIR/agent/venv/bin/python3 control_plane.py --id \$SPOKE_ID $SECRET_ARG --hub \$HUB_URL $ROLES_ARG
+ExecStart=$INSTALL_DIR/agent/venv/bin/python3 control_plane.py $ID_ARG $SECRET_ARG --hub \$HUB_URL $ROLES_ARG
 StandardOutput=append:/var/log/lm/lm-agent.log
 StandardError=append:/var/log/lm/lm-agent.log
 Restart=always
@@ -184,5 +259,19 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now "$SERVICE_NAME"
-echo "Generic agent installed (ID: $SPOKE_ID, roles: ${STARTUP_ROLES_CSV:-none})"
+# Enable so a CLONED disk auto-starts on first boot and onboards under its own
+# hostname (carryover: retains the template's PSK so it can be approved without
+# admin re-approval). Clone-only STOPs the service here so the template box does
+# not register while it is being prepared for cloning; the unit stays enabled.
+systemctl enable "$SERVICE_NAME" 2>/dev/null || true
+if [ "$CLONE_ONLY" = true ]; then
+    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+    echo "❄️  Clone-only mode active. Files staged + unit enabled, but service STOPPED."
+    echo "The service will start automatically when this disk is cloned and booted."
+    echo "Each clone derives its spoke id from its own hostname and inherits this"
+    echo "template's PSK (carryover). To pin a spoke ID instead, edit"
+    echo "/etc/systemd/system/${SERVICE_NAME}.service and add --id <id>."
+else
+    systemctl restart "$SERVICE_NAME"
+fi
+echo "Generic agent installed (ID: $ID_DISP, roles: ${STARTUP_ROLES_CSV:-none})"

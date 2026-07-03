@@ -35,7 +35,7 @@
 //   Setup data loaders (cache, firewalls, spokes/agents, users, sessions)
 //   Diagnostics & logs (loadDiagnostics, loadModuleLogs, loadRecoveryLogs,
 //          loadBugReports, showBugReport)
-//   Generic agents & roles (loadApprovedSpokes, loadGenericAgents,
+//   Generic agents & roles (loadApprovedSpokes, fetchLoadedRoles,
 //          showLoadRoleModal, loadRole, showDeployAgentInfo)
 //   OPNsense management (loadOpnsenseManagement + add/edit modals)
 //   Proxmox (loadPxmxData)
@@ -85,8 +85,6 @@ const ROUTES = {
     loadSpokesAndAgents:    { m: 'GET',  p: '/setup/pending_spokes',      api: 'get_all_spokes_status',
                               m2: 'GET', p2: '/api/pxmx/agents',          api2: 'get_pxmx_agents' },
     loadApprovedSpokes:     { m: 'GET',  p: '/setup/pending_spokes',      api: 'get_all_spokes_status' },
-    loadGenericAgents:      { m: 'GET',  p: '/setup/diagnostics',         api: 'get_diagnostics',
-                              m2: 'GET', p2: '/api/agents',               api2: 'list_agents' },
     loadRole:               { m: 'POST', p: '/api/agent/{spokeId}/load-role', api: 'load_agent_role' },
     showLoadRoleModal:      { modal: true, via: 'loadRole' },
     showDeployAgentInfo:    { modal: true, via: null }, // static modal, no fetch
@@ -1791,6 +1789,19 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminLogs : ''}
         ${isAdmin() ? adminSettings : ''}
     `;
+
+    // The Logs submenu is dynamic (logsSubmenu gates module tabs on
+    // activeProducts), so re-render it when the approved-module set changes
+    // while the Logs view is open — otherwise newly-approved modules wouldn't
+    // gain a log tab until the user re-opens Logs. Preserve the active tab.
+    if (currentView === 'logs') {
+        renderTopNav('logs');
+        if (currentSubView && document.querySelector(`#top-nav .sub-nav-item[data-submenu="${currentSubView}"]`)) {
+            document.querySelectorAll('#top-nav .sub-nav-item').forEach(el => {
+                el.classList.toggle('active', el.dataset.submenu === currentSubView);
+            });
+        }
+    }
 }
 
 // Render the dashboard sidebar Spokes + Agents lists. Splits known modules by
@@ -3155,33 +3166,26 @@ function _renderSetupDhcpTile(content) {
     loadInstances('dhcp');
 }
 
-// Setup → Generic Nodes tile. GET /api/generic-agents
-// (core/src/api.py get_generic_agents).
-function _renderSetupGenericNodesTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+// Setup → Module Management tile. One unified device-management page for every
+// managed module (Firewalls, Network Devices, Security/NAC, IPAM, LDAP, DNS,
+// DHCP). A single "+ Add Device" button opens a modal where the admin first
+// picks the module type (OPNsense, ClearPass, NetBox, …) and then fills in
+// that type's specifics — the device type is determined by the module type and
+// the associated spoke it is attached to. All known devices are listed in one
+// table with a per-row type badge + Edit/Delete. See DEVICE_TYPES below for the
+// declarative per-type schema (endpoint, fields, spoke filter, payload key).
+function _renderSetupModuleMgmtTile(content) {
+    const { card, btnCls } = _SETUP_CLS;
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Generic Agents</h3>
-                    <button onclick="showDeployAgentInfo()" class="text-xs font-bold text-slate-400 hover:text-[#01A982] transition-colors">+ Deploy Agent</button>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Managed Devices</h3>
+                    <button onclick="showAddDeviceModal()" class="${btnCls}">+ Add Device</button>
                 </div>
-                <div class="overflow-hidden rounded-md border border-slate-200">
-                    <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                            <tr>
-                                <th class="px-4 py-3">Agent ID</th>
-                                <th class="px-4 py-3">Status</th>
-                                <th class="px-4 py-3">Active Role</th>
-                                <th class="px-4 py-3"></th>
-                            </tr>
-                        </thead>
-                        <tbody id="generic-agents-body" class="divide-y divide-slate-200">
-                            <tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading…</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+                <p class="text-xs text-slate-400 mb-3">Every managed module device in one place — firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances. Click <strong>Add Device</strong> then choose the module type to attach.</p>
+                <div id="all-devices-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>`;
-    loadGenericAgents();
+    loadAllDevices();
 }
 
 // Setup → Simulations tile. Sim admin overview: global + per-tenant USB
@@ -5028,14 +5032,16 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
     // them here rather than re-fetching.
     const all = [...hubAgents, ...pxmxAgents];
 
-    // Active Role column: fetch the role sub-spokes each connected generic
-    // agent is currently hosting (GET_AVAILABLE_ROLES via the generic relay).
-    // Proxmox node agents have no roles, so they render an em-dash. Pending
-    // generic agents are skipped (the relay needs an authenticated connection).
-    const rolesByAgent = new Map(await Promise.all(
-        hubAgents.filter(a => a._status === 'connected')
-                 .map(async a => [a.agent_id, await fetchLoadedRoles(a.agent_id)])
-    ));
+    // Active Role column (folded in from the former Generic Nodes tile):
+    // each connected generic agent hosts 0..N role sub-spokes, surfaced via
+    // GET_AVAILABLE_ROLES on the generic relay. We paint the table immediately
+    // with a per-row "loading roles…" placeholder, then fill each agent's cell
+    // as its round-trip resolves — NO Promise.all barrier, so one sluggish
+    // agent can't stall the rest (mirrors the progressive-render approach the
+    // standalone Generic Nodes tile used). The role cell is keyed by agent_id;
+    // a reload that rebuilt the table while a fetch was outstanding still
+    // writes to the right cell if the agent is still listed, and silently
+    // skips (querySelector returns null) if it has since dropped off.
 
     if (all.length === 0) {
         agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected. Approve a generic agent (module_type "agent") or install the agent on a Proxmox node to begin.</p>`;
@@ -5080,19 +5086,17 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                             const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
                             const eAid = aid.replace(/'/g, "\\'");
                             const eLabel = label.replace(/'/g, "\\'");
-                            // Active Role cell: badges for each hosted role, or
-                            // "none (idle)" for a connected generic agent with no
-                            // role loaded. Proxmox node agents have no roles.
+                            // Active Role cell: a keyed placeholder for connected
+                            // generic agents that is filled async after paint (no
+                            // barrier). Proxmox node agents have no roles; pending
+                            // generic agents show an em-dash.
                             let roleCellHtml;
                             if (!isSpokeKind) {
                                 roleCellHtml = '<span class="text-slate-400">—</span>';
                             } else if (isPending) {
                                 roleCellHtml = '<span class="text-slate-400 italic">—</span>';
                             } else {
-                                const active = rolesByAgent.get(aid) || [];
-                                roleCellHtml = active.length > 0
-                                    ? active.map(r => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${escapeHtml(r.sub_spoke_id || '')}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`).join(' ')
-                                    : '<span class="text-slate-400 italic">none (idle)</span>';
+                                roleCellHtml = `<span class="lm-agent-role-cell text-slate-400 italic" data-role-cell="${escapeHtml(aid)}">loading roles…</span>`;
                             }
                             // Generic Hub-direct agents use the spoke-approval endpoints;
                             // Proxmox node agents use the pxmx relay endpoints. Approve/
@@ -5156,6 +5160,22 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                     </tbody>
                 </table>
             </div>`;
+        // Trickle: fill each connected generic agent's Active Role cell as its
+        // GET_AVAILABLE_ROLES resolves. No barrier, so a slow agent never delays
+        // the others. Looks the cell up by data-role-cell each time so a reload
+        // that rebuilt the table mid-flight still targets the right agent (and
+        // silently skips one that has since dropped off the list).
+        all.forEach(a => {
+            if (a._kind !== 'spoke' || a._status !== 'connected') return;
+            const aid = a.agent_id;
+            fetchLoadedRoles(aid).then(active => {
+                const cell = agentsWrap.querySelector(`.lm-agent-role-cell[data-role-cell="${CSS.escape(aid)}"]`);
+                if (!cell) return;
+                cell.outerHTML = (Array.isArray(active) && active.length > 0)
+                    ? active.map(r => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${escapeHtml(r.sub_spoke_id || '')}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`).join(' ')
+                    : '<span class="text-slate-400 italic">none (idle)</span>';
+            });
+        });
     }
 }
 
@@ -6267,103 +6287,6 @@ async function loadApprovedSpokes() {
     }
 }
 
-/**
- * Build the Roles-column HTML for a generic agent's hosted roles (the `active`
- * list returned by GET_AVAILABLE_ROLES). Shared between the initial paint and
- * the per-row async fill so the badge markup stays in one place.
- * @param {Array<{role:string,sub_spoke_id:string}>} active - loaded roles.
- * @returns {string} HTML for the Roles <td> contents.
- */
-function _rolesCellHtml(active) {
-    if (Array.isArray(active) && active.length > 0) {
-        return active.map(a =>
-            `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${a.sub_spoke_id}">${AGENT_ROLES[a.role]?.name || a.role}</span>`
-        ).join(' ');
-    }
-    return '<span class="text-slate-400 italic">none (idle)</span>';
-}
-
-async function loadGenericAgents() {
-    const bodyEl = document.getElementById('generic-agents-body');
-    if (!bodyEl) return;
-
-    try {
-        // Fetch connected generic agents
-        const [diagRes, agentRes] = await Promise.all([
-            setupFetch('/setup/diagnostics'),
-            fetch('/api/agents'),
-        ]);
-        const diagData = diagRes.ok ? await diagRes.json() : { spokes: [] };
-        const agentData = agentRes.ok ? await agentRes.json() : { agents: [] };
-
-        // Build a set of agent spoke IDs from /api/agents (module_type "agent")
-        const agentIds = new Set((agentData.agents || []).map(a => a.spoke_id));
-
-        // Also include spokes with "agent" in their ID that are in diagnostics
-        const diagSpokes = (diagData.spokes || []).filter(s =>
-            agentIds.has(s.spoke_id) || s.spoke_id.includes('agent')
-        );
-
-        if (diagSpokes.length === 0 && agentData.agents.length === 0) {
-            bodyEl.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">No generic agents connected. Deploy one with <code class="bg-slate-100 px-1 rounded">install_agent.sh</code>.</td></tr>`;
-            return;
-        }
-
-        // Merge both sources
-        const allAgents = [...new Map([
-            ...agentData.agents.map(a => [a.spoke_id, { spoke_id: a.spoke_id, authenticated: true, module_type: a.module_type }]),
-            ...diagSpokes.map(s => [s.spoke_id, { ...s, authenticated: s.authenticated }]),
-        ].reverse()).values()];
-
-        // Paint the table immediately from the two cheap endpoints, with a
-        // per-row "loading…" placeholder in the Roles column for online agents,
-        // then fill each agent's hosted roles as its GET_AVAILABLE_ROLES
-        // resolves. Previously this awaited a Promise.all over every connected
-        // agent before rendering — a BARRIER that made the whole table wait on
-        // the slowest agent (up to the 5s request_response timeout, the "long
-        // time to load at times" symptom). Now the table paints at the speed of
-        // /setup/diagnostics + /api/agents and roles trickle in per-row, so one
-        // sluggish agent can't stall the rest. The Roles cell is keyed by
-        // data-spoke-id (unique per the dedup Map above): the in-flight fetch
-        // looks its cell up by spoke id, so a reload that rebuilt the table
-        // while it was outstanding still writes to the right cell if the agent
-        // is still listed, and silently skips (querySelector returns null) if
-        // the agent has since dropped off the list — never a wrong-agent write.
-        bodyEl.innerHTML = allAgents.map(agent => {
-            const online = agent.authenticated;
-            const rolesCell = online
-                ? `<span class="lm-roles-cell text-slate-400 italic" data-spoke-id="${agent.spoke_id}">loading roles…</span>`
-                : '<span class="text-slate-400 italic">none (idle)</span>';
-            return `
-            <tr class="hover:bg-slate-50 transition-colors">
-                <td class="px-4 py-3 font-mono text-xs text-slate-700">${agent.spoke_id}</td>
-                <td class="px-4 py-3">
-                    <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${online ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${online ? 'Online' : 'Offline'}</span>
-                </td>
-                <td class="px-4 py-3 text-xs">${rolesCell}</td>
-                <td class="px-4 py-3 text-right space-x-2">
-                    ${online ? `<button onclick="showLoadRoleModal('${agent.spoke_id}')" class="text-xs font-bold text-[#01A982] hover:text-[#008c6a] transition-colors">Load Role</button>` : ''}
-                </td>
-            </tr>`;
-        }).join('');
-
-        // Fill each online agent's roles as its round-trip resolves — no
-        // barrier, so a slow agent never delays the others.
-        allAgents.forEach(agent => {
-            if (!agent.authenticated) return;
-            fetchLoadedRoles(agent.spoke_id).then(active => {
-                const cell = bodyEl.querySelector(
-                    `.lm-roles-cell[data-spoke-id="${agent.spoke_id}"]`
-                );
-                if (cell) cell.outerHTML = _rolesCellHtml(active);
-            });
-        });
-    } catch (err) {
-        console.error('Error loading generic agents:', err);
-        bodyEl.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-500 italic">Error: ${err.message}</td></tr>`;
-    }
-}
-
 async function fetchLoadedRoles(spokeId) {
     // Fetch the roles a generic agent is currently hosting (GET_AVAILABLE_ROLES
     // via the generic command relay). Returns the `active` list (possibly empty).
@@ -6488,7 +6411,9 @@ async function loadRole(spokeId) {
     }
     document.getElementById('load-role-modal')?.remove();
     alert(`Role activation on ${spokeId}:\n\n${results.join('\n')}`);
-    loadGenericAgents();
+    // Refresh the Spokes & Agents table so the Active Role column updates
+    // (generic nodes are now managed there, not a separate Generic Nodes tile).
+    if (currentView === 'setup') loadSpokesAndAgents();
 }
 
 async function unloadRole(spokeId, role) {
@@ -6502,7 +6427,7 @@ async function unloadRole(spokeId, role) {
         const data = await res.json();
         if (res.ok && (data.status === 'SUCCESS' || data.payload?.status === 'SUCCESS')) {
             alert(`Role "${AGENT_ROLES[role]?.name || role}" unloaded from ${spokeId}.`);
-            loadGenericAgents();
+            if (currentView === 'setup') loadSpokesAndAgents();
             showLoadRoleModal(spokeId);
         } else {
             alert('Failed to unload role: ' + (data.detail || data.message || JSON.stringify(data)));
@@ -10467,6 +10392,71 @@ const INSTANCE_PRODUCTS = {
     },
 };
 
+// DEVICE_TYPES — the unified registry backing Setup → Module Management. It
+// extends INSTANCE_PRODUCTS with the two bespoke device families (firewalls
+// and network devices) so every managed module shares one declarative shape:
+//   endpoint     — REST collection (GET lists, POST creates, DELETE/{id}).
+//   responseKey   — the list key in the GET response (firewalls / nw_devices /
+//                   instances).
+//   moduleType   — the spoke module_type the device attaches to (used to
+//                   filter the Associated Spoke dropdown).
+//   spokeFilter   — fallback predicate for spokes whose module_type is absent.
+//   payloadKey   — the POST body key ({payloadKey: config}); PUT is uniformly
+//                   {config} for every family.
+//   badgeLabel   — short label shown in the unified device table.
+//   rowSummary   — one-line host/endpoint summary for the table row.
+//   fields        — ordered form fields; type 'text'|'password'|'select'
+//                   (selects carry options as [value,label] pairs). 'port' is
+//                   coerced to an int on save (per-family default via `default`).
+// The five instance families reuse INSTANCE_PRODUCTS verbatim (same fields /
+// endpoints) so the per-module Add Instance modal and the unified page stay in
+// sync; only the device-type-specific keys are added here.
+const DEVICE_TYPES = {
+    firewall: {
+        title: 'Firewall',
+        endpoint: '/setup/firewalls',
+        responseKey: 'firewalls',
+        moduleType: 'firewall',
+        spokeFilter: s => s.module_type === 'firewall' || /^(opn|fw|firewall|pfsense|fortigate|juniper)/.test(s.spoke_id),
+        payloadKey: 'firewall',
+        badgeLabel: 'Firewall',
+        rowSummary: d => `${d.host || '—'}${d.port ? ':' + d.port : ''}`,
+        fields: [
+            { id: 'model', label: 'Model', type: 'select', options: [['opnsense','OPNsense'],['juniper','Juniper'],['fortigate','Fortigate'],['pfsense','pfSense']] },
+            { id: 'host', label: 'Host / IP', placeholder: '172.16.1.1' },
+            { id: 'port', label: 'Port', placeholder: '8443', coerce: 'int', default: 8443 },
+            { id: 'api_key', label: 'API Key' },
+            { id: 'api_secret', label: 'API Secret', type: 'password' },
+        ],
+    },
+    nw: {
+        title: 'Network Device',
+        endpoint: '/setup/nw-devices',
+        responseKey: 'nw_devices',
+        moduleType: 'nw',
+        spokeFilter: s => s.module_type === 'nw' || /^(nw|network)/.test(s.spoke_id),
+        payloadKey: 'device',
+        badgeLabel: 'Network',
+        rowSummary: d => `${d.address || '—'}${d.port ? ':' + d.port : ''}`,
+        fields: [
+            { id: 'object_type', label: 'Object Type', type: 'select', options: [['aos_switch','AOS Switch'],['cx_switch','CX Switch'],['ex_switch','EX Switch'],['gateway','Gateway']] },
+            { id: 'transport', label: 'Transport', type: 'select', options: [['auto','Auto'],['ssh','SSH/CLI'],['rest','REST API'],['snmp','SNMP']] },
+            { id: 'address', label: 'Address / Host IP', placeholder: '10.0.0.1' },
+            { id: 'port', label: 'Port', placeholder: '22 / 443', coerce: 'int' },
+            { id: 'username', label: 'Username' },
+            { id: 'password', label: 'Password', type: 'password' },
+            { id: 'enable_secret', label: 'Enable Secret', type: 'password' },
+            { id: 'api_token', label: 'API Token', type: 'password' },
+            { id: 'snmp_community', label: 'SNMP Community' },
+        ],
+    },
+    nac:   Object.assign({}, INSTANCE_PRODUCTS.nac,   { badgeLabel: 'NAC',  payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'nac' }),
+    ipam:  Object.assign({}, INSTANCE_PRODUCTS.ipam,  { badgeLabel: 'IPAM', payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'ipam' }),
+    ldap:  Object.assign({}, INSTANCE_PRODUCTS.ldap,  { badgeLabel: 'LDAP', payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'directory' }),
+    dns:   Object.assign({}, INSTANCE_PRODUCTS.dns,   { badgeLabel: 'DNS',  payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'dns' }),
+    dhcp:  Object.assign({}, INSTANCE_PRODUCTS.dhcp,  { badgeLabel: 'DHCP', payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'dhcp' }),
+};
+
 async function loadInstances(productKey) {
     const p = INSTANCE_PRODUCTS[productKey];
     if (!p) return;
@@ -10646,6 +10636,193 @@ async function applyIpamSchema() {
 
 function closeInstanceModal() {
     const modal = document.getElementById('instance-modal');
+    if (modal) modal.remove();
+}
+
+// ─── Module Management: unified device list + Add/Edit/Delete ──────────────
+// One page (Setup → Module Management) lists every managed module device and
+// lets an admin add any of them through a single modal: pick the module type
+// first, then fill in that type's specifics. DEVICE_TYPES drives the schema.
+
+async function loadAllDevices() {
+    const listEl = document.getElementById('all-devices-list');
+    if (!listEl) return;
+    listEl.innerHTML = '<p class="text-xs text-slate-400 italic animate-pulse">Loading…</p>';
+    const entries = Object.entries(DEVICE_TYPES);
+    const results = await Promise.all(entries.map(async ([typeKey, t]) => {
+        try {
+            const r = await setupFetch(t.endpoint);
+            if (!r.ok) return [];
+            const data = await r.json();
+            const items = data[t.responseKey] || [];
+            return (Array.isArray(items) ? items : []).map(d => ({ _typeKey: typeKey, _id: d.id, ...d }));
+        } catch (e) {
+            console.error(`loadAllDevices: ${typeKey} fetch failed:`, e);
+            return [];
+        }
+    }));
+    const all = results.flat();
+    window._allDevices = all;
+    if (all.length === 0) {
+        listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No managed devices yet. Click <strong>Add Device</strong> to attach one.</p>';
+        return;
+    }
+    listEl.innerHTML = all.map(d => {
+        const t = DEVICE_TYPES[d._typeKey];
+        const name = d.name || d.id;
+        const summary = t.rowSummary(d);
+        const spoke = d.spoke_id ? ' · ' + escapeHtml(d.spoke_id) : '';
+        const eId = String(d._id).replace(/'/g, "\\'");
+        return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
+            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(summary)}${spoke}</span></div>
+            <div class="flex gap-2">
+                <button onclick="editDevice('${d._typeKey}','${eId}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
+                <button onclick="deleteDevice('${d._typeKey}','${eId}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+// Render the type-specific field section for the unified Add/Edit Device modal.
+// Selects render their options; everything else is a text/password input.
+function _deviceFieldHtml(t, field, values) {
+    const id = `dev-${field.id}`;
+    const val = values ? (values[field.id] ?? '') : '';
+    const cls = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    if (field.type === 'select') {
+        const opts = (field.options || []).map(([v, lbl]) => `<option value="${v}"${v === val ? ' selected' : ''}>${lbl}</option>`).join('');
+        return `                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">${field.label}</label><select id="${id}" class="${cls}">${opts}</select></div>`;
+    }
+    const type = field.type || 'text';
+    const ph = field.placeholder ? ` placeholder="${field.placeholder}"` : '';
+    return `                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">${field.label}</label><input type="${type}" id="${id}" value="${escapeHtml(String(val))}"${ph} class="${cls}"></div>`;
+}
+
+function showAddDeviceModal(editTypeKey, editItem) {
+    const typeKeys = Object.keys(DEVICE_TYPES);
+    const modal = document.createElement('div');
+    modal.id = 'device-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
+                <h3 class="text-lg font-bold text-[#263040]">${editItem ? 'Edit' : 'Add'} Managed Device</h3>
+                <button onclick="closeDeviceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Device Name</label><input type="text" id="dev-name" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Module Type</label><select id="dev-type" ${editItem ? 'disabled' : ''} onchange="_onDeviceTypeChange()" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${typeKeys.map(k => `<option value="${k}"${k === editTypeKey ? ' selected' : ''}>${DEVICE_TYPES[k].title}</option>`).join('')}</select></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="dev-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                <div id="dev-fields" class="space-y-4"></div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
+                <button onclick="closeDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+                <button onclick="saveDevice()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    if (editItem) {
+        modal.dataset.editType = editTypeKey;
+        modal.dataset.editId = editItem.id;
+    }
+    _renderDeviceModalFields(editTypeKey || typeKeys[0], editItem);
+}
+
+// Re-render the type-specific fields + repopulate the Associated Spoke dropdown
+// when the Module Type selection changes. The device type is determined by the
+// module type (and the spoke it attaches to), so the spoke list is filtered to
+// that module's spokes.
+function _renderDeviceModalFields(typeKey, values) {
+    const t = DEVICE_TYPES[typeKey];
+    if (!t) return;
+    const wrap = document.getElementById('dev-fields');
+    if (wrap) wrap.innerHTML = t.fields.map(f => _deviceFieldHtml(t, f, values)).join('\n');
+    // Name is only auto-filled from the edit item (top-level field), not fields.
+    if (values && values.name) {
+        const nameEl = document.getElementById('dev-name');
+        if (nameEl) nameEl.value = values.name;
+    }
+    loadApprovedSpokes().then(spokes => {
+        const selector = document.getElementById('dev-spoke');
+        if (!selector) return;
+        const matched = spokes.filter(s => t.moduleType ? s.module_type === t.moduleType : true)
+                              .filter(s => t.spokeFilter ? t.spokeFilter(s) : true);
+        const current = values ? values.spoke_id : '';
+        selector.innerHTML = matched.length > 0
+            ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}"${s.spoke_id === current ? ' selected' : ''}>${s.spoke_id}</option>`).join('')
+            : `<option value="">No ${t.moduleType || ''} spokes found</option>`;
+    });
+}
+
+function _onDeviceTypeChange() {
+    const typeKey = document.getElementById('dev-type').value;
+    _renderDeviceModalFields(typeKey, null);
+}
+
+async function editDevice(typeKey, id) {
+    const all = window._allDevices || [];
+    const d = all.find(x => x._typeKey === typeKey && x._id === id);
+    if (!d) return;
+    showAddDeviceModal(typeKey, d);
+}
+
+async function saveDevice() {
+    const modal = document.getElementById('device-modal');
+    if (!modal) return;
+    const typeKey = document.getElementById('dev-type').value;
+    const t = DEVICE_TYPES[typeKey];
+    if (!t) return;
+    const id = modal.dataset.editId;
+    const config = {
+        name: (document.getElementById('dev-name').value || '').trim(),
+        spoke_id: document.getElementById('dev-spoke').value,
+    };
+    if (!config.name) { alert('Device name is required.'); return; }
+    t.fields.forEach(f => {
+        const el = document.getElementById('dev-' + f.id);
+        let v = el ? el.value : '';
+        if (f.coerce === 'int') v = parseInt(v, 10) || (f.default != null ? f.default : null);
+        config[f.id] = v;
+    });
+    // IPAM Apply-schema is product-specific; keep it on the IPAM instance modal.
+    // The unified modal handles the common add/edit path only.
+    try {
+        const method = id ? 'PUT' : 'POST';
+        const url = id ? `${t.endpoint}/${encodeURIComponent(id)}` : t.endpoint;
+        const payload = id ? { config } : { [t.payloadKey]: config };
+        const r = await setupFetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (r.ok) {
+            alert(`Device ${id ? 'updated' : 'added'} successfully!`);
+            closeDeviceModal();
+            loadAllDevices();
+        } else {
+            const err = await r.json().catch(() => ({}));
+            alert('Failed to save device: ' + (err.detail || r.status));
+        }
+    } catch (e) {
+        alert('Error saving device: ' + e.message);
+    }
+}
+
+async function deleteDevice(typeKey, id) {
+    const t = DEVICE_TYPES[typeKey];
+    if (!t) return;
+    if (!confirm(`Delete this ${t.title.toLowerCase()} (${id})?`)) return;
+    try {
+        const r = await setupFetch(`${t.endpoint}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error(await r.text().catch(() => r.status));
+        loadAllDevices();
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+function closeDeviceModal() {
+    const modal = document.getElementById('device-modal');
     if (modal) modal.remove();
 }
 

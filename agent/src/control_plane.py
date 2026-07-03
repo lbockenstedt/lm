@@ -243,8 +243,14 @@ class AgentControlPlane(BaseControlPlane):
 
 
 if __name__ == "__main__":
+    import socket as _socket
     parser = argparse.ArgumentParser()
-    parser.add_argument("--id",     required=True)
+    # --id defaults to this host's short hostname, re-evaluated on every start.
+    # A clone-only unit (install_agent.sh --clone) bakes NO --id, so each cloned
+    # disk derives its spoke id from its OWN hostname at runtime (parity with the
+    # leaf agent's clone-name fix) instead of inheriting the template's pinned
+    # id. A pinned --id (full install) stays frozen.
+    parser.add_argument("--id",     default=None)
     parser.add_argument("--secret", default=None,
                         help="Session secret. Omit for zero-touch provisioning — the hub will send it after admin approval.")
     parser.add_argument("--hub-secret", nargs='?', default="", const="")
@@ -254,6 +260,9 @@ if __name__ == "__main__":
     parser.add_argument("--roles",  default=os.environ.get("STARTUP_ROLES", ""),
                         help="Pre-load multiple roles at startup: comma-list, e.g. dns,dhcp.")
     args = parser.parse_args()
+
+    if not args.id:
+        args.id = _socket.gethostname().split(".")[0]
 
     startup_roles = [r for r in (args.roles or "").split(",") if r.strip()]
     cp = AgentControlPlane(args.id, args.secret, args.hub_secret, args.hub,
