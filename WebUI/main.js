@@ -2642,6 +2642,13 @@ function _renderSetupSpokesTile(content) {
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agents</h3>
                 </div>
                 <div id="agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
+            <div class="${card}">
+                <div class="flex justify-between items-center mb-3">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Generic Agents</h3>
+                    <span class="text-xs text-slate-400 italic">idle until a role is loaded</span>
+                </div>
+                <div id="generic-agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>`;
     loadSpokesAndAgents();
 }
@@ -4919,6 +4926,43 @@ async function _ackIdentityChange(endpoint) {
     }
 }
 
+// _mgmtBtn(label, onclick, extraCls) — one action button for a management card
+// row. Keeps the btn base class + per-button color consistent across the
+// Spokes / Agents / Generic Agents tiles.
+function _mgmtBtn(label, onclick, extraCls) {
+    return `<button onclick="${onclick}" class="${_SPOKES_TBL_CLS.btnCls} ${extraCls || ''}">${label}</button>`;
+}
+
+// _mgmtEntryCard(o) — a multi-line stacked card row for the Setup → Spokes &
+// Agents tiles. Replaces the cramped fixed-width <table table-fixed> layout
+// whose narrow columns wrapped text and stacked buttons awkwardly. Each entry
+// is a vertical card: a header line (status dot + name/id + badges), optional
+// meta lines (hostname, roles), and an actions row that wraps freely. Shared
+// by _renderSpokesTable, _renderAgentsTable, _renderGenericAgentsTable.
+//
+// o = { dot, name, sid, identityBanner, metaLines: [html], badges: [html],
+//       actions: [html] }
+function _mgmtEntryCard(o) {
+    const badges  = (o.badges || []).filter(Boolean).join(' ');
+    const meta    = (o.metaLines || []).filter(Boolean).join('');
+    const actions = (o.actions || []).filter(Boolean).join('');
+    return `<div class="lm-mgmt-card border border-slate-200 rounded-md bg-white p-3 hover:bg-slate-50 space-y-2">
+        <div class="flex items-start justify-between gap-3 flex-wrap">
+            <div class="flex items-start gap-2.5 min-w-0">
+                <div class="w-2 h-2 mt-1.5 rounded-full ${o.dot} shrink-0"></div>
+                <div class="min-w-0">
+                    <div class="font-medium text-slate-700 break-words">${o.name}</div>
+                    <div class="text-[10px] font-mono text-slate-400 break-all">${o.sid}</div>
+                    ${o.identityBanner || ''}
+                </div>
+            </div>
+            ${badges ? `<div class="flex items-center gap-1.5 flex-wrap justify-end">${badges}</div>` : ''}
+        </div>
+        ${meta}
+        ${actions ? `<div class="flex items-center gap-2 flex-wrap pl-6">${actions}</div>` : ''}
+    </div>`;
+}
+
 // _renderSpokesTable() — renders the Spokes half of the Setup → Spokes & Agents
 // admin view. Extracted from loadSpokesAndAgents; the fetch + split preamble
 // stays in the caller. Output HTML and handler names are preserved exactly.
@@ -4936,76 +4980,38 @@ function _renderSpokesTable(spokesWrap, trueSpokes) {
         if (trueSpokes.length === 0) {
             spokesWrap.innerHTML = `<p class="py-8 text-center text-slate-400 italic text-xs">No spokes have connected yet.</p>`;
         } else {
-            spokesWrap.innerHTML = `
-                <div class="${tblCls}">
-                    <table class="w-full text-left text-sm table-fixed">
-                        <colgroup>
-                            <col style="width:22%">
-                            <col style="width:13%">
-                            <col style="width:10%">
-                            <col style="width:9%">
-                            <col style="width:11%">
-                            <col style="width:35%">
-                        </colgroup>
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                            <tr>
-                                <th class="${thCls}">Spoke</th>
-                                <th class="${thCls}">Hostname</th>
-                                <th class="${thCls}">Module</th>
-                                <th class="${thCls}">Type</th>
-                                <th class="${thCls}">Status</th>
-                                <th class="${thCls} text-right">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-slate-200">
-                            ${trueSpokes.map(s => {
-                                const sid = s.spoke_id;
-                                const name = s.display_name || sid;
-                                const approved = s.approved;
-                                const mtRaw = String(s.module_type || '').toLowerCase();
-                                const modLabel = moduleLabel(mtRaw);
-                                const kindLabel = spokeKind(mtRaw);
-                                const hostname = s.hostname || '';
-                                const ic = s.identity_change;
-                                const eSid = sid.replace(/'/g, "\\'");
-                                const eName = name.replace(/'/g, "\\'");
-                                const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
-                                return `<tr class="hover:bg-slate-50">
-                                    <td class="${tdCls}">
-                                        <div class="flex items-center gap-3">
-                                            <div class="w-2 h-2 rounded-full ${approved ? 'bg-green-500' : 'bg-yellow-400'}"></div>
-                                            <div>
-                                                <div class="font-medium text-slate-700">${name}</div>
-                                                <div class="text-[10px] font-mono text-slate-400">${sid}</div>
-                                                ${_identityChangeBanner(ic, ackClick)}
-                                            </div>
-                                        </div>
-                                    </td>
-                                    <td class="${tdCls}">
-                                        <span class="text-xs font-mono text-slate-600">${hostname || '—'}</span>
-                                    </td>
-                                    <td class="${tdCls}">
-                                        <span class="text-xs font-semibold text-slate-700">${modLabel}</span>
-                                    </td>
-                                    <td class="${tdCls}">
-                                        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${kindLabel === 'Module' ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-600'}">${kindLabel}</span>
-                                    </td>
-                                    <td class="${tdCls}">
-                                        <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${approved ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}">${approved ? 'Approved' : 'Pending'}</span>
-                                    </td>
-                                    <td class="${tdCls} text-right">
-                                        <div class="flex justify-end gap-2">
-                                            <button onclick="openSpokeMetadataModal('${eSid}','${eName}')" class="${btnCls} bg-[#01A982] hover:bg-[#008c6a] text-white">Edit</button>
-                                            ${approved
-                                                ? `<button onclick="unapproveSpoke('${eSid}')" class="${btnCls} bg-red-50 hover:bg-red-100 text-red-600 border border-red-200">Un-approve</button>`
-                                                : `<button onclick="approveSpoke('${eSid}')" class="${btnCls} bg-blue-600 hover:bg-blue-700 text-white">Approve</button>`}
-                                        </div>
-                                    </td>
-                                </tr>`;
-                            }).join('')}
-                        </tbody>
-                    </table>
-                </div>`;
+            spokesWrap.innerHTML = `<div class="space-y-2">${trueSpokes.map(s => {
+                const sid = s.spoke_id;
+                const name = s.display_name || sid;
+                const approved = s.approved;
+                const mtRaw = String(s.module_type || '').toLowerCase();
+                const modLabel = moduleLabel(mtRaw);
+                const kindLabel = spokeKind(mtRaw);
+                const hostname = s.hostname || '';
+                const ic = s.identity_change;
+                const eSid = sid.replace(/'/g, "\\'");
+                const eName = name.replace(/'/g, "\\'");
+                const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
+                return _mgmtEntryCard({
+                    dot: approved ? 'bg-green-500' : 'bg-yellow-400',
+                    name, sid,
+                    identityBanner: _identityChangeBanner(ic, ackClick),
+                    metaLines: hostname
+                        ? [`<div class="text-xs font-mono text-slate-500 pl-6">host: ${hostname}</div>`]
+                        : [],
+                    badges: [
+                        `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${kindLabel === 'Module' ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-600'}">${kindLabel}</span>`,
+                        `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${modLabel}</span>`,
+                        `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${approved ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}">${approved ? 'Approved' : 'Pending'}</span>`,
+                    ],
+                    actions: [
+                        _mgmtBtn('Edit', `openSpokeMetadataModal('${eSid}','${eName}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
+                        approved
+                            ? _mgmtBtn('Un-approve', `unapproveSpoke('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')
+                            : _mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white'),
+                    ],
+                });
+            }).join('')}</div>`;
         }
     } catch (err) {
         spokesWrap.innerHTML = `<p class="py-6 text-center text-red-400 italic text-xs">Error: ${err.message}</p>`;
@@ -5058,126 +5064,74 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
     // skips (querySelector returns null) if it has since dropped off.
 
     if (all.length === 0) {
-        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected. Approve a generic agent (module_type "agent") or install the agent on a Proxmox node to begin.</p>`;
+        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No active agents. Load a role on a generic node (it moves here from Generic Agents) or install the agent on a Proxmox node to begin.</p>`;
     } else {
-        agentsWrap.innerHTML = `
-            <div class="${tblCls}">
-                <table class="w-full text-left text-sm table-fixed">
-                    <colgroup>
-                        <col style="width:20%">
-                        <col style="width:12%">
-                        <col style="width:10%">
-                        <col style="width:9%">
-                        <col style="width:16%">
-                        <col style="width:10%">
-                        <col style="width:23%">
-                    </colgroup>
-                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                        <tr>
-                            <th class="${thCls}">Agent</th>
-                            <th class="${thCls}">Hostname</th>
-                            <th class="${thCls}">Module</th>
-                            <th class="${thCls}">Type</th>
-                            <th class="${thCls}">Active Role</th>
-                            <th class="${thCls}">Status</th>
-                            <th class="${thCls} text-right">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody class="divide-y divide-slate-200">
-                        ${all.map(a => {
-                            const aid = a.agent_id;
-                            const label = a.display_name || a.hostname || aid;
-                            const isPending = a._status === 'pending';
-                            const isSpokeKind = a._kind === 'spoke';
-                            // Every row in this table is an agent. The Type
-                            // column distinguishes the two flavors: generic
-                            // Hub-direct agents (module_type "agent", e.g.
-                            // bugfixer / a generic node) vs Proxmox node agents
-                            // relayed through the pxmx spoke. The Module column
-                            // further names what each one runs.
-                            const typeLabel = isSpokeKind ? 'Generic Agent' : 'Proxmox Agent';
-                            const moduleLabelCell = a._module || '—';
-                            const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
-                            const eAid = aid.replace(/'/g, "\\'");
-                            const eLabel = label.replace(/'/g, "\\'");
-                            // Active Role cell: a keyed placeholder for connected
-                            // generic agents that is filled async after paint (no
-                            // barrier). Proxmox node agents have no roles; pending
-                            // generic agents show an em-dash.
-                            let roleCellHtml;
-                            if (!isSpokeKind) {
-                                roleCellHtml = '<span class="text-slate-400">—</span>';
-                            } else if (isPending) {
-                                roleCellHtml = '<span class="text-slate-400 italic">—</span>';
-                            } else {
-                                roleCellHtml = `<span class="lm-agent-role-cell text-slate-400 italic" data-role-cell="${escapeHtml(aid)}">loading roles…</span>`;
-                            }
-                            // Generic Hub-direct agents use the spoke-approval endpoints;
-                            // Proxmox node agents use the pxmx relay endpoints. Approve/
-                            // Un-approve + Reset Secret live on the Diagnostics page now.
-                            const editFn = isSpokeKind ? 'openSpokeMetadataModal' : 'openAgentConfigModal';
-                            const approveFnName = isSpokeKind ? 'approveSpoke' : 'approveAgent';
-                            const unapproveFnName = isSpokeKind ? 'unapproveSpoke' : 'revokeAgent';
-                            // Load Role is only available on connected generic agents
-                            // (it pushes a role sub-spoke through the generic relay).
-                            const loadRoleBtn = (isSpokeKind && !isPending)
-                                ? `<button onclick="showLoadRoleModal('${eAid}')" class="${btnCls} bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]">Load Role</button>`
-                                : '';
-                            // Identity-change banner (cloned+renamed / hostname-changed /
-                            // reimaged, correlated via the install UUID). The pxmx agent
-                            // endpoint surfaces this; the dismiss hits the agent ack route.
-                            const ic = a.identity_change || null;
-                            const ackEndpoint = isSpokeKind
-                                ? `/setup/spokes/${encodeURIComponent(aid)}/ack-change`
-                                : `/api/pxmx/agents/${encodeURIComponent(aid)}/ack-change`;
-                            const ackClick = `_ackIdentityChange('${ackEndpoint}')`;
-                            return `<tr class="hover:bg-slate-50">
-                                <td class="${tdCls}">
-                                    <div class="flex items-center gap-3">
-                                        <div class="w-2 h-2 rounded-full ${isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]'}"></div>
-                                        <div>
-                                            <div class="font-medium text-slate-700">
-                                                ${label}
-                                                ${a.client_simulation?.enabled ? '<span class="ml-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase bg-green-100 text-green-700 align-middle" title="Client Simulation mode">CS</span>' : ''}
-                                            </div>
-                                            <div class="text-[10px] font-mono text-slate-400">${aid}</div>
-                                            ${_identityChangeBanner(ic, ackClick)}
-                                        </div>
-                                    </div>
-                                </td>
-                                <td class="${tdCls}">
-                                    <span class="text-xs font-mono text-slate-600">${a.hostname || '—'}</span>
-                                </td>
-                                <td class="${tdCls}">
-                                    <span class="text-xs font-semibold text-slate-700">${moduleLabelCell}</span>
-                                </td>
-                                <td class="${tdCls}">
-                                    <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${typeLabel}</span>
-                                </td>
-                                <td class="${tdCls}">
-                                    ${roleCellHtml}
-                                </td>
-                                <td class="${tdCls}">
-                                    <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${statusLabel}</span>
-                                </td>
-                                <td class="${tdCls} text-right">
-                                    <div class="flex justify-end gap-2 flex-wrap">
-                                        <button onclick="${editFn}('${eAid}','${eLabel}')" class="${btnCls} bg-[#01A982] hover:bg-[#008c6a] text-white">Edit</button>
-                                        ${loadRoleBtn}
-                                        ${isPending
-                                            ? `<button onclick="${approveFnName}('${eAid}')" class="${btnCls} bg-blue-600 hover:bg-blue-700 text-white">Approve</button>`
-                                            : `<button onclick="${unapproveFnName}('${eAid}')" class="${btnCls} bg-red-50 hover:bg-red-100 text-red-600 border border-red-200">Un-approve</button>`}
-                                    </div>
-                                </td>
-                            </tr>`;
-                        }).join('')}
-                    </tbody>
-                </table>
-            </div>`;
-        // Trickle: fill each connected generic agent's Active Role cell as its
+        agentsWrap.innerHTML = `<div class="space-y-2">${all.map(a => {
+            const aid = a.agent_id;
+            const label = a.display_name || a.hostname || aid;
+            const isPending = a._status === 'pending';
+            const isSpokeKind = a._kind === 'spoke';
+            // Every card here is an agent. Type distinguishes the two flavors:
+            // generic Hub-direct agents (module_type "agent", now shown here
+            // only once they have a role loaded — idle ones sit in the Generic
+            // Agents tile) vs Proxmox node agents relayed through the pxmx
+            // spoke. The Module badge names what each one runs.
+            const typeLabel = isSpokeKind ? 'Generic Agent' : 'Proxmox Agent';
+            const moduleLabelCell = a._module || '—';
+            const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
+            const eAid = aid.replace(/'/g, "\\'");
+            const eLabel = label.replace(/'/g, "\\'");
+            // Active Role line: a keyed placeholder for connected generic agents
+            // that is filled async after paint (no barrier). Proxmox node agents
+            // have no roles; pending generic agents show an em-dash.
+            let rolesLine;
+            if (!isSpokeKind) {
+                rolesLine = '';
+            } else if (isPending) {
+                rolesLine = `<div class="text-xs text-slate-500 pl-6">roles: <span class="text-slate-400 italic">—</span></div>`;
+            } else {
+                rolesLine = `<div class="text-xs text-slate-500 pl-6">roles: <span class="lm-agent-role-cell text-slate-400 italic" data-role-cell="${escapeHtml(aid)}">loading…</span></div>`;
+            }
+            // Generic Hub-direct agents use the spoke-approval endpoints;
+            // Proxmox node agents use the pxmx relay endpoints. Approve/
+            // Un-approve + Reset Secret live on the Diagnostics page now.
+            const editFn = isSpokeKind ? 'openSpokeMetadataModal' : 'openAgentConfigModal';
+            const approveFnName = isSpokeKind ? 'approveSpoke' : 'approveAgent';
+            const unapproveFnName = isSpokeKind ? 'unapproveSpoke' : 'revokeAgent';
+            const ic = a.identity_change || null;
+            const ackEndpoint = isSpokeKind
+                ? `/setup/spokes/${encodeURIComponent(aid)}/ack-change`
+                : `/api/pxmx/agents/${encodeURIComponent(aid)}/ack-change`;
+            const ackClick = `_ackIdentityChange('${ackEndpoint}')`;
+            const nameWithCs = `${label}${a.client_simulation?.enabled ? ' <span class="ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase bg-green-100 text-green-700 align-middle" title="Client Simulation mode">CS</span>' : ''}`;
+            return _mgmtEntryCard({
+                dot: isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]',
+                name: nameWithCs, sid: aid,
+                identityBanner: _identityChangeBanner(ic, ackClick),
+                metaLines: [
+                    a.hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${a.hostname}</div>` : '',
+                    rolesLine,
+                ],
+                badges: [
+                    `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${typeLabel}</span>`,
+                    `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${moduleLabelCell}</span>`,
+                    `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${statusLabel}</span>`,
+                ],
+                actions: [
+                    _mgmtBtn('Edit', `${editFn}('${eAid}','${eLabel}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
+                    (isSpokeKind && !isPending)
+                        ? _mgmtBtn('Load Role', `showLoadRoleModal('${eAid}')`, 'bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]')
+                        : '',
+                    isPending
+                        ? _mgmtBtn('Approve', `${approveFnName}('${eAid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
+                        : _mgmtBtn('Un-approve', `${unapproveFnName}('${eAid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200'),
+                ],
+            });
+        }).join('')}</div>`;
+        // Trickle: fill each connected generic agent's Active Role line as its
         // GET_AVAILABLE_ROLES resolves. No barrier, so a slow agent never delays
         // the others. Looks the cell up by data-role-cell each time so a reload
-        // that rebuilt the table mid-flight still targets the right agent (and
+        // that rebuilt the tile mid-flight still targets the right agent (and
         // silently skips one that has since dropped off the list).
         all.forEach(a => {
             if (a._kind !== 'spoke' || a._status !== 'connected') return;
@@ -5193,12 +5147,64 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
     }
 }
 
+// _renderGenericAgentsTable() — renders the Generic Agents tile: generic
+// Hub-direct agents (module_type "agent") that are IDLE — they have no role
+// sub-spoke ({base}-{role}) registered yet. Once a role is loaded the agent
+// moves to the Agents tile (handled by the caller splitting on sub-spoke
+// presence); idle ones stay here until then. A generic node has no module of
+// its own, so this card intentionally shows NO Module badge (the blank-module
+// problem that prompted the dedicated tile). No Active Role line either — an
+// idle agent has none, and we skip the per-agent GET_AVAILABLE_ROLES round-trip
+// entirely (the tile's membership already tells us it is idle). Edit +
+// Load Role + Approve/Un-approve keep generic-node management in one place.
+function _renderGenericAgentsTable(genericWrap, idleGenericAgents) {
+    if (!genericWrap) return;
+    if (!Array.isArray(idleGenericAgents) || idleGenericAgents.length === 0) {
+        genericWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No idle generic agents. Approve a generic node (module_type "agent") and it appears here until you load a role on it.</p>`;
+        return;
+    }
+    genericWrap.innerHTML = `<div class="space-y-2">${idleGenericAgents.map(s => {
+        const sid = s.spoke_id;
+        const name = s.display_name || sid;
+        const isPending = !s.approved;
+        const hostname = s.hostname || '';
+        const ic = s.identity_change;
+        const eSid = sid.replace(/'/g, "\\'");
+        const eName = name.replace(/'/g, "\\'");
+        const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
+        return _mgmtEntryCard({
+            dot: isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]',
+            name, sid,
+            identityBanner: _identityChangeBanner(ic, ackClick),
+            metaLines: [
+                hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${hostname}</div>` : '',
+                `<div class="text-xs text-slate-500 pl-6">roles: <span class="text-slate-400 italic">none (idle)</span></div>`,
+            ],
+            badges: [
+                `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">Generic Agent</span>`,
+                `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${isPending ? 'Pending' : 'Approved'}</span>`,
+            ],
+            actions: [
+                _mgmtBtn('Edit', `openSpokeMetadataModal('${eSid}','${eName}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
+                !isPending
+                    ? _mgmtBtn('Load Role', `showLoadRoleModal('${eSid}')`, 'bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]')
+                    : '',
+                isPending
+                    ? _mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
+                    : _mgmtBtn('Un-approve', `unapproveSpoke('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200'),
+            ],
+        });
+    }).join('')}</div>`;
+}
+
 async function loadSpokesAndAgents() {
     const spokesWrap = document.getElementById('spokes-table-wrap');
     const agentsWrap = document.getElementById('agents-table-wrap');
+    const genericWrap = document.getElementById('generic-agents-table-wrap');
 
     // Fetch the full known-module list once and split it by module_type.
-    // Treated as agents (shown in the Agents section, not Spokes):
+    // Treated as agents (shown in the Agents/Generic Agents sections, not
+    // Spokes):
     //   - module_type "agent"  : generic Hub-direct agents (e.g. bugfixer)
     // The pxmx "hypervisor" spoke is itself a spoke, so it is shown in the
     // Spokes section (its Proxmox node agents are fetched separately into the
@@ -5233,8 +5239,22 @@ async function loadSpokesAndAgents() {
     const trueSpokes    = spokes.filter(s => !isAgent(s) && !pxmxAgentIds.has(s.spoke_id));
     const genericAgents = spokes.filter(isAgent);
 
+    // Split generic agents by whether they host a role yet. A loaded role
+    // registers a sub-spoke "{base}-{role}" (module_type = the role's), so a
+    // generic agent is "active" iff some known spoke id starts with
+    // "{base}-". Idle generic agents (no sub-spoke) go in the Generic Agents
+    // tile until a role is loaded; active ones move to the Agents tile
+    // alongside the Proxmox node agents. This needs no per-agent
+    // GET_AVAILABLE_ROLES round-trip — the sub-spoke presence in the already-
+    // fetched known-modules list is the signal (mirrors how the multi-role
+    // design registers each role as its own spoke).
+    const hasRole = baseId => spokes.some(o => o.spoke_id !== baseId && o.spoke_id.startsWith(baseId + '-'));
+    const idleGenericAgents    = genericAgents.filter(s => !hasRole(s.spoke_id));
+    const activeGenericAgents = genericAgents.filter(s =>  hasRole(s.spoke_id));
+
     _renderSpokesTable(spokesWrap, trueSpokes);
-    await _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents);
+    _renderGenericAgentsTable(genericWrap, idleGenericAgents);
+    await _renderAgentsTable(agentsWrap, activeGenericAgents, pxmxAgents);
 }
 
 async function approveAgent(agentId) {
