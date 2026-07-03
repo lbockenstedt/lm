@@ -134,7 +134,16 @@ class Mailbox:
                         await send_func(msg)
                         self.pending_ack[msg_id] = (msg, now, retries + 1)
                     except Exception as e:
+                        # Advance the backoff schedule even on failure. Without
+                        # this, a permanently-failing send (e.g. sign_message
+                        # raising "No key found" for an unapproved/keyless spoke)
+                        # retries EVERY 1s loop at the SAME attempt number
+                        # forever — flooding the log and never reaching the
+                        # max-retries give-up branch below. Bumping retries +
+                        # last_sent lets the exponential intervals progress and
+                        # the message drop after retry_intervals is exhausted.
                         logger.warning(f"Retry failed for {msg_id}: {e}")
+                        self.pending_ack[msg_id] = (msg, now, retries + 1)
                 else:
                     # Spoke is offline, move to offline queue if not already there
                     logger.info(f"Spoke {spoke_id} offline. Moving message {msg_id} to offline queue.")
@@ -142,6 +151,30 @@ class Mailbox:
                     del self.pending_ack[msg_id]
 
             await asyncio.sleep(1)
+
+    def clear_spoke(self, spoke_id: str) -> int:
+        """Drop ALL queued/pending messages destined for ``spoke_id``.
+
+        Called when an admin deletes a spoke, resets its secret, or un-approves
+        it (api.delete_spoke / reset_spoke_secret / approve_spoke unapprove).
+        Those paths wipe the spoke's session key, so any message still in
+        ``pending_ack`` for it can no longer be signed — without this clear it
+        would retry forever (the retry loop's backoff advances, but a keyless
+        spoke never becomes signable, so the messages would still churn through
+        the full backoff schedule per stranded message). Returns the number of
+        messages dropped (best-effort, non-raising).
+        """
+        dropped = 0
+        for msg_id in [mid for mid, (msg, _, _) in self.pending_ack.items()
+                       if msg.header.destination_id == spoke_id]:
+            del self.pending_ack[msg_id]
+            dropped += 1
+        if spoke_id in self.spoke_queues:
+            dropped += len(self.spoke_queues[spoke_id])
+            del self.spoke_queues[spoke_id]
+        if dropped:
+            logger.info(f"Cleared {dropped} queued message(s) for spoke {spoke_id}.")
+        return dropped
 
     def get_all_pending(self) -> list:
         """
