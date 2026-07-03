@@ -11,6 +11,7 @@ import threading
 import queue
 import os
 import socket
+import ssl
 from typing import Dict, Any, Type
 from .protocol import Message, MessageHeader, MessagePayload
 from ..security.signer import MessageSigner
@@ -103,6 +104,12 @@ class BaseControlPlane:
         # below; prep-for-imaging strips it so a cloned image mints a fresh one.
         self.hostname = socket.gethostname()
         self.install_uuid = self._ensure_install_uuid()
+        # TLS trust for wss:// connects. Verification is OFF by default (the hub
+        # presents a self-signed cert) — encryption without authentication, which
+        # is the lab default. Set LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT=<path> to
+        # verify the hub cert against a shipped CA. See _client_ssl_ctx.
+        self._tls_verify = os.environ.get("LM_HUB_TLS_VERIFY", "0").strip() in ("1", "true", "yes")
+        self._tls_ca_cert = os.environ.get("LM_HUB_CA_CERT", "").strip()
 
 
     # ------------------------------------------------------------------
@@ -501,6 +508,28 @@ class BaseControlPlane:
                 await self._resolve_hub_url()
             await asyncio.sleep(_delay)
 
+    def _client_ssl_ctx(self):
+        """Build an SSL context for a ``wss://`` connect to the hub.
+
+        Default (lab): ``ssl._create_unverified_context()`` — traffic is
+        encrypted but the self-signed hub cert is NOT authenticated (MITM-able
+        on-path). Set ``LM_HUB_TLS_VERIFY=1`` and ``LM_HUB_CA_CERT=<path>`` to
+        verify the hub cert against a shipped CA. Returns None only on a
+        build failure (the caller then connects without TLS and fails fast,
+        surfacing the misconfiguration instead of hanging)."""
+        try:
+            if self._tls_verify and self._tls_ca_cert:
+                ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
+                logger.info("wss: verifying hub cert against CA %s", self._tls_ca_cert)
+                return ctx
+            ctx = ssl._create_unverified_context()
+            logger.debug("wss: using unverified context (self-signed hub cert; "
+                         "set LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT to verify)")
+            return ctx
+        except Exception as e:
+            logger.error("Could not build wss SSL context: %s — connecting without TLS", e)
+            return None
+
     async def _resolve_hub_url(self) -> None:
         """When ``self.hub_url`` is empty/``auto``/None, auto-discover the hub via
         DNS (``lm-hub.<suffix>``) then mDNS and set ``self.hub_url`` to the result.
@@ -532,7 +561,11 @@ class BaseControlPlane:
         # "Extra data: line 1 column 9 (char 8)". Negotiating no compression in
         # both directions sidesteps the whole class of failures at the cost of
         # a little bandwidth.
-        async with websockets.connect(self.hub_url, compression=None) as websocket:
+        # TLS: a wss:// hub_url gets an SSL context (verify-off by default for
+        # the self-signed hub cert; LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT verifies).
+        # ws:// stays plaintext (loopback / legacy). See _client_ssl_ctx.
+        ssl_ctx = self._client_ssl_ctx() if self.hub_url.lower().startswith("wss://") else None
+        async with websockets.connect(self.hub_url, compression=None, ssl=ssl_ctx) as websocket:
             self._hub_ws = websocket
             # Capture the running loop so the updater thread can schedule a final
             # synchronous log flush (run_coroutine_threadsafe) before os._exit(0).

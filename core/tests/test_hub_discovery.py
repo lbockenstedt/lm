@@ -168,6 +168,134 @@ def test_main_cli_prints_url_or_none(monkeypatch, tmp_path, capsys):
     assert out == "ws://lm-hub.example.com:8765"
 
 
+# ── TLS scheme + same-box detection ──────────────────────────────────────────
+
+class _FakeServiceInfoTxt(_FakeServiceInfo):
+    """ServiceInfo with a TXT record (zeroconf stores properties as bytes)."""
+    def __init__(self, ip, port, props=None):
+        super().__init__(ip, port)
+        self.properties = {k.encode(): v.encode() for k, v in (props or {}).items()}
+
+
+def _fake_zeroconf_with(info):
+    """A fake zeroconf module whose get_service_info returns ``info``."""
+    class _Z:
+        def get_service_info(self, type_, name, timeout=2000):
+            return info
+        def unregister_service(self, i): pass
+        def close(self): pass
+    mod = type(sys)("zeroconf")
+    mod.Zeroconf = _Z
+    mod.ServiceBrowser = _FakeServiceBrowser
+    return mod
+
+
+def _no_dns(monkeypatch, tmp_path):
+    resolv = tmp_path / "resolv.conf"
+    _write_resolv(str(resolv), "search example.com\n")
+    monkeypatch.setattr(hd, "_RESOLV_CONF", str(resolv))
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("__none__"))
+
+
+def test_is_hub_local_loopback_and_own_ip(monkeypatch):
+    monkeypatch.setattr(hd, "_own_ipv4s", lambda: ["127.0.0.1", "10.0.0.5"])
+    assert hd.is_hub_local("127.0.0.1") is True
+    assert hd.is_hub_local("10.0.0.5") is True
+    assert hd.is_hub_local("10.0.0.99") is False
+    assert hd.is_hub_local("") is False
+
+
+def test_mdns_same_box_returns_loopback_plain(monkeypatch, tmp_path):
+    """Co-located caller → ws://127.0.0.1:<port> even when the hub advertises TLS."""
+    _no_dns(monkeypatch, tmp_path)
+    monkeypatch.setattr(hd, "_own_ipv4s", lambda: ["127.0.0.1", "10.0.0.5"])
+    monkeypatch.setitem(sys.modules, "zeroconf",
+                        _fake_zeroconf_with(_FakeServiceInfoTxt("10.0.0.5", 8765, {"tls_port": "443"})))
+
+    url = hd.discover_hub_url(timeout=2.0)
+
+    assert url == "ws://127.0.0.1:8765"
+
+
+def test_mdns_remote_with_tls_txt_returns_wss_on_tls_port(monkeypatch, tmp_path):
+    """Remote caller + hub advertises tls_port → wss://<ip>:<tls_port>."""
+    _no_dns(monkeypatch, tmp_path)
+    monkeypatch.setattr(hd, "_own_ipv4s", lambda: ["127.0.0.1"])  # 10.0.0.5 not local
+    monkeypatch.setitem(sys.modules, "zeroconf",
+                        _fake_zeroconf_with(_FakeServiceInfoTxt("10.0.0.5", 8765, {"tls_port": "443", "agent_port": "8443"})))
+
+    url = hd.discover_hub_url(timeout=2.0)
+
+    assert url == "wss://10.0.0.5:443"
+
+
+def test_mdns_remote_no_tls_txt_returns_plain(monkeypatch, tmp_path):
+    """Remote caller + cert-less hub (no tls_port TXT) → legacy ws://<ip>:<port>."""
+    _no_dns(monkeypatch, tmp_path)
+    monkeypatch.setattr(hd, "_own_ipv4s", lambda: ["127.0.0.1"])
+    monkeypatch.setitem(sys.modules, "zeroconf",
+                        _fake_zeroconf_with(_FakeServiceInfoTxt("10.0.0.5", 8765)))
+
+    url = hd.discover_hub_url(timeout=2.0)
+
+    assert url == "ws://10.0.0.5:8765"
+
+
+def test_mdns_agent_listener_with_tls_returns_wss_on_agent_port(monkeypatch, tmp_path):
+    """agent_listener=True + TLS → wss on the agent_port TXT (8443), not tls_port (443)."""
+    _no_dns(monkeypatch, tmp_path)
+    monkeypatch.setattr(hd, "_own_ipv4s", lambda: ["127.0.0.1"])
+    monkeypatch.setitem(sys.modules, "zeroconf",
+                        _fake_zeroconf_with(_FakeServiceInfoTxt("10.0.0.5", 8765, {"tls_port": "443", "agent_port": "8443"})))
+
+    url = hd.discover_hub_url(timeout=2.0, agent_listener=True)
+
+    assert url == "wss://10.0.0.5:8443"
+
+
+def test_mdns_agent_listener_no_tls_uses_agent_port_default(monkeypatch, tmp_path):
+    """agent_listener=True + no TLS → ws on agent_port TXT (or 8766 default)."""
+    _no_dns(monkeypatch, tmp_path)
+    monkeypatch.setattr(hd, "_own_ipv4s", lambda: ["127.0.0.1"])
+    monkeypatch.setitem(sys.modules, "zeroconf",
+                        _fake_zeroconf_with(_FakeServiceInfoTxt("10.0.0.5", 8765, {"agent_port": "8766"})))
+
+    url = hd.discover_hub_url(timeout=2.0, agent_listener=True)
+
+    assert url == "ws://10.0.0.5:8766"
+
+
+def test_dns_same_box_returns_loopback_plain(monkeypatch, tmp_path):
+    """DNS-resolved hub IP that is this box's own IP → ws://127.0.0.1:<port>."""
+    resolv = tmp_path / "resolv.conf"
+    _write_resolv(str(resolv), "search example.com\n")
+    monkeypatch.setattr(hd, "_RESOLV_CONF", str(resolv))
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("lm-hub.example.com", ip="10.0.0.7"))
+    _no_zeroconf(monkeypatch)
+    monkeypatch.setattr(hd, "_own_ipv4s", lambda: ["127.0.0.1", "10.0.0.7"])
+
+    url = hd.discover_hub_url(timeout=2.0)
+
+    assert url == "ws://127.0.0.1:8765"
+
+
+def test_cli_agent_listener_flag(monkeypatch, tmp_path, capsys):
+    resolv = tmp_path / "resolv.conf"
+    _write_resolv(str(resolv), "search example.com\n")
+    monkeypatch.setattr(hd, "_RESOLV_CONF", str(resolv))
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("__none__"))
+    monkeypatch.setattr(hd, "_own_ipv4s", lambda: ["127.0.0.1"])
+    monkeypatch.setitem(sys.modules, "zeroconf",
+                        _fake_zeroconf_with(_FakeServiceInfoTxt("10.0.0.5", 8765, {"tls_port": "443", "agent_port": "8443"})))
+
+    monkeypatch.setattr(sys, "argv", ["hub_discovery", "--timeout", "2", "--agent-listener"])
+    rc = hd._main()
+    out = capsys.readouterr().out.strip()
+
+    assert rc == 0
+    assert out == "wss://10.0.0.5:8443"
+
+
 # ── install scripts parse cleanly ────────────────────────────────────────────
 
 def test_install_scripts_syntax_clean():
