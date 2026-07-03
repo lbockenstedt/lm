@@ -9,7 +9,7 @@ LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub**
 ```
                         ┌──────────────┐
    browser (WebUI) ─────│   LM hub     │  lm repo: core/src + WebUI + generic_agent + agent
-                        │  (uvicorn)   │  0.0.0.0:443 wss  (or 0.0.0.0:8765 plain, no cert)
+                        │  (uvicorn)   │  0.0.0.0:443 wss  (or 0.0.0.0:443 plain, no cert)
                         └──────┬───────┘
             ws/wss over /ws/spoke (one spoke = one module_type)
           ┌────────┬────────┼────────┬────────┬────────┬────────┐
@@ -18,7 +18,7 @@ LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub**
           │        │                                      
           │  relay-only for Proxmox                       
           ▼                                              
-   pxmx host agents  (wss to pxmx spoke agent listener, 8443/443)
+   pxmx host agents  (wss to hub /ws/agent → pxmx spoke loopback :8443, or :443 standalone)
    GenericLeafAgent leaf agents  (ws/wss to hub /ws/spoke or a SpokeGateway)
    bugfixer  (agent-type WS client of the hub, not a spoke)
 ```
@@ -41,14 +41,14 @@ LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub**
 
 | Link | Same-box | Remote |
 |---|---|---|
-| spoke → hub | `ws://127.0.0.1:8765` (loopback plain) | `wss://<hub>:443` |
-| pxmx agent → pxmx spoke | `ws://127.0.0.1:<agent_port>` | `wss://<hub>:<agent_port>` |
-| leaf agent → hub/gateway | `ws://127.0.0.1:8765` | `wss://<hub>:443` |
+| spoke → hub | `wss://127.0.0.1:443/ws/spoke` (loopback, verify-off) | `wss://<hub>:443/ws/spoke` |
+| pxmx agent → hub `/ws/agent` | `wss://127.0.0.1:443/ws/agent` (loopback) | `wss://<hub>:443/ws/agent` (hub byte-proxies to pxmx spoke loopback :8443) |
+| leaf agent → hub/gateway | `wss://127.0.0.1:443/ws/spoke` (loopback, verify-off) | `wss://<hub>:443/ws/spoke` |
 
 - **Hub unified server:** one uvicorn process on `0.0.0.0:LM_TLS_PORT` (default **443**), `wss` when `LM_TLS_CERT`/`LM_TLS_KEY` are set, plaintext otherwise. WebSocket routes: `/ws/spoke` (spoke + agent control), `/ws/console/{session_id}` (browser ↔ Proxmox VNC byte relay), `/sim/ws` (cs telemetry). HTTP routes: `/api/*`, `/setup/*`, `/auth/*`, `/admin/*`, `/sim/api/*`, plus the mounted WebUI.
-- **Loopback plain:** the hub also accepts `ws://127.0.0.1:8765` for co-located spokes/agents so same-box traffic isn't forced through TLS.
-- **pxmx agent listener:** `LM_PXMX_AGENT_PORT` — default **8443** all-in-one (avoids colliding with the hub's 443); standalone pxmx spoke uses **443**. Legacy no-cert port **8766**. The hub advertises this port in mDNS TXT `agent_port` so agents auto-discover it. `/api/pxmx/agent-install-cmd` returns the `wss://<host>:<agent_port>` install string.
-- **No-cert fallback:** if `LM_TLS_CERT`/`LM_TLS_KEY` are unset, the hub serves a single `0.0.0.0:8765` plain listener (today's legacy behavior) and discovery returns `ws://` — backward compatible.
+- **Co-located (loopback):** same-box spokes/agents dial `wss://127.0.0.1:443/ws/spoke` (or `/ws/agent`) with TLS verify OFF — the single :443 listener serves loopback too, so same-box traffic isn't a separate port. (The pxmx spoke's own agent listener stays loopback `127.0.0.1:8443`, reached via the hub `/ws/agent` byte-proxy — not advertised externally.)
+- **pxmx agent listener:** `LM_PXMX_AGENT_PORT` — default **8443** loopback all-in-one (`LM_PXMX_AGENT_LOOPBACK=1`; the hub `/ws/agent` byte-proxy dials it); standalone pxmx spoke uses **443** wss. Legacy no-cert port **8766**. mDNS TXT `agent_port` advertises the **external** dial port (**443** on both deployments) so agents auto-discover `wss://<hub>:443/ws/agent`; the loopback 8443 is NOT advertised. `/api/pxmx/agent-install-cmd` returns the `wss://<host>:443/ws/agent` install string.
+- **No-cert fallback:** if `LM_TLS_CERT`/`LM_TLS_KEY` are unset, the hub serves a single `0.0.0.0:443` plaintext listener and discovery returns `ws://<host>:443/ws/spoke` — backward compatible.
 
 ## Discovery (mDNS + DNS)
 

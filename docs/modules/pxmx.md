@@ -24,7 +24,8 @@ The spoke communicates with the Proxmox API. The Hub orchestrates the "Stitched 
 ## 4. Agent
 
 The Proxmox host agent is a lightweight service that runs on each PVE node,
-connects back to the spoke's **agent listen port `8766`**, authenticates with a
+connects to the hub's **`/ws/agent` route on :443** (the hub byte-proxies the
+frames to the co-located pxmx spoke's loopback agent listener), authenticates with a
 shared `agent_secret`, and pushes telemetry (VM list, node stats) periodically.
 The agent is installed from the sibling `pxmx` repo — see
 [agent.md](agent.md) for the generic LM host-agent model and the
@@ -37,7 +38,7 @@ Run on **each Proxmox node** after the spoke is installed:
 ```bash
 curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \
   | sudo bash -s -- \
-  --spoke-url ws://<hub-ip>:8766 \
+  --spoke-url wss://<hub-ip>:443/ws/agent \
   --id pxmx-agent-$(hostname)
 ```
 

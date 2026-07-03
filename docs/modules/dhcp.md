@@ -8,7 +8,7 @@ The `dhcp/` package is the LM DHCP spoke. It manages Kea DHCP4 through the Kea C
 - **Status & version** — report spoke health and version to the Hub.
 
 ## 2. Configuration
-Deploy with `install_dhcp.sh`. The spoke talks to the Kea Control Agent at `http://localhost:8001` by default (port 8001 is used to avoid conflicting with the LM hub on 8000). Connection details (Hub URL, spoke ID, PSK for first-time onboarding) are written during install; thereafter the spoke uses its provisioned key.
+Deploy with `install_dhcp.sh`. The spoke talks to the Kea Control Agent at `http://localhost:8001` by default (port 8001 is used to avoid conflicting with NetBox / the legacy webui-spoke on 8000; the unified LM hub owns :443, not 8000). Connection details (Hub URL, spoke ID, PSK for first-time onboarding) are written during install; thereafter the spoke uses its provisioned key.
 
 ## 3. Technical implementation (`dhcp/src/`)
 | Path | Role |

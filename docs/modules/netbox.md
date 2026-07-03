@@ -93,7 +93,7 @@ sibling repo first and run its installer:
 ```bash
 git clone https://github.com/lbockenstedt/netbox.git /opt/lm/netbox
 sudo bash /opt/lm/netbox/install.sh --spoke-only \
-  --hub ws://<hub-ip>:8765 \
+  --hub wss://<hub-ip>:443/ws/spoke \
   --id netbox-spoke-1 \
   --secret <first-secret>
 ```

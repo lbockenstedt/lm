@@ -20,7 +20,7 @@ The `core/` package is the LM Hub itself — the central node of the zero-trust 
 | `simulations/` | The ported Client-Sim (cs) operator UI — store, service shapers, routes, broadcaster, tenant filter. |
 
 ## 3. Technical implementation
-The Hub runs one `LabManagerHub` instance per process. `run_api_server` hosts the HTTP/WS surface (default port `8000`); the control plane listens on port `8765`. Spokes and the pxmx host agents connect, authenticate, and register; the Hub then routes signed messages between them (`send_to_spoke` / `send_to_agent` / `request_response`). Sensitive command types that transit a Proxmox token secret are redacted in logs (`_REDACT_COMMANDS`).
+The Hub runs one `LabManagerHub` instance per process. `build_server` runs a single in-loop uvicorn on `0.0.0.0:LM_TLS_PORT` (default `443`, wss when a cert is configured) hosting the HTTP/WS surface — REST API + WebUI + `/ws/spoke` + `/ws/agent` + `/ws/console` on one listener. Spokes and the pxmx host agents connect, authenticate, and register; the Hub then routes signed messages between them (`send_to_spoke` / `send_to_agent` / `request_response`). Sensitive command types that transit a Proxmox token secret are redacted in logs (`_REDACT_COMMANDS`).
 
 ## 4. Auth & sessions
 - Login mints a token stored in the in-memory `_sessions` map and sets an `lm_session` cookie (8h `max_age`, `httponly`, `same-site=lax`).

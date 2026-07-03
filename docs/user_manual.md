@@ -14,7 +14,7 @@ The installer creates a secure non-root system user, `svc_lm`, to run the Hub an
 
 ### Accessing the Interface
 Once installed, the WebUI is available at:
-`http://<HUB_IP>:8000`
+`https://<HUB_IP>:443`
 
 ## 🛠️ Administration
 
@@ -52,5 +52,5 @@ You can customize the visual identity of your Lab Manager instance via the UI:
 
 ## 🔍 Troubleshooting
 *   **Logs**: Hub and Spoke logs are now centrally located in `/var/log/lm/`. Use `cat /var/log/lm/hub.log` or `journalctl -u lm` to diagnose issues.
-*   **Connectivity**: Ensure port `8765` (WebSocket) and `8000` (REST API) are open between the Hub and Spokes.
+*   **Connectivity**: Ensure port `443` (HTTPS + WebSocket `/ws/spoke`) is open between the Hub and Spokes.
 *   **Auth Failures**: If a spoke fails to authenticate, verify the `first-secret` used during installation.

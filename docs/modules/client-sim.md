@@ -27,7 +27,7 @@ toggle, config-push, and the `/sim/ws` telemetry stream). Route handlers live in
 
 ```bash
 sudo bash install_cs.sh \
-  --hub ws://<hub-ip>:8765 \
+  --hub wss://<hub-ip>:443/ws/spoke \
   --id cs-spoke-1 \
   --secret <first-secret>
 ```

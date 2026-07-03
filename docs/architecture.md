@@ -32,7 +32,7 @@ The system follows a **Hub-and-Spoke architecture**:
 Some spokes act as mini-hubs for downstream leaf agents:
 
 ```
-Hub ──WS──► Proxmox Spoke  ──WS :8766──► pxmx-agent (per Proxmox host)
+Hub ──WS──► Proxmox Spoke  ──WS :443 /ws/agent──► pxmx-agent (per Proxmox host)
         ──► KVM Spoke      ──WS :8767──► kvm-agent  (per KVM host)
         ──► CS Spoke       (simulation — no upstream agents)
 ```

@@ -14,7 +14,7 @@ X-Admin-Token: <value-of-LM_ADMIN_TOKEN>
 
 ## 1. General
 
-- **Base URL**: `http://<hub-ip>:8000`
+- **Base URL**: `https://<hub-ip>:443`
 - **Format**: `application/json`
 
 ---
