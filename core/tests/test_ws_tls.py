@@ -188,7 +188,7 @@ def test_build_service_info_advertises_tls_when_enabled(monkeypatch):
     assert info is not None
     props = info.kwargs["properties"]
     assert props["tls_port"] == "443"        # remote callers switch to wss://:443
-    assert props["agent_port"] == "8443"     # pxmx agent listener (TLS-aware)
+    assert props["agent_port"] == "443"     # unified external agent dial port (tls_port)
     assert props["version"] == "9.9.9"
     assert info.kwargs["port"] == 443        # unified srv_port = tls_port (443)
 
@@ -206,22 +206,26 @@ def test_build_service_info_no_tls_txt_when_disabled(monkeypatch):
     props = info.kwargs["properties"]
     # No tls_port → a remote caller's discovery stays ws:// (legacy, cert-less).
     assert "tls_port" not in props
-    assert props["agent_port"] == "8443"
+    assert props["agent_port"] == "443"  # external agent dial port = tls_port
 
 
-def test_build_service_info_legacy_agent_port_8766(monkeypatch):
-    # A hub with no pxmx_agent_port attr (e.g. a not-yet-restarted box running
-    # old code) falls back to the legacy 8766 agent-listener port.
+def test_build_service_info_external_agent_port_independent_of_loopback(monkeypatch):
+    # The advertised agent_port TXT is the EXTERNAL dial port (the unified
+    # tls_port=443 surface an agent reaches /ws/agent on), NOT the co-located
+    # pxmx spoke's loopback LM_PXMX_AGENT_PORT. So even when pxmx_agent_port
+    # (loopback) is absent AND external_agent_port is unset, the TXT advertises
+    # tls_port (443) — the two ports are deliberately distinct under the
+    # unified-443 merge (external 443 advertised; loopback 8443 NOT advertised).
     monkeypatch.setattr(main.LabManagerHub, "_mdns_warned", False)
     monkeypatch.setitem(sys.modules, "zeroconf", _fake_zeroconf_module())
     monkeypatch.setattr(main.LabManagerHub, "_local_ipv4s", lambda self: ["10.0.0.5"])
     monkeypatch.setattr(main.LabManagerHub, "_hub_version_str", lambda self: "9.9.9")
     hub = _stub_hub(tls_enabled=False, pxmx_agent_port=8443)
-    del hub.pxmx_agent_port  # simulate the attr being absent
+    del hub.pxmx_agent_port  # loopback attr absent — must NOT affect advertised port
 
     info = hub._build_hub_service_info()
 
     assert info is not None
     props = info.kwargs["properties"]
-    assert props["agent_port"] == "8766"     # getattr fallback
+    assert props["agent_port"] == "443"     # external_agent_port fallback → tls_port
     assert "tls_port" not in props

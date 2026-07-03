@@ -1,7 +1,7 @@
 """Hub mDNS broadcast — ``LabManagerHub`` registration lifecycle (Phase 6).
 
-Covers ``_build_hub_service_info`` (ServiceInfo shape: port 8765, non-loopback
-address, ``agent_port=8766`` TXT), ``_start_mdns_broadcast`` (registers once) /
+Covers ``_build_hub_service_info`` (ServiceInfo shape: port 443, non-loopback
+address, ``agent_port=443`` TXT — the unified external dial port), ``_start_mdns_broadcast`` (registers once) /
 ``_stop_mdns_broadcast`` (unregisters + closes, idempotent), and the
 graceful-degradation path when ``zeroconf`` is not importable (one-time warning,
 no registration, no exception). A fake ``zeroconf`` module is injected into
@@ -55,8 +55,11 @@ def _make_hub(port=8765, tls_port=443):
 
     Under the unified-443 merge the mDNS ``ServiceInfo.port`` is the hub's
     ``tls_port`` (443 — the single unified surface), NOT the legacy
-    ``self.port``. ``pxmx_agent_port`` is deliberately left unset so the
-    ``getattr(..., 8766)`` fallback exercises the legacy agent-port path.
+    ``self.port``. ``external_agent_port`` is deliberately left unset so the
+    ``getattr(self, "external_agent_port", self.tls_port)`` fallback advertises
+    the unified ``tls_port`` (443) as the agent_port TXT — the external dial
+    port an agent uses to reach the /ws/agent leg (the co-located loopback
+    LM_PXMX_AGENT_PORT is NOT advertised).
     """
     hub = main.LabManagerHub.__new__(main.LabManagerHub)
     hub.port = port
@@ -81,7 +84,7 @@ def test_build_service_info_shape(monkeypatch):
     assert kw["name"] == "lm-hub._lm-hub._tcp.local."
     assert kw["port"] == 443          # unified srv_port = tls_port (no longer 8765)
     assert kw["server"] == "lm-hub.local."
-    assert kw["properties"]["agent_port"] == "8766"
+    assert kw["properties"]["agent_port"] == "443"  # external dial port = tls_port
     assert "version" in kw["properties"]
     # At least one non-loopback IPv4 (the hub always advertises a reachable addr;
     # _local_ipv4s falls back to 127.0.0.1 only on a loopback-only box).

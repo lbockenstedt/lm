@@ -318,7 +318,7 @@ from cert_distribution import (  # noqa: E402
 )
 
 
-def _mdns_hub_properties(version_str: str, pxmx_agent_port: int,
+def _mdns_hub_properties(version_str: str, agent_port: int,
                          tls_port: int, advertise_tls: bool) -> Dict[str, str]:
     """Build the mDNS TXT records the hub advertises for ``_lm-hub._tcp.local.``.
 
@@ -330,9 +330,16 @@ def _mdns_hub_properties(version_str: str, pxmx_agent_port: int,
     (set ``LM_HUB_ADVERTISE_TLS=1``). Without it, discovery returns
     ``ws://<ip>:443`` and a plaintext WebSocket handshake to a TLS port fails
     "did not receive a valid HTTP response".
+
+    ``agent_port`` is the EXTERNAL dial port a pxmx agent uses to reach the
+    agent-WS leg. Under the unified-443 merge that is the hub's single :443
+    surface (``/ws/agent`` → byte-proxy to the co-located pxmx spoke's loopback
+    ``LM_PXMX_AGENT_PORT``); the loopback port itself is NOT advertised. A
+    standalone pxmx box (separate from the hub) serves ``/ws/agent`` on its own
+    :443 and agents pin ``--spoke-url`` to it.
     """
     props = {"version": str(version_str),
-             "agent_port": str(pxmx_agent_port)}
+             "agent_port": str(agent_port)}
     if advertise_tls:
         props["tls_port"] = str(tls_port)
     return props
@@ -3058,23 +3065,26 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         ips = self._local_ipv4s()
         addresses = [_sock.inet_aton(ip) for ip in ips]
         # TXT records:
-        #   agent_port — the pxmx agent-listener port the hub box serves (the
-        #     pxmx spoke binds it; 8443 when TLS on, 8766 legacy). Lets a pxmx
-        #     agent discover its target port instead of hardcoding 8766.
+        #   agent_port — the EXTERNAL dial port a pxmx agent uses to reach the
+        #     agent-WS leg. Under the unified-443 merge that is the hub's single
+        #     :443 surface (/ws/agent → byte-proxy to the co-located pxmx spoke's
+        #     loopback LM_PXMX_AGENT_PORT, which is NOT advertised). Lets a pxmx
+        #     agent discover its target port instead of hardcoding it.
         #   tls_port   — present when callers reach the hub over TLS (the hub
         #     serves wss itself, OR LM_HUB_ADVERTISE_TLS=1 for a proxy-TLS
         #     deployment); a remote caller's discovery switches to
         #     wss://<ip>:<tls_port>. Absent → plaintext.
         properties = _mdns_hub_properties(
             self._hub_version_str(),
-            getattr(self, "pxmx_agent_port", 8766),
+            int(getattr(self, "external_agent_port", self.tls_port)),
             self.tls_port,
             getattr(self, "advertise_tls", self.tls_enabled))
         # Under the unified-443 merge the hub serves the spoke-WS on the SAME
         # 0.0.0.0:443 uvicorn as the WebUI/REST (/ws/spoke route), so the SRV
         # port a spoke-leg caller dials is tls_port (443 w/ TLS, 443 plain) —
-        # NOT the retired 8765 bare-listener port. The agent leg still reads
-        # agent_port (8443) until the agent-leg proxy lands.
+        # NOT the retired 8765 bare-listener port. The agent leg dials the SAME
+        # :443 surface (/ws/agent), which the hub byte-proxies to the co-located
+        # pxmx spoke's loopback LM_PXMX_AGENT_PORT (8443, NOT advertised).
         srv_port = int(self.tls_port)
         return ServiceInfo(
             type_="_lm-hub._tcp.local.",

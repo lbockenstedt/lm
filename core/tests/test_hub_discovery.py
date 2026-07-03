@@ -97,7 +97,7 @@ def test_dns_port_override_targets_agent_listener(monkeypatch, tmp_path):
 
     url = hd.discover_hub_url(timeout=2.0, port_override=8766, agent_listener=True)
 
-    assert url == "ws://lm-hub.corp.local:8766"
+    assert url == "ws://lm-hub.corp.local:8766/ws/agent"
 
 
 # ── mDNS path ────────────────────────────────────────────────────────────────
@@ -124,7 +124,7 @@ def test_mdns_port_override_uses_agent_port(monkeypatch, tmp_path):
 
     url = hd.discover_hub_url(timeout=2.0, port_override=8766, agent_listener=True)
 
-    assert url == "ws://10.0.0.5:8766"
+    assert url == "ws://10.0.0.5:8766/ws/agent"
 
 
 # ── None + graceful degradation ──────────────────────────────────────────────
@@ -245,7 +245,12 @@ def test_mdns_remote_no_tls_txt_returns_plain(monkeypatch, tmp_path):
 
 
 def test_mdns_agent_listener_with_tls_returns_wss_on_agent_port(monkeypatch, tmp_path):
-    """agent_listener=True + TLS → wss on the agent_port TXT (8443), not tls_port (443)."""
+    """agent_listener=True + TLS → wss on the agent_port TXT, appended /ws/agent.
+
+    Phase 2 advertises agent_port=443 (the external dial port), but the
+    discovery logic must use whatever agent_port TXT is present (not tls_port)
+    and append /ws/agent — verified here with agent_port=8443 distinct from
+    tls_port=443 so the agent-leg-uses-agent_port branch is exercised."""
     _no_dns(monkeypatch, tmp_path)
     monkeypatch.setattr(hd, "_own_ipv4s", lambda: ["127.0.0.1"])
     monkeypatch.setitem(sys.modules, "zeroconf",
@@ -253,7 +258,7 @@ def test_mdns_agent_listener_with_tls_returns_wss_on_agent_port(monkeypatch, tmp
 
     url = hd.discover_hub_url(timeout=2.0, agent_listener=True)
 
-    assert url == "wss://10.0.0.5:8443"
+    assert url == "wss://10.0.0.5:8443/ws/agent"
 
 
 def test_mdns_agent_listener_no_tls_uses_agent_port_default(monkeypatch, tmp_path):
@@ -265,7 +270,7 @@ def test_mdns_agent_listener_no_tls_uses_agent_port_default(monkeypatch, tmp_pat
 
     url = hd.discover_hub_url(timeout=2.0, agent_listener=True)
 
-    assert url == "ws://10.0.0.5:8766"
+    assert url == "ws://10.0.0.5:8766/ws/agent"
 
 
 def test_dns_same_box_returns_loopback_plain(monkeypatch, tmp_path):
@@ -299,7 +304,7 @@ def test_cli_agent_listener_flag(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out.strip()
 
     assert rc == 0
-    assert out == "wss://10.0.0.5:8443"
+    assert out == "wss://10.0.0.5:8443/ws/agent"
 
 
 # ── install scripts parse cleanly ────────────────────────────────────────────

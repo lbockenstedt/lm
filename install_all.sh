@@ -1133,12 +1133,14 @@ User=$SvcUser
 WorkingDirectory=$BASE_DIR
 EnvironmentFile=-$BASE_DIR/.env
 # Unified :443 surface: the hub's single uvicorn serves WebUI + REST + /ws/spoke
-# + /ws/console on 0.0.0.0:443 (wss with a cert, plaintext without). The pxmx
-# agent listener stays on 8443 for now (Phase 1 — the hub proxies /ws/agent to
-# it in Phase 2). Cert verification is OFF by default (self-signed → encrypt
-# without auth); --tls-verify at install sets LM_HUB_TLS_VERIFY=1 +
-# LM_HUB_CA_CERT so co-located spokes/agents verify. AmbientCapabilities lets
-# svc_lm bind the privileged 443 without being root.
+# + /ws/agent + /ws/console on 0.0.0.0:443 (wss with a cert, plaintext without).
+# /ws/agent byte-proxies to the co-located pxmx spoke's loopback
+# LM_PXMX_AGENT_PORT (127.0.0.1:8443 plaintext — TLS terminates here at 443; the
+# pxmx spoke runs LM_PXMX_AGENT_LOOPBACK=1 via its own unit). Cert verification
+# is OFF by default (self-signed → encrypt without auth); --tls-verify at
+# install sets LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT so co-located
+# spokes/agents verify. AmbientCapabilities lets svc_lm bind the privileged
+# 443 without being root.
 Environment=LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443 LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV$_TLS_CA_UNIT
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE

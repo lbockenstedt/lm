@@ -80,6 +80,13 @@ HUB_URL=$HUB_URL
 SPOKE_ID=$SPOKE_ID
 SPOKE_SECRET=$SPOKE_SECRET
 HUB_SECRET=$HUB_SECRET
+# Unified-443 merge: this co-located pxmx spoke's agent listener runs in
+# LOOPBACK mode — bind 127.0.0.1:8443 plaintext. TLS terminates at the hub's
+# single :443 surface; the hub's /ws/agent route byte-proxies to this loopback
+# listener. The 8443 loopback port is NOT advertised (mDNS agent_port TXT
+# advertises the external 443).
+LM_PXMX_AGENT_PORT=8443
+LM_PXMX_AGENT_LOOPBACK=1
 EOF
 
 # --- Agent Secret (shared with local Proxmox agent on this machine) ---
@@ -151,8 +158,8 @@ systemctl enable lm-pxmx
 # Apply new code now and prevent split-brain: stop the current instance, reap
 # any orphaned/stale pxmx control_plane process left by a previous install
 # (different unit or invocation), then start fresh. A stale instance holding
-# :8766 while a new one reaches the hub with no agent is exactly the split-brain
-# that makes the node agent invisible in the UI.
+# the loopback :8443 while a new one reaches the hub with no agent is exactly
+# the split-brain that makes the node agent invisible in the UI.
 systemctl stop lm-pxmx 2>/dev/null || true
 pkill -f 'control_plane.*--id pxmx-spoke-1' 2>/dev/null || true
 sleep 1
@@ -165,8 +172,8 @@ echo "📦 Version: $(cat VERSION 2>/dev/null || echo unknown)"
 
 # Print the agent install command so the admin knows what to run on each Proxmox node.
 # Default to mDNS/DNS auto-discovery: the agent reads this hub's _lm-hub._tcp TXT
-# agent_port record (8443 on this all-in-one hub with TLS on, 8766 legacy no-TLS) and
-# picks ws:// vs wss:// automatically — so no --spoke-url / port is needed. Pinning
+# agent_port record (443 — the unified external surface) and dials
+# wss://<hub>:443/ws/agent automatically — no --spoke-url / port needed. Pinning
 # is shown only as an optional fallback.
 LM_HOST=$(echo "$HUB_URL" | sed 's|^wss://||;s|^ws://||' | cut -d: -f1)
 echo ""
@@ -176,9 +183,9 @@ echo ""
 echo "  curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \\"
 echo "    | sudo bash"
 echo "  (auto-discovers this hub via DNS lm-hub.* / mDNS _lm-hub._tcp — no port needed;"
-echo "   the agent reads the hub's agent_port TXT record, 8443 here with TLS on.)"
+echo "   the agent reads the hub's agent_port TXT record, 443, and dials wss://<hub>:443/ws/agent.)"
 if [ -n "$LM_HOST" ]; then
-    echo "  To pin instead:  --spoke-url wss://${LM_HOST}:8443   (or ws://${LM_HOST}:8766 with TLS off)"
+    echo "  To pin instead:  --spoke-url wss://${LM_HOST}:443/ws/agent"
 fi
 echo "  (omitting --id derives <hostname>-agent; clone+rename auto-correlates via install UUID)"
 echo ""

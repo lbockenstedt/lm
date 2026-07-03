@@ -61,8 +61,17 @@ HUB_SHORT_NAME = "lm-hub"
 DEFAULT_HUB_PORT = 443
 # Path on the unified :443 uvicorn for the spoke-WS leg (handle_connection).
 SPOKE_WS_PATH = "/ws/spoke"
+# Path on the unified :443 uvicorn for the pxmx agent-WS leg. On an all-in-one
+# hub the /ws/agent route is a dumb byte-proxy to the pxmx spoke's loopback
+# agent listener (LM_PXMX_AGENT_PORT, 127.0.0.1 plaintext); on a standalone
+# pxmx box the spoke serves /ws/agent directly on :443 wss. Either way an agent
+# dials wss://<hub>:443/ws/agent.
+AGENT_WS_PATH = "/ws/agent"
 # Default pxmx agent-listener port (legacy/plain; superseded by the agent_port
-# TXT record when the hub advertises TLS).
+# TXT record when the hub advertises TLS). Under the unified-443 merge the
+# advertised agent_port is 443 (the external dial port); the hub's loopback dial
+# port to the co-located pxmx spoke is LM_PXMX_AGENT_PORT (8443), a separate
+# value NOT advertised.
 DEFAULT_AGENT_PORT = 8766
 
 # Overridable for tests; production reads /etc/resolv.conf.
@@ -285,10 +294,12 @@ def discover_hub_url(timeout: float = 5.0,
         if ip is not None:
             base_port = port_override if port_override is not None else (
                 DEFAULT_AGENT_PORT if agent_listener else DEFAULT_HUB_PORT)
-            # Spoke leg targets the unified :443 /ws/spoke route. DNS carries no
-            # TXT → no TLS inference (a cert-bearing hub reachable only via DNS
-            # is pinned with --hub wss://host:443/ws/spoke). Same-box → loopback.
-            spoke_path = SPOKE_WS_PATH if not agent_listener else ""
+            # Spoke leg targets the unified :443 /ws/spoke route; the agent leg
+            # targets /ws/agent (hub proxy on all-in-one, direct on standalone
+            # pxmx). DNS carries no TXT → no TLS inference (a cert-bearing hub
+            # reachable only via DNS is pinned with --hub wss://host:443/ws/spoke
+            # or wss://host:443/ws/agent). Same-box → loopback.
+            spoke_path = AGENT_WS_PATH if agent_listener else SPOKE_WS_PATH
             if is_hub_local(ip):
                 logger.info("discovered hub via DNS (local): 127.0.0.1:%d%s", base_port, spoke_path)
                 return f"ws://127.0.0.1:{base_port}{spoke_path}"
@@ -305,7 +316,7 @@ def discover_hub_url(timeout: float = 5.0,
                 agent_port or DEFAULT_AGENT_PORT)
         else:
             base_port = port_override if port_override is not None else svc_port
-        spoke_path = SPOKE_WS_PATH if not agent_listener else ""
+        spoke_path = AGENT_WS_PATH if agent_listener else SPOKE_WS_PATH
         # Same box as the hub → loopback. Under the unified-443 merge the hub
         # serves ONLY :443 (wss when TLS is on, plain otherwise — there is no
         # separate plaintext loopback listener anymore), so a co-located caller
