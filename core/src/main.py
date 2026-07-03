@@ -54,7 +54,7 @@ import shutil
 import tempfile
 from contextlib import AsyncExitStack
 from collections import deque
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import asdict
 import websockets
 from starlette.websockets import WebSocketDisconnect
@@ -476,6 +476,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Used to reject a stale (rotated-out) session key reconnecting and
         # evicting a live current-key connection (zombie-after-outage guard).
         self.active_connection_key_ids: Dict[str, Optional[str]] = {}
+        # { spoke_id: True once the spoke has proved it holds its session secret
+        #   — either by presenting a valid secret in the connect auth frame OR by
+        #   sending at least one hub-verified signed frame. Cleared on
+        #   disconnect. Distinguishes a working spoke from a protocol-incompatible
+        #   one (e.g. a legacy GenericLeafAgent) that connects but can NEVER adopt
+        #   a session key, so LOAD_ROLE/GET_AVAILABLE_ROLES can fail fast instead
+        #   of hanging to the request_response timeout. }
+        self.spoke_authenticated: Dict[str, bool] = {}
         # { spoke_id: ConnectionTelemetry }
         self.spoke_telemetry: Dict[str, Dict[str, Any]] = {}
         # { spoke_id: TokenBucket } for rate limiting non-heartbeat messages
@@ -1196,6 +1204,54 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                                     f"parent={parent_spoke_id}")
         self.known_modules = self.state.system_state["known_modules"]
 
+    # Reasons returned by spoke_can_accept_commands for the False cases.
+    _CMD_NOT_CONNECTED = "not_connected"
+    _CMD_UNAUTHENTICATED = "unauthenticated"
+
+    def spoke_can_accept_commands(self, spoke_id: str) -> Tuple[bool, str]:
+        """Whether a command/response round-trip to ``spoke_id`` can succeed.
+
+        Returns ``(True, "")`` when the spoke is connected AND has proved it
+        holds its session key (``spoke_authenticated`` flag — set when it
+        presented a valid secret at connect or sent a hub-verified signed frame).
+
+        Returns ``(False, "not_connected")`` when the spoke isn't connected.
+
+        Returns ``(False, "unauthenticated")`` when the spoke IS connected but
+        has been connected long enough to authenticate yet has never verified a
+        signature — it never adopted a session key, so it structurally CANNOT
+        respond to commands. This is the signature of a protocol-incompatible
+        legacy GenericLeafAgent (installed before the installer repoint to
+        agent/install_agent.sh): it connects and heartbeats but dispatches on
+        top-level ``type`` instead of the hub's ``header/payload`` envelope, so
+        it ignores SPOKE_UPDATE_SESSION_KEY / LOAD_ROLE and would otherwise hang
+        the caller to its request_response timeout.
+
+        The >10s grace window lets a fresh zero-touch spoke receive its pushed
+        key + send its first signed frame before we declare it unauthenticated,
+        so a just-approved spoke isn't falsely rejected.
+        """
+        if spoke_id not in self.active_connections:
+            return False, self._CMD_NOT_CONNECTED
+        if self.spoke_authenticated.get(spoke_id):
+            return True, ""
+        tel = self.spoke_telemetry.get(spoke_id) or {}
+        last_attempt = tel.get("last_attempt")
+        if last_attempt is None:
+            # No connect timestamp recorded -> treat as fresh (grace window),
+            # NOT time.time() - 0 (which would look ancient and falsely fail-fast).
+            conn_age = 0.0
+        else:
+            try:
+                conn_age = time.time() - float(last_attempt)
+            except (TypeError, ValueError):
+                conn_age = 0.0
+        if conn_age > 10.0:
+            return False, self._CMD_UNAUTHENTICATED
+        # Fresh connection still warming up — give it the benefit of the doubt
+        # and let the request_response timeout handle a genuine failure.
+        return True, ""
+
     async def _try_psk_self_provision(self, spoke_id: str, tenant_hint: str, psk: str) -> bool:
         """Validate a spoke's onboarding PSK against the tenant's stored PSKs
         and, on a match, auto-approve + auto-bind the spoke to that tenant (PSK
@@ -1549,6 +1605,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 key_id = self.key_manager.get_valid_key(spoke_id, secret)
                 if key_id:
                     is_authenticated = True
+                    self.spoke_authenticated[spoke_id] = True
                     logger.info(f"Spoke {spoke_id} authenticated successfully with secret.")
                     self.record_spoke_event(spoke_id, "auth_ok", "secret verified")
                 else:
@@ -1777,6 +1834,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     if not self.key_manager.verify_signature(spoke_id, message_bytes, signature):
                         logger.warning(f"Invalid signature from spoke {spoke_id}")
                         continue
+                    # A verified signature proves the spoke installed its session
+                    # key. Mark it authenticated (idempotent — also set at connect
+                    # when a secret was presented). A spoke that never reaches here
+                    # (legacy/incompatible agent that can't adopt a key) stays
+                    # unauthenticated, so command routes can fail fast.
+                    self.spoke_authenticated[spoke_id] = True
                 else:
                     # No signature provided. Allow ONLY heartbeats for unauthenticated spokes.
                     payload = msg_data.get("payload", {})
@@ -1963,6 +2026,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             if spoke_id:
                 self.spoke_module_types.pop(spoke_id, None)
                 self.spoke_parent_map.pop(spoke_id, None)
+                self.spoke_authenticated.pop(spoke_id, None)
 
     # ── Update pipeline (extracted) ───────────────────────────────────────
     # get_local_version / get_remote_version / _is_git_repo / _download_update /

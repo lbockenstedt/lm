@@ -6297,6 +6297,23 @@ def create_app(hub):
         hub = app.state.hub
         if spoke_id not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Agent {spoke_id} not connected")
+        # Fail fast on a connected-but-unauthenticated agent (see
+        # LabManagerHub.spoke_can_accept_commands). A protocol-incompatible
+        # legacy GenericLeafAgent connects + heartbeats but never adopts a
+        # session key, so LOAD_ROLE would otherwise hang to the 120s
+        # request_response timeout with a generic "Timed out waiting for spoke
+        # response". Surface an actionable reinstall hint instead.
+        _ok, reason = hub.spoke_can_accept_commands(spoke_id)
+        if reason == hub._CMD_UNAUTHENTICATED:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Agent {spoke_id} is connected but not authenticated — it has "
+                    f"not adopted a session key, so it cannot load roles. This is a "
+                    f"legacy/incompatible agent: reinstall it via install_menu.sh "
+                    f"(agent/install_agent.sh), approve the base generic node, then retry."
+                ),
+            )
         try:
             data   = await request.json()
             role   = data.get("role")
