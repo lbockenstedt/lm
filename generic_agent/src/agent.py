@@ -63,7 +63,7 @@ except ImportError:  # dev box without the vendored copy on path
 class GenericLeafAgent:
     def __init__(self, spoke_url: str, agent_id: str, secret: Optional[str] = None):
         # spoke_url may be a concrete URL, "" / "auto" (auto-discover), or a pin.
-        self.spoke_url = spoke_url or "auto"
+        self.spoke_url = self._normalize_url(spoke_url or "auto")
         self.agent_id = agent_id
         self.secret = secret or self._load_secret()
         # No secret is OK — agent will connect unauthenticated and await admin approval.
@@ -76,6 +76,30 @@ class GenericLeafAgent:
         logger.info(f"Initializing GenericLeafAgent [{agent_id}] -> {spoke_url or 'auto'}")
         self.websocket = None
         self.config = {}
+
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        """Normalize a pinned spoke URL against the hub's two-listener contract:
+        port 8765 is the loopback *plaintext* listener, port 443 is the remote
+        *TLS* (wss://) listener. A pinned ``ws://<host>:443`` is plaintext to a
+        TLS port — the server does a TLS handshake and the client's plaintext
+        HTTP upgrade reads as gibberish → ``InvalidMessage: did not receive a
+        valid HTTP response``. That pin is a stale pre-TLS-rollout value; upgrade
+        it to ``wss://`` so it works without an operator edit. ``ws://`` on any
+        other port (e.g. 8765 loopback) and the ``auto`` sentinel are untouched.
+        """
+        if not url or url == "auto" or not url.lower().startswith("ws://"):
+            return url
+        try:
+            from urllib.parse import urlparse
+            port = urlparse(url).port
+        except Exception:
+            port = None
+        if port == 443:
+            upgraded = "wss://" + url[len("ws://"):]
+            logger.info("Upgrading pinned %s → %s (port 443 is the hub's TLS listener)", url, upgraded)
+            return upgraded
+        return url
 
     def _load_secret(self) -> Optional[str]:
         config_path = "/etc/lm-agent/config.json"
@@ -136,10 +160,23 @@ class GenericLeafAgent:
     async def run(self):
         """Reconnect loop: resolve the hub, connect, serve, back off on loss.
         Re-discovers each pass while the URL is still the sentinel so a hub that
-        comes up after this agent (or moves) is found without a restart."""
+        comes up after this agent (or moves) is found without a restart. When
+        discovery can't find a hub yet, it backs off and retries discovery next
+        pass — it must NOT try to connect to the literal "auto" sentinel, which
+        is not a URI (``websockets.connect("auto")`` → InvalidURI)."""
         backoff = 5
-        await self._resolve_spoke_url()
         while True:
+            # Resolve the sentinel each pass (a concrete pin is left untouched) so
+            # a hub that appears later is picked up without a restart.
+            if self.spoke_url in ("", "auto", None):
+                await self._resolve_spoke_url()
+            # Discovery may still have nothing — back off + re-discover instead of
+            # connecting to the "auto" string (InvalidURI spam every 5s).
+            if self.spoke_url in ("", "auto", None):
+                logger.info("No hub discovered yet; retrying in %ss (pass --spoke-url to pin).", backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 120)
+                continue
             try:
                 await self._connect_once()
                 backoff = 5  # clean disconnect → reset
@@ -151,8 +188,6 @@ class GenericLeafAgent:
                 logger.error(f"Unexpected connection error: {e} — retrying in {backoff}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 120)
-            if self.spoke_url in ("", "auto", None):
-                await self._resolve_spoke_url()
             await asyncio.sleep(backoff)
 
     async def _connect_once(self):
