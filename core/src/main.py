@@ -303,6 +303,20 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
         logger.warning(f"_fit_log_payload size-cap failed: {e}")
         return all_logs[-1000:]  # safe fallback
 
+
+# ── Certificate distribution (le → target spokes, hub-brokered) ─────────────
+# Pure transport helpers live in cert_distribution.py (no heavy imports, so they
+# are unit-testable without constructing a LabManagerHub, which pulls in at-rest
+# encryption). The Hub methods _distribute_one_cert / _distribute_all_certs are
+# thin wrappers passing self.request_response / self.get_spoke_by_type /
+# self.CERT_CAPABLE_MODULES. See cert_distribution.py for the architecture.
+from cert_distribution import (  # noqa: E402
+    CERT_CAPABLE_MODULES as _CERT_CAPABLE_MODULES,
+    distribute_cert_to_targets as _distribute_cert_to_targets,
+    distribute_all_certs as _distribute_all_certs_impl,
+)
+
+
 class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin, RepoSyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
@@ -2059,6 +2073,41 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 logger.debug(f"Tenant sync skipped: {e}")
             await asyncio.sleep(300)  # every 5 minutes
 
+    # ── Certificate distribution (le → target spokes, hub-brokered) ─────────────
+    # Thin wrappers over the module-level pure helpers (see _distribute_* above)
+    # so the transport logic is unit-testable without constructing a Hub.
+    CERT_CAPABLE_MODULES = _CERT_CAPABLE_MODULES  # v1: opnsense (firewall)
+
+    async def _distribute_one_cert(self, le_spoke_id: str, domain: str,
+                                   targets: list) -> list:
+        """Pull cert material for ``domain`` from le → INSTALL_CERT to each
+        target spoke (resolved by module_type). See _distribute_cert_to_targets."""
+        return await _distribute_cert_to_targets(
+            self.request_response, self.get_spoke_by_type,
+            self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets)
+
+    async def _distribute_all_certs(self, le_spoke_id: str) -> None:
+        """Distribute every managed cert whose targets are stale. See
+        _distribute_all_certs_impl."""
+        await _distribute_all_certs_impl(
+            self.request_response, self.get_spoke_by_type,
+            self.CERT_CAPABLE_MODULES, le_spoke_id)
+
+    async def run_cert_distribution_loop(self):
+        """Hourly: push renewed cert material from the le spoke to each cert's
+        target spokes (hub-brokered transport). Also fired inline on
+        /api/le/issue + /api/le/renew for immediate effect after a
+        (re)issue. See _distribute_one_cert / _distribute_all_certs."""
+        await asyncio.sleep(60)  # let the le spoke connect + reconcile its ledger
+        while True:
+            try:
+                le_sid = self.get_spoke_by_type("certificates")
+                if le_sid:
+                    await self._distribute_all_certs(le_sid)
+            except Exception as e:
+                logger.warning("[sync-error] cert-distribution loop failed: %s", e)
+            await asyncio.sleep(3600)  # hourly
+
     # ── IPAM → CPPM endpoint sync → core/src/endpoint_sync.py (EndpointSyncMixin) ──
     # IPAM_SOURCES, _endpoint_sync_cfg/_source/_tenants/_next_delay, _ipam_scope_for_tenant,
     # tenant_id_for_ipam_scope, sync_tenant_endpoints, trigger_endpoint_sync, run_endpoint_sync_loop
@@ -3125,6 +3174,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # spoke directly), acks terminal results, and syncs USB config down via
         # SET_AGENT_CONFIG. See gateway/cs_bridge.py (Phase D2).
         cs_bridge_task = asyncio.create_task(self.run_cs_bridge_loop())
+        # Certificate distribution: the hub is the transport for cert material
+        # from the le (Let's Encrypt) spoke to each cert's target spokes. For
+        # every managed cert with stale targets it pulls fullchain+key from le
+        # (LE_GET_CERT) and pushes INSTALL_CERT to the target spoke (resolved by
+        # module_type); each target applies the cert to its own device via its
+        # SSH/REST/console access, then LE_MARK_DISTRIBUTED records the push on
+        # the le ledger. Also fired inline on /api/le/issue + /api/le/renew.
+        # See run_cert_distribution_loop / _distribute_one_cert.
+        cert_dist_task = asyncio.create_task(self.run_cert_distribution_loop())
 
         # compression=None disables permessage-deflate. The hub's core venv and
         # each spoke's venv pin `websockets` to nothing, so a spoke self-update's

@@ -2163,6 +2163,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-6">
   <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
   <div class="flex justify-end gap-2">
+    <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
     <button onclick="loadLEData()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200">↻ Refresh</button>
   </div>
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
@@ -8609,13 +8610,16 @@ async function loadLEData(subMenu) {
 
     const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
     const tw = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
+    // The le spoke returns nested {status, data:{...}}; unwrap to the inner data
+    // so both the nested le shape and a flat sibling shape resolve the same way.
+    const inner = b => (b && typeof b.data === 'object' && b.data !== null) ? b.data : (b || {});
 
     // Status bar from /api/le/status (best-effort — falls back to the certs call).
     try {
         const s = await _spokeFetch('/api/le/status');
         const bar = document.getElementById('le-status-bar');
         if (bar && s.ok && s.data) {
-            const d = s.data;
+            const d = inner(s.data);
             const certbot = d.certbot_present ? 'present' : 'not installed';
             const certbotColor = d.certbot_present ? 'text-green-600' : 'text-amber-500';
             bar.innerHTML =
@@ -8633,23 +8637,136 @@ async function loadLEData(subMenu) {
             container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>`;
             return;
         }
-        const certs = (d && d.certs) || [];
+        const body = inner(d);
+        const certs = body.certs || [];
         window._leCerts = certs;
-        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'State'];
-        const rows = certs.map(c => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+        const tgtBadge = t => {
+            const ok = t.last_status === 'SUCCESS';
+            const cls = ok ? 'bg-green-100 text-green-700' : (t.last_status === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500');
+            const mark = ok ? '✓' : (t.last_status === 'ERROR' ? '✗' : '·');
+            return `<span class="px-1.5 py-0.5 rounded text-xs font-medium ${cls}">${mark} ${t.module_type}${t.identifier ? '/' + t.identifier : ''}</span>`;
+        };
+        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Targets'];
+        const rows = certs.map(c => {
+            const dEsc = String(c.domain || '').replace(/'/g, "\\'");
+            const tgts = c.targets || [];
+            const tgtCell = tgts.length
+                ? `<div class="flex flex-wrap gap-1">${tgts.map(tgtBadge).join('')}</div>`
+                : `<span class="text-xs text-slate-400 italic">none</span>`;
+            return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 <td class="px-4 py-2 font-mono font-medium">${c.domain || '—'}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${c.challenge || '—'}</span></td>
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
-                <td class="px-4 py-2 text-xs">${c.state || '—'}</td>
-            </tr>`).join('');
-        const note = (d && d.message) ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${d.message}</p>` : '';
+                <td class="px-4 py-2 text-xs">${(c.not_after || '—').slice(0, 10)}</td>
+                <td class="px-4 py-2"><div class="flex items-center gap-2">${tgtCell}<button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium">manage</button></div></td>
+            </tr>`;
+        }).join('');
+        const note = body.message ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${body.message}</p>` : '';
         container.innerHTML = certs.length === 0
-            ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet.</p>`
+            ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet. Issue one via POST /api/le/issue (API) — a WebUI issue form is a follow-up.</p>`
             : note + tw(th(cols) + `<tbody>${rows}</tbody>`);
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     }
+}
+
+// Re-push any stale cert material to its targets now (no certbot invocation —
+// the hub pulls LE_GET_CERT and pushes INSTALL_CERT for changed targets only).
+async function leDistributeNow() {
+    try {
+        const { ok, detail } = await _spokeFetch('/api/le/distribute', { method: 'POST' });
+        if (!ok) alert('Distribute failed: ' + (detail || ''));
+        await loadLEData();
+    } catch (e) { alert('Distribute failed: ' + e.message); }
+}
+
+// Per-cert target manager modal. The hub brokers cert material from the le
+// spoke to each target spoke (resolved by module_type); each target applies the
+// cert to its own device. v1 install target: firewall (OPNsense). Other module
+// types record an ERROR ("does not support cert install yet") until wired.
+const LE_MODULE_TYPES = [
+    ['firewall', 'firewall (OPNsense)'],
+    ['ipam', 'ipam (NetBox)'],
+    ['hypervisor', 'hypervisor (Proxmox)'],
+    ['nac', 'nac (ClearPass)'],
+    ['directory', 'directory (LDAP)'],
+    ['simulation', 'simulation (Client Sim)'],
+    ['nw', 'nw (Network Devices)'],
+    ['dns', 'dns'], ['dhcp', 'dhcp'],
+];
+
+function showLeTargetsModal(domain) {
+    const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
+    const tgts = cert.targets || [];
+    const esc = s => String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    const row = (t, i) => {
+        const ok = t.last_status === 'SUCCESS';
+        const cls = ok ? 'bg-green-100 text-green-700' : (t.last_status === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500');
+        return `<tr class="border-b border-slate-100">
+            <td class="px-3 py-2 text-xs font-mono">${t.module_type || '—'}${t.identifier ? ' / ' + esc(t.identifier) : ''}</td>
+            <td class="px-3 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${t.last_status || 'pending'}</span></td>
+            <td class="px-3 py-2 text-xs text-slate-500">${(t.last_pushed_at || '—').slice(0, 19).replace('T', ' ')}</td>
+            <td class="px-3 py-2 text-xs text-slate-400">${t.last_message ? esc(t.last_message).slice(0, 60) : ''}</td>
+            <td class="px-3 py-2"><button onclick="removeLeTarget('${esc(domain)}', ${i})" class="text-xs text-red-600 hover:text-red-700 font-medium">remove</button></td>
+        </tr>`;
+    };
+    const mtOpts = LE_MODULE_TYPES.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('');
+    const modal = document.createElement('div');
+    modal.id = 'le-targets-modal';
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
+    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6">
+        <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
+        <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device.</p>
+        <div class="overflow-x-auto mb-4"><table class="w-full text-sm">
+            <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
+                <th class="px-3 py-2 text-left font-medium">Target</th>
+                <th class="px-3 py-2 text-left font-medium">Status</th>
+                <th class="px-3 py-2 text-left font-medium">Last push</th>
+                <th class="px-3 py-2 text-left font-medium">Message</th>
+                <th></th>
+            </tr></thead>
+            <tbody>${tgts.length ? tgts.map(row).join('') : '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-400 italic">No targets yet — add one below, then “Distribute now”.</td></tr>'}</tbody>
+        </table></div>
+        <div class="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-4">
+            <div class="flex flex-col">
+                <label class="text-xs text-slate-500 mb-1">Module type</label>
+                <select id="le-tgt-mt" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
+            </div>
+            <div class="flex flex-col flex-1 min-w-[180px]">
+                <label class="text-xs text-slate-500 mb-1">Identifier (optional)</label>
+                <input id="le-tgt-id" type="text" placeholder="e.g. edge-1" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+            </div>
+            <button onclick="addLeTarget('${esc(domain)}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold">Add target</button>
+            <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md text-sm font-bold">Distribute now</button>
+            <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+}
+
+async function addLeTarget(domain) {
+    const mt = document.getElementById('le-tgt-mt')?.value;
+    const identifier = document.getElementById('le-tgt-id')?.value?.trim() || '';
+    if (!mt) { alert('Module type required'); return; }
+    try {
+        const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/targets`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ module_type: mt, identifier }),
+        });
+        if (!ok) { alert('Add target failed: ' + (detail || '')); return; }
+        await loadLEData();
+        showLeTargetsModal(domain);
+    } catch (e) { alert('Add target failed: ' + e.message); }
+}
+
+async function removeLeTarget(domain, idx) {
+    try {
+        const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/targets/${idx}`, { method: 'DELETE' });
+        if (!ok) { alert('Remove target failed: ' + (detail || '')); return; }
+        await loadLEData();
+        showLeTargetsModal(domain);
+    } catch (e) { alert('Remove target failed: ' + e.message); }
 }
 
 function editDnsRecord(name, rtype) {

@@ -6258,8 +6258,34 @@ def create_app(hub):
 
     # ─── Certificate Management (le) API ──────────────────────────────────────
     # Relays LE_* commands to the certificates spoke via _relay_spoke (same
-    # SUCCESS/ERROR contract + 502-on-spoke-error as DNS/DHCP). The spoke's
-    # handlers are structured stubs until certbot/acme.sh is wired.
+    # SUCCESS/ERROR contract + 502-on-spoke-error as DNS/DHCP). The le spoke
+    # owns certbot (issue/renew/revoke) + the cert ledger; the HUB is the
+    # transport for cert material from le to each cert's target spokes — issue
+    # and renew inline-trigger hub._distribute_one_cert (LE_GET_CERT →
+    # INSTALL_CERT per target → LE_MARK_DISTRIBUTED), and a background
+    # run_cert_distribution_loop re-pushes stale targets hourly.
+
+    def _le_inner(payload):
+        """The le spoke returns nested {status, data:{...}}; pull out data."""
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            return payload["data"]
+        return payload if isinstance(payload, dict) else {}
+
+    async def _le_request(command, body):
+        """Relay command to the le spoke; return (hub, le_sid, payload) with the
+        SUCCESS payload (raises 502/503/500 on spoke error/down)."""
+        hub = app.state.hub
+        le_sid = _get_le_spoke(hub)
+        try:
+            result = await hub.request_response(le_sid, command, body or {})
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("%s relay failed", command)
+            raise HTTPException(status_code=500, detail=str(e))
+        ret = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        return hub, le_sid, _spoke_payload_or_raise(ret)
+
     @app.get("/api/le/certs")
     async def le_list_certs():
         """List managed certificates from the le spoke."""
@@ -6276,18 +6302,93 @@ def create_app(hub):
 
     @app.post("/api/le/issue")
     async def le_issue_cert(request: Request):
-        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_ISSUE_CERT",
-                                  await request.json(), log_name="le_issue_cert")
+        """Issue a cert via the le spoke, then hub-broker the new material to
+        its targets. Returns the spoke result with an added ``distribution``
+        per-target summary."""
+        hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", await request.json())
+        inner = _le_inner(payload)
+        domain = inner.get("domain")
+        targets = inner.get("targets")
+        dist = []
+        if domain and targets:
+            try:
+                dist = await hub._distribute_one_cert(le_sid, domain, targets)
+            except Exception as e:
+                logger.warning("cert distribution after issue failed: %s", e)
+                dist = [{"status": "ERROR", "message": str(e)}]
+        inner["distribution"] = dist
+        return payload
 
     @app.post("/api/le/renew")
     async def le_renew_cert(request: Request):
-        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_RENEW_CERT",
-                                  await request.json(), log_name="le_renew_cert")
+        """Renew one (body.domain) or all managed certs via the le spoke, then
+        hub-broker renewed material to each renewed cert's targets. Returns the
+        spoke result with per-cert + aggregate ``distribution`` summaries."""
+        hub, le_sid, payload = await _le_request("LE_RENEW_CERT", await request.json())
+        inner = _le_inner(payload)
+        agg = []
+        for r in inner.get("renewed") or []:
+            if r.get("renewed") and r.get("domain") and r.get("targets"):
+                try:
+                    d = await hub._distribute_one_cert(le_sid, r["domain"], r["targets"])
+                    r["distribution"] = d
+                    agg.extend(d)
+                except Exception as e:
+                    logger.warning("cert distribution after renew failed for %s: %s",
+                                   r.get("domain"), e)
+                    r["distribution"] = [{"status": "ERROR", "message": str(e)}]
+                    agg.extend(r["distribution"])
+        inner["distribution"] = agg
+        return payload
 
     @app.post("/api/le/revoke")
     async def le_revoke_cert(request: Request):
         return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REVOKE_CERT",
                                   await request.json(), log_name="le_revoke_cert")
+
+    @app.post("/api/le/distribute")
+    async def le_distribute():
+        """Re-push any stale cert material to its targets now (no certbot
+        invocation — just LE_GET_CERT → INSTALL_CERT for targets whose
+        last_pushed_hash differs). Returns the refreshed cert list so the UI
+        shows fresh last_pushed_* state."""
+        hub = app.state.hub
+        le_sid = _get_le_spoke(hub)
+        try:
+            await hub._distribute_all_certs(le_sid)
+        except Exception as e:
+            logger.exception("le_distribute failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_distribute")
+
+    # ── per-cert distribution targets ──────────────────────────────────────────
+    # Each target = {module_type, identifier?} describing which spoke/device a
+    # cert should be installed on. The hub resolves the spoke by module_type and
+    # pushes INSTALL_CERT; the target spoke applies the cert to its own device.
+
+    @app.get("/api/le/certs/{domain}/targets")
+    async def le_list_targets(domain: str):
+        payload = await _relay_spoke(_get_le_spoke(app.state.hub), "LE_LIST_CERTS",
+                                     log_name="le_list_targets")
+        for c in _le_inner(payload).get("certs") or []:
+            if c.get("domain") == domain:
+                return {"status": "SUCCESS", "targets": c.get("targets", [])}
+        raise HTTPException(status_code=404, detail=f"no managed cert for {domain}")
+
+    @app.post("/api/le/certs/{domain}/targets")
+    async def le_add_target(domain: str, request: Request):
+        body = await request.json()
+        if not isinstance(body, dict) or not body.get("module_type"):
+            raise HTTPException(status_code=400, detail="module_type required")
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_ADD_TARGET",
+                                  {"domain": domain, "target": body},
+                                  log_name="le_add_target")
+
+    @app.delete("/api/le/certs/{domain}/targets/{idx}")
+    async def le_remove_target(domain: str, idx: int):
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REMOVE_TARGET",
+                                  {"domain": domain, "idx": idx},
+                                  log_name="le_remove_target")
 
     # ─── DHCP API ─────────────────────────────────────────────────────────────
 
