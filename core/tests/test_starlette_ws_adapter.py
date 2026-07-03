@@ -12,7 +12,7 @@ push to a given spoke can't interleave ASGI send frames.
 
 import asyncio
 
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 import api as api_mod  # noqa: E402  (conftest puts core/src on sys.path)
 
@@ -30,6 +30,7 @@ class _FakeStarletteWS:
         self._incoming = list(incoming)
         self._client = client
         self._close_raises = close_raises
+        self.application_state = WebSocketState.CONNECTED
         self.sent = []
         self.closed = None  # (code, reason) once close() is called
 
@@ -80,6 +81,32 @@ def test_adapter_remote_address_none_when_no_client():
     adapter = api_mod.StarletteWSAdapter(ws)
 
     assert adapter.remote_address is None
+
+
+# ── state (websockets-lib WebSocketServerProtocol.state compatibility) ───────
+
+def test_adapter_state_maps_starlette_to_websockets_names():
+    # get_diagnostics reads ws.state on each stored spoke connection; it must
+    # surface the websockets-lib State name strings, not Starlette's enum.
+    ws = _FakeStarletteWS()
+    adapter = api_mod.StarletteWSAdapter(ws)
+
+    ws.application_state = WebSocketState.CONNECTED
+    assert adapter.state == "OPEN"
+    ws.application_state = WebSocketState.CONNECTING
+    assert adapter.state == "CONNECTING"
+    ws.application_state = WebSocketState.DISCONNECTED
+    assert adapter.state == "CLOSED"
+
+
+def test_adapter_state_falls_back_to_closed_when_state_unavailable():
+    # A socket that doesn't expose application_state (or raises) must degrade to
+    # "CLOSED" rather than 500 the Diagnostics endpoint (the original bug).
+    ws = _FakeStarletteWS()
+    del ws.application_state  # simulate a pre-accept / oddball socket
+    adapter = api_mod.StarletteWSAdapter(ws)
+
+    assert adapter.state == "CLOSED"
 
 
 # ── close ─────────────────────────────────────────────────────────────────────

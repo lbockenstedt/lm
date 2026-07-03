@@ -150,6 +150,27 @@ class StarletteWSAdapter:
         client = self._ws.client  # (host, port) tuple or None pre-accept
         return tuple(client) if client else None
 
+    @property
+    def state(self):
+        """websockets-lib ``WebSocketServerProtocol.state`` compatibility.
+
+        The Diagnostics endpoint (``get_diagnostics``) reads ``ws.state`` off
+        each stored spoke connection to surface ``connection_state``. The old
+        ``websockets`` server socket exposed a ``State`` enum
+        (OPEN/CLOSING/CLOSED/CONNECTING); this adapter maps Starlette's
+        ``application_state`` to those name strings so the value serializes the
+        same way in the diagnostics JSON (and any ``str(ws.state)`` consumer).
+        """
+        try:
+            st = self._ws.application_state
+        except Exception:
+            return "CLOSED"
+        if st == WebSocketState.CONNECTED:
+            return "OPEN"
+        if st == WebSocketState.CONNECTING:
+            return "CONNECTING"
+        return "CLOSED"
+
     async def recv(self) -> str:
         return await self._ws.receive_text()
 
