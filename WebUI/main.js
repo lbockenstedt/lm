@@ -5960,67 +5960,69 @@ function _diagRowHtml(s, fns) {
     const badge = recoveryBadge(rec);
     // Heartbeat: status color + age since last heartbeat frame.
     const hbStatus = String(s.heartbeat_status || '');
-    const hbTone = hbStatus === 'GREEN' ? 'text-green-600'
-                 : hbStatus === 'YELLOW' ? 'text-amber-600'
-                 : 'text-red-600';
     const hbAge = (s.heartbeat_age_s == null) ? 'never'
                : (s.heartbeat_age_s === 0 ? 'now' : `${s.heartbeat_age_s}s`);
+    const hbBadgeTone = hbStatus === 'GREEN' ? 'bg-green-100 text-green-700'
+                      : hbStatus === 'YELLOW' ? 'bg-amber-100 text-amber-700'
+                      : 'bg-red-100 text-red-700';
     // Out-of-contact alert badge (SpokeAlertMixin) — separate, forgiving tier
     // (warning >=5m / error >=30m) distinct from the realtime heartbeat light.
     const aTier = String(s.alert_tier || '');
     const alertBadge = (aTier === 'error' || aTier === 'warning')
-        ? `<span class="block mt-1 text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase ${aTier === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}" title="Out of contact ${Math.round((s.alert_duration_s || 0) / 60)}m — forgiving alert tier (separate from the heartbeat light)">alert · ${aTier}</span>`
+        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${aTier === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}" title="Out of contact ${Math.round((s.alert_duration_s || 0) / 60)}m — forgiving alert tier (separate from the heartbeat light)">alert · ${aTier}</span>`
         : '';
-    const hbCell = `<span class="block font-bold ${hbTone}">${hbStatus || '—'}</span>
-                    <span class="block text-slate-400 text-[10px]">${hbAge}</span>
-                    ${alertBadge}`;
-    // Version: module version + skew warning badge.
+    // Version skew warning badge.
     const skew = s.version_skew
-        ? `<span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase" title="Not on the current .NN numbering">skew</span>`
+        ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase" title="Not on the current .NN numbering">skew</span>`
         : '';
-    const verCell = `<span class="font-mono text-xs text-slate-600">${s.version || 'unknown'}</span>${skew}`;
-    // Status + last error stacked.
-    const errCell = `<div class="${status.tone}">${status.text}</div>
-                     ${s.last_error ? `<div class="text-[10px] text-red-500 font-mono mt-0.5 truncate max-w-[24rem]" title="${escapeHtml(s.last_error)}">${escapeHtml(s.last_error)}</div>` : ''}`;
-    // Recovery badge + Pause/Resume control (hidden for pxmx node agents).
+    // Status dot: green = healthy & beating, amber = slow-but-live, red =
+    // offline/never/RED, slate = no heartbeat telemetry yet. Mirrors the
+    // Generic Agents tile's dot semantics so the two cards read the same way.
+    const dot = !s.authenticated ? 'bg-red-500'
+              : hbStatus === 'GREEN' ? 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]'
+              : hbStatus === 'YELLOW' ? 'bg-amber-400'
+              : hbStatus === 'RED' ? 'bg-red-500'
+              : 'bg-slate-300';
     const isPaused = !!rec.manual_pause;
-    const btnLabel = isPaused ? 'Resume' : 'Pause';
-    const recCell = `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${badge.tone}" title="${escapeHtml(badge.title)}">${badge.text}</span>
-                     ${allowRecoveryPause ? `<button onclick="setRecoveryPause('${s.spoke_id}', ${!isPaused})"
-                                                     class="ml-1 text-[10px] ${isPaused ? 'text-green-600' : 'text-slate-400'} hover:underline">${btnLabel}</button>` : ''}`;
-    return `
-            <tr class="align-top hover:bg-slate-50 transition-colors">
-                <td class="px-4 py-3 font-mono text-xs text-slate-700 whitespace-nowrap">
-                    ${s.spoke_id}
-                    ${s.module_type ? `<span class="block text-[10px] text-slate-400">${escapeHtml(s.module_type)}</span>` : ''}
-                </td>
-                <td class="px-4 py-3 whitespace-nowrap">
-                    <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${s.authenticated ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">${s.authenticated ? 'Online' : 'Offline'}</span>
-                </td>
-                <td class="px-4 py-3 text-xs whitespace-nowrap">${hbCell}</td>
-                <td class="px-4 py-3 whitespace-nowrap">${verCell}</td>
-                <td class="px-4 py-3 text-xs w-full">${errCell}</td>
-                <td class="px-4 py-3 text-xs whitespace-nowrap">${recCell}</td>
-                <td class="px-4 py-3 text-xs whitespace-nowrap">
-                    <button onclick="toggleSpokeEvents('${s.spoke_id}')" class="text-blue-500 hover:text-blue-700 font-medium">${evCount} ▾</button>
-                </td>
-                <td class="px-4 py-3 text-xs whitespace-nowrap text-right">
-                    <div class="flex justify-end gap-2">
-                        ${s.approved
-                            ? `<button onclick="${unapproveFn}('${s.spoke_id}')" class="px-2 py-1 rounded bg-red-50 hover:bg-red-100 text-red-600 border border-red-200">Un-approve</button>`
-                            : `<button onclick="${approveFn}('${s.spoke_id}')" class="px-2 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white">Approve</button>`}
-                        <button onclick="${resetFn}('${s.spoke_id}')" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300">Reset Secret</button>
-                        <button onclick="${deleteFn}('${s.spoke_id}')" class="px-2 py-1 rounded bg-red-600 hover:bg-red-700 text-white">Delete</button>
-                    </div>
-                </td>
-            </tr>
-            <tr>
-                <td colspan="8" class="px-4 pb-3">
-                    <div id="events-${s.spoke_id}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto">
-                        ${(s.events || []).map(spokeEventRow).join('') || '<span class="text-slate-400 italic">No connection events recorded.</span>'}
-                    </div>
-                </td>
-            </tr>`;
+    const pauseLabel = isPaused ? 'Resume' : 'Pause';
+    const eSid = s.spoke_id.replace(/'/g, "\\'");
+    const mtLabel = s.module_type ? moduleLabel(String(s.module_type).toLowerCase()) : '';
+
+    // Card-based layout (shared _mgmtEntryCard with the Spokes/Generic Agents
+    // tiles) so the Diagnostics tile reads like the rest of the Setup → Spokes
+    // & Agents page instead of a cramped fixed-width table. State lives in
+    // badges; the status line + last error sit in metaLines; Approve/Reset/
+    // Delete/Recovery/Events are the action row. The events panel is a sibling
+    // div toggled by the same toggleSpokeEvents(id) the table used.
+    return _mgmtEntryCard({
+        dot,
+        name: s.display_name || s.spoke_id,
+        sid: s.spoke_id,
+        badges: [
+            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${s.authenticated ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${s.authenticated ? 'Online' : 'Offline'}</span>`,
+            mtLabel ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${escapeHtml(mtLabel)}</span>` : '',
+            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${hbBadgeTone}" title="Time since last inbound heartbeat frame (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s/never)">${hbStatus || '—'} · ${hbAge}</span>`,
+            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600 font-mono">${escapeHtml(s.version || 'unknown')}</span>`,
+            skew,
+            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${badge.tone}" title="${escapeHtml(badge.title)}">${badge.text}</span>`,
+            alertBadge,
+        ],
+        metaLines: [
+            `<div class="text-xs ${status.tone} pl-6">${status.text}</div>`,
+            s.last_error ? `<div class="text-[10px] text-red-500 font-mono pl-6 break-all">${escapeHtml(s.last_error)}</div>` : '',
+        ],
+        actions: [
+            s.approved
+                ? _mgmtBtn('Un-approve', `${unapproveFn}('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')
+                : _mgmtBtn('Approve', `${approveFn}('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white'),
+            _mgmtBtn('Reset Secret', `${resetFn}('${eSid}')`, 'bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300'),
+            _mgmtBtn('Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
+            allowRecoveryPause
+                ? _mgmtBtn(pauseLabel, `setRecoveryPause('${eSid}', ${!isPaused})`, isPaused ? 'text-green-600' : 'text-slate-400 hover:underline')
+                : '',
+            `<button onclick="toggleSpokeEvents('${eSid}')" class="text-blue-500 hover:text-blue-700 font-medium text-xs">${evCount} events ▾</button>`,
+        ],
+    }) + `<div id="events-${s.spoke_id}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.events || []).map(spokeEventRow).join('') || '<span class="text-slate-400 italic">No connection events recorded.</span>'}</div>`;
 }
 
 // Map a Proxmox node agent (from /api/pxmx/agents) into the same telemetry
@@ -6175,40 +6177,22 @@ async function loadDiagnostics() {
         window.__lmHubVersion = hubVersion;
         window.__lmWebuiVersion = webuiVersion;
 
-        // Shared 8-column header for the Spokes and Agents tables — only the
-        // first-column label differs. The Agents table gets the SAME telemetry
-        // columns the Spokes table gets; that's the point of this view.
-        const diagHead = (firstCol) => `
-                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                        <tr>
-                            <th class="px-4 py-3 font-bold whitespace-nowrap">${firstCol}</th>
-                            <th class="px-4 py-3 font-bold whitespace-nowrap">State</th>
-                            <th class="px-4 py-3 font-bold whitespace-nowrap">Heartbeat</th>
-                            <th class="px-4 py-3 font-bold whitespace-nowrap">Version</th>
-                            <th class="px-4 py-3 font-bold w-full">Status / Last Error</th>
-                            <th class="px-4 py-3 font-bold whitespace-nowrap">Recovery</th>
-                            <th class="px-4 py-3 font-bold whitespace-nowrap">Events</th>
-                            <th class="px-4 py-3 font-bold whitespace-nowrap text-right">Actions</th>
-                        </tr>
-                    </thead>`;
+        // Card-stack section header — matches the Spokes/Generic Agents tiles
+        // (the Diagnostics tile now renders the same _mgmtEntryCard rows instead
+        // of a fixed-width table, so there's no shared column header to emit).
+        const _diagSection = (label, rowsHtml, extraCls = '') => `
+            <h3 class="mb-2 ${extraCls} text-sm font-bold text-slate-700 uppercase tracking-wider">${label}</h3>
+            <div class="space-y-2">${rowsHtml}</div>`;
         // Generic Hub-direct agents use the spoke-approval endpoints; Proxmox
         // node agents use the pxmx relay (revokeAgent doubles as reset) and get
         // no Recovery Pause control (the hub watchdog doesn't manage them).
         const _agentFns = a => a._kind === 'pxmx'
             ? { approveFn: 'approveAgent', unapproveFn: 'revokeAgent', resetFn: 'revokeAgent', deleteFn: 'deleteAgent', allowRecoveryPause: false }
             : {};
-        // Agents table (Reset Secret + Approve/Un-approve live here now). Empty
+        // Agents section (Reset Secret + Approve/Un-approve live here now). Empty
         // string when there are no agents so the section simply doesn't render.
-        const agentsTableHtml = agents.length === 0 ? '' : `
-            <h3 class="mt-6 mb-2 text-sm font-bold text-slate-700 uppercase tracking-wider">Agents</h3>
-            <div class="overflow-x-auto rounded-md border border-slate-200 bg-white mb-4">
-                <table class="w-full text-left text-sm">
-                    ${diagHead('Agent ID')}
-                    <tbody class="divide-y divide-slate-200">
-                        ${agents.map(a => _diagRowHtml(a, _agentFns(a))).join('')}
-                    </tbody>
-                </table>
-            </div>`;
+        const agentsSectionHtml = agents.length === 0 ? '' : _diagSection(
+            'Agents', agents.map(a => _diagRowHtml(a, _agentFns(a))).join(''), 'mt-6');
 
         container.innerHTML = `
             <div class="mb-3 flex flex-wrap items-center gap-3 text-xs">
@@ -6217,18 +6201,12 @@ async function loadDiagnostics() {
                 ${recovering ? `<span class="px-2 py-1 rounded-md bg-amber-100 text-amber-700 font-medium">Recovering: ${recovering}</span>` : ''}
                 ${gaveUp ? `<span class="px-2 py-1 rounded-md bg-red-100 text-red-700 font-medium">Gave up: ${gaveUp}</span>` : ''}
                 ${paused ? `<span class="px-2 py-1 rounded-md bg-slate-200 text-slate-600 font-medium">Paused: ${paused}</span>` : ''}
-                <span class="text-slate-400">A component not on the current .NN numbering is flagged in the Version column.</span>
+                <span class="text-slate-400">A component not on the current .NN numbering is flagged by a <span class="font-bold uppercase">skew</span> badge.</span>
             </div>
-            <h3 class="mb-2 text-sm font-bold text-slate-700 uppercase tracking-wider">Spokes</h3>
-            <div class="overflow-x-auto rounded-md border border-slate-200 bg-white">
-                <table class="w-full text-left text-sm">
-                    ${diagHead('Spoke ID')}
-                    <tbody class="divide-y divide-slate-200">
-                        ${trueSpokes.map(s => _diagRowHtml(s)).join('')}
-                    </tbody>
-                </table>
-            </div>
-            ${agentsTableHtml}
+            ${trueSpokes.length === 0
+                ? `<p class="py-6 text-center text-slate-400 italic text-xs">No spokes have connected yet.</p>`
+                : _diagSection('Spokes', trueSpokes.map(s => _diagRowHtml(s)).join(''))}
+            ${agentsSectionHtml}
             <p class="mt-3 text-xs text-slate-400">
                 <strong>Heartbeat</strong> is the time since the last inbound heartbeat frame (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s/never).
                 <strong>Recovery</strong> shows the hub watchdog's auto-restart state: <em>Recovering n/3</em> = restarting with backoff,
