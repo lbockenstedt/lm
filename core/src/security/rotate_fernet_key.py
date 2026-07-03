@@ -81,6 +81,13 @@ def _build_decryptor(old_key: str):
     deployed still rotate). Reuses ``HubEncryption._derive_machine_id_fernet``
     via ``__new__`` so the fail-closed primary-key init is bypassed — the legacy
     derivation is host-only and needs no env."""
+    # security.encryption builds its singleton from LM_FERNET_KEY at import time
+    # (fail-closed). The admin running this CLI may not have LM_FERNET_KEY in
+    # their shell (it lives in .env), so set it from the resolved old key before
+    # importing — the singleton then constructs with the old key. We don't USE
+    # the singleton (we build old + legacy Fernets directly below), but it must
+    # not raise on import.
+    os.environ["LM_FERNET_KEY"] = old_key
     try:
         from security.encryption import HubEncryption  # pytest / hub (core/src on path)
     except ImportError:

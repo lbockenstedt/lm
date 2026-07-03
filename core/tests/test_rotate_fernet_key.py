@@ -115,3 +115,25 @@ def test_rotate_invalid_old_key(tmp_path, monkeypatch):
     state.mkdir()
     with pytest.raises(RuntimeError):
         rotate(str(state), str(tmp_path / ".env"), apply_env=False, dry_run=False)
+
+
+def test_rotate_reads_old_key_from_env_file_when_env_unset(tmp_path, monkeypatch):
+    """Production path: the admin's shell has no LM_FERNET_KEY (it lives in
+    .env). Rotation must parse the old key from --env-file and still work —
+    _build_decryptor sets the env from the resolved key before importing
+    security.encryption (which is fail-closed at import)."""
+    monkeypatch.delenv("LM_FERNET_KEY", raising=False)
+    old_key = Fernet.generate_key().decode()
+    state = tmp_path / "state"
+    state.mkdir()
+    env = tmp_path / ".env"
+    env.write_text(f"HUB_URL=ws://x:8765\nLM_FERNET_KEY={old_key}\n")
+    enc = {"a": 1}
+    (state / "system.json").write_bytes(_encrypt(old_key, enc))
+
+    rotated, skipped, new_key = rotate(str(state), str(env), apply_env=True, dry_run=False)
+
+    assert rotated == 1
+    assert skipped == 0
+    assert json.loads(Fernet(new_key.encode()).decrypt((state / "system.json").read_bytes())) == enc
+    assert f"LM_FERNET_KEY={new_key}" in env.read_text().splitlines()
