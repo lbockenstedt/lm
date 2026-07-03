@@ -1,3 +1,8 @@
 websockets
 python-dotenv
 psutil
+# mDNS hub auto-discovery (_lm-hub._tcp.local.) at install + runtime; the agent
+# imports the vendored src/hub_discovery.py which degrades to DNS-only if this
+# is missing. Without it a co-located/same-L2 agent that has no lm-hub DNS
+# record silently never finds the hub ("Hub auto-discovery found no hub").
+zeroconf>=0.131,<1.0

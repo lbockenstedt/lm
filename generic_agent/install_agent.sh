@@ -68,14 +68,17 @@ fi
 cd "$ROOT_DIR/generic-agent"
 python3 -m venv venv
 ./venv/bin/python3 -m pip install --upgrade pip -q
-# Install from requirements.txt (websockets, python-dotenv, psutil). agent.py
-# imports psutil at module top — a bare `pip install websockets python-dotenv`
-# here previously left the venv without psutil → ModuleNotFoundError crash-loop
-# at boot. requirements.txt is the single source so this can't drift again.
+# Install from requirements.txt (websockets, python-dotenv, psutil, zeroconf).
+# agent.py imports psutil at module top — a bare `pip install websockets
+# python-dotenv` here previously left the venv without psutil →
+# ModuleNotFoundError crash-loop at boot. zeroconf is required for mDNS hub
+# auto-discovery (_lm-hub._tcp.local.) — without it a same-L2 agent with no
+# lm-hub DNS record silently never finds the hub. requirements.txt is the
+# single source so this can't drift again.
 if [ -f requirements.txt ]; then
     ./venv/bin/python3 -m pip install -r requirements.txt -q
 else
-    ./venv/bin/python3 -m pip install websockets python-dotenv psutil -q
+    ./venv/bin/python3 -m pip install websockets python-dotenv psutil zeroconf -q
 fi
 
 # Log directory shared with the hub + spokes; the systemd service runs as

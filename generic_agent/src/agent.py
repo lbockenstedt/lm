@@ -113,9 +113,10 @@ class GenericLeafAgent:
 
     async def _resolve_spoke_url(self) -> None:
         """When spoke_url is the auto-discovery sentinel, locate the hub via
-        DNS (lm-hub.<suffix>) then mDNS and set spoke_url to the result. A
-        co-located agent gets ws://127.0.0.1:8765; a remote one gets
-        wss://<hub>:443 when the hub advertises TLS."""
+        DNS (lm-hub.<suffix>) then mDNS and set spoke_url to the result. Under
+        the unified-443 merge a co-located agent gets
+        wss://127.0.0.1:443/ws/spoke (verify-off); a remote one gets
+        wss://<hub>:443/ws/spoke when the hub advertises TLS."""
         if self.spoke_url not in ("", "auto", None):
             return
         if discover_hub_url is None:
