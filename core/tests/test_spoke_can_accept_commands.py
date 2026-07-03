@@ -283,3 +283,83 @@ def test_non_numeric_last_attempt_no_crash(caplog):
     with caplog.at_level(logging.ERROR, logger="GenericAgent"):
         hub._maybe_log_unauthenticated_agent("weird")  # must not raise
     assert _genagent_error_records(caplog) == []
+
+
+# ── _install_pending_connection: a newer pending connection evicts a prior ────
+# pending one, but not a prior AUTHENTICATED one. The lm-opnsense saga had TWO
+# agents (legacy lm-generic-agent + new lm-agent) dialing as one spoke_id; the
+# legacy one connected first and held active_connections forever, so
+# approve_and_bind_spoke pushed the session key to the legacy ws (which ignored
+# it) and the new agent never adopted its key. Forwards to the real
+# LabManagerHub._install_pending_connection (async).
+
+class _FakeWs:
+    """Minimal async websocket stand-in: records close() calls."""
+    def __init__(self):
+        self.closed = None
+    async def close(self, code=None, reason=None):
+        self.closed = (code, reason)
+
+
+class _PendingHub:
+    """Stand-in exposing exactly what _install_pending_connection reads/writes."""
+    def __init__(self):
+        self.active_connections = {}
+        self.active_connection_key_ids = {}
+        self.spoke_authenticated = {}
+        self.spoke_events = {}
+
+    def record_spoke_event(self, spoke_id, event, detail):
+        self.spoke_events.setdefault(spoke_id, []).append((event, detail))
+
+    async def _install_pending_connection(self, spoke_id, websocket):
+        return await main.LabManagerHub._install_pending_connection(self, spoke_id, websocket)
+
+
+async def test_first_pending_connection_takes_slot():
+    hub = _PendingHub()
+    ws = _FakeWs()
+    await hub._install_pending_connection("lm-opnsense", ws)
+    assert hub.active_connections["lm-opnsense"] is ws
+    assert hub.active_connection_key_ids["lm-opnsense"] is None
+    assert ws.closed is None  # nothing to evict
+
+
+async def test_newer_pending_evicts_prior_pending():
+    # The lm-opnsense saga: legacy agent holds the slot (pending, never auths);
+    # the new agent connects and must take over so approve_and_bind_spoke pushes
+    # the session key to the NEW agent's ws.
+    hub = _PendingHub()
+    legacy_ws = _FakeWs()
+    new_ws = _FakeWs()
+    await hub._install_pending_connection("lm-opnsense", legacy_ws)
+    await hub._install_pending_connection("lm-opnsense", new_ws)
+    assert hub.active_connections["lm-opnsense"] is new_ws  # new wins
+    assert legacy_ws.closed is not None  # prior pending ws was closed
+    assert any(ev == "replaced_pending" for ev, _ in hub.spoke_events["lm-opnsense"])
+
+
+async def test_pending_does_not_evict_authenticated_connection():
+    # Stale-process guard: a working authenticated connection must NOT be
+    # clobbered by a stale unauthenticated reconnect. The new pending ws runs
+    # on as a ghost (no slot); the live authed connection keeps the slot.
+    hub = _PendingHub()
+    authed_ws = _FakeWs()
+    stale_ws = _FakeWs()
+    await hub._install_pending_connection("lm-opnsense", authed_ws)
+    hub.spoke_authenticated["lm-opnsense"] = True
+    await hub._install_pending_connection("lm-opnsense", stale_ws)
+    assert hub.active_connections["lm-opnsense"] is authed_ws  # authed keeps it
+    assert authed_ws.closed is None  # live connection untouched
+    assert stale_ws.closed is None   # ghost pending ws not closed (just no slot)
+
+
+async def test_same_websocket_reinstall_is_noop():
+    # Idempotent: installing the same ws again (e.g. a re-entry) must not close
+    # itself or churn the slot.
+    hub = _PendingHub()
+    ws = _FakeWs()
+    await hub._install_pending_connection("lm-opnsense", ws)
+    await hub._install_pending_connection("lm-opnsense", ws)
+    assert hub.active_connections["lm-opnsense"] is ws
+    assert ws.closed is None

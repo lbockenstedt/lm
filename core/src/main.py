@@ -766,6 +766,48 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         else:
             tel["status"] = "DISCONNECTED"
 
+    async def _install_pending_connection(self, spoke_id: str, websocket) -> None:
+        """Track a pending (unauthenticated) connection in ``active_connections``.
+
+        A prior PENDING (unauthenticated) connection for the same spoke_id is
+        evicted — its socket is closed so its hub-side handler exits — and the
+        new connection takes the slot. Without this, two agents running on the
+        same box under one spoke_id (e.g. a leftover legacy
+        ``lm-generic-agent`` alongside the new role-capable ``lm-agent``) race
+        for the single ``active_connections`` slot and whichever connected first
+        keeps it forever; ``approve_and_bind_spoke`` then pushes the session key
+        to THAT (possibly legacy/incompatible) ws, the newer agent never adopts
+        its key, and ``LOAD_ROLE`` 503s with "connected but not authenticated".
+        Evicting lets the newest connection win; once one authenticates the
+        ``not prior_authed`` guard here + the authenticated-path
+        ``_install_active_connection`` both protect it from a stale unauthenticated
+        reconnect (the original stale-process guard this replaced).
+
+        A prior AUTHENTICATED connection is left untouched — the new pending
+        connection proceeds through ``handle_connection`` as a non-slot ghost
+        (same as before this helper existed) rather than tearing down a working
+        live connection.
+        """
+        prior_authed = self.spoke_authenticated.get(spoke_id, False)
+        prior_ws = self.active_connections.get(spoke_id)
+        if prior_ws is not None and prior_ws is not websocket and prior_authed:
+            # An authenticated connection owns the slot — leave it. The new
+            # pending ws runs on as a ghost (no slot); it can't receive hub
+            # pushes but won't disrupt the live connection.
+            return
+        if prior_ws is not None and prior_ws is not websocket:
+            logger.info(
+                f"Replacing prior pending connection for {spoke_id} with a "
+                f"newer connection (the prior never authenticated).")
+            self.record_spoke_event(spoke_id, "replaced_pending",
+                                    "newer connection took over the unauthenticated slot")
+            try:
+                await prior_ws.close(1008, "Replaced by a newer connection")
+            except Exception:
+                pass
+        self.active_connections[spoke_id] = websocket
+        self.active_connection_key_ids[spoke_id] = None
+
     def get_spoke_by_type(self, module_type: str) -> Optional[str]:
         """Return the first connected, approved spoke that advertised the given module_type."""
         for sid, mtype in self.spoke_module_types.items():
@@ -1783,11 +1825,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 return
 
             # Ensure connection is tracked even if not fully auth'd (for negotiation).
-            # Don't clobber an already-live authenticated connection with a
-            # pending/no-secret one (e.g. a stale process reconnecting unauthenticated).
-            if spoke_id not in self.active_connections:
-                self.active_connections[spoke_id] = websocket
-                self.active_connection_key_ids[spoke_id] = None
+            # See _install_pending_connection: a prior PENDING connection is
+            # evicted (so a newer connection wins the slot), but a prior
+            # AUTHENTICATED connection is NOT clobbered (stale-process guard).
+            await self._install_pending_connection(spoke_id, websocket)
 
             # Update telemetry — capture remote IP so the UI can auto-fill service URLs
             remote_ip = None

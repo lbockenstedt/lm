@@ -280,6 +280,28 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
+
+# Retire the LEGACY Generic Leaf Agent (lm-generic-agent.service) if it's
+# installed on this box. The legacy leaf (generic_agent/install_github.sh) is
+# protocol-INCOMPATIBLE with the hub: it dispatches on top-level `type` and has
+# no SPOKE_UPDATE_SESSION_KEY / LOAD_ROLE / GET_AVAILABLE_ROLES handlers, so it
+# can never adopt a session key. If BOTH this role-capable lm-agent AND the
+# legacy lm-generic-agent run on the same box, both dial the hub as the SAME
+# spoke_id (derived from hostname) and race for the hub's single
+# active_connections slot. Whichever connects first wins; when an admin then
+# approves, approve_and_bind_spoke pushes the session key to THAT ws — if it's
+# the legacy one, it ignores the push, the role-capable agent never adopts its
+# key, and LOAD_ROLE 503s with "connected but not authenticated". Disabling the
+# legacy service on every lm-agent install guarantees only the role-capable
+# agent connects. Non-fatal if the legacy unit isn't present.
+LEGACY_SERVICE="lm-generic-agent"
+if systemctl list-unit-files 2>/dev/null | grep -qE "\\${LEGACY_SERVICE}\\.service"; then
+    systemctl disable "$LEGACY_SERVICE" 2>/dev/null || true
+    systemctl stop "$LEGACY_SERVICE" 2>/dev/null || true
+    echo "🧹  Retired legacy ${LEGACY_SERVICE}.service (disabled + stopped)."
+    echo "    The role-capable ${SERVICE_NAME} now owns this box's spoke connection."
+fi
+
 # Enable so a CLONED disk auto-starts on first boot and onboards under its own
 # hostname (carryover: retains the template's PSK so it can be approved without
 # admin re-approval). Clone-only STOPs the service here so the template box does
