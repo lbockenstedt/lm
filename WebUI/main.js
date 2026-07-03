@@ -500,6 +500,11 @@ let currentSubChild = '';
 let _opnFirewalls = [];
 let showHiddenOnlyFirewallRules = false;
 let currentUser = null;
+// Cached outerHTML of the admin-only nav items (Setup/Logs/System), captured
+// from the static HTML on first sight. Lets _rebuildMainNav restore them after
+// a rebuild that ran while isAdmin() was momentarily false dropped them from
+// the DOM (see _rebuildMainNav). null until first capture.
+let _adminNavHtmlCache = null;
 let _opnCurrentItems = {};
 let currentTenant = 'default';
 let currentProduct = null;
@@ -883,7 +888,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions', 'Diagnostics'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
-    setup: ['Spokes & Agents', 'Generic Nodes', 'Firewalls', 'Network Devices', 'Security/NAC', 'IPAM', 'LDAP', 'DNS', 'DHCP', 'Simulations'],
+    setup: ['Spokes & Agents', 'Module Management', 'Simulations'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines'],
     ldap: ['OUs', 'Users', 'Groups'],
@@ -930,6 +935,33 @@ const SUBMENU_LABELS = {
     'logs-cs': 'Simulations',
     'logs-agents': 'Agents',
 };
+
+// Logs submenu: only show a module's log tab when that module is actually
+// installed/approved (window.activeProducts, rebuilt by _rebuildMainNav from
+// /setup/pending_spokes + active connections). Hub-native tabs (hub, recovery,
+// errors, bugs) always show. logs-agents shows when any agent is connected
+// (window.hasAgents, set by _renderDashboardLists). The module→product map
+// mirrors PRODUCT_MAP so a tab appears exactly when the matching spoke exists.
+const LOG_MODULE_PRODUCT = {
+    'logs-pxmx':   'pxmx',
+    'logs-opn':    'opnsense',
+    'logs-netbox': 'netbox',
+    'logs-cppm':   'cppm',
+    'logs-cs':     'cs',
+};
+function logsSubmenu() {
+    const products = window.activeProducts || new Set();
+    const hasAgents = !!window.hasAgents;
+    // Preserve the canonical order: hub first, then installed module tabs in
+    // their fixed sequence, agents, then the hub-native filtered views last.
+    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'];
+    return order.filter(m => {
+        if (m === 'logs-hub' || m === 'logs-recovery' || m === 'logs-errors' || m === 'logs-bugs') return true;
+        if (m === 'logs-agents') return hasAgents;
+        const product = LOG_MODULE_PRODUCT[m];
+        return !product || products.has(product);
+    });
+}
 
 async function loadFirewalls() {
     try {
@@ -1732,17 +1764,32 @@ function _rebuildMainNav(allSpokes, connections) {
         el.classList.remove('hidden');
         return el.outerHTML;
     };
+    // Admin nav items (Setup/Logs/System) live in the static HTML. Cache their
+    // HTML on first sight so a rebuild that runs while isAdmin() is momentarily
+    // false (a transient state where currentUser is null/not-yet-admin) can't
+    // PERMANENTLY destroy them: once a rebuild omits them they're gone from the
+    // DOM and `_getNavHtml` returns '' on every later tick, forcing a hard
+    // refresh to bring them back. The cache is sourced from the static HTML
+    // (single source of truth) and reused verbatim until a fresh capture is
+    // available. Capture happens before the destructive innerHTML write below.
     const setupNav    = _getNavHtml('nav-setup');
     const logsNav     = _getNavHtml('nav-logs');
     const settingsNav = _getNavHtml('nav-settings');
+    if (setupNav && logsNav && settingsNav) {
+        _adminNavHtmlCache = { setup: setupNav, logs: logsNav, settings: settingsNav };
+    }
+    const _cachedNavs = _adminNavHtmlCache || {};
+    const adminSetup    = setupNav    || _cachedNavs.setup    || '';
+    const adminLogs     = logsNav     || _cachedNavs.logs     || '';
+    const adminSettings = settingsNav || _cachedNavs.settings || '';
 
     mainNav.innerHTML = `
         ${dashboardNav}
         ${dynamicHtml}
         <div class="pt-4 mt-4 border-t border-slate-200"></div>
-        ${isAdmin() ? setupNav : ''}
-        ${isAdmin() ? logsNav : ''}
-        ${isAdmin() ? settingsNav : ''}
+        ${isAdmin() ? adminSetup : ''}
+        ${isAdmin() ? adminLogs : ''}
+        ${isAdmin() ? adminSettings : ''}
     `;
 }
 
@@ -1808,6 +1855,9 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
     } catch (err) { console.error('updateStatus: pxmx agents fetch failed — generic agents still render', err); }
 
     const all = [...hubAgentRows, ...pxmxRows];
+    // Cache agent presence so the Logs submenu (logsSubmenu) can gate the
+    // "Agents" tab on whether any agent is actually connected.
+    window.hasAgents = all.length > 0;
     if (agentCount) agentCount.textContent = all.length;
     if (all.length === 0) {
         agentList.innerHTML = `<p class="text-xs text-slate-400 italic">No agents connected.</p>`;
@@ -1990,7 +2040,10 @@ function renderTopNav(viewId) {
     if (!topNav) return;
     // CS (Simulations) is now a set of native LM views (see sim-views.js); it
     // gets a normal sub-nav strip like every other spoke.
-    const subMenus = (VIEW_SUBMENUS[viewId] || []).filter(m => !(m === 'Simulations' && !isAdmin()));
+    // Logs is dynamic: only show tabs for modules that are actually installed
+    // (see logsSubmenu). Every other view uses its fixed VIEW_SUBMENUS list.
+    const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
+    const subMenus = rawSubmenus.filter(m => !(m === 'Simulations' && !isAdmin()));
     topNav.innerHTML = subMenus.map((menu, i) => {
         const label = SUBMENU_LABELS[menu] || menu;
         return `<div class="sub-nav-item ${i === 0 ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer select-none" data-submenu="${menu}" onclick="setSubView('${menu}')">${label}</div>`;
@@ -3266,16 +3319,9 @@ function _renderSetupGeneralTile(content) {
 // original monolithic function's trailing default branch.
 const SETUP_TILES = {
     'Spokes & Agents':  _renderSetupSpokesTile,
+    'Module Management': _renderSetupModuleMgmtTile,
     'Tenant Config':    _renderSetupTenantTile,
     'User Access':      _renderSetupUserAccessTile,
-    'Firewalls':        _renderSetupFirewallsTile,
-    'Network Devices':  _renderSetupNwTile,
-    'Security/NAC':     _renderSetupNacTile,
-    'IPAM':             _renderSetupIpamTile,
-    'LDAP':             _renderSetupLdapTile,
-    'DNS':              _renderSetupDnsTile,
-    'DHCP':             _renderSetupDhcpTile,
-    'Generic Nodes':    _renderSetupGenericNodesTile,
     'Simulations':      _renderSetupSimulationsTile,
 };
 
@@ -5010,11 +5056,13 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                             const label = a.display_name || a.hostname || aid;
                             const isPending = a._status === 'pending';
                             const isSpokeKind = a._kind === 'spoke';
-                            // Every row in this table is an agent (generic hub
-                            // agents + Proxmox node agents); the Module column
-                            // distinguishes what each one runs (BugFixer /
-                            // Proxmox), so Type is uniformly "Agent".
-                            const typeLabel = 'Agent';
+                            // Every row in this table is an agent. The Type
+                            // column distinguishes the two flavors: generic
+                            // Hub-direct agents (module_type "agent", e.g.
+                            // bugfixer / a generic node) vs Proxmox node agents
+                            // relayed through the pxmx spoke. The Module column
+                            // further names what each one runs.
+                            const typeLabel = isSpokeKind ? 'Generic Agent' : 'Proxmox Agent';
                             const moduleLabelCell = a._module || '—';
                             const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
                             const eAid = aid.replace(/'/g, "\\'");
@@ -10614,7 +10662,33 @@ async function saveAppearance() {
 async function _pingSession() {
     if (!currentUser) return;
     try {
-        await fetch('/auth/me', { credentials: 'same-origin' });
+        const r = await fetch('/auth/me', { credentials: 'same-origin' });
+        if (r && r.ok) {
+            // Re-read the live user record so a promotion/demotion (or an
+            // admin-flag reconciliation) made AFTER login takes effect without a
+            // manual page refresh. Without this, currentUser.permissions is
+            // frozen at login and the admin navs (Setup/Logs/System) never
+            // appear/disappear until the user reloads. /auth/me re-reads the
+            // live record server-side (api.py:auth_me); a 401 is caught by the
+            // global fetch override (handleSessionExpired) and throws, skipping
+            // this branch entirely.
+            const fresh = await r.json();
+            if (fresh && typeof fresh === 'object') {
+                const wasAdmin = isAdmin();
+                currentUser = {
+                    ...currentUser,
+                    permissions: fresh.permissions ?? currentUser.permissions,
+                    tenants:      fresh.tenants      ?? currentUser.tenants,
+                    tenant_id:    fresh.tenant_id    ?? currentUser.tenant_id,
+                    protected:    fresh.protected    ?? currentUser.protected,
+                };
+                if (wasAdmin !== isAdmin()) {
+                    // Admin status changed mid-session — re-render the sidebar so
+                    // the admin-only nav items appear/disappear without a reload.
+                    updateStatus();
+                }
+            }
+        }
     } catch (e) { /* 401 already routed to login by the fetch override */ }
 }
 
@@ -10636,6 +10710,20 @@ async function _initApp() {
         }
         currentTenant = resolved;
         setTenant(currentTenant);
+
+        // Reveal the admin-only nav items (Setup/Logs/System) immediately now
+        // that the session is confirmed, instead of waiting for the first
+        // updateStatus() poll to rebuild the sidebar. That poll awaits /status
+        // plus the admin-only /setup/pending_spokes + /setup/diagnostics; if it
+        // is slow or fails the items stay hidden until a manual refresh — the
+        // "sometimes I have to refresh to get the admin menus" race.
+        // _rebuildMainNav re-affirms visibility on every poll; this just makes
+        // the first paint correct. Non-admins keep the static `hidden`.
+        if (isAdmin()) {
+            ['nav-setup', 'nav-logs', 'nav-settings'].forEach(id => {
+                document.getElementById(id)?.classList.remove('hidden');
+            });
+        }
 
         // Admins (protected, no tenant assignments) get a picker listing EVERY
         // tenant so they can view any tenant's systems in Simulations (and
