@@ -479,6 +479,34 @@ class BaseControlPlane:
         self.modules[name] = module_instance
         logger.info(f"Registered module: {name}")
 
+    async def send_to_hub(self, payload_type: str, data: Dict[str, Any]) -> bool:
+        """Send an unsolicited signed frame to the hub (e.g. a spoke-initiated
+        ``LE_CERT_RENEWED`` event so the hub re-distributes a renewed cert
+        immediately instead of waiting for the hourly loop).
+
+        Best-effort: a no-op + debug log if the websocket isn't connected yet
+        (the hub's hourly distribution loop is the fallback). Mirrors the
+        heartbeat send (signed, ``destination_id: hub``). Returns True on send.
+        A module calls this via the ``control_plane`` reference its
+        ControlPlane passes it (see LEControlPlane.run_hub_mode → LESpoke)."""
+        ws = self._hub_ws
+        if ws is None:
+            logger.debug("send_to_hub(%s): not connected; skipping", payload_type)
+            return False
+        try:
+            msg = {
+                "header": {"message_id": str(uuid.uuid4()),
+                           "timestamp": round(time.time(), 6),
+                           "sender_id": self.spoke_id, "destination_id": "hub"},
+                "payload": {"type": payload_type, "data": data or {}},
+            }
+            msg["signature"] = self._sign(msg)
+            await ws.send(json.dumps(msg, separators=(',', ':')))
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("send_to_hub(%s) failed: %s", payload_type, e)
+            return False
+
     async def run(self):
         """Main loop for the control plane."""
         # Clear any stale healthy marker from a prior boot — a fresh start must

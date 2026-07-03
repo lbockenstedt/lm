@@ -1810,6 +1810,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     await self._handle_spoke_log(spoke_id, payload)
                     continue
 
+                # --- LE cert renewed (event-driven distribution) ---
+                # A le spoke renewed a cert and emitted LE_CERT_RENEWED so we
+                # re-push the material to its targets now instead of waiting up
+                # to 1h for run_cert_distribution_loop. Fire-and-forget (the
+                # inbound dispatch loop must not block on a LE_GET_CERT +
+                # INSTALL_CERT round-trip); the hourly loop is the fallback.
+                if payload.get("type") == "LE_CERT_RENEWED":
+                    ev = payload.get("data", {}) or {}
+                    _ev_domain = ev.get("domain")
+                    _ev_targets = ev.get("targets") or []
+                    if _ev_domain and _ev_targets:
+                        asyncio.create_task(self._on_le_cert_renewed(
+                            spoke_id, _ev_domain, _ev_targets))
+                    else:
+                        logger.debug("LE_CERT_RENEWED from %s missing "
+                                     "domain/targets; hourly loop will cover it",
+                                     spoke_id)
+                    continue
+
                 # --- Scale-Out Relay Logic ---
                 # _handle_agent_relay_up returns True when it matched + handled a
                 # sub-type (AGENT_LOG/HEARTBEAT/AGENT_TELEMETRY/CS_*), in which case
@@ -2150,6 +2169,22 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             except Exception as e:
                 logger.warning("[sync-error] cert-distribution loop failed: %s", e)
             await asyncio.sleep(3600)  # hourly
+
+    async def _on_le_cert_renewed(self, le_spoke_id: str, domain: str,
+                                  targets: list) -> None:
+        """Event-driven cert distribution: a le spoke renewed a cert and emitted
+        ``LE_CERT_RENEWED``; re-push the material to its targets NOW instead of
+        waiting up to 1h for run_cert_distribution_loop. Mirrors the inline
+        /api/le/issue + /api/le/renew path (_distribute_one_cert). The hourly
+        loop is the fallback if this races a disconnect."""
+        try:
+            summary = await self._distribute_one_cert(le_spoke_id, domain, targets)
+            ok = sum(1 for s in (summary or []) if s.get("status") == "SUCCESS")
+            logger.info("[cert] LE_CERT_RENEWED %s from %s: %d/%d target(s) pushed",
+                        domain, le_spoke_id, ok, len(summary or []))
+        except Exception as e:
+            logger.warning("[sync-error] LE_CERT_RENEWED distribution for %s "
+                           "failed: %s", domain, e)
 
     # ── IPAM → CPPM endpoint sync → core/src/endpoint_sync.py (EndpointSyncMixin) ──
     # IPAM_SOURCES, _endpoint_sync_cfg/_source/_tenants/_next_delay, _ipam_scope_for_tenant,
