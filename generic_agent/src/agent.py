@@ -352,9 +352,20 @@ if __name__ == "__main__":
     # Pin a concrete URL to override.
     parser.add_argument("--spoke-url", default="auto",
                         help="URL of the Spoke Gateway (or 'auto' to discover; default)")
-    parser.add_argument("--id", default="generic-agent-1", help="Agent ID")
+    parser.add_argument("--id", default=None,
+                        help="Agent ID (default: this host's short hostname, "
+                             "re-evaluated on every start so a cloned disk "
+                             "onboards under its OWN hostname instead of the "
+                             "template's baked id)")
     parser.add_argument("--secret", help="Agent session secret")
     args = parser.parse_args()
+
+    # No pinned --id → derive from the live short hostname at runtime. This is
+    # what makes a cloned disk take its own hostname as its spoke id: the
+    # installer's clone-only mode omits --id, so each clone re-evaluates
+    # socket.gethostname() on start. A pinned --id (full install) stays frozen.
+    if not args.id:
+        args.id = socket.gethostname().split(".")[0]
 
     try:
         agent = GenericLeafAgent(args.spoke_url, args.id, args.secret)

@@ -202,6 +202,7 @@ run_generic_install() {
 
     local default_id="$(hostname -s 2>/dev/null || echo host)"
     local SPOKE_URL SPOKE_ID SPOKE_SECRET HUB_SECRET CLONE_ONLY
+    CLONE_ONLY=0
 
     while true; do
         read -rp "Hub WebSocket URL [auto - discover via mDNS/DNS]: " SPOKE_URL || SPOKE_URL=""
@@ -213,17 +214,36 @@ run_generic_install() {
         { [[ "$SPOKE_URL" == "auto" ]] || [[ "$SPOKE_URL" =~ ^wss?:// ]]; } && break
         echo "  (must be 'auto' or start with ws:// or wss://)"
     done
-    while true; do
-        read -rp "Spoke ID [${default_id}]: " SPOKE_ID || SPOKE_ID=""
-        [ -z "$SPOKE_ID" ] && SPOKE_ID="$default_id"
-        [[ "$SPOKE_ID" =~ ^[A-Za-z0-9_.-]+$ ]] && break
-        echo "  (letters, digits, . _ - only)"
-    done
+
+    # Ask clone-only UP FRONT. In clone-only mode the staged unit omits --id so
+    # each cloned disk derives its spoke id from its OWN hostname at runtime
+    # (socket.gethostname() in agent.py), while RETAINING this template's PSK
+    # (secret) so the hub auto-approves the clone under its own hostname
+    # (carryover — no admin re-approval). So the Spoke ID prompt is skipped in
+    # clone-only; the secret prompt is still asked (the clone re-bakes the
+    # template's PSK so it authenticates).
+    local clone_ans
+    read -rp "Clone-only mode? (stage for cloning — don't start; each clone's id follows its own hostname and inherits this template's approval) [y/N]: " clone_ans || clone_ans=""
+    [[ "$clone_ans" =~ ^[Yy]$ ]] && CLONE_ONLY=1 || CLONE_ONLY=0
+
+    SPOKE_ID=""
+    if [ "$CLONE_ONLY" -eq 0 ]; then
+        while true; do
+            read -rp "Spoke ID [${default_id}]: " SPOKE_ID || SPOKE_ID=""
+            [ -z "$SPOKE_ID" ] && SPOKE_ID="$default_id"
+            [[ "$SPOKE_ID" =~ ^[A-Za-z0-9_.-]+$ ]] && break
+            echo "  (letters, digits, . _ - only)"
+        done
+    else
+        echo "${C_DIM}Clone-only: spoke id will be each clone's own hostname (evaluated at start).${C_RESET}"
+    fi
     while true; do
         read -rp "First secret [optional — Enter to skip and await admin approval]: " SPOKE_SECRET || SPOKE_SECRET=""
         # No secret is a valid first-install state: the agent connects
         # unauthenticated and shows up as pending in the hub WebUI until an
-        # admin approves it (then the hub negotiates its session secret).
+        # admin approves it (then the hub negotiates its session secret). In
+        # clone-only mode re-enter the TEMPLATE's PSK so each clone authenticates
+        # and auto-approves under its own hostname (carryover).
         break
     done
     read -rp "Hub root secret [optional, Enter to skip]: " HUB_SECRET || HUB_SECRET=""
@@ -241,20 +261,27 @@ run_generic_install() {
         [ -z "$TLS_CA_CERT" ] && TLS_CA_CERT="/opt/lm/certs/hub.crt"
     fi
 
-    local clone_ans
-    read -rp "Clone-only mode? (install but don't start the service) [y/N]: " clone_ans || clone_ans=""
-    [[ "$clone_ans" =~ ^[Yy]$ ]] && CLONE_ONLY=1 || CLONE_ONLY=0
-
-    local generic_args=(--spoke-url "$SPOKE_URL" --id "$SPOKE_ID")
+    # Clone-only: omit --id so the agent derives its id from socket.gethostname()
+    # at runtime (each clone → its own hostname). The PSK (--secret) is still
+    # baked so the clone authenticates + auto-approves under its hostname
+    # (carryover). Full install: bake the operator's explicit --id.
+    local generic_args=(--spoke-url "$SPOKE_URL")
+    [ "$CLONE_ONLY" -eq 0 ] && generic_args+=(--id "$SPOKE_ID")
     [ -n "$SPOKE_SECRET" ] && generic_args+=(--secret "$SPOKE_SECRET")
     [ -n "$HUB_SECRET" ]  && generic_args+=(--hub-secret "$HUB_SECRET")
     [ "$TLS_VERIFY" -eq 1 ] && generic_args+=(--tls-verify --tls-ca-cert "$TLS_CA_CERT")
     [ "$CLONE_ONLY" -eq 1 ] && generic_args+=(--clone)
 
+    local id_disp
+    if [ "$CLONE_ONLY" -eq 1 ]; then
+        id_disp="(derived from each clone's hostname at runtime)"
+    else
+        id_disp="$SPOKE_ID"
+    fi
     echo
     echo "${C_BOLD}Installer source :${C_RESET} $CLONE_SRC"
     echo "${C_BOLD}Spoke URL        :${C_RESET} $SPOKE_URL"
-    echo "${C_BOLD}Spoke ID         :${C_RESET} $SPOKE_ID"
+    echo "${C_BOLD}Spoke ID         :${C_RESET} $id_disp"
     echo "${C_BOLD}Secret           :${C_RESET} $([ -n "$SPOKE_SECRET" ] && echo provided || echo 'none — will await admin approval')"
     echo "${C_BOLD}TLS verify       :${C_RESET} $([ "$TLS_VERIFY" -eq 1 ] && echo "yes (CA=$TLS_CA_CERT)" || echo 'no — encrypt without auth')"
     echo "${C_BOLD}Clone-only       :${C_RESET} $([ "$CLONE_ONLY" -eq 1 ] && echo yes || echo no)"

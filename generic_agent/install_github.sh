@@ -155,25 +155,20 @@ if [ -f /etc/systemd/system/lm-bootstrap.service ] || \
     systemctl daemon-reload 2>/dev/null || true
 fi
 
-# Clone-only: strip the agent's persisted identity so the disk image is
-# clone-ready. The base spoke (agent-spoke) writes its install UUID — the guid
-# the hub uses for clone/rename correlation — plus HUB_SECRET and the negotiated
-# session key to a .env at its repo root (_repo_root/.env). A cloned disk
-# inheriting that .env would replay THIS template's identity: same UUID → the
-# hub treats every clone as a clone-and-rename of the template (carrying its
-# approval) instead of a fresh spoke awaiting admin approval.
+# Clone-only: RETAIN the agent's persisted identity (do NOT strip it). The
+# spoke id is NOT baked into the unit in clone-only mode (install_menu.sh omits
+# --id), so each cloned disk derives its id from its OWN hostname at runtime
+# (socket.gethostname() in agent.py). The PSK (--secret) IS baked, so each clone
+# authenticates with the template's PSK and the hub auto-approves it under its
+# own hostname (carryover — the clone comes online approved without admin
+# re-approval). Stripping the identity here would force every clone back into
+# pending-approval, which is the opposite of the chosen carryover behavior.
 #
-# Line 77's rm -rf already wipes /opt/lm/generic-agent (this installer's dir),
-# but the identity .env can persist at paths that survive that wipe: the legacy
-# install_agent.sh layout /opt/lm/agent/.env, a top-level /opt/lm/.env, and the
-# leaf agent's /etc/lm-agent/config.json (which carries the secret). Strip all
-# of them so the clone generates a fresh install UUID on first start. (Full
-# installs are untouched — they WANT the prompted identity.)
-if [ "$CLONE_ONLY" = true ]; then
-    log_c "🧹 Clone-only: stripping persisted agent identity (.env / config) for clone-readiness…"
-    rm -f "$ROOT_DIR/generic-agent/.env" "$ROOT_DIR/agent/.env" "$ROOT_DIR/.env" 2>/dev/null || true
-    rm -f /etc/lm-agent/config.json 2>/dev/null || true
-fi
+# Line 77's rm -rf wipes /opt/lm/generic-agent (this installer's dir) and
+# re-clones the code, but the identity at /etc/lm-agent/config.json (secret) is
+# outside that dir and survives — exactly what carryover needs. Intentionally
+# left in place on clone-only. (Full installs are also untouched — they WANT
+# the prompted identity.)
 # Build the ExecStart argument list conditionally so an empty --secret (or
 # --id) is OMITTED entirely rather than passed as a blank token. A blank
 # `--secret ` here would otherwise swallow the next flag (`--spoke-url`) and
@@ -212,21 +207,24 @@ EOF
 
 systemctl daemon-reload
 
-# Enable the service so a CLONED disk auto-starts on first boot and onboards as
-# a fresh spoke (the clone-only identity strip above ensures a fresh UUID).
+# Enable the service so a CLONED disk auto-starts on first boot and onboards
+# under its own hostname (carryover: retains the template's PSK so the hub
+# auto-approves it without admin re-approval).
 systemctl enable lm-generic-agent 2>/dev/null || true
 
 if [ "$CLONE_ONLY" = true ]; then
-    # STOP any running instance so the TEMPLATE box does not register with a
-    # stale in-memory identity. The rm -rf above wiped the on-disk files, but a
-    # previously-started service keeps its loaded code + spoke URL/identity in
-    # memory and keeps dialing the hub; daemon-reload + enable do NOT restart
-    # it, and the clone-only path intentionally skips `restart`, so an explicit
-    # stop is required. The unit stays enabled so a cloned disk still auto-starts.
+    # STOP any running instance so the TEMPLATE box does not register while it
+    # is being prepared for cloning. A previously-started service keeps its
+    # loaded code + spoke URL/identity in memory and keeps dialing the hub;
+    # daemon-reload + enable do NOT restart it, and the clone-only path
+    # intentionally skips `restart`, so an explicit stop is required. The unit
+    # stays enabled so a cloned disk still auto-starts on first boot.
     systemctl stop lm-generic-agent 2>/dev/null || true
     log_c "❄️  Clone-only mode active. Files staged + unit enabled, but service STOPPED."
-    echo "The service will start automatically when this disk is cloned and booted (fresh identity)."
-    echo "Note: To change the spoke ID manually, edit /etc/systemd/system/lm-generic-agent.service"
+    echo "The service will start automatically when this disk is cloned and booted."
+    echo "Each clone derives its spoke id from its own hostname and inherits this"
+    echo "template's approval (PSK retained). To pin a spoke ID manually instead,"
+    echo "edit /etc/systemd/system/lm-generic-agent.service and add --id <id>."
 else
     log_c "🔄 Starting agent service..."
     systemctl restart lm-generic-agent
