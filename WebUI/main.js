@@ -4996,8 +4996,10 @@ function _renderSpokesTable(spokesWrap, trueSpokes) {
 
 // _renderAgentsTable() — renders the Agents half (generic Hub-direct agents +
 // Proxmox node agents). Extracted from loadSpokesAndAgents; pxmxAgents are
-// fetched by the caller and passed in. Output HTML and handler names preserved.
-function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
+// fetched by the caller and passed in. The Active Role column + Load Role
+// action for generic agents were folded in from the former Setup → Generic
+// Nodes tile so generic nodes are managed entirely from Spokes & Agents.
+async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
     if (!agentsWrap) return;
     const { btnCls, tblCls, thCls, tdCls } = _SPOKES_TBL_CLS;
 
@@ -5026,6 +5028,15 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
     // them here rather than re-fetching.
     const all = [...hubAgents, ...pxmxAgents];
 
+    // Active Role column: fetch the role sub-spokes each connected generic
+    // agent is currently hosting (GET_AVAILABLE_ROLES via the generic relay).
+    // Proxmox node agents have no roles, so they render an em-dash. Pending
+    // generic agents are skipped (the relay needs an authenticated connection).
+    const rolesByAgent = new Map(await Promise.all(
+        hubAgents.filter(a => a._status === 'connected')
+                 .map(async a => [a.agent_id, await fetchLoadedRoles(a.agent_id)])
+    ));
+
     if (all.length === 0) {
         agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected. Approve a generic agent (module_type "agent") or install the agent on a Proxmox node to begin.</p>`;
     } else {
@@ -5033,12 +5044,13 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
             <div class="${tblCls}">
                 <table class="w-full text-left text-sm table-fixed">
                     <colgroup>
-                        <col style="width:22%">
-                        <col style="width:13%">
+                        <col style="width:20%">
+                        <col style="width:12%">
                         <col style="width:10%">
                         <col style="width:9%">
-                        <col style="width:11%">
-                        <col style="width:35%">
+                        <col style="width:16%">
+                        <col style="width:10%">
+                        <col style="width:23%">
                     </colgroup>
                     <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
                         <tr>
@@ -5046,6 +5058,7 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                             <th class="${thCls}">Hostname</th>
                             <th class="${thCls}">Module</th>
                             <th class="${thCls}">Type</th>
+                            <th class="${thCls}">Active Role</th>
                             <th class="${thCls}">Status</th>
                             <th class="${thCls} text-right">Actions</th>
                         </tr>
@@ -5067,12 +5080,31 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                             const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
                             const eAid = aid.replace(/'/g, "\\'");
                             const eLabel = label.replace(/'/g, "\\'");
+                            // Active Role cell: badges for each hosted role, or
+                            // "none (idle)" for a connected generic agent with no
+                            // role loaded. Proxmox node agents have no roles.
+                            let roleCellHtml;
+                            if (!isSpokeKind) {
+                                roleCellHtml = '<span class="text-slate-400">—</span>';
+                            } else if (isPending) {
+                                roleCellHtml = '<span class="text-slate-400 italic">—</span>';
+                            } else {
+                                const active = rolesByAgent.get(aid) || [];
+                                roleCellHtml = active.length > 0
+                                    ? active.map(r => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${escapeHtml(r.sub_spoke_id || '')}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`).join(' ')
+                                    : '<span class="text-slate-400 italic">none (idle)</span>';
+                            }
                             // Generic Hub-direct agents use the spoke-approval endpoints;
                             // Proxmox node agents use the pxmx relay endpoints. Approve/
                             // Un-approve + Reset Secret live on the Diagnostics page now.
                             const editFn = isSpokeKind ? 'openSpokeMetadataModal' : 'openAgentConfigModal';
                             const approveFnName = isSpokeKind ? 'approveSpoke' : 'approveAgent';
                             const unapproveFnName = isSpokeKind ? 'unapproveSpoke' : 'revokeAgent';
+                            // Load Role is only available on connected generic agents
+                            // (it pushes a role sub-spoke through the generic relay).
+                            const loadRoleBtn = (isSpokeKind && !isPending)
+                                ? `<button onclick="showLoadRoleModal('${eAid}')" class="${btnCls} bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]">Load Role</button>`
+                                : '';
                             // Identity-change banner (cloned+renamed / hostname-changed /
                             // reimaged, correlated via the install UUID). The pxmx agent
                             // endpoint surfaces this; the dismiss hits the agent ack route.
@@ -5105,11 +5137,15 @@ function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                                     <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${typeLabel}</span>
                                 </td>
                                 <td class="${tdCls}">
+                                    ${roleCellHtml}
+                                </td>
+                                <td class="${tdCls}">
                                     <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${statusLabel}</span>
                                 </td>
                                 <td class="${tdCls} text-right">
-                                    <div class="flex justify-end gap-2">
+                                    <div class="flex justify-end gap-2 flex-wrap">
                                         <button onclick="${editFn}('${eAid}','${eLabel}')" class="${btnCls} bg-[#01A982] hover:bg-[#008c6a] text-white">Edit</button>
+                                        ${loadRoleBtn}
                                         ${isPending
                                             ? `<button onclick="${approveFnName}('${eAid}')" class="${btnCls} bg-blue-600 hover:bg-blue-700 text-white">Approve</button>`
                                             : `<button onclick="${unapproveFnName}('${eAid}')" class="${btnCls} bg-red-50 hover:bg-red-100 text-red-600 border border-red-200">Un-approve</button>`}
@@ -5164,7 +5200,7 @@ async function loadSpokesAndAgents() {
     const genericAgents = spokes.filter(isAgent);
 
     _renderSpokesTable(spokesWrap, trueSpokes);
-    _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents);
+    await _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents);
 }
 
 async function approveAgent(agentId) {
@@ -6231,6 +6267,22 @@ async function loadApprovedSpokes() {
     }
 }
 
+/**
+ * Build the Roles-column HTML for a generic agent's hosted roles (the `active`
+ * list returned by GET_AVAILABLE_ROLES). Shared between the initial paint and
+ * the per-row async fill so the badge markup stays in one place.
+ * @param {Array<{role:string,sub_spoke_id:string}>} active - loaded roles.
+ * @returns {string} HTML for the Roles <td> contents.
+ */
+function _rolesCellHtml(active) {
+    if (Array.isArray(active) && active.length > 0) {
+        return active.map(a =>
+            `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${a.sub_spoke_id}">${AGENT_ROLES[a.role]?.name || a.role}</span>`
+        ).join(' ');
+    }
+    return '<span class="text-slate-400 italic">none (idle)</span>';
+}
+
 async function loadGenericAgents() {
     const bodyEl = document.getElementById('generic-agents-body');
     if (!bodyEl) return;
@@ -6263,35 +6315,49 @@ async function loadGenericAgents() {
             ...diagSpokes.map(s => [s.spoke_id, { ...s, authenticated: s.authenticated }]),
         ].reverse()).values()];
 
-        // Fetch each agent's hosted roles in parallel (multi-role: a generic
-        // node hosts N role sub-spokes; show them as badges in the Roles column).
-        const rolesByAgent = new Map(await Promise.all(
-            allAgents.filter(a => a.authenticated).map(async a => [a.spoke_id, await fetchLoadedRoles(a.spoke_id)])
-        ));
-
+        // Paint the table immediately from the two cheap endpoints, with a
+        // per-row "loading…" placeholder in the Roles column for online agents,
+        // then fill each agent's hosted roles as its GET_AVAILABLE_ROLES
+        // resolves. Previously this awaited a Promise.all over every connected
+        // agent before rendering — a BARRIER that made the whole table wait on
+        // the slowest agent (up to the 5s request_response timeout, the "long
+        // time to load at times" symptom). Now the table paints at the speed of
+        // /setup/diagnostics + /api/agents and roles trickle in per-row, so one
+        // sluggish agent can't stall the rest. The Roles cell is keyed by
+        // data-spoke-id (unique per the dedup Map above): the in-flight fetch
+        // looks its cell up by spoke id, so a reload that rebuilt the table
+        // while it was outstanding still writes to the right cell if the agent
+        // is still listed, and silently skips (querySelector returns null) if
+        // the agent has since dropped off the list — never a wrong-agent write.
         bodyEl.innerHTML = allAgents.map(agent => {
             const online = agent.authenticated;
-            const active = rolesByAgent.get(agent.spoke_id) || [];
-            let roleLabel;
-            if (active.length > 0) {
-                roleLabel = active.map(a =>
-                    `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${a.sub_spoke_id}">${AGENT_ROLES[a.role]?.name || a.role}</span>`
-                ).join(' ');
-            } else {
-                roleLabel = '<span class="text-slate-400 italic">none (idle)</span>';
-            }
+            const rolesCell = online
+                ? `<span class="lm-roles-cell text-slate-400 italic" data-spoke-id="${agent.spoke_id}">loading roles…</span>`
+                : '<span class="text-slate-400 italic">none (idle)</span>';
             return `
             <tr class="hover:bg-slate-50 transition-colors">
                 <td class="px-4 py-3 font-mono text-xs text-slate-700">${agent.spoke_id}</td>
                 <td class="px-4 py-3">
                     <span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${online ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${online ? 'Online' : 'Offline'}</span>
                 </td>
-                <td class="px-4 py-3 text-xs">${roleLabel}</td>
+                <td class="px-4 py-3 text-xs">${rolesCell}</td>
                 <td class="px-4 py-3 text-right space-x-2">
                     ${online ? `<button onclick="showLoadRoleModal('${agent.spoke_id}')" class="text-xs font-bold text-[#01A982] hover:text-[#008c6a] transition-colors">Load Role</button>` : ''}
                 </td>
             </tr>`;
         }).join('');
+
+        // Fill each online agent's roles as its round-trip resolves — no
+        // barrier, so a slow agent never delays the others.
+        allAgents.forEach(agent => {
+            if (!agent.authenticated) return;
+            fetchLoadedRoles(agent.spoke_id).then(active => {
+                const cell = bodyEl.querySelector(
+                    `.lm-roles-cell[data-spoke-id="${agent.spoke_id}"]`
+                );
+                if (cell) cell.outerHTML = _rolesCellHtml(active);
+            });
+        });
     } catch (err) {
         console.error('Error loading generic agents:', err);
         bodyEl.innerHTML = `<tr><td colspan="4" class="px-4 py-8 text-center text-red-500 italic">Error: ${err.message}</td></tr>`;
