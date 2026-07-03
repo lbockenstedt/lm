@@ -33,7 +33,7 @@
 //          _renderSetupSection (+ _renderSetup*Tile helpers + SETUP_TILES)
 //   Setup → Simulations admin overview (subnet-filter, USB, DHCP status)
 //   Setup data loaders (cache, firewalls, spokes/agents, users, sessions)
-//   Diagnostics & logs (loadDiagnostics, loadModuleLogs, loadRecoveryLogs,
+//   Diagnostics & logs (loadModuleLogs, loadRecoveryLogs,
 //          loadBugReports, showBugReport)
 //   Generic agents & roles (loadApprovedSpokes, fetchLoadedRoles,
 //          showLoadRoleModal, loadRole, showDeployAgentInfo)
@@ -156,7 +156,7 @@ const ROUTES = {
     saveCacheConfig:        { m: 'PUT',  p: '/admin/cache/config',        api: 'admin_update_cache_config' },
     purgeAllCaches:         { m: 'POST', p: '/admin/cache/purge',         api: 'admin_purge_cache' },
     loadSubnetFilterToggles:{ m: 'GET',  p: '/admin/subnet-filter-config',api: 'get_subnet_filter_config' },
-    loadDiagnostics:        { m: 'GET',  p: '/setup/diagnostics',         api: 'get_diagnostics' },
+    loadSpokesAndAgents:    { m: 'GET',  p: '/setup/pending_spokes + /api/pxmx/agents + /setup/diagnostics', api: 'get_pending_spokes / get_pxmx_agents / get_diagnostics' },
     loadModuleLogs:         { m: 'GET',  p: '/setup/logs/{module}',       api: 'get_module_logs' },
     loadRecoveryLogs:       { m: 'GET',  p: '/setup/logs',                api: 'get_hub_logs' },
 
@@ -2661,9 +2661,6 @@ function _renderSettingsSection(subMenu) {
                 </div>
             </div>`;
         loadActiveSessions();
-    } else if (subMenu === 'Diagnostics') {
-        content.innerHTML = `<div id="diag-container" class="${card} p-6"></div>`;
-        loadDiagnostics();
     } else {
         content.innerHTML = `
             <div class="${card} p-6 space-y-4">
@@ -2685,12 +2682,18 @@ const _SETUP_CLS = {
     btnSecCls: 'bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium border border-slate-200',
 };
 
-// Setup → Spokes & Agents tile. Renders the spokes/agents admin tables, then
+// Setup → Spokes & Agents tile. Renders the spokes/agents admin cards, then
 // kicks off loadSpokesAndAgents() which fans out to GET /setup/pending_spokes
-// + GET /api/pxmx/agents (core/src/api.py get_pending_spokes).
+// + GET /api/pxmx/agents + GET /setup/diagnostics (core/src/api.py
+// get_pending_spokes / get_pxmx_agents / get_diagnostics). The diagnostics
+// telemetry (heartbeat/version/recovery/events) is folded inline into the
+// Spokes / Agents / Generic Agents cards; the summary bar above Spokes carries
+// the Hub/WebUI version + recovery counts that used to head the standalone
+// Diagnostics card (now removed).
 function _renderSetupSpokesTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
+            <div id="spokes-summary" class="flex flex-wrap items-center gap-3 text-xs"></div>
             <div class="${card}">
                 <div class="flex justify-between items-center mb-3">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes</h3>
@@ -2710,16 +2713,8 @@ function _renderSetupSpokesTile(content) {
                     <span class="text-xs text-slate-400 italic">idle until a role is loaded</span>
                 </div>
                 <div id="generic-agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
-            </div>
-            <div class="${card}">
-                <div class="flex justify-between items-center mb-3">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Diagnostics</h3>
-                    <button onclick="loadDiagnostics()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
-                </div>
-                <div id="diag-container"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>`;
     loadSpokesAndAgents();
-    loadDiagnostics();
 }
 
 // Setup → Tenant Config tile. GET /api/tenants (core/src/api.py get_tenants).
@@ -5034,8 +5029,13 @@ function _mgmtEntryCard(o) {
 
 // _renderSpokesTable() — renders the Spokes half of the Setup → Spokes & Agents
 // admin view. Extracted from loadSpokesAndAgents; the fetch + split preamble
-// stays in the caller. Output HTML and handler names are preserved exactly.
-function _renderSpokesTable(spokesWrap, trueSpokes) {
+// stays in the caller. `diagBy` (Map<spoke_id, /setup/diagnostics entry>) folds
+// the former Diagnostics tile's telemetry into each row — heartbeat/version/
+// skew/recovery/alert badges, the status-text + last-error lines, Reset Secret
+// / Delete / Recovery Pause / Events actions, and the expandable events panel —
+// via _diagTelemetryExtras. Missing telemetry (diag fetch failed for this id)
+// degrades gracefully to the approval-only row.
+function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
     if (!spokesWrap) return;
     const { btnCls, tblCls, thCls, tdCls } = _SPOKES_TBL_CLS;
 
@@ -5061,25 +5061,35 @@ function _renderSpokesTable(spokesWrap, trueSpokes) {
                 const eSid = sid.replace(/'/g, "\\'");
                 const eName = name.replace(/'/g, "\\'");
                 const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
+                // Telemetry extras from the diagnostics endpoint. The heartbeat-
+                // aware dot overrides the approval dot ONLY when the spoke is
+                // approved (a pending spoke keeps amber; an approved-but-silent
+                // spoke goes red). No diag entry → null → approval-only row.
+                const extras = diagBy && diagBy.has(sid) ? _diagTelemetryExtras(diagBy.get(sid)) : null;
+                const dot = (extras && approved) ? extras.dot
+                          : (approved ? 'bg-green-500' : 'bg-yellow-400');
                 return _mgmtEntryCard({
-                    dot: approved ? 'bg-green-500' : 'bg-yellow-400',
+                    dot,
                     name, sid,
                     identityBanner: _identityChangeBanner(ic, ackClick),
-                    metaLines: hostname
-                        ? [`<div class="text-xs font-mono text-slate-500 pl-6">host: ${hostname}</div>`]
-                        : [],
+                    metaLines: [
+                        hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${hostname}</div>` : '',
+                        ...(extras ? extras.metaLines : []),
+                    ],
                     badges: [
                         `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${kindLabel === 'Module' ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-600'}">${kindLabel}</span>`,
                         `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${modLabel}</span>`,
                         `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${approved ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}">${approved ? 'Approved' : 'Pending'}</span>`,
+                        ...(extras ? extras.badges : []),
                     ],
                     actions: [
                         _mgmtBtn('Edit', `openSpokeMetadataModal('${eSid}','${eName}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
                         approved
                             ? _mgmtBtn('Un-approve', `unapproveSpoke('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')
                             : _mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white'),
+                        ...(extras ? extras.actions : []),
                     ],
-                });
+                }) + (extras ? extras.eventsPanel : '');
             }).join('')}</div>`;
         }
     } catch (err) {
@@ -5092,7 +5102,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes) {
 // fetched by the caller and passed in. The Active Role column + Load Role
 // action for generic agents were folded in from the former Setup → Generic
 // Nodes tile so generic nodes are managed entirely from Spokes & Agents.
-async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
+async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy) {
     if (!agentsWrap) return;
     const { btnCls, tblCls, thCls, tdCls } = _SPOKES_TBL_CLS;
 
@@ -5161,9 +5171,18 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
             } else {
                 rolesLine = `<div class="text-xs text-slate-500 pl-6">roles: <span class="lm-agent-role-cell text-slate-400 italic" data-role-cell="${escapeHtml(aid)}">loading…</span></div>`;
             }
-            // Generic Hub-direct agents use the spoke-approval endpoints;
-            // Proxmox node agents use the pxmx relay endpoints. Approve/
-            // Un-approve + Reset Secret live on the Diagnostics page now.
+            // Telemetry extras folded in from the former Diagnostics tile.
+            // Generic Hub-direct agents pull their entry from diagBy (the
+            // /setup/diagnostics map); Proxmox node agents are normalized into
+            // the same shape from the pxmx agent object itself (they connect
+            // through the pxmx spoke, so the hub has no direct diag entry).
+            // pxmx agents suppress Reset Secret (revokeAgent is already the
+            // Un-approve button here) and Recovery Pause (watchdog is spoke-
+            // scoped). The heartbeat dot overrides the approval dot only when
+            // the agent is connected/approved — pending keeps amber.
+            const extras = isSpokeKind
+                ? (diagBy && diagBy.has(aid) ? _diagTelemetryExtras(diagBy.get(aid)) : null)
+                : _diagTelemetryExtras(_normalizePxmxAgent(a), { resetFn: 'revokeAgent', deleteFn: 'deleteAgent', allowRecoveryPause: false, allowReset: false });
             const editFn = isSpokeKind ? 'openSpokeMetadataModal' : 'openAgentConfigModal';
             const approveFnName = isSpokeKind ? 'approveSpoke' : 'approveAgent';
             const unapproveFnName = isSpokeKind ? 'unapproveSpoke' : 'revokeAgent';
@@ -5173,18 +5192,22 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                 : `/api/pxmx/agents/${encodeURIComponent(aid)}/ack-change`;
             const ackClick = `_ackIdentityChange('${ackEndpoint}')`;
             const nameWithCs = `${label}${a.client_simulation?.enabled ? ' <span class="ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase bg-green-100 text-green-700 align-middle" title="Client Simulation mode">CS</span>' : ''}`;
+            const dot = (extras && !isPending) ? extras.dot
+                      : (isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]');
             return _mgmtEntryCard({
-                dot: isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]',
+                dot,
                 name: nameWithCs, sid: aid,
                 identityBanner: _identityChangeBanner(ic, ackClick),
                 metaLines: [
                     a.hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${a.hostname}</div>` : '',
                     rolesLine,
+                    ...(extras ? extras.metaLines : []),
                 ],
                 badges: [
                     `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${typeLabel}</span>`,
                     `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${moduleLabelCell}</span>`,
                     `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${statusLabel}</span>`,
+                    ...(extras ? extras.badges : []),
                 ],
                 actions: [
                     _mgmtBtn('Edit', `${editFn}('${eAid}','${eLabel}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
@@ -5194,8 +5217,9 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
                     isPending
                         ? _mgmtBtn('Approve', `${approveFnName}('${eAid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
                         : _mgmtBtn('Un-approve', `${unapproveFnName}('${eAid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200'),
+                    ...(extras ? extras.actions : []),
                 ],
-            });
+            }) + (extras ? extras.eventsPanel : '');
         }).join('')}</div>`;
         // Trickle: fill each connected generic agent's Active Role line as its
         // GET_AVAILABLE_ROLES resolves. No barrier, so a slow agent never delays
@@ -5226,7 +5250,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents) {
 // idle agent has none, and we skip the per-agent GET_AVAILABLE_ROLES round-trip
 // entirely (the tile's membership already tells us it is idle). Edit +
 // Load Role + Approve/Un-approve keep generic-node management in one place.
-function _renderGenericAgentsTable(genericWrap, idleGenericAgents) {
+function _renderGenericAgentsTable(genericWrap, idleGenericAgents, diagBy) {
     if (!genericWrap) return;
     if (!Array.isArray(idleGenericAgents) || idleGenericAgents.length === 0) {
         genericWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No idle generic agents. Approve a generic node (module_type "agent") and it appears here until you load a role on it.</p>`;
@@ -5241,17 +5265,24 @@ function _renderGenericAgentsTable(genericWrap, idleGenericAgents) {
         const eSid = sid.replace(/'/g, "\\'");
         const eName = name.replace(/'/g, "\\'");
         const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
+        // Telemetry extras from the diagnostics map (same merge as the Spokes
+        // tile). Heartbeat dot overrides the approval dot only when approved.
+        const extras = diagBy && diagBy.has(sid) ? _diagTelemetryExtras(diagBy.get(sid)) : null;
+        const dot = (extras && !isPending) ? extras.dot
+                  : (isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]');
         return _mgmtEntryCard({
-            dot: isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]',
+            dot,
             name, sid,
             identityBanner: _identityChangeBanner(ic, ackClick),
             metaLines: [
                 hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${hostname}</div>` : '',
                 `<div class="text-xs text-slate-500 pl-6">roles: <span class="text-slate-400 italic">none (idle)</span></div>`,
+                ...(extras ? extras.metaLines : []),
             ],
             badges: [
                 `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">Generic Agent</span>`,
                 `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${isPending ? 'Pending' : 'Approved'}</span>`,
+                ...(extras ? extras.badges : []),
             ],
             actions: [
                 _mgmtBtn('Edit', `openSpokeMetadataModal('${eSid}','${eName}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
@@ -5261,8 +5292,9 @@ function _renderGenericAgentsTable(genericWrap, idleGenericAgents) {
                 isPending
                     ? _mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
                     : _mgmtBtn('Un-approve', `unapproveSpoke('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200'),
+                ...(extras ? extras.actions : []),
             ],
-        });
+        }) + (extras ? extras.eventsPanel : '');
     }).join('')}</div>`;
 }
 
@@ -5304,6 +5336,23 @@ async function loadSpokesAndAgents() {
         }
     } catch (err) { console.error('loadSpokesAndAgents: pxmx agents fetch failed — generic agents still render', err); }
 
+    // Diagnostics telemetry (the former standalone Diagnostics tile, now folded
+    // into the three management cards). Fetched once here and keyed by spoke_id
+    // so each renderer can merge heartbeat/version/recovery/events into its row
+    // via _diagTelemetryExtras. Best-effort: a failed/non-admin fetch leaves
+    // diagBy empty and the tiles degrade to their approval-only rows. The same
+    // response drives the summary bar (Hub/WebUI version + recovery counts).
+    let diagBy = null;
+    let diagData = null;
+    try {
+        const diagRes = await setupFetch('/setup/diagnostics');
+        if (diagRes.ok) {
+            diagData = await diagRes.json();
+            diagBy = new Map((diagData.spokes || []).map(s => [s.spoke_id, s]));
+        }
+    } catch (err) { console.error('loadSpokesAndAgents: diagnostics fetch failed — telemetry badges skipped', err); }
+    _renderSpokesSummary(diagData);
+
     const isAgent = s => String(s.module_type || '').toLowerCase() === 'agent';
     const trueSpokes    = spokes.filter(s => !isAgent(s) && !pxmxAgentIds.has(s.spoke_id));
     const genericAgents = spokes.filter(isAgent);
@@ -5321,9 +5370,40 @@ async function loadSpokesAndAgents() {
     const idleGenericAgents    = genericAgents.filter(s => !hasRole(s.spoke_id));
     const activeGenericAgents = genericAgents.filter(s =>  hasRole(s.spoke_id));
 
-    _renderSpokesTable(spokesWrap, trueSpokes);
-    _renderGenericAgentsTable(genericWrap, idleGenericAgents);
-    await _renderAgentsTable(agentsWrap, activeGenericAgents, pxmxAgents);
+    _renderSpokesTable(spokesWrap, trueSpokes, diagBy);
+    _renderGenericAgentsTable(genericWrap, idleGenericAgents, diagBy);
+    await _renderAgentsTable(agentsWrap, activeGenericAgents, pxmxAgents, diagBy);
+}
+
+// _renderSpokesSummary(diagData) — the Hub/WebUI version + recovery-count bar
+// that sat at the top of the former Diagnostics tile, hoisted above the Spokes
+// card now that the diagnostics telemetry lives inline in the management cards.
+// `diagData` is the /setup/diagnostics JSON (or null when the fetch failed /
+// viewer is non-admin — bar clears so a broken telemetry fetch doesn't leave a
+// stale summary). Stashes hub/webui version on window for File-a-Bug context.
+function _renderSpokesSummary(diagData) {
+    const el = document.getElementById('spokes-summary');
+    if (!el) return;
+    if (!diagData) { el.innerHTML = ''; return; }
+    const hubVersion = diagData.hub_version || 'unknown';
+    const webuiVersion = diagData.webui_version || 'unknown';
+    window.__lmHubVersion = hubVersion;
+    window.__lmWebuiVersion = webuiVersion;
+    let recovering = 0, gaveUp = 0, paused = 0;
+    for (const s of (diagData.spokes || [])) {
+        const r = s.recovery || {};
+        if (r.manual_pause) paused++;
+        else if (r.gave_up) gaveUp++;
+        else if (r.in_progress) recovering++;
+    }
+    el.innerHTML = `
+        <span class="px-2 py-1 rounded-md bg-slate-100 text-slate-600 font-mono">Hub ${escapeHtml(hubVersion)}</span>
+        <span class="px-2 py-1 rounded-md bg-slate-100 text-slate-600 font-mono">WebUI ${escapeHtml(webuiVersion)}</span>
+        ${recovering ? `<span class="px-2 py-1 rounded-md bg-amber-100 text-amber-700 font-medium">Recovering: ${recovering}</span>` : ''}
+        ${gaveUp ? `<span class="px-2 py-1 rounded-md bg-red-100 text-red-700 font-medium">Gave up: ${gaveUp}</span>` : ''}
+        ${paused ? `<span class="px-2 py-1 rounded-md bg-slate-200 text-slate-600 font-medium">Paused: ${paused}</span>` : ''}
+        <span class="text-slate-400">Heartbeat = time since last beat (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s). <span class="font-bold uppercase">skew</span> = not on current .NN. <span class="font-bold uppercase">alert</span> = forgiving out-of-contact tier (≥5m / ≥30m).</span>
+    `;
 }
 
 async function approveAgent(agentId) {
@@ -5661,22 +5741,13 @@ async function saveSpokeMetadata(spokeId) {
     }
 }
 
-// Reload whichever management surface is active. The spoke approve/un-approve/
-// reset-secret actions are driven from the Setup > Spokes & Agents page, which
-// now hosts BOTH the admin tables (loadSpokesAndAgents) and the Diagnostics
-// tile (loadDiagnostics), so the post-action refresh repopulates both — a
-// spoke state change should surface in the telemetry tables too. The legacy
-// System > Diagnostics sub-view (still reachable if setSubView('Diagnostics')
-// is called under settings) refreshes only its own table.
+// Reload the active management surface after a spoke/agent state change
+// (approve / un-approve / reset-secret / delete). The Setup > Spokes & Agents
+// page now hosts the admin cards AND the folded-in diagnostics telemetry in
+// one loadSpokesAndAgents() pass, so a single call repopulates both — a spoke
+// state change surfaces in the telemetry badges too.
 function _reloadActiveMgmtView() {
-    if (currentView === 'setup' && currentSubView === 'Spokes & Agents') {
-        loadSpokesAndAgents();
-        loadDiagnostics();
-    } else if (currentView === 'settings' && currentSubView === 'Diagnostics') {
-        loadDiagnostics();
-    } else {
-        loadSpokesAndAgents();
-    }
+    loadSpokesAndAgents();
 }
 
 async function approveSpoke(spokeId) {
@@ -5942,27 +6013,34 @@ async function setRecoveryPause(spokeId, pause) {
             body: JSON.stringify({ pause }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        await loadDiagnostics();  // refresh to reflect new badge
+        await loadSpokesAndAgents();  // refresh to reflect new badge
     } catch (err) {
         showToast(`Failed to ${pause ? 'pause' : 'resume'} recovery for ${spokeId}: ${err.message}`, 'error');
     }
 }
 
-// Shared row renderer for the Diagnostics Spokes and Agents tables. Builds the
-// full telemetry row — State / Heartbeat / Version / Status-Last-Error /
-// Recovery / Events / Actions — plus the expandable events row, identical for
-// spokes and agents so the Agents table shows the same data as the Spokes
-// table. `fns` selects the action handlers: generic Hub-direct agents use the
-// spoke-approval endpoints (the defaults); Proxmox node agents use the pxmx
-// relay endpoints and get no Recovery Pause control (the hub watchdog doesn't
-// manage them — they connect through the pxmx hypervisor spoke).
-function _diagRowHtml(s, fns) {
+// _diagTelemetryExtras(s, fns) — the diagnostics-only telemetry bits for one
+// spoke/agent, factored out of the former standalone Diagnostics tile so the
+// Spokes / Agents / Generic Agents management cards can fold them in without
+// re-rendering the name / module / approve row they already own. Returns the
+// heartbeat-aware status dot plus the telemetry badges (heartbeat · age,
+// version, skew, recovery, out-of-contact alert), the status-text + last-error
+// meta lines, the Reset Secret / Delete / Recovery Pause / Events action row,
+// and the expandable events panel — everything _mgmtEntryCard doesn't already
+// get from the management renderer that calls this.
+//
+// `s` is a /setup/diagnostics entry (true spokes + generic Hub-direct agents)
+// or a _normalizePxmxAgent() shape (Proxmox node agents). `fns` selects action
+// handlers: spokes + generic agents use the spoke endpoints (defaults);
+// Proxmox node agents pass the pxmx relay endpoints, suppress Recovery Pause
+// (the hub watchdog is spoke-scoped, not per-agent), and suppress Reset Secret
+// (revokeAgent is already the Agents tile's Un-approve button — no duplicate).
+function _diagTelemetryExtras(s, fns) {
     fns = fns || {};
-    const approveFn = fns.approveFn || 'approveSpoke';
-    const unapproveFn = fns.unapproveFn || 'unapproveSpoke';
     const resetFn = fns.resetFn || 'resetSpokeSecret';
     const deleteFn = fns.deleteFn || 'deleteSpoke';
     const allowRecoveryPause = fns.allowRecoveryPause !== false;
+    const allowReset = fns.allowReset !== false;
     const status = spokeStatusMessage(s);
     const evCount = (s.events || []).length;
     const rec = s.recovery || {};
@@ -5984,9 +6062,12 @@ function _diagRowHtml(s, fns) {
     const skew = s.version_skew
         ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase" title="Not on the current .NN numbering">skew</span>`
         : '';
-    // Status dot: green = healthy & beating, amber = slow-but-live, red =
-    // offline/never/RED, slate = no heartbeat telemetry yet. Mirrors the
-    // Generic Agents tile's dot semantics so the two cards read the same way.
+    // Heartbeat-aware status dot: green = healthy & beating, amber = slow-but-
+    // live, red = offline/never/RED, slate = no heartbeat telemetry yet. The
+    // management renderers use this in place of their approval-only dot when
+    // telemetry is available AND the spoke is approved/connected — a pending
+    // spoke keeps its amber approval dot (heartbeat is meaningless pre-approval)
+    // but an approved-but-silent spoke goes red even though it is approved.
     const dot = !s.authenticated ? 'bg-red-500'
               : hbStatus === 'GREEN' ? 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]'
               : hbStatus === 'YELLOW' ? 'bg-amber-400'
@@ -5995,21 +6076,9 @@ function _diagRowHtml(s, fns) {
     const isPaused = !!rec.manual_pause;
     const pauseLabel = isPaused ? 'Resume' : 'Pause';
     const eSid = s.spoke_id.replace(/'/g, "\\'");
-    const mtLabel = s.module_type ? moduleLabel(String(s.module_type).toLowerCase()) : '';
-
-    // Card-based layout (shared _mgmtEntryCard with the Spokes/Generic Agents
-    // tiles) so the Diagnostics tile reads like the rest of the Setup → Spokes
-    // & Agents page instead of a cramped fixed-width table. State lives in
-    // badges; the status line + last error sit in metaLines; Approve/Reset/
-    // Delete/Recovery/Events are the action row. The events panel is a sibling
-    // div toggled by the same toggleSpokeEvents(id) the table used.
-    return _mgmtEntryCard({
+    return {
         dot,
-        name: s.display_name || s.spoke_id,
-        sid: s.spoke_id,
         badges: [
-            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${s.authenticated ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">${s.authenticated ? 'Online' : 'Offline'}</span>`,
-            mtLabel ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${escapeHtml(mtLabel)}</span>` : '',
             `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${hbBadgeTone}" title="Time since last inbound heartbeat frame (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s/never)">${hbStatus || '—'} · ${hbAge}</span>`,
             `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600 font-mono">${escapeHtml(s.version || 'unknown')}</span>`,
             skew,
@@ -6021,21 +6090,22 @@ function _diagRowHtml(s, fns) {
             s.last_error ? `<div class="text-[10px] text-red-500 font-mono pl-6 break-all">${escapeHtml(s.last_error)}</div>` : '',
         ],
         actions: [
-            s.approved
-                ? _mgmtBtn('Un-approve', `${unapproveFn}('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')
-                : _mgmtBtn('Approve', `${approveFn}('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white'),
-            _mgmtBtn('Reset Secret', `${resetFn}('${eSid}')`, 'bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300'),
+            allowReset
+                ? _mgmtBtn('Reset Secret', `${resetFn}('${eSid}')`, 'bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300')
+                : '',
             _mgmtBtn('Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
             allowRecoveryPause
                 ? _mgmtBtn(pauseLabel, `setRecoveryPause('${eSid}', ${!isPaused})`, isPaused ? 'text-green-600' : 'text-slate-400 hover:underline')
                 : '',
             `<button onclick="toggleSpokeEvents('${eSid}')" class="text-blue-500 hover:text-blue-700 font-medium text-xs">${evCount} events ▾</button>`,
         ],
-    }) + `<div id="events-${s.spoke_id}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.events || []).map(spokeEventRow).join('') || '<span class="text-slate-400 italic">No connection events recorded.</span>'}</div>`;
+        eventsPanel: `<div id="events-${s.spoke_id}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.events || []).map(spokeEventRow).join('') || '<span class="text-slate-400 italic">No connection events recorded.</span>'}</div>`,
+    };
 }
 
 // Map a Proxmox node agent (from /api/pxmx/agents) into the same telemetry
-// shape spokes/generic-agents use, so the shared _diagRowHtml renderer works.
+// shape spokes/generic-agents use, so _diagTelemetryExtras can fold its
+// heartbeat/version into the Agents card the same way it does for spokes.
 // These agents connect through the pxmx hypervisor spoke; the pxmx spoke now
 // relays their AGENT_HEARTBEAT up, so the hub HeartbeatManager tracks them
 // (keyed spoke_id:agent_id) and /api/pxmx/agents carries heartbeat_status +
@@ -6077,156 +6147,6 @@ function _normalizePxmxAgent(a) {
         recovery: {},
         _kind: 'pxmx',
     };
-}
-
-// Build the unified agent list for management surfaces: generic Hub-direct
-// agents (module_type "agent" from /setup/pending_spokes — they approve via
-// the spoke-approval endpoints) plus Proxmox node agents (/api/pxmx/agents —
-// they approve/revoke via the pxmx relay endpoints). Each entry is normalized
-// with _kind ('spoke' | 'pxmx'), _status ('pending' | 'connected'), _module,
-// and approved so the caller can pick the right handler. Best-effort: returns
-// [] if neither source is reachable. Used by the Diagnostics Agents table
-// (Reset Secret + Approve/Un-approve were moved there from Spokes & Agents).
-async function _loadAgentsList() {
-    let genericAgents = [];
-    try {
-        const res = await setupFetch('/setup/pending_spokes');
-        if (res.ok) {
-            const spokes = (await res.json()).spokes || [];
-            const isAgent = s => String(s.module_type || '').toLowerCase() === 'agent';
-            genericAgents = spokes.filter(isAgent);
-        }
-    } catch (e) { console.error('_loadAgentsList: pending_spokes fetch failed — best-effort, generic agents still render', e); }
-
-    const hubAgents = genericAgents.map(s => {
-        const sid = s.spoke_id;
-        const dn = s.display_name || sid;
-        const module = /bugfixer/i.test(sid) || /bugfixer/i.test(dn) ? 'BugFixer' : dn;
-        return { agent_id: sid, display_name: dn, approved: !!s.approved,
-                 _status: s.approved ? 'connected' : 'pending',
-                 _kind: 'spoke', _module: module,
-                 _module_type: String(s.module_type || '').toLowerCase() };
-    });
-
-    let pxmxAgents = [];
-    try {
-        const r = await fetch('/api/pxmx/agents', { credentials: 'same-origin' });
-        if (r.ok) {
-            const d = await r.json();
-            const connected = (d.agents || []).map(a => ({ ...a, _status: 'connected', _kind: 'pxmx', _module: 'Proxmox', approved: true }));
-            const pending   = (d.pending_agents || []).map(a => ({ ...a, _status: 'pending', _kind: 'pxmx', _module: 'Proxmox', approved: false }));
-            pxmxAgents = [...connected, ...pending];
-        }
-    } catch (e) { console.error('_loadAgentsList: pxmx agents fetch failed — generic agents still render', e); }
-
-    return [...hubAgents, ...pxmxAgents];
-}
-
-async function loadDiagnostics() {
-    const container = document.getElementById('diag-container');
-    if (!container) return;
-
-    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching spoke telemetry...</div>`;
-
-    try {
-        const response = await setupFetch('/setup/diagnostics');
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
-        const spokes = data.spokes || [];
-        // Generic Hub-direct agents (module_type "agent") are known_modules, so
-        // /setup/diagnostics already returns their full telemetry inside spokes
-        // — the SAME shape as a true spoke. Split them out client-side for
-        // display: true spokes in the Spokes table, generic agents in the Agents
-        // table (mirroring the Spokes columns). Proxmox node agents are pulled
-        // from /api/pxmx/agents and normalized into that shape — sparse, since
-        // they connect through the pxmx hypervisor spoke rather than directly to
-        // the hub (no hub-side heartbeat/recovery/events), so those columns
-        // render '—' / 0 events.
-        const _isAg = s => String(s.module_type || '').toLowerCase() === 'agent';
-        const genericAgents = spokes.filter(_isAg).map(s => ({ ...s, _kind: 'spoke' }));
-        let pxmxAgents = [];
-        const pxmxAgentIds = new Set();
-        try {
-            const _all = await _loadAgentsList();
-            const _pxmx = _all.filter(a => a._kind === 'pxmx');
-            pxmxAgents = _pxmx.map(_normalizePxmxAgent);
-            _pxmx.forEach(a => pxmxAgentIds.add(a.agent_id));
-        } catch (e) { console.error('loadDiagnostics: pxmx agents fetch failed — generic agents still render', e); }
-        // A Proxmox node agent connects through the pxmx hypervisor spoke, not
-        // directly to the hub, so it must never appear as a hub-direct spoke in
-        // the Spokes table. Older approvals leaked the agent_id into
-        // known_modules (the hub has no WebSocket for it), which made
-        // /setup/diagnostics emit a bogus OFFLINE spoke row — drop any such
-        // leaked record so the agent shows only in the Agents table. The
-        // backend approve flow no longer registers these agents as modules;
-        // this filter also covers pre-existing leaks from before that fix.
-        const trueSpokes = spokes.filter(s => !_isAg(s) && !pxmxAgentIds.has(s.spoke_id));
-        const agents = [...genericAgents, ...pxmxAgents];
-
-        if (spokes.length === 0 && agents.length === 0) {
-            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No spoke or agent telemetry available.</div>`;
-            return;
-        }
-
-        // Recovery summary across spokes (spokes already includes generic
-        // Hub-direct agents; pxmx node agents have no hub-side recovery, so they
-        // are excluded from the banner).
-        let recovering = 0, gaveUp = 0, paused = 0;
-        for (const s of spokes) {
-            const r = s.recovery || {};
-            if (r.manual_pause) paused++;
-            else if (r.gave_up) gaveUp++;
-            else if (r.in_progress) recovering++;
-        }
-
-        const hubVersion = data.hub_version || 'unknown';
-        const webuiVersion = data.webui_version || 'unknown';
-        // Stash for File-a-Bug context (diagnostics is admin-only, so these may
-        // be 'unknown' for non-admin users — fileBug() falls back gracefully).
-        window.__lmHubVersion = hubVersion;
-        window.__lmWebuiVersion = webuiVersion;
-
-        // Card-stack section header — matches the Spokes/Generic Agents tiles
-        // (the Diagnostics tile now renders the same _mgmtEntryCard rows instead
-        // of a fixed-width table, so there's no shared column header to emit).
-        const _diagSection = (label, rowsHtml, extraCls = '') => `
-            <h3 class="mb-2 ${extraCls} text-sm font-bold text-slate-700 uppercase tracking-wider">${label}</h3>
-            <div class="space-y-2">${rowsHtml}</div>`;
-        // Generic Hub-direct agents use the spoke-approval endpoints; Proxmox
-        // node agents use the pxmx relay (revokeAgent doubles as reset) and get
-        // no Recovery Pause control (the hub watchdog doesn't manage them).
-        const _agentFns = a => a._kind === 'pxmx'
-            ? { approveFn: 'approveAgent', unapproveFn: 'revokeAgent', resetFn: 'revokeAgent', deleteFn: 'deleteAgent', allowRecoveryPause: false }
-            : {};
-        // Agents section (Reset Secret + Approve/Un-approve live here now). Empty
-        // string when there are no agents so the section simply doesn't render.
-        const agentsSectionHtml = agents.length === 0 ? '' : _diagSection(
-            'Agents', agents.map(a => _diagRowHtml(a, _agentFns(a))).join(''), 'mt-6');
-
-        container.innerHTML = `
-            <div class="mb-3 flex flex-wrap items-center gap-3 text-xs">
-                <span class="px-2 py-1 rounded-md bg-slate-100 text-slate-600 font-mono">Hub ${hubVersion}</span>
-                <span class="px-2 py-1 rounded-md bg-slate-100 text-slate-600 font-mono">WebUI ${webuiVersion}</span>
-                ${recovering ? `<span class="px-2 py-1 rounded-md bg-amber-100 text-amber-700 font-medium">Recovering: ${recovering}</span>` : ''}
-                ${gaveUp ? `<span class="px-2 py-1 rounded-md bg-red-100 text-red-700 font-medium">Gave up: ${gaveUp}</span>` : ''}
-                ${paused ? `<span class="px-2 py-1 rounded-md bg-slate-200 text-slate-600 font-medium">Paused: ${paused}</span>` : ''}
-                <span class="text-slate-400">A component not on the current .NN numbering is flagged by a <span class="font-bold uppercase">skew</span> badge.</span>
-            </div>
-            ${trueSpokes.length === 0
-                ? `<p class="py-6 text-center text-slate-400 italic text-xs">No spokes have connected yet.</p>`
-                : _diagSection('Spokes', trueSpokes.map(s => _diagRowHtml(s)).join(''))}
-            ${agentsSectionHtml}
-            <p class="mt-3 text-xs text-slate-400">
-                <strong>Heartbeat</strong> is the time since the last inbound heartbeat frame (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s/never).
-                <strong>Recovery</strong> shows the hub watchdog's auto-restart state: <em>Recovering n/3</em> = restarting with backoff,
-                <em>Gave up</em> = a restart can't fix it (e.g. missing venv — re-run the spoke installer), <em>Paused</em> = admin halted recovery.
-                An <strong>alert · warning/error</strong> badge is the separate, forgiving out-of-contact tier (warning ≥5 min, error ≥30 min) — distinct from the realtime heartbeat light above; configure it under System → Sync.
-                Click an events count to expand that module's connection timeline. Full raw logs: System → Logs → hub (filter <code>[recovery]</code>).
-            </p>
-        `;
-    } catch (err) {
-        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading diagnostics: ${err.message}</div>`;
-    }
 }
 
 async function loadModuleLogs(module, isRefresh = false) {
