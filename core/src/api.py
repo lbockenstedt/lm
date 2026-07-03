@@ -6305,12 +6305,23 @@ def create_app(hub):
                 raise HTTPException(status_code=400, detail="role is required")
             result = await hub.request_response(spoke_id, "LOAD_ROLE", {"role": role, "config": config})
             payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            # Update hub's module_type index so routing picks up the new type immediately
+            # Multi-role agent: the base stays module_type "agent" and HOSTS the
+            # role as a new sub-spoke ({base}-{role}) that registers its own
+            # module_type on connect — so do NOT overwrite the base's type here.
+            # Legacy single-role morph (base BECAME the role) is gated on an
+            # explicit `morph: true` in the response, which the multi-role agent
+            # never sends; only then do we update spoke_module_types[base].
             if isinstance(payload, dict) and payload.get("status") == "SUCCESS":
-                new_mtype = payload.get("module_type")
-                if new_mtype:
-                    hub.spoke_module_types[spoke_id] = new_mtype
-                    logger.info("Agent %s morphed to module_type %s", spoke_id, new_mtype)
+                if payload.get("morph") is True:
+                    new_mtype = payload.get("module_type")
+                    if new_mtype:
+                        hub.spoke_module_types[spoke_id] = new_mtype
+                        logger.info("Agent %s morphed to module_type %s", spoke_id, new_mtype)
+                else:
+                    sub_id = payload.get("sub_spoke_id")
+                    if sub_id:
+                        logger.info("Agent %s hosting role sub-spoke %s (module_type=%s)",
+                                    spoke_id, sub_id, payload.get("module_type"))
             return payload
         except HTTPException:
             raise

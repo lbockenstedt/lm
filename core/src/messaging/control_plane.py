@@ -479,6 +479,12 @@ class BaseControlPlane:
         self.modules[name] = module_instance
         logger.info(f"Registered module: {name}")
 
+    def _extra_auth_fields(self) -> dict:
+        """Extra fields merged into the WS auth frame on connect. Base default
+        is empty; subclasses override (e.g. agent ``RoleConnection`` adds
+        ``parent_spoke_id`` for hub parent-auto-approve of role sub-spokes)."""
+        return {}
+
     async def send_to_hub(self, payload_type: str, data: Dict[str, Any]) -> bool:
         """Send an unsolicited signed frame to the hub (e.g. a spoke-initiated
         ``LE_CERT_RENEWED`` event so the hub re-distributes a renewed cert
@@ -628,6 +634,10 @@ class BaseControlPlane:
                 auth_payload["install_uuid"] = self.install_uuid
             if self.hostname:
                 auth_payload["hostname"] = self.hostname
+            # Subclasses (e.g. agent RoleConnection) can add extra auth fields
+            # — notably ``parent_spoke_id`` so the hub auto-approves a multi-role
+            # agent's role sub-spokes via the (already-approved) base agent.
+            auth_payload.update(self._extra_auth_fields())
 
             await websocket.send(json.dumps(auth_payload, separators=(',', ':')))
             logger.info(f"Connected to Lab Manager Hub as {self.spoke_id}. Performing mutual authentication...")

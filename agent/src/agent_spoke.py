@@ -93,19 +93,19 @@ class GenericAgent(BaseSpoke):
 
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
         super().__init__(spoke_id, config)
-        self._role: Optional[BaseSpoke] = None
-        self._role_name: Optional[str] = None
-        # Set by AgentControlPlane after registration so LOAD/UNLOAD_ROLE can
-        # request a module_type morph + reconnect (become a spoke / revert to agent).
+        # Multi-role: the agent HOSTS zero or more role sub-spokes concurrently.
+        # Each entry: {"instance": BaseSpoke, "conn": RoleConnection, "task": asyncio.Task}.
+        # The base agent connection stays module_type "agent" (the Generic Node
+        # control channel for LOAD/UNLOAD_ROLE); each role opens its own
+        # RoleConnection under spoke_id {base}-{role} with the role's module_type.
+        self._roles: Dict[str, Dict[str, Any]] = {}
+        # Set by AgentControlPlane after registration so LOAD_ROLE can read
+        # hub_url + .env helpers and spawn RoleConnection sub-spokes.
         self.control_plane = None
         # Background deployment state for deploy roles (e.g. bugfixer).
         self._deploy_role: Optional[str] = None
         self._deploy_task: Optional[asyncio.Task] = None
         self._deploy_status: Dict[str, Any] = {"state": "idle"}
-        # Auto-load startup role if requested
-        startup_role = config.get("role")
-        if startup_role:
-            self._sync_load_role(startup_role, config.get("role_config", {}))
 
     # ── Role loading ──────────────────────────────────────────────────────────
 
@@ -143,19 +143,26 @@ class GenericAgent(BaseSpoke):
             sys.modules.pop(pkg_name, None)
             return None
 
-    def _sync_load_role(self, role_name: str, role_config: dict) -> bool:
+    def _sync_load_role(self, role_name: str, role_config: dict,
+                        sub_spoke_id: str = None) -> Optional[BaseSpoke]:
+        """Load a role class + instantiate it for the given sub-spoke id.
+
+        Returns the (possibly ``_RoleAdapter``-wrapped) role instance, or None
+        on load failure. The instance is constructed with the SUB-SPOKE id
+        (``{base}-{role}``) so its get_status / reporting carries the right
+        identity — NOT the base agent's spoke_id (multi-role: the base stays
+        "agent" and the role lives on its own connection)."""
         cls = self._load_role_class(role_name)
         if cls is None:
-            return False
-        inst = cls(self.spoke_id, role_config)
+            return None
+        inst = cls(sub_spoke_id or f"{self.spoke_id}-{role_name}", role_config)
         # Spokes that aren't BaseSpoke subclasses (cppm's CPPMSpoke) get wrapped
-        # so handle_command/get_status delegation in GenericAgent stays uniform.
+        # so handle_command/get_status delegation stays uniform.
         if not isinstance(inst, BaseSpoke):
             inst = _RoleAdapter(inst)
-        self._role = inst
-        self._role_name = role_name
-        logger.info("Role loaded: %s", role_name)
-        return True
+        logger.info("Role loaded: %s (sub-spoke %s)", role_name,
+                    sub_spoke_id or f"{self.spoke_id}-{role_name}")
+        return inst
 
     async def _install_role(self, role_name: str) -> dict:
         """Clone the role repo (if external) and install its system + Python deps."""
@@ -264,14 +271,18 @@ class GenericAgent(BaseSpoke):
             return {"status": "SUCCESS",
                     "roles": list(_ROLE_MAP.keys()),
                     "deploy_roles": list(_DEPLOY_ROLES.keys()),
-                    "active": self._role_name or "none"}
+                    "active": [{"role": r,
+                                "sub_spoke_id": e["conn"].spoke_id,
+                                "module_type": e["conn"].module_type}
+                               for r, e in self._roles.items()]}
 
         if cmd == "LOAD_ROLE":
             role_name = data.get("role")
             if not role_name:
                 return {"status": "ERROR", "message": "role is required"}
             # Deploy roles: run an external install script in the background.
-            # The agent does not morph; the deployed service connects separately.
+            # The agent does not host a sub-spoke; the deployed service connects
+            # separately under its own spoke_id.
             if role_name in _DEPLOY_ROLES:
                 if self._deploy_task and not self._deploy_task.done():
                     return {"status": "ERROR",
@@ -287,58 +298,130 @@ class GenericAgent(BaseSpoke):
             if role_name not in _ROLE_MAP:
                 return {"status": "ERROR", "message": f"Unknown role '{role_name}'",
                         "available": list(_ROLE_MAP.keys()) + list(_DEPLOY_ROLES.keys())}
+            # Idempotent: re-loading an already-hosted role is a no-op success
+            # (boot _seed + a runtime LOAD could otherwise double-spawn).
+            if role_name in self._roles:
+                return {"status": "SUCCESS", "role": role_name,
+                        "sub_spoke_id": self._roles[role_name]["conn"].spoke_id,
+                        "module_type": _ROLE_MAP[role_name][2],
+                        "message": f"Role '{role_name}' already loaded"}
             install_result = await self._install_role(role_name)
             if install_result["status"] != "SUCCESS":
                 return install_result
             role_config = data.get("config", {})
-            ok = self._sync_load_role(role_name, role_config)
-            if not ok:
+            sub_spoke_id = f"{self.spoke_id}-{role_name}"
+            inst = self._sync_load_role(role_name, role_config, sub_spoke_id)
+            if inst is None:
                 return {"status": "ERROR", "message": f"Could not load role '{role_name}'"}
             _, _, mtype, _ = _ROLE_MAP[role_name]
-            # Re-register with the hub under the role's module_type (become a
-            # spoke of that type). request_morph updates control_plane.module_type
-            # and reconnects; the response below is sent before the close fires.
+            # Spawn a RoleConnection sub-spoke: an independent hub connection
+            # under {base}-{role} with the role's module_type. The hub routes
+            # role commands to it via get_spoke_by_type and auto-approves it via
+            # the parent agent (parent_spoke_id). The base agent does NOT morph
+            # — it stays "agent" and hosts this sub-spoke alongside any others.
             cp = getattr(self, "control_plane", None)
-            if cp is not None:
-                await cp.request_morph(mtype)
+            if cp is None:
+                return {"status": "ERROR",
+                        "message": "Agent control plane not wired — cannot spawn role connection"}
+            from control_plane import RoleConnection  # lazy: avoid circular import
+            conn = RoleConnection(role_name, base_id=self.spoke_id,
+                                  hub_url=cp.hub_url, role_instance=inst)
+            task = asyncio.create_task(conn.run())
+            self._roles[role_name] = {"instance": inst, "conn": conn, "task": task}
+            self._persist_loaded_roles()
             return {"status": "SUCCESS", "role": role_name, "module_type": mtype,
-                    "message": f"Agent morphed to '{role_name}' ({mtype})"}
+                    "sub_spoke_id": sub_spoke_id,
+                    "message": f"Role '{role_name}' hosted as sub-spoke {sub_spoke_id} ({mtype})"}
 
         if cmd == "GET_DEPLOY_STATUS":
             return {"status": "SUCCESS", "deploy": self._deploy_status,
                     "active_role": self._deploy_role}
 
         if cmd == "UNLOAD_ROLE":
-            if self._role:
-                old = self._role_name
-                self._role = None
-                self._role_name = None
-                # Revert to a plain agent (module_type "agent") + reconnect so
-                # the hub re-registers it under Generic Nodes again.
-                cp = getattr(self, "control_plane", None)
-                if cp is not None:
-                    await cp.request_morph("agent")
-                return {"status": "SUCCESS", "message": f"Role '{old}' unloaded"}
-            return {"status": "SUCCESS", "message": "No active role"}
+            role_name = data.get("role")
+            # Backward-compat: no role arg + exactly one loaded role → that one.
+            if not role_name:
+                if len(self._roles) == 1:
+                    role_name = next(iter(self._roles))
+                elif not self._roles:
+                    return {"status": "SUCCESS", "message": "No active role"}
+                else:
+                    return {"status": "ERROR",
+                            "message": "Multiple roles loaded; specify 'role' to unload",
+                            "active": list(self._roles.keys())}
+            if role_name not in self._roles:
+                return {"status": "ERROR", "message": f"Role '{role_name}' is not loaded",
+                        "active": list(self._roles.keys())}
+            await self._stop_role(role_name)
+            return {"status": "SUCCESS", "role": role_name,
+                    "message": f"Role '{role_name}' unloaded (sub-spoke disconnected)"}
 
         if cmd == "UPDATE_CONFIG":
             self.config = data
             return {"status": "SUCCESS"}
 
-        # Delegate to active role
-        if self._role:
-            return await self._role.handle_command(command_type, data)
+        # Role commands are NOT handled here: they arrive on each role's own
+        # RoleConnection (routed by module_type), not on the base agent. The
+        # base handles only its own commands above (+ deploy roles).
 
-        return {"status": "ERROR", "message": f"No active role. Use LOAD_ROLE first."}
+        return {"status": "ERROR",
+                "message": f"Unknown agent command '{command_type}'. "
+                           f"Loaded roles: {list(self._roles.keys()) or 'none'}"}
+
+    async def _stop_role(self, role_name: str) -> None:
+        """Tear down a loaded role: cancel its RoleConnection run loop (the
+        async-with websockets.connect closes the socket on CancelledError),
+        await cleanup, drop it from the registry, and persist LOADED_ROLES so
+        the role is not re-spawned on the next boot."""
+        entry = self._roles.pop(role_name, None)
+        if entry is None:
+            return
+        conn = entry["conn"]
+        task = entry["task"]
+        try:
+            ws = getattr(conn, "_hub_ws", None)
+            if ws is not None:
+                await ws.close()
+        except Exception as e:
+            logger.debug("close on unload of %s failed: %s", role_name, e)
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        logger.info("Role unloaded: %s (sub-spoke %s)", role_name, conn.spoke_id)
+        self._persist_loaded_roles()
+
+    def _persist_loaded_roles(self) -> None:
+        """Persist the loaded-role set to .env (LOADED_ROLES) so runtime-loaded
+        roles survive a self-update restart (the RoleConnection SPOKE_UPDATE
+        handler exits the whole process; AgentControlPlane re-spawns every role
+        in LOADED_ROLES on the next boot). No-op if the control plane isn't
+        wired yet (e.g. construction-time)."""
+        cp = getattr(self, "control_plane", None)
+        if cp is None:
+            return
+        roles = sorted(self._roles.keys())
+        try:
+            cp._persist_secret_to_env("LOADED_ROLES", ",".join(roles))
+        except Exception as e:
+            logger.warning("Could not persist LOADED_ROLES: %s", e)
 
     async def get_status(self) -> Dict[str, Any]:
-        if self._role:
-            return await self._role.get_status()
+        roles_status = []
+        for role_name, entry in self._roles.items():
+            conn = entry["conn"]
+            roles_status.append({
+                "role": role_name,
+                "sub_spoke_id": conn.spoke_id,
+                "module_type": conn.module_type,
+                "connected": getattr(conn, "_hub_ws", None) is not None,
+            })
         return {
             "spoke_id": self.spoke_id,
             "module":   "generic-agent",
-            "role":     "none",
-            "status":   "IDLE",
+            "roles":    roles_status,
+            "status":   "IDLE" if not self._roles else "HOSTING",
             "deploy":   self._deploy_status,
         }
 

@@ -227,79 +227,240 @@ def test_install_role_le_installs_certbot(tmp_path, monkeypatch):
     assert repo_url and repo_url.endswith("/le.git")
 
 
-# ── 5. morph: agent can be a spoke or an agent ───────────────────────────────
+# ── 5. multi-role: one agent hosts many role sub-spokes ─────────────────────
 
 class _FakeControlPlane:
-    """Records request_morph calls (no real reconnect)."""
+    """Stands in for AgentControlPlane during LOAD/UNLOAD_ROLE: supplies hub_url
+    + a no-op .env persister so GenericAgent can spawn RoleConnection sub-spokes
+    without a real hub connection. Records nothing — the base no longer morphs."""
     def __init__(self):
-        self.morphs = []
-    async def request_morph(self, module_type):
-        self.morphs.append(module_type)
+        self.env = {}
+    hub_url = "ws://hub:8765"
+    def _persist_secret_to_env(self, key, val):
+        self.env[key] = val
 
 
-def test_load_role_calls_request_morph_with_role_module_type(monkeypatch):
-    agent = GenericAgent("agent-1", {})
-    cp = _FakeControlPlane()
-    agent.control_plane = cp
-    # Avoid real install/load: stub _install_role + _load_role_class.
+class _FakeRoleConn:
+    """Replaces RoleConnection so LOAD_ROLE doesn't open a real WS. Records
+    construction args; run() completes immediately so the spawned task finishes
+    without connecting. Mirrors the real RoleConnection's identity rules."""
+    instances = []
+    def __init__(self, role_name, base_id, hub_url, role_instance, secret=None):
+        self.role_name = role_name
+        self.base_id = base_id
+        self.hub_url = hub_url
+        self.role_instance = role_instance
+        self.spoke_id = f"{base_id}-{role_name}"
+        self.module_type = _ROLE_MAP[role_name][2]
+        self._hub_ws = None
+        _FakeRoleConn.instances.append(self)
+    async def run(self):
+        return None
+
+
+def _stub_role_load(agent, monkeypatch):
+    """Avoid real install/load: _install_role → SUCCESS, _load_role_class → a
+    trivial class. RoleConnection is patched separately per test."""
     async def _fake_install(role_name):
         return {"status": "SUCCESS"}
     class _FakeRole:
         def __init__(self, spoke_id, config):
-            pass
+            self.spoke_id = spoke_id
+            self.config = config
     monkeypatch.setattr(agent, "_install_role", _fake_install)
     monkeypatch.setattr(agent, "_load_role_class", lambda rn: _FakeRole)
-    res = asyncio.run(agent.handle_command(
-        "LOAD_ROLE", {"role": "network"}))
-    assert res["status"] == "SUCCESS"
-    assert res["module_type"] == "nw"
-    assert cp.morphs == ["nw"], f"expected request_morph('nw'), got {cp.morphs}"
 
 
-def test_unload_role_morphs_back_to_agent():
+def _patch_role_conn(monkeypatch):
+    _FakeRoleConn.instances = []
+    monkeypatch.setattr(cp_module, "RoleConnection", _FakeRoleConn)
+
+
+def test_base_module_type_stays_agent():
+    """The base AgentControlPlane connection never morphs — it stays 'agent' so
+    it can host role sub-spokes. The old request_morph/_reconnect_after_morph
+    path is gone."""
+    cp = AgentControlPlane("agent-1", "s", "", "ws://hub:8765")
+    assert cp.module_type == "agent"
+    assert not hasattr(cp, "request_morph")
+    assert not hasattr(cp, "_reconnect_after_morph")
+
+
+def test_load_role_spawns_roleconnection_subspoke(monkeypatch):
+    """LOAD_ROLE hosts a RoleConnection sub-spoke under {base}-{role} with the
+    role's module_type. No morph — the base stays 'agent'."""
     agent = GenericAgent("agent-1", {})
     cp = _FakeControlPlane()
     agent.control_plane = cp
-    agent._role = _FakeControlPlane()   # truthy placeholder
-    agent._role_name = "network"
-    res = asyncio.run(agent.handle_command("UNLOAD_ROLE", {}))
-    assert res["status"] == "SUCCESS"
-    assert agent._role is None and agent._role_name is None
-    assert cp.morphs == ["agent"], f"expected request_morph('agent'), got {cp.morphs}"
-
-
-def test_request_morph_updates_module_type_and_closes_ws(monkeypatch):
-    cp = AgentControlPlane("agent-1", "s", "", "ws://hub:8765", "")
-    assert cp.module_type == "agent"
-    closed = {"yes": False}
-    class _FakeWS:
-        async def close(self):
-            closed["yes"] = True
-    cp._hub_ws = _FakeWS()
-
-    # Speed up the 0.2s reconnect delay without breaking scheduler yields.
-    _real_sleep = asyncio.sleep
-    async def _fast_sleep(*a, **k):
-        await _real_sleep(0)
-    monkeypatch.setattr(cp_module.asyncio, "sleep", _fast_sleep)
+    _stub_role_load(agent, monkeypatch)
+    _patch_role_conn(monkeypatch)
 
     async def _run():
-        await cp.request_morph("firewall")
-        await cp._morph_task       # drain the scheduled reconnect
-    asyncio.run(_run())
-    assert cp.module_type == "firewall"
-    assert closed["yes"] is True, "request_morph did not close the hub WS"
+        res = await agent.handle_command("LOAD_ROLE", {"role": "network"})
+        await asyncio.sleep(0)          # let the spawned sub-spoke task settle
+        return res
+    res = asyncio.run(_run())
+
+    assert res["status"] == "SUCCESS"
+    assert res["module_type"] == "nw"
+    assert res["sub_spoke_id"] == "agent-1-network"
+    # Exactly one RoleConnection spawned, identity-correct.
+    assert len(_FakeRoleConn.instances) == 1
+    conn = _FakeRoleConn.instances[0]
+    assert conn.spoke_id == "agent-1-network"
+    assert conn.module_type == "nw"
+    assert conn.base_id == "agent-1"
+    # The role is registered on the agent + persisted to LOADED_ROLES for boot.
+    assert "network" in agent._roles
+    assert cp.env.get("LOADED_ROLES") == "network"
 
 
-def test_spoke_update_for_sibling_role_pulls_sibling_repo(tmp_path, monkeypatch):
-    """Morphed to a sibling role (network) → SPOKE_UPDATE must pull /opt/lm/nw,
-    NOT /opt/lm (the lm repo). Verifies the corruption-prevention override."""
-    cp = AgentControlPlane("agent-1", "s", "", "ws://hub:8765", "")
-    class _Ag:
-        _role_name = "network"
-    cp.modules["agent"] = _Ag()
-    monkeypatch.setattr(cp, "_lm_root", lambda: tmp_path)
-    (tmp_path / "nw").mkdir()       # role repo dir present
+def test_load_multiple_roles_hosts_all_concurrently(monkeypatch):
+    """dns + dhcp on one agent → both hosted; GET_AVAILABLE_ROLES lists both with
+    their sub_spoke_ids + module_types."""
+    agent = GenericAgent("agent-1", {})
+    cp = _FakeControlPlane()
+    agent.control_plane = cp
+    _stub_role_load(agent, monkeypatch)
+    _patch_role_conn(monkeypatch)
+
+    async def _run():
+        r1 = await agent.handle_command("LOAD_ROLE", {"role": "dns"})
+        r2 = await agent.handle_command("LOAD_ROLE", {"role": "dhcp"})
+        await asyncio.sleep(0)
+        avail = await agent.handle_command("GET_AVAILABLE_ROLES", {})
+        return r1, r2, avail
+    r1, r2, avail = asyncio.run(_run())
+
+    assert r1["sub_spoke_id"] == "agent-1-dns"
+    assert r2["sub_spoke_id"] == "agent-1-dhcp"
+    assert set(agent._roles.keys()) == {"dns", "dhcp"}
+    active = {a["role"]: a for a in avail["active"]}
+    assert active["dns"] == {"role": "dns", "sub_spoke_id": "agent-1-dns",
+                             "module_type": "dns"}
+    assert active["dhcp"] == {"role": "dhcp", "sub_spoke_id": "agent-1-dhcp",
+                              "module_type": "dhcp"}
+    # LOADED_ROLES persisted as a sorted comma-list of both roles.
+    assert cp.env.get("LOADED_ROLES") == "dhcp,dns"
+
+
+def test_load_role_is_idempotent(monkeypatch):
+    """Re-loading an already-hosted role is a no-op success — boot _seed + a
+    runtime LOAD could otherwise double-spawn a sub-spoke."""
+    agent = GenericAgent("agent-1", {})
+    agent.control_plane = _FakeControlPlane()
+    _stub_role_load(agent, monkeypatch)
+    _patch_role_conn(monkeypatch)
+
+    async def _run():
+        first = await agent.handle_command("LOAD_ROLE", {"role": "dns"})
+        await asyncio.sleep(0)
+        second = await agent.handle_command("LOAD_ROLE", {"role": "dns"})
+        return first, second
+    first, second = asyncio.run(_run())
+
+    assert first["status"] == "SUCCESS" and second["status"] == "SUCCESS"
+    assert second["sub_spoke_id"] == "agent-1-dns"
+    # Only one RoleConnection was ever spawned.
+    assert len(_FakeRoleConn.instances) == 1
+
+
+def test_unload_role_removes_only_that_role(monkeypatch):
+    """UNLOAD_ROLE {role} tears down that sub-spoke only; siblings stay loaded."""
+    agent = GenericAgent("agent-1", {})
+    cp = _FakeControlPlane()
+    agent.control_plane = cp
+    _stub_role_load(agent, monkeypatch)
+    _patch_role_conn(monkeypatch)
+
+    async def _run():
+        await agent.handle_command("LOAD_ROLE", {"role": "dns"})
+        await agent.handle_command("LOAD_ROLE", {"role": "dhcp"})
+        await asyncio.sleep(0)
+        res = await agent.handle_command("UNLOAD_ROLE", {"role": "dns"})
+        return res
+    res = asyncio.run(_run())
+
+    assert res["status"] == "SUCCESS"
+    assert res["role"] == "dns"
+    assert "dns" not in agent._roles and "dhcp" in agent._roles
+    # LOADED_ROLES updated to the remaining role only.
+    assert cp.env.get("LOADED_ROLES") == "dhcp"
+
+
+def test_unload_role_without_arg_unloads_the_one_loaded(monkeypatch):
+    """Backward-compat: no role arg + exactly one loaded role → unload that one."""
+    agent = GenericAgent("agent-1", {})
+    agent.control_plane = _FakeControlPlane()
+    _stub_role_load(agent, monkeypatch)
+    _patch_role_conn(monkeypatch)
+
+    async def _run():
+        await agent.handle_command("LOAD_ROLE", {"role": "dns"})
+        await asyncio.sleep(0)
+        return await agent.handle_command("UNLOAD_ROLE", {})
+    res = asyncio.run(_run())
+
+    assert res["status"] == "SUCCESS"
+    assert agent._roles == {}
+
+
+def test_unload_role_without_arg_errors_when_multiple_loaded(monkeypatch):
+    """No role arg + >1 loaded role → ERROR listing active roles (ambiguous)."""
+    agent = GenericAgent("agent-1", {})
+    agent.control_plane = _FakeControlPlane()
+    _stub_role_load(agent, monkeypatch)
+    _patch_role_conn(monkeypatch)
+
+    async def _run():
+        await agent.handle_command("LOAD_ROLE", {"role": "dns"})
+        await agent.handle_command("LOAD_ROLE", {"role": "dhcp"})
+        await asyncio.sleep(0)
+        return await agent.handle_command("UNLOAD_ROLE", {})
+    res = asyncio.run(_run())
+
+    assert res["status"] == "ERROR"
+    assert set(res["active"]) == {"dns", "dhcp"}
+
+
+# ── 6. RoleConnection: identity, auth, per-role SPOKE_UPDATE ─────────────────
+
+class _FakeRoleInstance:
+    """Minimal role instance for RoleConnection construction."""
+    def __init__(self, spoke_id, config):
+        self.spoke_id = spoke_id
+        self.config = config
+
+
+def test_role_connection_identity_and_auth_fields():
+    """A RoleConnection speaks as {base}-{role}, claims parent_spoke_id, and
+    sends NO install_uuid (so the clone-rename reconciler won't clobber the
+    base). Its module_type is the role's; secret persistence + updater are no-ops."""
+    inst = _FakeRoleInstance("agent-1-network", {})
+    conn = cp_module.RoleConnection(
+        "network", base_id="agent-1", hub_url="ws://hub:8765",
+        role_instance=inst)
+    assert conn.spoke_id == "agent-1-network"
+    assert conn.module_type == "nw"
+    assert conn.parent_spoke_id == "agent-1"
+    assert conn.install_uuid == ""               # critical: no install_uuid
+    assert conn._extra_auth_fields() == {"parent_spoke_id": "agent-1"}
+    # Sub-spokes re-provision via parent-auto-approve each boot — persist + the
+    # redundant per-role updater are suppressed (base agent handles self-update).
+    assert conn.start_updater_worker() is None
+    assert conn._persist_session_secret("x") is None
+    assert conn._persist_hub_secret("x") is None
+
+
+def test_role_connection_spoke_update_pulls_its_sibling_repo(tmp_path, monkeypatch):
+    """A RoleConnection for network → SPOKE_UPDATE pulls /opt/lm/nw (ITS sibling
+    repo), never /opt/lm (the lm repo). Verifies the per-role override."""
+    inst = _FakeRoleInstance("agent-1-network", {})
+    conn = cp_module.RoleConnection(
+        "network", base_id="agent-1", hub_url="ws://hub:8765",
+        role_instance=inst)
+    monkeypatch.setattr(conn, "_lm_root", lambda: tmp_path)
+    (tmp_path / "nw").mkdir()                   # sibling repo dir present
 
     calls = []
     import subprocess as _sp
@@ -310,28 +471,25 @@ def test_spoke_update_for_sibling_role_pulls_sibling_repo(tmp_path, monkeypatch)
     def _fake_rungit(args, cwd):
         calls.append({"cmd": ["git"] + list(args), "cwd": cwd})
         return _sp.CompletedProcess(args=args, returncode=0, stdout="abc", stderr="")
-    monkeypatch.setattr(cp, "_run_git", _fake_rungit)
+    monkeypatch.setattr(conn, "_run_git", _fake_rungit)
 
-    res = asyncio.run(cp.handle_system_command(
+    res = asyncio.run(conn.handle_system_command(
         "SPOKE_UPDATE", {"repo_url": "https://github.com/lbockenstedt/nw.git"}))
     assert res["status"] == "SUCCESS", res
-    # Every git op targeted the sibling dir, never /opt/lm itself.
     cwds = [str(c["cwd"]) for c in calls if c.get("cwd")]
-    assert cwds, "no git calls recorded"
-    assert all(c.endswith("/nw") for c in cwds), f"pull targeted wrong dir: {cwds}"
-    # remote set-url used the nw repo URL (from _ROLE_MAP, not the payload).
+    assert cwds and all(c.endswith("/nw") for c in cwds), \
+        f"pull targeted wrong dir: {cwds}"
     seturl = [c for c in calls if "set-url" in c["cmd"]]
     assert seturl and any("github.com/lbockenstedt/nw.git" in a for a in seturl[0]["cmd"]), \
         f"set-url did not use the nw URL: {seturl}"
 
 
-def test_spoke_update_unmorphed_delegates_to_base_handler(monkeypatch):
-    """No active role → SPOKE_UPDATE delegates to BaseControlPlane (pulls /opt/lm,
-    the lm repo / agent code) — existing behavior preserved."""
-    cp = AgentControlPlane("agent-1", "s", "", "ws://hub:8765", "")
-    class _Ag:
-        _role_name = None
-    cp.modules["agent"] = _Ag()
+def test_role_connection_inrepo_role_delegates_spoke_update_to_base(monkeypatch):
+    """dns ships in the lm repo (repo_url None) → RoleConnection SPOKE_UPDATE
+    delegates to the BaseControlPlane handler (pulls /opt/lm), not a sibling."""
+    inst = _FakeRoleInstance("agent-1-dns", {})
+    conn = cp_module.RoleConnection(
+        "dns", base_id="agent-1", hub_url="ws://hub:8765", role_instance=inst)
 
     sentinel = {"status": "SUCCESS", "message": "base-handled"}
     recorded = {}
@@ -340,14 +498,20 @@ def test_spoke_update_unmorphed_delegates_to_base_handler(monkeypatch):
         return sentinel
     monkeypatch.setattr(BaseControlPlane, "handle_system_command", _fake_super)
 
-    res = asyncio.run(cp.handle_system_command(
-        "SPOKE_UPDATE", {"repo_url": "https://github.com/lbockenstedt/lm.git"}))
+    res = asyncio.run(conn.handle_system_command("SPOKE_UPDATE", {}))
     assert res == sentinel
-    assert recorded.get("called")[0] == "SPOKE_UPDATE", "super not invoked"
+    assert recorded["called"][0] == "SPOKE_UPDATE"
 
-    # Non-SPOKE_UPDATE system commands also pass through to base.
-    async def _fake_super2(self_, cmd_type, data):
-        return {"status": "SUCCESS", "message": "passthrough"}
-    monkeypatch.setattr(BaseControlPlane, "handle_system_command", _fake_super2)
-    res2 = asyncio.run(cp.handle_system_command("SPOKE_GET_STATUS", {}))
-    assert res2["message"] == "passthrough"
+
+def test_role_connection_spoke_update_errors_when_repo_absent(tmp_path, monkeypatch):
+    """Sibling repo dir missing → SPOKE_UPDATE returns ERROR (no git ops on a
+    nonexistent cwd), instead of crashing or pulling the wrong tree."""
+    inst = _FakeRoleInstance("agent-1-network", {})
+    conn = cp_module.RoleConnection(
+        "network", base_id="agent-1", hub_url="ws://hub:8765",
+        role_instance=inst)
+    monkeypatch.setattr(conn, "_lm_root", lambda: tmp_path)
+    # NOTE: no (tmp_path / "nw").mkdir() — repo absent.
+    res = asyncio.run(conn.handle_system_command("SPOKE_UPDATE", {}))
+    assert res["status"] == "ERROR"
+    assert "nw" in res["message"]

@@ -405,6 +405,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.spoke_versions: Dict[str, str] = {}
         # { spoke_id: module_type } — e.g. {"pxmx-spoke-1": "hypervisor"}
         self.spoke_module_types: Dict[str, str] = {}
+        # { spoke_id: parent_spoke_id } — for multi-role generic agents: each
+        # loaded role opens a sub-spoke under {base}-{role} that claims the base
+        # agent as its parent in the WS auth frame. The hub auto-approves such a
+        # sub-spoke when its parent agent is already approved + connected (see
+        # _can_parent_auto_approve / _auto_approve_pending_subspokes), binding it
+        # to the parent's tenant so a Generic Node hosting N roles needs only the
+        # one base-agent approval.
+        self.spoke_parent_map: Dict[str, str] = {}
 
         # --- System Diagnostics ---
         self.logs = deque(maxlen=500)
@@ -1140,6 +1148,53 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 payload=MessagePayload(type="APPROVED", data={}))
             await self.send_to_spoke(approval_msg)
             await self.push_config_to_spoke(spoke_id)
+        # Multi-role generic agent: when a base agent (module_type "agent") gets
+        # approved — by admin, PSK, or a connect-with-secret — sweep up any of
+        # its role sub-spokes that connected first and are still pending. Covers
+        # the sub-before-parent connect ordering; sub-after-parent is handled at
+        # the sub-spoke's connect (parent-auto-approve block in handle_connection).
+        if self.spoke_module_types.get(spoke_id) == "agent":
+            await self._auto_approve_pending_subspokes(spoke_id)
+
+    def _can_parent_auto_approve(self, spoke_id: str, parent_spoke_id: str) -> bool:
+        """True if ``spoke_id`` may be auto-approved via ``parent_spoke_id``:
+        the sub-spoke id is prefix-tied to the claimed parent (``{parent}-…``,
+        the agent's own id-construction convention), the parent is approved +
+        currently connected, and the parent is a generic agent
+        (module_type ``"agent"``). Same deploy-claim trust class as PSK
+        (the claim transits the WS but is never logged as a secret)."""
+        if not parent_spoke_id or not spoke_id.startswith(parent_spoke_id + "-"):
+            return False
+        return (parent_spoke_id in self.approved_modules
+                and parent_spoke_id in self.active_connections
+                and self.spoke_module_types.get(parent_spoke_id) == "agent")
+
+    async def _auto_approve_pending_subspokes(self, parent_spoke_id: str) -> None:
+        """Approve every still-pending role sub-spoke of an approved base agent.
+
+        Called from ``approve_and_bind_spoke`` when a base agent (module_type
+        ``"agent"``) is approved. Each pending sub-spoke that claimed this parent
+        (``spoke_parent_map[sid] == parent``) and is prefix-tied to it gets
+        approved + bound to the parent's tenant on its already-open connection
+        (``approve_and_bind_spoke`` pushes the session key + APPROVED + config
+        to the live ws). Sub-spokes whose parent isn't this one — or that share
+        the prefix by coincidence — are left untouched."""
+        tenant = self.state.get_spoke_tenant(parent_spoke_id) or ""
+        for sid in list(self.active_connections.keys()):
+            if sid == parent_spoke_id:
+                continue
+            if self.approved_modules.get(sid, False):
+                continue
+            if self.spoke_parent_map.get(sid) != parent_spoke_id:
+                continue
+            if not self._can_parent_auto_approve(sid, parent_spoke_id):
+                continue
+            logger.info(f"Parent auto-approve (sweep): {sid} via parent "
+                        f"{parent_spoke_id} (tenant={tenant or 'unassigned'}).")
+            await self.approve_and_bind_spoke(sid, tenant)
+            self.record_spoke_event(sid, "parent_auto_approve",
+                                    f"parent={parent_spoke_id}")
+        self.known_modules = self.state.system_state["known_modules"]
 
     async def _try_psk_self_provision(self, spoke_id: str, tenant_hint: str, psk: str) -> bool:
         """Validate a spoke's onboarding PSK against the tenant's stored PSKs
@@ -1472,6 +1527,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # spoke's re-keyed material is in place for get_valid_key below.
             install_uuid = (auth_data.get("install_uuid") or "").strip()
             spoke_hostname = (auth_data.get("hostname") or "").strip()
+            # Multi-role generic agent: a role sub-spoke (spoke_id {base}-{role})
+            # claims its base agent as parent so the hub can auto-approve it via
+            # the parent. Absent on every other spoke (no behavior change).
+            parent_spoke_id = (auth_data.get("parent_spoke_id") or "").strip()
 
             logger.info(f"Auth attempt: spoke_id={spoke_id}, secret={f'{secret[:4]}...{secret[-4:]}' if secret and len(secret) > 8 else '***'}")
             self.record_spoke_event(spoke_id, "auth_attempt", f"secret={'yes' if secret else 'no'} module_type={module_type}")
@@ -1620,6 +1679,30 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         f"(tenant_hint={tenant_id_hint}): invalid/missing PSK — pending admin approval.")
                     self.record_spoke_event(spoke_id, "psk_self_provision_failed",
                                             f"tenant_hint={tenant_id_hint}")
+
+            # Multi-role generic agent — parent-auto-approve: a role sub-spoke
+            # (spoke_id {base}-{role}) that claimed a parent agent in its auth
+            # frame is auto-approved + tenant-bound when the parent is already
+            # approved + connected + module_type "agent", reusing the same
+            # approve_and_bind_spoke state machine as admin/PSK approval. This
+            # runs alongside the PSK block (both are claim-based auto-approve)
+            # and before the approval check so the approved branch pushes the
+            # session key + config. Non-fatal: parent not approved/connected or
+            # the id isn't prefix-tied to the claimed parent → fall through to
+            # pending admin approval as today. Record the parent claim either way
+            # so a later base-agent approval can sweep up waiting sub-spokes
+            # (_auto_approve_pending_subspokes covers the sub-before-parent order).
+            if parent_spoke_id:
+                self.spoke_parent_map[spoke_id] = parent_spoke_id
+                if (not self.approved_modules.get(spoke_id, False)
+                        and self._can_parent_auto_approve(spoke_id, parent_spoke_id)):
+                    tenant = self.state.get_spoke_tenant(parent_spoke_id) or ""
+                    logger.info(f"Parent auto-approve: {spoke_id} via parent "
+                                f"{parent_spoke_id} (tenant={tenant or 'unassigned'}).")
+                    await self.approve_and_bind_spoke(spoke_id, tenant)
+                    self.known_modules = self.state.system_state["known_modules"]
+                    self.record_spoke_event(spoke_id, "parent_auto_approve",
+                                            f"parent={parent_spoke_id}")
 
             # Check if the module is already approved
             if not self.approved_modules.get(spoke_id, False):
@@ -1879,6 +1962,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.active_connection_key_ids.pop(spoke_id, None)
             if spoke_id:
                 self.spoke_module_types.pop(spoke_id, None)
+                self.spoke_parent_map.pop(spoke_id, None)
 
     # ── Update pipeline (extracted) ───────────────────────────────────────
     # get_local_version / get_remote_version / _is_git_repo / _download_update /

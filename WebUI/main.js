@@ -6215,11 +6215,23 @@ async function loadGenericAgents() {
             ...diagSpokes.map(s => [s.spoke_id, { ...s, authenticated: s.authenticated }]),
         ].reverse()).values()];
 
+        // Fetch each agent's hosted roles in parallel (multi-role: a generic
+        // node hosts N role sub-spokes; show them as badges in the Roles column).
+        const rolesByAgent = new Map(await Promise.all(
+            allAgents.filter(a => a.authenticated).map(async a => [a.spoke_id, await fetchLoadedRoles(a.spoke_id)])
+        ));
+
         bodyEl.innerHTML = allAgents.map(agent => {
             const online = agent.authenticated;
-            const mtype = agent.module_type || 'agent';
-            const roleLabel = mtype === 'agent' ? '<span class="text-slate-400 italic">none (idle)</span>'
-                : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${mtype}</span>`;
+            const active = rolesByAgent.get(agent.spoke_id) || [];
+            let roleLabel;
+            if (active.length > 0) {
+                roleLabel = active.map(a =>
+                    `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${a.sub_spoke_id}">${AGENT_ROLES[a.role]?.name || a.role}</span>`
+                ).join(' ');
+            } else {
+                roleLabel = '<span class="text-slate-400 italic">none (idle)</span>';
+            }
             return `
             <tr class="hover:bg-slate-50 transition-colors">
                 <td class="px-4 py-3 font-mono text-xs text-slate-700">${agent.spoke_id}</td>
@@ -6238,7 +6250,22 @@ async function loadGenericAgents() {
     }
 }
 
-function showLoadRoleModal(spokeId) {
+async function fetchLoadedRoles(spokeId) {
+    // Fetch the roles a generic agent is currently hosting (GET_AVAILABLE_ROLES
+    // via the generic command relay). Returns the `active` list (possibly empty).
+    try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'GET_AVAILABLE_ROLES' }),
+        });
+        if (!res.ok) return [];
+        const data = await res.json();
+        return Array.isArray(data.active) ? data.active : [];
+    } catch (e) { return []; }
+}
+
+async function showLoadRoleModal(spokeId) {
     const existing = document.getElementById('load-role-modal');
     if (existing) existing.remove();
 
@@ -6246,7 +6273,7 @@ function showLoadRoleModal(spokeId) {
     modal.id = 'load-role-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4';
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200">
             <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
                 <div>
                     <h3 class="text-lg font-bold text-slate-800">Load Role</h3>
@@ -6256,31 +6283,49 @@ function showLoadRoleModal(spokeId) {
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
-            <div class="p-6 space-y-5">
-                <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">Role</label>
-                    <select id="role-select" onchange="updateRoleDesc(this.value)"
-                        class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                        <option value="">— Select a role —</option>
-                        ${Object.entries(AGENT_ROLES).map(([id, r]) =>
-                            `<option value="${id}">${r.name}</option>`
-                        ).join('')}
-                    </select>
+            <div class="p-6 space-y-4">
+                <p class="text-xs text-slate-500">A generic agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">${spokeId}-&lt;role&gt;</code>) that auto-approves via this agent.</p>
+                <div id="role-list" class="space-y-2 max-h-72 overflow-y-auto">
+                    <p class="text-xs text-slate-400 italic">Loading roles…</p>
                 </div>
                 <p id="role-desc" class="text-xs text-slate-500 italic min-h-[1.5rem]"></p>
                 <div id="role-note" class="p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
-                    The agent will install required system packages (e.g. unbound, kea) and activate the role.
-                    This may take 30–60 seconds. The spoke will reconnect as the new service type.
+                    The agent installs required system packages (e.g. unbound, kea, certbot) and hosts the role as a new sub-spoke. This may take 30–60 seconds per role.
                 </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="document.getElementById('load-role-modal').remove()"
                     class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
                 <button onclick="loadRole('${spokeId}')"
-                    class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Activate Role</button>
+                    class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Activate Selected</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
+
+    const active = await fetchLoadedRoles(spokeId);
+    const loadedByRole = new Map((active || []).map(a => [a.role, a]));
+    const list = document.getElementById('role-list');
+    const rows = Object.entries(AGENT_ROLES).map(([id, r]) => {
+        const loaded = loadedByRole.get(id);
+        if (loaded) {
+            return `
+                <div class="flex items-center justify-between gap-3 p-2 rounded-md bg-green-50 border border-green-200">
+                    <label class="flex items-center gap-2 text-sm text-slate-700 flex-1 min-w-0">
+                        <span class="font-medium truncate">${r.name}</span>
+                        <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-green-600 text-white shrink-0">loaded</span>
+                    </label>
+                    <button onclick="unloadRole('${spokeId}','${id}')"
+                        class="text-xs font-bold text-red-600 hover:text-red-700 transition-colors shrink-0">Unload</button>
+                </div>`;
+        }
+        const deployNote = r.deploy ? ' (background deploy — own service)' : '';
+        return `
+            <label class="flex items-center gap-2 p-2 rounded-md border border-slate-200 hover:bg-slate-50 transition-colors cursor-pointer" onfocus="updateRoleDesc('${id}')" onmouseover="updateRoleDesc('${id}')">
+                <input type="checkbox" value="${id}" class="role-check w-4 h-4 rounded text-[#01A982] focus:ring-green-500" onchange="updateRoleDesc('${id}')">
+                <span class="text-sm text-slate-700 font-medium">${r.name}${deployNote}</span>
+            </label>`;
+    }).join('');
+    list.innerHTML = rows || '<p class="text-xs text-slate-400 italic">No roles available.</p>';
 }
 
 function updateRoleDesc(roleId) {
@@ -6292,41 +6337,64 @@ function updateRoleDesc(roleId) {
         if (r?.deploy) {
             note.innerHTML = `The agent runs the role's install script in the background and stays online as a generic agent. The deployed service installs as a systemd unit and connects to the Hub as its own agent. This can take a few minutes; watch <strong>Setup → Spokes & Agents</strong> for the new agent to appear.`;
         } else {
-            note.textContent = `The agent will install required system packages (e.g. unbound, kea, certbot) and activate the role. This may take 30–60 seconds. The spoke will reconnect as the new service type.`;
+            note.textContent = `The agent installs required system packages (e.g. unbound, kea, certbot) and hosts the role as a new sub-spoke, auto-approved via this agent. This may take 30–60 seconds; the new spoke appears in Spokes & Agents as Connected.`;
         }
     }
 }
 
 async function loadRole(spokeId) {
-    const roleId = document.getElementById('role-select')?.value;
-    if (!roleId) { alert('Please select a role.'); return; }
+    const checked = Array.from(document.querySelectorAll('.role-check:checked')).map(el => el.value);
+    if (checked.length === 0) { alert('Select at least one role to load.'); return; }
 
     const btn = document.querySelector('#load-role-modal button[onclick^="loadRole"]');
     if (btn) { btn.disabled = true; btn.textContent = 'Activating…'; }
 
+    const results = [];
+    for (const roleId of checked) {
+        try {
+            const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/load-role`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role: roleId }),
+            });
+            const data = await res.json();
+            const name = AGENT_ROLES[roleId]?.name || roleId;
+            if (res.ok && data.status === 'SUCCESS') {
+                if (data.deploy) {
+                    results.push(`✓ ${name}: deployment started (watch Spokes & Agents)`);
+                } else {
+                    results.push(`✓ ${name}: sub-spoke ${data.sub_spoke_id || spokeId + '-' + roleId} connecting (auto-approved)`);
+                }
+            } else {
+                results.push(`✗ ${name}: ${data.detail || data.message || JSON.stringify(data)}`);
+            }
+        } catch (err) {
+            results.push(`✗ ${AGENT_ROLES[roleId]?.name || roleId}: ${err.message}`);
+        }
+    }
+    document.getElementById('load-role-modal')?.remove();
+    alert(`Role activation on ${spokeId}:\n\n${results.join('\n')}`);
+    loadGenericAgents();
+}
+
+async function unloadRole(spokeId, role) {
+    if (!confirm(`Unload role "${AGENT_ROLES[role]?.name || role}" from ${spokeId}? Its sub-spoke will disconnect.`)) return;
     try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/load-role`, {
+        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ role: roleId }),
+            body: JSON.stringify({ command: 'UNLOAD_ROLE', data: { role } }),
         });
         const data = await res.json();
-        if (res.ok && data.status === 'SUCCESS') {
-            document.getElementById('load-role-modal')?.remove();
-            const roleName = AGENT_ROLES[roleId]?.name || roleId;
-            if (data.deploy) {
-                alert(`Deployment of "${roleName}" started on ${spokeId}.\n\nThe install runs in the background and may take a few minutes. The deployed service will connect to the Hub as its own agent — watch Setup → Spokes & Agents for it to appear (then approve it).`);
-            } else {
-                alert(`Role "${roleName}" activated on ${spokeId}.\nThe agent will reconnect as module type "${data.module_type}".`);
-            }
+        if (res.ok && (data.status === 'SUCCESS' || data.payload?.status === 'SUCCESS')) {
+            alert(`Role "${AGENT_ROLES[role]?.name || role}" unloaded from ${spokeId}.`);
             loadGenericAgents();
+            showLoadRoleModal(spokeId);
         } else {
-            alert('Failed to load role: ' + (data.detail || data.message || JSON.stringify(data)));
-            if (btn) { btn.disabled = false; btn.textContent = 'Activate Role'; }
+            alert('Failed to unload role: ' + (data.detail || data.message || JSON.stringify(data)));
         }
     } catch (err) {
         alert('Error: ' + err.message);
-        if (btn) { btn.disabled = false; btn.textContent = 'Activate Role'; }
     }
 }
 
@@ -6335,11 +6403,13 @@ function showDeployAgentInfo() {
     if (existing) existing.remove();
 
     const hubHost = window.location.hostname;
-    // Protocol-aware: if the WebUI itself was loaded over HTTPS the hub serves
-    // wss on 443 (port implicit); otherwise fall back to legacy ws://...:8765.
+    // Unified-443: the hub serves wss on 443 with path /ws/spoke for spokes.
+    // Over HTTPS (the normal case) the port is implicit; HTTP dev fallback uses
+    // the legacy plaintext loopback port. The agent appends /ws/spoke itself,
+    // but pinning the full path avoids any ambiguity on a pathless pin.
     const hubWS   = window.location.protocol === "https:"
-        ? `wss://${hubHost}`
-        : `ws://${hubHost}:8765`;
+        ? `wss://${hubHost}:443/ws/spoke`
+        : `ws://${hubHost}:443/ws/spoke`;
     const cmd = `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n  | sudo bash -s -- \\\n    --hub ${hubWS} \\\n    --id my-agent-1`;
 
     const modal = document.createElement('div');
