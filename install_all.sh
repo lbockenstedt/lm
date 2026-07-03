@@ -13,6 +13,15 @@ REINSTALL=false
 RESET_SECRETS=false
 RESET_USERS=false
 EXCLUDE=()
+# TLS cert verification is OFF by default (self-signed hub cert → encrypt
+# without authenticating; the lab default). Pass --tls-verify to make
+# co-located spokes/agents verify the hub cert against a CA. With no
+# --tls-ca-cert, the hub's own generated cert ($TLS_CERT) is used as the CA
+# (works because co-located clients share the box). Supply --tls-ca-cert
+# <path> to verify against a different CA. The env values are resolved below
+# (after $TLS_CERT is defined) and written into .env + the unit.
+TLS_VERIFY=false
+TLS_CA_CERT=""
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -20,6 +29,8 @@ while [[ "$#" -gt 0 ]]; do
         --reset-secrets) RESET_SECRETS=true ;;
         --reset-users)   RESET_USERS=true ;;
         --exclude)       shift; IFS=',' read -ra EXCLUDE <<< "$1" ;;
+        --tls-verify)    TLS_VERIFY=true ;;
+        --tls-ca-cert)   shift; TLS_CA_CERT="$1" ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
     shift
@@ -1034,6 +1045,17 @@ if [ -f "$TLS_KEY" ]; then
     chmod 600 "$TLS_KEY"
     chown "$SvcUser:$SvcUser" "$TLS_KEY" "$TLS_CERT" 2>/dev/null || true
 fi
+# Resolve the verify flag into env values now that $TLS_CERT is defined.
+# Co-located clients can verify against the hub's own generated cert (it doubles
+# as the trust anchor); an explicit --tls-ca-cert overrides that.
+if $TLS_VERIFY; then
+    HUB_TLS_VERIFY_ENV=1
+    HUB_TLS_CA_ENV="${TLS_CA_CERT:-$TLS_CERT}"
+else
+    HUB_TLS_VERIFY_ENV=0
+    HUB_TLS_CA_ENV=""
+fi
+
 # Also surface the TLS knobs in .env so non-unit launches (start_all.sh) see them.
 if ! grep -q "^LM_TLS_CERT=" "$BASE_DIR/.env" 2>/dev/null; then
     {
@@ -1041,9 +1063,26 @@ if ! grep -q "^LM_TLS_CERT=" "$BASE_DIR/.env" 2>/dev/null; then
         echo "LM_TLS_KEY=$TLS_KEY"
         echo "LM_TLS_PORT=443"
         echo "LM_PXMX_AGENT_PORT=8443"
-        echo "LM_HUB_TLS_VERIFY=0"
+        echo "LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV"
+        [ -n "$HUB_TLS_CA_ENV" ] && echo "LM_HUB_CA_CERT=$HUB_TLS_CA_ENV"
     } >> "$BASE_DIR/.env"
 fi
+# A re-install with --tls-verify (or removing it) should update an existing .env
+# rather than leaving a stale verify setting from a prior install.
+if [ -f "$BASE_DIR/.env" ]; then
+    sed -i "s|^LM_HUB_TLS_VERIFY=.*|LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV|" "$BASE_DIR/.env" 2>/dev/null || true
+    if [ -n "$HUB_TLS_CA_ENV" ]; then
+        grep -q "^LM_HUB_CA_CERT=" "$BASE_DIR/.env" 2>/dev/null \
+            && sed -i "s|^LM_HUB_CA_CERT=.*|LM_HUB_CA_CERT=$HUB_TLS_CA_ENV|" "$BASE_DIR/.env" \
+            || echo "LM_HUB_CA_CERT=$HUB_TLS_CA_ENV" >> "$BASE_DIR/.env"
+    else
+        sed -i "/^LM_HUB_CA_CERT=/d" "$BASE_DIR/.env" 2>/dev/null || true
+    fi
+fi
+
+# Build the verify fragment for the unit Environment line (empty when off).
+_TLS_CA_UNIT=""
+[ -n "$HUB_TLS_CA_ENV" ] && _TLS_CA_UNIT=" LM_HUB_CA_CERT=$HUB_TLS_CA_ENV"
 
 # Create the systemd service unit
 cat <<EOF > /etc/systemd/system/lm.service
@@ -1058,10 +1097,11 @@ User=$SvcUser
 WorkingDirectory=$BASE_DIR
 EnvironmentFile=-$BASE_DIR/.env
 # TLS: cert/key for the wss listener (0.0.0.0:443); pxmx agent listener port
-# (8443, avoids colliding with the hub's 443 when co-located); verification off
-# by default (self-signed) — set LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT to verify.
+# (8443, avoids colliding with the hub's 443 when co-located). Cert verification
+# is OFF by default (self-signed → encrypt without auth); --tls-verify at install
+# sets LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT so co-located spokes/agents verify.
 # AmbientCapabilities lets svc_lm bind the privileged 443 without being root.
-Environment=LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443 LM_HUB_TLS_VERIFY=0
+Environment=LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443 LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV$_TLS_CA_UNIT
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStart=/bin/bash $BASE_DIR/start_all.sh

@@ -37,16 +37,42 @@ log_e() {
     log "ERROR: $1"
 }
 
+# TLS cert verification is OFF by default (self-signed hub cert → encrypt
+# without auth). Pass --tls-verify to make the agent verify the hub cert. With
+# no --tls-ca-cert, /opt/lm/certs/hub.crt is used if present (co-located with
+# the hub); otherwise --tls-ca-cert <path> is required (a remote agent has no
+# local hub cert to default to).
+TLS_VERIFY=false
+TLS_CA_CERT=""
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --spoke-url) SPOKE_URL="$2"; shift 2 ;;
         --id) SPOKE_ID="$2"; shift 2 ;;
         --secret) SPOKE_SECRET="$2"; shift 2 ;;
         --hub-secret) HUB_SECRET="$2"; shift 2 ;;
+        --tls-verify)  TLS_VERIFY=true; shift ;;
+        --tls-ca-cert) TLS_CA_CERT="$2"; shift 2 ;;
         --clone) CLONE_ONLY=true; shift ;;
         *) echo "Unknown parameter passed: $1"; exit 1 ;;
     esac
 done
+
+# Resolve the verify flag into unit env values.
+if $TLS_VERIFY; then
+    if [ -z "$TLS_CA_CERT" ]; then
+        if [ -f /opt/lm/certs/hub.crt ]; then
+            TLS_CA_CERT=/opt/lm/certs/hub.crt
+        else
+            echo "❌ --tls-verify requires --tls-ca-cert <path> (no /opt/lm/certs/hub.crt on this box — copy the hub CA cert here first)."
+            exit 1
+        fi
+    fi
+    HUB_TLS_VERIFY_ENV=1
+    HUB_TLS_CA_ENV="$TLS_CA_CERT"
+else
+    HUB_TLS_VERIFY_ENV=0
+    HUB_TLS_CA_ENV=""
+fi
 
 # --spoke-url is optional: omit it (or pass "auto") and the agent auto-discovers
 # the hub (same-box ws://127.0.0.1:8765, remote wss://<hub>:443 via mDNS/DNS).
@@ -156,6 +182,11 @@ EXEC_ARGS=(--spoke-url "\"$SPOKE_URL\"")
 [ -n "$SPOKE_SECRET" ] && EXEC_ARGS+=(--secret "\"$SPOKE_SECRET\"")
 EXEC_START="$(printf ' %s' "${EXEC_ARGS[@]}")"
 EXEC_START="${EXEC_START:1}"
+# Build the TLS-verify Environment fragment (empty when verification is off,
+# the default). When --tls-verify was passed, set LM_HUB_TLS_VERIFY=1 +
+# LM_HUB_CA_CERT so the agent authenticates the hub cert.
+_TLS_ENV="LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV"
+[ -n "$HUB_TLS_CA_ENV" ] && _TLS_ENV="$_TLS_ENV LM_HUB_CA_CERT=$HUB_TLS_CA_ENV"
 cat <<EOF > /etc/systemd/system/lm-generic-agent.service
 [Unit]
 Description=Lab Manager Generic Leaf Agent
@@ -165,6 +196,7 @@ After=network.target
 User=svc_lm
 WorkingDirectory=$ROOT_DIR/generic-agent
 Environment="PYTHONPATH=$ROOT_DIR"
+Environment=$_TLS_ENV
 ExecStart=$ROOT_DIR/generic-agent/venv/bin/python3 $ROOT_DIR/generic-agent/src/agent.py ${EXEC_START}
 StandardOutput=append:/var/log/lm/agent.log
 StandardError=append:/var/log/lm/agent.log

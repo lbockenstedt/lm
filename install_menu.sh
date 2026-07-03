@@ -228,6 +228,19 @@ run_generic_install() {
     done
     read -rp "Hub root secret [optional, Enter to skip]: " HUB_SECRET || HUB_SECRET=""
 
+    # TLS cert verification is OFF by default (encrypt without authenticating
+    # the self-signed hub cert). Opt in here only if you want the agent to
+    # verify the hub cert — a co-located agent finds /opt/lm/certs/hub.crt
+    # automatically; a remote agent must supply the hub CA cert path.
+    local TLS_VERIFY=0 TLS_CA_CERT=""
+    local tls_ans
+    read -rp "Verify hub TLS certificate? (requires the hub CA cert) [y/N]: " tls_ans || tls_ans=""
+    if [[ "$tls_ans" =~ ^[Yy]$ ]]; then
+        TLS_VERIFY=1
+        read -rp "Hub CA cert path [/opt/lm/certs/hub.crt]: " TLS_CA_CERT || TLS_CA_CERT=""
+        [ -z "$TLS_CA_CERT" ] && TLS_CA_CERT="/opt/lm/certs/hub.crt"
+    fi
+
     local clone_ans
     read -rp "Clone-only mode? (install but don't start the service) [y/N]: " clone_ans || clone_ans=""
     [[ "$clone_ans" =~ ^[Yy]$ ]] && CLONE_ONLY=1 || CLONE_ONLY=0
@@ -235,6 +248,7 @@ run_generic_install() {
     local generic_args=(--spoke-url "$SPOKE_URL" --id "$SPOKE_ID")
     [ -n "$SPOKE_SECRET" ] && generic_args+=(--secret "$SPOKE_SECRET")
     [ -n "$HUB_SECRET" ]  && generic_args+=(--hub-secret "$HUB_SECRET")
+    [ "$TLS_VERIFY" -eq 1 ] && generic_args+=(--tls-verify --tls-ca-cert "$TLS_CA_CERT")
     [ "$CLONE_ONLY" -eq 1 ] && generic_args+=(--clone)
 
     echo
@@ -242,6 +256,7 @@ run_generic_install() {
     echo "${C_BOLD}Spoke URL        :${C_RESET} $SPOKE_URL"
     echo "${C_BOLD}Spoke ID         :${C_RESET} $SPOKE_ID"
     echo "${C_BOLD}Secret           :${C_RESET} $([ -n "$SPOKE_SECRET" ] && echo provided || echo 'none — will await admin approval')"
+    echo "${C_BOLD}TLS verify       :${C_RESET} $([ "$TLS_VERIFY" -eq 1 ] && echo "yes (CA=$TLS_CA_CERT)" || echo 'no — encrypt without auth')"
     echo "${C_BOLD}Clone-only       :${C_RESET} $([ "$CLONE_ONLY" -eq 1 ] && echo yes || echo no)"
     echo
 
