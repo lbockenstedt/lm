@@ -68,6 +68,22 @@ log_e() {
     log "ERROR: $1"
 }
 
+# Probe the hub /status endpoint across every port/scheme the hub may be on:
+#   - https://localhost:443  (unified wss hub, TLS on — the new default)
+#   - http://localhost:443   (unified plaintext hub, no cert)
+#   - http://localhost:8000  (legacy hub OR the LM_TLS_PORT=8000 boot probe)
+# Returns 0 (and sets $? 0) as soon as any one answers 200. Used by the
+# boot/rollback health checks so a rolled-back pre-unified hub (8000) AND the
+# unified 443 hub are both detected without knowing which is running.
+_status_200() {
+    local url code
+    for url in "https://localhost:443/status" "http://localhost:443/status" "http://localhost:8000/status"; do
+        code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 3 "$url" 2>/dev/null || echo 000)"
+        [ "$code" = "200" ] && return 0
+    done
+    return 1
+}
+
 # ------------------------------------------------------------------
 # Update recovery helpers (manual path) — THIN WRAPPERS over the Python
 # entrypoint core/src/update_recovery.py, which is the SINGLE SOURCE OF TRUTH
@@ -234,10 +250,11 @@ rollback_hub_code() {
     systemctl restart lm 2>/dev/null || true
 
     # Re-poll /status for the rolled-back boot.
-    local waited=0 code
+    local waited=0 code=000
     while [ "$waited" -lt "$RECOVERY_ROLLBACK_TIMEOUT" ]; do
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:8000/status 2>/dev/null || echo 000)"
-        [ "$code" = "200" ] && break
+        # Rolled-back code may be pre-unified (hub on 8000) or unified (443) —
+        # _status_200 probes both schemes/ports so either is detected.
+        if _status_200; then code=200; break; fi
         sleep 2; waited=$((waited + 2))
     done
     if [ "$code" != "200" ]; then
@@ -368,7 +385,10 @@ ROLLBACK_TIMEOUT=30
 KEEP_BACKUPS=3
 SVC_USER="svc_lm"
 BASE_DIR="/opt/lm"
-STATUS_URL="http://localhost:8000/status"
+# After `systemctl restart lm` the hub runs the unified :443 surface (wss with
+# a cert, plaintext 443 without). _status_200 (defined above) probes 443 wss,
+# 443 plain, and legacy 8000 so the watchdog detects the hub regardless of TLS
+# or a rolled-back pre-unified code path.
 RECOVERY_PY="$BASE_DIR/core/src/update_recovery.py"
 
 # Re-exec under a transient systemd unit outside lm's cgroup so this process
@@ -384,10 +404,9 @@ if [ -z "${LM_UPDATE_RESTART_GUARD:-}" ]; then
 fi
 
 poll_status() {  # $1=timeout  -> 0 if /status returns 200 within timeout
-    local timeout="$1" waited=0 code
+    local timeout="$1" waited=0
     while [ "$waited" -lt "$timeout" ]; do
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$STATUS_URL" 2>/dev/null || echo 000)"
-        [ "$code" = "200" ] && return 0
+        _status_200 && return 0
         sleep 2; waited=$((waited + 2))
     done
     return 1
@@ -535,7 +554,9 @@ chmod 440 /etc/sudoers.d/lm
 # those services in a permanent "failed" state through the rest of the install.
 log_c "🧹 Cleaning up existing Hub processes..."
 systemctl stop lm || true
-for port in 8000 8765; do
+# Clear the unified 443 port (real hub), 8000 (boot probe / legacy hub), and
+# 8765 (legacy spoke-WS) so nothing stale can hold the hub's bind.
+for port in 443 8000 8765; do
     pid=$(lsof -t -i :$port || true)
     if [ -n "$pid" ]; then
         kill -9 $pid || true
@@ -812,19 +833,29 @@ else:
     print(f"  All update_sources already present -> {f}")
 PYEOF
 
-log_c "🚀 Starting Hub (API & WebUI)..."
+log_c "🚀 Starting Hub (boot probe on :8000)..."
+# Boot-crash probe: start the hub on an UNPRIVILEGED port (LM_TLS_PORT=8000) so
+# svc_lm can bind it without the systemd unit's CAP_NET_BIND_SERVICE. This probe
+# only exists to catch a new-version boot crash (import/DB errors) BEFORE we
+# commit the unified :443 unit, and to persist pre-approvals into the hub state
+# file. The cert + .env + systemd unit are written below (after the module
+# installs) and the final `systemctl restart lm` brings up the REAL hub on the
+# unified 0.0.0.0:443 wss surface (svc_lm + ambient cap + cert). Spoke units are
+# baked with the real wss://localhost:443/ws/spoke URL (HUB_WS below) and
+# reconnect-loop (Restart=always) until that restart lands.
 export PYTHONPATH="$BASE_DIR/core/src"
 if command -v sudo >/dev/null 2>&1; then
     sudo -u $SvcUser env \
         LM_FERNET_KEY="$LM_FERNET_KEY" \
+        LM_TLS_PORT=8000 \
         PYTHONPATH="$PYTHONPATH" \
         nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
 else
-    nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
+    LM_TLS_PORT=8000 nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
 fi
 
 # Give the Hub API a moment to fully start and stabilize
-log_c "⏳ Waiting for Hub API and WebSocket server to initialize..."
+log_c "⏳ Waiting for Hub boot probe to initialize..."
 HUB_WAIT=0
 HUB_TIMEOUT=60
 until curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/status | grep -q "200"; do
@@ -843,8 +874,12 @@ sleep 2
 recovery_clear_pending
 recovery_prune_backups "$RECOVERY_KEEP_BACKUPS"
 
+# HUB_API targets the :8000 boot probe (above) for in-install REST calls
+# (pre-approval below writes to the shared state file, which the real :443 hub
+# inherits at the final restart). HUB_WS is the REAL unified spoke-WS URL baked
+# into every spoke unit — spokes reconnect-loop until the :443 hub lands.
 HUB_API="http://localhost:8000"
-HUB_WS="ws://localhost:8765"
+HUB_WS="wss://localhost:443/ws/spoke"
 
 # Anti-lockout: ensure the first admin account always retains admin + protected status.
 # Runs on every install/update so manual state edits can never permanently lock out the admin.
@@ -1021,10 +1056,11 @@ chown -R $SvcUser:$SvcUser "$BASE_DIR"
 # If a future change moves these scripts out of the repo root, re-add an explicit
 # copy from the clone source here.
 
-# ── Self-signed TLS cert for the hub's wss listener (remote spokes/agents) ──
-# When present the hub serves plaintext on 127.0.0.1:8765 (loopback, co-located
-# spokes) AND wss on 0.0.0.0:443 (remote). Skip gracefully if openssl is absent
-# — the hub then falls back to legacy single plaintext 0.0.0.0:8765.
+# ── Self-signed TLS cert for the hub's unified :443 wss surface ──
+# With the cert present the hub serves wss on 0.0.0.0:443 (WebUI + REST +
+# /ws/spoke + /ws/console); co-located spokes dial wss://127.0.0.1:443/ws/spoke
+# with verify-off. Without a cert the hub serves plaintext 0.0.0.0:443. Skip
+# gracefully if openssl is absent — the hub then falls back to plaintext :443.
 TLS_CERT_DIR="$BASE_DIR/certs"
 TLS_CERT="$TLS_CERT_DIR/hub.crt"
 TLS_KEY="$TLS_CERT_DIR/hub.key"
@@ -1096,11 +1132,13 @@ RemainAfterExit=yes
 User=$SvcUser
 WorkingDirectory=$BASE_DIR
 EnvironmentFile=-$BASE_DIR/.env
-# TLS: cert/key for the wss listener (0.0.0.0:443); pxmx agent listener port
-# (8443, avoids colliding with the hub's 443 when co-located). Cert verification
-# is OFF by default (self-signed → encrypt without auth); --tls-verify at install
-# sets LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT so co-located spokes/agents verify.
-# AmbientCapabilities lets svc_lm bind the privileged 443 without being root.
+# Unified :443 surface: the hub's single uvicorn serves WebUI + REST + /ws/spoke
+# + /ws/console on 0.0.0.0:443 (wss with a cert, plaintext without). The pxmx
+# agent listener stays on 8443 for now (Phase 1 — the hub proxies /ws/agent to
+# it in Phase 2). Cert verification is OFF by default (self-signed → encrypt
+# without auth); --tls-verify at install sets LM_HUB_TLS_VERIFY=1 +
+# LM_HUB_CA_CERT so co-located spokes/agents verify. AmbientCapabilities lets
+# svc_lm bind the privileged 443 without being root.
 Environment=LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443 LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV$_TLS_CA_UNIT
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
@@ -1158,6 +1196,6 @@ log_c "🎉 Native installation complete!"
 log_c "📂 All modules are located in: $BASE_DIR"
 log_c "⚙️ Service 'lm' is enabled and running."
 log_c "🚀 To manage the system: systemctl start|stop|restart lm"
-log_c "🌐 Hub API & Dashboard: http://$(hostname -I | awk '{print $1}'):8000"
+log_c "🌐 Hub API & Dashboard: https://$(hostname -I | awk '{print $1}'):443  (wss; --tls-verify off by default → accept the self-signed cert)"
 log_c "📦 Version: $(cat "$BASE_DIR/core/VERSION" 2>/dev/null || echo unknown)"
 log_c "📝 Logs: $INSTALL_LOG (install) and $LOG_DIR/hub.log (hub runtime) — check these if the hub later misbehaves."

@@ -125,6 +125,55 @@ import uvicorn
 
 logger = logging.getLogger("Hub")
 
+
+class StarletteWSAdapter:
+    """Expose the ``websockets``-lib server-socket API on top of a Starlette
+    ``WebSocket`` so ``LabManagerHub.handle_connection`` (and ``send_to_spoke``,
+    which calls ``ws.send(...)`` on stored connections) can run UNCHANGED on a
+    FastAPI/uvicorn WebSocket route — the unified-443 merge.
+
+    The spoke protocol is JSON text only (no binary, no subprotocols), so
+    ``recv``/``send`` map to ``receive_text``/``send_text``. ``async for msg in
+    ws:`` maps to a receive loop that stops on ``WebSocketDisconnect``.
+    ``remote_address`` maps to ``websocket.client``. Sends are serialized with an
+    ``asyncio.Lock`` so the many hub background loops that push to a given spoke
+    can't interleave ASGI send frames on the same socket.
+    """
+
+    def __init__(self, websocket: WebSocket):
+        self._ws = websocket
+        self._send_lock = asyncio.Lock()
+
+    @property
+    def remote_address(self):
+        client = self._ws.client  # (host, port) tuple or None pre-accept
+        return tuple(client) if client else None
+
+    async def recv(self) -> str:
+        return await self._ws.receive_text()
+
+    async def send(self, data: str) -> None:
+        async with self._send_lock:
+            await self._ws.send_text(data)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        try:
+            async with self._send_lock:
+                await self._ws.close(code=code, reason=reason)
+        except Exception:
+            pass
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        # Starlette raises WebSocketDisconnect on close; let it propagate
+        # (async-for only catches StopAsyncIteration) so handle_connection's
+        # ``except`` clean-close branch runs — sets telemetry DISCONNECTED and
+        # records the connection_closed event, matching the websockets-lib path.
+        return await self._ws.receive_text()
+
+
 from messaging.protocol import Message, MessageHeader, MessagePayload
 from simulations.routes import register_simulations_routes
 from simulations.tenant_filter import (filter_items_by_prefixes,
@@ -3451,6 +3500,22 @@ def create_app(hub):
         return {"session_id": session_id, "ws_token": ws_token,
                 "ticket": ticket, "expires_in": 60}
 
+    @app.websocket("/ws/spoke")
+    async def spoke_ws(websocket: WebSocket):
+        """Spoke/agent-control WebSocket on the unified :443 uvicorn.
+
+        Replaces the former bare ``websockets.serve`` listener (which lived in
+        the hub's main asyncio loop on 8765 loopback / 443 wss). The hub's
+        ``handle_connection`` owns the full mutual-auth handshake + signed-frame
+        dispatch loop; it expects a ``websockets``-lib-style socket, so wrap the
+        Starlette ``WebSocket`` in ``StarletteWSAdapter`` and hand it off. The
+        route ``accept()``s first — ``handle_connection`` does its own
+        ``recv``/``send``/``close`` and never calls accept.
+        """
+        hub = app.state.hub
+        await websocket.accept()
+        await hub.handle_connection(StarletteWSAdapter(websocket))
+
     @app.websocket("/ws/console/{session_id}")
     async def pxmx_console_ws(websocket: WebSocket, session_id: str):
         """Browser↔Proxmox VNC byte relay (agent-terminates-WSS).
@@ -5342,7 +5407,15 @@ def create_app(hub):
             if not script_path:
                 raise HTTPException(status_code=404, detail="Module not found")
 
-            hub_url = f"ws://{hub.host}:{hub.port}"
+            # Co-located module spokes target the hub's unified loopback surface
+            # (wss://127.0.0.1:443/ws/spoke when TLS is on, ws://…:443/ws/spoke
+            # otherwise) — NOT the retired ws://0.0.0.0:8765 bare listener. The
+            # spoke connects to this URL verbatim; LM_HUB_TLS_VERIFY=0 (set in
+            # each co-located spoke's .env by its installer) skips self-signed
+            # cert verification on the loopback wss.
+            scheme = "wss" if getattr(hub, "tls_enabled", False) else "ws"
+            hub_port = getattr(hub, "tls_port", 443)
+            hub_url = f"{scheme}://127.0.0.1:{hub_port}/ws/spoke"
 
             spoke_id = custom_spoke_id if custom_spoke_id else f"{module_id}-spoke-1"
 
@@ -6669,10 +6742,33 @@ def create_app(hub):
 
     return app
 
-def run_api_server(hub, port=8000):
-    """Build the app and run the uvicorn server that hosts the Hub HTTP/WS surface.
-
-    Blocks the caller; this is the Hub's main long-running coroutine host.
+def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
+    """Build the awaitable uvicorn ``Server`` for the unified hub surface on a
+    single port (443). ``Server.serve()`` is awaitable (vs blocking
+    ``uvicorn.run``) so the hub ``await``s it as a task in its main asyncio loop
+    — letting the ``/ws/spoke`` route, HTTP routes, and all hub background loops
+    share one event loop (no cross-loop hazard). Pass ``ssl_certfile`` /
+    ``ssl_keyfile`` when a cert is configured so uvicorn serves wss; without a
+    cert it serves plaintext on the same port (legacy no-TLS fallback).
     """
     app = create_app(hub)
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    cfg_kwargs = {"host": host, "port": port, "log_config": None}
+    if tls_cert and tls_key:
+        cfg_kwargs["ssl_certfile"] = tls_cert
+        cfg_kwargs["ssl_keyfile"] = tls_key
+    return uvicorn.Server(uvicorn.Config(app, **cfg_kwargs))
+
+
+def run_api_server(hub, port=443):
+    """Standalone BLOCKING launcher (``uvicorn.run``). The hub itself uses
+    ``build_server()`` + in-loop ``Server.serve()`` so WebSocket routes share the
+    hub's asyncio loop; this blocking form is kept for direct/standalone
+    launches. Honors ``LM_TLS_CERT``/``LM_TLS_KEY`` for wss; otherwise plaintext.
+    """
+    app = create_app(hub)
+    cert = os.environ.get("LM_TLS_CERT", "").strip()
+    key = os.environ.get("LM_TLS_KEY", "").strip()
+    if cert and key:
+        uvicorn.run(app, host="0.0.0.0", port=port, ssl_certfile=cert, ssl_keyfile=key)
+    else:
+        uvicorn.run(app, host="0.0.0.0", port=port)

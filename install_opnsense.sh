@@ -2,7 +2,7 @@
 set -e
 
 # Default Configuration
-HUB_URL="ws://localhost:8765"
+HUB_URL="wss://localhost:443/ws/spoke"
 SPOKE_ID="${SPOKE_ID:-opn-$(hostname -s)}"
 SPOKE_SECRET="lm-secret"
 

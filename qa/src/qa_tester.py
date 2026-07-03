@@ -116,11 +116,12 @@ async def test_mutual_auth():
     Test scenario: Spoke connects to Hub, both authenticate.
     """
     # This requires a running Hub.
-    # For the purpose of this QA module, we assume Hub is at localhost:8765
+    # For the purpose of this QA module, we assume Hub is at the unified :443
+    # surface (wss, /ws/spoke route).
     spoke_id = "qa-spoke-1"
     secret = os.getenv("QA_SPOKE_SECRET", "qa-secret-123")
     hub_secret = os.getenv("QA_HUB_SECRET", "hub-secret-abc") # This must match the Hub's hub_secret.json
-    hub_url = os.getenv("QA_HUB_URL", "ws://localhost:8765")
+    hub_url = os.getenv("QA_HUB_URL", "wss://localhost:443/ws/spoke")
 
     tester = QASpokeMock(spoke_id, secret, hub_secret, hub_url)
     try:

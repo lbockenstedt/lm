@@ -47,7 +47,7 @@ log_e() {
 # CONFIGURATION: Hub Server URL
 # ------------------------------------------------------------------
 HUB_URL_FILE="$ROOT_DIR/hub_url.conf"
-DEFAULT_HUB_URL="ws://localhost:8765"
+DEFAULT_HUB_URL="wss://localhost:443/ws/spoke"
 
 # Parse arguments for --server
 HUB_SERVER_OVERRIDE=""
@@ -79,7 +79,9 @@ log_c "🚀 Launching Lab Manager Stack (Native API-Only Mode)..."
 BASE_DIR="$(pwd)"
 
 log_c "🧹 Cleaning up existing processes..."
-for port in 8000 8765; do
+# Clear the unified 443 port (real hub), 8000 (boot probe / legacy hub), and
+# 8765 (legacy spoke-WS) so nothing stale can hold the hub's bind.
+for port in 443 8000 8765; do
     PORT_PID=$(lsof -t -i :$port || true)
     if [ -n "$PORT_PID" ]; then
         log_c "Found process $PORT_PID on port $port. Killing it..."
@@ -179,6 +181,12 @@ done
 log_c ""
 log_c "🎉 All systems launched in the background!"
 log_c "------------------------------------------------------------------"
-log_c "Hub API:   ${HUB_URL//ws\:\/\/http\:\/\/}"
+# HUB_URL is the spoke-WS URL (wss://…:443/ws/spoke). Derive the WebUI/API URL
+# from it for the printed dashboard line (wss→https, strip the /ws/spoke path).
+_HUB_WEBUI="${HUB_URL%%/ws/spoke}"
+_HUB_WEBUI="${_HUB_WEBUI/wss:\/\//https:\/\/}"
+_HUB_WEBUI="${_HUB_WEBUI/ws:\/\//http:\/\/}"
+log_c "Hub WebUI: $_HUB_WEBUI"
+log_c "Spoke WS:  $HUB_URL"
 log_c "------------------------------------------------------------------"
 log_c "🕒 End time: $(date)"

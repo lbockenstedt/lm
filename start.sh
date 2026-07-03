@@ -41,7 +41,7 @@ UI_PID=$!
 # 3. Start Client Simulator (CS) Module as a Spoke
 echo "Starting Client Simulator module..."
 cd "$ROOT_DIR/cs"
-./venv/bin/python3 src/control_plane.py --id cs-spoke-1 --secret la-manager-secret --hub ws://localhost:8765 &
+./venv/bin/python3 src/control_plane.py --id cs-spoke-1 --secret la-manager-secret --hub wss://localhost:443/ws/spoke &
 CS_PID=$!
 
 echo ""

@@ -50,10 +50,19 @@ def _fake_zeroconf_module():
     return mod
 
 
-def _make_hub(port=8765):
-    """A bare LabManagerHub with just the attributes the broadcast needs."""
+def _make_hub(port=8765, tls_port=443):
+    """A bare LabManagerHub with just the attributes the broadcast needs.
+
+    Under the unified-443 merge the mDNS ``ServiceInfo.port`` is the hub's
+    ``tls_port`` (443 — the single unified surface), NOT the legacy
+    ``self.port``. ``pxmx_agent_port`` is deliberately left unset so the
+    ``getattr(..., 8766)`` fallback exercises the legacy agent-port path.
+    """
     hub = main.LabManagerHub.__new__(main.LabManagerHub)
     hub.port = port
+    hub.tls_port = tls_port
+    hub.tls_enabled = False
+    hub.advertise_tls = False
     return hub
 
 
@@ -70,7 +79,7 @@ def test_build_service_info_shape(monkeypatch):
     kw = info.kwargs
     assert kw["type_"] == "_lm-hub._tcp.local."
     assert kw["name"] == "lm-hub._lm-hub._tcp.local."
-    assert kw["port"] == 8765
+    assert kw["port"] == 443          # unified srv_port = tls_port (no longer 8765)
     assert kw["server"] == "lm-hub.local."
     assert kw["properties"]["agent_port"] == "8766"
     assert "version" in kw["properties"]

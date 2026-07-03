@@ -190,7 +190,7 @@ def test_build_service_info_advertises_tls_when_enabled(monkeypatch):
     assert props["tls_port"] == "443"        # remote callers switch to wss://:443
     assert props["agent_port"] == "8443"     # pxmx agent listener (TLS-aware)
     assert props["version"] == "9.9.9"
-    assert info.kwargs["port"] == 8765       # the loopback/plain port stays 8765
+    assert info.kwargs["port"] == 443        # unified srv_port = tls_port (443)
 
 
 def test_build_service_info_no_tls_txt_when_disabled(monkeypatch):

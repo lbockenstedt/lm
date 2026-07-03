@@ -57,6 +57,7 @@ from collections import deque
 from typing import Dict, Any, Optional, List
 from dataclasses import asdict
 import websockets
+from starlette.websockets import WebSocketDisconnect
 
 from messaging.protocol import Message, MessageHeader, MessagePayload, Acknowledgement
 from messaging.mailbox import Mailbox
@@ -66,7 +67,7 @@ from state.manager import StateManager
 from simulations.broadcaster import SimulationsBroadcaster
 from simulations.store import SimulationsStore
 from security.auth_manager import AuthManager, LDAPAuthProvider
-from api import run_api_server, _save_sessions
+from api import build_server, _save_sessions
 from update_recovery import (
     snapshot_code, write_pending, clear_pending,
     is_version_bad, clear_bad_versions_older_than,
@@ -317,6 +318,26 @@ from cert_distribution import (  # noqa: E402
 )
 
 
+def _mdns_hub_properties(version_str: str, pxmx_agent_port: int,
+                         tls_port: int, advertise_tls: bool) -> Dict[str, str]:
+    """Build the mDNS TXT records the hub advertises for ``_lm-hub._tcp.local.``.
+
+    Pure (no ``self``) so the TLS-advertisement gate is unit-testable without
+    constructing a LabManagerHub. ``advertise_tls`` (not ``tls_enabled``) gates
+    ``tls_port`` so a reverse-proxy/TLS-termination deployment — where the hub
+    serves plaintext behind the proxy (no cert → ``tls_enabled`` False) yet
+    callers dial ``wss://<proxy>:443`` — can still tell discovery to use wss
+    (set ``LM_HUB_ADVERTISE_TLS=1``). Without it, discovery returns
+    ``ws://<ip>:443`` and a plaintext WebSocket handshake to a TLS port fails
+    "did not receive a valid HTTP response".
+    """
+    props = {"version": str(version_str),
+             "agent_port": str(pxmx_agent_port)}
+    if advertise_tls:
+        props["tls_port"] = str(tls_port)
+    return props
+
+
 class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin, RepoSyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
@@ -343,6 +364,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # hub's 443; a standalone pxmx spoke sets 443).
         self.pxmx_agent_port = int(os.environ.get("LM_PXMX_AGENT_PORT", "8443"))
         self.tls_enabled = bool(self.tls_cert_path and self.tls_key_path)
+        # "The hub owns a TLS cert" (tls_enabled → it serves wss itself) is
+        # distinct from "callers reach the hub over TLS" (advertise_tls → the
+        # mDNS broadcast carries a tls_port TXT so discovery returns wss://).
+        # They're the same when the hub terminates TLS itself, but diverge for a
+        # reverse-proxy/TLS-termination deployment: the hub behind the proxy
+        # serves plaintext (no cert → tls_enabled False) yet callers dial
+        # wss://<proxy>:443. Without advertise_tls the broadcast omits tls_port
+        # and discovery returns ws://...:443 → a plaintext WebSocket handshake
+        # to a TLS port ("did not receive a valid HTTP response"). Opt in with
+        # LM_HUB_ADVERTISE_TLS=1 for that deployment shape.
+        self.advertise_tls = self.tls_enabled or os.environ.get(
+            "LM_HUB_ADVERTISE_TLS", "").strip() in ("1", "true", "yes")
         self.mailbox = Mailbox()
         self.heartbeat = HeartbeatManager()
         self.key_manager = KeyManager()
@@ -419,8 +452,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         log_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
         logger.addHandler(log_handler)
 
-        # { spoke_id: websocket_connection }
-        self.active_connections: Dict[str, websockets.WebSocketServerProtocol] = {}
+        # { spoke_id: websocket_connection } — StarletteWSAdapter wrapping a
+        # FastAPI/uvicorn WebSocket on the unified :443 /ws/spoke route (the
+        # former bare websockets.serve listener). Typed Any so the hub doesn't
+        # depend on the websockets-lib Protocol type at the I/O boundary.
+        self.active_connections: Dict[str, Any] = {}
         # { spoke_id: key_id last used to authenticate the active connection }
         # Used to reject a stale (rotated-out) session key reconnecting and
         # evicting a live current-key connection (zombie-after-outage guard).
@@ -1794,7 +1830,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # (not DEBUG) so a new/unknown spoke frame is visible by default.
                 logger.info(f"Received verified message from {spoke_id}: {payload.get('type')}")
 
-        except websockets.ConnectionClosed:
+        except (websockets.ConnectionClosed, WebSocketDisconnect):
             logger.info(f"Connection closed for spoke {spoke_id}")
             if spoke_id:
                 self.spoke_telemetry[spoke_id]["status"] = "DISCONNECTED"
@@ -3025,17 +3061,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         #   agent_port — the pxmx agent-listener port the hub box serves (the
         #     pxmx spoke binds it; 8443 when TLS on, 8766 legacy). Lets a pxmx
         #     agent discover its target port instead of hardcoding 8766.
-        #   tls_port   — present only when the hub serves wss; a remote caller's
-        #     discovery switches to wss://<ip>:<tls_port>. Absent → plaintext
-        #     (a co-located caller always uses ws://127.0.0.1 regardless).
-        properties = {"version": self._hub_version_str(),
-                      "agent_port": str(getattr(self, "pxmx_agent_port", 8766))}
-        if getattr(self, "tls_enabled", False):
-            properties["tls_port"] = str(self.tls_port)
+        #   tls_port   — present when callers reach the hub over TLS (the hub
+        #     serves wss itself, OR LM_HUB_ADVERTISE_TLS=1 for a proxy-TLS
+        #     deployment); a remote caller's discovery switches to
+        #     wss://<ip>:<tls_port>. Absent → plaintext.
+        properties = _mdns_hub_properties(
+            self._hub_version_str(),
+            getattr(self, "pxmx_agent_port", 8766),
+            self.tls_port,
+            getattr(self, "advertise_tls", self.tls_enabled))
+        # Under the unified-443 merge the hub serves the spoke-WS on the SAME
+        # 0.0.0.0:443 uvicorn as the WebUI/REST (/ws/spoke route), so the SRV
+        # port a spoke-leg caller dials is tls_port (443 w/ TLS, 443 plain) —
+        # NOT the retired 8765 bare-listener port. The agent leg still reads
+        # agent_port (8443) until the agent-leg proxy lands.
+        srv_port = int(self.tls_port)
         return ServiceInfo(
             type_="_lm-hub._tcp.local.",
             name="lm-hub._lm-hub._tcp.local.",
-            port=int(self.port),
+            port=srv_port,
             addresses=addresses,
             server="lm-hub.local.",
             properties=properties,
@@ -3097,8 +3141,35 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception as e:
             logger.debug(f"Could not load version file: {e}")
 
-        api_thread = threading.Thread(target=run_api_server, args=(self,), daemon=True)
-        api_thread.start()
+        # Unified :443 surface: ONE uvicorn server (HTTP/WebUI + /ws/spoke +
+        # /ws/console + /ws/agent) on 0.0.0.0:<tls_port> (443), wss when a cert
+        # is configured, plaintext on the same port otherwise. Server.serve() is
+        # awaitable, so it runs as a task in THIS event loop — the /ws/spoke
+        # route (handle_connection via StarletteWSAdapter), HTTP routes, and all
+        # the hub background loops below share one loop (no cross-loop hazard
+        # that the old daemon-thread uvicorn + main-loop websockets.serve split
+        # had). Mirrors the cs spoke's in-loop uvicorn pattern.
+        if self.tls_enabled:
+            # Fail fast + loud on a broken cert so systemd surfaces a crash-loop
+            # instead of silently serving plaintext on 0.0.0.0:443.
+            _ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            try:
+                _ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
+            except Exception as e:
+                logger.error("TLS cert load failed: %s (cert=%s key=%s) — "
+                             "hub NOT starting; fix the cert or unset "
+                             "LM_TLS_CERT/LM_TLS_KEY to fall back to plaintext.",
+                             e, self.tls_cert_path, self.tls_key_path)
+                raise
+            del _ctx
+        listen_port = self.tls_port  # single unified port (443 w/ TLS, 443 plain)
+        self._api_server = build_server(
+            self, host=self.host, port=listen_port,
+            tls_cert=self.tls_cert_path, tls_key=self.tls_key_path)
+        self._api_task = asyncio.create_task(self._api_server.serve())
+        _scheme = "wss" if self.tls_enabled else "ws"
+        logger.info(f"Hub {version} unified surface on {_scheme}://{self.host}:{listen_port} "
+                    f"(/ws/spoke, /ws/agent, /ws/console + WebUI/REST)")
 
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
@@ -3199,51 +3270,28 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # big". 16 MiB ceiling pairs with the total-char cap in collect_all_logs
         # so the serialized payload stays safely under the frame limit.
         self._start_mdns_broadcast()
+        self.is_ready = True
         try:
-            if self.tls_enabled:
-                # Dual listener: plaintext loopback (127.0.0.1:<port>) for
-                # co-located spokes + wss (0.0.0.0:<tls_port>) for remote
-                # spokes/agents. The same handle_connection serves both; a
-                # remote host cannot reach the loopback plaintext socket.
-                server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                try:
-                    server_ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
-                except Exception as e:
-                    # A broken/missing cert must NOT silently downgrade to a
-                    # plaintext 0.0.0.0 listener (that would re-expose the LAN).
-                    # Fail fast + loud so systemd surfaces the crash-loop; fix
-                    # the cert or unset LM_TLS_CERT to return to legacy plaintext.
-                    logger.error("TLS cert load failed: %s (cert=%s key=%s) — "
-                                 "hub NOT starting; fix the cert or unset "
-                                 "LM_TLS_CERT/LM_TLS_KEY to fall back to plaintext.",
-                                 e, self.tls_cert_path, self.tls_key_path)
-                    raise
-                logger.info(f"Hub TLS enabled: cert={self.tls_cert_path} "
-                            f"tls_port={self.tls_port} "
-                            f"pxmx_agent_port={self.pxmx_agent_port} "
-                            f"(verify-off default; spokes set LM_HUB_TLS_VERIFY=1)")
-                async with AsyncExitStack() as stack:
-                    await stack.enter_async_context(websockets.serve(
-                        self.handle_connection, "127.0.0.1", self.port,
-                        compression=None, max_size=16 * 1024 * 1024))
-                    await stack.enter_async_context(websockets.serve(
-                        self.handle_connection, "0.0.0.0", self.tls_port,
-                        compression=None, max_size=16 * 1024 * 1024, ssl=server_ctx))
-                    self.is_ready = True
-                    logger.info(f"Lab Manager Hub {version} started on "
-                                f"ws://127.0.0.1:{self.port} (loopback) + "
-                                f"wss://0.0.0.0:{self.tls_port} (TLS)")
-                    logger.info(f"Hub API started on port 8000")
-                    await asyncio.Future()
-            else:
-                # Legacy: no cert configured → single plaintext server (today's
-                # behavior) so a box that hasn't generated a cert keeps working.
-                async with websockets.serve(self.handle_connection, self.host, self.port, compression=None, max_size=16 * 1024 * 1024) as server:
-                    self.is_ready = True
-                    logger.info(f"Lab Manager Hub {version} started on ws://{self.host}:{self.port}")
-                    logger.info(f"Hub API started on port 8000")
-                    await asyncio.Future()
+            # Block forever, but surface an immediate unified-server failure
+            # (e.g. :443 already in use) instead of hanging silently with a
+            # dead hub — the old websockets.serve raised on bind; a task just
+            # stores the exception, so check it on first completion.
+            _blocker = asyncio.Future()
+            await asyncio.wait(
+                {asyncio.ensure_future(_blocker), self._api_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if self._api_task.done() and not self._api_task.cancelled():
+                exc = self._api_task.exception()
+                if exc is not None:
+                    logger.error("Hub unified :443 server exited unexpectedly: %s", exc)
+                    raise exc
         finally:
+            self._api_server.should_exit = True
+            try:
+                await self._api_task
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Hub API server shutdown: %s", exc)
             self._stop_mdns_broadcast()
 
 
