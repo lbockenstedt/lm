@@ -454,6 +454,47 @@ const PRODUCT_MAP = {
     'le': 'le',
 };
 
+// module_type -> nav product. A spoke's REGISTERED module_type is the
+// authoritative signal that a module is actually loaded: a generic node
+// (module_type "agent") with no role loaded must NOT light a product nav item
+// even when its NAME resembles a product (e.g. an agent named "lm-opnsense").
+// Only a real module spoke (module_type "firewall" / "dns" / ...) or a loaded
+// role sub-spoke ("{base}-{role}", module_type = the role's) maps to a product.
+// "agent" / "qa" have no product; "directory" (LDAP) has no nav class (it lives
+// behind its own view), matching the old PRODUCT_MAP which had no ldap entry.
+const MODULE_TYPE_PRODUCT = {
+    hypervisor: 'pxmx',
+    firewall: 'opnsense',
+    nac: 'cppm',
+    simulation: 'cs',
+    ipam: 'netbox',
+    dns: 'dns',
+    dhcp: 'dhcp',
+    nw: 'nw',
+    certificates: 'le',
+};
+
+// spoke_id prefix -> product, used ONLY as a fallback when a spoke's module_type
+// is unknown — i.e. an approved-but-OFFLINE spoke whose module_type was popped on
+// disconnect (hub spoke_module_types is cleared when the WS closes), so its
+// historical Logs tab stays reachable while it is briefly down. PREFIX match
+// (sid === prefix OR sid.startsWith(prefix + '-')), mirroring the hub's
+// _PREFIX_MODULE (api.py _module_type_for), NOT substring — so a generic agent
+// named "lm-opnsense" never matches the "opn" / "opnsense" prefix and can't ghost
+// a Firewalls nav item. A connected generic agent has module_type "agent" (known)
+// so this fallback is never reached for it.
+const _ID_PREFIX_PRODUCT = {
+    pxmx: 'pxmx', opn: 'opnsense', opnsense: 'opnsense', pfsense: 'opnsense',
+    cppm: 'cppm', ise: 'cppm', cs: 'cs', netbox: 'netbox', phpipam: 'netbox',
+    dns: 'dns', dhcp: 'dhcp', nw: 'nw', le: 'le',
+};
+function _productFromIdPrefix(sid) {
+    for (const [prefix, product] of Object.entries(_ID_PREFIX_PRODUCT)) {
+        if (sid === prefix || sid.startsWith(prefix + '-')) return product;
+    }
+    return null;
+}
+
 const LOG_NAMES = {
     'hub': 'Lab Manager Logs',
     'opn': 'Firewall Logs',
@@ -1685,18 +1726,30 @@ function _updateSpokeCount(approvedSpokes) {
 // modules so their historical logs stay reachable while briefly down. Drops
 // classes the user can't see (canSeeModule).
 function _rebuildMainNav(allSpokes, connections) {
+    // Drive nav off each spoke's REGISTERED module_type — NOT its spoke_id name.
+    // A generic node named "lm-opnsense" is module_type "agent" (no role loaded)
+    // and must NOT light the Firewalls nav; only a real firewall spoke
+    // (module_type "firewall" — a standalone opn-spoke or a loaded-role sub-spoke
+    // "{base}-opnsense") does. Substring-matching the spoke_id against PRODUCT_MAP
+    // (the old approach) matched the agent's NAME, ghosting a Firewalls nav item
+    // even with no role loaded. module_type is authoritative when present; the
+    // id-prefix fallback (_productFromIdPrefix) only fires for approved-but-offline
+    // spokes whose module_type was popped on disconnect.
+    const typeBy = {};
+    allSpokes.forEach(s => { typeBy[s.spoke_id] = String(s.module_type || '').toLowerCase(); });
+    const productFor = sid => {
+        const mt = typeBy[sid];
+        if (mt) return MODULE_TYPE_PRODUCT[mt] || null;   // known type is authoritative
+        return _productFromIdPrefix(sid);                  // offline spoke -> prefix fallback
+    };
+
     // connectedProducts = products backed by a LIVE connection. The main-nav
     // class items (Firewalls/IPAM/...) are driven by THIS set, so a stale
-    // approved-but-offline registry entry — e.g. an opnsense approved in a
-    // prior test, or a leaked id — no longer ghosts a "Firewalls" nav item when
-    // no firewall is actually connected. (Matching the spoke_id by substring is
-    // kept for parity with the connections list, which holds the real module
-    // ids; the approved-offline ghost was the sole source of spurious items.)
+    // approved-but-offline registry entry can't ghost a nav item.
     const connectedProducts = new Set();
     connections.forEach(id => {
-        for (const [key, product] of Object.entries(PRODUCT_MAP)) {
-            if (id.includes(key)) connectedProducts.add(product);
-        }
+        const p = productFor(id);
+        if (p) connectedProducts.add(p);
     });
 
     // activeProducts adds approved-but-offline modules on top, so the Logs
@@ -1705,9 +1758,8 @@ function _rebuildMainNav(allSpokes, connections) {
     const activeProducts = new Set(connectedProducts);
     allSpokes.forEach(spoke => {
         if (spoke.approved) {
-            for (const [key, product] of Object.entries(PRODUCT_MAP)) {
-                if (spoke.spoke_id.includes(key)) activeProducts.add(product);
-            }
+            const p = productFor(spoke.spoke_id);
+            if (p) activeProducts.add(p);
         }
     });
 
