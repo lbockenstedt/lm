@@ -48,11 +48,12 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
-# If not in clone mode, we still need the SPOKE_URL to configure the service
+# --spoke-url is optional: omit it (or pass "auto") and the agent auto-discovers
+# the hub (same-box ws://127.0.0.1:8765, remote wss://<hub>:443 via mDNS/DNS).
+# A concrete URL pins it. Backward compat: an explicit --spoke-url still works.
 if [ "$CLONE_ONLY" = false ] && [ -z "$SPOKE_URL" ]; then
-    echo "❌ Missing required argument: --spoke-url is required for full installation."
-    echo "Usage: curl -sSL <url> | sudo bash -s -- --spoke-url <spoke_url>"
-    exit 1
+    SPOKE_URL="auto"
+    log_c "ℹ️ No --spoke-url given — agent will auto-discover the hub."
 fi
 
 log_c "🚀 Starting Lab Manager GitHub Bootstrap..."

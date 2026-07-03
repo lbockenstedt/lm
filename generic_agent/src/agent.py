@@ -6,8 +6,15 @@ import logging
 import psutil
 import argparse
 import os
+import ssl
 import socket
+import sys
 from typing import Dict, Any, Optional
+
+# Make this file's dir importable so the vendored hub_discovery.py resolves
+# regardless of PYTHONPATH (the systemd unit sets PYTHONPATH=/opt/lm, which
+# does NOT include generic-agent/src).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Logging: write to stderr only — do NOT open a log file from the agent. The
 # systemd unit captures stderr to /var/log/lm/agent.log
@@ -40,14 +47,33 @@ except ImportError:
 configure_logging()
 logger = logging.getLogger("GenericLeafAgent")
 
+# Hub auto-discovery (vendored copy kept byte-identical to lm core + pxmx).
+# Resolves same-box → ws://127.0.0.1:8765 (loopback plain) vs remote →
+# wss://<hub>:443 (TLS) from the hub's mDNS TXT tls_port / DNS lm-hub.<suffix>.
+try:
+    from hub_discovery import discover_hub_url
+except ImportError:  # dev box without the vendored copy on path
+    try:
+        from core.src.messaging.hub_discovery import discover_hub_url
+    except ImportError:
+        discover_hub_url = None
+        logger.warning("hub_discovery module unavailable — --spoke-url must be pinned.")
+
+
 class GenericLeafAgent:
     def __init__(self, spoke_url: str, agent_id: str, secret: Optional[str] = None):
-        self.spoke_url = spoke_url
+        # spoke_url may be a concrete URL, "" / "auto" (auto-discover), or a pin.
+        self.spoke_url = spoke_url or "auto"
         self.agent_id = agent_id
         self.secret = secret or self._load_secret()
         # No secret is OK — agent will connect unauthenticated and await admin approval.
+        # TLS trust for wss:// connects (mirrors BaseControlPlane._client_ssl_ctx):
+        # verify OFF by default (self-signed hub cert → encrypt without auth, the
+        # lab default); LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT verifies against a CA.
+        self._tls_verify = os.environ.get("LM_HUB_TLS_VERIFY", "0").strip() in ("1", "true", "yes")
+        self._tls_ca_cert = os.environ.get("LM_HUB_CA_CERT", "").strip()
 
-        logger.info(f"Initializing GenericLeafAgent [{agent_id}] -> {spoke_url}")
+        logger.info(f"Initializing GenericLeafAgent [{agent_id}] -> {spoke_url or 'auto'}")
         self.websocket = None
         self.config = {}
 
@@ -61,6 +87,44 @@ class GenericLeafAgent:
             logger.error(f"Failed to load secret: {e}")
         return None
 
+    async def _resolve_spoke_url(self) -> None:
+        """When spoke_url is the auto-discovery sentinel, locate the hub via
+        DNS (lm-hub.<suffix>) then mDNS and set spoke_url to the result. A
+        co-located agent gets ws://127.0.0.1:8765; a remote one gets
+        wss://<hub>:443 when the hub advertises TLS."""
+        if self.spoke_url not in ("", "auto", None):
+            return
+        if discover_hub_url is None:
+            logger.warning("Cannot auto-discover hub (hub_discovery unavailable); "
+                           "pass --spoke-url to pin.")
+            return
+        url = discover_hub_url(timeout=5.0)
+        if url:
+            self.spoke_url = url
+            logger.info(f"Auto-discovered hub at {url}")
+        else:
+            logger.warning("Hub auto-discovery found no hub (no lm-hub DNS record / "
+                           "mDNS broadcast); will retry on reconnect. Pass --spoke-url to pin.")
+
+    def _client_ssl_ctx(self):
+        """SSL context for a wss:// connect. Default: unverified (encrypt
+        without authenticating the self-signed hub cert). Verify-on with
+        LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT. Returns None on build failure so
+        the caller connects without TLS and fails fast (surfacing the
+        misconfiguration instead of hanging)."""
+        try:
+            if self._tls_verify and self._tls_ca_cert:
+                ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
+                logger.info("wss: verifying hub cert against CA %s", self._tls_ca_cert)
+                return ctx
+            ctx = ssl._create_unverified_context()
+            logger.debug("wss: using unverified context (set LM_HUB_TLS_VERIFY=1 "
+                         "+ LM_HUB_CA_CERT to verify)")
+            return ctx
+        except Exception as e:
+            logger.error("Could not build wss SSL context: %s — connecting without TLS", e)
+            return None
+
     async def collect_metrics(self) -> Dict[str, Any]:
         return {
             "cpu_usage": psutil.cpu_percent(interval=1),
@@ -70,10 +134,43 @@ class GenericLeafAgent:
         }
 
     async def run(self):
-        import websockets
-        logger.info(f"Connecting to Spoke Gateway at {self.spoke_url}...")
+        """Reconnect loop: resolve the hub, connect, serve, back off on loss.
+        Re-discovers each pass while the URL is still the sentinel so a hub that
+        comes up after this agent (or moves) is found without a restart."""
+        backoff = 5
+        await self._resolve_spoke_url()
+        while True:
+            try:
+                await self._connect_once()
+                backoff = 5  # clean disconnect → reset
+            except (OSError, asyncio.TimeoutError) as e:
+                logger.warning(f"Connection to {self.spoke_url} failed: {e} — retrying in {backoff}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 120)
+            except Exception as e:
+                logger.error(f"Unexpected connection error: {e} — retrying in {backoff}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 120)
+            if self.spoke_url in ("", "auto", None):
+                await self._resolve_spoke_url()
+            await asyncio.sleep(backoff)
 
-        async with websockets.connect(self.spoke_url) as websocket:
+    async def _connect_once(self):
+        import websockets
+        # TLS: wss:// gets an SSL context (verify-off default for the self-signed
+        # hub cert; LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT verifies). ws:// stays
+        # plaintext (loopback / legacy). compression=None sidesteps the
+        # per-message-deflate desync the rest of the codebase guards against.
+        ssl_ctx = self._client_ssl_ctx() if self.spoke_url.lower().startswith("wss://") else None
+        if ssl_ctx is None:
+            _tls_mode = "plaintext (loopback/legacy)"
+        elif self._tls_verify and self._tls_ca_cert:
+            _tls_mode = f"TLS verified (CA={self._tls_ca_cert})"
+        else:
+            _tls_mode = "TLS unverified (self-signed hub cert)"
+        logger.info(f"Connecting to Spoke Gateway at {self.spoke_url}... [{_tls_mode}]")
+
+        async with websockets.connect(self.spoke_url, compression=None, ssl=ssl_ctx) as websocket:
             self.websocket = websocket
 
             # 1. Handshake: prove agent identity to the Hub. The hub's spoke
@@ -192,7 +289,11 @@ class GenericLeafAgent:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--spoke-url", required=True, help="URL of the Spoke Gateway")
+    # --spoke-url is now optional: omit it (or pass "auto") to let the agent
+    # auto-discover the hub (same-box ws://127.0.0.1:8765, remote wss://:443).
+    # Pin a concrete URL to override.
+    parser.add_argument("--spoke-url", default="auto",
+                        help="URL of the Spoke Gateway (or 'auto' to discover; default)")
     parser.add_argument("--id", default="generic-agent-1", help="Agent ID")
     parser.add_argument("--secret", help="Agent session secret")
     args = parser.parse_args()

@@ -204,10 +204,14 @@ run_generic_install() {
     local SPOKE_URL SPOKE_ID SPOKE_SECRET HUB_SECRET CLONE_ONLY
 
     while true; do
-        read -rp "Hub WebSocket URL [ws://hub-host:8765]: " SPOKE_URL || SPOKE_URL=""
-        [ -z "$SPOKE_URL" ] && SPOKE_URL="ws://hub-host:8765"
-        [[ "$SPOKE_URL" =~ ^wss?:// ]] && break
-        echo "  (must start with ws:// or wss://)"
+        read -rp "Hub WebSocket URL [auto - discover via mDNS/DNS]: " SPOKE_URL || SPOKE_URL=""
+        [ -z "$SPOKE_URL" ] && SPOKE_URL="auto"
+        # 'auto' lets the agent pick ws://127.0.0.1:8765 (same box) or
+        # wss://<hub>:443 (remote, TLS) from the hub's mDNS/DNS advertisement.
+        # A concrete ws:// or wss:// URL pins it (use wss://host:443 for a
+        # TLS-enabled remote hub; ws://...:8765 only works same-box).
+        { [[ "$SPOKE_URL" == "auto" ]] || [[ "$SPOKE_URL" =~ ^wss?:// ]]; } && break
+        echo "  (must be 'auto' or start with ws:// or wss://)"
     done
     while true; do
         read -rp "Spoke ID [${default_id}]: " SPOKE_ID || SPOKE_ID=""

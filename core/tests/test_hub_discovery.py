@@ -299,13 +299,19 @@ def test_cli_agent_listener_flag(monkeypatch, tmp_path, capsys):
 # ── install scripts parse cleanly ────────────────────────────────────────────
 
 def test_install_scripts_syntax_clean():
-    """bash -n the three installers touched by the discovery wiring."""
+    """bash -n the installers touched by the discovery / TLS wiring."""
     import subprocess
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    _here = os.path.dirname(__file__)
+    # Sibling repos (cs, pxmx) live 3 levels up (vscode/); lm-internal scripts
+    # (install_menu.sh, generic_agent/) live 2 levels up (lm/).
+    root = os.path.abspath(os.path.join(_here, "..", "..", ".."))
+    lm_root = os.path.abspath(os.path.join(_here, "..", ".."))
     scripts = [
         os.path.join(root, "cs", "lm-spoke", "install_cs.sh"),
         os.path.join(root, "pxmx", "install_pxmx.sh"),
         os.path.join(root, "pxmx", "agent", "install_agent.sh"),
+        os.path.join(lm_root, "install_menu.sh"),
+        os.path.join(lm_root, "generic_agent", "install_github.sh"),
     ]
     for s in scripts:
         assert os.path.isfile(s), f"missing installer: {s}"
