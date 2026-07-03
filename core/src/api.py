@@ -3135,13 +3135,24 @@ def create_app(hub):
 
     @app.get("/api/pxmx/agent-install-cmd")
     async def get_pxmx_agent_install_cmd(request: Request):
-        """Return a ready-to-paste install command for the pxmx node agent."""
+        """Return a ready-to-paste install command for the pxmx node agent.
+
+        NOTE — this is the **co-located / all-in-one (loopback)** path: it points
+        the agent at THIS hub box's `/ws/agent` route, which the hub byte-proxies
+        to a co-located pxmx spoke's loopback listener (``agent → hub → spoke``).
+        For a **standalone** pxmx spoke on a separate box (``agent → spoke →
+        hub``, the default), do NOT use this command — run ``install_pxmx.sh``
+        on the spoke box and use the ``--spoke-url wss://<spoke>:443/ws/agent``
+        command it prints (a standalone spoke does not broadcast ``_lm-hub``
+        mDNS, so the agent cannot auto-discover it). See docs/pxmx.md.
+        """
         import socket as _socket
         host = request.headers.get("host", "").split(":")[0] or _socket.gethostbyname(_socket.gethostname())
         hub = app.state.hub
-        # When the hub has a TLS cert, the pxmx agent listener on the hub box is
-        # wss on LM_PXMX_AGENT_PORT (8443 all-in-one / 443 standalone); omit the
-        # port when it's 443. Without TLS, legacy plaintext :8766.
+        # Co-located/all-in-one: the pxmx agent listener on the hub box is wss on
+        # LM_PXMX_AGENT_PORT (8443 loopback; 443 if the hub box also serves it
+        # directly); omit the port when it's 443. Without TLS, legacy plaintext
+        # :8766. (Standalone spokes serve their own :443 — not reflected here.)
         if getattr(hub, "tls_enabled", False):
             agent_port = int(getattr(hub, "pxmx_agent_port", 8443))
             spoke_url = f"wss://{host}" if agent_port == 443 else f"wss://{host}:{agent_port}"

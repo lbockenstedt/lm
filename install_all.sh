@@ -996,6 +996,16 @@ for mod in "${MODULES_ORDER[@]}"; do
     # failure and leaves the spoke venv deleted but not recreated.
     # Preserve existing NETBOX_URL and NETBOX_API_TOKEN across reinstalls.
     MOD_ARGS=(--hub "$HUB_WS" --id "$SPOKE_ID")
+    # pxmx: this is the all-in-one / co-located path — the hub and the pxmx spoke
+    # run on the SAME box, so the hub already owns :443. The pxmx spoke's agent
+    # listener MUST therefore run in loopback mode (bind 127.0.0.1:8443 plaintext;
+    # the hub /ws/agent route byte-proxies to it → agent → hub → spoke). A
+    # standalone pxmx spoke (separate box, agent → spoke → hub) is installed
+    # directly via install_pxmx.sh WITHOUT --loopback. See docs/pxmx.md
+    # "Agent listener modes".
+    if [[ "$mod" == "pxmx" ]]; then
+        MOD_ARGS+=(--loopback)
+    fi
     if [[ "$mod" == "netbox" ]]; then
         MOD_ARGS+=(--spoke-only)
         _NB_ENV="$BASE_DIR/netbox/.env"

@@ -9,8 +9,8 @@ Consolidated reference for every environment variable read across the LM system.
 | `LM_TLS_CERT` | Path to hub TLS cert (enables wss) | — | `core/src/main.py`, `api.py` |
 | `LM_TLS_KEY` | Path to hub TLS key | — | `core/src/main.py`, `api.py` |
 | `LM_TLS_PORT` | Hub unified listener port | 443 | `core/src/main.py` |
-| `LM_PXMX_AGENT_PORT` | pxmx spoke's own agent-listener port (loopback `8443` all-in-one via `LM_PXMX_AGENT_LOOPBACK`; `443` standalone). mDNS advertises the **external** dial port `443`, not this. | 8443 | `core/src/main.py`, `install_pxmx.sh` |
-| `LM_PXMX_AGENT_LOOPBACK` | `1` binds the pxmx agent listener to loopback only (all-in-one) so the hub `/ws/agent` byte-proxy dials it | 1 (all-in-one) | pxmx spoke |
+| `LM_PXMX_AGENT_PORT` | pxmx spoke's own agent-listener port. **443 (standalone DEFAULT)** — the spoke serves `wss://0.0.0.0:443` so a remote agent dials `wss://<spoke>:443/ws/agent` directly (agent → spoke → hub). `8443` only with `--loopback` (co-located all-in-one; the hub `/ws/agent` byte-proxy dials it). mDNS advertises the **external** dial port `443`, not this. | 443 | `core/src/main.py`, `install_pxmx.sh` |
+| `LM_PXMX_AGENT_LOOPBACK` | `1` binds the pxmx agent listener to loopback only (`127.0.0.1:8443` plaintext) so the hub `/ws/agent` byte-proxy dials it — co-located all-in-one only. **Unset by default** (standalone `agent → spoke → hub`); set only via `install_pxmx.sh --loopback`, which `install_all.sh` passes on the co-located path. | unset (standalone) | pxmx spoke |
 | `LM_HUB_ADVERTISE_TLS` | Force mDNS `tls_port` TXT even with no cert (reverse-proxy/TLS-termination) | — | `core/src/main.py` |
 | `LM_CORS_ORIGINS` | Comma-separated credentialed CORS origins | — | `core/src/api.py` |
 
@@ -52,9 +52,9 @@ Consolidated reference for every environment variable read across the LM system.
 | Var | Purpose | Default | Read by |
 |---|---|---|---|
 | `HUB_URL`, `SPOKE_ID`, `SPOKE_SECRET`, `HUB_SECRET` | Spoke identity | — | spoke `.env` |
-| `LM_TLS_CERT` / `LM_TLS_KEY` | Spoke cert (all-in-one reuses hub cert) | — | spoke |
-| `LM_PXMX_AGENT_PORT` | Spoke's own agent listener (loopback all-in-one) | 8443 | spoke |
-| `LM_PXMX_AGENT_LOOPBACK` | Bind agent listener to loopback only (all-in-one) | 1 | spoke |
+| `LM_TLS_CERT` / `LM_TLS_KEY` | Spoke cert (standalone: self-signed at `/opt/lm/pxmx/certs/hub.{crt,key}`; all-in-one reuses hub cert) | — | spoke |
+| `LM_PXMX_AGENT_PORT` | Spoke's own agent listener — **443 standalone (default)**, `8443` with `--loopback` | 443 | spoke |
+| `LM_PXMX_AGENT_LOOPBACK` | `1` = loopback `127.0.0.1:8443` (co-located all-in-one, `--loopback`/install_all only); unset = standalone `agent → spoke → hub` | unset | spoke |
 | `LM_HUB_TLS_VERIFY` / `LM_HUB_CA_CERT` | Client TLS verify | off | spoke + agent |
 | `LM_PXMX_STATE_DIR` | Update state | `/var/lib/pxmx/update-state` | spoke + agent |
 | `LM_SD_NOTIFY_INTERVAL_S` | systemd notify | 20 | agent |

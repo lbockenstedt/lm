@@ -29,15 +29,15 @@ Top menu: `1) Hub` (spoke checklist → `install_all.sh --exclude <unselected>`)
 `--hub` (required), `--id`, `--secret`, `--role` (one of `dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le`). Boot-time `--role` does NOT run `_install_role` (only system packages pre-installed).
 
 ### Other lm installers
-`install.sh`, `install_hub.sh`, `install_ui.sh`, `install_hub_ui.sh`, `install_pxmx.sh` (pxmx agent/spoke; `agent_port` advertised **443** external on both deployments — agents dial `wss://<hub>:443/ws/agent`; the all-in-one pxmx spoke's own listener is loopback `8443` via `LM_PXMX_AGENT_LOOPBACK`, reached by the hub `/ws/agent` byte-proxy — legacy `8766` no-TLS), `install_cs.sh`, `install_opnsense.sh`, `install_production.sh`, `prep_for_image.sh`, `start.sh`, `start_all.sh`, `sync_secrets.sh`, `verify_auth.sh`.
+`install.sh`, `install_hub.sh`, `install_ui.sh`, `install_hub_ui.sh`, `install_pxmx.sh` (pxmx agent/spoke; **standalone DEFAULT** — spoke serves `wss://:443`, agent dials `wss://<spoke>:443/ws/agent` directly, `agent → spoke → hub`; `--loopback` opt-in for co-located all-in-one — binds loopback `8443`, hub `/ws/agent` byte-proxies to it, `agent → hub → spoke`, passed only by `install_all.sh`; legacy `8766` no-TLS fallback), `install_cs.sh`, `install_opnsense.sh`, `install_production.sh`, `prep_for_image.sh`, `start.sh`, `start_all.sh`, `sync_secrets.sh`, `verify_auth.sh`.
 
 ## pxmx
 
 ### `install_pxmx.sh`
-`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--tls-verify` (+ `--tls-ca-cert`; **required** on standalone), `--all-prereqs` (no-op). IDs default `<hostname>-spoke`.
+`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--tls-verify` (+ `--tls-ca-cert`; **required** on standalone), `--loopback` (opt-in co-located/all-in-one mode — **passed only by `install_all.sh`**; default is standalone `agent → spoke → hub`), `--all-prereqs` (no-op). IDs default `<hostname>-spoke`. See [pxmx.md "Agent listener modes"](pxmx.md).
 
 ### `agent/install_agent.sh`
-`--spoke-url`, `--id`, `--secret` (all optional; auto-discovers when `--spoke-url` absent).
+`--spoke-url`, `--id`, `--secret`. **Standalone spoke: `--spoke-url wss://<spoke>:443/ws/agent` is REQUIRED** (a standalone spoke does not broadcast `_lm-hub` mDNS, so the agent cannot auto-discover it). Auto-discovery (`--spoke-url` absent) applies only on the loopback/all-in-one path, where the agent discovers the **hub** and dials `wss://<hub>:443/ws/agent`.
 
 ## cs
 
