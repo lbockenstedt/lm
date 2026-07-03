@@ -432,6 +432,7 @@ function updateContextActions() {
 const AGENT_ROLES = {
     'dns':  { name: 'DNS Server (Unbound)',  desc: 'Manages Unbound DNS. Syncs records from NetBox.', deploy: false },
     'dhcp': { name: 'DHCP Server (Kea)',     desc: 'Manages Kea DHCP4. Syncs subnets and reservations from NetBox.', deploy: false },
+    'le':   { name: 'Certificate Management (Let\'s Encrypt)', desc: 'Issues/renews prod Let\'s Encrypt certs via certbot (HTTP-01 / DNS-01) and serves them to the hub for distribution to target spokes (e.g. OPNsense). Installs certbot + DNS-01 plugins.', deploy: false },
     'bugfixer': { name: 'BugFixer', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
 };
 
@@ -6284,7 +6285,7 @@ function updateRoleDesc(roleId) {
         if (r?.deploy) {
             note.innerHTML = `The agent runs the role's install script in the background and stays online as a generic agent. The deployed service installs as a systemd unit and connects to the Hub as its own agent. This can take a few minutes; watch <strong>Setup → Spokes & Agents</strong> for the new agent to appear.`;
         } else {
-            note.textContent = `The agent will install required system packages (e.g. unbound, kea) and activate the role. This may take 30–60 seconds. The spoke will reconnect as the new service type.`;
+            note.textContent = `The agent will install required system packages (e.g. unbound, kea, certbot) and activate the role. This may take 30–60 seconds. The spoke will reconnect as the new service type.`;
         }
     }
 }

@@ -10,7 +10,7 @@
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \
 #     | sudo bash -s -- --hub ws://HUB_IP:8765 [--role <role>] [--id my-agent-1]
-#   Roles: dns | dhcp | network | netbox | opnsense | ldap | simulation | cppm | proxmox
+#   Roles: dns | dhcp | network | netbox | opnsense | ldap | simulation | cppm | proxmox | le
 #   (omit --role for a bare agent that morphs later via LOAD_ROLE from the hub)
 set -euo pipefail
 
@@ -31,7 +31,7 @@ while [[ "$#" -gt 0 ]]; do
     esac; shift
 done
 
-[[ -z "$HUB_URL" ]] && { echo "Usage: $0 --hub <ws://HUB:8765> [--id my-agent-1] [--role dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox]"; exit 1; }
+[[ -z "$HUB_URL" ]] && { echo "Usage: $0 --hub <ws://HUB:8765> [--id my-agent-1] [--role dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le]"; exit 1; }
 SPOKE_ID="${SPOKE_ID:-agent-$(hostname -s)}"
 mkdir -p /var/log/lm
 
@@ -62,7 +62,7 @@ python3 -m venv venv
 #     find the spoke code immediately. requirements.txt path mirrors the
 #     agent's role_file.parent.parent derivation (simulation's is under cs/lm-spoke).
 if [[ -n "$STARTUP_ROLE" ]]; then
-    ROLE_REPO=""; ROLE_CLONE_DIR=""; ROLE_REQ=""
+    ROLE_REPO=""; ROLE_CLONE_DIR=""; ROLE_REQ=""; ROLE_APT=""
     case "$STARTUP_ROLE" in
         dns)        ROLE_REQ="$INSTALL_DIR/dns/requirements.txt" ;;
         dhcp)       ROLE_REQ="$INSTALL_DIR/dhcp/requirements.txt" ;;
@@ -73,7 +73,9 @@ if [[ -n "$STARTUP_ROLE" ]]; then
         simulation) ROLE_REPO="https://github.com/lbockenstedt/cs.git";        ROLE_CLONE_DIR="cs";       ROLE_REQ="$INSTALL_DIR/cs/lm-spoke/requirements.txt" ;;
         cppm)       ROLE_REPO="https://github.com/lbockenstedt/cppm.git";      ROLE_CLONE_DIR="cppm";     ROLE_REQ="$INSTALL_DIR/cppm/requirements.txt" ;;
         proxmox)    ROLE_REPO="https://github.com/lbockenstedt/pxmx.git";      ROLE_CLONE_DIR="pxmx";     ROLE_REQ="$INSTALL_DIR/pxmx/requirements.txt" ;;
-        *) echo "❌ Unknown role '$STARTUP_ROLE'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm proxmox"; exit 1 ;;
+        le)         ROLE_REPO="https://github.com/lbockenstedt/le.git";        ROLE_CLONE_DIR="le";       ROLE_REQ="$INSTALL_DIR/le/requirements.txt" \
+                        ROLE_APT="certbot python3-certbot-dns-cloudflare python3-certbot-dns-route53 openssl" ;;
+        *) echo "❌ Unknown role '$STARTUP_ROLE'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm proxmox le"; exit 1 ;;
     esac
 
     if [[ -n "$ROLE_REPO" ]]; then
@@ -91,6 +93,16 @@ if [[ -n "$STARTUP_ROLE" ]]; then
         ./venv/bin/pip install -r "$ROLE_REQ" -q
     else
         echo "⚠️  No requirements.txt found at $ROLE_REQ for role '$STARTUP_ROLE'"
+    fi
+
+    # System packages a boot-time --role load needs but can't install itself
+    # (the agent's _install_role only runs on a later LOAD_ROLE from the hub).
+    # Today only le needs one: certbot (+ the common DNS-01 plugins). The le
+    # spoke creates /etc/lm-le and its ledger dir on demand and runs as root
+    # (the generic-agent unit is User=root), so no extra dirs/permissions here.
+    if [[ -n "$ROLE_APT" ]]; then
+        echo "Installing system packages for role '$STARTUP_ROLE': $ROLE_APT…"
+        apt-get install -y -qq $ROLE_APT
     fi
 fi
 

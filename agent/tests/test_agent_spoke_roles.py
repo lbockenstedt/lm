@@ -1,14 +1,16 @@
 """Role-loading for the morphable agent-spoke (``GenericAgent``).
 
-Covers the three blockers fixed when extending ``_ROLE_MAP`` from 2 → 8 roles:
-  1. the role map is complete with the right module_types;
+Covers the blockers fixed when extending ``_ROLE_MAP`` from 2 → 10 roles:
+  1. the role map is complete with the right module_types (incl. le →
+     certificates, a sibling repo the agent shallow-clones on LOAD_ROLE);
   2. the package-aware loader resolves RELATIVE imports without an
      ``__init__.py`` (ldap's ``from .ldap_manager import LdapManager``);
   3. the ``_RoleAdapter`` wraps a non-BaseSpoke spoke (cppm's ``CPPMSpoke``),
      delegating handle_command/get_version and supplying a get_status fallback;
   4. ``_install_role`` shallow-clones a missing sibling repo, skips when present
-     / for in-repo roles, and finds requirements.txt at role_file.parent.parent
-     (incl. simulation's ``cs/lm-spoke/`` subdir).
+     / for in-repo roles, finds requirements.txt at role_file.parent.parent
+     (incl. simulation's ``cs/lm-spoke/`` subdir), and installs the system
+     packages a role needs (certbot + DNS-01 plugins for le).
 """
 import asyncio
 import importlib
@@ -24,7 +26,7 @@ from core.src.messaging.control_plane import BaseControlPlane
 
 # ── 1. role map completeness ─────────────────────────────────────────────────
 
-def test_role_map_has_all_eight_roles_with_correct_module_types():
+def test_role_map_has_all_roles_with_correct_module_types():
     expected = {
         "dns":        "dns",
         "dhcp":       "dhcp",
@@ -35,6 +37,7 @@ def test_role_map_has_all_eight_roles_with_correct_module_types():
         "simulation": "simulation",
         "cppm":       "nac",
         "proxmox":    "hypervisor",
+        "le":         "certificates",
     }
     assert set(_ROLE_MAP.keys()) == set(expected.keys()), \
         f"missing/extra roles: {set(_ROLE_MAP.keys()) ^ set(expected.keys())}"
@@ -42,12 +45,16 @@ def test_role_map_has_all_eight_roles_with_correct_module_types():
         rel_path, cls_name, got_mtype, repo_url = _ROLE_MAP[role]
         assert got_mtype == mtype, f"{role}: module_type {got_mtype!r} != {mtype!r}"
         assert cls_name, f"{role}: empty class name"
-        # in-repo roles have no clone URL; the six siblings do.
+        # in-repo roles have no clone URL; the siblings do (incl. le).
         if role in ("dns", "dhcp"):
             assert repo_url is None, f"{role} should be in-repo (no repo_url)"
         else:
             assert isinstance(repo_url, str) and repo_url.startswith("https://"), \
                 f"{role}: expected a GitHub clone URL, got {repo_url!r}"
+    # le points at its sibling repo + the LESpoke class.
+    rel_path, cls_name, _, _ = _ROLE_MAP["le"]
+    assert rel_path == "le/src/le_spoke.py"
+    assert cls_name == "LESpoke"
 
 
 # ── 2. package-aware loader (relative import, no __init__.py) ────────────────
@@ -196,6 +203,28 @@ def test_install_role_requirements_path_for_simulation_subdir(tmp_path, monkeypa
     # pip install --quiet -r <req>; the -r arg must be the lm-spoke requirements.
     assert any(str(req) == arg for c in pip_calls for arg in c), \
         f"pip did not target {req}; calls={pip_calls}"
+
+
+def test_install_role_le_installs_certbot(tmp_path, monkeypatch):
+    """le is the one sibling that needs a SYSTEM package (certbot, plus the
+    common DNS-01 plugins) — the others are pip-only. A LOAD_ROLE le must
+    apt-install certbot so the spoke can actually issue certs (it runs as root
+    via the generic-agent unit and creates /etc/lm-le + its ledger dir itself)."""
+    (tmp_path / "le").mkdir()        # repo already staged → skip clone
+    calls = []
+    _fake_subprocess_run(monkeypatch, calls)
+    agent = _agent_with_tmp_root(tmp_path, monkeypatch)
+    res = asyncio.run(agent._install_role("le"))
+    assert res["status"] == "SUCCESS"
+    apt_calls = [c for c in calls if c[:2] == ["apt-get", "install"]]
+    assert apt_calls, "expected an apt-get install for le (certbot)"
+    flat = " ".join(a for c in apt_calls for a in c)
+    assert "certbot" in flat, f"certbot missing from apt install: {apt_calls}"
+    assert "python3-certbot-dns-cloudflare" in flat
+    # le is a sibling repo → must not be treated as in-repo (no clone here only
+    # because the dir was pre-created; the role map URL is checked separately).
+    _, _, _, repo_url = _ROLE_MAP["le"]
+    assert repo_url and repo_url.endswith("/le.git")
 
 
 # ── 5. morph: agent can be a spoke or an agent ───────────────────────────────

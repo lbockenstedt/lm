@@ -183,10 +183,17 @@ class GenericAgent(BaseSpoke):
             else:
                 logger.debug("Role repo already present at %s; skipping clone.", clone_dir)
 
-        # 2. System packages (in-repo roles only today; siblings are pip-only).
+        # 2. System packages. dns/dhcp need their daemons; le needs certbot +
+        # the common DNS-01 plugins (the spoke itself creates /etc/lm-le and the
+        # ledger dir on demand, and runs as root so it can bind :80 / write
+        # /etc/letsencrypt — the generic-agent service is User=root). Other
+        # siblings are pip-only (curl/requests-based).
         install_cmds = {
             "dns":  ["apt-get", "install", "-y", "-qq", "unbound"],
             "dhcp": ["apt-get", "install", "-y", "-qq", "kea-dhcp4-server", "kea-ctrl-agent"],
+            "le":   ["apt-get", "install", "-y", "-qq", "certbot",
+                     "python3-certbot-dns-cloudflare", "python3-certbot-dns-route53",
+                     "openssl"],
         }
         cmds = install_cmds.get(role_name)
         if cmds:
