@@ -565,6 +565,18 @@ class BaseControlPlane:
         # the self-signed hub cert; LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT verifies).
         # ws:// stays plaintext (loopback / legacy). See _client_ssl_ctx.
         ssl_ctx = self._client_ssl_ctx() if self.hub_url.lower().startswith("wss://") else None
+        # Surface the connect attempt + TLS mode at INFO so it reaches the hub
+        # via the log relay (the unverified-context line in _client_ssl_ctx is
+        # DEBUG). This pairs with the "Connection lost (...)" warning below to
+        # form a troubleshooting trail: "Connecting wss://hub:443 [TLS
+        # unverified]" then "Connection lost ([SSL: CERTIFICATE_VERIFY_FAILED])".
+        if ssl_ctx is None:
+            _tls_mode = "plaintext (loopback/legacy)"
+        elif self._tls_verify and self._tls_ca_cert:
+            _tls_mode = f"TLS verified (CA={self._tls_ca_cert})"
+        else:
+            _tls_mode = "TLS unverified (self-signed hub cert)"
+        logger.info("Connecting to hub %s [%s]", self.hub_url, _tls_mode)
         async with websockets.connect(self.hub_url, compression=None, ssl=ssl_ctx) as websocket:
             self._hub_ws = websocket
             # Capture the running loop so the updater thread can schedule a final

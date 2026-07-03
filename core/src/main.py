@@ -3148,7 +3148,22 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # spokes/agents. The same handle_connection serves both; a
                 # remote host cannot reach the loopback plaintext socket.
                 server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                server_ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
+                try:
+                    server_ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
+                except Exception as e:
+                    # A broken/missing cert must NOT silently downgrade to a
+                    # plaintext 0.0.0.0 listener (that would re-expose the LAN).
+                    # Fail fast + loud so systemd surfaces the crash-loop; fix
+                    # the cert or unset LM_TLS_CERT to return to legacy plaintext.
+                    logger.error("TLS cert load failed: %s (cert=%s key=%s) — "
+                                 "hub NOT starting; fix the cert or unset "
+                                 "LM_TLS_CERT/LM_TLS_KEY to fall back to plaintext.",
+                                 e, self.tls_cert_path, self.tls_key_path)
+                    raise
+                logger.info(f"Hub TLS enabled: cert={self.tls_cert_path} "
+                            f"tls_port={self.tls_port} "
+                            f"pxmx_agent_port={self.pxmx_agent_port} "
+                            f"(verify-off default; spokes set LM_HUB_TLS_VERIFY=1)")
                 async with AsyncExitStack() as stack:
                     await stack.enter_async_context(websockets.serve(
                         self.handle_connection, "127.0.0.1", self.port,
