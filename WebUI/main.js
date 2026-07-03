@@ -1678,17 +1678,31 @@ function _updateSpokeCount(approvedSpokes) {
     if (spokeCount) spokeCount.textContent = approvedSpokes.length;
 }
 
-// Rebuild #main-nav from the active module classes (derived from connected
-// spokes + approved spokes). Drops classes the user can't see (canSeeModule).
+// Rebuild #main-nav from the active module classes. Nav class items are driven
+// by CONNECTED spokes only (connectedProducts), so an approved-but-offline
+// stale registry entry can't ghost a nav item. window.activeProducts (used by
+// the Logs submenu + setView product picker) still includes approved-but-offline
+// modules so their historical logs stay reachable while briefly down. Drops
+// classes the user can't see (canSeeModule).
 function _rebuildMainNav(allSpokes, connections) {
-    const activeProducts = new Set();
-
+    // connectedProducts = products backed by a LIVE connection. The main-nav
+    // class items (Firewalls/IPAM/...) are driven by THIS set, so a stale
+    // approved-but-offline registry entry — e.g. an opnsense approved in a
+    // prior test, or a leaked id — no longer ghosts a "Firewalls" nav item when
+    // no firewall is actually connected. (Matching the spoke_id by substring is
+    // kept for parity with the connections list, which holds the real module
+    // ids; the approved-offline ghost was the sole source of spurious items.)
+    const connectedProducts = new Set();
     connections.forEach(id => {
         for (const [key, product] of Object.entries(PRODUCT_MAP)) {
-            if (id.includes(key)) activeProducts.add(product);
+            if (id.includes(key)) connectedProducts.add(product);
         }
     });
 
+    // activeProducts adds approved-but-offline modules on top, so the Logs
+    // submenu (logsSubmenu) + the setView product picker still reach a
+    // configured module's historical logs while it is briefly disconnected.
+    const activeProducts = new Set(connectedProducts);
     allSpokes.forEach(spoke => {
         if (spoke.approved) {
             for (const [key, product] of Object.entries(PRODUCT_MAP)) {
@@ -1701,7 +1715,7 @@ function _rebuildMainNav(allSpokes, connections) {
 
     const activeClasses = [];
     for (const [className, products] of Object.entries(MODULE_CLASSES)) {
-        if (products.some(p => activeProducts.has(p))) {
+        if (products.some(p => connectedProducts.has(p))) {
             activeClasses.push(className);
         }
     }
@@ -1723,7 +1737,7 @@ function _rebuildMainNav(allSpokes, connections) {
         const isActive = (currentView === className
             || (MODULE_CLASSES[className] || []).includes(currentView))
             ? 'active' : '';
-        const firstProduct = MODULE_CLASSES[className].find(p => activeProducts.has(p));
+        const firstProduct = MODULE_CLASSES[className].find(p => connectedProducts.has(p));
         let icon = '';
 
         if (className === 'Firewalls') {
