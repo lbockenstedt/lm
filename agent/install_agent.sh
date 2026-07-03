@@ -101,16 +101,37 @@ STARTUP_ROLES_CSV="$(IFS=,; printf '%s' "${_ROLE_LIST[*]}")"
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv python3-pip git curl
 
-# Clone or update the LM repo (contains agent + all roles)
-if [[ -d "$INSTALL_DIR/core" ]]; then
+# Clone or update the LM repo (contains agent + all roles).
+# A real prior install is a git checkout at $INSTALL_DIR (has .git + agent/).
+# NOTE: a bare /opt/lm/core with NO .git is the cs-spoke base_spoke extraction
+# (install_cs.sh copies only core/ so base_spoke.py resolves) — that is NOT a
+# full LM clone, so detecting on core/ alone would wrongly skip the clone and
+# then fail at `cd $INSTALL_DIR/agent` (the original "No such file or directory"
+# symptom on a box that already ran the cs spoke installer). Detect on .git.
+if [[ -d "$INSTALL_DIR/.git" ]]; then
     echo "Updating existing LM installation…"
     git -C "$INSTALL_DIR" pull --rebase --autostash -q 2>/dev/null || true
+elif [[ -d "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
+    # /opt/lm already exists but is NOT a git clone (e.g. cs-spoke left core/
+    # behind). `git clone` refuses to write into a non-empty dir, so clone to
+    # a temp dir and merge the checkout in — core/ is overwritten with the real
+    # lm core (same source the cs spoke uses), and agent/ + role dirs land too.
+    echo "Cloning LM repo into existing $INSTALL_DIR …"
+    _LM_TMP="$(mktemp -d)"
+    if git clone -q --branch "$LM_BRANCH" https://github.com/lbockenstedt/lm.git "$_LM_TMP/lm"; then
+        cp -a "$_LM_TMP/lm/." "$INSTALL_DIR"/
+    fi
+    rm -rf "$_LM_TMP"
 else
     echo "Cloning LM repo…"
     git clone -q --branch "$LM_BRANCH" https://github.com/lbockenstedt/lm.git "$INSTALL_DIR"
 fi
 
 # Python venv for agent
+if [[ ! -d "$INSTALL_DIR/agent" ]]; then
+    echo "ERROR: $INSTALL_DIR/agent is missing — LM clone failed. Re-run $0." >&2
+    exit 1
+fi
 cd "$INSTALL_DIR/agent"
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip -q
