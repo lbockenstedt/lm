@@ -1720,9 +1720,11 @@ function _updateSpokeCount(approvedSpokes) {
 }
 
 // Rebuild #main-nav from the active module classes. Nav class items are driven
-// by CONNECTED spokes only (connectedProducts), so an approved-but-offline
-// stale registry entry can't ghost a nav item. window.activeProducts (used by
-// the Logs submenu + setView product picker) still includes approved-but-offline
+// by CONNECTED + APPROVED spokes only (connectedProducts), so neither a stale
+// approved-but-offline registry entry nor a freshly-connected still-pending
+// (unapproved) spoke can ghost a nav item — the module menu appears only once
+// a module of that class has been approved. window.activeProducts (used by the
+// Logs submenu + setView product picker) still includes approved-but-offline
 // modules so their historical logs stay reachable while briefly down. Drops
 // classes the user can't see (canSeeModule).
 function _rebuildMainNav(allSpokes, connections) {
@@ -1743,11 +1745,18 @@ function _rebuildMainNav(allSpokes, connections) {
         return _productFromIdPrefix(sid);                  // offline spoke -> prefix fallback
     };
 
-    // connectedProducts = products backed by a LIVE connection. The main-nav
-    // class items (Firewalls/IPAM/...) are driven by THIS set, so a stale
-    // approved-but-offline registry entry can't ghost a nav item.
+    // connectedProducts = products backed by a LIVE connection to an APPROVED
+    // module. The main-nav class items (Firewalls/IPAM/...) are driven by THIS
+    // set, so:
+    //   - a stale approved-but-offline registry entry can't ghost a nav item
+    //     (connection required), AND
+    //   - a freshly-connected zero-touch spoke that is still PENDING admin
+    //     approval can't light its module menu either (approval required) —
+    //     the menu only appears once a module of that class has been approved.
+    const approvedIds = new Set(allSpokes.filter(s => s.approved).map(s => s.spoke_id));
     const connectedProducts = new Set();
     connections.forEach(id => {
+        if (!approvedIds.has(id)) return;   // unapproved/pending — no menu yet
         const p = productFor(id);
         if (p) connectedProducts.add(p);
     });
