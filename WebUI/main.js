@@ -430,10 +430,17 @@ function updateContextActions() {
 
 // Roles available to load on a generic agent (matches lm/agent/src/agent_spoke.py _ROLE_MAP)
 const AGENT_ROLES = {
-    'dns':  { name: 'DNS Server (Unbound)',  desc: 'Manages Unbound DNS. Syncs records from NetBox.', deploy: false },
-    'dhcp': { name: 'DHCP Server (Kea)',     desc: 'Manages Kea DHCP4. Syncs subnets and reservations from NetBox.', deploy: false },
-    'le':   { name: 'Certificate Management (Let\'s Encrypt)', desc: 'Issues/renews prod Let\'s Encrypt certs via certbot (HTTP-01 / DNS-01) and serves them to the hub for distribution to target spokes (e.g. OPNsense). Installs certbot + DNS-01 plugins.', deploy: false },
-    'bugfixer': { name: 'BugFixer', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
+    'dns':        { name: 'DNS Server (Unbound)',  desc: 'Manages Unbound DNS. Syncs records from NetBox.', deploy: false },
+    'dhcp':       { name: 'DHCP Server (Kea)',     desc: 'Manages Kea DHCP4. Syncs subnets and reservations from NetBox.', deploy: false },
+    'network':    { name: 'Network Devices (nw)',  desc: 'Polls fleet switches for ARP/MAC topology and syncs device/MAC/ARP data into NetBox.', deploy: false },
+    'netbox':     { name: 'IPAM/DCIM (NetBox)',    desc: 'Source-of-truth for sites, racks, devices, prefixes, IPs, VMs, tenants. Sinks every discovery sync and runs the NetBox→Kea DHCP scope sync.', deploy: false },
+    'opnsense':   { name: 'Firewall (OPNsense)',   desc: 'Manages an OPNsense firewall — aliases, filter/NAT rules, Unbound DNS, DHCP leases, ARP. Syncs DHCP/ARP into NetBox.', deploy: false },
+    'ldap':       { name: 'Directory (LDAP)',      desc: 'Wraps an LDAP directory for identity/group lookups.', deploy: false },
+    'simulation': { name: 'Client Simulator (cs)', desc: 'Client-sim engine, client registry, USB auto-provisioning relay, per-client override control panel, and the DHCP/client API for the isolated sim-client network.', deploy: false },
+    'cppm':       { name: 'NAC (Aruba ClearPass)', desc: 'Syncs ClearPass sessions/endpoints (by-MAC / by-IP) into NetBox.', deploy: false },
+    'proxmox':    { name: 'Hypervisor (Proxmox / pxmx)', desc: 'Proxmox spoke bridging the hub to per-host pxmx agents (VM lifecycle, VNC console, USB auto-provisioning).', deploy: false },
+    'le':         { name: 'Certificate Management (Let\'s Encrypt)', desc: 'Issues/renews prod Let\'s Encrypt certs via certbot (HTTP-01 / DNS-01) and serves them to the hub for distribution to target spokes (e.g. OPNsense). Installs certbot + DNS-01 plugins.', deploy: false },
+    'bugfixer':   { name: 'BugFixer', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
 };
 
 const PRODUCT_MAP = {
