@@ -14,6 +14,18 @@ except ImportError:
 
 logger = logging.getLogger("GenericAgent")
 
+# Set by control_plane.py right after its RoleConnection class is defined (both
+# modules are fully loaded by then; see the assignment there for why). LOAD_ROLE
+# reads this instead of doing `from control_plane import RoleConnection` at call
+# time — that bare import is NOT safe once ANY role has been loaded:
+# _load_role_class() below inserts the role's own src/ dir at sys.path[0] so its
+# flat imports resolve (e.g. cppm's `from queries import ...`), and nearly every
+# role repo also ships its own control_plane.py (its standalone spoke's own
+# entrypoint), which then shadows the agent's control_plane module for any
+# later bare `import control_plane` — surfacing as "cannot import name
+# 'RoleConnection' from 'control_plane' (/opt/lm/<role>/src/control_plane.py)".
+RoleConnection = None
+
 # Each entry: (rel_path, cls_name, module_type, repo_url_or_None)
 #   rel_path   — spoke file under the lm-root (e.g. dns/src/dns_spoke.py);
 #                the first path segment is also the clone target dir name.
@@ -323,7 +335,10 @@ class GenericAgent(BaseSpoke):
             if cp is None:
                 return {"status": "ERROR",
                         "message": "Agent control plane not wired — cannot spawn role connection"}
-            from control_plane import RoleConnection  # lazy: avoid circular import
+            if RoleConnection is None:
+                return {"status": "ERROR",
+                        "message": "RoleConnection unavailable — control_plane module "
+                                   "not fully loaded"}
             conn = RoleConnection(role_name, base_id=self.spoke_id,
                                   hub_url=cp.hub_url, role_instance=inst)
             task = asyncio.create_task(conn.run())

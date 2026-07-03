@@ -273,7 +273,13 @@ def _stub_role_load(agent, monkeypatch):
 
 def _patch_role_conn(monkeypatch):
     _FakeRoleConn.instances = []
+    # agent_spoke.handle_command's LOAD_ROLE reads agent_spoke.RoleConnection
+    # (a back-reference control_plane.py sets once at import time), NOT a bare
+    # `from control_plane import RoleConnection` at call time — see the comment
+    # on agent_spoke.RoleConnection for why. Patch both names so any direct
+    # cp_module.RoleConnection(...) construction in other tests still works.
     monkeypatch.setattr(cp_module, "RoleConnection", _FakeRoleConn)
+    monkeypatch.setattr(agent_spoke, "RoleConnection", _FakeRoleConn)
 
 
 def test_base_module_type_stays_agent():

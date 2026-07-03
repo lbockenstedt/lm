@@ -28,6 +28,7 @@ try:
 except ImportError:
     from messaging.control_plane import BaseControlPlane
 
+import agent_spoke
 from agent_spoke import GenericAgent, _ROLE_MAP
 
 try:
@@ -193,6 +194,15 @@ class RoleConnection(BaseControlPlane):
         auto-approve this sub-spoke via the parent agent. BaseControlPlane
         merges this dict into the auth_payload it sends on connect."""
         return {"parent_spoke_id": self.parent_spoke_id}
+
+
+# Back-reference so agent_spoke.GenericAgent's LOAD_ROLE handler can use this
+# class without a bare `from control_plane import RoleConnection` at call time.
+# That bare import is unsafe once ANY role has been loaded (its src/ dir gets
+# put at sys.path[0] and — for nearly every role — shadows this control_plane
+# module with the role's OWN control_plane.py). Safe to set here: both modules
+# are fully loaded by this point and no role's sys.path insert has happened yet.
+agent_spoke.RoleConnection = RoleConnection
 
 
 class AgentControlPlane(BaseControlPlane):
