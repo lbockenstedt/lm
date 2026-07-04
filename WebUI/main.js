@@ -6142,7 +6142,15 @@ function _normalizePxmxAgent(a) {
     return {
         spoke_id: a.agent_id,
         display_name: a.display_name || a.hostname || a.agent_id,
-        approved: !!a.approved,
+        // A connected pxmx-hosted agent is by definition approved — it only
+        // reaches connected_agents on the spoke after authenticating with the
+        // real secret, which it only has post-approval. The raw agent object
+        // from GET_AGENTS never carries an explicit "approved" field (only
+        // hub.approved_modules does, which isn't merged in here), so without
+        // this, spokeStatusMessage() saw authenticated=true + approved=false
+        // and showed "Online — pending approval" next to an already-green
+        // "Connected" badge.
+        approved: connected || !!a.approved,
         authenticated: connected,
         connection_state: connected ? 'CONNECTED' : 'PENDING',
         module_type: 'pxmx',
