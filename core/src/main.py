@@ -988,6 +988,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         "CS_HW_RESET_EVENT": "CS_INGEST_HW_RESET",
         "CS_COMMAND_RESULT": "CS_INGEST_COMMAND_RESULT",
         "CS_TOKEN_RESULT":   "CS_STORE_PROXMOX_TOKEN",
+        # Pre-teardown expire: the agent fires this just before destroying a
+        # sim VM so no stale queued command (e.g. reboot) is later delivered
+        # to whatever guest reuses that vmid slot (cs_sim.destroy_vm ->
+        # _expire_pending_commands). CS_CLEAR_COMMANDS already supports the
+        # `target` scoping this needs (cs_spoke.py's CS_CLEAR_COMMANDS
+        # handler).
+        "CS_EXPIRE_PENDING_COMMANDS": "CS_CLEAR_COMMANDS",
     }
 
     async def _relay_cs_event(self, spoke_id: str, agent_id: str,
@@ -2275,18 +2282,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
         except (websockets.ConnectionClosed, WebSocketDisconnect):
             logger.info(f"Connection closed for spoke {spoke_id}")
-            if spoke_id:
+            # Only this connection's own belated exception may update telemetry —
+            # an evicted/zombie connection (see _install_active_connection) can
+            # still be blocked in recv() when it's replaced, and its eventual
+            # ConnectionClosed/accept-first exception must not clobber the live
+            # replacement connection's just-written CONNECTED telemetry. Same
+            # guard as the `finally` cleanup below.
+            if spoke_id and self.active_connections.get(spoke_id) is websocket:
                 self._mark_spoke_disconnected(spoke_id)
-            self.record_spoke_event(spoke_id, "connection_closed", "clean websocket close")
+                self.record_spoke_event(spoke_id, "connection_closed", "clean websocket close")
         except Exception as e:
             logger.error(f"Error handling connection for {spoke_id}: {e}")
-            if spoke_id:
+            if spoke_id and self.active_connections.get(spoke_id) is websocket:
                 self.spoke_telemetry[spoke_id] = {
                     "last_attempt": time.time(),
                     "status": "ERROR",
                     "error": str(e)
                 }
-            self.record_spoke_event(spoke_id, "connection_error", str(e))
+                self.record_spoke_event(spoke_id, "connection_error", str(e))
         finally:
             # Only clean up the registry if it still points at THIS websocket.
             # An evicted/zombie connection's finally must not delete the entry
