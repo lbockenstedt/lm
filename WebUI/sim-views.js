@@ -315,9 +315,20 @@ function disconnectCSWebSocket() {
 // needing every render function to remember to add its own guard.
 function csUserIsEditing() {
     const el = document.activeElement;
-    if (!el) return false;
-    const tag = el.tagName;
-    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    if (el) {
+        const tag = el.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    }
+    // VM Server bulk-select: focus alone isn't enough here. Checking boxes
+    // then moving toward Start/Stop/Delete shifts focus off any checkbox
+    // (and off the page entirely once the mouse is down on the button) well
+    // before the click lands, so a refresh landing in that gap wiped the
+    // whole selection out from under the user even though they were still
+    // actively mid-action. A checked box is a timing-independent signal that
+    // the user has a pending selection, regardless of what currently has
+    // focus — don't refresh (and rebuild the table from scratch) while one
+    // exists.
+    return !!document.querySelector('.cs-vm-sel:checked');
 }
 
 function csWsRefresh() {
