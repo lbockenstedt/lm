@@ -427,6 +427,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.logs = deque(maxlen=500)
         self.agent_logs = {} # { agent_id: deque(logs) }
         self.max_log_size = 1000
+        # Per-agent index populated from AGENT_RELAY_UP: agent_id →
+        # {spoke_id, hostname, last_seen}. Lets the hub route a command to the
+        # spoke that owns the agent (pxmx-dialed → pxmx spoke, cs-dialed → cs
+        # spoke) instead of assuming every agent is on the pxmx spoke. Evicted
+        # when the owning spoke disconnects. See get_spoke_for_agent.
+        self.agent_info: Dict[str, Dict[str, Any]] = {}
         # Per-spoke connection lifecycle events. Lets the WebUI distinguish
         # "never dialed" / "flapping every few seconds" / "clean-exit after
         # self-update" / "auth failed" — all of which previously collapsed to a
@@ -818,6 +824,30 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         prefix = _MODULE_TYPE_PREFIX.get(module_type)
         if prefix:
             return next((sid for sid in self.active_connections if prefix in sid), None)
+        return None
+
+    def get_spoke_for_agent(self, agent_id: str, fallback_hypervisor: bool = True) -> Optional[str]:
+        """Return the connected spoke_id that owns ``agent_id``.
+
+        ``agent_info`` is populated from every ``AGENT_RELAY_UP`` frame, so a
+        pxmx-dialed agent indexes to the pxmx spoke and a cs-dialed agent
+        indexes to the cs spoke. Returns None when the agent is not connected
+        / not yet heartbeat-indexed (e.g. the first ~30s after connect, before
+        any relayed frame arrives).
+
+        When ``fallback_hypervisor`` is True, a missing index falls back to the
+        pxmx (``hypervisor``) spoke — correct for the all-in-one path where
+        every agent is on the pxmx spoke. Callers that must NOT misroute a
+        cs-dialed agent (e.g. the CS bridge relaying commands) pass
+        ``fallback_hypervisor=False`` and skip when None is returned.
+        """
+        info = self.agent_info.get(agent_id)
+        if info:
+            sid = info.get("spoke_id")
+            if sid and sid in self.active_connections:
+                return sid
+        if fallback_hypervisor:
+            return self.get_spoke_by_type("hypervisor")
         return None
 
     def get_all_spokes_by_type(self, module_type: str):
@@ -1545,6 +1575,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             parent_spoke_id=spoke_id,
         )
 
+        # Index the agent → its owning spoke so command routing (CS bridge,
+        # SET_AGENT_CONFIG) reaches the right spoke: a pxmx-dialed agent indexes
+        # to the pxmx spoke, a cs-dialed agent indexes to the cs spoke. Updated
+        # on every relayed frame (heartbeat/telemetry/log/CS_*), so the index is
+        # fresh and the hostname tracks a rename. Evicted on spoke disconnect.
+        if agent_id:
+            self.agent_info[agent_id] = {
+                "spoke_id":  spoke_id,
+                "hostname":  (relay_data.get("hostname") or "").strip() or agent_id,
+                "last_seen": time.time(),
+            }
+
         logger.info(f"Relayed message from Agent {agent_id} via Spoke {spoke_id}: {original_msg.get('payload', {}).get('type')}")
 
         # Handle Agent Logs
@@ -2185,6 +2227,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # so a reconnect that's still broken re-emits the ERROR once
                 # past the grace window (instead of staying suppressed).
                 self._unauth_warned_spokes.discard(spoke_id)
+                # Evict every agent hosted by this spoke from the agent→spoke
+                # index. They'll re-index on reconnect (next AGENT_RELAY_UP).
+                # Iterate over a snapshot — mutating the dict during iteration
+                # would otherwise raise RuntimeError.
+                for aid in list(self.agent_info):
+                    if self.agent_info.get(aid, {}).get("spoke_id") == spoke_id:
+                        self.agent_info.pop(aid, None)
 
     # ── Update pipeline (extracted) ───────────────────────────────────────
     # get_local_version / get_remote_version / _is_git_repo / _download_update /
@@ -3002,6 +3051,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # In-memory agent logs + telemetry.
         if old_id in self.agent_logs:
             self.agent_logs[new_id] = self.agent_logs.pop(old_id)
+        # Agent→spoke index: keep the routing entry under the new id so command
+        # relay survives a clone-and-rename.
+        if old_id in self.agent_info:
+            self.agent_info[new_id] = self.agent_info.pop(old_id)
         if parent_spoke_id:
             if parent_spoke_id in self.spoke_telemetry:
                 nested = self.spoke_telemetry[parent_spoke_id]

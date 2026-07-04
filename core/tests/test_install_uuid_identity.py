@@ -92,6 +92,7 @@ class _ReconcileHub:
         self.active_connections = {}
         self.active_connection_key_ids = {}
         self.agent_logs = {}
+        self.agent_info = {}
 
     # Mirror the real record_spoke_event: per-spoke deque, most-recent-first read.
     def record_spoke_event(self, spoke_id, event, detail=""):
