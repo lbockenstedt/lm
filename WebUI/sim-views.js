@@ -1920,9 +1920,10 @@ const CS_HUB_CONFIG_FIELDS = [
     { key: 'ignored_hostnames',           label: 'Ignored Hostnames (JSON array)', type: 'json', ph: '["sim-rpi-0000"]', full: true },
 ];
 
-function _csHcOnOff(id, val) {
+function _csHcOnOff(id, val, onChangeFn) {
     const on = String(val || 'off').toLowerCase() === 'on' || val === true;
-    return `<select id="${id}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+    const onchange = onChangeFn ? ` onchange="${onChangeFn}()"` : '';
+    return `<select id="${id}"${onchange} class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
       <option value="off" ${!on ? 'selected' : ''}>Off</option>
       <option value="on"  ${on ? 'selected' : ''}>On</option>
     </select>`;
@@ -1938,20 +1939,26 @@ async function csHubConfigCard(path) {
                      : (typeof valRaw === 'object' && valRaw != null) ? JSON.stringify(valRaw) : '';
         const label = `<label class="text-xs text-slate-500 ${col.full ? 'md:col-span-3' : ''}">${csEscape(col.label)}`;
         let input;
-        if (col.type === 'onoff') input = _csHcOnOff('cs-hc-' + col.key, valRaw);
-        else if (col.type === 'number') input = `<input id="cs-hc-${col.key}" type="number" value="${csEscape(valStr)}" ${col.min != null ? `min="${col.min}"` : ''} ${col.max != null ? `max="${col.max}"` : ''} placeholder="${csEscape(col.ph || '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
-        else input = `<input id="cs-hc-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
+        if (col.type === 'onoff') input = _csHcOnOff('cs-hc-' + col.key, valRaw, 'csSaveHubConfig');
+        else if (col.type === 'number') input = `<input id="cs-hc-${col.key}" type="number" value="${csEscape(valStr)}" ${col.min != null ? `min="${col.min}"` : ''} ${col.max != null ? `max="${col.max}"` : ''} placeholder="${csEscape(col.ph || '')}" onblur="csSaveHubConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
+        else input = `<input id="cs-hc-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" onblur="csSaveHubConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         return `${label}${input}</label>`;
     }).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Hub Config</h3>
-      <label class="flex items-center gap-2 text-xs text-slate-600 mb-3"><input id="cs-hc-enabled" type="checkbox" ${enabled ? 'checked' : ''}> Enable hub as source of truth</label>
+      <p class="text-xs text-slate-400 mb-3">Changes save automatically — a select/checkbox saves on change, a text/number field saves when you click or tab away from it.</p>
+      <label class="flex items-center gap-2 text-xs text-slate-600 mb-3"><input id="cs-hc-enabled" type="checkbox" ${enabled ? 'checked' : ''} onchange="csHcToggleEnabled(this.checked)"> Enable hub as source of truth</label>
       <div id="cs-hc-fields" class="${enabled ? '' : 'hidden'} grid grid-cols-1 md:grid-cols-3 gap-3">
         ${fields}
       </div>
-      <button onclick="csSaveHubConfig()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save &amp; Push to All Spokes</button>
     </div>`;
 }
+
+window.csHcToggleEnabled = function (checked) {
+    const fields = csEl('cs-hc-fields');
+    if (fields) fields.classList.toggle('hidden', !checked);
+    csSaveHubConfig();
+};
 
 window.csSaveHubConfig = async function () {
     // Mirror webui-hub saveHubConfig: skip empty fields; parse JSON-array keys;
@@ -2053,18 +2060,17 @@ async function csSetupAutoProvConfigCard() {
                      : (typeof valRaw === 'object' && valRaw != null) ? JSON.stringify(valRaw) : '';
         const label = `<label class="text-xs text-slate-500 ${col.full ? 'md:col-span-3' : ''}">${csEscape(col.label)}`;
         let input;
-        if (col.type === 'onoff') input = _csHcOnOff('cs-ap-' + col.key, valRaw);
-        else if (col.type === 'number') input = `<input id="cs-ap-${col.key}" type="number" value="${csEscape(valStr)}" ${col.min != null ? `min="${col.min}"` : ''} ${col.max != null ? `max="${col.max}"` : ''} placeholder="${csEscape(col.ph || '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
-        else input = `<input id="cs-ap-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
+        if (col.type === 'onoff') input = _csHcOnOff('cs-ap-' + col.key, valRaw, 'csSaveAutoProvConfig');
+        else if (col.type === 'number') input = `<input id="cs-ap-${col.key}" type="number" value="${csEscape(valStr)}" ${col.min != null ? `min="${col.min}"` : ''} ${col.max != null ? `max="${col.max}"` : ''} placeholder="${csEscape(col.ph || '')}" onblur="csSaveAutoProvConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
+        else input = `<input id="cs-ap-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" onblur="csSaveAutoProvConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         return `${label}${input}</label>`;
     }).join('');
-    const note = enabled ? '<span class="text-slate-400">Hub-owned knobs; pushed to every spoke on save. Turning Auto-Provision VMs On also enables hub config (mirrors the Overview/USB toggle).</span>'
-        : '<span class="text-amber-600">Hub config is not enabled — saving pushes only when Auto-Provision VMs is On (which enables hub config) or after you enable it in the Hub Config card below.</span>';
+    const note = enabled ? '<span class="text-slate-400">Hub-owned knobs; saved automatically as you edit (a select/checkbox on change, a text/number field when you click or tab away). Turning Auto-Provision VMs On also enables hub config (mirrors the Overview/USB toggle).</span>'
+        : '<span class="text-amber-600">Hub config is not enabled — auto-save pushes to spokes only when Auto-Provision VMs is On (which enables hub config) or after you enable it in the Hub Config card below.</span>';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">VM Auto-Provisioning</h3>
       <p class="text-xs text-slate-400 mb-3">${note}</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${rows}</div>
-      <button onclick="csSaveAutoProvConfig()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save &amp; Push to All Spokes</button>
     </div>`;
 }
 
