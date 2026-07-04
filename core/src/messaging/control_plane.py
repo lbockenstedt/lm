@@ -568,45 +568,66 @@ class BaseControlPlane:
     def _normalize_hub_url(url):
         """Normalize a pinned hub URL for the unified-443 hub (best-effort).
 
-        Two migrations so operators don't have to re-edit stale pre-unified pins
-        (parity with the leaf agent's ``_normalize_url``):
+        Fills in missing pieces with sane defaults (parity with the pxmx
+        agent's ``_normalize_spoke_url``), plus the pre-existing unified-443
+        migrations so operators don't have to re-edit stale pre-unified pins:
 
-        1. **ws://…:443 → wss://…:443.** Port 443 is the TLS (wss://) listener; a
-           ``ws://`` pin to it is plaintext-to-TLS → ``InvalidMessage: did not
-           receive a valid HTTP response``. The hub's mDNS broadcast can also
-           omit the ``tls_port`` TXT, so discovery can hand back ``ws://<ip>:443``
-           — upgrade it so the agent uses TLS. ``ws://`` on any other port (e.g.
-           8765 loopback on a not-yet-upgraded hub) is left alone.
+        1. **No scheme at all → default ``wss://``.** A bare ``--hub
+           172.16.1.31`` (or ``host:port``) is assumed to mean the unified
+           TLS listener, not raw/plaintext — "assume wss:// and 443 unless
+           otherwise stated".
 
-        2. **Append ``/ws/spoke`` to a pathless :443 pin.** Under the unified-443
-           merge the spoke-WS lives at ``/ws/spoke`` (path-routed on the single
-           :443 uvicorn). A pre-unified pin like ``wss://host:443`` (no path)
-           hits the WebUI root ``/`` and is rejected ``HTTP 403``. A pin that
-           already carries a path is left as-is.
+        2. **No port → default 443**, the hub's single unified listener.
 
-        The ``auto`` sentinel, empty, and non-ws URLs are returned unchanged
+        3. **``ws://…:443`` → ``wss://…:443``.** Port 443 is always the TLS
+           listener; a ``ws://`` pin to it is plaintext-to-TLS →
+           ``InvalidMessage: did not receive a valid HTTP response``. The
+           hub's mDNS broadcast can also omit the ``tls_port`` TXT, so
+           discovery can hand back ``ws://<ip>:443`` — upgrade it. ``ws://``
+           on any OTHER (explicitly-given) port — e.g. 8765 loopback on a
+           not-yet-upgraded hub — is left alone; that listener is plaintext
+           by design.
+
+        4. **Append ``/ws/spoke`` to a pathless :443 pin only.** Under the
+           unified-443 merge the spoke-WS lives at ``/ws/spoke`` (path-routed
+           on the single :443 uvicorn). A pin resolving to port 443 with no
+           path hits the WebUI root ``/`` and is rejected ``HTTP 403``. This
+           is gated on port 443 specifically: the legacy loopback ``:8765``
+           listener has no path routing at all, so a pin to it must NOT get
+           ``/ws/spoke`` appended. A pin that already carries a path is left
+           as-is either way.
+
+        The ``auto`` sentinel and empty string are returned unchanged
         (``_resolve_hub_url`` handles ``auto``).
         """
         if not url or url == "auto":
             return url
-        low = url.lower()
-        if not low.startswith("ws://") and not low.startswith("wss://"):
-            return url
+        raw = url.strip()
+        if "://" not in raw:
+            raw = "wss://" + raw
         try:
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
+            from urllib.parse import urlsplit, urlunsplit
+            parts = urlsplit(raw)
         except Exception:
             return url
-        # 1. ws://…:443 → wss://…:443
-        if low.startswith("ws://") and parsed.port == 443:
-            url = "wss://" + url[len("ws://"):]
+        scheme = parts.scheme or "wss"
+        netloc = parts.netloc
+        host_part = netloc.rsplit("]", 1)[-1] if netloc else netloc
+        if netloc and ":" not in host_part:
+            netloc = f"{netloc}:443"
+            port = 443
+        else:
+            port = parts.port
+        if scheme == "ws" and port == 443:
+            scheme = "wss"
             logger.info("Upgrading pinned %s → wss:// (port 443 is the hub TLS listener)", url)
-            parsed = urlparse(url)
-        # 2. pathless :443 pin → append /ws/spoke (else the WebUI root 403s)
-        if parsed.port == 443 and parsed.path in ("", "/"):
-            url = url.rstrip("/") + "/ws/spoke"
+        path = parts.path
+        if port == 443 and path in ("", "/"):
+            path = "/ws/spoke"
             logger.info("Appending /ws/spoke to pinned URL (unified-443 spoke-WS path): %s", url)
-        return url
+        elif path not in ("", "/"):
+            path = path.rstrip("/")
+        return urlunsplit((scheme, netloc, path, "", ""))
 
     async def _resolve_hub_url(self) -> None:
         """When ``self.hub_url`` is empty/``auto``/None, auto-discover the hub via
