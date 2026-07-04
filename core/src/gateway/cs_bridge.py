@@ -2,22 +2,26 @@
 command queue and the unified pxmx agents (Phase D2).
 
 Architecture invariant (see the unify plan): a pxmx agent opens exactly one
-socket — to the pxmx spoke. It never contacts the cs spoke. The hub mediates.
-This loop is the mediator's "command delivery + USB-config sync" half
+socket — either to a dedicated pxmx (hypervisor) spoke, or directly to a cs
+(simulation) spoke's own ``/ws/agent`` listener (the split-topology case,
+``AgentHostingControlPlane`` shared by both spoke types). It never contacts
+the cs spoke for command relay in either case — the hub mediates. This loop
+is the mediator's "command delivery + USB-config sync" half
 (``_relay_cs_event`` in ``main.py`` is the other half — agent events → cs spoke).
 
 Each tick (``CS_POLL_INTERVAL_S``, default 5s):
 
-  1. Resolve the connected pxmx (hypervisor) spoke; if none, idle.
-  2. ``GET_AGENTS`` on it for the connected-agent list (with hostnames).
+  1. Resolve every connected agent-hosting spoke — hypervisor (pxmx) AND
+     simulation (cs) types, since either can hold an agent's live WS.
+  2. ``GET_AGENTS`` on each for its connected-agent list (with hostnames).
   3. For every agent whose ``agent_config[aid].client_simulation.enabled`` is
      true, resolve its cs spoke (``get_client_sim_spoke(tenant_id)``) and
      ``CS_POLL_AGENT_INBOX{hostname}`` — the cs spoke returns pending commands
      (already marked ``delivered``) and resets stale (>30s, unacked) ones.
-  4. Relay each command to the agent as ``CS_COMMAND`` through the pxmx spoke's
-     ``SPOKE_RELAY`` (``{target_agent_id, command:"CS_COMMAND", data}``). The
-     spoke's ``send_to_agent`` enforces a 15s sync window, so the relay waits
-     up to ``CS_RELAY_TIMEOUT_S`` (16s). Fast commands return
+  4. Relay each command to the agent as ``CS_COMMAND`` through the owning
+     spoke's ``SPOKE_RELAY`` (``{target_agent_id, command:"CS_COMMAND", data}``).
+     The spoke's ``send_to_agent`` enforces a 15s sync window, so the relay
+     waits up to ``CS_RELAY_TIMEOUT_S`` (16s). Fast commands return
      ``{status:SUCCESS|ERROR}``; long ops return ``{status:ACCEPTED}`` (Phase E
      streams ``CS_PROGRESS`` + a terminal ``CS_COMMAND_RESULT`` that the agent
      emits up and the D1 relay maps to ``CS_INGEST_COMMAND_RESULT`` → ack).
@@ -32,8 +36,8 @@ pushed to the agent via ``SET_AGENT_CONFIG`` → ``UPDATE_CONFIG`` so
 is authoritative for USB-provision knobs; the hub store is not touched (the
 spoke persists the merged config spoke-side for reconnect re-push).
 
-Best-effort throughout: a missing pxmx/cs spoke, an offline agent, or a relay
-failure is logged at debug and skipped — it never breaks the loop or the
+Best-effort throughout: a missing agent-host/cs spoke, an offline agent, or a
+relay failure is logged at debug and skipped — it never breaks the loop or the
 agent's own telemetry/heartbeat.
 """
 
@@ -66,7 +70,9 @@ def _unwrap(result: Any) -> Dict[str, Any]:
 
 class CSBridgePoller:
     """One long-lived hub task. Polls the cs spoke's inbox for every
-    CS-enabled connected pxmx agent and relays commands + USB config."""
+    CS-enabled connected agent — whether it's hosted by a pxmx (hypervisor)
+    spoke or a cs (simulation) spoke's own agent listener — and relays
+    commands + USB config to whichever spoke actually holds its connection."""
 
     def __init__(self, hub) -> None:
         self.hub = hub
@@ -97,37 +103,49 @@ class CSBridgePoller:
 
     async def _tick(self) -> None:
         hub = self.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
-        if not pxmx_spoke:
-            return  # no pxmx spoke connected; nothing to relay to
-
-        agents = await self._connected_agents(pxmx_spoke)
-        if not agents:
+        # An agent can connect through a dedicated pxmx (hypervisor) spoke OR
+        # directly to a cs (simulation) spoke's own /ws/agent listener (the
+        # split-topology case). Hardcoding a single hypervisor spoke here meant
+        # a cs-hosted agent's queued commands (VM start/stop/delete/...) were
+        # NEVER relayed at all when no separate pxmx spoke was connected — the
+        # loop returned before it ever looked at GET_AGENTS, so they just sat
+        # in the cs spoke's local queue until the 15-minute expiry. Mirrors
+        # get_spoke_for_agent's fallback_hypervisor=False contract (see its
+        # docstring — this loop is the caller it names) by resolving agents
+        # from every agent-hosting spoke, not just one.
+        agent_spokes = list(dict.fromkeys(
+            hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
+        ))
+        if not agent_spokes:
             return
 
         now = time.time()
-        for a in agents:
-            aid = a.get("agent_id")
-            hostname = a.get("hostname") or aid
-            if not aid:
+        for host_spoke in agent_spokes:
+            agents = await self._connected_agents(host_spoke)
+            if not agents:
                 continue
-            cs_cfg = self._client_simulation(aid)
-            if not cs_cfg.get("enabled"):
-                continue
-            tenant_id = cs_cfg.get("tenant_id") or self._spoke_tenant(pxmx_spoke)
-            cs_spoke = hub.get_client_sim_spoke(tenant_id)
-            if not cs_spoke:
-                continue
+            for a in agents:
+                aid = a.get("agent_id")
+                hostname = a.get("hostname") or aid
+                if not aid:
+                    continue
+                cs_cfg = self._client_simulation(aid)
+                if not cs_cfg.get("enabled"):
+                    continue
+                tenant_id = cs_cfg.get("tenant_id") or self._spoke_tenant(host_spoke)
+                cs_spoke = hub.get_client_sim_spoke(tenant_id)
+                if not cs_spoke:
+                    continue
 
-            await self._relay_inbox(pxmx_spoke, cs_spoke, aid, hostname)
+                await self._relay_inbox(host_spoke, cs_spoke, aid, hostname)
 
-            if now - self._last_usb_push.get(aid, 0.0) >= self.usb_interval:
-                await self._sync_usb_config(pxmx_spoke, cs_spoke, aid, hostname, now)
+                if now - self._last_usb_push.get(aid, 0.0) >= self.usb_interval:
+                    await self._sync_usb_config(host_spoke, cs_spoke, aid, hostname, now)
 
     # ── helpers ────────────────────────────────────────────────────────────
 
-    async def _connected_agents(self, pxmx_spoke: str) -> list:
-        resp = await self.hub.request_response(pxmx_spoke, "GET_AGENTS", {}, timeout=5.0)
+    async def _connected_agents(self, host_spoke: str) -> list:
+        resp = await self.hub.request_response(host_spoke, "GET_AGENTS", {}, timeout=5.0)
         data = _unwrap(resp)
         agents = data.get("agents", []) if isinstance(data, dict) else []
         return [a for a in agents if isinstance(a, dict) and a.get("agent_id")]
@@ -145,7 +163,7 @@ class CSBridgePoller:
         except Exception:
             return None
 
-    async def _relay_inbox(self, pxmx_spoke: str, cs_spoke: str,
+    async def _relay_inbox(self, host_spoke: str, cs_spoke: str,
                            agent_id: str, hostname: str) -> None:
         hub = self.hub
         inbox = await hub.request_response(cs_spoke, "CS_POLL_AGENT_INBOX",
@@ -157,9 +175,9 @@ class CSBridgePoller:
         for cmd in commands:
             if not isinstance(cmd, dict):
                 continue
-            await self._relay_one(pxmx_spoke, cs_spoke, agent_id, cmd)
+            await self._relay_one(host_spoke, cs_spoke, agent_id, cmd)
 
-    async def _relay_one(self, pxmx_spoke: str, cs_spoke: str,
+    async def _relay_one(self, host_spoke: str, cs_spoke: str,
                          agent_id: str, cmd: Dict[str, Any]) -> None:
         hub = self.hub
         cmd_id = cmd.get("id")
@@ -175,7 +193,7 @@ class CSBridgePoller:
 
         try:
             raw = await hub.request_response(
-                pxmx_spoke, "SPOKE_RELAY",
+                host_spoke, "SPOKE_RELAY",
                 {"target_agent_id": agent_id, "command": "CS_COMMAND", "data": relay_data},
                 timeout=self.relay_timeout,
             )
@@ -214,7 +232,7 @@ class CSBridgePoller:
         except Exception as exc:  # noqa: BLE001
             logger.debug("CS bridge: ack %s (%s) failed: %s", cmd_id, status, exc)
 
-    async def _sync_usb_config(self, pxmx_spoke: str, cs_spoke: str,
+    async def _sync_usb_config(self, host_spoke: str, cs_spoke: str,
                                agent_id: str, hostname: str, now: float) -> None:
         hub = self.hub
         try:
@@ -250,7 +268,7 @@ class CSBridgePoller:
         merged["client_simulation"] = cs_cfg
 
         try:
-            await hub.request_response(pxmx_spoke, "SET_AGENT_CONFIG",
+            await hub.request_response(host_spoke, "SET_AGENT_CONFIG",
                                        {"agent_id": agent_id, "config": merged},
                                        timeout=5.0)
             self._last_usb_cfg[agent_id] = sig
