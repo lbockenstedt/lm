@@ -3315,36 +3315,46 @@ async function csRenderSpokeManagement() {
     };
     const tenantCell = (t) => t ? csEscape(t) : `<span class="text-amber-600 font-semibold">unbound</span>`;
 
+    // Two <tr>s per spoke (data row + a full-width actions row underneath) so
+    // the 6 admin action buttons get their own line instead of being crammed
+    // into a narrow trailing "Actions" cell, which forced them to wrap. Both
+    // rows share the same class + data-cs-* attributes so csSpokeFilter's
+    // search hides/shows the pair together.
     window._csSpokeRowHtml = function (s) {
         const isPending = !s.approved;
         const assignBtn = admin
-            ? `<button onclick="openSpokeAssignModal('${csEscape(s.spoke_id)}','${csEscape(s.tenant_id || '')}')" class="text-xs text-[#01A982] font-bold hover:underline mr-2">${!s.tenant_id ? 'Assign' : 'Rebind'}</button>`
+            ? `<button onclick="openSpokeAssignModal('${csEscape(s.spoke_id)}','${csEscape(s.tenant_id || '')}')" class="text-xs text-[#01A982] font-bold hover:underline whitespace-nowrap">${!s.tenant_id ? 'Assign' : 'Rebind'}</button>`
             : '';
         const approveBtn = admin
-            ? `<button onclick="csSpokeApprove('${csEscape(s.spoke_id)}',${isPending ? 'true' : 'false'})" class="text-xs ${isPending ? 'text-green-600 font-bold' : 'text-amber-600'} hover:underline mr-2">${isPending ? 'Approve' : 'Revoke'}</button>`
+            ? `<button onclick="csSpokeApprove('${csEscape(s.spoke_id)}',${isPending ? 'true' : 'false'})" class="text-xs ${isPending ? 'text-green-600 font-bold' : 'text-amber-600'} hover:underline whitespace-nowrap">${isPending ? 'Approve' : 'Revoke'}</button>`
             : '';
         const labelBtn = admin
-            ? `<button onclick="csSpokeEditLabel('${csEscape(s.spoke_id)}','${csEscape((s.display_name || s.spoke_id || '').replace(/'/g, "\\'"))}')" class="text-xs text-slate-500 hover:underline mr-2">Label</button>`
+            ? `<button onclick="csSpokeEditLabel('${csEscape(s.spoke_id)}','${csEscape((s.display_name || s.spoke_id || '').replace(/'/g, "\\'"))}')" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Label</button>`
             : '';
         const cfgBtn = admin
-            ? `<button onclick="csSpokePatchConfig('${csEscape(s.spoke_id)}')" class="text-xs text-slate-500 hover:underline mr-2">Config</button>`
+            ? `<button onclick="csSpokePatchConfig('${csEscape(s.spoke_id)}')" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Config</button>`
             : '';
         const diagBtn = admin
-            ? `<button onclick="csSpokeDiag('${csEscape(s.spoke_id)}')" class="text-xs text-slate-500 hover:underline mr-2">Diag</button>`
+            ? `<button onclick="csSpokeDiag('${csEscape(s.spoke_id)}')" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Diag</button>`
             : '';
         const delBtn = admin
-            ? `<button onclick="csSpokeDelete('${csEscape(s.spoke_id)}')" class="text-xs text-red-500 hover:underline">Delete</button>`
+            ? `<button onclick="csSpokeDelete('${csEscape(s.spoke_id)}')" class="text-xs text-red-500 hover:underline whitespace-nowrap">Delete</button>`
             : '';
-        const actions = admin ? (assignBtn + approveBtn + labelBtn + cfgBtn + diagBtn + delBtn) : '<span class="text-slate-300">—</span>';
-        return `<tr class="cs-spoke-row" data-cs-spoke="${csEscape(s.spoke_id).toLowerCase()}" data-cs-name="${csEscape((s.display_name || s.spoke_id || '').toLowerCase())}">
-          <td class="px-3 py-2 font-mono text-xs">${csEscape(s.spoke_id)}</td>
-          <td class="px-3 py-2 text-sm">${csEscape(s.display_name || s.spoke_id)}</td>
-          <td class="px-3 py-2">${typeBadge(s.module_type)}</td>
-          <td class="px-3 py-2">${csOnlineBadge(s.connected)}</td>
-          <td class="px-3 py-2">${s.approved ? '<span class="text-green-600 text-xs font-bold">Approved</span>' : '<span class="text-amber-600 text-xs font-bold">Pending</span>'}</td>
-          <td class="px-3 py-2 text-xs">${tenantCell(s.tenant_id)}</td>
-          <td class="px-3 py-2 text-xs text-slate-500">${(s.vm_count != null) ? s.vm_count : '—'}</td>
-          <td class="px-3 py-2 whitespace-nowrap">${actions}</td>
+        const actions = admin
+            ? `<div class="flex flex-wrap items-center gap-4">${assignBtn}${approveBtn}${labelBtn}${cfgBtn}${diagBtn}${delBtn}</div>`
+            : '<span class="text-slate-300">—</span>';
+        const dataAttrs = `data-cs-spoke="${csEscape(s.spoke_id).toLowerCase()}" data-cs-name="${csEscape((s.display_name || s.spoke_id || '').toLowerCase())}"`;
+        return `<tr class="cs-spoke-row" ${dataAttrs}>
+          <td class="px-3 pt-2 pb-1 font-mono text-xs whitespace-nowrap">${csEscape(s.spoke_id)}</td>
+          <td class="px-3 pt-2 pb-1 text-sm whitespace-nowrap">${csEscape(s.display_name || s.spoke_id)}</td>
+          <td class="px-3 pt-2 pb-1 whitespace-nowrap">${typeBadge(s.module_type)}</td>
+          <td class="px-3 pt-2 pb-1 whitespace-nowrap">${csOnlineBadge(s.connected)}</td>
+          <td class="px-3 pt-2 pb-1 whitespace-nowrap">${s.approved ? '<span class="text-green-600 text-xs font-bold">Approved</span>' : '<span class="text-amber-600 text-xs font-bold">Pending</span>'}</td>
+          <td class="px-3 pt-2 pb-1 text-xs whitespace-nowrap">${tenantCell(s.tenant_id)}</td>
+          <td class="px-3 pt-2 pb-1 text-xs text-slate-500 whitespace-nowrap">${(s.vm_count != null) ? s.vm_count : '—'}</td>
+        </tr>
+        <tr class="cs-spoke-row" ${dataAttrs}>
+          <td class="px-3 pt-0 pb-2.5" colspan="7">${actions}</td>
         </tr>`;
     };
 
@@ -3354,7 +3364,7 @@ async function csRenderSpokeManagement() {
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes</h3>
         <span class="text-xs text-slate-400">${admin ? 'All tenants (admin)' : 'Tenant: ' + csEscape(tenant)}</span>
       </div>
-      ${csTable(['Spoke ID', 'Name', 'Type', 'State', 'Approval', 'Tenant', 'VMs', 'Actions'], rows)}
+      ${csTable(['Spoke ID', 'Name', 'Type', 'State', 'Approval', 'Tenant', 'VMs'], rows)}
     </div>`;
 
     const claimCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
