@@ -4472,6 +4472,40 @@ def create_app(hub):
                         flat.append(f"[{agent_id}] {line}")
                 return {"logs": flat[-500:]}
 
+            # This module's spoke(s) run on a SEPARATE box from the hub in any
+            # real (non-all-in-one) deployment, so /var/log/lm/<module>.log
+            # below is a HUB-local path that only ever exists for a spoke
+            # co-located on the hub's own machine — for cs/pxmx/opnsense/etc.
+            # running elsewhere it 404s every time ("no logs" in the WebUI)
+            # even though the spoke has been dutifully relaying its own log
+            # lines up via SPOKE_LOG the whole time (_handle_spoke_log stores
+            # them in hub.agent_logs[spoke_id], same buffer the "agents"
+            # branch above already reads). Prefer that live relay, scoped to
+            # this module's spoke(s), before ever touching the local file.
+            module_type_map = {
+                "opn": "firewall", "pxmx": "hypervisor", "cppm": "nac",
+                "cs": "simulation", "ldap": "directory", "netbox": "ipam",
+                "dns": "dns", "dhcp": "dhcp", "nw": "nw", "le": "certificates",
+            }
+            mtype = module_type_map.get(module)
+            matching_sids = set()
+            if mtype:
+                matching_sids.update(
+                    sid for sid, mt in hub.spoke_module_types.items() if mt == mtype)
+            # Prefix fallback catches a spoke whose module_type isn't live
+            # right now (disconnected — popped from spoke_module_types) but
+            # whose buffered logs from while it WAS connected are still held.
+            matching_sids.update(
+                sid for sid in hub.agent_logs if sid == module or sid.startswith(module + "-"))
+
+            if matching_sids:
+                flat = []
+                for sid in matching_sids:
+                    for line in hub.agent_logs.get(sid, []):
+                        flat.append(f"[{sid}] {line}")
+                if flat:
+                    return {"logs": flat[-500:]}
+
             # Map WebUI module keys → actual log filenames under /var/log/lm/
             log_name_map = {
                 "opn":    "lm-opnsense",
