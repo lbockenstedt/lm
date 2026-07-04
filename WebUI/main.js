@@ -6052,6 +6052,33 @@ function toggleSpokeEvents(spokeId) {
     panel.classList.toggle('hidden');
 }
 
+// Copy a spoke/agent's connection-events panel to the clipboard — same
+// clipboard-write + fallback + toast pattern as copyLogs() (Setup → Logs).
+async function copySpokeEvents(spokeId) {
+    const panel = document.getElementById(`events-${spokeId}`);
+    if (!panel) return;
+    const text = panel.innerText;
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            const textArea = document.createElement('textarea');
+            textArea.value = text;
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+                document.execCommand('copy');
+            } catch (err) {
+                throw new Error('execCommand copy failed');
+            }
+            document.body.removeChild(textArea);
+        }
+        if (typeof showToast === 'function') showToast('Events copied to clipboard.', 'success');
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Copy failed: ' + e.message, 'error');
+    }
+}
+
 // Minimal HTML escaper for safely interpolating server-provided strings
 // (spoke IDs, error text, module types) into template literals.
 function escapeHtml(s) {
@@ -6167,6 +6194,7 @@ function _diagTelemetryExtras(s, fns) {
                 ? _mgmtBtn(pauseLabel, `setRecoveryPause('${eSid}', ${!isPaused})`, isPaused ? 'text-green-600' : 'text-slate-400 hover:underline')
                 : '',
             `<button onclick="toggleSpokeEvents('${eSid}')" class="text-blue-500 hover:text-blue-700 font-medium text-xs">${evCount} events ▾</button>`,
+            evCount ? `<button onclick="copySpokeEvents('${eSid}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Copy</button>` : '',
         ],
         eventsPanel: `<div id="events-${s.spoke_id}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.events || []).map(spokeEventRow).join('') || '<span class="text-slate-400 italic">No connection events recorded.</span>'}</div>`,
     };
