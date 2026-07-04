@@ -461,7 +461,7 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
             }[module_key]
             result = await hub.request_response(spoke, cmd, {"tenant": slug} if slug else {})
         elif module_key == "pxmx_vms":
-            spoke = hub.get_spoke_by_type("hypervisor")
+            spoke = hub.get_hypervisor_spoke()
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
             cfg = hub.state.get_tenant(tenant_id) or {}
             payload = {"tag_filter": cfg["proxmox_tag"]} if cfg.get("proxmox_tag") else {}
@@ -1319,7 +1319,7 @@ def create_app(hub):
         # when the hypervisor spoke is down (sources[*].connected already flags
         # that; agents just enriches with the per-server detail).
         agents: list = []
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if pxmx_spoke:
             try:
                 r = await hub.request_response(pxmx_spoke, "GET_AGENTS", {}, timeout=15.0)
@@ -1723,7 +1723,7 @@ def create_app(hub):
             hub.state.system_state["global_config"] = global_config
             hub.state.save_state()
 
-            pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+            pxmx_spoke = hub.get_hypervisor_spoke()
             if pxmx_spoke:
                 msg = _hub_msg(pxmx_spoke, "update_config", config)
                 await hub.send_to_spoke(msg)
@@ -2823,7 +2823,7 @@ def create_app(hub):
         spoke_nac  = hub.get_spoke_by_type("nac")
         fw_spokes  = hub.get_all_spokes_by_type("firewall") or []
         spoke_ipam = hub.get_spoke_by_type("ipam")
-        spoke_pxmx = hub.get_spoke_by_type("hypervisor")
+        spoke_pxmx = hub.get_hypervisor_spoke()
         spoke_ldap = hub.get_spoke_by_type("directory")
 
         tasks: dict = {}
@@ -3075,7 +3075,7 @@ def create_app(hub):
             "cppm": {"status": "OFFLINE", "policy": "Unknown"}
         }
 
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if pxmx_spoke:
             px_res_raw = await hub.request_response(pxmx_spoke, "GET_VM_INFO", {"vm_id": vm_id})
             px_res = px_res_raw.get("payload", {}).get("data", {}) if isinstance(px_res_raw, dict) else {}
@@ -3275,7 +3275,7 @@ def create_app(hub):
         # in the split-topology case, not necessarily pxmx) rather than
         # always targeting the hypervisor spoke.
         owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
-            or hub.get_spoke_by_type("hypervisor")
+            or hub.get_hypervisor_spoke()
         if not owning_spoke:
             raise HTTPException(status_code=503, detail="No agent-hosting spoke connected")
         try:
@@ -3371,7 +3371,7 @@ def create_app(hub):
             pushed = False
             queued = False
             owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
-                or hub.get_spoke_by_type("hypervisor")
+                or hub.get_hypervisor_spoke()
             if owning_spoke:
                 try:
                     push = getattr(hub, "push_or_queue_to_spoke", None)
@@ -3426,7 +3426,7 @@ def create_app(hub):
         action = (body.get("action") or "").strip()
         if not action:
             raise HTTPException(status_code=400, detail="missing 'action'")
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             raise HTTPException(status_code=503, detail="hypervisor spoke not connected")
         try:
@@ -3448,7 +3448,7 @@ def create_app(hub):
         spoke is offline, the relay is skipped and we still clear the override."""
         hub = app.state.hub
         relayed = False
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if pxmx_spoke:
             try:
                 result = await hub.request_response(pxmx_spoke, "SPOKE_RELAY", {
@@ -3470,7 +3470,7 @@ def create_app(hub):
     @app.get("/api/pxmx/nodes")
     async def get_pxmx_nodes():
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             return {"nodes": [], "spoke_connected": False}
         try:
@@ -3518,7 +3518,7 @@ def create_app(hub):
                 cached = _cache_entry(tid, "pxmx_vms")
                 if cached:
                     return _with_tpl(await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant))
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             if sess:
                 tid = sess.get("user", {}).get("tenant_id")
@@ -3568,7 +3568,7 @@ def create_app(hub):
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
         session_id = str(uuid.uuid4())
@@ -3820,7 +3820,7 @@ def create_app(hub):
         if action not in ("start", "stop", "reboot", "restart", "snapshot"):
             raise HTTPException(status_code=400, detail=f"unknown action: {action}")
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
         payload = {
@@ -3855,7 +3855,7 @@ def create_app(hub):
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             return {"pools": [], "spoke_connected": False}
         try:
@@ -3881,7 +3881,7 @@ def create_app(hub):
         if not node:
             raise HTTPException(status_code=400, detail="node query param required")
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             return {"isos": [], "node": node, "spoke_connected": False}
         try:
@@ -3907,7 +3907,7 @@ def create_app(hub):
         if not node:
             raise HTTPException(status_code=400, detail="node query param required")
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             return {"storages": [], "node": node, "spoke_connected": False}
         try:
@@ -3951,7 +3951,7 @@ def create_app(hub):
         if not volid:
             raise HTTPException(status_code=400, detail="volid (ISO) is required")
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
         # Resolve the acting tenant's labels (display name + proxmox_tag) —
@@ -4044,7 +4044,7 @@ def create_app(hub):
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
+        pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
 
@@ -4148,7 +4148,7 @@ def create_app(hub):
         pxmx_tag = scoping["proxmox_tag"]        or None
 
         spoke_ipam       = hub.get_spoke_by_type("ipam")
-        spoke_hypervisor = hub.get_spoke_by_type("hypervisor")
+        spoke_hypervisor = hub.get_hypervisor_spoke()
         spoke_nac        = hub.get_spoke_by_type("nac")
 
         async def _req(spoke, cmd, payload=None):
@@ -4314,7 +4314,7 @@ def create_app(hub):
                 return [{"source": cmd, "type": "error", "name": str(e)}]
 
         spoke_ipam       = hub.get_spoke_by_type("ipam")
-        spoke_hypervisor = hub.get_spoke_by_type("hypervisor")
+        spoke_hypervisor = hub.get_hypervisor_spoke()
         spoke_nac        = hub.get_spoke_by_type("nac")
         spoke_directory  = hub.get_spoke_by_type("directory")
         spoke_firewall   = hub.get_spoke_by_type("firewall")

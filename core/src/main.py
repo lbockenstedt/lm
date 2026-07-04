@@ -902,8 +902,28 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             if sid and sid in self.active_connections:
                 return sid
         if fallback_hypervisor:
-            return self.get_spoke_by_type("hypervisor")
+            return self.get_hypervisor_spoke()
         return None
+
+    def get_hypervisor_spoke(self) -> Optional[str]:
+        """Return a connected spoke that can answer Proxmox-agent commands —
+        either a dedicated hypervisor (pxmx) spoke, or, in the split-topology
+        case, a simulation (cs) spoke hosting its own agent listener with no
+        separate pxmx spoke at all. Prefers a real hypervisor spoke if one is
+        connected.
+
+        Drop-in replacement for the ~18 call sites across api.py that called
+        ``get_spoke_by_type("hypervisor")`` directly (VM/console/node/pool/
+        ISO/storage/template browsing, agent removal, endpoint/NAC sync's
+        Proxmox enrichment, the pxmx_vms cache refresh, ...) — every one of
+        them silently returned nothing for an all-cs-hosted deployment like
+        this one, the same blind spot cs_bridge.py's CSBridgePoller had (see
+        that fix's commit) before it was taught to check every agent-hosting
+        spoke type instead of only "hypervisor". Doesn't replace
+        get_spoke_for_agent, which is still the right choice wherever a
+        specific agent_id is already in scope — this is for the handful of
+        callers that only ever assumed a single global hypervisor spoke."""
+        return self.get_spoke_by_type("hypervisor") or self.get_spoke_by_type("simulation")
 
     def get_all_spokes_by_type(self, module_type: str):
         """Return all connected spoke IDs that advertised the given module_type."""

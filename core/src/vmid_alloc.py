@@ -67,7 +67,7 @@ async def allocate_vmid(hub, tenant_id: str) -> Optional[int]:
     if not netbox:
         logger.debug("vmid-alloc tenant=%s: NetBox spoke down — skip", tenant_id)
         return None
-    hyp = hub.get_spoke_by_type("hypervisor")
+    hyp = hub.get_hypervisor_spoke()
     if not hyp:
         logger.debug("vmid-alloc tenant=%s: hypervisor spoke down — skip", tenant_id)
         return None
