@@ -6014,6 +6014,8 @@ const SPOKE_EVENT_LABELS = {
     pending_approval:     { label: 'Pending approval',      tone: 'text-amber-600' },
     connection_closed:    { label: 'Connection closed',     tone: 'text-amber-600' },
     connection_error:     { label: 'Connection error',       tone: 'text-red-600' },
+    replaced_connection:  { label: 'Reconnected (old socket closed)', tone: 'text-amber-600' },
+    stale_key_rejected:   { label: 'Stale key rejected',     tone: 'text-red-600' },
     spoke_out_of_contact: { label: 'Out of contact (alert)', tone: 'text-amber-600' },
     spoke_back_in_contact:{ label: 'Back in contact',        tone: 'text-green-600' },
 };
