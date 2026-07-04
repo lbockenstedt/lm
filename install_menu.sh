@@ -208,16 +208,16 @@ run_generic_install() {
     local SPOKE_URL SPOKE_ID SPOKE_SECRET HUB_SECRET CLONE_ONLY
     CLONE_ONLY=0
 
-    while true; do
-        read -rp "Hub WebSocket URL [auto - discover via mDNS/DNS]: " SPOKE_URL || SPOKE_URL=""
-        [ -z "$SPOKE_URL" ] && SPOKE_URL="auto"
-        # 'auto' lets the agent discover the hub via mDNS/DNS and pick
-        # wss://127.0.0.1:443/ws/spoke (same box) or wss://<hub>:443/ws/spoke
-        # (remote) from the hub's advertisement. A concrete ws:// or wss:// URL
-        # pins it (use wss://host:443/ws/spoke for the unified :443 hub).
-        { [[ "$SPOKE_URL" == "auto" ]] || [[ "$SPOKE_URL" =~ ^wss?:// ]]; } && break
-        echo "  (must be 'auto' or start with ws:// or wss://)"
-    done
+    read -rp "Hub WebSocket URL [auto - discover via mDNS/DNS, or just an IP/host]: " SPOKE_URL || SPOKE_URL=""
+    [ -z "$SPOKE_URL" ] && SPOKE_URL="auto"
+    # 'auto' lets the agent discover the hub via mDNS/DNS and pick
+    # wss://127.0.0.1:443/ws/spoke (same box) or wss://<hub>:443/ws/spoke
+    # (remote) from the hub's advertisement. Anything else is passed straight
+    # through as --hub to install_agent.sh, which normalizes it
+    # (BaseControlPlane._normalize_hub_url / _normalize_spoke_url): a bare IP
+    # or hostname (e.g. "172.16.1.31") gets wss:// + :443 + /ws/spoke appended
+    # automatically — only a scheme/port/path you actually want to override
+    # needs typing out (e.g. ws://127.0.0.1:8765 for a legacy loopback).
 
     # Ask clone-only UP FRONT. In clone-only mode the staged unit omits --id so
     # each cloned disk derives its spoke id from its OWN hostname at runtime
