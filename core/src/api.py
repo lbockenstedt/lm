@@ -937,6 +937,25 @@ def create_app(hub):
             # to the path param when agent_info has no entry yet (e.g.
             # approving before the first relayed frame has arrived).
             target_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) or spoke_id
+
+            # Inherit the parent spoke's tenant binding (Setup → Spokes &
+            # Agents' "Tenant" button / Simulations → Spoke Management) so an
+            # agent connecting to a tenant-bound spoke is assigned to that
+            # tenant automatically — no per-agent config needed. Only seeds
+            # when the agent has no explicit tenant of its own yet (an
+            # existing override, e.g. set via the Agent Configuration modal,
+            # is left alone) and the spoke actually has a tenant to inherit.
+            spoke_tenant = hub.state.get_spoke_tenant(target_spoke)
+            if spoke_tenant:
+                agent_cfg_store = hub.state.system_state.setdefault("agent_config", {})
+                entry = dict(agent_cfg_store.get(agent_id, {}))
+                cs_cfg = dict(entry.get("client_simulation") or {})
+                if not cs_cfg.get("tenant_id"):
+                    cs_cfg["tenant_id"] = spoke_tenant
+                    entry["client_simulation"] = cs_cfg
+                    agent_cfg_store[agent_id] = entry
+                    hub.state.save_state()
+
             if target_spoke in hub.active_connections:
                 msg = _hub_msg(target_spoke, "SPOKE_RELAY", {
                     "target_agent_id": agent_id,
@@ -990,6 +1009,7 @@ def create_app(hub):
                 "hostname": meta.get("hostname", ""),
                 "install_uuid": meta.get("install_uuid", ""),
                 "identity_change": _identity_change_for(hub, sid, meta),
+                "tenant_id": hub.state.get_spoke_tenant(sid) or "",
             })
 
         return {"spokes": spokes_status}

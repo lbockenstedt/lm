@@ -5068,12 +5068,20 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                 const extras = diagBy && diagBy.has(sid) ? _diagTelemetryExtras(diagBy.get(sid)) : null;
                 const dot = (extras && approved) ? extras.dot
                           : (approved ? 'bg-green-500' : 'bg-yellow-400');
+                // Tenant binding: any spoke can be assigned to a tenant (not just
+                // cs, and not just from Simulations → Spoke Management, which only
+                // ever surfaced this for cs spokes). Agent-hosting spokes (cs/pxmx)
+                // seed newly-approved agents from this binding — see
+                // approve_agent_under_spoke in api.py.
+                const tenantId = s.tenant_id || '';
+                const eTenant = tenantId.replace(/'/g, "\\'");
                 return _mgmtEntryCard({
                     dot,
                     name, sid,
                     identityBanner: _identityChangeBanner(ic, ackClick),
                     metaLines: [
                         hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${hostname}</div>` : '',
+                        `<div class="text-xs text-slate-500 pl-6">tenant: ${tenantId ? `<span class="font-mono text-slate-700">${escapeHtml(tenantId)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</div>`,
                         ...(extras ? extras.metaLines : []),
                     ],
                     badges: [
@@ -5084,6 +5092,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                     ],
                     actions: [
                         _mgmtBtn('Edit', `openSpokeMetadataModal('${eSid}','${eName}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
+                        _mgmtBtn('Tenant', `openSpokeAssignModal('${eSid}','${eTenant}')`, 'bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]'),
                         approved
                             ? _mgmtBtn('Un-approve', `unapproveSpoke('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')
                             : _mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white'),
@@ -5561,11 +5570,15 @@ async function saveAgentConfig(agentId) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-/* Spoke Management (Simulations → Spoke Management): admin assigns/rebinds a
- * cs spoke to a tenant. Mirrors openAgentConfigModal but talks to the existing
- * admin /setup/approve_spoke route (idempotent re-approve + tenant binding).
- * Only the admin UI renders the button that opens this, so /setup/tenants
- * (admin-only) is safe to call here. */
+/* Admin assigns/rebinds ANY spoke to a tenant — a "Tenant" button on every row
+ * in Setup → Spokes & Agents (_renderSpokesTable), plus Simulations → Spoke
+ * Management for cs spokes specifically. Mirrors openAgentConfigModal but
+ * talks to the existing admin /setup/approve_spoke route (idempotent
+ * re-approve + tenant binding). Agent-hosting spokes (cs/pxmx) seed any newly
+ * approved agent's tenant from this binding (approve_agent_under_spoke in
+ * api.py), so an agent connecting to a tenant-bound spoke inherits it without
+ * per-agent configuration. Only the admin UI renders the button that opens
+ * this, so /setup/tenants (admin-only) is safe to call here. */
 async function openSpokeAssignModal(spokeId, currentTenantId) {
     const modal = document.createElement('div');
     modal.id = 'spoke-assign-modal';
@@ -5622,7 +5635,11 @@ async function saveSpokeAssign(spokeId) {
         if (res.ok) {
             showToast(d.message || 'Spoke assigned', 'success');
             document.getElementById('spoke-assign-modal')?.remove();
-            if (typeof loadCSData === 'function') loadCSData('Spoke Management');
+            // Now opened from two contexts: Simulations → Spoke Management
+            // (cs spokes only) and Setup → Spokes & Agents (any spoke) — reload
+            // whichever is actually on screen.
+            if (currentView === 'setup') loadSpokesAndAgents();
+            else if (typeof loadCSData === 'function') loadCSData('Spoke Management');
         } else {
             showToast(d.detail || 'Assign failed', 'error');
         }
