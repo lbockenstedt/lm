@@ -1322,7 +1322,6 @@ async function csRenderConfig() {
       <p class="text-xs text-slate-400 mb-2">Paste a JSON config object to push to all spokes (unwrapped at the spoke's <code>_apply_hub_config</code>).</p>
       <textarea id="cs-configpush" rows="10" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500" placeholder='{ "key": "value" }'></textarea>
       <button onclick="csSaveConfigPush()" class="mt-3 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button>
-      <span id="cs-configpush-msg" class="ml-3 text-xs"></span>
     </div>`;
 
     // per-spoke config state (desired vs applied) — best-effort read from cache.
@@ -1346,20 +1345,19 @@ async function csRenderConfig() {
 }
 
 window.csSaveConfigPush = async function () {
-    const msg = csEl('cs-configpush-msg');
     const raw = csEl('cs-configpush').value;
     let cfg;
     try { cfg = raw.trim() ? JSON.parse(raw) : {}; } catch (e) {
         console.error('csSaveConfigPush: invalid JSON config', e);
-        if (msg) { msg.textContent = 'Invalid JSON: ' + e.message; msg.className = 'ml-3 text-xs text-red-500'; }
+        showToast('Invalid JSON: ' + e.message, 'error');
         return;
     }
     try {
         await csFetch('/aggregate/config-push', { method: 'POST', body: JSON.stringify({ config: cfg }) });
-        if (msg) { msg.textContent = 'Pushed.'; msg.className = 'ml-3 text-xs text-green-600'; }
+        showToast('Pushed.', 'success');
     } catch (e) {
         console.error('csSaveConfigPush: config push failed', e);
-        if (msg) { msg.textContent = e.message; msg.className = 'ml-3 text-xs text-red-500'; }
+        showToast(e.message, 'error');
     }
 };
 
@@ -1572,7 +1570,6 @@ async function csRenderConfigSimulation() {
       <div class="flex items-center gap-3 mt-4">
         <button onclick="csSaveSimConfStructured()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
         <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Refresh</button>
-        <span id="cs-simconf-msg" class="text-xs"></span>
       </div>
     </div>`;
 
@@ -1630,18 +1627,16 @@ function csSerializeSimConf() {
 }
 
 window.csSaveSimConfStructured = async function () {
-    const msg = csEl('cs-simconf-msg');
-    if (msg) { msg.textContent = 'Saving…'; msg.className = 'ml-3 text-xs text-slate-400'; }
     try {
         const content = csSerializeSimConf();
         const r = await csFetch(`/${csTenant()}/config/simulation-conf`,
             { method: 'PUT', body: JSON.stringify({ content }) });
-        if (msg) { msg.textContent = 'Saved (' + ((r && r.synced_spokes) != null ? r.synced_spokes + ' spokes' : 'ok') + ').'; msg.className = 'text-xs text-green-600'; }
+        showToast('Saved (' + ((r && r.synced_spokes) != null ? r.synced_spokes + ' spokes' : 'ok') + ').', 'success');
         // Re-load the merged view so the UI reflects the now-effective config.
         csRenderConfigSimulation();
     } catch (e) {
         console.error('csSaveSimConfStructured: save failed', e);
-        if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; }
+        showToast(e.message, 'error');
     }
 };
 
@@ -1725,7 +1720,6 @@ function csRenderUserOverridesCard(uo, uoErr) {
         <button onclick="csUOAdd()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
         <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-md text-sm font-bold">Refresh</button>
         <button onclick="csUOSave()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
-        <span id="cs-uo-msg" class="text-xs"></span>
       </div>
       <div id="cs-uo-cards">${csUORenderCards()}</div>
     </div>`;
@@ -1812,8 +1806,6 @@ window.csUODownload = function (btn) {
 };
 
 window.csUOSave = async function () {
-    const msg = csEl('cs-uo-msg');
-    if (msg) { msg.textContent = 'Saving…'; msg.className = 'text-xs text-slate-400'; }
     let text = '';
     for (const [u, kv] of Object.entries(csUserOverridesState)) {
         text += `[${u}]\n`;
@@ -1826,10 +1818,10 @@ window.csUOSave = async function () {
     try {
         const r = await csFetch(`/${csTenant()}/config/user-overrides-conf`,
             { method: 'PUT', body: JSON.stringify({ content: text.trim() }) });
-        if (msg) { msg.textContent = 'Saved (' + ((r && r.synced_spokes) != null ? r.synced_spokes + ' spokes' : 'ok') + ').'; msg.className = 'text-xs text-green-600'; }
+        showToast('Saved (' + ((r && r.synced_spokes) != null ? r.synced_spokes + ' spokes' : 'ok') + ').', 'success');
     } catch (e) {
         console.error('csUOSave: save failed', e);
-        if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; }
+        showToast(e.message, 'error');
     }
 };
 
@@ -1922,12 +1914,10 @@ async function csHubConfigCard(path) {
         ${fields}
       </div>
       <button onclick="csSaveHubConfig()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save &amp; Push to All Spokes</button>
-      <span id="cs-hc-msg" class="ml-3 text-xs"></span>
     </div>`;
 }
 
 window.csSaveHubConfig = async function () {
-    const msg = csEl('cs-hc-msg');
     // Mirror webui-hub saveHubConfig: skip empty fields; parse JSON-array keys;
     // scalars (incl. numbers) are sent as strings — the spoke stores them as-is
     // and normalizes the on/off keys via _normalize_relay_enabled.
@@ -1955,10 +1945,10 @@ window.csSaveHubConfig = async function () {
             hub_config: merged
         };
         const r = await csFetch('/tenant/' + csTenant() + '/hub-config', { method: 'PUT', body: JSON.stringify(body) });
-        if (msg) { msg.textContent = '✅ Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).'; msg.className = 'ml-3 text-xs text-green-600'; }
+        showToast('Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).', 'success');
     } catch (e) {
         console.error('csSaveHubConfig: hub-config push failed', e);
-        if (msg) { msg.textContent = '❌ ' + e.message; msg.className = 'ml-3 text-xs text-red-500'; }
+        showToast(e.message, 'error');
     }
 };
 
@@ -2039,12 +2029,10 @@ async function csSetupAutoProvConfigCard() {
       <p class="text-xs text-slate-400 mb-3">${note}</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${rows}</div>
       <button onclick="csSaveAutoProvConfig()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save &amp; Push to All Spokes</button>
-      <span id="cs-ap-msg" class="ml-3 text-xs"></span>
     </div>`;
 }
 
 window.csSaveAutoProvConfig = async function () {
-    const msg = csEl('cs-ap-msg');
     // Collect only this card's fields (cs-ap- prefix). Numbers/scalars are sent
     // as strings — the cs speak stores + normalizes them (usb_missing_timeout
     // minutes→seconds, protected_vmids parsed + 1001 merged, thresholds clamped).
@@ -2077,13 +2065,13 @@ window.csSaveAutoProvConfig = async function () {
             hub_config: merged
         };
         const r = await csFetch('/tenant/' + csTenant() + '/hub-config', { method: 'PUT', body: JSON.stringify(body) });
-        if (msg) { msg.textContent = '✅ Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).'; msg.className = 'ml-3 text-xs text-green-600'; }
+        showToast('Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).', 'success');
         // Keep the Overview/USB auto-provision checkbox + status in sync with
         // this save (same underlying key) so the two controls never drift.
         try { if (typeof csRefreshAutoProvStatus === 'function') csRefreshAutoProvStatus(); } catch (_) {}
     } catch (e) {
         console.error('csSaveAutoProvConfig: hub-config push failed', e);
-        if (msg) { msg.textContent = '❌ ' + e.message; msg.className = 'ml-3 text-xs text-red-500'; }
+        showToast(e.message, 'error');
     }
 };
 
@@ -2107,20 +2095,18 @@ async function csProcessingModesCard() {
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Processing Modes</h3>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${fields}</div>
       <button onclick="csSaveProcessingModes()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button>
-      <span id="cs-pm-msg" class="ml-3 text-xs"></span>
     </div>`;
 }
 
 window.csSaveProcessingModes = async function () {
-    const msg = csEl('cs-pm-msg');
     const features = ['central_api', 'teams', 'email'];
     try {
         for (const k of features) {
             const v = csEl('cs-pm-' + k) && csEl('cs-pm-' + k).value;
             if (v) await csFetch('/hub/tenants/' + csTenant() + '/processing-modes', { method: 'PATCH', body: JSON.stringify({ [k]: v }) });
         }
-        if (msg) { msg.textContent = 'Saved.'; msg.className = 'ml-3 text-xs text-green-600'; }
-    } catch (e) { console.error('csSaveProcessingModes: save failed', e); if (msg) { msg.textContent = e.message; msg.className = 'ml-3 text-xs text-red-500'; } }
+        showToast('Saved.', 'success');
+    } catch (e) { console.error('csSaveProcessingModes: save failed', e); showToast(e.message, 'error'); }
 };
 
 async function csNotificationsCard() {
@@ -2139,12 +2125,10 @@ async function csNotificationsCard() {
         ${f('cs-notif-emails', 'To Emails (comma-separated)', Array.isArray(n.to_emails) ? n.to_emails.join(', ') : (n.to_emails || ''))}
       </div>
       <button onclick="csSaveNotifications()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button>
-      <span id="cs-notif-msg" class="ml-3 text-xs"></span>
     </div>`;
 }
 
 window.csSaveNotifications = async function () {
-    const msg = csEl('cs-notif-msg');
     const body = {
         enabled: !!(csEl('cs-notif-enabled') && csEl('cs-notif-enabled').checked),
         smtp_host: csEl('cs-notif-host') && csEl('cs-notif-host').value,
@@ -2158,8 +2142,8 @@ window.csSaveNotifications = async function () {
     if (teams) body.teams_webhook_url = teams;
     try {
         await csFetch('/' + csTenant() + '/settings/notifications', { method: 'POST', body: JSON.stringify(body) });
-        if (msg) { msg.textContent = 'Saved.'; msg.className = 'ml-3 text-xs text-green-600'; }
-    } catch (e) { console.error('csSaveNotifications: save failed', e); if (msg) { msg.textContent = e.message; msg.className = 'ml-3 text-xs text-red-500'; } }
+        showToast('Saved.', 'success');
+    } catch (e) { console.error('csSaveNotifications: save failed', e); showToast(e.message, 'error'); }
 };
 
 /* ===========================================================================
@@ -2234,7 +2218,6 @@ async function csRenderSetupCentralApi() {
       <div class="flex gap-2 mt-4">
         <button onclick="csSaveCentralConn()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
         <button onclick="csTestCentral()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Central</button>
-        <span id="cs-csc-conn-msg" class="text-xs self-center"></span>
       </div>
       <div id="cs-csc-test" class="mt-3 text-xs text-slate-500"></div>
     </div>`;
@@ -2266,7 +2249,6 @@ async function csRenderSetupCentralApi() {
 
       <div class="flex gap-2 mt-4">
         <button onclick="csSaveCentralSites()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
-        <span id="cs-csc-msg" class="text-xs self-center"></span>
       </div>
     </div>`;
 
@@ -2344,7 +2326,6 @@ window.csCscMonSync = function () {
 };
 
 window.csSaveCentralConn = async function () {
-    const msg = csEl('cs-csc-conn-msg');
     const v = id => (csEl(id) && csEl(id).value) || '';
     const mode = v('cs-csc-mode');
     const hub_central_config = {
@@ -2360,12 +2341,11 @@ window.csSaveCentralConn = async function () {
     if (v('cs-csc-refreshtoken')) hub_central_config.refresh_token = v('cs-csc-refreshtoken');
     try {
         const r = await csFetch('/aggregate/central', { method: 'POST', body: JSON.stringify({ mode, hub_central_config }) });
-        if (msg) { msg.textContent = '✅ Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).'; msg.className = 'text-xs text-green-600'; }
-    } catch (e) { console.error('csSaveCentralConn: central connection save failed', e); if (msg) { msg.textContent = '❌ ' + e.message; msg.className = 'text-xs text-red-500'; } }
+        showToast('Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).', 'success');
+    } catch (e) { console.error('csSaveCentralConn: central connection save failed', e); showToast(e.message, 'error'); }
 };
 
 window.csSaveCentralSites = async function () {
-    const msg = csEl('cs-csc-msg');
     const site_mappings = {};
     document.querySelectorAll('#cs-csc-sm-rows .cs-csc-sm-row').forEach(row => {
         const w = (row.querySelector('[data-cs-sm-w]').value || '').trim();
@@ -2381,8 +2361,8 @@ window.csSaveCentralSites = async function () {
     const cfg = { site_mappings, monitored_checks: window._csCscMonitoredChecks || [], hardware_checks };
     try {
         const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(cfg) });
-        if (msg) { msg.textContent = '✅ Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).'; msg.className = 'text-xs text-green-600'; }
-    } catch (e) { console.error('csSaveCentralSites: central sites save failed', e); if (msg) { msg.textContent = '❌ ' + e.message; msg.className = 'text-xs text-red-500'; } }
+        showToast('Saved. Pushed to ' + ((r && r.pushed_to_spokes) != null ? r.pushed_to_spokes : 0) + ' spoke(s).', 'success');
+    } catch (e) { console.error('csSaveCentralSites: central sites save failed', e); showToast(e.message, 'error'); }
 };
 
 window.csTestCentral = async function () {
@@ -2455,13 +2435,11 @@ async function csRenderSetupGithub() {
         <div class="flex gap-2 mt-4">
           <button onclick="csSaveGithub()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-2 rounded-md text-sm font-bold">Save</button>
           <button onclick="csClearGithub()" class="bg-red-100 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Clear</button>
-          <span id="cs-gh-msg" class="text-xs self-center"></span>
         </div>
       </div></div>`);
 }
 
 window.csSaveGithub = async function () {
-    const msg = csEl('cs-gh-msg');
     const body = {
         repo_url: csEl('cs-gh-url') && csEl('cs-gh-url').value,
         repo_branch: csEl('cs-gh-branch') && csEl('cs-gh-branch').value,
@@ -2470,9 +2448,9 @@ window.csSaveGithub = async function () {
     if (tok) body.github_token = tok;
     try {
         await csFetch(`/${csTenant()}/settings/github?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
-        if (msg) { msg.textContent = 'Saved.'; msg.className = 'text-xs text-green-600'; }
+        showToast('Saved.', 'success');
         csRenderSetupGithub();
-    } catch (e) { console.error('csSaveGithub: save failed', e); if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; } }
+    } catch (e) { console.error('csSaveGithub: save failed', e); showToast(e.message, 'error'); }
 };
 
 window.csClearGithub = async function () {
@@ -2499,20 +2477,18 @@ async function csRenderSetupSecurity() {
           ${f('cs-sec-provider', 'Auth Provider', cfg.auth_provider)}
         </div>
         <button onclick="csSaveSecurity()" class="mt-4 bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-2 rounded-md text-sm font-bold">Save</button>
-        <span id="cs-sec-msg" class="ml-3 text-xs"></span>
       </div></div>`);
 }
 
 window.csSaveSecurity = async function () {
-    const msg = csEl('cs-sec-msg');
     const body = {
         session_timeout_minutes: csEl('cs-sec-timeout') && csEl('cs-sec-timeout').value,
         auth_provider: csEl('cs-sec-provider') && csEl('cs-sec-provider').value,
     };
     try {
         await csFetch(`/${csTenant()}/settings/security?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
-        if (msg) { msg.textContent = 'Saved.'; msg.className = 'text-xs text-green-600'; }
-    } catch (e) { console.error('csSaveSecurity: save failed', e); if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; } }
+        showToast('Saved.', 'success');
+    } catch (e) { console.error('csSaveSecurity: save failed', e); showToast(e.message, 'error'); }
 };
 
 // ── Notifications (reuses the existing card) ─────────────────────────────────
@@ -3400,7 +3376,6 @@ async function csRenderSpokeManagement() {
         <input id="cs-claim-psk" placeholder="onboarding PSK" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
         <button onclick="csClaimSpoke()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold shadow-sm">Claim</button>
       </div>
-      <span id="cs-claim-msg" class="text-xs block mt-2"></span>
     </div>`;
 
     let pskCard = '';
@@ -3497,42 +3472,36 @@ async function csSpokeMgmtPskCard() {
         <button onclick="csSpokeMgmtGenPsk()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-1.5 rounded-md text-xs font-bold shadow-sm">+ Generate</button>
       </div>
       ${psks.length ? csTable(['PSK', ''], rows) : '<p class="text-xs text-slate-400 italic py-4 text-center">No PSKs issued.</p>'}
-      <span id="cs-psk-mgmt-msg" class="text-xs"></span>
       ${deploy}
     </div>`;
 }
 
 window.csSpokeMgmtGenPsk = async function () {
-    const msg = csEl('cs-psk-mgmt-msg');
     try { await csFetch('/tenant/' + csTenant() + '/onboarding-psk', { method: 'POST', body: '{}' }); await csRenderSpokeManagement(); }
-    catch (e) { console.error('csSpokeMgmtGenPsk: psk generate failed', e); if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; } }
+    catch (e) { console.error('csSpokeMgmtGenPsk: psk generate failed', e); showToast(e.message, 'error'); }
 };
 
 window.csSpokeMgmtRevokePsk = async function (psk) {
-    const msg = csEl('cs-psk-mgmt-msg');
     try { await csFetch('/tenant/' + csTenant() + '/onboarding-psk', { method: 'DELETE', body: JSON.stringify({ psk }) }); await csRenderSpokeManagement(); }
-    catch (e) { console.error('csSpokeMgmtRevokePsk: psk revoke failed', e); if (msg) { msg.textContent = e.message; msg.className = 'text-xs text-red-500'; } }
+    catch (e) { console.error('csSpokeMgmtRevokePsk: psk revoke failed', e); showToast(e.message, 'error'); }
 };
 
 window.csClaimSpoke = async function () {
-    const msg = csEl('cs-claim-msg');
     const spokeId = ((csEl('cs-claim-id') && csEl('cs-claim-id').value) || '').trim();
     const psk = ((csEl('cs-claim-psk') && csEl('cs-claim-psk').value) || '').trim();
     if (!spokeId || !psk) {
-        if (msg) { msg.textContent = 'Spoke ID and PSK are required.'; msg.className = 'text-xs text-red-500'; }
+        showToast('Spoke ID and PSK are required.', 'error');
         return;
     }
     try {
         await csFetch('/tenant/' + csTenant() + '/spokes/' + encodeURIComponent(spokeId) + '/claim?tenant_id=' + csTenant(),
             { method: 'POST', body: JSON.stringify({ onboarding_psk: psk }) });
-        if (msg) { msg.textContent = 'Claimed — spoke approved + bound.'; msg.className = 'text-xs text-green-600'; }
-        if (typeof showToast === 'function') showToast('Spoke claimed', 'success');
+        showToast('Claimed — spoke approved + bound.', 'success');
         await csRenderSpokeManagement();
     } catch (e) {
         console.error('csClaimSpoke: claim failed', e);
         const m = (e && e.message) ? e.message : String(e);
-        if (msg) { msg.textContent = m; msg.className = 'text-xs text-red-500'; }
-        if (typeof showToast === 'function') showToast('Claim failed: ' + m, 'error');
+        showToast('Claim failed: ' + m, 'error');
     }
 };
 
