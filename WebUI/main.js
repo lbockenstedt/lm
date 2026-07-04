@@ -5602,7 +5602,10 @@ async function saveAgentConfig(agentId) {
         });
         const d = await res.json().catch(() => ({}));
         if (res.ok) {
-            showToast(d.message || 'Agent config saved', 'success');
+            // d.queued: the owning spoke was momentarily unreachable and this
+            // was queued via the Mailbox instead of dropped — surface that as
+            // a distinct tone from an already-live push (see push_or_queue_to_spoke).
+            showToast(d.message || 'Agent config saved', d.queued ? 'info' : 'success');
             document.getElementById('agent-config-modal')?.remove();
             loadSpokesAndAgents();
         } else {

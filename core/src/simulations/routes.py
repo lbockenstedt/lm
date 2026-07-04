@@ -499,7 +499,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         devices = _normalize_usb_vidpids((body or {}).get("usb_vidpids"))
         await store.set_global_usb_vidpids(devices)
         pushed = await _push_usb_to_all_tenants()
-        return {"status": "saved", "pushed_to_spokes": pushed}
+        return {"status": "saved", "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/superadmin/global-usb-ignored-vidpids")
     async def sim_get_global_usb_ignored(request: Request):
@@ -519,7 +519,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         vidpids = _normalize_usb_ignored((body or {}).get("usb_vidpids"))
         await store.set_global_usb_ignored_vidpids(vidpids)
         pushed = await _push_usb_to_all_tenants()
-        return {"status": "saved", "pushed_to_spokes": pushed}
+        return {"status": "saved", "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/superadmin/discovered-usb-vidpids")
     async def sim_get_discovered_usb(request: Request):
@@ -593,21 +593,36 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     service = SimulationsService(hub)
     store = hub.simulations_store
 
-    async def _push_config(tenant_id: str, payload: dict) -> int:
+    class _PushResult(int):
+        """An ``int`` (spoke-pushed count) that also remembers whether the push
+        was delivered live or queued for later. Behaves exactly like the plain
+        ``0``/``1`` every call site already used — JSON-encodes as a bare
+        number, works in ``if pushed`` / arithmetic — so none of the ~16
+        call sites need to change how they use the count itself. They only
+        need to opt in to reading ``.queued``/``.message`` where they want to
+        tell the caller the change is delayed rather than already live."""
+        def __new__(cls, count: int, queued: bool = False, message: str = ""):
+            obj = int.__new__(cls, count)
+            obj.queued = queued
+            obj.message = message
+            return obj
+
+    async def _push_config(tenant_id: str, payload: dict) -> "_PushResult":
         """Best-effort CS_CONFIG_UPDATE push to the tenant's Client-Sim spoke.
-        Returns the number of spokes pushed (0 if none connected/assigned). The
-        spoke-side CSBridge routes CS_CONFIG_UPDATE through server._apply_hub_config,
-        which handles central_api/central_config/notifications/sim_conf_override/
-        user_conf_override/relay_onboarding_psk + the HUB_CONFIG_OWNED_KEYS.
+        Returns a _PushResult (int-like: 0 if no spoke connected/assigned, 1 if
+        pushed — .queued is True when it was queued rather than delivered
+        live). The spoke-side CSBridge routes CS_CONFIG_UPDATE through
+        server._apply_hub_config, which handles central_api/central_config/
+        notifications/sim_conf_override/user_conf_override/
+        relay_onboarding_psk + the HUB_CONFIG_OWNED_KEYS.
 
         Uses push_or_queue_to_spoke (not a bare request_response) so a spoke
         that's approved+bound but momentarily unreachable — mid self-update
         restart, brief reconnect blip — gets this queued for delivery the
         moment it reconnects instead of silently reporting "0 spokes pushed"
         for what looked like a fine, connected spoke a few seconds earlier.
-        Counts as pushed (1) either way: a queued push WILL apply, just not
-        this instant, and every one of this function's ~16 call sites already
-        treats the return value as a plain "spoke was reached" count."""
+        Still counts as pushed (1) either way: a queued push WILL apply, just
+        not this instant."""
         spoke_id = None
         get_spoke = getattr(hub, "get_client_sim_spoke", None)
         if callable(get_spoke):
@@ -616,25 +631,27 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             except Exception:
                 spoke_id = None
         if not spoke_id:
-            return 0
+            return _PushResult(0)
         push = getattr(hub, "push_or_queue_to_spoke", None)
         if not callable(push):
             # Fallback for a hub build without push_or_queue_to_spoke yet.
             try:
                 await hub.request_response(spoke_id, "CS_CONFIG_UPDATE", payload, timeout=5.0)
-                return 1
+                return _PushResult(1)
             except Exception as exc:
                 logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", spoke_id, exc)
-                return 0
+                return _PushResult(0)
         try:
             outcome = await push(spoke_id, "CS_CONFIG_UPDATE", payload, timeout=5.0)
-            if outcome.get("queued"):
+            queued = bool(outcome.get("queued"))
+            if queued:
                 logger.info("CS_CONFIG_UPDATE for %s queued (spoke unreachable): %s",
                            spoke_id, outcome.get("message"))
-            return 1
+            return _PushResult(1, queued=queued,
+                              message=outcome.get("message", "") if queued else "")
         except Exception as exc:
             logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", spoke_id, exc)
-            return 0
+            return _PushResult(0)
 
     async def _cs_forward(tenant_id: str, cmd_type: str, payload: dict,
                           timeout: float = 8.0) -> dict:
@@ -893,14 +910,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cfg["mode"] = mode
         await store.set_central_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"central_config": hub_cc})
-        return {"saved": True, "pushed_to_spokes": pushed}
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.post("/sim/api/aggregate/config-push")
     async def config_push(request: Request, tenant_id: str = Depends(get_tenant_id)):
         body = await request.json()
         cfg = body.get("config") if isinstance(body, dict) else body
         pushed = await _push_config(tenant_id, {"config": cfg or {}})
-        return {"pushed_to_spokes": pushed}
+        return {"pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     # ── spokes / checks (literal first segment) ────────────────────────────
     @app.get("/sim/api/spokes/diag")
@@ -1015,7 +1032,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         hc = body.get("hub_config") or {}
         await store.set_hub_config(tenant_id, enabled, hc)
         pushed = await _push_config(tenant_id, hc if enabled else {}) if enabled else 0
-        return {"saved": True, "pushed_to_spokes": pushed}
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.post("/sim/api/tenant/{tenant}/hub-config/reset")
     async def reset_hub_config(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -1030,7 +1047,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         result = await store.reset_hub_config(tenant_id)
         pushed = await _push_config(tenant_id, result["hub_config"]) \
             if result["hub_config_enabled"] else 0
-        return {"saved": True, "pushed_to_spokes": pushed,
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False)),
                 "hub_config_enabled": result["hub_config_enabled"],
                 "hub_config": result["hub_config"]}
 
@@ -1044,7 +1061,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         psk = _secrets.token_urlsafe(24)
         await store.add_psk(tenant_id, psk)
         pushed = await _push_config(tenant_id, {"relay_onboarding_psk": psk})
-        return {"psk": psk, "pushed_to_spokes": pushed}
+        return {"psk": psk, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.delete("/sim/api/tenant/{tenant}/onboarding-psk")
     async def revoke_psk(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -1053,7 +1070,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         removed = await store.remove_psk(tenant_id, psk) if psk else False
         # Rotate the spoke's PSK away from the revoked value.
         pushed = await _push_config(tenant_id, {"relay_onboarding_psk": ""}) if removed else 0
-        return {"removed": removed, "pushed_to_spokes": pushed}
+        return {"removed": removed, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.post("/sim/api/tenant/{tenant}/spokes/{spoke_id}/claim")
     async def claim_spoke(request: Request, tenant: str, spoke_id: str,
@@ -1152,7 +1169,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not isinstance(cfg, dict):
             raise HTTPException(status_code=400, detail="config must be an object")
         pushed = await _push_config(tenant_id, cfg)
-        return {"saved": True, "pushed_to_spokes": pushed}
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.delete("/sim/api/spokes/{spoke_id}")
     async def cs_spoke_delete(request: Request, spoke_id: str,
@@ -1205,7 +1222,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if feature == "central_api" and value:
             payload = {"central_api": {"mode": "central" if value == "centralized" else "classic"}}
         pushed = await _push_config(tenant_id, payload) if payload else 0
-        return {"saved": True, "pushed_to_spokes": pushed}
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     # ── {tenant}/... param routes (registered last) ────────────────────────
     @app.get("/sim/api/{tenant}/spokes/{spoke_id}/config")
@@ -1484,7 +1501,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if cfg.get("teams_webhook_url"):
             notif["teams_webhook_url"] = cfg["teams_webhook_url"]
         pushed = await _push_config(tenant_id, {"notifications": notif})
-        return {"saved": True, "pushed_to_spokes": pushed}
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/{tenant}/spokes")
     async def list_spokes(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -1609,7 +1626,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg["usb_auto_provision"] = "on" if enabled else "off"
         await store.set_hub_config(tenant_id, bool(hc.get("hub_config_enabled", False)) or enabled, cfg)
         pushed = await _push_config(tenant_id, {"usb_auto_provision": cfg["usb_auto_provision"]})
-        return {"saved": True, "usb_auto_provision": cfg["usb_auto_provision"], "pushed_to_spokes": pushed}
+        return {"saved": True, "usb_auto_provision": cfg["usb_auto_provision"], "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/{tenant}/usb-provisioning-status")
     async def cs_usb_provisioning_status(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -1702,7 +1719,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # still respects superadmin-global approvals, and vice versa.
         pushed = await _push_usb_to_tenant(tenant_id)
         return {"saved": True, "usb_vidpids": cfg["usb_vidpids"],
-                "usb_ignored_vidpids": cfg["usb_ignored_vidpids"], "pushed_to_spokes": pushed}
+                "usb_ignored_vidpids": cfg["usb_ignored_vidpids"], "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     # ── Setup subtabs (Wave 2) ────────────────────────────────────────────────
     @app.get("/sim/api/{tenant}/settings/github")
@@ -1734,13 +1751,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cfg["github_token"] = str(body.get("github_token"))
         await store.set_github_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"github_config": cfg})
-        return {"saved": True, "pushed_to_spokes": pushed}
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.delete("/sim/api/{tenant}/settings/github")
     async def clear_github(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         await store.set_github_config(tenant_id, {})
         pushed = await _push_config(tenant_id, {"github_config": None})
-        return {"cleared": True, "pushed_to_spokes": pushed}
+        return {"cleared": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/{tenant}/settings/security")
     async def get_security(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -1757,7 +1774,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg = {k: str(body.get(k) or "").strip() for k in ("session_timeout_minutes", "auth_provider") if k in body}
         await store.set_security_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"security_config": cfg})
-        return {"saved": True, "pushed_to_spokes": pushed}
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/{tenant}/central-sites-config")
     async def get_central_sites(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -1773,7 +1790,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg = body if isinstance(body, dict) else {}
         await store.set_central_sites_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"central_sites_config": cfg})
-        return {"saved": True, "pushed_to_spokes": pushed}
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/{tenant}/central/available")
     async def get_central_available(tenant: str, tenant_id: str = Depends(get_tenant_id)):
