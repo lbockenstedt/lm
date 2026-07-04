@@ -305,17 +305,31 @@ function disconnectCSWebSocket() {
     if (csWs) { try { csWs.close(); } catch (e) { console.error('disconnectCSWebSocket: error closing ws', e); } csWs = null; }
 }
 
+// True while the user is actively focused on a form control anywhere on the
+// page (typing in a text/number field, mid-interaction with a checkbox/select/
+// textarea just clicked). loadCSData's re-render replaces the ENTIRE current
+// view's innerHTML (csSet), which would otherwise wipe both the field's value
+// AND focus/cursor position out from under an in-progress edit — matching
+// what the original client-sim UI's per-field ``!input.matches(':focus')``
+// guards prevented, but applied once at the render chokepoint instead of
+// needing every render function to remember to add its own guard.
+function csUserIsEditing() {
+    const el = document.activeElement;
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+}
+
 function csWsRefresh() {
     if (typeof currentView === 'undefined' || currentView !== 'cs') return;
-    // Setup pages hold forms/inputs — a WS-driven re-render on every telemetry
-    // frame (~10s) wipes any in-progress edit (e.g. a half-typed GitHub token
-    // or Proxmox field). Skip auto-refresh there; the user hits Refresh
-    // manually. Live data pages (Dashboard / VM Server / Clients / etc.) still
-    // auto-refresh as before.
-    if (typeof currentSubView !== 'undefined' && currentSubView === 'Setup') return;
     if (csWsRefreshTimer) return; // debounce
     csWsRefreshTimer = setTimeout(() => {
         csWsRefreshTimer = null;
+        // Don't stomp an in-progress edit on ANY page (Config, Auto-
+        // Provisioning, Central API Setup, or a search box on a live-data
+        // page) — skip this cycle and let the next telemetry pulse (~10s
+        // later, debounced above) retry once the user is done.
+        if (csUserIsEditing()) return;
         loadCSData(currentSubView, currentSubChild, true);
     }, 1500);
 }
