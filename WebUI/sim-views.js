@@ -2772,7 +2772,18 @@ function csVmCategory(v) {
     const name = String(v.name || '').toLowerCase();
     if (t === 'template' || name.includes('template')) return 'Templates';
     if (t === 'lxc' || t === 'container') return 'Containers';
-    if (name.startsWith('sim-') || name.includes('client')) return 'Simulation Clients';
+    // Prefer VMID over the display name: the auto-provisioning "realistic
+    // hostname" feature (vm_names.json, e.g. vmid 90025 -> "kbell") means a
+    // sim-managed VM's name often does NOT start with "sim-" or contain
+    // "client" at all, so a name-only check misfiled every custom-named sim
+    // client into 'Other'. 90000 is the sim-managed floor used everywhere
+    // else in the stack (pxmx cs_guard.SIM_VMIN / assert_sim_vm), so treat
+    // it as the primary signal and keep the name check only as a fallback
+    // for anything below that floor.
+    const vmid = parseInt(v.vmid, 10);
+    if ((!isNaN(vmid) && vmid >= 90000) || name.startsWith('sim-') || name.includes('client')) {
+        return 'Simulation Clients';
+    }
     return 'Other';
 }
 
@@ -2781,6 +2792,14 @@ async function csRenderVmServerVms() {
     let hosts;
     try { hosts = await csVmLoad(); }
     catch (e) { console.error('csRenderVmServerVms: vm load failed', e); csSet(csErrorBox('Could not load VMs', e)); return; }
+    // csVmLoad() above is the slow part of a refresh cycle. csWsRefresh's own
+    // csUserIsEditing() guard only runs BEFORE this fetch starts, so a
+    // checkbox checked WHILE it's in flight still slips through and gets
+    // wiped when the table below replaces the DOM. Re-check right after the
+    // await, before touching anything, so a race here bails out the same way
+    // the pre-fetch guard does — the next telemetry pulse retries once the
+    // user is done (matches csWsRefresh's own comment).
+    if (csUserIsEditing()) return;
     const h = csVmSelectedHost();
     if (!h) { csSet(csEmpty('No host selected.')); return; }
     const vms = h.proxmox_vms || [];
