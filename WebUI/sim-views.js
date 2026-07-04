@@ -253,7 +253,11 @@ function csStatusBadge(status) {
 }
 
 function csTable(headers, rowsHtml, opts = {}) {
-    const ths = headers.map(h => `<th class="px-4 py-2 text-left font-semibold">${csEscape(h)}</th>`).join('');
+    // opts.headerHtml: optional array (same length as headers) of raw HTML to
+    // use for a given column's <th> instead of the escaped header text — used
+    // by the VM Server VMs table to put a "select all" checkbox in the header.
+    const rawHeaders = opts.headerHtml || [];
+    const ths = headers.map((h, i) => `<th class="px-4 py-2 text-left font-semibold">${rawHeaders[i] || csEscape(h)}</th>`).join('');
     return `<div class="overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">${ths}</thead>
@@ -2751,18 +2755,38 @@ async function csRenderVmServerVms() {
         <button onclick="csVmBulk('delete_vm')" class="bg-red-100 text-red-700 px-2 py-1 rounded font-bold">Delete</button>
         <span id="cs-vm-bulk-msg" class="text-slate-400 ml-2"></span>
       </div>
-      <div id="cs-vm-list">${csTable(['VMID', 'Name', 'Type', 'Status', 'Actions'], rows, {id:'cs-vm-table'})}</div>
+      <div id="cs-vm-list">${csVmTable(rows)}</div>
     </div>`);
     window._csVmGrouped = grouped;
     window._csVmByVmid = {};
     vms.forEach(v => { window._csVmByVmid[v.vmid] = v; });
 }
 
+const CS_VM_TABLE_HEADERS = ['VMID', 'Name', 'Type', 'Status', 'Actions'];
+const CS_VM_TABLE_HEADER_HTML = [
+    '<label class="inline-flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="cs-vm-selectall" onchange="csVmSelectAll(this.checked)"/> VMID</label>',
+];
+function csVmTable(rows) {
+    return csTable(CS_VM_TABLE_HEADERS, rows, {id: 'cs-vm-table', headerHtml: CS_VM_TABLE_HEADER_HTML});
+}
+
+// Toggles every visible row checkbox (the current category tab only — matches
+// what the bulk actions above already operate on) and keeps its own state in
+// sync when a row is (de)selected individually.
+window.csVmSelectAll = function (checked) {
+    document.querySelectorAll('.cs-vm-sel').forEach(cb => { cb.checked = checked; });
+};
+window.csVmSelUpdateHeader = function () {
+    const boxes = Array.from(document.querySelectorAll('.cs-vm-sel'));
+    const header = csEl('cs-vm-selectall');
+    if (header) header.checked = boxes.length > 0 && boxes.every(cb => cb.checked);
+};
+
 function csVmRow(v) {
     const vid = csEscape(v.vmid);
     const act = (label, action, cls) => `<button onclick="csVmAction(${v.vmid},'${action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${cls}">${label}</button>`;
     return `<tr>
-      <td class="px-3 py-2 font-mono text-xs"><input type="checkbox" class="cs-vm-sel" data-vmid="${vid}"/> ${vid}</td>
+      <td class="px-3 py-2 font-mono text-xs"><input type="checkbox" class="cs-vm-sel" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}</td>
       <td class="px-3 py-2 text-sm">${csEscape(v.name || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(v.is_template ? 'template' : (v.type || '—'))}</td>
       <td class="px-3 py-2">${csStatusBadge(v.status || (v.pending_checkin ? 'pending' : 'unknown'))}</td>
@@ -2780,7 +2804,7 @@ function csVmRow(v) {
 window.csVmVmsTab = function (cat) {
     const rows = (window._csVmGrouped && window._csVmGrouped[cat] || []).map(csVmRow).join('');
     const list = csEl('cs-vm-list');
-    if (list) list.innerHTML = csTable(['VMID', 'Name', 'Type', 'Status', 'Actions'], rows, {id:'cs-vm-table'});
+    if (list) list.innerHTML = csVmTable(rows);
     ['Simulation Clients','Other','Containers','Templates'].forEach(c => {
         const b = csEl('cs-vmtab-' + c);
         if (b) b.className = 'px-3 py-1.5 rounded-md text-xs font-bold ' + (c === cat ? 'bg-[#01A982] text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200');
