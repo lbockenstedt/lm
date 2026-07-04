@@ -631,7 +631,7 @@ def create_app(hub):
         # Unauthenticated endpoints within gated namespaces
         _PUBLIC = {"/auth/login", "/auth/me", "/auth/setup", "/status",
                    "/sim/api/init", "/sim/api/health"}
-        _PUBLIC_GET = {"/setup/appearance"}
+        _PUBLIC_GET = {"/setup/appearance", "/setup/toast-config"}
         if path in _PUBLIC or (request.method == "GET" and path in _PUBLIC_GET):
             return await call_next(request)
 
@@ -4405,6 +4405,30 @@ def create_app(hub):
             return {"status": "ok", "message": "Appearance settings updated."}
         except Exception as e:
             logger.exception("update_appearance failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/setup/toast-config")
+    async def get_toast_config():
+        hub = app.state.hub
+        seconds = hub.state.system_state.get("toast_duration_s", 10)
+        return {"toast_duration_s": seconds}
+
+    @app.post("/setup/toast-config")
+    async def update_toast_config(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            # Clamp to a sane range — 0/negative would make toasts vanish
+            # instantly (effectively hiding errors) and there is no reason to
+            # keep one on screen for more than 5 minutes.
+            seconds = max(1, min(300, int(data.get("toast_duration_s", 10))))
+            hub.state.system_state["toast_duration_s"] = seconds
+            hub.state.save_state()
+            return {"status": "ok", "toast_duration_s": seconds}
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="toast_duration_s must be a number")
+        except Exception as e:
+            logger.exception("update_toast_config failed")
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/setup/logs/all")

@@ -164,6 +164,9 @@ const ROUTES = {
     loadAppearance:         { m: 'GET',  p: '/setup/appearance',          api: 'get_appearance' },
     loadAppearanceForm:     { m: 'GET',  p: '/setup/appearance',          api: 'get_appearance' },
     saveAppearance:         { m: 'POST', p: '/setup/appearance',          api: 'update_appearance' },
+    loadToastConfig:        { m: 'GET',  p: '/setup/toast-config',        api: 'get_toast_config' },
+    loadToastConfigForm:    { m: 'GET',  p: '/setup/toast-config',        api: 'get_toast_config' },
+    saveToastConfig:        { m: 'POST', p: '/setup/toast-config',        api: 'update_toast_config' },
     loadBugReports:         { m: 'GET',  p: '/setup/bug-reports',         api: 'list_bug_reports' },
     showBugReport:          { m: 'GET',  p: '/setup/bug-reports/{rid}',   api: 'get_bug_report' },
     submitBugReport:        { m: 'POST', p: '/api/bug-report',            api: 'file_bug_report' },
@@ -611,23 +614,37 @@ function showToast(message, type = 'info') {
     const colors = { success: '#01A982', error: '#e53e3e', info: '#4a5568' };
     const toast = document.createElement('div');
     toast.className = 'lm-toast';
-    toast.textContent = message;
     // Stack under any toasts already on screen so simultaneous ones (e.g. Apply
     // Schema's result + warning) don't overlap. Top-right of the viewport.
     const stack = document.querySelectorAll('.lm-toast').length;
     const topOffset = 1.5 + stack * 4.0; // rem
     toast.style.cssText = `
         position:fixed;top:${topOffset}rem;right:1.5rem;z-index:9999;
+        display:flex;align-items:center;gap:.75rem;
         background:${colors[type] || colors.info};color:#fff;
-        padding:.75rem 1.25rem;border-radius:.5rem;font-size:.875rem;
+        padding:.75rem 1rem .75rem 1.25rem;border-radius:.5rem;font-size:.875rem;
         box-shadow:0 4px 12px rgba(0,0,0,.2);opacity:0;
         transition:opacity .2s ease;max-width:20rem;`;
-    document.body.appendChild(toast);
-    requestAnimationFrame(() => { toast.style.opacity = '1'; });
-    setTimeout(() => {
+    const text = document.createElement('span');
+    text.style.cssText = 'flex:1;';
+    text.textContent = message;
+    toast.appendChild(text);
+    const dismiss = () => {
         toast.style.opacity = '0';
         toast.addEventListener('transitionend', () => toast.remove());
-    }, 3500);
+    };
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '×';
+    closeBtn.setAttribute('aria-label', 'Dismiss');
+    closeBtn.style.cssText = 'background:none;border:none;color:inherit;opacity:.75;' +
+        'cursor:pointer;font-size:1.1rem;line-height:1;padding:0;';
+    closeBtn.addEventListener('mouseenter', () => { closeBtn.style.opacity = '1'; });
+    closeBtn.addEventListener('mouseleave', () => { closeBtn.style.opacity = '.75'; });
+    closeBtn.addEventListener('click', dismiss);
+    toast.appendChild(closeBtn);
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => { toast.style.opacity = '1'; });
+    setTimeout(dismiss, window.TOAST_DURATION_MS || 10000);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -3382,6 +3399,17 @@ function _renderSetupGeneralTile(content) {
             </div>
         </div>
         <div class="${card}">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Notifications</h3>
+            <p class="text-xs text-slate-400">How long toast messages (success/error confirmations in the bottom/top-right corner) stay on screen before fading out. A visible dismiss (×) always closes one early regardless of this setting.</p>
+            <div class="flex items-center gap-3">
+                <label class="${labelCls}">Toast Duration (seconds)</label>
+                <input type="number" id="toast-duration-input" min="1" max="300" value="10"
+                    class="w-20 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                <button onclick="saveToastConfig()" class="${btnCls}">Save</button>
+                <span id="toast-duration-status" class="text-xs text-slate-400"></span>
+            </div>
+        </div>
+        <div class="${card}">
             <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Appearance</h3>
             <p class="text-xs text-slate-400">Configure the header logo shown to the left of the title. Use <code>hpe-svg</code> for the built-in HPE mark, or any image URL/path.</p>
             <div class="space-y-1">
@@ -3400,6 +3428,7 @@ function _renderSetupGeneralTile(content) {
     loadSetupConfig();
     loadCacheConfig();
     loadAppearanceForm();
+    loadToastConfigForm();
     if (currentView === 'settings') loadSubnetFilterToggles();
 }
 
@@ -10868,6 +10897,49 @@ function closeDeviceModal() {
     if (modal) modal.remove();
 }
 
+// Toast duration (Setup → General → Notifications). window.TOAST_DURATION_MS
+// is read by showToast(); loaded once at startup (loadToastConfig, below,
+// public GET so it works pre-auth on the login screen too) and again whenever
+// the General settings tile renders its form. Falls back to 10s if the fetch
+// fails or hasn't completed yet — matches the server-side default.
+window.TOAST_DURATION_MS = 10000;
+
+async function loadToastConfig() {
+    try {
+        const r = await fetch('/setup/toast-config', { credentials: 'same-origin' });
+        if (!r.ok) return;
+        const d = await r.json();
+        if (d.toast_duration_s) window.TOAST_DURATION_MS = Number(d.toast_duration_s) * 1000;
+    } catch (e) { console.error('loadToastConfig', e); }
+}
+
+async function loadToastConfigForm() {
+    await loadToastConfig();
+    const el = document.getElementById('toast-duration-input');
+    if (el) el.value = window.TOAST_DURATION_MS / 1000;
+}
+
+async function saveToastConfig() {
+    const el = document.getElementById('toast-duration-input');
+    const status = document.getElementById('toast-duration-status');
+    const seconds = Math.max(1, Math.min(300, Number(el?.value) || 10));
+    try {
+        const r = await setupFetch('/setup/toast-config', {
+            method: 'POST', body: JSON.stringify({ toast_duration_s: seconds }),
+        });
+        if (r.ok) {
+            window.TOAST_DURATION_MS = seconds * 1000;
+            if (status) status.textContent = 'Saved.';
+            showToast(`Toasts now stay on screen for ${seconds}s`, 'success');
+        } else if (status) {
+            status.textContent = 'Failed to save.';
+        }
+    } catch (e) {
+        if (status) status.textContent = 'Failed to save.';
+        console.error('saveToastConfig', e);
+    }
+}
+
 async function loadAppearance() {
     try {
         const response = await setupFetch('/setup/appearance');
@@ -11066,6 +11138,7 @@ async function _initApp() {
         setTheme(savedTheme);
 
         loadAppearance();
+        loadToastConfig();
         loadTenantPrefixes();  // background — prefixes used for filtering, not dashboard render
         setView('dashboard');
         _startCacheStatusPolling();

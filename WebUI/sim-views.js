@@ -2753,7 +2753,6 @@ async function csRenderVmServerVms() {
         <button onclick="csVmBulk('reboot_vm')" class="bg-slate-200 text-slate-700 px-2 py-1 rounded font-bold">Reboot</button>
         <button onclick="csVmBulk('reclone_vm')" class="bg-blue-100 text-blue-700 px-2 py-1 rounded font-bold">Reclone</button>
         <button onclick="csVmBulk('delete_vm')" class="bg-red-100 text-red-700 px-2 py-1 rounded font-bold">Delete</button>
-        <span id="cs-vm-bulk-msg" class="text-slate-400 ml-2"></span>
       </div>
       <div id="cs-vm-list">${csVmTable(rows)}</div>
     </div>`);
@@ -2855,7 +2854,7 @@ async function csExpirePendingForTarget() {
 }
 
 function csVmFlash(msg) {
-    const el = csEl('cs-vm-bulk-msg'); if (el) { el.textContent = msg; setTimeout(() => { if (el) el.textContent = ''; }, 2500); }
+    if (typeof showToast === 'function') showToast(msg, 'success');
 }
 
 // ── Console / Terminal (Phase-5 stubs, faithful to current LM state) ───────
