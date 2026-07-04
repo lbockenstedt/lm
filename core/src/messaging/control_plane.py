@@ -996,6 +996,92 @@ class BaseControlPlane:
         module_name = self.spoke_id.split("-")[0]
         return f"lm-{module_name}"
 
+    def _perform_spoke_update_sync(self, repo_url: str) -> Dict[str, Any]:
+        """Blocking git-update body for the ``SPOKE_UPDATE`` command. Runs on a
+        worker thread via ``asyncio.to_thread`` (see ``handle_system_command``)
+        so the event loop — and every other in-flight spoke command — stays
+        responsive while ``git fetch``/``pull`` run. Mirrors
+        ``perform_self_update_check``'s existing thread-safe pattern (same
+        ``_flush_log_relay_sync`` + ``os._exit(3)`` combo)."""
+        try:
+            # Identify spoke root directory (assuming the control plane is running from src/...)
+            # e.g. /opt/lm/pxmx/src/control_plane.py -> /opt/lm/pxmx
+            cwd = os.path.abspath(os.getcwd())
+            # If we are in a src folder, go up one level
+            if cwd.endswith("src"):
+                cwd = os.path.dirname(cwd)
+
+            logger.info(f"Performing update in {cwd} from {repo_url}...")
+
+            # 1. Update remote origin
+            subprocess.run(["git", "remote", "set-url", "origin", repo_url], cwd=cwd, check=True)
+
+            # 2. Configure pull strategy
+            subprocess.run(["git", "config", "pull.rebase", "true"], cwd=cwd, check=True)
+            subprocess.run(["git", "config", "rebase.autoStash", "true"], cwd=cwd, check=True)
+
+            # 3. Abort any interrupted rebase before pulling
+            self._run_git(["rebase", "--abort"], cwd=cwd)
+
+            # 4. Snapshot HEAD + the code tree before pull so the external
+            # watchdog can roll back (git reset --hard head_before) if the new
+            # code crashes at boot. The src/ file snapshot is belt-and-suspenders.
+            head_before = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+            backup_dir = self._snapshot_for_update(head_before, cwd)
+
+            # 5. Fetch + pull; on rebase conflict reset hard to origin
+            subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True)
+            pull = self._run_git(["pull", "--rebase", "--autostash", "origin"], cwd=cwd)
+            if pull.returncode != 0:
+                logger.warning(f"git pull --rebase failed (rc={pull.returncode}); resetting hard to origin")
+                branch = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd).stdout.strip() or "main"
+                subprocess.run(["git", "rebase", "--abort"], cwd=cwd, check=False)
+                subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=cwd, check=True)
+
+            head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
+
+            # 6. Only restart if new commits were pulled
+            if head_after != head_before:
+                # Skip a known-bad commit (rolled back before): reset to
+                # head_before and stay put rather than crash-looping into the
+                # same broken code.
+                if self._is_known_bad_commit(head_after):
+                    logger.warning(
+                        "SPOKE_UPDATE: new HEAD %s is a known-bad commit "
+                        "(rolled back before); resetting to %s and skipping.",
+                        head_after[:8], head_before[:8])
+                    self._run_git(["reset", "--hard", head_before], cwd=cwd)
+                    self._clear_pending_update()
+                    return {"status": "SUCCESS",
+                            "message": f"Update {head_after[:8]} is marked bad; stayed on {head_before[:8]}"}
+                # Reload to run the new code. _prepare_restart_with_watchdog
+                # writes the pending manifest + schedules the external
+                # health-gate watchdog (lm-component-update-restart) so a bad
+                # update is rolled back instead of crash-looping forever. We
+                # then flush logs and exit NON-ZERO (3); systemd sees a
+                # failure exit and Restart=on-failure reliably relaunches us.
+                # (The old `systemctl restart` child died in our own cgroup
+                # mid-restart, stranding the spoke offline — see
+                # _prepare_service_restart's docstring.)
+                if self._prepare_restart_with_watchdog(
+                        head_before, head_after, backup_dir, cwd, reason="spoke-update"):
+                    self._flush_log_relay_sync()
+                    os._exit(3)
+                return {"status": "SUCCESS",
+                        "message": f"Updated from {repo_url}; restart skipped"}
+            else:
+                logger.debug("SPOKE_UPDATE: already up to date; no restart needed.")
+                return {"status": "SUCCESS", "message": "Already up to date; no restart needed"}
+        except subprocess.CalledProcessError as e:
+            logger.error(f"SPOKE_UPDATE failed (git command exit code {e.returncode}): {e}")
+            stderr = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or '')
+            stdout = e.stdout.decode('utf-8', errors='replace') if isinstance(e.stdout, bytes) else (e.stdout or '')
+            detail = (stderr or stdout or str(e)).strip()
+            return {"status": "ERROR", "message": f"git operation failed: {detail}"}
+        except Exception as e:
+            logger.error(f"SPOKE_UPDATE failed: {e}")
+            return {"status": "ERROR", "message": str(e)}
+
     async def handle_system_command(self, cmd_type: str, data: Dict[str, Any]) -> Any:
         """Handles commands that affect the entire spoke system rather than a specific module."""
         if cmd_type in ("SPOKE_SET_LOG_LEVEL", "SET_LOG_LEVEL"):
@@ -1013,85 +1099,15 @@ class BaseControlPlane:
             repo_url = data.get("repo_url")
             if not repo_url:
                 return {"status": "ERROR", "message": "Missing repo_url for update"}
-
-            try:
-                # Identify spoke root directory (assuming the control plane is running from src/...)
-                # e.g. /opt/lm/pxmx/src/control_plane.py -> /opt/lm/pxmx
-                cwd = os.path.abspath(os.getcwd())
-                # If we are in a src folder, go up one level
-                if cwd.endswith("src"):
-                    cwd = os.path.dirname(cwd)
-
-                logger.info(f"Performing update in {cwd} from {repo_url}...")
-
-                # 1. Update remote origin
-                subprocess.run(["git", "remote", "set-url", "origin", repo_url], cwd=cwd, check=True)
-
-                # 2. Configure pull strategy
-                subprocess.run(["git", "config", "pull.rebase", "true"], cwd=cwd, check=True)
-                subprocess.run(["git", "config", "rebase.autoStash", "true"], cwd=cwd, check=True)
-
-                # 3. Abort any interrupted rebase before pulling
-                self._run_git(["rebase", "--abort"], cwd=cwd)
-
-                # 4. Snapshot HEAD + the code tree before pull so the external
-                # watchdog can roll back (git reset --hard head_before) if the new
-                # code crashes at boot. The src/ file snapshot is belt-and-suspenders.
-                head_before = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
-                backup_dir = self._snapshot_for_update(head_before, cwd)
-
-                # 5. Fetch + pull; on rebase conflict reset hard to origin
-                subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True)
-                pull = self._run_git(["pull", "--rebase", "--autostash", "origin"], cwd=cwd)
-                if pull.returncode != 0:
-                    logger.warning(f"git pull --rebase failed (rc={pull.returncode}); resetting hard to origin")
-                    branch = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd).stdout.strip() or "main"
-                    subprocess.run(["git", "rebase", "--abort"], cwd=cwd, check=False)
-                    subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=cwd, check=True)
-
-                head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
-
-                # 6. Only restart if new commits were pulled
-                if head_after != head_before:
-                    # Skip a known-bad commit (rolled back before): reset to
-                    # head_before and stay put rather than crash-looping into the
-                    # same broken code.
-                    if self._is_known_bad_commit(head_after):
-                        logger.warning(
-                            "SPOKE_UPDATE: new HEAD %s is a known-bad commit "
-                            "(rolled back before); resetting to %s and skipping.",
-                            head_after[:8], head_before[:8])
-                        self._run_git(["reset", "--hard", head_before], cwd=cwd)
-                        self._clear_pending_update()
-                        return {"status": "SUCCESS",
-                                "message": f"Update {head_after[:8]} is marked bad; stayed on {head_before[:8]}"}
-                    # Reload to run the new code. _prepare_restart_with_watchdog
-                    # writes the pending manifest + schedules the external
-                    # health-gate watchdog (lm-component-update-restart) so a bad
-                    # update is rolled back instead of crash-looping forever. We
-                    # then flush logs and exit NON-ZERO (3); systemd sees a
-                    # failure exit and Restart=on-failure reliably relaunches us.
-                    # (The old `systemctl restart` child died in our own cgroup
-                    # mid-restart, stranding the spoke offline — see
-                    # _prepare_service_restart's docstring.)
-                    if self._prepare_restart_with_watchdog(
-                            head_before, head_after, backup_dir, cwd, reason="spoke-update"):
-                        await self._flush_log_relay_async()
-                        os._exit(3)
-                    return {"status": "SUCCESS",
-                            "message": f"Updated from {repo_url}; restart skipped"}
-                else:
-                    logger.debug("SPOKE_UPDATE: already up to date; no restart needed.")
-                    return {"status": "SUCCESS", "message": "Already up to date; no restart needed"}
-            except subprocess.CalledProcessError as e:
-                logger.error(f"SPOKE_UPDATE failed (git command exit code {e.returncode}): {e}")
-                stderr = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or '')
-                stdout = e.stdout.decode('utf-8', errors='replace') if isinstance(e.stdout, bytes) else (e.stdout or '')
-                detail = (stderr or stdout or str(e)).strip()
-                return {"status": "ERROR", "message": f"git operation failed: {detail}"}
-            except Exception as e:
-                logger.error(f"SPOKE_UPDATE failed: {e}")
-                return {"status": "ERROR", "message": str(e)}
+            # The git fetch/pull below can take anywhere from seconds to minutes
+            # on a slow/rate-limited link. Run it off the event loop thread —
+            # this handler used to call subprocess.run(...) inline, which froze
+            # EVERY other coroutine (all other command handling, GET_AGENTS
+            # polling, VM actions, etc.) for the whole duration, since asyncio
+            # is single-threaded. That looked like the whole spoke going
+            # unresponsive (in-flight requests timing out at the hub) each time
+            # a new commit landed. See _perform_spoke_update_sync.
+            return await asyncio.to_thread(self._perform_spoke_update_sync, repo_url)
 
         if cmd_type == "SPOKE_SET_HUB_SECRET":
             new_secret = data.get("hub_secret")
