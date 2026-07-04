@@ -243,8 +243,8 @@ const CRUD_ROUTES = {
                               m2: 'POST', p2: '/setup/spoke-name',                          api2: 'rename_spoke' },
     openSpokeAssignModal:   { m: 'GET',  p: '/setup/tenants',                                api: 'get_tenants' }, // (modal)
     saveSpokeAssign:        { m: 'POST', p: '/setup/approve_spoke',                          api: 'approve_spoke' },
-    approveAgent:           { m: 'POST', p: '/setup/spokes/{pxmxSpokeId}/agents/{agentId}/approve', api: 'approve_agent_under_spoke',
-                              m2: 'GET', p2: '/setup/pending_spokes',                        api2: 'get_all_spokes_status' }, // finds pxmx spoke first
+    approveAgent:           { m: 'POST', p: '/setup/spokes/{spokeId}/agents/{agentId}/approve', api: 'approve_agent_under_spoke',
+                              m2: 'GET', p2: '/api/pxmx/agents',                              api2: 'get_pxmx_agents' }, // resolves the agent's real owning spoke first (hypervisor OR simulation)
     revokeAgent:            { m: 'POST', p: '/api/pxmx/agents/{agentId}/revoke',             api: 'revoke_pxmx_agent' },
     editAgentName:          { m: 'POST', p: '/api/pxmx/agents/{agentId}/rename',             api: 'rename_pxmx_agent' },
     openAgentConfigModal:   { m: 'GET',  p: '/api/pxmx/agents/{agentId}/config',             api: 'get_pxmx_agent_config',
@@ -5407,13 +5407,24 @@ function _renderSpokesSummary(diagData) {
 }
 
 async function approveAgent(agentId) {
-    // Find the pxmx spoke ID first
-    const spokesRes = await setupFetch('/setup/pending_spokes');
-    const { spokes = [] } = spokesRes.ok ? await spokesRes.json() : {};
-    const pxmxSpoke = spokes.find(s => s.approved && s.spoke_id.includes('pxmx'));
-    if (!pxmxSpoke) { showToast('Hypervisor spoke not connected', 'error'); return; }
+    // Resolve the spoke that actually owns this agent from the same
+    // aggregated list the Agents tile renders from (now tagged with
+    // spoke_id — see get_pxmx_agents in api.py), rather than assuming a
+    // hypervisor (pxmx) spoke: a cs-dialed agent in the split-topology case
+    // is not on pxmx at all, and hardcoding that lookup either routed the
+    // approval to the wrong spoke (silently no-op — the agent stays pending
+    // forever) or blocked approval outright when no pxmx spoke was connected.
+    let spokeId = null;
     try {
-        const res = await setupFetch(`/setup/spokes/${encodeURIComponent(pxmxSpoke.spoke_id)}/agents/${encodeURIComponent(agentId)}/approve`, {
+        const res = await fetch('/api/pxmx/agents', { credentials: 'same-origin' });
+        const data = res.ok ? await res.json() : {};
+        const all = [...(data.agents || []), ...(data.pending_agents || [])];
+        const found = all.find(a => a.agent_id === agentId);
+        spokeId = found && found.spoke_id;
+    } catch (e) { console.error('approveAgent: could not resolve owning spoke', e); }
+    if (!spokeId) { showToast('Could not determine which spoke owns this agent', 'error'); return; }
+    try {
+        const res = await setupFetch(`/setup/spokes/${encodeURIComponent(spokeId)}/agents/${encodeURIComponent(agentId)}/approve`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
         });
         const d = await res.json();

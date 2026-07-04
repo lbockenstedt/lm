@@ -927,15 +927,25 @@ def create_app(hub):
                 known.remove(agent_id)
             hub.state.save_state()
 
-            if spoke_id in hub.active_connections:
-                msg = _hub_msg(spoke_id, "SPOKE_RELAY", {
+            # Resolve the spoke that actually owns this agent rather than
+            # trusting the path's spoke_id blindly — the WebUI's approve
+            # button doesn't always know which spoke a given agent is
+            # connected through (a cs-dialed agent in the split-topology case
+            # is not on the pxmx spoke), so a caller-supplied wrong spoke_id
+            # would silently no-op (relay sent to a spoke that has never
+            # heard of this agent_id, leaving it pending forever). Falls back
+            # to the path param when agent_info has no entry yet (e.g.
+            # approving before the first relayed frame has arrived).
+            target_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) or spoke_id
+            if target_spoke in hub.active_connections:
+                msg = _hub_msg(target_spoke, "SPOKE_RELAY", {
                     "target_agent_id": agent_id,
                     "command": "APPROVAL_SUCCESS",
                     "payload": {}
                 })
                 await hub.send_to_spoke(msg)
 
-            return {"status": "ok", "message": f"Agent {agent_id} approved under spoke {spoke_id}"}
+            return {"status": "ok", "message": f"Agent {agent_id} approved under spoke {target_spoke}"}
         except Exception as e:
             logger.exception("approve_agent_under_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -3167,15 +3177,21 @@ def create_app(hub):
 
     @app.get("/api/pxmx/agents")
     async def get_pxmx_agents():
+        """Agents tile data source. Aggregates GET_AGENTS across EVERY
+        agent-hosting spoke (hypervisor=pxmx, simulation=cs — both subclass
+        AgentHostingControlPlane), not just pxmx: a Proxmox host agent can now
+        dial a cs spoke's /ws/agent directly (the split-topology work), and
+        those agents were previously invisible here entirely — the tile only
+        ever asked the pxmx spoke. Each agent is tagged with its own owning
+        spoke_id so approve/revoke route correctly regardless of which spoke
+        it's actually connected to."""
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
-        if not pxmx_spoke:
+        agent_spokes = list(dict.fromkeys(
+            hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
+        ))
+        if not agent_spokes:
             return {"agents": [], "pending_agents": [], "spoke_connected": False}
         try:
-            result = await hub.request_response(pxmx_spoke, "GET_AGENTS", {})
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            # Merge in stored per-agent config: display name + Client Simulation mode.
-            # `agent_config` is the new home; `agent_display_names` is a read fallback.
             agent_cfg = hub.state.system_state.get("agent_config", {})
             names = hub.state.system_state.get("agent_display_names", {})
             now = time.time()
@@ -3183,7 +3199,7 @@ def create_app(hub):
             def _agent_identity_change_for(hub, parent_spoke, aid, cfg):
                 """Latest unacked rename/reimage event for an agent.
 
-                Agent identity events are recorded on the PARENT pxmx spoke's
+                Agent identity events are recorded on the PARENT spoke's
                 timeline (with ``"agent "`` in the detail), so scan that and
                 return the newest one newer than the agent's ``change_acked_ts``.
                 """
@@ -3195,30 +3211,39 @@ def create_app(hub):
                             return ev
                 return None
 
-            for a in data.get("agents", []):
-                aid = a["agent_id"]
-                cfg = agent_cfg.get(aid, {})
-                if cfg.get("display_name"):
-                    a["display_name"] = cfg["display_name"]
-                elif aid in names:
-                    a["display_name"] = names[aid]
-                if cfg.get("client_simulation"):
-                    a["client_simulation"] = cfg["client_simulation"]
-                # Hub-tracked per-agent heartbeat (keyed spoke_id:agent_id, fed
-                # by the pxmx spoke relaying AGENT_HEARTBEAT up). Surfaces in
-                # System → Diagnostics alongside the spoke heartbeats; falls
-                # back to RED/never when the hub has never seen the agent beat.
-                hb_key = f"{pxmx_spoke}:{aid}"
-                hb_last = hub.heartbeat.last_seen.get(hb_key)
-                a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
-                a["heartbeat_status"] = str(hub.heartbeat.get_status(hb_key).value)
-                # Install-UUID identity tracking: prefer the hub-stored hostname
-                # (captured on connect, survives agent disconnect) over the live
-                # GET_AGENTS value, and surface the latest unacked rename event.
-                a["hostname"] = cfg.get("hostname", "") or a.get("hostname", "") or aid
-                a["install_uuid"] = cfg.get("install_uuid", "")
-                a["identity_change"] = _agent_identity_change_for(hub, pxmx_spoke, aid, cfg)
-            return data
+            all_agents: list = []
+            all_pending: list = []
+            for parent_spoke in agent_spokes:
+                try:
+                    result = await hub.request_response(parent_spoke, "GET_AGENTS", {})
+                except Exception as exc:  # noqa: BLE001 — one dead spoke shouldn't blank the tile
+                    logger.warning("GET_AGENTS failed for spoke %s: %s", parent_spoke, exc)
+                    continue
+                data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+                for a in data.get("agents", []) or []:
+                    aid = a["agent_id"]
+                    a["spoke_id"] = parent_spoke
+                    cfg = agent_cfg.get(aid, {})
+                    if cfg.get("display_name"):
+                        a["display_name"] = cfg["display_name"]
+                    elif aid in names:
+                        a["display_name"] = names[aid]
+                    if cfg.get("client_simulation"):
+                        a["client_simulation"] = cfg["client_simulation"]
+                    # Hub-tracked per-agent heartbeat (keyed spoke_id:agent_id,
+                    # fed by the owning spoke relaying AGENT_HEARTBEAT up).
+                    hb_key = f"{parent_spoke}:{aid}"
+                    hb_last = hub.heartbeat.last_seen.get(hb_key)
+                    a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
+                    a["heartbeat_status"] = str(hub.heartbeat.get_status(hb_key).value)
+                    a["hostname"] = cfg.get("hostname", "") or a.get("hostname", "") or aid
+                    a["install_uuid"] = cfg.get("install_uuid", "")
+                    a["identity_change"] = _agent_identity_change_for(hub, parent_spoke, aid, cfg)
+                    all_agents.append(a)
+                for p in data.get("pending_agents", []) or []:
+                    p["spoke_id"] = parent_spoke
+                    all_pending.append(p)
+            return {"agents": all_agents, "pending_agents": all_pending, "spoke_connected": True}
         except Exception as e:
             logger.exception("get_pxmx_agents failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -3226,11 +3251,15 @@ def create_app(hub):
     @app.post("/api/pxmx/agents/{agent_id}/revoke")
     async def revoke_pxmx_agent(agent_id: str):
         hub = app.state.hub
-        pxmx_spoke = hub.get_spoke_by_type("hypervisor")
-        if not pxmx_spoke:
-            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        # Resolve the spoke that actually owns this agent (may be a cs spoke
+        # in the split-topology case, not necessarily pxmx) rather than
+        # always targeting the hypervisor spoke.
+        owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
+            or hub.get_spoke_by_type("hypervisor")
+        if not owning_spoke:
+            raise HTTPException(status_code=503, detail="No agent-hosting spoke connected")
         try:
-            result = await hub.request_response(pxmx_spoke, "SPOKE_RELAY", {
+            result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
                 "target_agent_id": agent_id,
                 "command": "REVOKE_AGENT",
             })
@@ -3311,10 +3340,11 @@ def create_app(hub):
             # even when the agent is offline, so a failure here just means the agent
             # picks up the config on its next connect/reconnect.
             pushed = False
-            pxmx_spoke = hub.get_spoke_by_type("hypervisor")
-            if pxmx_spoke:
+            owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
+                or hub.get_spoke_by_type("hypervisor")
+            if owning_spoke:
                 try:
-                    res = await hub.request_response(pxmx_spoke, "SET_AGENT_CONFIG", {
+                    res = await hub.request_response(owning_spoke, "SET_AGENT_CONFIG", {
                         "agent_id": agent_id,
                         "config": {"client_simulation": cs_cfg},
                     })
