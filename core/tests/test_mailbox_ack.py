@@ -17,8 +17,8 @@ def _run(coro):
     return asyncio.get_event_loop().run_until_complete(coro) if False else asyncio.run(coro)
 
 
-def test_unknown_ack_warning_names_source_spoke_type_and_ip(caplog):
-    mb = Mailbox()
+def test_unknown_ack_warning_names_source_spoke_type_and_ip(caplog, tmp_path):
+    mb = Mailbox(state_dir=str(tmp_path))
     with caplog.at_level(logging.WARNING, logger="Mailbox"):
         asyncio.run(mb.acknowledge(Acknowledgement(
             correlation_id="838a423e-cf9b-4849-94ef-2684f880329f",
@@ -38,8 +38,8 @@ def test_unknown_ack_warning_names_source_spoke_type_and_ip(caplog):
     assert "status=FAILED" in msg
 
 
-def test_known_ack_retires_no_unknown_warning(caplog):
-    mb = Mailbox()
+def test_known_ack_retires_no_unknown_warning(caplog, tmp_path):
+    mb = Mailbox(state_dir=str(tmp_path))
     m = Message(
         header=MessageHeader(message_id="m1", destination_id="s1",
                              priority=MessagePriority.NORMAL),
@@ -74,8 +74,8 @@ def _msg(mid, dest="s1"):
     )
 
 
-def test_retry_advances_backoff_on_failure_then_drops(caplog):
-    mb = Mailbox()
+def test_retry_advances_backoff_on_failure_then_drops(caplog, tmp_path):
+    mb = Mailbox(state_dir=str(tmp_path))
     # A message whose send always raises. Seed pending_ack with an old
     # last_sent so the first retry tick fires immediately.
     mb.pending_ack["m1"] = (_msg("m1"), 0.0, 0)
@@ -114,11 +114,11 @@ def test_retry_advances_backoff_on_failure_then_drops(caplog):
     )
 
 
-def test_retry_succeeding_advances_retries_stays_pending():
+def test_retry_succeeding_advances_retries_stays_pending(tmp_path):
     # A successful send does NOT retire the message — it stays in pending_ack
     # (still awaiting the spoke's ack) with retries bumped, so the backoff
     # schedule progresses between acks. Only acknowledge() retires it.
-    mb = Mailbox()
+    mb = Mailbox(state_dir=str(tmp_path))
     mb.pending_ack["m1"] = (_msg("m1"), 0.0, 0)
 
     async def succeeds(_msg):
@@ -143,8 +143,8 @@ def test_retry_succeeding_advances_retries_stays_pending():
 
 # ── clear_spoke: delete/reset/unapprove must purge stranded messages ──────────
 
-def test_clear_spoke_drops_pending_ack_and_offline_queue():
-    mb = Mailbox()
+def test_clear_spoke_drops_pending_ack_and_offline_queue(tmp_path):
+    mb = Mailbox(state_dir=str(tmp_path))
     a = _msg("a", dest="s1")
     b = _msg("b", dest="s2")
     mb.pending_ack["a"] = (a, 0.0, 0)
@@ -161,8 +161,8 @@ def test_clear_spoke_drops_pending_ack_and_offline_queue():
     assert "s3" in mb.spoke_queues  # other spokes' queues untouched
 
 
-def test_clear_spoke_missing_spoke_is_noop():
-    mb = Mailbox()
+def test_clear_spoke_missing_spoke_is_noop(tmp_path):
+    mb = Mailbox(state_dir=str(tmp_path))
     assert mb.clear_spoke("never-seen") == 0
     assert mb.pending_ack == {}
     assert mb.spoke_queues == {}

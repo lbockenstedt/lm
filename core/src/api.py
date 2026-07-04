@@ -3358,26 +3358,49 @@ def create_app(hub):
 
             # Best-effort push to a live agent. SET_AGENT_CONFIG persists spoke-side
             # even when the agent is offline, so a failure here just means the agent
-            # picks up the config on its next connect/reconnect.
+            # picks up the config on its next connect/reconnect — but that only
+            # works if the OWNING SPOKE actually received this SET_AGENT_CONFIG in
+            # the first place. If the spoke itself was momentarily unreachable
+            # (mid self-update restart, brief reconnect blip — the same window
+            # that made hub-config saves report "0 spokes"), a bare
+            # request_response would raise immediately and this command would
+            # just be dropped with nothing spoke-side to push down once the
+            # agent reconnects. push_or_queue_to_spoke queues it via the Mailbox
+            # instead, so it's delivered (and persists spoke-side) the moment the
+            # spoke itself comes back.
             pushed = False
+            queued = False
             owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
                 or hub.get_spoke_by_type("hypervisor")
             if owning_spoke:
                 try:
-                    res = await hub.request_response(owning_spoke, "SET_AGENT_CONFIG", {
-                        "agent_id": agent_id,
-                        "config": {"client_simulation": cs_cfg},
-                    })
-                    rdata = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
-                    pushed = rdata.get("status") == "SUCCESS"
+                    push = getattr(hub, "push_or_queue_to_spoke", None)
+                    if callable(push):
+                        outcome = await push(owning_spoke, "SET_AGENT_CONFIG", {
+                            "agent_id": agent_id,
+                            "config": {"client_simulation": cs_cfg},
+                        })
+                        queued = bool(outcome.get("queued"))
+                        rdata = outcome.get("result") or {}
+                        rdata = rdata.get("payload", {}).get("data", rdata) if isinstance(rdata, dict) else rdata
+                        pushed = queued or (isinstance(rdata, dict) and rdata.get("status") == "SUCCESS")
+                    else:
+                        res = await hub.request_response(owning_spoke, "SET_AGENT_CONFIG", {
+                            "agent_id": agent_id,
+                            "config": {"client_simulation": cs_cfg},
+                        })
+                        rdata = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+                        pushed = rdata.get("status") == "SUCCESS"
                 except Exception as e:
                     logger.info(f"SET_AGENT_CONFIG push for '{agent_id}' failed (will re-push on reconnect): {e}")
 
             return {
                 "status": "ok" if pushed else "partial_success",
-                "message": ("Config saved and pushed to agent." if pushed
+                "message": ("Config queued — spoke temporarily unreachable, will apply on reconnect." if queued
+                            else "Config saved and pushed to agent." if pushed
                             else "Config saved; agent will receive it on next connect/reconnect."),
                 "pushed": pushed,
+                "queued": queued,
                 "config": store[agent_id],
             }
         except Exception as e:

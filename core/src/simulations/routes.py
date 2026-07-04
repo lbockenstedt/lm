@@ -598,7 +598,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Returns the number of spokes pushed (0 if none connected/assigned). The
         spoke-side CSBridge routes CS_CONFIG_UPDATE through server._apply_hub_config,
         which handles central_api/central_config/notifications/sim_conf_override/
-        user_conf_override/relay_onboarding_psk + the HUB_CONFIG_OWNED_KEYS."""
+        user_conf_override/relay_onboarding_psk + the HUB_CONFIG_OWNED_KEYS.
+
+        Uses push_or_queue_to_spoke (not a bare request_response) so a spoke
+        that's approved+bound but momentarily unreachable — mid self-update
+        restart, brief reconnect blip — gets this queued for delivery the
+        moment it reconnects instead of silently reporting "0 spokes pushed"
+        for what looked like a fine, connected spoke a few seconds earlier.
+        Counts as pushed (1) either way: a queued push WILL apply, just not
+        this instant, and every one of this function's ~16 call sites already
+        treats the return value as a plain "spoke was reached" count."""
         spoke_id = None
         get_spoke = getattr(hub, "get_client_sim_spoke", None)
         if callable(get_spoke):
@@ -608,8 +617,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 spoke_id = None
         if not spoke_id:
             return 0
+        push = getattr(hub, "push_or_queue_to_spoke", None)
+        if not callable(push):
+            # Fallback for a hub build without push_or_queue_to_spoke yet.
+            try:
+                await hub.request_response(spoke_id, "CS_CONFIG_UPDATE", payload, timeout=5.0)
+                return 1
+            except Exception as exc:
+                logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", spoke_id, exc)
+                return 0
         try:
-            await hub.request_response(spoke_id, "CS_CONFIG_UPDATE", payload, timeout=5.0)
+            outcome = await push(spoke_id, "CS_CONFIG_UPDATE", payload, timeout=5.0)
+            if outcome.get("queued"):
+                logger.info("CS_CONFIG_UPDATE for %s queued (spoke unreachable): %s",
+                           spoke_id, outcome.get("message"))
             return 1
         except Exception as exc:
             logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", spoke_id, exc)

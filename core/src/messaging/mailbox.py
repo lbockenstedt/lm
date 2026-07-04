@@ -8,19 +8,30 @@ is the retry/durability layer for non-heartbeat traffic; heartbeats themselves
 are not ack-tracked here (their liveness signal flows through
 ``heartbeat.py``). The envelope shape for both messages and acks is defined in
 ``protocol.py``.
+
+Persisted to ``<state_dir>/mailbox.json`` (same dir + encryption as
+StateManager's system/tenant state — queued payloads can carry secrets, e.g.
+SPOKE_UPDATE_SESSION_KEY's plaintext session key) so a hub restart doesn't
+drop in-flight or offline-queued messages: they were sitting in memory only
+before, so a restart silently lost anything a temporarily-disconnected spoke
+hadn't acked yet. Loaded on construction; saved after every mutation that
+actually changes pending_ack/spoke_queues.
 """
 
 import asyncio
+import json
+import os
 import time
 import logging
-from typing import Dict, List, Optional
-from .protocol import Message, Acknowledgement, MessagePriority
+from dataclasses import asdict
+from typing import Any, Dict, List, Optional
+from .protocol import Message, MessageHeader, MessagePayload, Acknowledgement, MessagePriority
 
 # Logging configured by the process entrypoint (hub main.py); see base_spoke.py.
 logger = logging.getLogger("Mailbox")
 
 class Mailbox:
-    def __init__(self):
+    def __init__(self, state_dir: Optional[str] = None):
         # Messages sent by the Hub that are awaiting an Ack
         # { message_id: (message, first_sent_time, retry_count) }
         self.pending_ack: Dict[str, tuple[Message, float, int]] = {}
@@ -30,6 +41,101 @@ class Mailbox:
         self.spoke_queues: Dict[str, List[Message]] = {}
 
         self.retry_intervals = [5, 15, 60, 300, 900]  # Exponential backoff intervals in seconds
+
+        # Same directory StateManager resolves (prod /var/lib/lm/state, dev
+        # home-dir fallback) so the two files sit side by side.
+        if state_dir is None:
+            state_dir = "/var/lib/lm/state"
+            try:
+                os.makedirs(state_dir, exist_ok=True)
+                test_file = os.path.join(state_dir, ".write_test")
+                with open(test_file, "w") as f:
+                    f.write("test")
+                os.remove(test_file)
+            except Exception:
+                state_dir = os.path.expanduser("~/.local/share/lm/state")
+                os.makedirs(state_dir, exist_ok=True)
+        self._path = os.path.join(state_dir, "mailbox.json")
+        self._load()
+
+    # ── persistence ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _message_to_dict(message: Message) -> Dict[str, Any]:
+        return asdict(message)
+
+    @staticmethod
+    def _message_from_dict(d: Dict[str, Any]) -> Message:
+        h = dict(d.get("header") or {})
+        if "priority" in h:
+            try:
+                h["priority"] = MessagePriority(h["priority"])
+            except Exception:
+                h["priority"] = MessagePriority.NORMAL
+        p = dict(d.get("payload") or {})
+        return Message(header=MessageHeader(**h), payload=MessagePayload(**p),
+                       signature=d.get("signature"))
+
+    def _save(self) -> None:
+        """Best-effort atomic + encrypted write — mirrors StateManager._save_file.
+        Never raises: a failed mailbox persist must not break message delivery."""
+        try:
+            from security.encryption import hub_encryption
+            data = {
+                "pending_ack": {
+                    mid: {"message": self._message_to_dict(msg),
+                          "first_sent": ts, "retries": retries}
+                    for mid, (msg, ts, retries) in self.pending_ack.items()
+                },
+                "spoke_queues": {
+                    sid: [self._message_to_dict(m) for m in msgs]
+                    for sid, msgs in self.spoke_queues.items()
+                },
+            }
+            json_data = json.dumps(data, indent=2, default=str)
+            encrypted = hub_encryption.encrypt(json_data)
+            tmp_path = self._path + ".tmp"
+            with open(tmp_path, "wb") as f:
+                f.write(encrypted)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self._path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Mailbox persist failed ({self._path}): {e}")
+
+    def _load(self) -> None:
+        """Restore pending_ack/spoke_queues from disk (warm start after a hub
+        restart). Best-effort: any failure just starts empty — never fatal."""
+        if not os.path.exists(self._path):
+            return
+        try:
+            from security.encryption import hub_encryption
+            with open(self._path, "rb") as f:
+                encrypted = f.read()
+            if not encrypted:
+                return
+            json_data = hub_encryption.decrypt(encrypted)
+            data = json.loads(json_data) or {}
+            for mid, entry in (data.get("pending_ack") or {}).items():
+                try:
+                    msg = self._message_from_dict(entry["message"])
+                    self.pending_ack[mid] = (msg, float(entry["first_sent"]), int(entry["retries"]))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"Mailbox load: dropping unreadable pending_ack entry {mid}: {e}")
+            for sid, msgs in (data.get("spoke_queues") or {}).items():
+                restored = []
+                for m in msgs:
+                    try:
+                        restored.append(self._message_from_dict(m))
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"Mailbox load: dropping unreadable queued message for {sid}: {e}")
+                if restored:
+                    self.spoke_queues[sid] = restored
+            total = len(self.pending_ack) + sum(len(v) for v in self.spoke_queues.values())
+            if total:
+                logger.info(f"Mailbox: restored {total} message(s) from {self._path} (warm start).")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Mailbox load failed ({self._path}): {e} — starting empty.")
 
     async def push(self, message: Message, send_func):
         """
@@ -45,6 +151,7 @@ class Mailbox:
             # If it fails here, it's already in the queue for the retry loop to handle if we add it
 
         self.pending_ack[message.header.message_id] = (message, time.time(), 0)
+        self._save()
 
     async def acknowledge(self, ack: Acknowledgement):
         """
@@ -53,6 +160,7 @@ class Mailbox:
         if ack.correlation_id in self.pending_ack:
             logger.info(f"Message {ack.correlation_id} acknowledged with status: {ack.status}")
             del self.pending_ack[ack.correlation_id]
+            self._save()
         else:
             # Unknown ack: the original message is no longer in pending_ack
             # (already acked, expired, or never sent by this Hub), so we cannot
@@ -84,6 +192,7 @@ class Mailbox:
 
         self.spoke_queues[spoke_id].append(message)
         logger.info(f"Queued message {message.header.message_id} for offline spoke {spoke_id}")
+        self._save()
 
     async def flush_mailbox(self, spoke_id: str, send_func):
         """
@@ -97,6 +206,7 @@ class Mailbox:
                 await self.push(msg, send_func)
 
             self.spoke_queues[spoke_id] = []
+            self._save()
 
     async def retry_loop(self, send_func_map):
         """
@@ -107,6 +217,7 @@ class Mailbox:
             now = time.time()
             to_retry = []
 
+            changed = False
             for msg_id, (msg, last_sent, retries) in list(self.pending_ack.items()):
                 if retries >= len(self.retry_intervals):
                     # Include spoke_id (destination) + message type so triage
@@ -118,6 +229,7 @@ class Mailbox:
                         f"message_type={msg.payload.type})"
                     )
                     del self.pending_ack[msg_id]
+                    changed = True
                     continue
 
                 wait_time = self.retry_intervals[retries]
@@ -127,6 +239,7 @@ class Mailbox:
             for msg_id, msg, retries in to_retry:
                 spoke_id = msg.header.destination_id
                 send_func = send_func_map.get(spoke_id)
+                changed = True
 
                 if send_func:
                     logger.info(f"Retrying message {msg_id} (Attempt {retries + 1})")
@@ -147,8 +260,11 @@ class Mailbox:
                 else:
                     # Spoke is offline, move to offline queue if not already there
                     logger.info(f"Spoke {spoke_id} offline. Moving message {msg_id} to offline queue.")
-                    self.queue_for_spoke(spoke_id, msg)
+                    self.queue_for_spoke(spoke_id, msg)  # saves its own change
                     del self.pending_ack[msg_id]
+
+            if changed:
+                self._save()
 
             await asyncio.sleep(1)
 
@@ -174,6 +290,7 @@ class Mailbox:
             del self.spoke_queues[spoke_id]
         if dropped:
             logger.info(f"Cleared {dropped} queued message(s) for spoke {spoke_id}.")
+            self._save()
         return dropped
 
     def get_all_pending(self) -> list:

@@ -674,6 +674,61 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self._recent_request_timeouts[msg_id] = time.time() + self._RECENT_TIMEOUT_TTL
                 self._prune_recent_timeouts()
 
+    async def push_or_queue_to_spoke(self, spoke_id: str, command_type: str,
+                                     data: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
+        """Best-effort synchronous push to a spoke, with a durable queue-on-
+        reconnect fallback instead of an outright failure.
+
+        Config-push routes (hub-config, central-api, sim-conf, ...) used a
+        bare ``request_response`` — if the spoke happened to be mid-reconnect
+        (self-update restart, brief network blip) ``send_to_spoke`` raises
+        ``ConnectionError`` immediately and the caller reported "pushed to 0
+        spokes" even though the spoke is genuinely approved and about to come
+        back in a few seconds. This tries the live path first (the common
+        case), and on failure — including a request_response timeout, which
+        means "no reply", not "the spoke rejected it" — falls back to
+        ``mailbox.push``, the SAME durable delivery SPOKE_UPDATE already
+        relies on: the message becomes a real ``pending_ack`` entry
+        (persisted to disk — survives a hub restart), retried on the
+        exponential backoff schedule, and once the retry loop sees the spoke
+        genuinely has no live connection, moved to its offline queue for
+        delivery in full the moment it reconnects (``flush_mailbox``, called
+        from ``handle_connection``). Applies equally to an agent-hosting
+        spoke — an agent-targeted SPOKE_RELAY is just another command_type
+        here, so the same fallback covers agent commands routed through it.
+
+        Returns ``{"status": "ok", "queued": bool, "result"|"message": ...}``.
+        Callers should surface ``queued`` distinctly (e.g. "queued — applies
+        on reconnect") rather than claiming the change is live immediately.
+        """
+        try:
+            result = await self.request_response(spoke_id, command_type, data, timeout=timeout)
+            # A timeout return (no reply at all) means "unreachable", not "the
+            # spoke rejected it" — queue it. A real ERROR reply from the spoke
+            # is a genuine refusal; queuing that would just repeat the same
+            # rejection forever, so only the timeout shape falls through.
+            if (isinstance(result, dict) and result.get("status") == "ERROR"
+                    and result.get("message") == "Timed out waiting for spoke response"):
+                raise TimeoutError("no reply — spoke may be reconnecting")
+            return {"status": "ok", "queued": False, "result": result}
+        except Exception as exc:
+            logger.warning(
+                f"push_or_queue_to_spoke: live push of {command_type} to {spoke_id} "
+                f"failed ({exc}); queuing for delivery on reconnect."
+            )
+            msg = Message(
+                header=MessageHeader(
+                    message_id=str(uuid.uuid4()), timestamp=time.time(),
+                    sender_id="hub", destination_id=spoke_id,
+                ),
+                payload=MessagePayload(type=command_type, data=data),
+            )
+            await self.mailbox.push(msg, self.send_to_spoke)
+            return {
+                "status": "ok", "queued": True,
+                "message": f"{spoke_id} temporarily unreachable — queued for delivery on reconnect.",
+            }
+
     def _prune_recent_timeouts(self) -> None:
         """Drop expired entries from ``_recent_request_timeouts`` (called on each
         new addition so the dict stays bounded)."""
