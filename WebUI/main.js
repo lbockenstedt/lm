@@ -3397,6 +3397,17 @@ function _renderSetupGeneralTile(content) {
             <div class="flex gap-2 pt-2">
                 <button onclick="saveUpdateSources()" class="${btnCls}">Save Sources</button>
             </div>
+            <div class="border-t border-slate-200 mt-4 pt-4">
+                <p class="text-xs text-slate-400 mb-3">How often the hub checks GitHub and syncs: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes an update to every approved spoke. Same schedule as System → Sync's "GitHub Repo Sync" card — either one saves/shows it.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="repo-sync-enabled" class="w-4 h-4 text-green-600 rounded" checked>Enable scheduled sync</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Check every (minutes)</label>
+                        <input type="number" id="repo-sync-interval" min="1" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button>
+                </div>
+            </div>
         </div>
         <div class="${card}">
             <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Notifications</h3>
@@ -3429,6 +3440,7 @@ function _renderSetupGeneralTile(content) {
     loadCacheConfig();
     loadAppearanceForm();
     loadToastConfigForm();
+    loadRepoSyncConfig();
     if (currentView === 'settings') loadSubnetFilterToggles();
 }
 
