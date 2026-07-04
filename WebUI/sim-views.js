@@ -78,8 +78,11 @@ function csTenant() { return encodeURIComponent(csTenantRaw()); }
  *   - raw fetch(url)   -> public/same-origin routes needing no JSON header.
  *
  * @param {string} path    Request path relative to /sim/api (e.g.
- *                         '/aggregate/clients?tenant_id=default'). The caller
- *                         is responsible for tenant scoping (csTenant()).
+ *                         '/aggregate/clients?tenant_id=default'). csFetch
+ *                         appends ?tenant_id=<csTenant()> automatically if
+ *                         the path doesn't already carry one (see below) —
+ *                         you don't need to add it yourself, though existing
+ *                         call sites that already do are left alone.
  * @param {RequestInit} [opts] Standard fetch options; `headers` are merged with
  *                         the default JSON Content-Type header.
  * @returns {Promise<any>} Parsed JSON (object/array) when the response is
@@ -89,7 +92,23 @@ function csTenant() { return encodeURIComponent(csTenantRaw()); }
  */
 async function csFetch(path, opts = {}) {
     const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
-    const res = await fetch('/sim/api' + path, { ...opts, headers });
+    // The backend's get_tenant_id() dependency (core/src/simulations/routes.py)
+    // resolves the tenant ONLY from the query string (?tenant_id= / ?tenant=)
+    // — it never reads a {tenant} PATH segment, even though most routes have
+    // one. Around two dozen call sites in this file built paths like
+    // '/tenant/' + csTenant() + '/hub-config' with no query param at all,
+    // so those requests silently fell back to whatever the admin's session
+    // resolves to instead of the tenant actually selected in the UI —
+    // causing e.g. the VM Server auto-provisioning toggle (whose call DID
+    // append ?tenant_id=) and Setup/Proxmox's same setting (whose call did
+    // NOT) to permanently read/write two different tenant buckets. Fixed
+    // once here instead of auditing every call site: append tenant_id
+    // unless the caller already put one in the query string.
+    let url = '/sim/api' + path;
+    if (!/[?&](tenant_id|tenant)=/.test(url)) {
+        url += (url.includes('?') ? '&' : '?') + 'tenant_id=' + csTenant();
+    }
+    const res = await fetch(url, { ...opts, headers });
     if (res.status === 401) { handleSessionExpired(); throw new Error('Session expired'); }
     if (res.status === 404) throw new Error('Not implemented (404)');
     if (!res.ok) {
