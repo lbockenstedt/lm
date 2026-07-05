@@ -37,7 +37,7 @@ Top menu: `1) Hub` (spoke checklist → `install_all.sh --exclude <unselected>`)
 `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--tls-verify` (+ `--tls-ca-cert`; **required** on standalone), `--loopback` (opt-in co-located/all-in-one mode — **passed only by `install_all.sh`**; default is standalone `agent → spoke → hub`), `--all-prereqs` (no-op). IDs default `<hostname>-spoke`. See [pxmx.md "Agent listener modes"](pxmx.md).
 
 ### `agent/install_agent.sh`
-`--spoke-url`, `--id`, `--secret`. **Standalone spoke: `--spoke-url wss://<spoke>:443/ws/agent` is REQUIRED** (a standalone spoke does not broadcast `_lm-hub` mDNS, so the agent cannot auto-discover it). Auto-discovery (`--spoke-url` absent) applies only on the loopback/all-in-one path, where the agent discovers the **hub** and dials `wss://<hub>:443/ws/agent`.
+`--spoke-ip` (preferred; auto-determines the WS URL), `--spoke-url` (advanced full-URL pin), `--id`, `--secret`. **Standalone spoke: `--spoke-ip <spoke>` is REQUIRED (just the IP; the agent auto-determines the rest)** (a standalone spoke does not broadcast `_lm-hub` mDNS, so the agent cannot auto-discover it). Auto-discovery (`--spoke-ip`/`--spoke-url` absent) applies only on the loopback/all-in-one path, where the agent discovers the **hub** and dials `wss://<hub>:443/ws/agent`.
 
 ## cs
 

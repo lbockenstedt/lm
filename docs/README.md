@@ -42,7 +42,7 @@ The canonical doc set lives here in `lm/docs/`. Each separate repo also carries 
 ## Quick lookup
 
 - **Hub port:** unified `0.0.0.0:443` wss (or `:443` plain, no cert); co-located callers dial `wss://127.0.0.1:443`. No separate loopback port.
-- **pxmx agent link (standalone DEFAULT — agent → spoke → hub):** the pxmx spoke (own box) serves `wss://:443` and the agent dials `wss://<spoke>:443/ws/agent` **directly** (pinned via `--spoke-url`; no mDNS auto-discovery for a standalone spoke). **Loopback (opt-in — agent → hub → spoke):** only when co-located all-in-one (`install_all.sh --loopback` path) — the agent dials `wss://<hub>:443/ws/agent` and the hub byte-proxies to the pxmx spoke's loopback `:8443` (`LM_PXMX_AGENT_LOOPBACK=1`). See [pxmx.md](pxmx.md).
+- **pxmx agent link (standalone DEFAULT — agent → spoke → hub):** the pxmx spoke (own box) serves `wss://:443` and the agent dials `wss://<spoke>:443/ws/agent` **directly** (pinned via `--spoke-ip` — just the spoke's IP, the agent auto-determines the scheme/port/`/ws/agent` path by probing; no mDNS auto-discovery for a standalone spoke). **Loopback (opt-in — agent → hub → spoke):** only when co-located all-in-one (`install_all.sh --loopback` path) — the agent dials `wss://<hub>:443/ws/agent` and the hub byte-proxies to the pxmx spoke's loopback `:8443` (`LM_PXMX_AGENT_LOOPBACK=1`). See [pxmx.md](pxmx.md).
 - **cs client API:** 8080.
 - **TLS verify:** off by default; opt in with `--tls-verify` (+ `--tls-ca-cert`).
 - **Discovery:** mDNS `_lm-hub._tcp.local.` TXT (`agent_port`=443, `tls_port`) + DNS `lm-hub.<search>`; same-box = IP-equality.
