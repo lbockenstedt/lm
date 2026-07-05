@@ -26,8 +26,9 @@ fi
 
 log_c "🔍 Scanning Hub logs for authentication status..."
 
-# Define the spokes we expect to see
-SPOKES=("pxmx-spoke-1" "opn-spoke-1" "cs-spoke-1" "cppm-spoke-1")
+# Unified agent-spoke model: one generic agent hosts every module as a role, so
+# we verify the agent's auth (its role sub-spokes auth+approve via the parent).
+SPOKES=("agent-$(hostname -s)")
 ANY_FAILURES=false
 
 echo "--------------------------------------------------"

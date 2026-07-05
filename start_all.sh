@@ -96,24 +96,14 @@ for port in 443 8000 8765; do
         kill -9 $PORT_PID || true
     fi
 done
-# Kill only the spokes this script manages — do NOT kill separately-managed
-# systemd services (lm-ldap, lm-netbox, lm-dns, lm-dhcp), and do NOT touch
-# spokes that have their own dedicated, enabled lm-<spoke> systemd unit. Those
-# units own the spoke (with Restart=always); killing the unit's process here
-# just makes systemd respawn it, and if this script then also launches the
-# spoke we get a split-brain — two processes on the same spoke_id where only
-# one holds the agent socket, so the agent vanishes from the UI
-# (GET_AGENTS returns []).
-for spoke in cs pxmx opnsense cppm; do
-    if systemctl is-enabled --quiet "lm-$spoke" 2>/dev/null; then
-        continue
-    fi
-    case $spoke in
-        cs) id="cs-spoke-1" ;; pxmx) id="pxmx-spoke-1" ;;
-        opnsense) id="opn-spoke-1" ;; cppm) id="cppm-spoke-1" ;;
-    esac
-    pkill -f "$id" 2>/dev/null || true
-done
+# Unified agent-spoke model: this box runs ONE generic agent (which hosts every
+# module as a role). Kill only a manually-launched agent this script started —
+# do NOT touch an enabled lm-agent systemd unit (killing it just makes systemd
+# respawn it, and a second launch here would split-brain the agent socket, so
+# the agent vanishes from the UI / GET_AGENTS returns []).
+if ! systemctl is-enabled --quiet lm-agent 2>/dev/null; then
+    pkill -f "agent/src/control_plane.py" 2>/dev/null || true
+fi
 sleep 2
 
 # --- 1. Launch Hub ---
@@ -138,53 +128,29 @@ nohup "$HUB_DIR/venv/bin/python3" "$HUB_DIR/src/main.py" > "$LOG_DIR/hub.log" 2>
 log_c "Hub started (logs: $LOG_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
-# --- 2. Launch Spokes ---
-# Define spokes and their folders
-SPOKES=("cs" "pxmx" "opnsense" "cppm")
-
-for spoke in "${SPOKES[@]}"; do
-    SPOKE_DIR="$SPOKE_ROOT/$spoke"
-    if [ -d "$SPOKE_DIR" ]; then
-        # If this spoke has its own dedicated, enabled systemd unit (lm-<spoke>),
-        # let that unit own it — do NOT launch a second instance here. Launching
-        # here races the unit (Restart=always) and creates a split-brain: two
-        # processes share the same spoke_id but only one holds the agent socket,
-        # so the agent disappears from the UI (GET_AGENTS returns []).
-        if systemctl is-enabled --quiet "lm-$spoke" 2>/dev/null; then
-            log_c "$spoke has a dedicated systemd unit (lm-$spoke) — leaving it to the unit, not launching a duplicate."
-            continue
-        fi
-        log_c "Starting $spoke..."
-        cd "$SPOKE_DIR" || continue
-        export PYTHONPATH="$SPOKE_DIR/src:$ROOT_DIR:${PYTHONPATH:-}"
-
-        # Determine the correct spoke ID
-        case $spoke in
-            "cs") SPOKE_ID="cs-$(hostname -s)" ;;
-            "pxmx") SPOKE_ID="pxmx-$(hostname -s)" ;;
-            "opnsense") SPOKE_ID="opn-$(hostname -s)" ;;
-            "cppm") SPOKE_ID="cppm-$(hostname -s)" ;;
-        esac
-
-        # Read SPOKE_SECRET and HUB_SECRET from the spoke's own .env. The grep
-        # pipelines are guarded with `|| true` because a missing key line is the
-        # normal case (zero-touch spokes have no secret) — under set -e + pipefail
-        # an unguarded no-match grep would abort the launch.
-        SECRET="lm-secret"
-        HUB_SECRET_ARG=""
-        if [ -f ".env" ]; then
-            SPOKE_SECRET_FILE=$(grep "^SPOKE_SECRET=" .env | cut -d'=' -f2 | tr -d '"' | tr -d "'" || true)
-            [ -n "$SPOKE_SECRET_FILE" ] && SECRET="$SPOKE_SECRET_FILE"
-            SPOKE_HUB_SECRET=$(grep "^HUB_SECRET=" .env | cut -d'=' -f2 | tr -d '"' | tr -d "'" || true)
-            [ -n "$SPOKE_HUB_SECRET" ] && HUB_SECRET_ARG="--hub-secret $SPOKE_HUB_SECRET"
-        fi
-
-        nohup "$SPOKE_DIR/venv/bin/python3" "$SPOKE_DIR/src/control_plane.py" --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" $HUB_SECRET_ARG > "$LOG_DIR/$spoke.log" 2>&1 &
-        log_c "$spoke started (logs: $LOG_DIR/$spoke.log) with secret ${SECRET:0:4}...${SECRET: -4}"
-    else
-        log_w "Spoke directory $SPOKE_DIR not found (runs on another host?). Skipping..."
+# --- 2. Launch the unified agent (hosts every module as a role) ---
+# One generic agent replaces the former per-module dedicated spokes. If a
+# dedicated lm-agent systemd unit is enabled, that unit owns it — don't launch a
+# duplicate (it races Restart=always and split-brains the agent socket).
+AGENT_DIR="$ROOT_DIR/agent"
+if systemctl is-enabled --quiet lm-agent 2>/dev/null; then
+    log_c "lm-agent has a dedicated systemd unit — leaving it to the unit, not launching a duplicate."
+elif [ -d "$AGENT_DIR/src" ]; then
+    log_c "Starting unified agent..."
+    cd "$AGENT_DIR" || true
+    export PYTHONPATH="$AGENT_DIR/src:$ROOT_DIR:$ROOT_DIR/core/src:${PYTHONPATH:-}"
+    # Roles persist in the agent .env (LOADED_ROLES); pass them so the agent
+    # re-hosts each role sub-spoke on this manual launch too.
+    AGENT_ROLES_ARG=""
+    if [ -f "$AGENT_DIR/.env" ]; then
+        _LR=$(grep "^LOADED_ROLES=" "$AGENT_DIR/.env" | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+        [ -n "$_LR" ] && AGENT_ROLES_ARG="--roles $_LR"
     fi
-done
+    nohup "$AGENT_DIR/venv/bin/python3" "$AGENT_DIR/src/control_plane.py" --hub "$HUB_URL" $AGENT_ROLES_ARG > "$LOG_DIR/agent.log" 2>&1 &
+    log_c "unified agent started (logs: $LOG_DIR/agent.log)${_LR:+ with roles: $_LR}"
+else
+    log_w "Agent directory $AGENT_DIR not found (runs on another host?). Skipping agent launch."
+fi
 
 log_c ""
 log_c "🎉 All systems launched in the background!"

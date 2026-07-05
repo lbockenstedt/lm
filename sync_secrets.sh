@@ -36,12 +36,11 @@ chmod 755 "$LOG_DIR"
 # Hub API base URL. Allow override via environment variable for non-localhost deployments.
 HUB_API="${HUB_API:-http://localhost:8000}"
 
-# Define modules and their corresponding Spoke IDs
+# Unified agent-spoke model: this box runs ONE generic agent (which hosts every
+# module as a role), so there is a single id to sync a secret for. Its role
+# sub-spokes ({agent}-{role}) parent-auto-approve and need no separate secret.
 declare -A SPOKE_IDS=(
-    ["cs"]="cs-spoke-1"
-    ["pxmx"]="pxmx-spoke-1"
-    ["opnsense"]="opn-spoke-1"
-    ["cppm"]="cppm-spoke-1"
+    ["agent"]="agent-$(hostname -s)"
 )
 
 log_c "🔑 Starting Secret Synchronization..."
