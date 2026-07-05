@@ -109,8 +109,22 @@ apt-get install -y -qq python3 python3-venv python3-pip git curl
 # then fail at `cd $INSTALL_DIR/agent` (the original "No such file or directory"
 # symptom on a box that already ran the cs spoke installer). Detect on .git.
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-    echo "Updating existing LM installation…"
-    git -C "$INSTALL_DIR" pull --rebase --autostash -q 2>/dev/null || true
+    # HARD-SYNC an existing clone to origin/$LM_BRANCH instead of a soft
+    # `pull --rebase --autostash`. A soft pull silently no-ops (|| true) on a
+    # detached HEAD, a diverged/conflicting local history, or a stale branch —
+    # leaving the OLD checkout in place. If that old checkout predates the
+    # control_plane.py entrypoint, the unit written below crash-loops with
+    # "can't open .../agent/src/control_plane.py: No such file or directory".
+    # fetch + `reset --hard FETCH_HEAD` forces the TRACKED tree to match remote
+    # exactly regardless of local state; untracked venv/ and .env are left
+    # intact (so the preserved SPOKE_SECRET read further down survives). git
+    # clean is deliberately NOT run — it would delete venv/ and .env.
+    echo "Syncing existing LM installation to origin/$LM_BRANCH…"
+    if git -C "$INSTALL_DIR" fetch -q origin "$LM_BRANCH" 2>/dev/null; then
+        git -C "$INSTALL_DIR" reset --hard FETCH_HEAD -q 2>/dev/null || true
+    else
+        echo "⚠️  fetch failed — keeping current checkout; the entrypoint check below will re-clone if needed."
+    fi
 elif [[ -d "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
     # /opt/lm already exists but is NOT a git clone (e.g. cs-spoke left core/
     # behind). `git clone` refuses to write into a non-empty dir, so clone to
@@ -120,11 +134,36 @@ elif [[ -d "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then
     _LM_TMP="$(mktemp -d)"
     if git clone -q --branch "$LM_BRANCH" https://github.com/lbockenstedt/lm.git "$_LM_TMP/lm"; then
         cp -a "$_LM_TMP/lm/." "$INSTALL_DIR"/
+        rm -rf "$_LM_TMP"
+    else
+        rm -rf "$_LM_TMP"
+        echo "ERROR: git clone of LM repo failed (network / DNS to github.com?). Re-run $0." >&2
+        exit 1
     fi
-    rm -rf "$_LM_TMP"
 else
     echo "Cloning LM repo…"
     git clone -q --branch "$LM_BRANCH" https://github.com/lbockenstedt/lm.git "$INSTALL_DIR"
+fi
+
+# Belt-and-suspenders: the unit below execs $INSTALL_DIR/agent/src/control_plane.py.
+# If a fetch failed above and the existing checkout is stale (or the tree is
+# otherwise incomplete), that entrypoint can still be absent — which would
+# crash-loop the service. Force one clean re-clone via temp+cp (leaves venv/
+# and .env intact), then abort loudly BEFORE writing the unit if it is STILL
+# missing, so the failure surfaces at install time instead of as a restart loop.
+AGENT_ENTRY="$INSTALL_DIR/agent/src/control_plane.py"
+if [[ ! -f "$AGENT_ENTRY" ]]; then
+    echo "⚠️  $AGENT_ENTRY missing after sync — forcing a clean re-clone…"
+    _LM_TMP="$(mktemp -d)"
+    if git clone -q --branch "$LM_BRANCH" https://github.com/lbockenstedt/lm.git "$_LM_TMP/lm"; then
+        cp -a "$_LM_TMP/lm/." "$INSTALL_DIR"/
+    fi
+    rm -rf "$_LM_TMP"
+fi
+if [[ ! -f "$AGENT_ENTRY" ]]; then
+    echo "ERROR: $AGENT_ENTRY still missing after re-clone. Aborting install." >&2
+    echo "       Check network access to github.com/lbockenstedt/lm ($LM_BRANCH branch)." >&2
+    exit 1
 fi
 
 # Python venv for agent
