@@ -26,7 +26,15 @@ None (no installer present).
 
 ## Key commands / handlers (`dns_spoke.handle_command`)
 
-`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DNS_STATUS`, `DNS_LIST` (parses `list_local_data` lines `<name> <ttl> IN <type> <value>`), `DNS_ADD` (`local_data`), `DNS_DELETE` (`local_data_remove`), `DNS_UPDATE` (delete-then-add, non-atomic), `DNS_SYNC` (`sync_records` — only-add-missing against existing names, added/skipped counts).
+`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DNS_STATUS`, `DNS_LIST` (parses `list_local_data` lines `<name> <ttl> IN <type> <value>`), `DNS_ADD` (`local_data`), `DNS_DELETE` (`local_data_remove`), `DNS_UPDATE` (delete-then-add, non-atomic), `DNS_SYNC` (`sync_records` — only-add-missing against existing names, added/skipped counts), `DNS_STATS` (`get_stats` via `unbound-control stats_noreset` — total queries, cache hit/miss + ratio, recursion latency, uptime, per-type breakdown; relayed by `GET /api/dns/stats`), `DNS_FORWARDERS` (`list_forwarders` via `unbound-control list_forwards` — per-zone upstream servers; relayed by `GET /api/dns/forwarders`).
+
+## NetBox auto-sync (source of truth)
+
+NetBox is the IPAM source of truth. The hub's `DnsDhcpSyncMixin` (`core/src/dns_dhcp_sync.py`) reconciles Unbound to NetBox on a periodic loop (`run_dns_dhcp_sync_loop`, `global_config.dns_dhcp_sync` `{enabled` default true`, interval` default 300s`}`) — an IP given a `dns_name` in NetBox lands in Unbound without pressing **Sync now**. The loop and the on-demand `POST /api/dns/sync` share the same extraction helper (`build_dns_records`), so button and loop never diverge. Only-add-missing (idempotent); skips quietly when NetBox/DNS spokes are offline. Per-run status at `GET /api/dns-dhcp/sync-status`.
+
+## WebUI
+
+Module view tabs: **Records**, **Statistics** (total-queries / cache-hit-ratio / recursion / uptime tiles + queries-by-type breakdown, `GET /api/dns/stats`), **Forwarders** (per-zone upstream resolvers, `GET /api/dns/forwarders`).
 
 ## Key files
 
