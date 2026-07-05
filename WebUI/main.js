@@ -790,6 +790,20 @@ function canAccessTenant(tenantId) {
     return allowed.length === 0 || allowed.includes(tenantId);
 }
 
+// Tenant-scoped visibility of a spoke for the CURRENT user. Additive and
+// conservative — it NEVER narrows the admin all-tenants view (admins always
+// see every spoke). For a tenant-scoped (non-admin) user it hides only spokes
+// bound to a tenant they can't access; a spoke with NO tenant binding is
+// treated as global/unassigned and stays visible to everyone (so shared
+// infrastructure spokes never disappear). `spoke` is a /setup/pending_spokes
+// row (carries `tenant_id`). Used by _rebuildMainNav + _renderDashboardLists.
+function _spokeVisibleToTenant(spoke) {
+    if (isAdmin()) return true;                 // admin: all-tenants view unchanged
+    const t = spoke && spoke.tenant_id;
+    if (!t) return true;                        // unassigned / global — visible to all
+    return canAccessTenant(t);
+}
+
 // ─── Tenant prefix filtering ──────────────────────────────────────────────────
 
 let _tenantPrefixes = [];  // e.g. ['172.16.0.0/23', '10.20.0.0/16']
@@ -1648,7 +1662,7 @@ function unhideAllFirewallRules() {
 // intentionally does NOT use this helper — its rows are full <table> rows with
 // action buttons and a different color scheme (bg-yellow-400 pending, green
 // dot without the 8px glow), so routing them here would change their output.
-function _renderSpokeAgentRow(label, mod, status, spokeVariant) {
+function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
     const dot = status === 'online'
         ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]'
         : (status === 'pending' ? 'bg-amber-400' : 'bg-slate-400');
@@ -1663,12 +1677,20 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant) {
     const nameCls = spokeVariant
         ? 'text-sm font-medium text-slate-700 group-hover:text-green-600 transition-colors'
         : 'text-sm font-medium text-slate-700';
+    // Read-only tenant chip: shows which tenant a spoke is bound to (or nothing
+    // when unassigned/global). Additive — surfaces the binding already returned
+    // by /setup/pending_spokes so an admin can see at a glance which tenant owns
+    // a spoke without opening Setup → Spokes & Agents.
+    const tenantChip = tenant
+        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-emerald-50 text-emerald-700" title="Tenant: ${escapeHtml(String(tenant))}">${escapeHtml(String(tenant))}</span>`
+        : '';
     return `
         <div class="${container}">
             <div class="flex items-center gap-3">
                 <div class="w-2 h-2 rounded-full ${dot}"></div>
                 <span class="${nameCls}">${label}</span>
                 <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-600">${mod}</span>
+                ${tenantChip}
             </div>
             ${badge}
         </div>`;
@@ -1773,6 +1795,15 @@ function _updateSpokeCount(approvedSpokes) {
 // modules so their historical logs stay reachable while briefly down. Drops
 // classes the user can't see (canSeeModule).
 function _rebuildMainNav(allSpokes, connections) {
+    // Tenant scoping (additive, non-admin only). For a tenant-scoped user, drop
+    // spokes bound to a tenant they can't access before deriving the nav, so a
+    // tenant-A firewall never lights the Firewalls nav for a tenant-B user.
+    // Admins are unaffected (_spokeVisibleToTenant returns true for them), and
+    // unassigned/global spokes stay visible to everyone. Narrowing allSpokes
+    // here propagates to approvedIds/typeBy/connectedProducts below, so no other
+    // change in this function is needed.
+    allSpokes = allSpokes.filter(_spokeVisibleToTenant);
+
     // Drive nav off each spoke's REGISTERED module_type — NOT its spoke_id name.
     // A generic node named "lm-opnsense" is module_type "agent" (no role loaded)
     // and must NOT light the Firewalls nav; only a real firewall spoke
@@ -1938,6 +1969,12 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
     // Agents list. Proxmox node agents are fetched separately via
     // /api/pxmx/agents and appended below — they are distinct from the
     // hypervisor spoke itself.
+    // Tenant scoping (additive, non-admin only) — same rule as _rebuildMainNav:
+    // a tenant-scoped user only sees spokes for tenants they can access, plus
+    // unassigned/global spokes. Admins keep the full all-tenants list.
+    allSpokes = allSpokes.filter(_spokeVisibleToTenant);
+    approvedSpokes = approvedSpokes.filter(_spokeVisibleToTenant);
+
     const isAgent = s => {
         const mt = String(s.module_type || '').toLowerCase();
         return mt === 'agent';
@@ -1959,7 +1996,7 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
                 const mod = moduleLabel(spoke.module_type);
                 const status = !spoke.approved ? 'pending'
                     : (connections.includes(id) ? 'online' : 'offline');
-                return _renderSpokeAgentRow(id, mod, status, true);
+                return _renderSpokeAgentRow(id, mod, status, true, spoke.tenant_id);
             }).join('');
         }
     }
