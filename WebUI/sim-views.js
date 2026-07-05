@@ -439,7 +439,7 @@ function csChildPlaceholder(primary, child) {
     csSet(`<div class="max-w-2xl mx-auto mt-10">
         <div class="hpe-card rounded-lg p-8 shadow-sm text-center">
             <div class="text-3xl mb-3">🚧</div>
-            <h3 class="text-lg font-bold text-slate-700 mb-1">${csEscape(primary)} · ${csEscape(child)}</h3>
+            <h3 class="text-lg font-bold text-slate-700 mb-1">${csEscape(primary)} · ${csEscape(child)} ${helpIcon('cs', null, 'Simulations help')}</h3>
             <p class="text-sm text-slate-500">This section is part of the ongoing webui-hub → cs module port and will be populated in a coming wave. The structure is in place so the navigation matches the original.</p>
         </div>
     </div>`);
@@ -1354,7 +1354,7 @@ async function csRenderConfig() {
     // Config → API child (default): config-push JSON editor + per-spoke state.
     csSetToolbar('');
     const pushCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">API Config Push</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">API Config Push ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-2">Paste a JSON config object to push to all spokes (unwrapped at the spoke's <code>_apply_hub_config</code>).</p>
       <textarea id="cs-configpush" rows="10" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500" placeholder='{ "key": "value" }'></textarea>
       <button onclick="csSaveConfigPush()" class="mt-3 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button>
@@ -1372,7 +1372,7 @@ async function csRenderConfig() {
           <td class="px-3 py-2 text-xs text-slate-400">${csEscape(h.hub_last_checkin ? new Date(h.hub_last_checkin * 1000).toLocaleString() : '—')}</td>
         </tr>`).join('');
         stateCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Per-Spoke Config State</h3>
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Per-Spoke Config State ${helpIcon('cs', null, 'Simulations help')}</h3>
           ${csTable(['Spoke', 'Online', 'Conf Read Error', 'Last Check-in'], rows)}
         </div>`;
     } catch (e) { console.error('csRenderConfig: per-spoke config state load failed, hiding card', e); stateCard = ''; }
@@ -1595,7 +1595,7 @@ async function csRenderConfigSimulation() {
     const simCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
         <div class="flex items-center gap-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Config</h3>
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Config ${helpIcon('cs', null, 'Simulations help')}</h3>
           <span class="inline-block bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 text-[10px] font-bold">Hub-managed override (no GitHub API key)</span>
           ${simSource === 'spoke' ? '' : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke offline — showing stored override</span>'}
         </div>
@@ -1748,7 +1748,7 @@ function csRenderUserOverridesCard(uo, uoErr) {
     csUserOverridesFetched = (uo && uo.fetched_at) ? csFmtFetched(uo.fetched_at) : '—';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex flex-wrap justify-between items-center mb-2 gap-2">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">User Overrides</h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">User Overrides ${helpIcon('cs', null, 'Simulations help')}</h3>
         <span class="text-[10px] text-slate-400">Last fetched: ${csEscape(csUserOverridesFetched)}</span>
       </div>
       <p class="text-xs text-slate-400 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the bucket profile for that user).</p>
@@ -2000,7 +2000,7 @@ async function csHubConfigCard(path) {
         return `${label}${input}</label>`;
     }).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Hub Config</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Changes save automatically — a select/checkbox saves on change, a text/number field saves when you click or tab away from it.</p>
       <label class="flex items-center gap-2 text-xs text-slate-600 mb-3"><input id="cs-hc-enabled" type="checkbox" ${enabled ? 'checked' : ''} onchange="csHcToggleEnabled(this.checked)"> Enable hub as source of truth</label>
       <div id="cs-hc-fields" class="${enabled ? '' : 'hidden'} grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -2123,7 +2123,7 @@ async function csSetupAutoProvConfigCard() {
     const note = enabled ? '<span class="text-slate-400">Hub-owned knobs; saved automatically as you edit (a select/checkbox on change, a text/number field when you click or tab away). Turning Auto-Provision VMs On also enables hub config (mirrors the Overview/USB toggle).</span>'
         : '<span class="text-amber-600">Hub config is not enabled — auto-save pushes to spokes only when Auto-Provision VMs is On (which enables hub config) or after you enable it in the Hub Config card below.</span>';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">VM Auto-Provisioning</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">VM Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-3">${note}</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${rows}</div>
     </div>`;
@@ -2189,7 +2189,7 @@ async function csProcessingModesCard() {
       <select id="cs-pm-${k}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">${opts(modes[k])}</select>
     </label>`).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Processing Modes</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Processing Modes ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${fields}</div>
       <button onclick="csSaveProcessingModes()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button>
     </div>`;
@@ -2213,7 +2213,7 @@ async function csNotificationsCard() {
       <input id="${id}" ${type === 'checkbox' ? 'type="checkbox" ' + (val ? 'checked' : '') : `value="${csEscape(val != null ? val : '')}"`} class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
     </label>`;
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Notifications</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Notifications ${helpIcon('cs', null, 'Simulations help')}</h3>
       <label class="flex items-center gap-2 text-xs text-slate-600 mb-3"><input id="cs-notif-enabled" type="checkbox" ${n.enabled ? 'checked' : ''}> Notifications enabled</label>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         ${f('cs-notif-host', 'SMTP Host', n.smtp_host)}${f('cs-notif-port', 'SMTP Port', n.smtp_port, 'number')}
@@ -2266,7 +2266,7 @@ async function csSetupAutoProvCard() {
         unknown = (hosts || []).reduce((n, h) => n + csUnknownUsbCount(h), 0);
     } catch (e) { console.error('csSetupAutoProvCard: vm load for USB counts failed, defaulting to 0', e); }
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Dongle / Auto-Provisioning</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Dongle / Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-3 gap-3 mb-3">${csStat('Auto-Provision', on ? 'On' : 'Off')}${csStat('Present USB', present)}${csStat('Unknown USB', unknown)}</div>
       <label class="flex items-center gap-2 text-sm text-slate-600">
         <input id="cs-setup-autoprov" type="checkbox" ${on ? 'checked' : ''} onchange="csToggleAutoProvision(this.checked)"/>
@@ -2301,7 +2301,7 @@ async function csRenderSetupCentralApi() {
     </select>`;
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Central API Connection</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Central API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Aruba Central cluster credentials. Pushed to the spoke as <code>central_config</code>; the spoke sentinel-merges them — secrets only overwrite when non-empty.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="text-xs text-slate-500">Mode${modeSel}</label>
@@ -2325,7 +2325,7 @@ async function csRenderSetupCentralApi() {
         : '<p class="text-xs text-slate-400 italic">None configured. Load the available-checks catalog to pick Aruba Central alerts/insights.</p>';
 
     const sitesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Sites &amp; Checks</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Sites &amp; Checks ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Hub-owned site mappings + Aruba Central sim/hardware monitors. Pushed to the spoke as <code>central_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
@@ -2492,7 +2492,7 @@ async function csRenderSetupProxmox() {
           <button onclick="csResetHubConfig()" class="shrink-0 bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Reset to Default</button>
         </div>`;
         csSet(`<div class="space-y-4">${autoProv}<div class="hpe-card rounded-lg p-5 shadow-sm">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Hub Config</h3>
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
           <p class="text-xs text-slate-400 mb-3">Remaining hub-owned knobs (reclone schedule, VMID range, VLANs, USB VID/PID lists, watchdog group). Pushed to the spoke on save.</p>
         </div>${card}${resetBar}</div>`);
     } catch (e) { console.error('csRenderSetupProxmox: proxmox config load failed', e); csSet(csErrorBox('Could not load Proxmox config', e)); }
@@ -2529,7 +2529,7 @@ async function csRenderSetupGithub() {
         _csBranchSelect('cs-gh-branch', cfg.repo_branch, branches, null)}</label>`;
     csSet(`<div class="max-w-2xl space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">GitHub</h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">GitHub ${helpIcon('cs', null, 'Simulations help')}</h3>
         <div class="grid grid-cols-1 gap-3">
           ${f('cs-gh-url', 'Repo URL', cfg.repo_url)}${branchField}
           ${f('cs-gh-token', 'GitHub Token ' + (cfg.has_token ? '(set — leave blank to keep)' : '(new)'), '', 'password')}
@@ -2572,7 +2572,7 @@ async function csRenderSetupSecurity() {
       <input id="${id}" value="${csEscape(val != null ? val : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
     csSet(`<div class="max-w-2xl space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Security</h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Security ${helpIcon('cs', null, 'Simulations help')}</h3>
         <p class="text-xs text-slate-400 mb-3">Governs the spoke's local dashboard auth. LM hub auth is managed separately in LM settings.</p>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           ${f('cs-sec-timeout', 'Session Timeout (minutes)', cfg.session_timeout_minutes)}
@@ -3026,7 +3026,7 @@ function csRenderVmServerConsoleStub(label, kind) {
     csSet(`<div>${csVmHostBanner()}
       <div class="hpe-card rounded-lg p-10 shadow-sm text-center">
         <div class="text-3xl mb-3">${kind === 'console' ? '🖥️' : '⌨️'}</div>
-        <h3 class="text-lg font-bold text-slate-700 mb-1">${csEscape(label)}</h3>
+        <h3 class="text-lg font-bold text-slate-700 mb-1">${csEscape(label)} ${helpIcon('cs', null, 'Simulations help')}</h3>
         <p class="text-sm text-slate-500 max-w-md mx-auto">${csEscape(label)} requires a ${kind === 'console' ? 'noVNC' : 'xterm.js'} WebSocket proxied through the LM hub. This is wired in Phase 5; the rest of the VM Server port is live now.</p>
       </div></div>`);
 }
@@ -3524,14 +3524,14 @@ async function csRenderSpokeManagement() {
     const rows = spokes.map(window._csSpokeRowHtml).join('');
     const spokesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex justify-between items-center mb-3">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes</h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('cs', null, 'Simulations help')}</h3>
         <span class="text-xs text-slate-400">${admin ? 'All tenants (admin)' : 'Tenant: ' + csEscape(tenant)}</span>
       </div>
       ${csTable(['Spoke ID', 'Name', 'Type', 'State', 'Approval', 'Tenant', 'VMs'], rows)}
     </div>`;
 
     const claimCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Claim a Pending Simulation Spoke</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Claim a Pending Simulation Spoke ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-[11px] text-slate-400 mb-3">If a <b>Simulation</b> spoke connected <em>without</em> a PSK it lands as pending. Enter its Spoke ID and this tenant's onboarding PSK to approve + bind it to <span class="font-mono">${csEscape(tenant)}</span>. Only Simulation (Client-Sim) spokes can be claimed here.</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         <input id="cs-claim-id" placeholder="spoke-id" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
@@ -3630,7 +3630,7 @@ async function csSpokeMgmtPskCard() {
         : '<p class="text-[11px] text-slate-400 mt-2">Generate a PSK to reveal the self-provision deploy snippet.</p>';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex justify-between items-center mb-3">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding PSK <span class="text-slate-400 normal-case font-normal">· tenant ${csEscape(tenant)}</span></h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding PSK <span class="text-slate-400 normal-case font-normal">· tenant ${csEscape(tenant)}</span> ${helpIcon('cs', null, 'Simulations help')}</h3>
         <button onclick="csSpokeMgmtGenPsk()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-1.5 rounded-md text-xs font-bold shadow-sm">+ Generate</button>
       </div>
       ${psks.length ? csTable(['PSK', ''], rows) : '<p class="text-xs text-slate-400 italic py-4 text-center">No PSKs issued.</p>'}

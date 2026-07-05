@@ -2274,7 +2274,7 @@ function _viewTemplate(viewId) {
                 return `<div class="space-y-6">
   <div class="${card}" id="all-tenants-card">
     <div class="flex justify-between items-center mb-3">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">All Tenants</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">All Tenants ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
       <button onclick="loadAllTenantsOverview(true)" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
     </div>
     <div id="all-tenants-overview"><p class="text-sm text-slate-400 italic">Loading tenants…</p></div>
@@ -2284,7 +2284,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-6">
   <div class="${card}" id="tenant-summary-card">
     <div class="flex justify-between items-center mb-3">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Summary — <span id="dash-tenant-name" class="text-[#01A982] font-mono normal-case"></span></h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Summary — <span id="dash-tenant-name" class="text-[#01A982] font-mono normal-case"></span> ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
       <button onclick="loadDashboardSummary()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
     </div>
     <div id="tenant-summary-grid" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
@@ -2711,11 +2711,11 @@ function _renderSettingsSection(subMenu) {
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="${card} p-6">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Spokes (<span id="spoke-count">0</span>)</h3>
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Spokes (<span id="spoke-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div id="spoke-list" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                     </div>
                     <div class="${card} p-6">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Agents (<span id="agent-count">0</span>)</h3>
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Agents (<span id="agent-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div id="agent-list" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                     </div>
                 </div>
@@ -2725,7 +2725,7 @@ function _renderSettingsSection(subMenu) {
         content.innerHTML = `
             <div class="${card} p-6">
                 <div class="flex justify-between items-center mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Active Sessions</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Active Sessions ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="loadActiveSessions()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
                 </div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
@@ -2749,7 +2749,7 @@ function _renderSettingsSection(subMenu) {
     } else {
         content.innerHTML = `
             <div class="${card} p-6 space-y-4">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub Status</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub Status ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 <p class="text-xs text-slate-400 italic">Hub is running. See System → Hub Status for metrics and spoke health.</p>
             </div>`;
     }
@@ -2781,20 +2781,20 @@ function _renderSetupSpokesTile(content) {
             <div id="spokes-summary" class="flex flex-wrap items-center gap-3 text-xs"></div>
             <div class="${card}">
                 <div class="flex justify-between items-center mb-3">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="loadSpokesAndAgents()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
                 </div>
                 <div id="spokes-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
                 <div class="flex justify-between items-center mb-3">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agents</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
                 <div id="agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
                 <div class="flex justify-between items-center mb-3">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Generic Agents</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Generic Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <span class="text-xs text-slate-400 italic">idle until a role is loaded</span>
                 </div>
                 <div id="generic-agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
@@ -2808,7 +2808,7 @@ function _renderSetupTenantTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex justify-between items-center">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenants</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenants ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <div class="flex gap-2">
                         <button onclick="syncTenantsFromNetBox()" class="${btnSecCls} text-xs">↓ Sync from NetBox</button>
                         <input type="text" id="new-tenant-id" placeholder="new-tenant-id" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-40">
@@ -2856,7 +2856,7 @@ function _renderSetupUserAccessTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex justify-between items-center">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">User Management</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">User Management ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="showAddUserModal()" class="${btnCls}">+ Add User</button>
                 </div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
@@ -2930,7 +2930,7 @@ function _renderSetupSyncTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM ↔ NAC Sync</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM ↔ NAC Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="ep-sync-run-btn" onclick="runEndpointSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Bidirectional. <strong>Forward (IPAM → NAC):</strong> periodically pulls endpoint records (IP / MAC / tenant) from the selected IPAM source and populates ClearPass Device Inventory via the CPPM spoke. The IPAM source is the source of truth — each sync overwrites the tenant's CPPM endpoint set to match. Also fires automatically after any IPAM edit made through the LM module. <strong>Reverse (NAC → IPAM, realtime):</strong> the sub-block below pulls ClearPass Access Tracker / session data (MAC, IP, switch IP/port) every ~1 min and adds to NetBox the devices not already present (only-add-missing — NetBox stays source of truth). NetBox is registered today; the design is modular so another IPAM product can be swapped in by adding one entry to the hub's IPAM_SOURCES registry.</p>
@@ -2989,7 +2989,7 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hypervisor → IPAM Sync</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hypervisor → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="vm-sync-run-btn" onclick="runVmSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Periodically pulls each tenant's VMs from the selected hypervisor source (Proxmox via the pxmx spoke, scoped by the tenant's proxmox_tag) and mirrors them into NetBox virtualization records — vCPUs / disk / cluster / primary IP4 / NetBox tenant, matched by a <code>proxmox_unique_id</code> custom field. The hypervisor is the source of truth — each sync overwrites the tenant's NetBox VM set to match (stale records are deleted). Also fires automatically after a VM lifecycle action (start/stop/restart/snapshot). Proxmox is registered today; the design is modular so another hypervisor product can be swapped in by adding one entry to the hub's HYPERVISOR_SOURCES registry.</p>
@@ -3031,7 +3031,7 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Firewall → IPAM Sync</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Firewall → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="fw-sync-run-btn" onclick="runFwDiscoveryNow()" class="${btnCls}">Sync now</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Pulls DHCP leases + the ARP table from the selected firewall (OPNsense via the firewall spoke), attributes each discovered device to a tenant by prefix containment (the device IP must sit inside one of the tenant's NetBox prefixes), and mirrors them into NetBox DCIM devices + IP records — tenant-tagged, with the MAC written onto the IP's <code>mac_address</code> custom field (which feeds the IPAM → NAC endpoint sync, so static-IP devices DHCP can't see reach ClearPass). The firewall is the source of truth — each sync overwrites the tenant's discovered-device set to match (stale records are deleted). Devices whose IP matches no tenant prefix are dropped + counted. OPNsense is registered today; the design is modular so another firewall product can be swapped in by adding one entry to the hub's FIREWALL_DISCOVERY_SOURCES registry.</p>
@@ -3098,7 +3098,7 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Network Devices → IPAM Sync</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Network Devices → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="nw-sync-run-btn" onclick="runNwDiscoveryNow()" class="${btnCls}">Sync now</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Pulls the ARP table from every device on the selected network-device source (switches + gateways via the nw spoke, attributed to the tenant by prefix containment), and mirrors each discovered IP↔MAC into NetBox DCIM devices + IP records — tenant-tagged <code>Network Devices</code>, with the MAC written onto the IP's <code>mac_address</code> custom field (which feeds the IPAM → NAC endpoint sync). The network devices are the source of truth — each sync overwrites the tenant's nw-discovered device set to match (stale nw-owned records are deleted; firewall-discovered records are never touched). Devices whose IP matches no tenant prefix are dropped + counted. Switch/gateway products are registered in the hub's NW_DISCOVERY_SOURCES registry.</p>
@@ -3151,7 +3151,7 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Staleness Sweep</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Staleness Sweep ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="staleness-sweep-run-btn" onclick="runStalenessSweepNow()" class="${btnCls}">Sweep now</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Cluster-wide NetBox age-out of sync-owned objects. A device / VM / IP the syncs stop seeing ages out: not seen for <em>stale days</em> → status <strong>offline</strong> (a <code>decommissioned_at</code> clock starts); offline + decommissioned for <em>delete days</em> → <strong>deleted</strong> (its IPs free automatically); an unassigned stale IP → freed. Objects with no <code>last_seen</code> custom field (hand-managed inventory the syncs never touched) are <strong>never swept</strong>. Each detection stamps <code>last_seen</code>, so an object the syncs keep seeing is never swept.</p>
@@ -3178,7 +3178,7 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub Repo Sync</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub Repo Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="repo-sync-run-btn" onclick="runRepoSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Scheduled replication of <strong>all repos</strong>: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes <code>SPOKE_UPDATE</code> to every approved spoke (pxmx / opnsense / cs / cppm / netbox / ldap / nw) every <em>interval</em> (default 15 min). The hub self-restarts only when its own code changed (rolled back if it fails to boot); each spoke self-pulls and restarts only on its own version change. Replaces the old 1-hour auto-update loop — this is the single scheduled sync.</p>
@@ -3197,7 +3197,7 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Out-of-Contact Alerts</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Out-of-Contact Alerts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="saveSpokeAlertConfig()" class="${btnCls}">Save</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Forgiving liveness alerting, separate from the realtime heartbeat traffic-light. A spoke that blips for a few seconds (restart, WAN jitter) stays quiet; only once an approved spoke has been <strong>out of contact</strong> for <em>warn minutes</em> does a <strong>warning</strong> fire, and after <em>error minutes</em> it escalates to <strong>error</strong> (which also lands in the Error Log / bugfixer feed). Decoupled from the 300s recovery watchdog — that still restarts stranded spokes on its own schedule.</p>
@@ -3219,7 +3219,7 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="saveSourceOfTruthConfig()" class="${btnCls}">Save</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Per-module owner: a module's source of truth is never overwritten by a sync that disagrees. <strong>External</strong> = the feed owns the object (the sync overwrites NetBox to match — e.g. Proxmox owns VMs, the discovery feed owns device MAC/IP). <strong>NetBox</strong> = NetBox owns the object (only-add-missing — existing records are refreshed but never clobbered, protecting hand-managed inventory). Defaults: VMs = Proxmox (external), Devices = NetBox, Access Tracker = NetBox, Endpoint sync = NetBox.</p>
@@ -3349,7 +3349,7 @@ function _renderSetupModuleMgmtTile(content) {
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Managed Devices</h3>
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Managed Devices ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="showAddDeviceModal()" class="${btnCls}">+ Add Device</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Every managed module device in one place — firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances. Click <strong>Add Device</strong> then choose the module type to attach.</p>
@@ -3368,7 +3368,7 @@ function _renderSetupSimulationsTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Global USB Approvals</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Global USB Approvals ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide USB dongle approvals — applies to every tenant (merged with each tenant's own list).</p>
                 <div class="grid grid-cols-2 gap-6">
                     <div>
@@ -3392,17 +3392,17 @@ function _renderSetupSimulationsTile(content) {
                 </div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Discovered USB Devices</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Discovered USB Devices ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Every USB VID:PID seen across all tenants' spokes (plus tenant-certified/ignored entries not yet in telemetry). Approve or ignore a device type globally — applies to every tenant.</p>
                 <div id="global-usb-discovered" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Per-Tenant USB</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Per-Tenant USB ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Each tenant's own certified/ignored VID:PIDs (merged with the global list when pushed to their spoke). Approve/ignore per tenant below.</p>
                 <div id="tenant-usb-list" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">DHCP Server (dnsmasq)</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">DHCP Server (dnsmasq) ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Isolated sim-client DHCP on each cs spoke's second NIC (provisioned by install_cs.sh). Shows whether dnsmasq is running and how full the lease pool is. A spoke without dnsmasq shows "Not configured".</p>
                 <div id="cs-dhcp-server-status" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>`;
@@ -3420,7 +3420,7 @@ function _renderSetupGeneralTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     const subnetFilterCard = currentView === 'settings' ? `
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Tenant Subnet Filtering</h3>
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Tenant Subnet Filtering ${helpIcon('lm-hub', null, 'Hub help')}</h3>
             <p class="text-xs text-slate-500 mb-3">Filter each module's data by the tenant's NetBox prefixes, enforced server-side (a tenant cannot see another tenant's subnet data even via the API). Disable for modules that are scoped by tenant ID instead of subnet (e.g. Simulations).</p>
             <div id="subnet-filter-toggles" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
         </div>` : '';
@@ -3428,7 +3428,7 @@ function _renderSetupGeneralTile(content) {
         ${subnetFilterCard}
         <div class="${card}">
             <div class="flex justify-between items-center">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Optimization — Data Cache</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Optimization — Data Cache ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 <div class="flex items-center gap-3">
                     <label class="${labelCls}">Max Concurrent Tenants</label>
                     <input type="number" id="cache-max-concurrent" min="1" max="20" value="3"
@@ -3443,7 +3443,7 @@ function _renderSetupGeneralTile(content) {
         </div>
         <div class="${card}">
             <div class="flex justify-between items-center">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Update Configuration</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Update Configuration ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 <div class="flex gap-2">
                     <button onclick="triggerUpdate(event)" class="${btnCls}">Update All</button>
                 </div>
@@ -3478,7 +3478,7 @@ function _renderSetupGeneralTile(content) {
             </div>
         </div>
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Notifications</h3>
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Notifications ${helpIcon('lm-hub', null, 'Hub help')}</h3>
             <p class="text-xs text-slate-400">How long toast messages (success/error confirmations in the bottom/top-right corner) stay on screen before fading out. A visible dismiss (×) always closes one early regardless of this setting.</p>
             <div class="flex items-center gap-3">
                 <label class="${labelCls}">Toast Duration (seconds)</label>
@@ -3489,7 +3489,7 @@ function _renderSetupGeneralTile(content) {
             </div>
         </div>
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Appearance</h3>
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Appearance ${helpIcon('lm-hub', null, 'Hub help')}</h3>
             <p class="text-xs text-slate-400">Configure the header logo shown to the left of the title. Use <code>hpe-svg</code> for the built-in HPE mark, or any image URL/path.</p>
             <div class="space-y-1">
                 <label class="${labelCls}">Header logo URL / <code>hpe-svg</code></label>
@@ -7399,7 +7399,7 @@ function openVmDetail(uniqueId) {
         </button>
         <div class="rounded-lg border border-slate-200 bg-slate-50/50 p-4 mb-4">
             <h3 class="text-base font-semibold text-[#263040]">${escapeHtml(vm.name || '—')}
-                <span class="text-xs text-slate-400 font-normal font-mono">VMID ${vm.vmid} · ${escapeHtml((vm.cluster || '') + '/' + (vm.node || ''))}</span></h3>
+                <span class="text-xs text-slate-400 font-normal font-mono">VMID ${vm.vmid} · ${escapeHtml((vm.cluster || '') + '/' + (vm.node || ''))}</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>
             <p class="text-xs text-slate-500 mt-1">Status
                 <span class="px-2 py-0.5 rounded-full text-xs font-medium ${runCls}">${vm.status}</span>
                 · <span class="px-2 py-0.5 rounded-full text-xs font-medium ${typeCls}">${vm.type || 'vm'}</span>
@@ -7847,7 +7847,7 @@ function pxmxNodeDetailHtml(node, vms) {
 
     return `<div class="rounded-lg border border-slate-200 bg-slate-50/50 p-4 mb-4">
             <h3 class="text-base font-semibold text-[#263040]">${node.node}
-                <span class="text-xs text-slate-400 font-normal">${node.cluster ? '· cluster ' + node.cluster : ''}</span></h3>
+                <span class="text-xs text-slate-400 font-normal">${node.cluster ? '· cluster ' + node.cluster : ''}</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>
             <p class="text-xs text-slate-500 mt-1">Status
                 <span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${node.status}</span>
                 · CPU ${node.cpu_usage ?? '—'}% (${node.cpu_cores ?? '—'} cores)
@@ -7855,7 +7855,7 @@ function pxmxNodeDetailHtml(node, vms) {
                 · Proxmox ${pxmxShortVer(node.proxmox_version) || '—'}</p>
         </div>` +
         `<h3 class="text-base font-semibold text-[#263040] mb-3 px-1">Virtual Machines &amp; Containers
-            <span class="text-xs text-slate-400 font-normal">(${nodeVms.length} on this node, ${running} running)</span></h3>` +
+            <span class="text-xs text-slate-400 font-normal">(${nodeVms.length} on this node, ${running} running)</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>` +
         (nodeVms.length > 0
             ? pxmxVmTableHtml(nodeVms)
             : '<p class="p-4 text-slate-400 italic text-sm">No VMs on this node.</p>');
@@ -7909,7 +7909,7 @@ async function loadPxmxData(subMenu) {
                     : '';
                 container.innerHTML = staleBanner
                     + `<h3 class="text-base font-semibold text-[#263040] mb-3 px-1">Overview
-                        <span class="text-xs text-slate-400 font-normal">(${nodes.length}) — click a node to view its VMs</span></h3>`
+                        <span class="text-xs text-slate-400 font-normal">(${nodes.length}) — click a node to view its VMs</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>`
                     + `<div id="pxmx-nodes-wrap"></div>`;
                 renderPxmxNodes();
                 return;
@@ -7962,7 +7962,7 @@ async function loadPxmxData(subMenu) {
             container.innerHTML = staleBanner
                 + `<div class="flex items-center justify-between mb-1 px-1">
                     <h3 class="text-base font-semibold text-[#263040]">Virtual Machines &amp; Containers
-                        <span class="text-xs text-slate-400 font-normal">(${vms.length} total)</span></h3>
+                        <span class="text-xs text-slate-400 font-normal">(${vms.length} total)</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>
                     ${buildBtn}
                 </div>`
                 + (vms.length > 0 ? pxmxVmTableHtml(vms)
@@ -9520,7 +9520,7 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
         ${[50,100,200,500,1000].map(n => `<option value="${n}"${n===limit?' selected':''}>${n} records</option>`).join('')}
     </select>`;
     container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
-        <h3 class="text-base font-semibold text-[#263040]">Access Tracker <span class="text-xs text-slate-400 font-normal">(${sessions.length} of ${d.total ?? sessions.length})</span></h3>
+        <h3 class="text-base font-semibold text-[#263040]">Access Tracker <span class="text-xs text-slate-400 font-normal">(${sessions.length} of ${d.total ?? sessions.length})</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
         <div class="flex items-center gap-2">${limitSel}${sessRefreshBtn}</div>
     </div>` + tableWrap(th(cols) + `<tbody>${rows || '<tr><td colspan="9" class="px-4 py-6 text-center text-slate-400">No active sessions</td></tr>'}</tbody>`);
 }
@@ -9590,7 +9590,7 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
         Refresh</button>` : '';
     const devTitle = isUnknown ? 'Unknown Devices' : 'My Devices';
     container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
-        <h3 class="text-base font-semibold text-[#263040]">${devTitle} <span class="text-xs text-slate-400 font-normal">(${devices.length} devices)</span></h3>
+        <h3 class="text-base font-semibold text-[#263040]">${devTitle} <span class="text-xs text-slate-400 font-normal">(${devices.length} devices)</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
         ${devRefreshBtn}
     </div>` + tableWrap(th(cols) + `<tbody>${rows || '<tr><td colspan="8" class="px-4 py-6 text-center text-slate-400">No devices found</td></tr>'}</tbody>`);
     document.getElementById('cppm-dev-refresh')?.addEventListener('click', () => refreshModuleCache('cppm_devices').then(() => loadCPPMData(subMenu)));
