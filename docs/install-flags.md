@@ -16,8 +16,10 @@ Consolidated reference for every installer and its flags across the LM system. C
 
 ## lm (hub)
 
-### `install_all.sh` — hub + co-located spokes
-`--reinstall` (reinstall over existing), `--reset-secrets` (wipe spoke/hub secrets), `--reset-users` (wipe user accounts), `--exclude <csv>` (skip spoke modules), `--tls-verify` (optional `--tls-ca-cert <path>`; defaults CA to the hub's own `$TLS_CERT`). Per-module loop honors `--exclude` and passes `--hub $HUB_WS --id $SPOKE_ID [--spoke-only]`.
+### `install_all.sh` — hub + one co-located agent (all modules as roles)
+`--reinstall` (reinstall over existing), `--reset-secrets` (wipe spoke/hub secrets), `--reset-users` (wipe user accounts), `--exclude <csv>` (skip module roles), `--tls-verify` (optional `--tls-ca-cert <path>`; defaults CA to the hub's own `$TLS_CERT`).
+
+**Unified agent-spoke model:** installs ONE generic agent (`agent-<hostname>`) that hosts every module as a **role** — it maps each module → its `_ROLE_MAP` role and runs a single `install_agent.sh --id agent-<hostname> --roles <csv> --loopback`, instead of ten dedicated `*-spoke-1` installs. `--loopback` marks the agent co-located with the hub (hub owns `:443`): the pxmx role's agent-host listener binds `127.0.0.1:8443` (hub `/ws/agent` byte-proxies) and the cs role's `:443` listener is suppressed. Only the **agent id** is pre-approved; each role sub-spoke `{agent}-{role}` auto-approves via the parent. Connection config (NetBox URL/token, OPNsense host/key, …) now comes from the **hub push** (configure it in the WebUI), not a per-module `.env`; the NetBox *application* remains a separate install.
 
 ### `install_menu.sh` — interactive bootstrap
 Top menu: `1) Hub` (spoke checklist → `install_all.sh --exclude <unselected>`) or `2) Generic agent` (→ `generic_agent/install_github.sh`). Hub path prompts co-located spokes; Generic path prompts `--spoke-url` (default `auto`), `--id`, first secret, hub root secret, "Verify hub TLS certificate? (requires the hub CA cert) [y/N]", clone-only. Env `LM_BRANCH` (default `main`). Re-exes as root via sudo; re-exec from a temp file with stdin on `/dev/tty` for the one-liner.
@@ -25,8 +27,10 @@ Top menu: `1) Hub` (spoke checklist → `install_all.sh --exclude <unselected>`)
 ### `generic_agent/install_github.sh`
 `--spoke-url` (optional/`auto` → auto-discover), `--id`, `--secret`, `--hub-secret`, `--tls-verify` (+ `--tls-ca-cert`; defaults `/opt/lm/certs/hub.crt` if present, else requires it), `--clone` (install but don't start). Builds ExecStart arg list conditionally (omits blank `--secret`/`--id`).
 
-### `agent/install_agent.sh`
-`--hub` (required), `--id`, `--secret`, `--role` (one of `dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le`). Boot-time `--role` does NOT run `_install_role` (only system packages pre-installed).
+### `agent/install_agent.sh` — the unified installer (every node is an agent)
+`--hub` (optional; omit/`auto` → auto-discover), `--id` (default `agent-<hostname>`), `--secret`, `--hub-secret`, `--role <one>` / `--roles <csv>` (of `dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le|console`), `--loopback` (agent is **co-located with the hub** — pxmx role binds `127.0.0.1:8443`, cs role `:443` listener suppressed; standalone omits it → listeners on `:443`), `--clone` (clone-only; id derives from hostname at runtime), `--tls-verify`/`--tls-ca-cert`.
+
+Roles persist in `.env` `LOADED_ROLES` (durable across self-update restarts); on boot the agent spawns one `RoleConnection` sub-spoke `{agent}-{role}` per role (module_type = the role's, parent-auto-approved). `_install_role` clones the role's sibling repo + installs deps, and for `dns`/`dhcp`/`simulation`/`proxmox` runs the role's OS bootstrapping — `simulation`/`proxmox` invoke their installer's idempotent `--infra-only` (cs Kea/NIC + agent-listener cert; pxmx agent-host). Role-conditional runtime env (`LM_CS_AGENT_LISTENER`, `LM_TLS_CERT/KEY`, `LM_PXMX_AGENT_LOOPBACK`/`PORT`) is written to the agent `.env` and inherited by the in-process sub-spokes. The dedicated per-module `install_<module>.sh` scripts are superseded by this (kept only for their `--infra-only` host prep + standalone/legacy use).
 
 ### Other lm installers
 `install.sh`, `install_hub.sh`, `install_ui.sh`, `install_hub_ui.sh`, `install_pxmx.sh` (pxmx agent/spoke; **standalone DEFAULT** — spoke serves `wss://:443`, agent dials `wss://<spoke>:443/ws/agent` directly, `agent → spoke → hub`; `--loopback` opt-in for co-located all-in-one — binds loopback `8443`, hub `/ws/agent` byte-proxies to it, `agent → hub → spoke`, passed only by `install_all.sh`; legacy `8766` no-TLS fallback), `install_cs.sh`, `install_opnsense.sh`, `install_production.sh`, `prep_for_image.sh`, `start.sh`, `start_all.sh`, `sync_secrets.sh`, `verify_auth.sh`.
