@@ -5222,6 +5222,11 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                 // approve_agent_under_spoke in api.py.
                 const tenantId = s.tenant_id || '';
                 const eTenant = tenantId.replace(/'/g, "\\'");
+                // Role sub-spoke → its own row carries an "Unload Role" action
+                // that removes the role from the parent agent (annotated in
+                // loadSpokesAndAgents). Uniform with "Add role" on the agent.
+                const eRoleParent = (s._roleParent || '').replace(/'/g, "\\'");
+                const eRoleName = (s._roleName || '').replace(/'/g, "\\'");
                 return _mgmtEntryCard({
                     dot,
                     name, sid,
@@ -5243,6 +5248,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                         approved
                             ? _mgmtBtn('Un-approve', `unapproveSpoke('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')
                             : _mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white'),
+                        ...(s._roleName ? [_mgmtBtn('Unload Role', `unloadRole('${eRoleParent}','${eRoleName}')`, 'bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200')] : []),
                         ...(extras ? extras.actions : []),
                     ],
                 }) + (extras ? extras.eventsPanel : '');
@@ -5536,6 +5542,22 @@ async function loadSpokesAndAgents() {
     const isAgent = s => String(s.module_type || '').toLowerCase() === 'agent' || hasRole(s.spoke_id);
     const trueSpokes    = spokes.filter(s => !isAgent(s) && !pxmxAgentIds.has(s.spoke_id));
     const genericAgents = spokes.filter(isAgent);
+
+    // Annotate each role sub-spoke ("{agentBase}-{role}") with its parent agent
+    // + role name, so the Spokes table can offer a per-role "Unload" action
+    // (remove a role directly from its own spoke entry). The longest matching
+    // agent-id prefix is the closest parent; the suffix after it is the role
+    // name (== the _ROLE_MAP key the agent's UNLOAD_ROLE expects).
+    const _agentIds = genericAgents.map(a => a.spoke_id);
+    trueSpokes.forEach(s => {
+        const parent = _agentIds
+            .filter(aid => s.spoke_id !== aid && s.spoke_id.startsWith(aid + '-'))
+            .sort((a, b) => b.length - a.length)[0];
+        if (parent) {
+            s._roleParent = parent;
+            s._roleName = s.spoke_id.slice(parent.length + 1);
+        }
+    });
 
     // Split generic agents by whether they host a role yet. A loaded role
     // registers a sub-spoke "{base}-{role}" (module_type = the role's), so a
@@ -6724,7 +6746,7 @@ function updateRoleDesc(roleId) {
 
 async function loadRole(spokeId) {
     const checked = Array.from(document.querySelectorAll('.role-check:checked')).map(el => el.value);
-    if (checked.length === 0) { alert('Select at least one role to load.'); return; }
+    if (checked.length === 0) { showToast('Select at least one role to load.', 'info'); return; }
 
     const btn = document.querySelector('#load-role-modal button[onclick^="loadRole"]');
     if (btn) { btn.disabled = true; btn.textContent = 'Activating…'; }
@@ -6746,7 +6768,10 @@ async function loadRole(spokeId) {
                     results.push(`✓ ${name}: sub-spoke ${data.sub_spoke_id || spokeId + '-' + roleId} connecting (auto-approved)`);
                 }
             } else {
-                results.push(`✗ ${name}: ${data.detail || data.message || JSON.stringify(data)}`);
+                const msg = res.status === 503
+                    ? 'agent not connected — reconnect it to manage roles'
+                    : (data.detail || data.message || JSON.stringify(data));
+                results.push(`✗ ${name}: ${msg}`);
             }
         } catch (err) {
             results.push(`✗ ${AGENT_ROLES[roleId]?.name || roleId}: ${err.message}`);
@@ -6761,7 +6786,11 @@ async function loadRole(spokeId) {
 }
 
 async function unloadRole(spokeId, role) {
-    if (!confirm(`Unload role "${AGENT_ROLES[role]?.name || role}" from ${spokeId}? Its sub-spoke will disconnect.`)) return;
+    const roleLabel = AGENT_ROLES[role]?.name || role;
+    if (!confirm(`Unload role "${roleLabel}" from ${spokeId}? Its sub-spoke will disconnect.`)) return;
+    // Only reopen the Load Role modal if the unload was triggered from inside it
+    // (not from the per-role Unload action on a Spokes row).
+    const modalOpen = !!document.getElementById('load-role-modal');
     try {
         const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
             method: 'POST',
@@ -6770,14 +6799,17 @@ async function unloadRole(spokeId, role) {
         });
         const data = await res.json();
         if (res.ok && (data.status === 'SUCCESS' || data.payload?.status === 'SUCCESS')) {
-            alert(`Role "${AGENT_ROLES[role]?.name || role}" unloaded from ${spokeId}.`);
+            showToast(`Role "${roleLabel}" unloaded from ${spokeId}`, 'success');
             if (currentView === 'setup') loadSpokesAndAgents();
-            showLoadRoleModal(spokeId);
+            if (modalOpen) showLoadRoleModal(spokeId);
         } else {
-            alert('Failed to unload role: ' + (data.detail || data.message || JSON.stringify(data)));
+            const msg = res.status === 503
+                ? `${spokeId} is not connected — reconnect the agent to manage its roles.`
+                : (data.detail || data.message || JSON.stringify(data));
+            showToast('Failed to unload role: ' + msg, 'error');
         }
     } catch (err) {
-        alert('Error: ' + err.message);
+        showToast('Error unloading role: ' + err.message, 'error');
     }
 }
 
