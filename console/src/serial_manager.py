@@ -139,6 +139,14 @@ def enumerate_ports() -> List[Dict[str, Any]]:
     return ports
 
 
+def open_raw(dev: str, baud: int = 9600, timeout: float = 0.3):
+    """Open a transient serial handle (for baud-detect / fingerprint), bypassing
+    the session machinery. Caller must close it."""
+    if serial is None:
+        raise RuntimeError("pyserial not installed")
+    return serial.Serial(dev, int(baud or 9600), timeout=timeout)
+
+
 def detect_baud(dev: str, candidates: Optional[List[int]] = None,
                 read_secs: float = 1.5) -> Dict[str, Any]:
     """Sweep candidate baud rates (8N1), press Enter, score the reply; return the

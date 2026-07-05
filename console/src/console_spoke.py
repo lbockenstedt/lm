@@ -14,6 +14,7 @@ thread, so it schedules that coroutine back onto the event loop.
 import asyncio
 import base64
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -24,12 +25,14 @@ except ImportError:
 
 try:
     from serial_manager import (
-        PortStore, SessionManager, enumerate_ports, detect_baud, DEFAULT_BAUD_CANDIDATES,
+        PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
+    from fingerprint import run_identify
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
-        PortStore, SessionManager, enumerate_ports, detect_baud, DEFAULT_BAUD_CANDIDATES,
+        PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
+    from .fingerprint import run_identify  # type: ignore
 
 logger = logging.getLogger("ConsoleSpoke")
 
@@ -58,6 +61,13 @@ class ConsoleSpoke(BaseSpoke):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.store = PortStore()
         self.sessions = SessionManager(on_data=self._on_serial_data)
+        # Auto-identify (fingerprint) state. Credentials are pushed (signed) by
+        # the hub via CONSOLE_SET_CREDENTIALS and held in memory only (never
+        # logged/persisted). The background loop probes each newly-seen port once.
+        self._credentials: list = []
+        self._autoprobe_task = None
+        self._probe_attempts: Dict[str, float] = {}  # port_id → last attempt (monotonic)
+        self._probing: set = set()
 
     # ── reader-thread → hub bridge ────────────────────────────────────────────
     def _on_serial_data(self, session_id: str, data: bytes) -> None:
@@ -87,6 +97,7 @@ class ConsoleSpoke(BaseSpoke):
     # ── command dispatch ──────────────────────────────────────────────────────
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         cmd = command_type.upper()
+        self._ensure_autoprobe_task()  # start the fully-automatic identify loop once
 
         if cmd == "GET_VERSION":
             return {"status": "SUCCESS", "version": self.get_version()}
@@ -138,6 +149,28 @@ class ConsoleSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": "port_id is required"}
             self.store.update(pid, tenant_id=data.get("tenant_id", ""))
             return {"status": "SUCCESS", "port_id": pid, "tenant_id": data.get("tenant_id", "")}
+
+        if cmd == "CONSOLE_SET_CREDENTIALS":
+            # Global credential list, pushed (signed) by the hub. In memory only;
+            # never logged or persisted. Order = attempt order for auto-login.
+            creds = data.get("credentials") or []
+            self._credentials = [{"username": c.get("username", ""), "password": c.get("password", "")}
+                                 for c in creds if isinstance(c, dict)]
+            logger.info("console: loaded %d credential(s) for auto-identify", len(self._credentials))
+            return {"status": "SUCCESS", "count": len(self._credentials)}
+
+        if cmd == "CONSOLE_AUTOPROBE":
+            pid = data.get("port_id")
+            dev = self._port_device(pid) if pid else None
+            if not dev:
+                return {"status": "ERROR", "message": f"port {pid} not found"}
+            if self.sessions.is_open(pid):
+                return {"status": "ERROR", "message": "port is in use; close sessions first"}
+            res = await asyncio.to_thread(self._identify_blocking, pid, dev)
+            await self._emit_probe_result(pid, res)
+            return {"status": "SUCCESS", "port_id": pid,
+                    "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
+                    "identity": res.get("identity") or {}}
 
         if cmd == "CONSOLE_DETECT_BAUD":
             pid = data.get("port_id")
@@ -213,13 +246,111 @@ class ConsoleSpoke(BaseSpoke):
                 "settings": settings, "writer": info.get("writer"),
                 "read_only": bool(info.get("busy"))}
 
+    # ── auto-identify / fingerprint ───────────────────────────────────────────
+    def _identify_blocking(self, port_id: str, dev: str) -> Dict[str, Any]:
+        """Blocking read-only identify on a transient serial handle (run via
+        asyncio.to_thread). Detects baud first if none is locked yet."""
+        settings = self.store.settings(port_id)
+        baud = settings.get("baud")
+        detected = None
+        if not (self.store.get(port_id).get("probe") or {}).get("detected_baud"):
+            try:
+                d = detect_baud(dev, DEFAULT_BAUD_CANDIDATES)
+                if d.get("baud"):
+                    detected = d["baud"]
+                    baud = d["baud"]
+            except Exception as e:  # noqa: BLE001
+                logger.debug("probe baud-detect failed on %s: %s", dev, e)
+        try:
+            ser = open_raw(dev, baud or 9600, timeout=0.3)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"open failed: {e}"}
+        try:
+            res = run_identify(lambda: ser.read(256), ser.write, self._credentials)
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if detected:
+            res["detected_baud"] = detected
+        return res
+
+    async def _emit_probe_result(self, port_id: str, res: Dict[str, Any]) -> None:
+        """Persist the probe + push CONSOLE_PROBE_RESULT up (hub → NetBox)."""
+        probe = {
+            "banner": (res.get("banner") or "")[-2000:],
+            "vendor": res.get("vendor"),
+            "identity": res.get("identity") or {},
+            "logged_in": bool(res.get("logged_in")),
+            "error": res.get("error", ""),
+        }
+        if res.get("detected_baud"):
+            probe["detected_baud"] = res["detected_baud"]
+            self.store.update(port_id, settings={"baud": res["detected_baud"]})
+        self.store.update(port_id, probe=probe)
+        self._probe_attempts[port_id] = time.monotonic()
+        if self.control_plane is not None:
+            await self.control_plane.send_to_hub("CONSOLE_PROBE_RESULT", {
+                "spoke_id": self.spoke_id, "port_id": port_id,
+                "vendor": probe["vendor"], "identity": probe["identity"],
+                "banner": probe["banner"][-500:], "logged_in": probe["logged_in"],
+            })
+
+    def _ensure_autoprobe_task(self) -> None:
+        """Start the auto-identify loop once (fully automatic on detection —
+        decision #9), unless disabled via config auto_identify=False."""
+        if self._autoprobe_task is not None or not self.config.get("auto_identify", True):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._loop = self._loop or loop
+        self._autoprobe_task = loop.create_task(self._autoprobe_loop())
+
+    async def _autoprobe_loop(self) -> None:
+        await asyncio.sleep(10)  # let credentials/settings arrive first
+        while True:
+            try:
+                await self._autoprobe_scan()
+            except Exception:  # noqa: BLE001
+                logger.exception("console autoprobe scan failed")
+            await asyncio.sleep(120)
+
+    async def _autoprobe_scan(self) -> None:
+        """Probe each newly-seen port once. Guardrails: global toggle; skip ports
+        a human holds; probe once then cool down 1h on failure (no re-hammering
+        credentials)."""
+        if not self.config.get("auto_identify", True):
+            return
+        for p in enumerate_ports():
+            pid = p["port_id"]
+            if self.sessions.is_open(pid) or pid in self._probing:
+                continue
+            probe = self.store.get(pid).get("probe") or {}
+            last = self._probe_attempts.get(pid, 0.0)
+            if probe.get("identity") or (last and (time.monotonic() - last) < 3600):
+                continue
+            self._probing.add(pid)
+            try:
+                res = await asyncio.to_thread(self._identify_blocking, pid, p["device"])
+                await self._emit_probe_result(pid, res)
+            except Exception:  # noqa: BLE001
+                logger.exception("autoprobe %s failed", pid)
+                self._probe_attempts[pid] = time.monotonic()
+            finally:
+                self._probing.discard(pid)
+
     async def get_status(self) -> Dict[str, Any]:
+        self._ensure_autoprobe_task()
         ports = enumerate_ports()
         return {
             "spoke_id": self.spoke_id,
             "module": "console",
             "port_count": len(ports),
             "open_ports": sum(1 for p in ports if self.sessions.is_open(p["port_id"])),
+            "credentials_loaded": len(self._credentials),
             "status": "HEALTHY",
         }
 
