@@ -14,6 +14,32 @@
 So: **once a module/agent is connected to the hub, the hub must have all of its
 logs.** Relay is additive — the local file log stays; the hub copy is on top.
 
+## The hub's two logs (where your relayed lines land)
+
+The hub exposes **two** views, both built from the same sources — the hub's own
+deque, the per-module/agent relayed deques (`agent_logs[...]`, fed by `AGENT_LOG`
+/ `SPOKE_LOG`), and any `/var/log/lm/*.log` files **on the hub box**:
+
+1. **Error Log** — `LabManagerHub.collect_error_logs()` → the WebUI **Error Log
+   tab** and the **BugFixer**. Aggregates errors across **all** modules, keeping
+   only lines matching `\b(error|exception|traceback|critical)\b`
+   (case-insensitive), each prefixed `[module]`.
+2. **Per-module log** — `collect_all_logs()` → the module's own log view (all
+   levels, grouped by module).
+
+Two consequences every module must respect:
+
+- **Remote modules depend entirely on the relay.** The `/var/log/lm/*.log` disk
+  source only covers modules **co-located on the hub box**. An agent/spoke on a
+  separate host (e.g. a Proxmox node, a remote-site LXC) writes to *its own*
+  `/var/log/lm` — invisible to the hub filesystem. Its **only** path into either
+  hub log is the WebSocket relay. This is why the relay is mandatory, not optional.
+- **Error lines must carry the level word** so the Error-Log/BugFixer regex
+  matches them. The standard formatter `%(asctime)s - %(name)s - %(levelname)s -
+  %(message)s` guarantees this (an ERROR record contains "ERROR"; an
+  `exc_info=` traceback contains "Traceback"/"Exception"). Use it for the relay
+  handler; don't strip the level.
+
 ## The six requirements
 
 1. **Relay own logs to the hub once connected.**
