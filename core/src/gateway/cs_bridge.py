@@ -78,12 +78,21 @@ class CSBridgePoller:
         self.hub = hub
         self.poll_interval = _env_int("CS_POLL_INTERVAL_S", 5, 2)
         self.usb_interval = _env_int("CS_USB_CONFIG_INTERVAL_S", 60, 30)
+        # Re-push the agent's config even when UNCHANGED at least this often, so
+        # an agent that restarted (self-update) and lost its in-memory config —
+        # and therefore client-simulation mode + its CS_TELEMETRY (VM Server VMs
+        # + USB) — gets it back within one interval instead of never (the hub's
+        # change-detection cache survives the agent restart, so "unchanged"
+        # would otherwise mean "never re-sent"). UPDATE_CONFIG is idempotent on
+        # the agent (same enabled state → no restart), so this is cheap.
+        self.repush_interval = _env_int("CS_CONFIG_REPUSH_S", 120, 30)
         # Slightly above the pxmx spoke's send_to_agent 15s sync window so a
         # slow-but-successful fast command isn't falsely timed out by the hub.
         self.relay_timeout = _env_int("CS_RELAY_TIMEOUT_S", 16, 5) + 0.0
         # Per-agent USB-config sync state.
         self._last_usb_cfg: Dict[str, str] = {}   # agent_id -> canonical blob sig
-        self._last_usb_push: Dict[str, float] = {}  # agent_id -> ts
+        self._last_usb_push: Dict[str, float] = {}  # agent_id -> ts (last check)
+        self._last_actual_push: Dict[str, float] = {}  # agent_id -> ts (last SEND)
 
     # ── main loop ──────────────────────────────────────────────────────────
 
@@ -249,8 +258,12 @@ class CSBridgePoller:
             return
 
         sig = json.dumps(cfg, sort_keys=True, separators=(",", ":"), default=str)
-        if self._last_usb_cfg.get(agent_id) == sig:
-            self._last_usb_push[agent_id] = now  # unchanged; nothing to push
+        # Push when the config changed OR it's been >= repush_interval since we
+        # last actually sent it — the periodic re-push re-establishes CS mode on
+        # an agent that restarted and lost it (see repush_interval note).
+        stale = (now - self._last_actual_push.get(agent_id, 0.0)) >= self.repush_interval
+        if self._last_usb_cfg.get(agent_id) == sig and not stale:
+            self._last_usb_push[agent_id] = now  # unchanged + recently pushed
             return
 
         # Build the full agent config (preserve display_name/enabled/tenant_id)
@@ -272,6 +285,7 @@ class CSBridgePoller:
                                        {"agent_id": agent_id, "config": merged},
                                        timeout=5.0)
             self._last_usb_cfg[agent_id] = sig
+            self._last_actual_push[agent_id] = now
             logger.info("CS bridge: pushed usb_config to %s (tenant cs spoke %s)",
                         agent_id, cs_spoke)
         except Exception as exc:  # noqa: BLE001
