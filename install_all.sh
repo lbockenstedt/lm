@@ -68,6 +68,14 @@ log_e() {
     log "ERROR: $1"
 }
 
+log_w() {
+    # Warning: console + file, but NOT logged as ERROR — keeps expected/soft
+    # conditions (e.g. a pre-approval that will be done manually) out of the
+    # hub's Error Log / BugFixer, which key off the "error" token.
+    echo "⚠️  $1" >&2
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] WARNING: $1" >> "$INSTALL_LOG" 2>/dev/null || true
+}
+
 # Probe the hub /status endpoint across every port/scheme the hub may be on:
 #   - https://localhost:443  (unified wss hub, TLS on — the new default)
 #   - http://localhost:443   (unified plaintext hub, no cert)
@@ -945,7 +953,7 @@ for sid in cs-spoke-1 pxmx-spoke-1 opn-spoke-1 cppm-spoke-1 netbox-spoke-1 ldap-
     curl -sf -X POST "$HUB_API/setup/approve_spoke" \
         -H "Content-Type: application/json" \
         -d "{\"spoke_id\":\"$sid\",\"action\":\"approve\"}" > /dev/null \
-        || log_e "Pre-approval failed for $sid (spoke will need manual approval)"
+        || log_w "Pre-approval failed for $sid (spoke will need manual approval)"
 done
 
 MODULES_ORDER=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap" "dns" "dhcp" "nw" "le")

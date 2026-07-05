@@ -43,6 +43,14 @@ log_e() {
     log "ERROR: $1"
 }
 
+log_w() {
+    # Warning: console + file, but NOT logged as ERROR — keeps expected
+    # conditions (e.g. a spoke that runs on another host) out of the hub's
+    # Error Log / BugFixer, which key off the "error" token.
+    echo "⚠️  $1" >&2
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] WARNING: $1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
 # ------------------------------------------------------------------
 # CONFIGURATION: Hub Server URL
 # ------------------------------------------------------------------
@@ -174,7 +182,7 @@ for spoke in "${SPOKES[@]}"; do
         nohup "$SPOKE_DIR/venv/bin/python3" "$SPOKE_DIR/src/control_plane.py" --id "$SPOKE_ID" --secret "$SECRET" --hub "$HUB_URL" $HUB_SECRET_ARG > "$LOG_DIR/$spoke.log" 2>&1 &
         log_c "$spoke started (logs: $LOG_DIR/$spoke.log) with secret ${SECRET:0:4}...${SECRET: -4}"
     else
-        log_e "Warning: Spoke directory $SPOKE_DIR not found. Skipping..."
+        log_w "Spoke directory $SPOKE_DIR not found (runs on another host?). Skipping..."
     fi
 done
 
