@@ -198,8 +198,41 @@ class BaseControlPlane:
     # behavior (restart, no rollback) — never fatal.
 
     def _spoke_state_dir(self) -> str:
-        """Per-spoke recovery state dir (``/var/lib/lm/<spoke_id>/``)."""
-        return os.path.join("/var/lib/lm", self.spoke_id)
+        """Per-spoke recovery state dir (``/var/lib/lm/<spoke_id>/``).
+
+        Falls back to a repo-local ``.lm-state/<spoke_id>`` when ``/var/lib/lm``
+        isn't writable by this (non-root ``svc_lm``) process — otherwise the
+        pre-update snapshot + rollback silently disable with "Permission denied:
+        '/var/lib/lm'" (the installer didn't create/chown the dir). The chosen
+        path is passed to the external watchdog via ``--state-dir`` so both
+        agree. Cached so the choice is stable across a run."""
+        cached = getattr(self, "_state_dir_cached", None)
+        if cached:
+            return cached
+        primary = os.path.join("/var/lib/lm", self.spoke_id)
+        chosen = primary
+        try:
+            os.makedirs(primary, exist_ok=True)
+            # Confirm we can actually write here (makedirs can succeed on an
+            # existing dir we still can't write to).
+            probe = os.path.join(primary, ".wtest")
+            with open(probe, "w"):
+                pass
+            os.remove(probe)
+        except OSError:
+            fallback = os.path.join(self._repo_root(), ".lm-state", self.spoke_id)
+            try:
+                os.makedirs(fallback, exist_ok=True)
+                chosen = fallback
+                logger.warning("State dir %s not writable — using repo-local "
+                               "fallback %s (pre-update snapshot/rollback still "
+                               "work; run the installer to fix /var/lib/lm perms)",
+                               primary, fallback)
+            except OSError as e:
+                logger.warning("No writable state dir (%s); rollback disabled: %s",
+                               primary, e)
+        self._state_dir_cached = chosen
+        return chosen
 
     def _clear_healthy_marker(self) -> None:
         """Drop a stale ``healthy`` marker on boot so a fresh start must re-prove
