@@ -3201,9 +3201,14 @@ def create_app(hub):
         to a co-located pxmx spoke's loopback listener (``agent → hub → spoke``).
         For a **standalone** pxmx spoke on a separate box (``agent → spoke →
         hub``, the default), do NOT use this command — run ``install_pxmx.sh``
-        on the spoke box and use the ``--spoke-url wss://<spoke>:443/ws/agent``
-        command it prints (a standalone spoke does not broadcast ``_lm-hub``
-        mDNS, so the agent cannot auto-discover it). See docs/pxmx.md.
+        on the spoke box and use the ``--spoke-ip <spoke>`` command it prints (a
+        standalone spoke does not broadcast ``_lm-hub`` mDNS, so the agent cannot
+        auto-discover it). See docs/pxmx.md.
+
+        The command hands the agent just ``--spoke-ip <host>``; the agent probes
+        that host's known ``/ws/agent`` endpoints and auto-determines the scheme
+        + port + path (see the pxmx agent's discovery.resolve_agent_url). We
+        still compute the expected URL below for the modal to display.
         """
         import socket as _socket
         host = request.headers.get("host", "").split(":")[0] or _socket.gethostbyname(_socket.gethostname())
@@ -3212,6 +3217,7 @@ def create_app(hub):
         # LM_PXMX_AGENT_PORT (8443 loopback; 443 if the hub box also serves it
         # directly); omit the port when it's 443. Without TLS, legacy plaintext
         # :8766. (Standalone spokes serve their own :443 — not reflected here.)
+        # Display-only: the agent re-derives this itself from --spoke-ip.
         if getattr(hub, "tls_enabled", False):
             agent_port = int(getattr(hub, "pxmx_agent_port", 8443))
             spoke_url = f"wss://{host}" if agent_port == 443 else f"wss://{host}:{agent_port}"
@@ -3220,9 +3226,9 @@ def create_app(hub):
         cmd = (
             f"curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh "
             f"| sudo bash -s -- "
-            f"--spoke-url {spoke_url}"
+            f"--spoke-ip {host}"
         )
-        return {"cmd": cmd, "spoke_url": spoke_url}
+        return {"cmd": cmd, "spoke_url": spoke_url, "spoke_ip": host}
 
     @app.get("/api/pxmx/agents")
     async def get_pxmx_agents():
