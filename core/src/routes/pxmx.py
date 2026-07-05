@@ -1,0 +1,578 @@
+"""Proxmox agents/nodes/VMs + aggregate + VM-detail + console-create routes."""
+from api import (
+    HTTPException, Request, _cache_entry, access, get_tenant_scoping, logger, secrets, time,
+    uuid,
+)
+
+
+def register(app, hub, ctx):
+    """Register pxmx routes on the Hub app."""
+    _session_user = ctx._session_user
+    _is_admin = ctx._is_admin
+    _resolve_tenant = ctx._resolve_tenant
+    _filter_tenant = ctx._filter_tenant
+
+    @app.get("/vm/{vm_id}/details")
+    async def get_vm_details(vm_id: str):
+        hub = app.state.hub
+        res_info = hub.state.system_state.get("resources", {}).get(vm_id, {})
+        ip = res_info.get("metadata", {}).get("ip")
+
+        details = {
+            "vm_id": vm_id,
+            "ip": ip,
+            "metadata": res_info,
+            "proxmox": {"status": "OFFLINE"},
+            "opnsense": {"status": "OFFLINE", "rules": [], "dhcp": None},
+            "cppm": {"status": "OFFLINE", "policy": "Unknown"}
+        }
+
+        pxmx_spoke = hub.get_hypervisor_spoke()
+        if pxmx_spoke:
+            px_res_raw = await hub.request_response(pxmx_spoke, "GET_VM_INFO", {"vm_id": vm_id})
+            px_res = px_res_raw.get("payload", {}).get("data", {}) if isinstance(px_res_raw, dict) else {}
+            details["proxmox"] = px_res if px_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": px_res.get("message", "Unknown error")}
+
+        opn_spokes = hub.get_all_spokes_by_type("firewall")
+        if opn_spokes and ip:
+            rules_data = None
+            lease = None
+
+            for spoke_id in opn_spokes:
+                try:
+                    rules_raw = await hub.request_response(spoke_id, "OPNSENSE_GET_RULES_BY_IP", {"ip": ip})
+                    dhcp_raw = await hub.request_response(spoke_id, "OPNSENSE_GET_DHCP_LEASES", {})
+
+                    rules_res = rules_raw.get("payload", {}).get("data", {}) if isinstance(rules_raw, dict) else {}
+                    dhcp_res = dhcp_raw.get("payload", {}).get("data", []) if isinstance(dhcp_raw, dict) else []
+
+                    if rules_res.get("status") == "SUCCESS" and rules_res.get("rules"):
+                        rules_data = rules_res
+                        break
+
+                    if isinstance(dhcp_res, list):
+                        lease = next((l for l in dhcp_res if l.get("ip") == ip), None)
+                        if lease:
+                            rules_data = rules_res
+                            break
+                except Exception as e:
+                    logger.error(f"Error querying OPNsense spoke {spoke_id} for VM {vm_id}: {e}")
+
+            if rules_data:
+                details["opnsense"] = {
+                    "status": "ONLINE",
+                    "rules": rules_data.get("rules", []),
+                    "dhcp": lease
+                }
+            else:
+                details["opnsense"] = {"status": "OFFLINE", "rules": [], "dhcp": None}
+
+        cppm_spoke = hub.get_spoke_by_type("nac")
+        if cppm_spoke and ip:
+            cppm_res_raw = await hub.request_response(cppm_spoke, "CPPM_GET_POLICY_BY_IP", {"ip": ip})
+            cppm_res = cppm_res_raw.get("payload", {}).get("data", {}) if isinstance(cppm_res_raw, dict) else {}
+            details["cppm"] = cppm_res if cppm_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": cppm_res.get("message", "Unknown error")}
+
+        return details
+
+    @app.get("/api/aggregate/opnsense")
+    async def aggregate_opnsense():
+        hub = app.state.hub
+        opn_spokes = hub.get_all_spokes_by_type("firewall")
+
+        async def _one(sid):
+            try:
+                # Health + interface status are independent — fetch both at once
+                # per spoke, and all spokes run concurrently so the dashboard
+                # latency is one round-trip, not N×2.
+                health_raw, int_raw = await _asyncio.gather(
+                    hub.request_response(sid, "GET_SYSTEM_HEALTH", {}),
+                    hub.request_response(sid, "GET_INTERFACE_STATUS", {}),
+                )
+                health_data = health_raw.get("payload", {}).get("data", {}) if isinstance(health_raw, dict) else {}
+                int_data = int_raw.get("payload", {}).get("data", {}) if isinstance(int_raw, dict) else {}
+                return {"spoke_id": sid, "spoke_online": True,
+                        "health": health_data, "interfaces": int_data, "status": "ONLINE"}
+            except Exception as e:
+                return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
+
+        results = await _asyncio.gather(*(_one(sid) for sid in opn_spokes))
+        return {"hosts": list(results)}
+
+    @app.get("/api/aggregate/proxmox")
+    async def aggregate_proxmox():
+        hub = app.state.hub
+        pxmx_spokes = hub.get_all_spokes_by_type("hypervisor")
+
+        async def _one(sid):
+            try:
+                res_raw = await hub.request_response(sid, "GET_VM_INFO", {"vm_id": "all"})
+                res_data = res_raw.get("payload", {}).get("data", {}) if isinstance(res_raw, dict) else {}
+                return {"spoke_id": sid, "spoke_online": True, "data": res_data, "status": "ONLINE"}
+            except Exception as e:
+                return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
+
+        results = await _asyncio.gather(*(_one(sid) for sid in pxmx_spokes))
+        return {"hosts": list(results)}
+
+    @app.get("/api/pxmx/agent-install-cmd")
+    async def get_pxmx_agent_install_cmd(request: Request):
+        """Return a ready-to-paste install command for the pxmx node agent.
+
+        NOTE — this is the **co-located / all-in-one (loopback)** path: it points
+        the agent at THIS hub box's `/ws/agent` route, which the hub byte-proxies
+        to a co-located pxmx spoke's loopback listener (``agent → hub → spoke``).
+        For a **standalone** pxmx spoke on a separate box (``agent → spoke →
+        hub``, the default), do NOT use this command — run ``install_pxmx.sh``
+        on the spoke box and use the ``--spoke-ip <spoke>`` command it prints (a
+        standalone spoke does not broadcast ``_lm-hub`` mDNS, so the agent cannot
+        auto-discover it). See docs/pxmx.md.
+
+        The command hands the agent just ``--spoke-ip <host>``; the agent probes
+        that host's known ``/ws/agent`` endpoints and auto-determines the scheme
+        + port + path (see the pxmx agent's discovery.resolve_agent_url). We
+        still compute the expected URL below for the modal to display.
+        """
+        import socket as _socket
+        host = request.headers.get("host", "").split(":")[0] or _socket.gethostbyname(_socket.gethostname())
+        hub = app.state.hub
+        # Co-located/all-in-one: the pxmx agent listener on the hub box is wss on
+        # LM_PXMX_AGENT_PORT (8443 loopback; 443 if the hub box also serves it
+        # directly); omit the port when it's 443. Without TLS, legacy plaintext
+        # :8766. (Standalone spokes serve their own :443 — not reflected here.)
+        # Display-only: the agent re-derives this itself from --spoke-ip.
+        if getattr(hub, "tls_enabled", False):
+            agent_port = int(getattr(hub, "pxmx_agent_port", 8443))
+            spoke_url = f"wss://{host}" if agent_port == 443 else f"wss://{host}:{agent_port}"
+        else:
+            spoke_url = f"ws://{host}:8766"
+        cmd = (
+            f"curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh "
+            f"| sudo bash -s -- "
+            f"--spoke-ip {host}"
+        )
+        return {"cmd": cmd, "spoke_url": spoke_url, "spoke_ip": host}
+
+    @app.get("/api/pxmx/agents")
+    async def get_pxmx_agents():
+        """Agents tile data source. Aggregates GET_AGENTS across EVERY
+        agent-hosting spoke (hypervisor=pxmx, simulation=cs — both subclass
+        AgentHostingControlPlane), not just pxmx: a Proxmox host agent can now
+        dial a cs spoke's /ws/agent directly (the split-topology work), and
+        those agents were previously invisible here entirely — the tile only
+        ever asked the pxmx spoke. Each agent is tagged with its own owning
+        spoke_id so approve/revoke route correctly regardless of which spoke
+        it's actually connected to."""
+        hub = app.state.hub
+        agent_spokes = list(dict.fromkeys(
+            hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
+        ))
+        if not agent_spokes:
+            return {"agents": [], "pending_agents": [], "spoke_connected": False}
+        try:
+            agent_cfg = hub.state.system_state.get("agent_config", {})
+            names = hub.state.system_state.get("agent_display_names", {})
+            now = time.time()
+
+            def _agent_identity_change_for(hub, parent_spoke, aid, cfg):
+                """Latest unacked rename/reimage event for an agent.
+
+                Agent identity events are recorded on the PARENT spoke's
+                timeline (with ``"agent "`` in the detail), so scan that and
+                return the newest one newer than the agent's ``change_acked_ts``.
+                """
+                acked_ts = float(cfg.get("change_acked_ts") or 0.0)
+                for ev in hub.get_spoke_events(parent_spoke, limit=30):
+                    if ev.get("event") in ("identity_changed", "hostname_changed", "reimaged"):
+                        detail = ev.get("detail", "") or ""
+                        if "agent " in detail and aid in detail and ev.get("ts", 0) > acked_ts:
+                            return ev
+                return None
+
+            all_agents: list = []
+            all_pending: list = []
+            for parent_spoke in agent_spokes:
+                try:
+                    result = await hub.request_response(parent_spoke, "GET_AGENTS", {})
+                except Exception as exc:  # noqa: BLE001 — one dead spoke shouldn't blank the tile
+                    logger.warning("GET_AGENTS failed for spoke %s: %s", parent_spoke, exc)
+                    continue
+                data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+                for a in data.get("agents", []) or []:
+                    aid = a["agent_id"]
+                    a["spoke_id"] = parent_spoke
+                    cfg = agent_cfg.get(aid, {})
+                    if cfg.get("display_name"):
+                        a["display_name"] = cfg["display_name"]
+                    elif aid in names:
+                        a["display_name"] = names[aid]
+                    if cfg.get("client_simulation"):
+                        a["client_simulation"] = cfg["client_simulation"]
+                    # Hub-tracked per-agent heartbeat (keyed spoke_id:agent_id,
+                    # fed by the owning spoke relaying AGENT_HEARTBEAT up).
+                    hb_key = f"{parent_spoke}:{aid}"
+                    hb_last = hub.heartbeat.last_seen.get(hb_key)
+                    a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
+                    a["heartbeat_status"] = str(hub.heartbeat.get_status(hb_key).value)
+                    a["hostname"] = cfg.get("hostname", "") or a.get("hostname", "") or aid
+                    a["install_uuid"] = cfg.get("install_uuid", "")
+                    a["identity_change"] = _agent_identity_change_for(hub, parent_spoke, aid, cfg)
+                    all_agents.append(a)
+                for p in data.get("pending_agents", []) or []:
+                    p["spoke_id"] = parent_spoke
+                    all_pending.append(p)
+            return {"agents": all_agents, "pending_agents": all_pending, "spoke_connected": True}
+        except Exception as e:
+            logger.exception("get_pxmx_agents failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/agents/{agent_id}/revoke")
+    async def revoke_pxmx_agent(agent_id: str):
+        hub = app.state.hub
+        # Resolve the spoke that actually owns this agent (may be a cs spoke
+        # in the split-topology case, not necessarily pxmx) rather than
+        # always targeting the hypervisor spoke.
+        owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
+            or hub.get_hypervisor_spoke()
+        if not owning_spoke:
+            raise HTTPException(status_code=503, detail="No agent-hosting spoke connected")
+        try:
+            result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
+                "target_agent_id": agent_id,
+                "command": "REVOKE_AGENT",
+            })
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            if data.get("status") != "SUCCESS":
+                raise HTTPException(status_code=502, detail=data.get("message", "Relay failed"))
+            return {"status": "ok", "message": f"Agent '{agent_id}' disconnected"}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("revoke_pxmx_agent failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/agents/{agent_id}/ack-change")
+    async def ack_agent_identity_change(agent_id: str):
+        """Dismiss the amber "renamed" banner for a pxmx node agent (idempotent)."""
+        hub = app.state.hub
+        try:
+            cfg = hub.state.system_state.setdefault("agent_config", {}).setdefault(agent_id, {})
+            cfg["change_acked_ts"] = time.time()
+            hub.state._mark_dirty()
+            hub.state.save_state()
+            return {"status": "ok", "agent_id": agent_id}
+        except Exception as e:
+            logger.exception("ack_agent_identity_change failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/agents/{agent_id}/rename")
+    async def rename_pxmx_agent(agent_id: str, request: Request):
+        hub = app.state.hub
+        data = await request.json()
+        display_name = (data.get("display_name") or "").strip()
+        if not display_name:
+            raise HTTPException(status_code=400, detail="display_name required")
+        hub.state.system_state.setdefault("agent_display_names", {})[agent_id] = display_name
+        hub.state.save_state()
+        return {"status": "ok", "message": f"Agent '{agent_id}' renamed to '{display_name}'"}
+
+    @app.get("/api/pxmx/agents/{agent_id}/config")
+    async def get_pxmx_agent_config(agent_id: str):
+        """Return the stored per-agent config (display name + Client Simulation mode)."""
+        hub = app.state.hub
+        cfg = hub.state.system_state.get("agent_config", {}).get(agent_id, {})
+        # Fall back to the legacy display-name override if agent_config has none yet.
+        if not cfg.get("display_name"):
+            legacy = hub.state.system_state.get("agent_display_names", {}).get(agent_id)
+            if legacy:
+                cfg = dict(cfg)
+                cfg["display_name"] = legacy
+        return {"config": cfg}
+
+    @app.post("/api/pxmx/agents/{agent_id}/config")
+    async def set_pxmx_agent_config(agent_id: str, request: Request):
+        """Persist per-agent config (display name + Client Simulation mode) and push
+        the client_simulation config down to the agent via the pxmx spoke.
+        Reuses the spoke's SET_AGENT_CONFIG command, which persists in the spoke and
+        re-pushes UPDATE_CONFIG to the agent on reconnect (see proxmox_spoke.py:55-64)."""
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            display_name = (data.get("display_name") or "").strip() or None
+            cs = data.get("client_simulation") or {}
+            cs_cfg = {
+                "enabled": bool(cs.get("enabled")),
+                "tenant_id": (cs.get("tenant_id") or "").strip() or None,
+            }
+
+            # Persist (merge with any existing entry so partial updates keep fields).
+            store = hub.state.system_state.setdefault("agent_config", {})
+            entry = dict(store.get(agent_id, {}))
+            if display_name:
+                entry["display_name"] = display_name
+            entry["client_simulation"] = cs_cfg
+            store[agent_id] = entry
+            hub.state.save_state()
+
+            # Best-effort push to a live agent. SET_AGENT_CONFIG persists spoke-side
+            # even when the agent is offline, so a failure here just means the agent
+            # picks up the config on its next connect/reconnect — but that only
+            # works if the OWNING SPOKE actually received this SET_AGENT_CONFIG in
+            # the first place. If the spoke itself was momentarily unreachable
+            # (mid self-update restart, brief reconnect blip — the same window
+            # that made hub-config saves report "0 spokes"), a bare
+            # request_response would raise immediately and this command would
+            # just be dropped with nothing spoke-side to push down once the
+            # agent reconnects. push_or_queue_to_spoke queues it via the Mailbox
+            # instead, so it's delivered (and persists spoke-side) the moment the
+            # spoke itself comes back.
+            pushed = False
+            queued = False
+            owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
+                or hub.get_hypervisor_spoke()
+            if owning_spoke:
+                try:
+                    push = getattr(hub, "push_or_queue_to_spoke", None)
+                    if callable(push):
+                        outcome = await push(owning_spoke, "SET_AGENT_CONFIG", {
+                            "agent_id": agent_id,
+                            "config": {"client_simulation": cs_cfg},
+                        })
+                        queued = bool(outcome.get("queued"))
+                        rdata = outcome.get("result") or {}
+                        rdata = rdata.get("payload", {}).get("data", rdata) if isinstance(rdata, dict) else rdata
+                        pushed = queued or (isinstance(rdata, dict) and rdata.get("status") == "SUCCESS")
+                    else:
+                        res = await hub.request_response(owning_spoke, "SET_AGENT_CONFIG", {
+                            "agent_id": agent_id,
+                            "config": {"client_simulation": cs_cfg},
+                        })
+                        rdata = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+                        pushed = rdata.get("status") == "SUCCESS"
+                except Exception as e:
+                    logger.info(f"SET_AGENT_CONFIG push for '{agent_id}' failed (will re-push on reconnect): {e}")
+
+            return {
+                "status": "ok" if pushed else "partial_success",
+                "message": ("Config queued — spoke temporarily unreachable, will apply on reconnect." if queued
+                            else "Config saved and pushed to agent." if pushed
+                            else "Config saved; agent will receive it on next connect/reconnect."),
+                "pushed": pushed,
+                "queued": queued,
+                "config": store[agent_id],
+            }
+        except Exception as e:
+            logger.exception("set_pxmx_agent_config failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/agents/{agent_id}/cs-command")
+    async def pxmx_agent_cs_command(agent_id: str, request: Request):
+        """Admin/debug: send a Client-Simulation fast command to a Proxmox agent
+        — start/stop/reboot/snapshot_vm, the start_vms/stop_vms/snapshot_vms
+        batches, unlock_template, clear_provision_lock, clear_usb_quarantine.
+
+        Relays through the pxmx spoke as SPOKE_RELAY {command: CS_COMMAND}; the
+        agent returns SUCCESS or ERROR (a cs_guard refusal — e.g. vmid below the
+        90000 floor or a protected container — comes back as ERROR with the
+        guard's message). Sync only: long ops (delete/reclone/reseed/backup) are
+        not exposed here (they'd exceed the spoke's 15s relay window)."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        action = (body.get("action") or "").strip()
+        if not action:
+            raise HTTPException(status_code=400, detail="missing 'action'")
+        pxmx_spoke = hub.get_hypervisor_spoke()
+        if not pxmx_spoke:
+            raise HTTPException(status_code=503, detail="hypervisor spoke not connected")
+        try:
+            result = await hub.request_response(pxmx_spoke, "SPOKE_RELAY", {
+                "target_agent_id": agent_id,
+                "command": "CS_COMMAND",
+                "data": body,
+            })
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            return data
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"CS command relay failed: {e}")
+
+    @app.delete("/api/pxmx/agents/{agent_id}")
+    async def delete_pxmx_agent(agent_id: str):
+        """Remove a Proxmox node agent: best-effort disconnect of a live agent
+        (relayed through the hypervisor spoke) plus removal of any persisted
+        display-name override. If the agent is already dead / the hypervisor
+        spoke is offline, the relay is skipped and we still clear the override."""
+        hub = app.state.hub
+        relayed = False
+        pxmx_spoke = hub.get_hypervisor_spoke()
+        if pxmx_spoke:
+            try:
+                result = await hub.request_response(pxmx_spoke, "SPOKE_RELAY", {
+                    "target_agent_id": agent_id,
+                    "command": "REVOKE_AGENT",
+                })
+                data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+                relayed = data.get("status") == "SUCCESS"
+            except Exception as e:
+                # Agent may already be disconnected — non-fatal for a delete.
+                logger.info(f"Revoke relay for delete of agent '{agent_id}' skipped/failed (may be dead): {e}")
+        names = hub.state.system_state.get("agent_display_names", {})
+        if agent_id in names:
+            names.pop(agent_id, None)
+            hub.state.save_state()
+        msg = ("Agent disconnected and removed." if relayed else "Agent removed (was not connected).")
+        return {"status": "ok", "message": msg}
+
+    @app.get("/api/pxmx/nodes")
+    async def get_pxmx_nodes():
+        hub = app.state.hub
+        pxmx_spoke = hub.get_hypervisor_spoke()
+        if not pxmx_spoke:
+            return {"nodes": [], "spoke_connected": False}
+        try:
+            result = await hub.request_response(pxmx_spoke, "GET_NODE_STATS", {})
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            return data
+        except Exception as e:
+            logger.exception("get_pxmx_nodes failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── pxmx / Proxmox: VMs + agent commands (/api/pxmx/*) ───────────────────
+    @app.get("/api/pxmx/vms")
+    async def get_pxmx_vms(request: Request, agent_id: str = None, tenant: str = None):
+        """
+        Aggregate VM/CT list from all connected pxmx agents.
+        Each VM includes unique_id ("<cluster>/<node>/<vmid>"), agent_id, cluster, node, vmid.
+        Pass ?agent_id=<id> to scope to a single agent.
+        Pass ?tenant=<id> to filter by that tenant's proxmox_tag setting AND to
+        subnet-filter the returned VMs by that tenant's NetBox prefixes (each VM
+        carries an ``ips`` list; VMs whose ``ips`` all fall outside the tenant's
+        prefixes are dropped). The subnet filter is applied on all three return
+        paths (tenant cache hit / spoke-down cache / live) via
+        ``_filter_tenant`` so an admin acting as a tenant sees only that
+        tenant's VMs — the toggle is the ``hypervisor`` subnet-filter module.
+        """
+        hub = app.state.hub
+        # see _netbox_list_get (variant: hypervisor spoke, proxmox_tag payload, and
+        # a non-503 spoke-down shape {vms:[], spoke_connected:False} — inline).
+        logger.debug("relay %s %s tenant=%s agent_id=%s", request.method, request.url.path, tenant, agent_id)
+        # Template-pool names are advertised to the UI so it can mark which VMs
+        # are clonable templates (clone-from-template). Computed once, merged into
+        # the response envelope on every return path below.
+        template_pools = access._template_pools(hub)
+
+        def _with_tpl(data):
+            if isinstance(data, dict):
+                data = dict(data)
+                data["template_pools"] = template_pools
+            return data
+
+        sess = _session_user(request)
+        if not agent_id and not tenant and sess and not _is_admin(sess):
+            tid = sess.get("user", {}).get("tenant_id")
+            if tid:
+                cached = _cache_entry(tid, "pxmx_vms")
+                if cached:
+                    return _with_tpl(await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant))
+        pxmx_spoke = hub.get_hypervisor_spoke()
+        if not pxmx_spoke:
+            if sess:
+                tid = sess.get("user", {}).get("tenant_id")
+                cached = _cache_entry(tid, "pxmx_vms") if tid else None
+                if cached:
+                    return _with_tpl(await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant))
+            return _with_tpl({"vms": [], "spoke_connected": False})
+        try:
+            scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
+            payload: dict = {}
+            if agent_id:
+                payload["agent_id"] = agent_id
+            if scoping.get("proxmox_tag"):
+                payload["tag_filter"] = scoping["proxmox_tag"]
+            result = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", payload)
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            return _with_tpl(await _filter_tenant(request, data, "hypervisor", ["ips"], tenant))
+        except Exception as e:
+            logger.exception("get_pxmx_vms failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/console")
+    async def pxmx_create_console(request: Request):
+        """Hypervisors view VNC console — create a console session for a VM.
+
+        Body: ``{unique_id, vmid, node, type}``. Mints a one-shot ``session_id``
+        + ``ws_token`` and tells the pxmx spoke→agent to open a Proxmox
+        vncwebsocket locally (agent-terminates-WSS) and relay frames over the
+        existing WS legs. Admin-only (VM console is privileged). The browser
+        then connects to ``/ws/console/{session_id}?token=<ws_token>`` for the
+        noVNC byte relay. Fire-and-forget VNC_START — the agent emits
+        VNC_READY/VNC_ERROR up, which the browser WS picks up."""
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        unique_id = str((body or {}).get("unique_id", "")).strip()
+        parts = unique_id.split("/")
+        if len(parts) < 3:
+            raise HTTPException(status_code=400, detail="invalid unique_id (expect <cluster>/<node>/<vmid>)")
+        cluster, node, vmid_s = parts[0], parts[1], parts[2]
+        try:
+            vmid = int(vmid_s)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_hypervisor_spoke()
+        if not pxmx_spoke:
+            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        session_id = str(uuid.uuid4())
+        ws_token = secrets.token_urlsafe(32)
+        tenant_id = sess.get("tenant_id") or ""
+        hub.register_vnc_session(session_id, {
+            "spoke_id": pxmx_spoke,
+            "tenant_id": tenant_id,
+            "ws_token": ws_token,
+            "vmid": vmid,
+            "node": node,
+            "unique_id": unique_id,
+        })
+        try:
+            # request_response (NOT send_to_spoke_command): the spoke→agent
+            # opens the Proxmox vncwebsocket synchronously and returns the
+            # Proxmox ticket, which doubles as the RFB VNC password noVNC must
+            # present during the security handshake. We pass it to the browser
+            # so noVNC authenticates with it; without it noVNC sends an empty
+            # password and Proxmox drops the RFB session → "Security failure" /
+            # blank console. 30s covers spoke→agent (25s) + the WSS open.
+            vnc_res = await hub.request_response(pxmx_spoke, "VNC_START", {
+                "session_id": session_id,
+                "unique_id": unique_id,
+                "vmid": vmid,
+                "node": node,
+                "type": str((body or {}).get("type", "qemu")),
+            }, timeout=30.0)
+        except Exception as e:
+            hub.unregister_vnc_session(session_id)
+            logger.exception("pxmx_create_console VNC_START failed")
+            raise HTTPException(status_code=502, detail=f"failed to start console: {e}")
+        ticket = ""
+        if isinstance(vnc_res, dict):
+            if vnc_res.get("status") not in ("SUCCESS", "OK"):
+                hub.unregister_vnc_session(session_id)
+                # "ACCEPTED" (no ticket) = the agent is on the OLD VNC code that
+                # acked fire-and-forget and never returned the Proxmox ticket —
+                # i.e. the agent hasn't self-updated to match the spoke/hub yet.
+                if vnc_res.get("status") == "ACCEPTED":
+                    detail = ("agent returned ACCEPTED (no ticket) — the pxmx agent "
+                              "on the Proxmox host is still on the old VNC code; "
+                              "wait for its self-update or restart lm-pxmx-agent")
+                else:
+                    detail = vnc_res.get("message") or vnc_res.get("error") or "agent refused VNC_START"
+                raise HTTPException(status_code=502, detail=f"failed to start console: {detail}")
+            ticket = str(vnc_res.get("ticket") or "")
+        return {"session_id": session_id, "ws_token": ws_token,
+                "ticket": ticket, "expires_in": 60}

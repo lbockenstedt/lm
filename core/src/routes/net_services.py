@@ -1,0 +1,319 @@
+"""DNS/LE/DHCP spoke-relay routes and shared spoke helpers."""
+from api import (
+    HTTPException, Request, _spoke_payload_or_raise, logger,
+)
+
+
+def register(app, hub, ctx):
+    """Register net_services routes on the Hub app."""
+    _filter_session = ctx._filter_session
+
+    def _get_dns_spoke(hub):
+        spoke_id = hub.get_spoke_by_type("dns")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="DNS spoke not connected")
+        return spoke_id
+
+    def _get_le_spoke(hub):
+        spoke_id = hub.get_spoke_by_type("certificates")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="Certificate spoke not connected")
+        return spoke_id
+
+    async def _relay_spoke(spoke_id, command, payload=None, log_name=""):
+        """Relay ``command`` to a spoke and return its SUCCESS payload.
+
+        Shared core of every DNS/DHCP relay handler (10 routes were near-
+        identical get-spoke → request_response → unwrap → except→500 blocks).
+        The spoke contract is ``{status: "SUCCESS", ...}`` / ``{status:
+        "ERROR", message|error}``; previously the hub passed an ERROR payload
+        back at HTTP 200, which was the last residual hold-out from the API
+        error-contract migration (every other spoke-relay group raises on
+        spoke-down). An upstream that responded with an error is now translated
+        to HTTP 502 (Bad Gateway) carrying the spoke's message as ``detail``,
+        matching the NetBox/CPPM relay contract. The success body — the spoke's
+        full SUCCESS dict — is returned verbatim so existing field access
+        (``data["records"]`` / ``data["subnets"]`` …) is unchanged. Spoke-down
+        (503) is raised by the ``_get_*_spoke`` caller before we run.
+        """
+        hub = app.state.hub
+        try:
+            result = await hub.request_response(spoke_id, command, payload or {})
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            return _spoke_payload_or_raise(data)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("%s relay failed", log_name or command)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/dns/records")
+    async def dns_list_records():
+        """List all DNS records from the Unbound spoke (unfiltered relay)."""
+        logger.debug("relay GET /api/dns/records")
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_LIST", log_name="dns_list_records")
+
+    @app.post("/api/dns/record")
+    async def dns_add_record(request: Request):
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_ADD", await request.json(), log_name="dns_add_record")
+
+    @app.delete("/api/dns/record")
+    async def dns_delete_record(request: Request):
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_DELETE", await request.json(), log_name="dns_delete_record")
+
+    @app.put("/api/dns/record")
+    async def dns_update_record(request: Request):
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_UPDATE", await request.json(), log_name="dns_update_record")
+
+    @app.get("/api/dns/status")
+    async def dns_status():
+        """Unbound service status / health from the DNS spoke."""
+        logger.debug("relay GET /api/dns/status")
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_STATUS", log_name="dns_status")
+
+    @app.get("/api/dns/stats")
+    async def dns_stats():
+        """Unbound query statistics (total/cache-hit/recursion + per-type) for
+        the DNS analytics panel."""
+        logger.debug("relay GET /api/dns/stats")
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_STATS", log_name="dns_stats")
+
+    @app.get("/api/dns/forwarders")
+    async def dns_forwarders():
+        """Configured upstream forwarders (per-zone upstream servers)."""
+        logger.debug("relay GET /api/dns/forwarders")
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_FORWARDERS", log_name="dns_forwarders")
+
+    @app.post("/api/dns/sync")
+    async def dns_sync_from_netbox():
+        """
+        Fetch all IPs with a dns_name from NetBox and sync them to Unbound.
+        Requires both NetBox spoke and DNS spoke to be connected. Delegates to
+        the shared DnsDhcpSyncMixin helper so the manual button and the periodic
+        auto-sync loop build the identical payload.
+        """
+        hub = app.state.hub
+        result = await hub.sync_dns_from_netbox()
+        if result.get("status") == "skipped":
+            raise HTTPException(status_code=503, detail=result.get("reason", "spoke not connected"))
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("error", "sync failed"))
+        return result
+
+    @app.get("/api/dns-dhcp/sync-status")
+    async def dns_dhcp_sync_status():
+        """Last-run status + config for the NetBox→Unbound/Kea auto-sync loop
+        (fuels the DNS/DHCP status tiles). Read-only, authed (under /api/)."""
+        hub = app.state.hub
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        cfg = gc.get("dns_dhcp_sync", {}) or {}
+        return {
+            "status": hub.dns_dhcp_sync_status,
+            "config": {
+                "enabled":  bool(cfg.get("enabled", True)),
+                "interval": int(cfg.get("interval", 300) or 300),
+            },
+        }
+
+    # ─── Certificate Management (le) API ──────────────────────────────────────
+    # Relays LE_* commands to the certificates spoke via _relay_spoke (same
+    # SUCCESS/ERROR contract + 502-on-spoke-error as DNS/DHCP). The le spoke
+    # owns certbot (issue/renew/revoke) + the cert ledger; the HUB is the
+    # transport for cert material from le to each cert's target spokes — issue
+    # and renew inline-trigger hub._distribute_one_cert (LE_GET_CERT →
+    # INSTALL_CERT per target → LE_MARK_DISTRIBUTED), and a background
+    # run_cert_distribution_loop re-pushes stale targets hourly.
+
+    def _le_inner(payload):
+        """The le spoke returns nested {status, data:{...}}; pull out data."""
+        if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
+            return payload["data"]
+        return payload if isinstance(payload, dict) else {}
+
+    async def _le_request(command, body):
+        """Relay command to the le spoke; return (hub, le_sid, payload) with the
+        SUCCESS payload (raises 502/503/500 on spoke error/down)."""
+        hub = app.state.hub
+        le_sid = _get_le_spoke(hub)
+        try:
+            result = await hub.request_response(le_sid, command, body or {})
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("%s relay failed", command)
+            raise HTTPException(status_code=500, detail=str(e))
+        ret = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        return hub, le_sid, _spoke_payload_or_raise(ret)
+
+    @app.get("/api/le/certs")
+    async def le_list_certs():
+        """List managed certificates from the le spoke."""
+        logger.debug("relay GET /api/le/certs")
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_LIST_CERTS",
+                                  log_name="le_list_certs")
+
+    @app.get("/api/le/status")
+    async def le_status():
+        """le spoke module status (version, certbot present, cert count)."""
+        logger.debug("relay GET /api/le/status")
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_GET_STATUS",
+                                  log_name="le_status")
+
+    @app.post("/api/le/issue")
+    async def le_issue_cert(request: Request):
+        """Issue a cert via the le spoke, then hub-broker the new material to
+        its targets. Returns the spoke result with an added ``distribution``
+        per-target summary."""
+        hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", await request.json())
+        inner = _le_inner(payload)
+        domain = inner.get("domain")
+        targets = inner.get("targets")
+        dist = []
+        if domain and targets:
+            try:
+                dist = await hub._distribute_one_cert(le_sid, domain, targets)
+            except Exception as e:
+                logger.warning("cert distribution after issue failed: %s", e)
+                dist = [{"status": "ERROR", "message": str(e)}]
+        inner["distribution"] = dist
+        return payload
+
+    @app.post("/api/le/renew")
+    async def le_renew_cert(request: Request):
+        """Renew one (body.domain) or all managed certs via the le spoke, then
+        hub-broker renewed material to each renewed cert's targets. Returns the
+        spoke result with per-cert + aggregate ``distribution`` summaries."""
+        hub, le_sid, payload = await _le_request("LE_RENEW_CERT", await request.json())
+        inner = _le_inner(payload)
+        agg = []
+        for r in inner.get("renewed") or []:
+            if r.get("renewed") and r.get("domain") and r.get("targets"):
+                try:
+                    d = await hub._distribute_one_cert(le_sid, r["domain"], r["targets"])
+                    r["distribution"] = d
+                    agg.extend(d)
+                except Exception as e:
+                    logger.warning("cert distribution after renew failed for %s: %s",
+                                   r.get("domain"), e)
+                    r["distribution"] = [{"status": "ERROR", "message": str(e)}]
+                    agg.extend(r["distribution"])
+        inner["distribution"] = agg
+        return payload
+
+    @app.post("/api/le/revoke")
+    async def le_revoke_cert(request: Request):
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REVOKE_CERT",
+                                  await request.json(), log_name="le_revoke_cert")
+
+    @app.post("/api/le/distribute")
+    async def le_distribute():
+        """Re-push any stale cert material to its targets now (no certbot
+        invocation — just LE_GET_CERT → INSTALL_CERT for targets whose
+        last_pushed_hash differs). Returns the refreshed cert list so the UI
+        shows fresh last_pushed_* state."""
+        hub = app.state.hub
+        le_sid = _get_le_spoke(hub)
+        try:
+            await hub._distribute_all_certs(le_sid)
+        except Exception as e:
+            logger.exception("le_distribute failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        return await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_distribute")
+
+    # ── per-cert distribution targets ──────────────────────────────────────────
+    # Each target = {module_type, identifier?} describing which spoke/device a
+    # cert should be installed on. The hub resolves the spoke by module_type and
+    # pushes INSTALL_CERT; the target spoke applies the cert to its own device.
+
+    @app.get("/api/le/certs/{domain}/targets")
+    async def le_list_targets(domain: str):
+        payload = await _relay_spoke(_get_le_spoke(app.state.hub), "LE_LIST_CERTS",
+                                     log_name="le_list_targets")
+        for c in _le_inner(payload).get("certs") or []:
+            if c.get("domain") == domain:
+                return {"status": "SUCCESS", "targets": c.get("targets", [])}
+        raise HTTPException(status_code=404, detail=f"no managed cert for {domain}")
+
+    @app.post("/api/le/certs/{domain}/targets")
+    async def le_add_target(domain: str, request: Request):
+        body = await request.json()
+        if not isinstance(body, dict) or not body.get("module_type"):
+            raise HTTPException(status_code=400, detail="module_type required")
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_ADD_TARGET",
+                                  {"domain": domain, "target": body},
+                                  log_name="le_add_target")
+
+    @app.delete("/api/le/certs/{domain}/targets/{idx}")
+    async def le_remove_target(domain: str, idx: int):
+        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REMOVE_TARGET",
+                                  {"domain": domain, "idx": idx},
+                                  log_name="le_remove_target")
+
+    # ─── DHCP API ─────────────────────────────────────────────────────────────
+
+    def _get_dhcp_spoke(hub):
+        spoke_id = hub.get_spoke_by_type("dhcp")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="DHCP spoke not connected")
+        return spoke_id
+
+    @app.get("/api/dhcp/subnets")
+    async def dhcp_list_subnets():
+        """List DHCP subnets configured on the Kea spoke (unfiltered relay)."""
+        logger.debug("relay GET /api/dhcp/subnets")
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_SUBNETS", log_name="dhcp_list_subnets")
+
+    @app.get("/api/dhcp/leases")
+    async def dhcp_list_leases(request: Request, subnet: str = None):
+        """List DHCP leases (optionally per-subnet); subnet-filtered before return."""
+        logger.debug("relay %s %s subnet=%s", request.method, request.url.path, subnet)
+        data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_LEASES", {"subnet": subnet}, log_name="dhcp_list_leases")
+        return await _filter_session(request, data, "dhcp", ["ip", "address"])
+
+    @app.post("/api/dhcp/reservation")
+    async def dhcp_add_reservation(request: Request):
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_ADD_RES", await request.json(), log_name="dhcp_add_reservation")
+
+    @app.get("/api/dhcp/reservations")
+    async def dhcp_list_reservations():
+        """List DHCP reservations from the Kea spoke (unfiltered relay)."""
+        logger.debug("relay GET /api/dhcp/reservations")
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_RES", log_name="dhcp_list_reservations")
+
+    @app.put("/api/dhcp/reservation")
+    async def dhcp_update_reservation(request: Request):
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_UPDATE_RES", await request.json(), log_name="dhcp_update_reservation")
+
+    @app.delete("/api/dhcp/reservation")
+    async def dhcp_delete_reservation(request: Request):
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_DEL_RES", await request.json(), log_name="dhcp_delete_reservation")
+
+    @app.get("/api/dhcp/status")
+    async def dhcp_status():
+        """Kea DHCP4 service status / health from the DHCP spoke."""
+        logger.debug("relay GET /api/dhcp/status")
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_STATUS", log_name="dhcp_status")
+
+    @app.get("/api/dhcp/stats")
+    async def dhcp_stats():
+        """Kea DHCP4 statistics — global + per-subnet pool utilization and the
+        headline packet counters for the DHCP analytics panel."""
+        logger.debug("relay GET /api/dhcp/stats")
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_STATS", log_name="dhcp_stats")
+
+    @app.post("/api/dhcp/sync")
+    async def dhcp_sync_from_netbox():
+        """
+        Fetch NetBox prefixes and IP-to-MAC reservations, sync to Kea DHCP4.
+        Delegates to the shared DnsDhcpSyncMixin helper so the manual button and
+        the periodic auto-sync loop build the identical payload.
+        """
+        hub = app.state.hub
+        result = await hub.sync_dhcp_from_netbox()
+        if result.get("status") == "skipped":
+            raise HTTPException(status_code=503, detail=result.get("reason", "spoke not connected"))
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("error", "sync failed"))
+        return result
+
+    # ── Cache management (/admin/cache/*, /setup/cache-config) ───────────────

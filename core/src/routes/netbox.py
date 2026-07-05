@@ -1,0 +1,555 @@
+"""NetBox (IPAM) config + sites/racks/devices/prefixes/IPs routes."""
+from api import (
+    HTTPException, Request, _cache_entry, _hub_msg, _invalidate_module_all_tenants,
+    _refresh_module_all_tenants, _unwrap_netbox, get_netbox_spoke, get_tenant_scoping, logger,
+)
+
+
+def register(app, hub, ctx):
+    """Register netbox routes on the Hub app."""
+    _session_user = ctx._session_user
+    _is_admin = ctx._is_admin
+    _resolve_tenant = ctx._resolve_tenant
+    _filter_session = ctx._filter_session
+    _trigger_endpoint_sync_after_ipam_edit = ctx._trigger_endpoint_sync_after_ipam_edit
+
+    @app.get("/setup/netbox-config")
+    async def get_netbox_config():
+        hub = app.state.hub
+        config = hub.state.system_state.get("global_config", {}).get("netbox", {})
+        return {"config": config}
+
+    @app.post("/setup/netbox-config")
+    async def update_netbox_config(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            config = data.get("config", {})
+            global_config = hub.state.system_state.get("global_config", {})
+            global_config["netbox"] = config
+            hub.state.system_state["global_config"] = global_config
+            hub.state.save_state()
+            spoke_id = get_netbox_spoke(hub)
+            if spoke_id:
+                msg = _hub_msg(spoke_id, "UPDATE_CONFIG", {"netbox_url": config.get("url"), "api_token": config.get("api_token")})
+                await hub.send_to_spoke(msg)
+                return {"status": "ok", "message": "Config saved and pushed to NetBox spoke.", "pushed": True}
+            return {"status": "partial_success", "message": "Config saved; NetBox spoke not connected.", "pushed": False}
+        except Exception as e:
+            logger.exception("update_netbox_config failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ─── NetBox data API ────────────────────────────────────────────────────────
+
+    async def _netbox_list_get(request, tenant, cache_key, cmd, slice_query, subnet_fields, route_name):
+        """Cache→spoke→offline GET for the NetBox list handlers (racks/devices/
+        prefixes/ips). Non-admin cache hit (when no slice param or tenant is
+        selected) → cached data; spoke down → offline cache fallback; otherwise a
+        live spoke round-trip with the resolved tenant slug. ``slice_query`` is the
+        dict of non-tenant slice params (site/rack/prefix/device); ``subnet_fields``
+        is None for raw data or a list like ``["prefix"]`` to apply the subnet
+        filter to both cached and live data. Handlers that can't share this
+        helper (get_firewall_data, get_cppm_devices/sessions, get_pxmx_vms)
+        inline the same cache→spoke→offline shape with a
+        ``# see _netbox_list_get (variant: …)`` cross-ref."""
+        hub = app.state.hub
+        logger.debug("relay %s %s tenant=%s %s", request.method, request.url.path, tenant, slice_query)
+        sess = _session_user(request)
+        cache_bypass = bool(tenant) or any(v for v in slice_query.values())
+        if not cache_bypass and sess and not _is_admin(sess):
+            tid = sess.get("user", {}).get("tenant_id")
+            if tid:
+                cached = _cache_entry(tid, cache_key)
+                if cached:
+                    data = cached["data"]
+                    if subnet_fields:
+                        return await _filter_session(request, data, "netbox", subnet_fields)
+                    return data
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            if sess:
+                tid = sess.get("user", {}).get("tenant_id")
+                cached = _cache_entry(tid, cache_key) if tid else None
+                if cached:
+                    data = cached["data"]
+                    if subnet_fields:
+                        return await _filter_session(request, data, "netbox", subnet_fields)
+                    return data
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
+            payload = dict(slice_query)
+            payload["tenant"] = scoping["netbox_tenant_slug"] or None
+            result = await hub.request_response(spoke_id, cmd, payload)
+            data = _unwrap_netbox(result)
+            if subnet_fields:
+                return await _filter_session(request, data, "netbox", subnet_fields)
+            return data
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception(route_name + " failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/netbox/health")
+    async def netbox_health():
+        """NetBox spoke reachability + API-token validity probe (10s timeout)."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            result = await hub.request_response(spoke_id, "NETBOX_HEALTH", {}, timeout=10.0)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_health failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/netbox/sites")
+    async def netbox_get_sites():
+        """List NetBox sites (admin sees all; unfiltered spoke round-trip)."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            result = await hub.request_response(spoke_id, "NETBOX_GET_SITES", {})
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_get_sites failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/netbox/racks")
+    async def netbox_get_racks(request: Request, site: str = None, tenant: str = None):
+        """List NetBox racks, optionally scoped by site; non-admins get the
+        tenant cache, admins/multi-tenant switches go live (see _netbox_list_get)."""
+        return await _netbox_list_get(request, tenant, "netbox_racks", "NETBOX_GET_RACKS",
+                                      {"site": site}, None, "netbox_get_racks")
+
+    @app.post("/api/netbox/racks")
+    async def netbox_add_rack(request: Request):
+        """Create a NetBox rack; invalidates the racks cache on success."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "NETBOX_ADD_RACK", data)
+            _refresh_module_all_tenants(hub, "netbox_racks")
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_add_rack failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.put("/api/netbox/racks/{rack_id}")
+    async def netbox_update_rack(rack_id: int, request: Request):
+        """Update a NetBox rack; invalidates the racks cache on success."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            data = await request.json()
+            data["rack_id"] = rack_id
+            result = await hub.request_response(spoke_id, "NETBOX_UPDATE_RACK", data)
+            _refresh_module_all_tenants(hub, "netbox_racks")
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_update_rack failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/api/netbox/racks/{rack_id}")
+    async def netbox_delete_rack(rack_id: int):
+        """Delete a NetBox rack; invalidates the racks cache on success."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            result = await hub.request_response(spoke_id, "NETBOX_DELETE_RACK", {"rack_id": rack_id})
+            _refresh_module_all_tenants(hub, "netbox_racks")
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_delete_rack failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/netbox/devices")
+    async def netbox_get_devices(request: Request, site: str = None, rack: str = None, tenant: str = None):
+        """List NetBox devices, optionally scoped by site/rack; non-admins get the
+        tenant cache, admins/multi-tenant switches go live (see _netbox_list_get)."""
+        return await _netbox_list_get(request, tenant, "netbox_devices", "NETBOX_GET_DEVICES",
+                                      {"site": site, "rack": rack}, None, "netbox_get_devices")
+
+    @app.post("/api/netbox/devices")
+    async def netbox_add_device(request: Request):
+        """Create a NetBox device; invalidates the device cache and triggers an endpoint sync."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "NETBOX_ADD_DEVICE", data)
+            _refresh_module_all_tenants(hub, "netbox_devices")
+            _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_add_device failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/netbox/claim-device/options")
+    async def netbox_claim_device_options(request: Request):
+        """Picklists (sites, device types, device roles, tenants) for the
+        Claim-an-unknown-device form. Non-admins see only their own allowed
+        tenants in the tenant list; admins see all."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            result = await hub.request_response(spoke_id, "NETBOX_GET_DEVICE_FORM_OPTIONS", {})
+            out = _unwrap_netbox(result)
+            sess = _session_user(request)
+            if sess and not _is_admin(sess) and isinstance(out, dict):
+                user = sess.get("user", {}) or {}
+                allowed_ids = user.get("tenants") or []
+                if not allowed_ids and user.get("tenant_id"):
+                    allowed_ids = [user.get("tenant_id")]
+                allowed = set()
+                for tid in allowed_ids:
+                    s = (get_tenant_scoping(hub, tid) or {}).get("netbox_tenant_slug")
+                    if s:
+                        allowed.add(s)
+                out = dict(out)
+                out["tenants"] = [t for t in (out.get("tenants") or []) if t.get("slug") in allowed]
+            return out
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_claim_device_options failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/netbox/claim-device")
+    async def netbox_claim_device(request: Request):
+        """Claim a CPPM unknown (untagged) endpoint into NetBox: create a
+        tenant-owned device and attach the endpoint's IP as its primary IPv4.
+        The spoke does the create; on success we invalidate the device caches
+        and trigger an endpoint sync so the matching ClearPass endpoint is
+        tagged with the tenant and leaves 'Unknown Devices'.
+
+        Security: a non-admin may only claim into one of their own tenants
+        (matched by NetBox tenant slug); any other slug → 403. Admins may claim
+        into any tenant."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            data = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        requested_slug = (str(data.get("tenant") or "").strip()) or None
+
+        sess = _session_user(request)
+        if sess and not _is_admin(sess):
+            user = sess.get("user", {}) or {}
+            allowed_ids = user.get("tenants") or []
+            if not allowed_ids and user.get("tenant_id"):
+                allowed_ids = [user.get("tenant_id")]
+            allowed = set()
+            for tid in allowed_ids:
+                s = (get_tenant_scoping(hub, tid) or {}).get("netbox_tenant_slug")
+                if s:
+                    allowed.add(s)
+            if not requested_slug or requested_slug not in allowed:
+                raise HTTPException(status_code=403, detail="Not authorized to claim into that tenant")
+
+        payload = {
+            "name": data.get("name", ""),
+            "device_type": data.get("device_type", ""),
+            "role": data.get("role", ""),
+            "site": data.get("site", ""),
+            "tenant": requested_slug or "",
+            "status": data.get("status", "active"),
+            "description": data.get("description", ""),
+            "ip": data.get("ip", ""),
+            "mac": data.get("mac", ""),
+            "dns_name": data.get("dns_name", ""),
+        }
+        try:
+            result = await hub.request_response(spoke_id, "NETBOX_CLAIM_DEVICE", payload)
+            result = _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_claim_device failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        if isinstance(result, dict) and result.get("status") == "SUCCESS":
+            _invalidate_module_all_tenants("netbox_devices")
+            _invalidate_module_all_tenants("cppm_devices")
+            _trigger_endpoint_sync_after_ipam_edit(hub, request, {"tenant": requested_slug} if requested_slug else None)
+        return result
+
+    @app.delete("/api/netbox/devices/{device_id}")
+    async def netbox_delete_device(device_id: int, request: Request):
+        """Delete a NetBox device; invalidates the device cache and triggers an endpoint sync."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            result = await hub.request_response(spoke_id, "NETBOX_DELETE_DEVICE", {"device_id": device_id})
+            _refresh_module_all_tenants(hub, "netbox_devices")
+            _trigger_endpoint_sync_after_ipam_edit(hub, request, None)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_delete_device failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.put("/api/netbox/devices/{device_id}")
+    async def netbox_update_device(device_id: int, request: Request):
+        """Update a NetBox device; invalidates the device cache and triggers an endpoint sync."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            data = await request.json()
+            data["device_id"] = device_id
+            result = await hub.request_response(spoke_id, "NETBOX_UPDATE_DEVICE", data)
+            _refresh_module_all_tenants(hub, "netbox_devices")
+            _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_update_device failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/netbox/prefixes")
+    async def netbox_get_prefixes(request: Request, site: str = None, tenant: str = None):
+        """List NetBox prefixes (subnet-filtered), optionally scoped by site;
+        non-admins get the tenant cache, admins go live (see _netbox_list_get)."""
+        return await _netbox_list_get(request, tenant, "netbox_prefixes", "NETBOX_GET_PREFIXES",
+                                      {"site": site}, ["prefix"], "netbox_get_prefixes")
+
+    @app.post("/api/netbox/prefixes")
+    async def netbox_allocate_prefix(request: Request):
+        """Allocate a NetBox prefix; invalidates the prefix + IP caches (30s timeout)."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "NETBOX_ALLOCATE_PREFIX", data, timeout=30.0)
+            _refresh_module_all_tenants(hub, "netbox_prefixes")
+            _refresh_module_all_tenants(hub, "netbox_ips")
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_allocate_prefix failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.put("/api/netbox/prefixes/{prefix_id}")
+    async def netbox_update_prefix(prefix_id: int, request: Request):
+        """Update a NetBox prefix; invalidates the prefix cache on success."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            data = await request.json()
+            data["prefix_id"] = prefix_id
+            result = await hub.request_response(spoke_id, "NETBOX_UPDATE_PREFIX", data)
+            _refresh_module_all_tenants(hub, "netbox_prefixes")
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_update_prefix failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/api/netbox/prefixes/{prefix_id}")
+    async def netbox_delete_prefix(prefix_id: int):
+        """Delete a NetBox prefix; invalidates the prefix + IP caches on success."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            result = await hub.request_response(spoke_id, "NETBOX_DELETE_PREFIX", {"prefix_id": prefix_id})
+            _refresh_module_all_tenants(hub, "netbox_prefixes")
+            _refresh_module_all_tenants(hub, "netbox_ips")
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_delete_prefix failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/netbox/available-subnets")
+    async def netbox_find_available_subnets(request: Request, near: str = None,
+                                             prefix_length: int = None,
+                                             hosts: int = None, count: int = 20,
+                                             exact: str = None):
+        """Find the closest free subnets of a requested size to ``near``.
+
+        Free = no tenant-assigned NetBox prefix overlaps it; search is RFC1918.
+        Size may be given as ``prefix_length`` or as ``hosts`` (host count →
+        smallest mask that fits). ``exact`` is tried first when given. Response
+        is only free CIDRs (no other tenants' data), so it is safe for non-admins."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        if not near:
+            raise HTTPException(status_code=400, detail="'near' CIDR is required")
+        try:
+            payload: dict = {"near": near, "count": int(count)}
+            if prefix_length is not None:
+                prefix_length = int(prefix_length)
+                if not 22 <= prefix_length <= 30:
+                    raise HTTPException(status_code=400,
+                                        detail="subnet size must be between /22 and /30 (up to a /22)")
+                payload["prefix_length"] = prefix_length
+            elif hosts is not None:
+                payload["hosts"] = int(hosts)
+            if exact:
+                payload["exact"] = exact
+            result = await hub.request_response(spoke_id, "NETBOX_FIND_AVAILABLE_PREFIXES",
+                                                 payload, timeout=30.0)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_find_available_subnets failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/netbox/subnet-assign")
+    async def netbox_assign_subnet(request: Request):
+        """Assign a chosen free subnet to a tenant (the picker "Assign" action).
+
+        Tenant is enforced server-side: a non-admin can only assign to their
+        own tenant (any ``tenant`` in the body is ignored); an admin may target
+        any tenant or leave it unassigned. Forwards NETBOX_CLAIM_PREFIX, which
+        reassigns an existing unassigned prefix or creates a new one."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        try:
+            body = await request.json()
+            prefix = body.get("prefix")
+            if not prefix:
+                raise HTTPException(status_code=400, detail="'prefix' is required")
+            if _is_admin(sess):
+                tenant = body.get("tenant")
+            else:
+                tenant = get_tenant_scoping(hub, _resolve_tenant(request, None))["netbox_tenant_slug"] or None
+            payload = {
+                "prefix": prefix,
+                "tenant": tenant,
+                "description": body.get("description", ""),
+                "site": body.get("site"),
+                "status": body.get("status", "active"),
+            }
+            result = await hub.request_response(spoke_id, "NETBOX_CLAIM_PREFIX", payload, timeout=30.0)
+            data = _unwrap_netbox(result)
+            if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                _refresh_module_all_tenants(hub, "netbox_prefixes")
+                _refresh_module_all_tenants(hub, "netbox_ips")
+            return data
+        except HTTPException:
+            raise
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_assign_subnet failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/netbox/ips")
+    async def netbox_get_ips(request: Request, prefix: str = None, device: str = None, tenant: str = None):
+        """List NetBox IP addresses (subnet-filtered), optionally scoped by
+        prefix/device; non-admins get the tenant cache, admins go live
+        (see _netbox_list_get)."""
+        return await _netbox_list_get(request, tenant, "netbox_ips", "NETBOX_GET_IPS",
+                                      {"prefix": prefix, "device": device}, ["address"], "netbox_get_ips")
+
+    @app.post("/api/netbox/ips")
+    async def netbox_allocate_ip(request: Request):
+        """Allocate a NetBox IP address; invalidates the IP cache and triggers an endpoint sync (30s timeout)."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            data = await request.json()
+            result = await hub.request_response(spoke_id, "NETBOX_ALLOCATE_IP", data, timeout=30.0)
+            _refresh_module_all_tenants(hub, "netbox_ips")
+            _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_allocate_ip failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/api/netbox/ips/{ip_id}")
+    async def netbox_release_ip(ip_id: int, request: Request):
+        """Release a NetBox IP back to the pool; invalidates the IP cache and triggers an endpoint sync."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            result = await hub.request_response(spoke_id, "NETBOX_RELEASE_IP", {"ip_id": ip_id})
+            _refresh_module_all_tenants(hub, "netbox_ips")
+            _trigger_endpoint_sync_after_ipam_edit(hub, request, None)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_release_ip failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.put("/api/netbox/ips/{ip_id}")
+    async def netbox_update_ip(ip_id: int, request: Request):
+        """Update a NetBox IP address; invalidates the IP cache and triggers an endpoint sync."""
+        hub = app.state.hub
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        try:
+            data = await request.json()
+            data["ip_id"] = ip_id
+            result = await hub.request_response(spoke_id, "NETBOX_UPDATE_IP_ADDR", data)
+            _refresh_module_all_tenants(hub, "netbox_ips")
+            _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_update_ip failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Update trigger + module install (/setup/update, /setup/modules/*) ─────
