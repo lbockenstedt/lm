@@ -2815,10 +2815,6 @@ async function csRefreshAutoProvStatus() {
         const prov = (sp && sp.provision) || {};
         const reason = prov.reason ? csEscape(String(prov.reason)) : '—';
         const loopOn = !!prov.loop_running;
-        const cfg = prov.config || {};
-        const vidpids = (cfg.dongle_vidpids != null) ? cfg.dongle_vidpids : '—';
-        const img1 = cfg.image1_template_id ? 'yes' : 'no';
-        const img2 = cfg.image2_template_id ? 'yes' : 'no';
         let html = `<div><b>Status:</b> ${on ? 'enabled' : 'disabled'} · ${csEscape(s.usb_auto_provision || 'off')}</div>`;
         html += `<div><b>CS-enabled agents:</b> ${csCount}</div>`;
         // Most common cause of "I enabled Auto-Provisioning but nothing happens":
@@ -2828,7 +2824,6 @@ async function csRefreshAutoProvStatus() {
             html += `<div class="text-amber-600 font-semibold">⚠ Auto-Provisioning is on but no hypervisor agent has Client Simulation mode enabled — enable it on the Hypervisors page (host → "Enable Client Simulation mode on this host").</div>`;
         }
         html += `<div><b>Last pass:</b> ${reason}${loopOn ? '' : ' <span class="text-amber-600">(provision loop not running — check the pxmx agent log)</span>'}</div>`;
-        html += `<div><b>Config:</b> dongle_vidpids=${csEscape(String(vidpids))} · image1=${img1} · image2=${img2}</div>`;
         st.innerHTML = html;
     } catch (e) {
         console.error('csRefreshAutoProvStatus: usb-provisioning-status fetch failed (best-effort)', e);
