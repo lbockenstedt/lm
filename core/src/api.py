@@ -576,6 +576,15 @@ def _spoke_payload_or_raise(data):
     return data
 
 
+def _unwrap_netbox(result):
+    """NetBox relay unwrap that ALSO surfaces a spoke-side status:"ERROR" as
+    HTTP 502 instead of returning the error body as HTTP 200. Combines
+    _unwrap_spoke + _spoke_payload_or_raise so NetBox routes follow the same
+    error contract as every other relay group; each route's added
+    `except HTTPException: raise` lets the 502 propagate (not become 500)."""
+    return _spoke_payload_or_raise(_unwrap_spoke(result))
+
+
 def create_app(hub):
     """Build the FastAPI app for the Hub.
 
@@ -5592,10 +5601,12 @@ def create_app(hub):
             payload = dict(slice_query)
             payload["tenant"] = scoping["netbox_tenant_slug"] or None
             result = await hub.request_response(spoke_id, cmd, payload)
-            data = _unwrap_spoke(result)
+            data = _unwrap_netbox(result)
             if subnet_fields:
                 return await _filter_session(request, data, "netbox", subnet_fields)
             return data
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception(route_name + " failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5609,7 +5620,9 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
         try:
             result = await hub.request_response(spoke_id, "NETBOX_HEALTH", {}, timeout=10.0)
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_health failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5623,7 +5636,9 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
         try:
             result = await hub.request_response(spoke_id, "NETBOX_GET_SITES", {})
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_get_sites failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5646,7 +5661,9 @@ def create_app(hub):
             data = await request.json()
             result = await hub.request_response(spoke_id, "NETBOX_ADD_RACK", data)
             _refresh_module_all_tenants(hub, "netbox_racks")
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_add_rack failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5663,7 +5680,9 @@ def create_app(hub):
             data["rack_id"] = rack_id
             result = await hub.request_response(spoke_id, "NETBOX_UPDATE_RACK", data)
             _refresh_module_all_tenants(hub, "netbox_racks")
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_update_rack failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5678,7 +5697,9 @@ def create_app(hub):
         try:
             result = await hub.request_response(spoke_id, "NETBOX_DELETE_RACK", {"rack_id": rack_id})
             _refresh_module_all_tenants(hub, "netbox_racks")
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_delete_rack failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5702,7 +5723,9 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, "NETBOX_ADD_DEVICE", data)
             _refresh_module_all_tenants(hub, "netbox_devices")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_add_device failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5718,7 +5741,7 @@ def create_app(hub):
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
         try:
             result = await hub.request_response(spoke_id, "NETBOX_GET_DEVICE_FORM_OPTIONS", {})
-            out = _unwrap_spoke(result)
+            out = _unwrap_netbox(result)
             sess = _session_user(request)
             if sess and not _is_admin(sess) and isinstance(out, dict):
                 user = sess.get("user", {}) or {}
@@ -5733,6 +5756,8 @@ def create_app(hub):
                 out = dict(out)
                 out["tenants"] = [t for t in (out.get("tenants") or []) if t.get("slug") in allowed]
             return out
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_claim_device_options failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5786,7 +5811,9 @@ def create_app(hub):
         }
         try:
             result = await hub.request_response(spoke_id, "NETBOX_CLAIM_DEVICE", payload)
-            result = _unwrap_spoke(result)
+            result = _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_claim_device failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5807,7 +5834,9 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, "NETBOX_DELETE_DEVICE", {"device_id": device_id})
             _refresh_module_all_tenants(hub, "netbox_devices")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, None)
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_delete_device failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5825,7 +5854,9 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, "NETBOX_UPDATE_DEVICE", data)
             _refresh_module_all_tenants(hub, "netbox_devices")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_update_device failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5849,7 +5880,9 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, "NETBOX_ALLOCATE_PREFIX", data, timeout=30.0)
             _refresh_module_all_tenants(hub, "netbox_prefixes")
             _refresh_module_all_tenants(hub, "netbox_ips")
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_allocate_prefix failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5866,7 +5899,9 @@ def create_app(hub):
             data["prefix_id"] = prefix_id
             result = await hub.request_response(spoke_id, "NETBOX_UPDATE_PREFIX", data)
             _refresh_module_all_tenants(hub, "netbox_prefixes")
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_update_prefix failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5882,7 +5917,9 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, "NETBOX_DELETE_PREFIX", {"prefix_id": prefix_id})
             _refresh_module_all_tenants(hub, "netbox_prefixes")
             _refresh_module_all_tenants(hub, "netbox_ips")
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_delete_prefix failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5918,7 +5955,9 @@ def create_app(hub):
                 payload["exact"] = exact
             result = await hub.request_response(spoke_id, "NETBOX_FIND_AVAILABLE_PREFIXES",
                                                  payload, timeout=30.0)
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_find_available_subnets failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -5955,11 +5994,13 @@ def create_app(hub):
                 "status": body.get("status", "active"),
             }
             result = await hub.request_response(spoke_id, "NETBOX_CLAIM_PREFIX", payload, timeout=30.0)
-            data = _unwrap_spoke(result)
+            data = _unwrap_netbox(result)
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
                 _refresh_module_all_tenants(hub, "netbox_prefixes")
                 _refresh_module_all_tenants(hub, "netbox_ips")
             return data
+        except HTTPException:
+            raise
         except HTTPException:
             raise
         except Exception as e:
@@ -5986,7 +6027,9 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, "NETBOX_ALLOCATE_IP", data, timeout=30.0)
             _refresh_module_all_tenants(hub, "netbox_ips")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_allocate_ip failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -6002,7 +6045,9 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, "NETBOX_RELEASE_IP", {"ip_id": ip_id})
             _refresh_module_all_tenants(hub, "netbox_ips")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, None)
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_release_ip failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -6020,7 +6065,9 @@ def create_app(hub):
             result = await hub.request_response(spoke_id, "NETBOX_UPDATE_IP_ADDR", data)
             _refresh_module_all_tenants(hub, "netbox_ips")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
-            return _unwrap_spoke(result)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("netbox_update_ip failed")
             raise HTTPException(status_code=500, detail=str(e))
