@@ -1111,6 +1111,8 @@ def create_app(hub):
                         logger.error(f"Failed to request version from {spoke_id}: {e}")
 
             return {"status": "ok", "message": f"Spoke {spoke_id} {'approved' if action != 'unapprove' else 'un-approved'}."}
+        except HTTPException:
+            raise  # 4xx must propagate as-is, not be re-wrapped as 500
         except Exception as e:
             logger.exception("approve_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -2133,6 +2135,8 @@ def create_app(hub):
                 return {"status": "ok", "message": "Firewall configuration updated and pushed to spoke.", "pushed": True}
             else:
                 return {"status": "partial_success", "message": "Configuration saved, but associated spoke is not connected.", "pushed": False}
+        except HTTPException:
+            raise  # 4xx/503 must propagate as-is, not be re-wrapped as 500
         except Exception as e:
             logger.exception("update_firewall failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -6138,6 +6142,8 @@ def create_app(hub):
             )
 
             return {"status": "ok", "message": f"Installation of {module_id} triggered for {spoke_id} in background."}
+        except HTTPException:
+            raise  # 4xx/503 must propagate as-is, not be re-wrapped as 500
         except Exception as e:
             logger.exception("install_module failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -6174,6 +6180,8 @@ def create_app(hub):
                 hostname_status = ""
 
             return {"status": "ok", "message": f"Spoke {spoke_id} renamed to {new_name}. {hostname_status}".strip()}
+        except HTTPException:
+            raise  # 4xx must propagate as-is, not be re-wrapped as 500
         except Exception as e:
             logger.exception("rename_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -6302,6 +6310,8 @@ def create_app(hub):
 
             secret = hub.key_manager.generate_first_secret(spoke_id)
             return {"spoke_id": spoke_id, "secret": secret}
+        except HTTPException:
+            raise  # 400 must propagate as-is, not be re-wrapped as 500
         except Exception as e:
             logger.exception("generate_secret failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -6326,6 +6336,8 @@ def create_app(hub):
 
             hub.state.assign_user_to_tenant(user_id, tenant_id)
             return {"status": "ok", "message": f"User {user_id} assigned to tenant {tenant_id}"}
+        except HTTPException:
+            raise  # 400/404/403 must propagate as-is, not be re-wrapped as 500
         except Exception as e:
             logger.exception("assign_user_tenant failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -6343,6 +6355,8 @@ def create_app(hub):
 
             hub.state.remove_user_from_tenant(user_id, tenant_id)
             return {"status": "ok", "message": f"User {user_id} removed from tenant {tenant_id}"}
+        except HTTPException:
+            raise  # 400 must propagate as-is, not be re-wrapped as 500
         except Exception as e:
             logger.exception("remove_user_tenant failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -6422,6 +6436,8 @@ def create_app(hub):
             hub.state.save_state()
 
             return {"status": "ok", "message": f"User {user_id} updated."}
+        except HTTPException:
+            raise  # 400/409 (e.g. "User already exists") must reach the client, not become 500
         except Exception as e:
             logger.exception("update_user failed")
             raise HTTPException(status_code=500, detail=str(e))
