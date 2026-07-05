@@ -894,6 +894,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.spoke_events.pop(spoke_id, None)
         self.spoke_recovery.pop(spoke_id, None)
         self.agent_logs.pop(spoke_id, None)
+        self.heartbeat.last_seen.pop(spoke_id, None)  # else grows unbounded across delete/recreate
 
     def _mark_spoke_disconnected(self, spoke_id: str) -> None:
         """Record a clean-WS-close disconnect in ``spoke_telemetry``.
