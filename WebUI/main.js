@@ -659,6 +659,63 @@ function showToast(message, type = 'info') {
     setTimeout(dismiss, window.TOAST_DURATION_MS || 10000);
 }
 
+// Interactive confirm toast — a non-blocking replacement for window.confirm()
+// on destructive actions (e.g. delete spoke/agent). Renders a toast carrying
+// Cancel + Confirm buttons and returns a Promise<boolean>: true on Confirm,
+// false on Cancel, dismiss, or timeout (a confirm prompt must default to the
+// safe no-op choice if ignored). Stacks under existing toasts like showToast.
+function showConfirmToast(message, opts = {}) {
+    const { confirmLabel = 'Confirm', cancelLabel = 'Cancel', danger = true } = opts;
+    return new Promise((resolve) => {
+        const toast = document.createElement('div');
+        toast.className = 'lm-toast';
+        const stack = document.querySelectorAll('.lm-toast').length;
+        const topOffset = 1.5 + stack * 4.0; // rem
+        toast.style.cssText = `
+            position:fixed;top:${topOffset}rem;right:1.5rem;z-index:9999;
+            display:flex;flex-direction:column;gap:.6rem;
+            background:#263040;color:#fff;
+            padding:.85rem 1rem;border-radius:.5rem;font-size:.875rem;
+            box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;
+            transition:opacity .2s ease;max-width:22rem;`;
+        const text = document.createElement('div');
+        text.style.cssText = 'white-space:pre-line;line-height:1.35;';
+        text.textContent = message;
+        toast.appendChild(text);
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:.5rem;justify-content:flex-end;';
+        let settled = false;
+        let timer;
+        const close = (val) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            toast.style.opacity = '0';
+            toast.addEventListener('transitionend', () => toast.remove());
+            resolve(val);
+        };
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = cancelLabel;
+        cancelBtn.style.cssText = 'background:rgba(255,255,255,.15);border:none;color:#fff;' +
+            'cursor:pointer;font-size:.8rem;font-weight:600;padding:.35rem .8rem;border-radius:.35rem;';
+        cancelBtn.addEventListener('click', () => close(false));
+        const okBtn = document.createElement('button');
+        okBtn.textContent = confirmLabel;
+        okBtn.style.cssText = `background:${danger ? '#e53e3e' : '#01A982'};border:none;color:#fff;` +
+            'cursor:pointer;font-size:.8rem;font-weight:700;padding:.35rem .8rem;border-radius:.35rem;';
+        okBtn.addEventListener('click', () => close(true));
+        row.appendChild(cancelBtn);
+        row.appendChild(okBtn);
+        toast.appendChild(row);
+
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => { toast.style.opacity = '1'; });
+        okBtn.focus();
+        timer = setTimeout(() => close(false), window.CONFIRM_TOAST_DURATION_MS || 12000);
+    });
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // "File a Bug" — footer button. Collects the user's explanation plus a
 // browser-console buffer (window.__lmBugBuffer, installed at top of file),
@@ -4976,7 +5033,7 @@ async function saveCacheConfig() {
 }
 
 async function purgeAllCaches() {
-    if (!confirm('Purge all tenant caches and re-warm from live data?')) return;
+    if (!await showConfirmToast('Purge all tenant caches and re-warm from live data?')) return;
     try {
         const r = await fetch('/admin/cache/purge', { method: 'POST', credentials: 'same-origin' });
         if (!r.ok) throw new Error(await r.text());
@@ -5009,7 +5066,7 @@ async function loadFirewallsList() {
 }
 
 async function deleteFirewallEntry(id) {
-    if (!confirm(`Delete firewall ${id}?`)) return;
+    if (!await showConfirmToast(`Delete firewall ${id}?`)) return;
     try {
         const r = await setupFetch(`/setup/firewalls/${id}`, { method: 'DELETE' });
         if (!r.ok) throw new Error(await r.text());
@@ -5071,7 +5128,7 @@ async function loadNwDevicesList() {
 }
 
 async function deleteNwDeviceEntry(id) {
-    if (!confirm(`Delete network device ${id}?`)) return;
+    if (!await showConfirmToast(`Delete network device ${id}?`)) return;
     try {
         const r = await setupFetch(`/setup/nw-devices/${id}`, { method: 'DELETE' });
         if (!r.ok) throw new Error(await r.text());
@@ -5635,7 +5692,7 @@ async function approveAgent(agentId) {
 }
 
 async function revokeAgent(agentId) {
-    if (!confirm(`Disconnect agent '${agentId}'? It will auto-reconnect and require re-approval.`)) return;
+    if (!await showConfirmToast(`Disconnect agent '${agentId}'? It will auto-reconnect and require re-approval.`)) return;
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/revoke`, {
             method: 'POST', credentials: 'same-origin',
@@ -5930,7 +5987,7 @@ async function saveSpokeAssign(spokeId) {
 
 async function deleteSpoke(spokeId, label) {
     const name = label || spokeId;
-    if (!confirm(`Delete '${name}'?\n\nThis permanently removes the registration and its secret. ` +
+    if (!await showConfirmToast(`Delete '${name}'?\n\nThis permanently removes the registration and its secret. ` +
                  `If it is currently connected it will be disconnected and must fully re-onboard to return. ` +
                  `This cannot be undone.`)) return;
     try {
@@ -5942,7 +5999,7 @@ async function deleteSpoke(spokeId, label) {
 }
 
 async function deleteAgent(agentId) {
-    if (!confirm(`Delete agent '${agentId}'?\n\nThis disconnects it if connected and removes its display-name ` +
+    if (!await showConfirmToast(`Delete agent '${agentId}'?\n\nThis disconnects it if connected and removes its display-name ` +
                  `override. It will need re-approval to reconnect. This cannot be undone.`)) return;
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}`, {
@@ -6093,7 +6150,7 @@ async function unapproveSpoke(spokeId) {
 }
 
 async function resetSpokeSecret(spokeId) {
-    if (!confirm(`Are you sure you want to reset the secret for ${spokeId}? This will wipe all stored keys and force the spoke to re-onboard using a new first-secret.`)) {
+    if (!await showConfirmToast(`Are you sure you want to reset the secret for ${spokeId}? This will wipe all stored keys and force the spoke to re-onboard using a new first-secret.`)) {
         return;
     }
     try {
@@ -6175,7 +6232,7 @@ async function loadUsers() {
 }
 
 async function deleteUser(userId) {
-    if (!confirm(`Are you sure you want to delete user ${userId}?`)) return;
+    if (!await showConfirmToast(`Are you sure you want to delete user ${userId}?`)) return;
     try {
         const response = await setupFetch(`/setup/users/${userId}`, { method: 'DELETE' });
         if (response.ok) {
@@ -6226,7 +6283,7 @@ async function loadActiveSessions() {
 }
 
 async function revokeSession(tokenHint) {
-    if (!confirm(`Revoke session ${tokenHint}?`)) return;
+    if (!await showConfirmToast(`Revoke session ${tokenHint}?`)) return;
     try {
         const r = await setupFetch(`/admin/sessions/${encodeURIComponent(tokenHint)}`, { method: 'DELETE' });
         const d = await r.json();
@@ -6787,7 +6844,7 @@ async function loadRole(spokeId) {
 
 async function unloadRole(spokeId, role) {
     const roleLabel = AGENT_ROLES[role]?.name || role;
-    if (!confirm(`Unload role "${roleLabel}" from ${spokeId}? Its sub-spoke will disconnect.`)) return;
+    if (!await showConfirmToast(`Unload role "${roleLabel}" from ${spokeId}? Its sub-spoke will disconnect.`)) return;
     // Only reopen the Load Role modal if the unload was triggered from inside it
     // (not from the per-role Unload action on a Spokes row).
     const modalOpen = !!document.getElementById('load-role-modal');
@@ -8965,7 +9022,7 @@ async function submitNetboxAddDevice() {
 }
 
 async function deleteNetboxDevice(deviceId) {
-    if (!confirm('Delete this device from NetBox?')) return;
+    if (!await showConfirmToast('Delete this device from NetBox?')) return;
     try {
         const r = await fetch(`/api/netbox/devices/${deviceId}`, { method: 'DELETE' });
         const d = await r.json();
@@ -9028,7 +9085,7 @@ async function submitNetboxRack() {
 }
 
 async function deleteNetboxRack(rackId) {
-    if (!confirm('Delete this rack from NetBox?')) return;
+    if (!await showConfirmToast('Delete this rack from NetBox?')) return;
     try {
         const r = await fetch(`/api/netbox/racks/${rackId}`, { method: 'DELETE' });
         const d = await r.json();
@@ -9140,7 +9197,7 @@ async function submitNetboxAllocatePrefix() {
 }
 
 async function deleteNetboxPrefix(prefixId) {
-    if (!confirm('Delete this prefix from NetBox? Any IP addresses under it may also be removed.')) return;
+    if (!await showConfirmToast('Delete this prefix from NetBox? Any IP addresses under it may also be removed.')) return;
     try {
         const r = await fetch(`/api/netbox/prefixes/${prefixId}`, { method: 'DELETE' });
         const d = await r.json();
@@ -9350,7 +9407,7 @@ async function releaseSubnetToPool(prefixId, prefixStr) {
     const msg = ipCount > 0
         ? `Return ${prefixStr} to the pool? This removes the subnet and its ${ipCount} IP address(es) from NetBox.`
         : `Return ${prefixStr} to the pool? This removes the subnet from NetBox.`;
-    if (!confirm(msg)) return;
+    if (!await showConfirmToast(msg)) return;
     try {
         const r = await fetch(`/api/netbox/prefixes/${prefixId}`, { method: 'DELETE' });
         const d = await r.json();
@@ -9427,7 +9484,7 @@ async function submitNetboxAllocateIP() {
 }
 
 async function releaseNetboxIP(ipId) {
-    if (!confirm('Release this IP address? This will delete it from NetBox.')) return;
+    if (!await showConfirmToast('Release this IP address? This will delete it from NetBox.')) return;
     try {
         const r = await fetch(`/api/netbox/ips/${ipId}`, { method: 'DELETE' });
         const d = await r.json();
@@ -9871,7 +9928,7 @@ async function saveDnsRecord() {
 }
 
 async function deleteDnsRecord(name, rtype) {
-    if (!confirm(`Delete DNS record ${name} (${rtype})?`)) return;
+    if (!await showConfirmToast(`Delete DNS record ${name} (${rtype})?`)) return;
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/record', {
             method: 'DELETE',
@@ -10073,7 +10130,7 @@ async function saveDhcpReservation() {
 }
 
 async function deleteDhcpReservation(ip) {
-    if (!confirm(`Delete reservation for ${ip}?`)) return;
+    if (!await showConfirmToast(`Delete reservation for ${ip}?`)) return;
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation', {
             method: 'DELETE',
@@ -10256,7 +10313,7 @@ async function loadCPPMData(subMenu) {
 }
 
 async function deleteOpnsenseItem(fwId, subMenu, itemId) {
-    if (!confirm(`Delete this ${subMenu.replace(/s$/, '')}?`)) return;
+    if (!await showConfirmToast(`Delete this ${subMenu.replace(/s$/, '')}?`)) return;
     let url = '';
     if (subMenu === 'Firewall Rules') url = `/api/firewall/${fwId}/rules/${encodeURIComponent(itemId)}`;
     else if (subMenu === 'NAT Policies') url = `/api/firewall/${fwId}/nat/${encodeURIComponent(itemId)}`;
@@ -10704,7 +10761,7 @@ async function saveLDAPEntity(subMenu) {
 }
 
 async function deleteLDAPEntity(dn) {
-    if (!confirm(`Are you sure you want to delete ${dn}?`)) return;
+    if (!await showConfirmToast(`Are you sure you want to delete ${dn}?`)) return;
     try {
         const response = await fetch('/api/ldap/entity', {
             method: 'DELETE',
@@ -11530,7 +11587,7 @@ async function saveInstance(productKey) {
 async function deleteInstance(productKey, id) {
     const p = INSTANCE_PRODUCTS[productKey];
     if (!p) return;
-    if (!confirm(`Delete this ${p.title.toLowerCase()}?`)) return;
+    if (!await showConfirmToast(`Delete this ${p.title.toLowerCase()}?`)) return;
     try {
         const r = await setupFetch(`${p.endpoint}/${id}`, { method: 'DELETE' });
         if (!r.ok) throw new Error(await r.text());
@@ -11751,7 +11808,7 @@ async function saveDevice() {
 async function deleteDevice(typeKey, id) {
     const t = DEVICE_TYPES[typeKey];
     if (!t) return;
-    if (!confirm(`Delete this ${t.title.toLowerCase()} (${id})?`)) return;
+    if (!await showConfirmToast(`Delete this ${t.title.toLowerCase()} (${id})?`)) return;
     try {
         const r = await setupFetch(`${t.endpoint}/${encodeURIComponent(id)}`, { method: 'DELETE' });
         if (!r.ok) throw new Error(await r.text().catch(() => r.status));
