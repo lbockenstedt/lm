@@ -2778,7 +2778,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         ~10-minute heartbeat so a recent snapshot is always present. Event-driven
         to avoid flooding the 500-line hub log buffer.
         """
-        expected = ["pxmx-spoke-1", "netbox-spoke-1", "opn-spoke-1", "cppm-spoke-1", "cs-spoke-1"]
+        # "expected" spokes are computed per-cycle from the APPROVED set (was a
+        # static dedicated-id list — permanent false "missing" alerts in the
+        # agent+role model, where ids are dynamic: {base} + {base}-{role}).
         await asyncio.sleep(20)  # let spokes connect first
         last: Dict[str, Any] = {}
         last_usb: List[str] = []
@@ -2790,6 +2792,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 mtypes = dict(self.spoke_module_types)
                 hyp_sid = self.get_spoke_by_type("hypervisor")
                 pxmx_sid = next((s for s in conns if "pxmx" in s), None)
+                expected = sorted(s for s, ok in self.approved_modules.items() if ok)
                 snap: Dict[str, Any] = {
                     "conns": conns,
                     "hyp": hyp_sid,
@@ -2904,7 +2907,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
     }
 
     def _spoke_unit(self, spoke_id: str) -> str:
-        """spoke_id (e.g. 'cs-spoke-1') -> systemd unit (e.g. 'lm-cs'), or ''."""
+        """spoke_id -> systemd unit, or '' if it has no own unit.
+
+        Agent-spoke model: a generic agent (module_type 'agent') runs a single
+        ``lm-agent`` unit that hosts all its role sub-spokes IN-PROCESS, so the
+        agent maps to lm-agent and a role sub-spoke ``{base}-{role}`` has NO own
+        unit — it doesn't match a dedicated prefix, returns '', and the parent
+        agent's lm-agent recovery covers it. Legacy dedicated spokes still map
+        by id prefix to lm-<module> (e.g. 'cs-spoke-1' -> 'lm-cs'). module_type
+        is read live, then from persisted metadata so an offline agent still
+        resolves to lm-agent.
+        """
+        mt = self.spoke_module_types.get(spoke_id) or \
+            (self.state.system_state.get("module_metadata", {}).get(spoke_id, {}) or {}).get("module_type")
+        if mt == "agent":
+            return "lm-agent"
         for prefix, unit in self._SPOKE_UNIT_PREFIX.items():
             if spoke_id.startswith(prefix):
                 return unit

@@ -1002,9 +1002,19 @@ def create_app(hub):
         }
 
         def _module_type_for(sid: str):
+            # Live registration wins; then the module_type we PERSISTED at
+            # registration (module_metadata[sid].module_type, written in main.py
+            # on connect) so an OFFLINE spoke/agent keeps its true type; then a
+            # spoke_id-prefix fallback for legacy dedicated ids. The persisted
+            # read is what lets a disconnected generic agent (module_type
+            # "agent") or a role sub-spoke "{base}-{role}" keep its category
+            # instead of falling through to "—" or a wrong prefix guess.
             mt = hub.spoke_module_types.get(sid)
             if mt:
                 return mt
+            meta = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
+            if meta.get("module_type"):
+                return meta["module_type"]
             for prefix, fallback in _PREFIX_MODULE.items():
                 if sid == prefix or sid.startswith(prefix + "-"):
                     return fallback
