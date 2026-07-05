@@ -7184,35 +7184,32 @@ def create_app(hub):
     async def dns_sync_from_netbox():
         """
         Fetch all IPs with a dns_name from NetBox and sync them to Unbound.
-        Requires both NetBox spoke and DNS spoke to be connected.
+        Requires both NetBox spoke and DNS spoke to be connected. Delegates to
+        the shared DnsDhcpSyncMixin helper so the manual button and the periodic
+        auto-sync loop build the identical payload.
         """
-        import asyncio as _asyncio
         hub = app.state.hub
-        nb_spoke  = get_netbox_spoke(hub)
-        dns_spoke = hub.get_spoke_by_type("dns")
-        if not nb_spoke:
-            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
-        if not dns_spoke:
-            raise HTTPException(status_code=503, detail="DNS spoke not connected")
-        try:
-            ips_raw = await hub.request_response(nb_spoke, "NETBOX_GET_IPS", {})
-            ips_data = ips_raw.get("payload", {}).get("data", ips_raw) if isinstance(ips_raw, dict) else {}
-            ip_list = ips_data.get("ip_addresses", [])
-            records = []
-            for entry in ip_list:
-                dns_name = entry.get("dns_name") or ""
-                address  = (entry.get("address") or "").split("/")[0]
-                if dns_name and address:
-                    records.append({"name": dns_name, "type": "A", "value": address, "ttl": 300})
-            result = await hub.request_response(dns_spoke, "DNS_SYNC", {"records": records})
-            return {
-                "status": "ok",
-                "records_synced": len(records),
-                "spoke_result": result.get("payload", {}).get("data", result) if isinstance(result, dict) else result,
-            }
-        except Exception as e:
-            logger.exception("dns_sync_from_netbox failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        result = await hub.sync_dns_from_netbox()
+        if result.get("status") == "skipped":
+            raise HTTPException(status_code=503, detail=result.get("reason", "spoke not connected"))
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("error", "sync failed"))
+        return result
+
+    @app.get("/api/dns-dhcp/sync-status")
+    async def dns_dhcp_sync_status():
+        """Last-run status + config for the NetBox→Unbound/Kea auto-sync loop
+        (fuels the DNS/DHCP status tiles). Read-only, authed (under /api/)."""
+        hub = app.state.hub
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        cfg = gc.get("dns_dhcp_sync", {}) or {}
+        return {
+            "status": hub.dns_dhcp_sync_status,
+            "config": {
+                "enabled":  bool(cfg.get("enabled", True)),
+                "interval": int(cfg.get("interval", 300) or 300),
+            },
+        }
 
     # ─── Certificate Management (le) API ──────────────────────────────────────
     # Relays LE_* commands to the certificates spoke via _relay_spoke (same
@@ -7397,62 +7394,16 @@ def create_app(hub):
     async def dhcp_sync_from_netbox():
         """
         Fetch NetBox prefixes and IP-to-MAC reservations, sync to Kea DHCP4.
+        Delegates to the shared DnsDhcpSyncMixin helper so the manual button and
+        the periodic auto-sync loop build the identical payload.
         """
         hub = app.state.hub
-        nb_spoke   = get_netbox_spoke(hub)
-        dhcp_spoke = hub.get_spoke_by_type("dhcp")
-        if not nb_spoke:
-            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
-        if not dhcp_spoke:
-            raise HTTPException(status_code=503, detail="DHCP spoke not connected")
-        try:
-            import asyncio as _asyncio
-            prefixes_raw, ips_raw = await _asyncio.gather(
-                hub.request_response(nb_spoke, "NETBOX_GET_PREFIXES", {}),
-                hub.request_response(nb_spoke, "NETBOX_GET_IPS", {}),
-            )
-            pfx_data = prefixes_raw.get("payload", {}).get("data", prefixes_raw) if isinstance(prefixes_raw, dict) else {}
-            ips_data  = ips_raw.get("payload", {}).get("data", ips_raw) if isinstance(ips_raw, dict) else {}
-
-            subnets = []
-            for p in pfx_data.get("prefixes", []):
-                prefix_str = p.get("prefix", "")
-                if not prefix_str:
-                    continue
-                subnets.append({
-                    "subnet":      prefix_str,
-                    "description": p.get("description", ""),
-                    "gateway":     p.get("custom_fields", {}).get("gateway", ""),
-                    "dns_servers": p.get("custom_fields", {}).get("dns_servers", "").split(",")
-                                   if p.get("custom_fields", {}).get("dns_servers") else [],
-                    "pools":       [],
-                })
-
-            reservations = []
-            for ip in ips_data.get("ip_addresses", []):
-                mac = (ip.get("custom_fields") or {}).get("mac_address", "")
-                address = (ip.get("address") or "").split("/")[0]
-                if mac and address:
-                    reservations.append({
-                        "ip":       address,
-                        "mac":      mac,
-                        "hostname": ip.get("dns_name", ""),
-                        "subnet":   "",
-                    })
-
-            result = await hub.request_response(dhcp_spoke, "DHCP_SYNC", {
-                "subnets":      subnets,
-                "reservations": reservations,
-            })
-            return {
-                "status": "ok",
-                "subnets_synced":       len(subnets),
-                "reservations_synced":  len(reservations),
-                "spoke_result": result.get("payload", {}).get("data", result) if isinstance(result, dict) else result,
-            }
-        except Exception as e:
-            logger.exception("dhcp_sync_from_netbox failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        result = await hub.sync_dhcp_from_netbox()
+        if result.get("status") == "skipped":
+            raise HTTPException(status_code=503, detail=result.get("reason", "spoke not connected"))
+        if result.get("status") == "error":
+            raise HTTPException(status_code=500, detail=result.get("error", "sync failed"))
+        return result
 
     # ── Cache management (/admin/cache/*, /setup/cache-config) ───────────────
 

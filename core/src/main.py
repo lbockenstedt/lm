@@ -79,6 +79,7 @@ from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
 from nw_discovery_sync import NwDiscoverySyncMixin
 from nw_cache import NwCacheMixin
+from dns_dhcp_sync import DnsDhcpSyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 from staleness_sweep import StalenessSweepMixin
 from spoke_alert_sync import SpokeAlertMixin
@@ -355,7 +356,7 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     return props
 
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin, RepoSyncMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin, RepoSyncMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -3866,6 +3867,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # forward endpoint-sync loop above. See run_realtime_nac_sync_loop
         # (RealtimeIpamNacSyncMixin). Also fired on-demand from the WebUI.
         realtime_nac_sync_task = asyncio.create_task(self.run_realtime_nac_sync_loop())
+        # NetBox → Unbound/Kea auto-sync: every ~5 min (global_config.dns_dhcp_sync
+        # .interval) reconcile the DNS (Unbound) and DHCP (Kea) spokes to NetBox —
+        # NetBox is the IPAM source of truth, so a reservation/DNS name added there
+        # lands in Kea/Unbound without a manual "Sync now". Only-add-missing +
+        # skips quietly when NetBox/DNS/DHCP spokes are offline. Shares its
+        # extraction helpers with POST /api/dns/sync and /api/dhcp/sync so the
+        # loop and the button can't diverge. See run_dns_dhcp_sync_loop
+        # (DnsDhcpSyncMixin).
+        dns_dhcp_sync_task = asyncio.create_task(self.run_dns_dhcp_sync_loop())
         # NetBox staleness sweep (cluster-wide): ages out sync-owned devices/VMs
         # not seen for stale_days → offline, and offline + decommissioned_at older
         # than delete_days → deleted (IPs free automatically). The lifecycle
