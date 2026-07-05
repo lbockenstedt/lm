@@ -977,8 +977,8 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'VM Server', 'API Server', 'Config', 'Setup', 'Spoke Management'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Records'],
-    dhcp: ['Subnets', 'Leases', 'Reservations'],
+    dns: ['Records', 'Statistics', 'Forwarders'],
+    dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
     nw: ['Devices', 'MAC Table', 'ARP', 'Interfaces'],
 };
 
@@ -2468,7 +2468,7 @@ function initView(viewId, subView) {
             loadDNSData(subView || 'Records');
             break;
         case 'dhcp':
-            loadDHCPData(subView || 'Subnets');
+            loadDHCPData(subView || 'Overview');
             break;
         case 'nw':
             loadNwData(subView || 'Devices');
@@ -9457,7 +9457,56 @@ async function _spokeFetch(url, opts) {
 
 // Amber error banner used by the DNS/DHCP list views on a spoke failure.
 function _spokeErrorBanner(detail, fallback) {
-    return `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${detail || fallback}</p>`;
+    return `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${escapeHtml(detail || fallback)}</p>`;
+}
+
+// ── Shared stat-tile + utilization-bar helpers for the DNS/DHCP analytics
+// panels (Phase 3). Kept local to the resolver views; mirror the compact
+// tile look used elsewhere in the app.
+function _ddTile(label, value, sub, valueColor) {
+    return `<div class="bg-white border border-slate-200 rounded-lg p-4">
+        <div class="text-[11px] uppercase tracking-wide text-slate-400 font-semibold">${escapeHtml(label)}</div>
+        <div class="mt-1 text-2xl font-bold ${valueColor || 'text-slate-800'}">${escapeHtml(String(value))}</div>
+        ${sub ? `<div class="text-xs text-slate-400 mt-0.5">${escapeHtml(String(sub))}</div>` : ''}
+    </div>`;
+}
+
+// A horizontal utilization/percentage bar, green→amber→red by threshold.
+function _ddBar(pct, label) {
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    const color = p >= 90 ? 'bg-red-500' : p >= 70 ? 'bg-amber-500' : 'bg-emerald-500';
+    return `<div class="flex items-center gap-2">
+        <div class="flex-1 bg-slate-100 rounded-full h-2 overflow-hidden"><div class="${color} h-2 rounded-full" style="width:${p}%"></div></div>
+        <span class="text-xs font-mono text-slate-500 w-12 text-right">${p}%</span>
+        ${label ? `<span class="text-xs text-slate-400">${escapeHtml(label)}</span>` : ''}
+    </div>`;
+}
+
+// Humanize an uptime in seconds → "3d 4h 12m".
+function _ddUptime(sec) {
+    sec = Number(sec) || 0;
+    const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+    return (d ? `${d}d ` : '') + (h || d ? `${h}h ` : '') + `${m}m`;
+}
+
+// Best-effort "last NetBox → Unbound/Kea auto-sync" line for the analytics
+// panels; silent when the status endpoint is unreachable.
+async function _ddSyncStatusLine(side) {
+    try {
+        const { ok, data } = await _spokeFetch('/api/dns-dhcp/sync-status');
+        if (!ok || !data) return '';
+        const s = (data.status || {})[side] || {};
+        const cfg = data.config || {};
+        if (!s.last_run) {
+            return `<div class="text-xs text-slate-400 mt-2">NetBox auto-sync: ${cfg.enabled === false ? 'disabled' : 'enabled'} (every ${cfg.interval || 300}s) — no run yet</div>`;
+        }
+        const when = new Date(s.last_run * 1000).toLocaleString();
+        const badge = s.status === 'ok' ? 'text-emerald-600' : s.status === 'error' ? 'text-red-500' : 'text-amber-500';
+        const detail = side === 'dns'
+            ? (s.records_synced != null ? `${s.records_synced} records` : (s.reason || s.error || ''))
+            : (s.subnets_synced != null ? `${s.subnets_synced} subnets / ${s.reservations_synced} reservations` : (s.reason || s.error || ''));
+        return `<div class="text-xs text-slate-400 mt-2">NetBox auto-sync: <span class="${badge} font-medium">${escapeHtml(s.status)}</span> · ${escapeHtml(detail)} · <span title="${escapeHtml(when)}">${escapeHtml(when)}</span></div>`;
+    } catch (_e) { return ''; }
 }
 
 async function loadDNSData(subMenu) {
@@ -9465,7 +9514,8 @@ async function loadDNSData(subMenu) {
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
     const addBtn = document.getElementById('dns-add-btn');
-    if (addBtn) addBtn.classList.remove('hidden');
+    // Add-record only applies to the Records tab; Statistics/Forwarders are read-only.
+    if (addBtn) addBtn.classList.toggle('hidden', !(subMenu === 'Records' || !subMenu));
 
     const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
     const tw = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
@@ -9473,6 +9523,62 @@ async function loadDNSData(subMenu) {
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
     try {
+        // ── Statistics: Unbound query telemetry (OPNsense-grade) ──────────
+        if (subMenu === 'Statistics') {
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats');
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
+            if (d.status && d.status !== 'SUCCESS') {
+                container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control stats unavailable'); return;
+            }
+            const g = d.global || {};
+            const qt = d.query_types || {};
+            const syncLine = await _ddSyncStatusLine('dns');
+            const tiles = [
+                _ddTile('Total Queries', (g.total_queries || 0).toLocaleString()),
+                _ddTile('Cache Hit Ratio', `${g.cache_hit_ratio || 0}%`, `${(g.cache_hits || 0).toLocaleString()} hits / ${(g.cache_misses || 0).toLocaleString()} miss`,
+                        (g.cache_hit_ratio || 0) >= 70 ? 'text-emerald-600' : 'text-amber-600'),
+                _ddTile('Recursive Replies', (g.num_recursive || 0).toLocaleString(), `avg ${g.recursion_time_avg || 0}s`),
+                _ddTile('Uptime', _ddUptime(g.uptime_seconds), `${(g.prefetch || 0).toLocaleString()} prefetched`),
+            ].join('');
+            // Per-type query breakdown as proportion-of-total bars.
+            const typeTotal = Object.values(qt).reduce((a, b) => a + b, 0) || 1;
+            const typeRows = Object.entries(qt).sort((a, b) => b[1] - a[1]).map(([t, c]) => `
+                <div class="flex items-center gap-3 py-1">
+                    <span class="w-16 text-xs font-mono font-medium text-slate-600">${escapeHtml(t)}</span>
+                    <div class="flex-1">${_ddBar(Math.round(c / typeTotal * 100))}</div>
+                    <span class="w-20 text-right text-xs font-mono text-slate-500">${c.toLocaleString()}</span>
+                </div>`).join('');
+            container.innerHTML = `
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
+                <div class="bg-white border border-slate-200 rounded-lg p-4">
+                    <div class="text-sm font-semibold text-slate-700 mb-2">Queries by Type</div>
+                    ${typeRows || '<p class="text-slate-400 italic text-sm">No query-type data yet.</p>'}
+                </div>
+                ${syncLine}`;
+            return;
+        }
+
+        // ── Forwarders: configured upstream resolvers ─────────────────────
+        if (subMenu === 'Forwarders') {
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/forwarders');
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
+            if (d.status && d.status !== 'SUCCESS') {
+                container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control forwarders unavailable'); return;
+            }
+            const fwds = d.forwarders || [];
+            const cols = ['Zone', 'Class', 'Upstream Servers'];
+            const rows = fwds.map(f => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(f.zone || '.')}</td>
+                <td class="px-4 py-2 text-xs">${escapeHtml(f.class || 'IN')}</td>
+                <td class="px-4 py-2 font-mono text-xs">${(f.upstreams || []).map(u => escapeHtml(u)).join(', ') || '—'}</td>
+            </tr>`).join('');
+            container.innerHTML = fwds.length === 0
+                ? '<p class="p-4 text-slate-400 italic text-sm">No upstream forwarders configured (Unbound is resolving recursively from root).</p>'
+                : tw(th(cols) + `<tbody>${rows}</tbody>`);
+            return;
+        }
+
+        // ── Records (default) ─────────────────────────────────────────────
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/records');
         if (!ok) {
             container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>`;
@@ -9792,6 +9898,41 @@ async function loadDHCPData(subMenu) {
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
     try {
+        // ── Overview: Kea pool utilization + packet counters (OPNsense-grade) ─
+        if (subMenu === 'Overview') {
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/stats');
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
+            if (d.status && d.status !== 'SUCCESS') {
+                container.innerHTML = _spokeErrorBanner(d.message, 'Kea statistics unavailable'); return;
+            }
+            const g = d.global || {};
+            const subnets = d.subnets || [];
+            const syncLine = await _ddSyncStatusLine('dhcp');
+            const tiles = [
+                _ddTile('Pool Utilization', `${g.utilization_pct || 0}%`, `${(g.assigned_addresses || 0).toLocaleString()} / ${(g.total_addresses || 0).toLocaleString()} addresses`,
+                        (g.utilization_pct || 0) >= 90 ? 'text-red-600' : (g.utilization_pct || 0) >= 70 ? 'text-amber-600' : 'text-emerald-600'),
+                _ddTile('Assigned Leases', (g.assigned_addresses || 0).toLocaleString(), `${(g.declined_addresses || 0).toLocaleString()} declined`),
+                _ddTile('DISCOVER / REQUEST', `${(g.pkt4_discover || 0).toLocaleString()} / ${(g.pkt4_request || 0).toLocaleString()}`, `${(g.pkt4_received || 0).toLocaleString()} received`),
+                _ddTile('OFFER / ACK / NAK', `${(g.pkt4_offer_sent || 0).toLocaleString()} / ${(g.pkt4_ack_sent || 0).toLocaleString()} / ${(g.pkt4_nak_sent || 0).toLocaleString()}`),
+            ].join('');
+            const subnetRows = subnets.map(s => `
+                <div class="py-2 border-b border-slate-100 last:border-0">
+                    <div class="flex items-center justify-between mb-1">
+                        <span class="font-mono text-sm font-medium text-slate-700">${escapeHtml(s.subnet || `subnet ${s.subnet_id}`)}</span>
+                        <span class="text-xs text-slate-500">${(s.assigned_addresses || 0).toLocaleString()} / ${(s.total_addresses || 0).toLocaleString()}${s.declined_addresses ? ` · ${s.declined_addresses} declined` : ''}</span>
+                    </div>
+                    ${_ddBar(s.utilization_pct)}
+                </div>`).join('');
+            container.innerHTML = `
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
+                <div class="bg-white border border-slate-200 rounded-lg p-4">
+                    <div class="text-sm font-semibold text-slate-700 mb-2">Scope Utilization</div>
+                    ${subnetRows || '<p class="text-slate-400 italic text-sm">No subnets configured.</p>'}
+                </div>
+                ${syncLine}`;
+            return;
+        }
+
         if (subMenu === 'Subnets') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets');
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
@@ -9800,9 +9941,9 @@ async function loadDHCPData(subMenu) {
             const rows = subnets.map(s => {
                 const pools = (s.pools || []).map(p => p.pool || p).join(', ');
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                    <td class="px-4 py-2 text-center text-xs">${s.id}</td>
-                    <td class="px-4 py-2 font-mono font-medium">${s.subnet}</td>
-                    <td class="px-4 py-2 font-mono text-xs">${pools || '—'}</td>
+                    <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(s.id))}</td>
+                    <td class="px-4 py-2 font-mono font-medium">${escapeHtml(s.subnet)}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(pools || '—')}</td>
                 </tr>`;
             }).join('');
             container.innerHTML = subnets.length === 0
@@ -9832,12 +9973,12 @@ async function loadDHCPData(subMenu) {
             window._dhcpReservations = res;
             const cols = ['IP Address', 'MAC', 'Hostname', 'Subnet', ''];
             const rows = res.map(r => {
-                const eIp = String(r.ip).replace(/'/g, "\\'");
+                const eIp = escJsAttr(r.ip);
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                    <td class="px-4 py-2 font-mono font-medium">${r.ip}</td>
-                    <td class="px-4 py-2 font-mono text-xs">${r.mac}</td>
-                    <td class="px-4 py-2 text-xs">${r.hostname || '—'}</td>
-                    <td class="px-4 py-2 font-mono text-xs">${r.subnet || '—'}</td>
+                    <td class="px-4 py-2 font-mono font-medium">${escapeHtml(r.ip)}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.mac)}</td>
+                    <td class="px-4 py-2 text-xs">${escapeHtml(r.hostname || '—')}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.subnet || '—')}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
                         <button onclick="editDhcpReservation('${eIp}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
                         <button onclick="deleteDhcpReservation('${eIp}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
@@ -9861,7 +10002,7 @@ async function _loadDhcpSubnetOptions(selId) {
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets');
         const subnets = ok ? (d.subnets || []) : [];
         sel.innerHTML = subnets.length
-            ? subnets.map(s => `<option value="${s.id}">${s.id} — ${s.subnet}</option>`).join('')
+            ? subnets.map(s => `<option value="${escapeHtml(String(s.id))}">${escapeHtml(String(s.id))} — ${escapeHtml(s.subnet)}</option>`).join('')
             : `<option value="">${ok ? 'No subnets configured' : (detail || 'Could not load subnets')}</option>`;
     } catch (err) {
         console.error('_loadDhcpSubnetOptions: could not load subnets', err);
