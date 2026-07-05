@@ -77,6 +77,37 @@ Two consequences every module must respect:
 6. **Keep the local file log.** Relay never replaces the file — the file is the
    fallback when the hub link itself is down.
 
+## Normalization — consistent format & levels across every module
+
+Every module's logs must read the same way and use levels consistently, so the
+hub views and the BugFixer see one coherent stream, not a mix of chatty and
+terse dialects.
+
+- **Use the shared `configure_logging()`** (`core/src/logging_setup.py`) at every
+  entrypoint — never a bare `logging.basicConfig(...)`. It sets the standard
+  format `%(asctime)s - %(name)s - %(levelname)s - %(message)s`, honors the
+  `LOG_LEVEL` env var, and keeps line-buffering consistent.
+- **Default level is INFO. DEBUG is OFF by default.** Debug is a *troubleshooting*
+  mode, toggled at runtime by the WebUI "Enable Debug" button (the hub broadcasts
+  `SET_LOG_LEVEL`; every module implements it via `set_log_level`). Never ship a
+  module defaulting to DEBUG, and never leave it on.
+- **Level discipline** — put each line at the right level so INFO stays scannable:
+  - **DEBUG** — chatty/high-frequency/routine detail: every received command, each
+    poll/heartbeat tick, per-iteration loop state, raw payloads, per-item progress.
+    If it repeats every few seconds in steady state, it's DEBUG.
+  - **INFO** — meaningful state changes and one-off events: connect/auth, config
+    applied, a VM provisioned/deleted, a role loaded, startup/shutdown, a gate
+    that changed outcome. Roughly: things an operator would want in the timeline.
+  - **WARNING** — recoverable problems / degraded conditions (retry, fallback,
+    missing-but-handled config).
+  - **ERROR** — a failed operation or an uncaught exception (always relayed).
+- **One event, one line** — don't log the same event at multiple levels or from
+  multiple layers; log it once, where it's most meaningful.
+
+Chatty INFO that repeats in steady state (e.g. "Command: GET_AGENTS" every poll,
+"Telemetry: N VMs" every tick) is the main offender — demote it to DEBUG so the
+default INFO stream and the hub Error/Module logs stay readable.
+
 ## Reference implementation
 
 `pxmx/agent/src/agent.py`:
@@ -94,3 +125,6 @@ Two consequences every module must respect:
 - [ ] `sys.excepthook` + asyncio exception handler route tracebacks to the hub.
 - [ ] Local file log retained.
 - [ ] Verified in **Setup → Agent/Spoke Logs** (not just the box CLI).
+- [ ] Uses shared `configure_logging()` (not `basicConfig`); default INFO, DEBUG off.
+- [ ] `SET_LOG_LEVEL` / `set_log_level` wired for the runtime "Enable Debug" knob.
+- [ ] Chatty/per-poll/per-tick lines are DEBUG; INFO reserved for state changes.
