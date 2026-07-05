@@ -839,6 +839,43 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
     def unregister_console_session(self, session_id: str) -> None:
         self.console_sessions.pop(session_id, None)
 
+    async def _handle_console_probe(self, spoke_id: str, data: Dict[str, Any]) -> None:
+        """A console spoke auto-identified a device — match/create a NetBox device
+        from the harvested identity (best-effort, event-driven). Uses the port's
+        EFFECTIVE tenant (per-port override in the payload, else the console
+        agent's tenant). replace=False so we upsert one device, not overwrite the
+        tenant's discovered set. Serial is surfaced in the port UI; NetBox gets
+        ip/mac/hostname (the sync_devices device shape)."""
+        identity = data.get("identity") or {}
+        ip = str(identity.get("ip") or "").strip()
+        mac = str(identity.get("mac") or "").strip()
+        hostname = str(identity.get("hostname") or identity.get("serial") or data.get("port_id") or "").strip()
+        if not (ip or mac or hostname):
+            return
+        netbox = self.get_spoke_by_type("ipam")
+        if not netbox:
+            logger.debug("console probe from %s: no NetBox spoke; device not synced", spoke_id)
+            return
+        tenant_id = str(data.get("tenant_id") or "").strip() or (self.state.get_spoke_tenant(spoke_id) or "")
+        tenant_cfg = self.state.get_tenant(tenant_id) or {}
+        slug = str(tenant_cfg.get("netbox_tenant_slug") or "").strip()
+        if not tenant_id or not slug:
+            logger.info("console probe from %s: tenant/netbox_tenant_slug unset; "
+                        "device not synced to NetBox", spoke_id)
+            return
+        payload = {
+            "tenant_id": tenant_id, "tenant_slug": slug,
+            "tenant_name": tenant_cfg.get("name") or tenant_id,
+            "source": "Console", "replace": False,
+            "devices": [{"ip": ip, "mac": mac, "hostname": hostname}], "defaults": {},
+        }
+        try:
+            await self.request_response(netbox, "NETBOX_SYNC_DEVICES", payload, timeout=60.0)
+            logger.info("console probe: synced %s to NetBox (tenant %s)",
+                        hostname or mac or ip, tenant_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("console probe NetBox sync failed: %s", e)
+
     def _evict_spoke(self, spoke_id: str) -> None:
         """Drop ALL per-spoke in-memory state for ``spoke_id``.
 
@@ -2307,6 +2344,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                             await _csess["queue"].put(("error", str(_cdata.get("error", "console error"))[:300]))
                         elif _ctype == "CONSOLE_CLOSED":
                             await _csess["queue"].put(("disconnect",))
+                    continue
+
+                # --- Console auto-identify result → NetBox (event-driven) ---
+                # A console spoke fingerprinted a device; match/create a NetBox
+                # device from the harvested identity. Fire-and-forget so the
+                # dispatch loop doesn't block on a NetBox round-trip.
+                if payload.get("type") == "CONSOLE_PROBE_RESULT":
+                    asyncio.create_task(self._handle_console_probe(spoke_id, payload.get("data", {}) or {}))
                     continue
 
                 # --- LE cert renewed (event-driven distribution) ---

@@ -293,6 +293,7 @@ class ConsoleSpoke(BaseSpoke):
         if self.control_plane is not None:
             await self.control_plane.send_to_hub("CONSOLE_PROBE_RESULT", {
                 "spoke_id": self.spoke_id, "port_id": port_id,
+                "tenant_id": self.store.get(port_id).get("tenant_id", ""),  # per-port override
                 "vendor": probe["vendor"], "identity": probe["identity"],
                 "banner": probe["banner"][-500:], "logged_in": probe["logged_in"],
             })

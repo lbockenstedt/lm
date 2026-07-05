@@ -7758,23 +7758,107 @@ function _renderConsolePorts(el, data) {
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}</div>
               <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)} · ${escapeHtml(p.port_id)}</div>
-              ${vendor ? `<div class="text-xs text-slate-500">${escapeHtml(vendor)}</div>` : ''}</td>
+              ${p.probe && p.probe.vendor
+                ? `<div class="text-xs mt-0.5"><span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-bold uppercase text-[9px]">${escapeHtml(p.probe.vendor)}</span> ${_consoleIdentitySummary(p.probe.identity)}</div>`
+                : (vendor ? `<div class="text-xs text-slate-500">${escapeHtml(vendor)}</div>` : '')}</td>
             <td class="px-4 py-3 text-center text-sm">${baud}</td>
             <td class="px-4 py-3 text-xs font-mono text-slate-500">${escapeHtml(p.spoke_id || '')}</td>
             <td class="px-4 py-3">${tenant}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
               <button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982] hover:bg-[#008c6a] text-white font-bold">🖥 Open</button>
               <button onclick="consoleDetectBaud('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Detect baud</button>
+              <button onclick="consoleIdentify('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Identify</button>
               <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
               ${tenantBtn}
             </td></tr>`;
     }).join('');
-    el.innerHTML = `<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
+    const tools = admin
+        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
+        : '';
+    el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
         <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
           <th class="px-4 py-3">Port</th><th class="px-4 py-3 text-center">Baud</th>
           <th class="px-4 py-3">Console agent</th><th class="px-4 py-3">Tenant</th>
           <th class="px-4 py-3 text-right">Actions</th></tr></thead>
         <tbody class="divide-y divide-slate-200">${rows}</tbody></table></div>`;
+}
+
+function _consoleIdentitySummary(identity) {
+    if (!identity) return '';
+    const parts = [];
+    if (identity.serial) parts.push('SN ' + escapeHtml(identity.serial));
+    if (identity.model) parts.push(escapeHtml(identity.model));
+    if (identity.mac) parts.push(escapeHtml(identity.mac));
+    if (identity.ip) parts.push(escapeHtml(identity.ip));
+    return parts.length ? `<span class="text-slate-500">${parts.join(' · ')}</span>` : '';
+}
+
+async function consoleIdentify(spokeId, portId) {
+    showToast('Identifying device (baud + banner + login + harvest)…', 'info');
+    try {
+        const res = await fetch('/api/console/identify', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, port_id: portId }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok) {
+            showToast(d.vendor ? `Identified: ${d.vendor}${d.logged_in ? ' (logged in)' : ''}` : 'No device identified', d.vendor ? 'success' : 'info');
+            loadConsoleData();
+        } else showToast(d.detail || 'Identify failed', 'error');
+    } catch (e) { showToast('Identify failed: ' + e.message, 'error'); }
+}
+
+async function openConsoleCredentialsModal() {
+    const modal = document.createElement('div');
+    modal.id = 'console-creds-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    let existing = [];
+    try {
+        const res = await fetch('/api/console/credentials', { credentials: 'same-origin' });
+        if (res.ok) existing = (await res.json()).credentials || [];
+    } catch (e) { console.error(e); }
+    const rowFor = (u) => `<div class="flex gap-2 console-cred-row">
+        <input class="console-cred-user flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="username" value="${(u || '').replace(/"/g, '&quot;')}">
+        <input class="console-cred-pass flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" type="password" placeholder="password (blank = keep)">
+        <button onclick="this.closest('.console-cred-row').remove()" class="px-2 text-red-400 hover:text-red-600">&times;</button></div>`;
+    modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <h3 class="text-lg font-bold text-[#263040]">Console Credential Library</h3>
+          <button onclick="this.closest('#console-creds-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+        </div>
+        <div class="p-6 space-y-3">
+          <p class="text-[11px] text-slate-400">Tried in order during auto-identify. Stored encrypted on the hub and pushed to Console agents; passwords are never displayed back. Leave a password blank to keep the stored one.</p>
+          <div id="console-cred-rows" class="space-y-2">${(existing.length ? existing.map(c => rowFor(c.username)).join('') : rowFor(''))}</div>
+          <button onclick="document.getElementById('console-cred-rows').insertAdjacentHTML('beforeend', _consoleCredRowHtml())" class="text-[11px] px-3 py-1 rounded border border-slate-300 hover:bg-slate-50">+ Add credential</button>
+          <div class="pt-3 flex justify-end gap-3">
+            <button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
+            <button onclick="saveConsoleCredentials()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold">Save</button>
+          </div>
+        </div></div>`;
+    document.body.appendChild(modal);
+}
+
+function _consoleCredRowHtml() {
+    return `<div class="flex gap-2 console-cred-row">
+        <input class="console-cred-user flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="username">
+        <input class="console-cred-pass flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" type="password" placeholder="password">
+        <button onclick="this.closest('.console-cred-row').remove()" class="px-2 text-red-400 hover:text-red-600">&times;</button></div>`;
+}
+
+async function saveConsoleCredentials() {
+    const rows = Array.from(document.querySelectorAll('.console-cred-row'));
+    const credentials = rows.map(r => ({
+        username: r.querySelector('.console-cred-user').value.trim(),
+        password: r.querySelector('.console-cred-pass').value,
+    })).filter(c => c.username);
+    try {
+        const res = await fetch('/api/console/credentials', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credentials }),
+        });
+        if (res.ok) { showToast('Credentials saved', 'success'); document.getElementById('console-creds-modal')?.remove(); }
+        else { const d = await res.json().catch(() => ({})); showToast(d.detail || 'Save failed', 'error'); }
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
 }
 
 async function _consoleLoadXterm() {

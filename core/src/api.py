@@ -3820,6 +3820,49 @@ def create_app(hub):
         """Target console spoke: explicit spoke_id, else the first connected one."""
         return (body or {}).get("spoke_id") or hub.get_spoke_by_type("console")
 
+    def _console_load_credentials(hub):
+        """Decrypt the global auto-identify credential list from hub state ([] if
+        unset/undecryptable)."""
+        blob = hub.state.system_state.get("console_credentials_enc")
+        if not blob:
+            return []
+        try:
+            from security.encryption import hub_encryption
+            return json.loads(hub_encryption.decrypt(blob.encode()))
+        except Exception:  # noqa: BLE001
+            logger.warning("console: could not decrypt stored credentials")
+            return []
+
+    def _console_save_credentials(hub, creds):
+        from security.encryption import hub_encryption
+        hub.state.system_state["console_credentials_enc"] = \
+            hub_encryption.encrypt(json.dumps(creds)).decode()
+        hub.state.save_state()
+
+    def _console_mark_seeded(hub, sid):
+        s = getattr(hub, "_console_creds_seeded", None)
+        if s is None:
+            s = set()
+            hub._console_creds_seeded = s
+        s.add(sid)
+
+    async def _console_seed_credentials(hub, spokes):
+        """Push the credential list to any console spoke not yet seeded this
+        process (so a spoke that connects after credentials were set still gets
+        them). Fire-and-forget + signed."""
+        creds = _console_load_credentials(hub)
+        if not creds:
+            return
+        seeded = getattr(hub, "_console_creds_seeded", None) or set()
+        for sid in spokes:
+            if sid in seeded:
+                continue
+            try:
+                await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS", {"credentials": creds})
+                _console_mark_seeded(hub, sid)
+            except Exception:  # noqa: BLE001
+                pass
+
     @app.get("/api/console/ports")
     async def console_ports(request: Request):
         """Serial ports across every connected Console spoke, each tagged with its
@@ -3829,6 +3872,7 @@ def create_app(hub):
         admin = _is_admin(sess)
         hub = app.state.hub
         spokes = hub.get_all_spokes_by_type("console") or []
+        await _console_seed_credentials(hub, spokes)  # ensure new console spokes have creds
         ports, errors = [], {}
         for sid in spokes:
             stenant = hub.state.get_spoke_tenant(sid) or ""
@@ -3878,6 +3922,23 @@ def create_app(hub):
                                        {"port_id": (body or {}).get("port_id")}, timeout=45.0)
         return _console_unwrap(r)
 
+    @app.post("/api/console/identify")
+    async def console_identify(request: Request):
+        """Manually trigger the read-only auto-identify (fingerprint) on a port.
+        Seeds credentials first so the login step can succeed."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = _console_spoke_or_none(hub, body)
+        if not sid:
+            raise HTTPException(status_code=503, detail="No Console spoke connected")
+        await _console_seed_credentials(hub, [sid])
+        r = await hub.request_response(sid, "CONSOLE_AUTOPROBE",
+                                       {"port_id": (body or {}).get("port_id")}, timeout=90.0)
+        return _console_unwrap(r)
+
     @app.post("/api/console/tenant")
     async def console_set_tenant(request: Request):
         """Bind a single PORT to a tenant (per-port override). Admin-only, like the
@@ -3898,6 +3959,55 @@ def create_app(hub):
             "port_id": body.get("port_id"), "tenant_id": body.get("tenant_id", ""),
         }, timeout=15.0)
         return _console_unwrap(r)
+
+    @app.get("/api/console/credentials")
+    async def console_get_credentials(request: Request):
+        """Return the global auto-identify credential list with passwords MASKED
+        (usernames + has_password only). Admin-gated by the /api/console/* rule +
+        this explicit admin check (credentials are privileged)."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        creds = _console_load_credentials(app.state.hub)
+        return {"credentials": [{"username": c.get("username", ""),
+                                 "has_password": bool(c.get("password"))} for c in creds]}
+
+    @app.post("/api/console/credentials")
+    async def console_post_credentials(request: Request):
+        """Replace the global auto-identify credential list (Fernet-encrypted in
+        hub state) and push it (signed) to every connected Console spoke. Admin
+        only."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        # Merge: a blank password keeps the currently-stored one for that username
+        # (the GET never returns passwords, so the UI submits blanks to keep them).
+        stored = {c.get("username"): c.get("password") for c in _console_load_credentials(hub)}
+        creds = []
+        for c in (body.get("credentials") or []):
+            if not isinstance(c, dict):
+                continue
+            u = str(c.get("username", "")).strip()
+            if not u:
+                continue
+            p = str(c.get("password", ""))
+            if not p and u in stored:
+                p = stored[u]
+            creds.append({"username": u, "password": p})
+        _console_save_credentials(hub, creds)
+        hub._console_creds_seeded = set()  # force re-seed with the new list
+        for sid in (hub.get_all_spokes_by_type("console") or []):
+            try:
+                await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS", {"credentials": creds})
+                _console_mark_seeded(hub, sid)
+            except Exception:  # noqa: BLE001
+                pass
+        return {"status": "ok", "count": len(creds)}
 
     @app.post("/api/console/open")
     async def console_open(request: Request):
