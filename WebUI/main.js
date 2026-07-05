@@ -5519,7 +5519,16 @@ async function loadSpokesAndAgents() {
     } catch (err) { console.error('loadSpokesAndAgents: diagnostics fetch failed — telemetry badges skipped', err); }
     _renderSpokesSummary(diagData);
 
-    const isAgent = s => String(s.module_type || '').toLowerCase() === 'agent';
+    // A loaded role registers a sub-spoke "{agentBase}-{role}", so a spoke that
+    // is the BASE of one is a generic agent hosting roles. Recognise it as an
+    // agent even when its own module_type didn't round-trip (a disconnected or
+    // pre-role agent can report module_type ""), so the AGENT itself lands in
+    // the Agents area instead of being double-listed as a plain spoke. Each
+    // role sub-spoke still keeps its OWN row in the Spokes table (its
+    // module_type is the role's, not "agent") — the intended model is one entry
+    // per role spoke plus one for the agent.
+    const hasRole = baseId => spokes.some(o => o.spoke_id !== baseId && o.spoke_id.startsWith(baseId + '-'));
+    const isAgent = s => String(s.module_type || '').toLowerCase() === 'agent' || hasRole(s.spoke_id);
     const trueSpokes    = spokes.filter(s => !isAgent(s) && !pxmxAgentIds.has(s.spoke_id));
     const genericAgents = spokes.filter(isAgent);
 
@@ -5531,8 +5540,7 @@ async function loadSpokesAndAgents() {
     // alongside the Proxmox node agents. This needs no per-agent
     // GET_AVAILABLE_ROLES round-trip — the sub-spoke presence in the already-
     // fetched known-modules list is the signal (mirrors how the multi-role
-    // design registers each role as its own spoke).
-    const hasRole = baseId => spokes.some(o => o.spoke_id !== baseId && o.spoke_id.startsWith(baseId + '-'));
+    // design registers each role as its own spoke). hasRole is defined above.
     const idleGenericAgents    = genericAgents.filter(s => !hasRole(s.spoke_id));
     const activeGenericAgents = genericAgents.filter(s =>  hasRole(s.spoke_id));
 
