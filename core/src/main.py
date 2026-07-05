@@ -549,6 +549,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # control tuples ("ready"/"error"/"disconnect"); VNC_FRAME_DOWN sends
         # the other way via send_to_spoke_command (fire-and-forget). 60s TTL.
         self.vnc_sessions: Dict[str, Dict[str, Any]] = {}
+        # Console serial sessions (Console role): session_id →
+        # {queue, expires, connected, ws_token, spoke_id, tenant_id, port_id}. The
+        # browser /ws/console-serial relay reads device→browser bytes off ``queue``
+        # (or control tuples "ready"/"error"/"disconnect"); keystrokes go the other
+        # way via send_to_spoke_command (CONSOLE_DATA, fire-and-forget). The TTL
+        # only reaps sessions minted by POST /open that the browser never connects;
+        # once ``connected`` the session is long-lived (interactive terminals idle).
+        self.console_sessions: Dict[str, Dict[str, Any]] = {}
         # { spoke_id: latest CS_TELEMETRY payload } — full Client-Sim data
         # (proxmox/clients/simulations/central/reclone) relayed by the combined
         # Client-Sim spoke over the LM websocket. Tenant-scoped at read time via
@@ -804,6 +812,32 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
     def unregister_vnc_session(self, session_id: str) -> None:
         self.vnc_sessions.pop(session_id, None)
+
+    CONSOLE_SESSION_TTL = 60
+
+    def register_console_session(self, session_id: str, meta: Dict[str, Any]) -> None:
+        """Create a console session's byte queue + metadata (mirrors VNC)."""
+        self.console_sessions[session_id] = {
+            "queue": asyncio.Queue(),
+            "expires": time.time() + self.CONSOLE_SESSION_TTL,
+            "connected": False,
+            **meta,
+        }
+
+    def get_console_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return a live console session (queue + meta) or None. The TTL only
+        applies BEFORE the browser connects; a ``connected`` session never
+        expires (interactive consoles sit idle at a prompt for long stretches)."""
+        sess = self.console_sessions.get(session_id)
+        if not sess:
+            return None
+        if not sess.get("connected") and sess.get("expires", 0) < time.time():
+            self.console_sessions.pop(session_id, None)
+            return None
+        return sess
+
+    def unregister_console_session(self, session_id: str) -> None:
+        self.console_sessions.pop(session_id, None)
 
     def _evict_spoke(self, spoke_id: str) -> None:
         """Drop ALL per-spoke in-memory state for ``spoke_id``.
@@ -2248,6 +2282,31 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # See _handle_spoke_log for the ingest + agent_logs buffering.
                 if payload.get("type") == "SPOKE_LOG":
                     await self._handle_spoke_log(spoke_id, payload)
+                    continue
+
+                # --- Console serial relay (CONSOLE_DATA_UP / READY / ERROR / CLOSED) ---
+                # The console role sub-spoke pushes live serial output + control
+                # signals straight up its own connection (send_to_hub). Route each
+                # to the browser session's queue; the /ws/console-serial relay reads
+                # bytes off it. Control signals are tuples so the WS loop can tell
+                # them from data bytes (mirrors the VNC ready/error/disconnect
+                # discipline — a bare-return there once killed the queue consumer).
+                _ctype = payload.get("type")
+                if _ctype in ("CONSOLE_DATA_UP", "CONSOLE_READY", "CONSOLE_ERROR", "CONSOLE_CLOSED"):
+                    _cdata = payload.get("data", {}) or {}
+                    _csess = self.get_console_session(_cdata.get("session_id")) if _cdata.get("session_id") else None
+                    if _csess:
+                        if _ctype == "CONSOLE_DATA_UP":
+                            try:
+                                await _csess["queue"].put(base64.b64decode(_cdata.get("data") or ""))
+                            except Exception:
+                                pass
+                        elif _ctype == "CONSOLE_READY":
+                            await _csess["queue"].put(("ready",))
+                        elif _ctype == "CONSOLE_ERROR":
+                            await _csess["queue"].put(("error", str(_cdata.get("error", "console error"))[:300]))
+                        elif _ctype == "CONSOLE_CLOSED":
+                            await _csess["queue"].put(("disconnect",))
                     continue
 
                 # --- LE cert renewed (event-driven distribution) ---

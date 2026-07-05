@@ -99,6 +99,7 @@ class ConsoleSpoke(BaseSpoke):
                 ports.append({
                     **p,
                     "alias": saved.get("alias", ""),
+                    "tenant_id": saved.get("tenant_id", ""),  # per-port override; hub fills effective
                     "settings": self.store.settings(pid),
                     "probe": saved.get("probe", {}),
                     "in_use": self.sessions.is_open(pid),
@@ -127,6 +128,16 @@ class ConsoleSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": "port_id is required"}
             self.store.update(pid, alias=data.get("alias", ""))
             return {"status": "SUCCESS", "port_id": pid, "alias": data.get("alias", "")}
+
+        if cmd == "CONSOLE_SET_TENANT":
+            # Per-PORT tenant override (a single console host can serve ports to
+            # different tenants). Empty tenant_id clears the override so the port
+            # falls back to the agent's tenant (resolved hub-side).
+            pid = data.get("port_id")
+            if not pid:
+                return {"status": "ERROR", "message": "port_id is required"}
+            self.store.update(pid, tenant_id=data.get("tenant_id", ""))
+            return {"status": "SUCCESS", "port_id": pid, "tenant_id": data.get("tenant_id", "")}
 
         if cmd == "CONSOLE_DETECT_BAUD":
             pid = data.get("port_id")

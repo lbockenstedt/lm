@@ -675,6 +675,14 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Certificate module access required"})
 
+        # /api/console/* (Console module) requires the ``console`` right OR admin.
+        # Mirrors the cs/nw/netbox/le gate; frontend hides the Console nav on the
+        # same right. The /ws/console-serial relay is gated separately by ws_token.
+        if path.startswith("/api/console/"):
+            if not (_is_admin(sess) or _has_console_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Console module access required"})
+
         # Tenant scoping: block requests for a ?tenant= the user isn't authorised for
         tenant = request.query_params.get("tenant")
         if tenant and not _check_tenant_access(sess, tenant):
@@ -3801,6 +3809,236 @@ def create_app(hub):
                 except Exception:
                     pass
 
+    # ── Console role: serial console access (/api/console/*, /ws/console-serial) ──
+    def _console_unwrap(result):
+        """request_response envelope → the spoke's inner data dict."""
+        if isinstance(result, dict):
+            return result.get("payload", {}).get("data", result)
+        return {}
+
+    def _console_spoke_or_none(hub, body):
+        """Target console spoke: explicit spoke_id, else the first connected one."""
+        return (body or {}).get("spoke_id") or hub.get_spoke_by_type("console")
+
+    @app.get("/api/console/ports")
+    async def console_ports(request: Request):
+        """Serial ports across every connected Console spoke, each tagged with its
+        spoke_id and EFFECTIVE tenant (per-port override, else the agent's tenant).
+        Non-admins only see ports whose effective tenant they can access."""
+        sess = _session_user(request)
+        admin = _is_admin(sess)
+        hub = app.state.hub
+        spokes = hub.get_all_spokes_by_type("console") or []
+        ports, errors = [], {}
+        for sid in spokes:
+            stenant = hub.state.get_spoke_tenant(sid) or ""
+            try:
+                r = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=15.0)
+            except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
+                errors[sid] = str(e)
+                continue
+            for p in (_console_unwrap(r).get("ports") or []):
+                override = p.get("tenant_id") or ""
+                eff = override or stenant
+                p["spoke_id"] = sid
+                p["tenant_id"] = eff            # effective (what scoping/NetBox uses)
+                p["tenant_override"] = override  # per-port override, if any
+                p["agent_tenant"] = stenant      # the whole-agent binding
+                if admin or _check_tenant_access(sess, eff):
+                    ports.append(p)
+        return {"consoles": spokes, "ports": ports, "errors": errors}
+
+    @app.post("/api/console/settings")
+    async def console_settings(request: Request):
+        """Set per-port settings (baud/parity/flow) or alias on a Console spoke."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = _console_spoke_or_none(hub, body)
+        if not sid:
+            raise HTTPException(status_code=503, detail="No Console spoke connected")
+        cmd = "CONSOLE_SET_ALIAS" if "alias" in body else "CONSOLE_SET_SETTINGS"
+        r = await hub.request_response(sid, cmd, body or {}, timeout=15.0)
+        return _console_unwrap(r)
+
+    @app.post("/api/console/detect-baud")
+    async def console_detect_baud(request: Request):
+        """Auto-detect + lock a port's baud rate (sweeps candidates; up to ~45s)."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = _console_spoke_or_none(hub, body)
+        if not sid:
+            raise HTTPException(status_code=503, detail="No Console spoke connected")
+        r = await hub.request_response(sid, "CONSOLE_DETECT_BAUD",
+                                       {"port_id": (body or {}).get("port_id")}, timeout=45.0)
+        return _console_unwrap(r)
+
+    @app.post("/api/console/tenant")
+    async def console_set_tenant(request: Request):
+        """Bind a single PORT to a tenant (per-port override). Admin-only, like the
+        whole-agent tenant assignment. Empty tenant_id clears the override so the
+        port falls back to the agent's tenant."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = _console_spoke_or_none(hub, body)
+        if not sid or not (body or {}).get("port_id"):
+            raise HTTPException(status_code=400, detail="spoke_id/port_id required")
+        r = await hub.request_response(sid, "CONSOLE_SET_TENANT", {
+            "port_id": body.get("port_id"), "tenant_id": body.get("tenant_id", ""),
+        }, timeout=15.0)
+        return _console_unwrap(r)
+
+    @app.post("/api/console/open")
+    async def console_open(request: Request):
+        """Mint a console session + ws_token and open the serial handle on the
+        Console spoke (request/response). The reader then pushes CONSOLE_DATA_UP,
+        which the browser drains via /ws/console-serial/{session_id}."""
+        sess = _session_user(request)
+        admin = _is_admin(sess)
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = _console_spoke_or_none(hub, body)
+        port_id = str((body or {}).get("port_id", "")).strip()
+        mode = str((body or {}).get("mode", "rw")).lower()
+        if not sid:
+            raise HTTPException(status_code=503, detail="No Console spoke connected")
+        if not port_id:
+            raise HTTPException(status_code=400, detail="port_id is required")
+        # Enforce the port's effective tenant for non-admins (per-port override,
+        # else the agent's tenant).
+        if not admin:
+            override = ""
+            try:
+                lr = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=15.0)
+                match = next((x for x in (_console_unwrap(lr).get("ports") or [])
+                              if x.get("port_id") == port_id), None)
+                override = (match or {}).get("tenant_id") or ""
+            except Exception:
+                pass
+            eff = override or (hub.state.get_spoke_tenant(sid) or "")
+            if not _check_tenant_access(sess, eff):
+                raise HTTPException(status_code=403,
+                                    detail="not authorized for this console port's tenant")
+        session_id = str(uuid.uuid4())
+        ws_token = secrets.token_urlsafe(32)
+        tenant_id = (sess or {}).get("tenant_id") or ""
+        hub.register_console_session(session_id, {
+            "spoke_id": sid, "tenant_id": tenant_id, "ws_token": ws_token, "port_id": port_id,
+        })
+        try:
+            r = await hub.request_response(sid, "CONSOLE_OPEN", {
+                "session_id": session_id, "port_id": port_id, "mode": mode,
+            }, timeout=15.0)
+        except Exception as e:
+            hub.unregister_console_session(session_id)
+            raise HTTPException(status_code=502, detail=f"failed to open console: {e}")
+        data = _console_unwrap(r)
+        if data.get("status") not in ("SUCCESS", "OK"):
+            hub.unregister_console_session(session_id)
+            raise HTTPException(status_code=502,
+                                detail=data.get("message") or "console spoke refused CONSOLE_OPEN")
+        return {"session_id": session_id, "ws_token": ws_token,
+                "settings": data.get("settings", {}), "read_only": bool(data.get("read_only")),
+                "writer": data.get("writer"), "expires_in": 60}
+
+    @app.websocket("/ws/console-serial/{session_id}")
+    async def console_serial_ws(websocket: WebSocket, session_id: str):
+        """Browser↔serial byte relay for the Console role. Gated by the one-shot
+        ws_token from POST /api/console/open. browser keystrokes → CONSOLE_DATA
+        (fire-and-forget); queued device output → browser bytes, with
+        ready/error/disconnect control tuples (ready must CONTINUE, not return —
+        the VNC relay bug). On exit: CONSOLE_CLOSE down + unregister."""
+        token = websocket.query_params.get("token") or ""
+        hub = app.state.hub
+        sess = hub.get_console_session(session_id)
+        if not sess or sess.get("ws_token") != token:
+            await websocket.accept()
+            await websocket.close(code=4401, reason="invalid or expired console session")
+            return
+        spoke_id = sess["spoke_id"]
+        queue = sess["queue"]
+        sess["connected"] = True  # long-lived interactive session; TTL no longer applies
+        await websocket.accept()
+        relay_tasks: list = []
+        try:
+            async def browser_to_spoke():
+                while True:
+                    msg = await websocket.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        raise WebSocketDisconnect(code=msg.get("code", 1000))
+                    raw = msg.get("bytes")
+                    if raw is None:
+                        text = msg.get("text")
+                        if not text:
+                            continue
+                        raw = text.encode()
+                    await hub.send_to_spoke_command(spoke_id, "CONSOLE_DATA", {
+                        "session_id": session_id,
+                        "data": base64.b64encode(raw).decode(),
+                    })
+
+            async def spoke_to_browser():
+                while True:
+                    item = await queue.get()
+                    if isinstance(item, (bytes, bytearray)):
+                        await websocket.send_bytes(bytes(item))
+                    elif isinstance(item, tuple) and item:
+                        kind = item[0]
+                        if kind == "error":
+                            await websocket.close(code=1011, reason=str(item[1]))
+                            return
+                        if kind == "disconnect":
+                            await websocket.close(code=1000, reason="console closed")
+                            return
+                        continue  # "ready": keep the consumer alive (VNC ready-return bug)
+                    else:
+                        return
+
+            relay_tasks = [asyncio.create_task(browser_to_spoke()),
+                           asyncio.create_task(spoke_to_browser())]
+            done, pending = await asyncio.wait(relay_tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*relay_tasks, return_exceptions=True)
+            for task in done:
+                exc = task.exception()
+                if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                    raise exc
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("console-serial ws %s relay failed: %s", session_id, exc)
+        finally:
+            hub.unregister_console_session(session_id)
+            try:
+                await hub.send_to_spoke_command(spoke_id, "CONSOLE_CLOSE", {"session_id": session_id})
+            except Exception:
+                pass
+            for task in relay_tasks:
+                if not task.done():
+                    task.cancel()
+            if relay_tasks:
+                await asyncio.gather(*relay_tasks, return_exceptions=True)
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+
     @app.post("/api/pxmx/vm-action")
     async def pxmx_vm_action(request: Request):
         """Hypervisors view VM lifecycle: start/stop/reboot/snapshot (ANY vmid).
@@ -6074,6 +6312,9 @@ def create_app(hub):
 
     def _has_le_access(sess):
         return access.has_le_access(sess)
+
+    def _has_console_access(sess):
+        return access.has_console_access(sess)
 
     def _check_tenant_access(sess, tenant_id):
         return access.check_tenant_access(sess, tenant_id)

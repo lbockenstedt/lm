@@ -170,6 +170,23 @@ Envelope: `CONSOLE_GET_CONFIG` (req/resp, up), `CONSOLE_PUSH_CONFIG {config,save
 (Config source RESOLVED: all four requested; v1 builds paste/upload, stubs template/NetBox/API on the same path.
 Apply flow RESOLVED: transactional, no post-request approval, verify before+after, save-on-pass, rollback-on-fail.)
 
+## 6d. Tenant binding + Console permission (added 2026-07-05)
+- **Two-level tenant binding.** The WHOLE console agent binds to a tenant via the
+  standard spoke Tenant action (a console sub-spoke also inherits the parent agent's
+  tenant on parent-auto-approve). Additionally an INDIVIDUAL port can be bound
+  (per-port override, `CONSOLE_SET_TENANT`) so one console host serves ports to
+  different tenants. Effective tenant = per-port override, else the agent's tenant
+  (`hub.state.get_spoke_tenant`). `/api/console/ports` tags each port with
+  effective/override/agent tenant and hides ports a non-admin can't access;
+  `/api/console/open` enforces it; per-port assignment (`POST /api/console/tenant`)
+  is admin-only like whole-agent assignment. The Phase F auto-created NetBox device
+  uses the port's effective tenant.
+- **Console is a User-Management right.** `console` is a permission right
+  (`access.has_console_access` + `/api/console/*` middleware gate) surfaced as a
+  Console column/checkbox in User Management + `MODULE_RIGHT 'Console':'console'` so
+  nav-hiding and API access agree (Phase D). Config-push (Phase G) adds a higher
+  `console-write` tier.
+
 ## 7. Implementation task breakdown → todo list (Console epic #1 + Phase tasks)
 A serial layer + in-repo scaffold + baud-detect primitive → B hub relay → C REST+WS → D WebUI terminal +
 credential/settings UI + banner/vendor display → E in-repo role + permissions → **F auto-identify/fingerprint
