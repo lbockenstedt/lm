@@ -2686,6 +2686,46 @@ function csOnlineDot(online) {
 }
 
 // ── Overview (fleet) ────────────────────────────────────────────────────────
+// Rolling 1h CPU/Mem average cell (px.cpu_1h_avg / px.mem_1h_avg) — mirrors the
+// original webui server list: value.toFixed(1)% or "—" before samples exist.
+// Colored red past 90% / amber past 75% so a loaded host reads at a glance.
+function csPctCell(v) {
+    if (v == null || v === '') return '<span class="text-slate-400">—</span>';
+    const n = Number(v);
+    if (!isFinite(n)) return '<span class="text-slate-400">—</span>';
+    const cls = n >= 90 ? 'text-red-600 font-semibold'
+              : n >= 75 ? 'text-amber-600 font-medium' : 'text-slate-600';
+    return `<span class="${cls}" style="font-variant-numeric:tabular-nums">${n.toFixed(1)}%</span>`;
+}
+
+// Auto-provisioning status badge for a host, from px.provision (the pxmx agent's
+// diagnostic). Shows the throttle + WHAT throttled it (provision_halt.reason +
+// the cpu/mem pct vs threshold, or CPU pacing) — copied from the original
+// webui's provision_halt badge — else Active / Idle / Off.
+function csProvThrottleBadge(px) {
+    const prov = (px && px.provision) || {};
+    const halt = prov.halt || {};
+    const pill = (cls, txt, title) =>
+        `<span title="${csEscape(title || '')}" class="px-2 py-0.5 rounded text-[10px] font-bold uppercase ${cls}">${csEscape(txt)}</span>`;
+    if (halt.halted) {
+        const r = String(halt.reason || '').toLowerCase();
+        const n = v => (v == null ? '?' : Number(v).toFixed(0));
+        let detail;
+        if (r === 'cpu') detail = `CPU ${n(halt.cpu_pct)}% ≥ ${n(halt.cpu_threshold)}%`;
+        else if (r === 'mem') detail = `Mem ${n(halt.mem_pct)}% ≥ ${n(halt.mem_threshold)}%`;
+        else if (r === 'pacing') detail = `CPU pacing ${n(halt.cpu_pct)}% ≥ ${n(halt.cpu_threshold)}%`;
+        else detail = r || 'throttled';
+        return pill('bg-red-100 text-red-700', `⏸ ${detail}`, 'Auto-provisioning throttled: ' + detail);
+    }
+    if (prov.auto_provision_on === false)
+        return pill('bg-slate-200 text-slate-500', 'Off', 'Auto-provisioning disabled');
+    if (prov.cs_enabled === false)
+        return pill('bg-slate-200 text-slate-500', 'No sim', 'Client-simulation mode not enabled on this agent');
+    if (prov.loop_running === false)
+        return pill('bg-amber-100 text-amber-700', 'Idle', prov.reason || 'Provision loop not running');
+    return pill('bg-green-100 text-green-700', 'Active', prov.reason || 'Provisioning active');
+}
+
 async function csRenderVmServer() {
     csSetToolbar('');
     let hosts;
@@ -2738,12 +2778,17 @@ async function csRenderVmServer() {
           <td class="px-4 py-2 text-center">${csOnlineBadge(h.spoke_online)}</td>
           <td class="px-4 py-2 text-center">${vmN}</td>
           <td class="px-4 py-2 text-center">${usbN}</td>
+          <td class="px-4 py-2 text-center text-xs">${csPctCell(px.cpu_1h_avg)}</td>
+          <td class="px-4 py-2 text-center text-xs">${csPctCell(px.mem_1h_avg)}</td>
+          <td class="px-4 py-2 text-center">${csProvThrottleBadge(px)}</td>
           <td class="px-4 py-2 text-xs text-slate-600">${csEscape(px.agent_version || '—')}</td>
           <td class="px-4 py-2 text-xs text-slate-600">${csEscape(csPveVersion(px.pve_version))}</td>
         </tr>`;
     }).join('');
-    const ths = ['Host', 'Online', 'VMs', 'USB', 'Agent', 'PVE']
-        .map((c, i) => `<th class="px-4 py-2 ${i === 1 || i === 2 || i === 3 ? 'text-center' : 'text-left'} font-medium">${c}</th>`).join('');
+    // Header alignment: center the numeric/badge columns (Online…Auto-Prov),
+    // left-align Host + the version columns.
+    const ths = ['Host', 'Online', 'VMs', 'USB', 'CPU 1h', 'Mem 1h', 'Auto-Prov', 'Agent', 'PVE']
+        .map((c, i) => `<th class="px-4 py-2 ${i >= 1 && i <= 6 ? 'text-center' : 'text-left'} font-medium">${c}</th>`).join('');
     const table = `<div class="overflow-x-auto"><table class="w-full text-sm">
       <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${ths}</tr></thead>
       <tbody>${rows}</tbody>
