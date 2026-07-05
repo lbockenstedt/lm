@@ -634,7 +634,10 @@ def create_app(hub):
         path = request.url.path
 
         # Only API namespaces require authentication — static UI files are always public.
-        _GATED_PREFIXES = ("/api/", "/setup/", "/admin/", "/auth/", "/sim/api/")
+        # /vm/ and /cppm/ were previously OUTSIDE this list → reachable with no
+        # session (e.g. GET /vm/{id}/details leaked a VM's firewall/DHCP/NAC data
+        # cross-tenant to anyone). They now require an authenticated session.
+        _GATED_PREFIXES = ("/api/", "/setup/", "/admin/", "/auth/", "/sim/api/", "/vm/", "/cppm/")
         if not any(path.startswith(p) for p in _GATED_PREFIXES) or path == "/status":
             return await call_next(request)
 
@@ -651,6 +654,19 @@ def create_app(hub):
 
         # /setup/* and /admin/* are admin-only
         if path.startswith("/setup/") or path.startswith("/admin/"):
+            if not _is_admin(sess):
+                return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+
+        # Privileged /api/* management namespaces are admin-only. Their per-route
+        # siblings were already admin-gated; these were missed, so any authenticated
+        # (incl. single-tenant, non-admin) user could reach them:
+        #   /api/agent/*   — send-arbitrary-command, load-role (remote code on agents)
+        #   /api/generic/* — provision (mints a spoke secret + hands over hub_secret)
+        #   /api/ldap/*    — directory user/group/OU CRUD + reset ANY user's password
+        #   /api/pxmx/agents/*/…  — revoke/rename/config/cs-command (agent mutations;
+        #                            the bare GET /api/pxmx/agents list stays authed-read)
+        _ADMIN_API_PREFIXES = ("/api/agent/", "/api/generic/", "/api/ldap/", "/api/pxmx/agents/")
+        if any(path.startswith(p) for p in _ADMIN_API_PREFIXES):
             if not _is_admin(sess):
                 return JSONResponse(status_code=403, content={"detail": "Admin access required"})
 
