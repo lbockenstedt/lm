@@ -5163,7 +5163,7 @@ function _mgmtEntryCard(o) {
                 <div class="w-2 h-2 mt-1.5 rounded-full ${o.dot} shrink-0"></div>
                 <div class="min-w-0">
                     <div class="font-medium text-slate-700 break-words">${o.name}</div>
-                    <div class="text-[10px] font-mono text-slate-400 break-all">${o.sid}</div>
+                    <div class="text-[10px] font-mono text-slate-400 break-all">${escapeHtml(o.sid)}</div>
                     ${o.identityBanner || ''}
                 </div>
             </div>
@@ -5206,7 +5206,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                 const hostname = s.hostname || '';
                 const ic = s.identity_change;
                 const eSid = sid.replace(/'/g, "\\'");
-                const eName = name.replace(/'/g, "\\'");
+                const eName = escJsAttr(name);
                 const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
                 // Telemetry extras from the diagnostics endpoint. The heartbeat-
                 // aware dot overrides the approval dot ONLY when the spoke is
@@ -5229,10 +5229,10 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                 const eRoleName = (s._roleName || '').replace(/'/g, "\\'");
                 return _mgmtEntryCard({
                     dot,
-                    name, sid,
+                    name: escapeHtml(name), sid,
                     identityBanner: _identityChangeBanner(ic, ackClick),
                     metaLines: [
-                        hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${hostname}</div>` : '',
+                        hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${escapeHtml(hostname)}</div>` : '',
                         `<div class="text-xs text-slate-500 pl-6">tenant: ${tenantId ? `<span class="font-mono text-slate-700">${escapeHtml(tenantId)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</div>`,
                         ...(extras ? extras.metaLines : []),
                     ],
@@ -5360,7 +5360,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 ? `/setup/spokes/${encodeURIComponent(aid)}/ack-change`
                 : `/api/pxmx/agents/${encodeURIComponent(aid)}/ack-change`;
             const ackClick = `_ackIdentityChange('${ackEndpoint}')`;
-            const nameWithCs = `${label}${a.client_simulation?.enabled ? ' <span class="ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase bg-green-100 text-green-700 align-middle" title="Client Simulation mode">CS</span>' : ''}`;
+            const nameWithCs = `${escapeHtml(label)}${a.client_simulation?.enabled ? ' <span class="ml-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase bg-green-100 text-green-700 align-middle" title="Client Simulation mode">CS</span>' : ''}`;
             const dot = (extras && !isPending) ? extras.dot
                       : (isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]');
             return _mgmtEntryCard({
@@ -5368,7 +5368,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 name: nameWithCs, sid: aid,
                 identityBanner: _identityChangeBanner(ic, ackClick),
                 metaLines: [
-                    a.hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${a.hostname}</div>` : '',
+                    a.hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${escapeHtml(a.hostname)}</div>` : '',
                     `<div class="text-xs text-slate-500 pl-6">tenant: ${rowTenant ? `<span class="font-mono text-slate-700">${escapeHtml(rowTenant)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</div>`,
                     rolesLine,
                     ...(extras ? extras.metaLines : []),
@@ -5440,7 +5440,7 @@ function _renderGenericAgentsTable(genericWrap, idleGenericAgents, diagBy) {
         const hostname = s.hostname || '';
         const ic = s.identity_change;
         const eSid = sid.replace(/'/g, "\\'");
-        const eName = name.replace(/'/g, "\\'");
+        const eName = escJsAttr(name);
         const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
         // Telemetry extras from the diagnostics map (same merge as the Spokes
         // tile). Heartbeat dot overrides the approval dot only when approved.
@@ -5449,10 +5449,10 @@ function _renderGenericAgentsTable(genericWrap, idleGenericAgents, diagBy) {
                   : (isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]');
         return _mgmtEntryCard({
             dot,
-            name, sid,
+            name: escapeHtml(name), sid,
             identityBanner: _identityChangeBanner(ic, ackClick),
             metaLines: [
-                hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${hostname}</div>` : '',
+                hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${escapeHtml(hostname)}</div>` : '',
                 `<div class="text-xs text-slate-500 pl-6">roles: <span class="text-slate-400 italic">none (idle)</span></div>`,
                 ...(extras ? extras.metaLines : []),
             ],
@@ -7123,7 +7123,7 @@ async function loadOpnsenseManagement() {
                         <button onclick="showOpnsenseEditModal('${item._fwId}','${subMenu}',${idx})" class="p-1 text-slate-400 hover:text-blue-600 transition-colors" title="Edit">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
                         </button>
-                        <button onclick="deleteOpnsenseItem('${item._fwId}','${subMenu}','${rawId.replace(/'/g,"\\'")}')" class="p-1 text-slate-400 hover:text-red-600 transition-colors" title="Delete">
+                        <button onclick="deleteOpnsenseItem('${item._fwId}','${subMenu}','${escJsAttr(rawId)}')" class="p-1 text-slate-400 hover:text-red-600 transition-colors" title="Delete">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                         </button>
                     </div>
@@ -9571,7 +9571,7 @@ async function loadLEData(subMenu) {
         };
         const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Targets'];
         const rows = certs.map(c => {
-            const dEsc = String(c.domain || '').replace(/'/g, "\\'");
+            const dEsc = escJsAttr(c.domain || '');
             const tgts = c.targets || [];
             const tgtCell = tgts.length
                 ? `<div class="flex flex-wrap gap-1">${tgts.map(tgtBadge).join('')}</div>`
@@ -9815,11 +9815,11 @@ async function loadDHCPData(subMenu) {
             const leases = d.leases || [];
             const cols = ['IP Address', 'MAC', 'Hostname', 'State', 'Valid Until'];
             const rows = leases.map(l => `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                <td class="px-4 py-2 font-mono font-medium">${l['ip-address'] || l.ip || '—'}</td>
-                <td class="px-4 py-2 font-mono text-xs">${l['hw-address'] || l.mac || '—'}</td>
-                <td class="px-4 py-2 text-xs">${l.hostname || '—'}</td>
-                <td class="px-4 py-2 text-xs">${l.state || (l['state'] === 0 ? 'default' : (l['state'] === 1 ? 'declined' : 'expired'))}</td>
-                <td class="px-4 py-2 font-mono text-xs">${l['valid-lft'] || '—'}</td>
+                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(l['ip-address'] || l.ip || '—')}</td>
+                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(l['hw-address'] || l.mac || '—')}</td>
+                <td class="px-4 py-2 text-xs">${escapeHtml(l.hostname || '—')}</td>
+                <td class="px-4 py-2 text-xs">${escapeHtml(l.state || (l['state'] === 0 ? 'default' : (l['state'] === 1 ? 'declined' : 'expired')))}</td>
+                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(String(l['valid-lft'] || '—'))}</td>
             </tr>`).join('');
             container.innerHTML = leases.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No active leases.</p>'
