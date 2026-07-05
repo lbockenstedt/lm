@@ -83,6 +83,7 @@ a bare ``raise HTTPException(500, detail=str(e))`` so hub logs capture the trace
 """
 
 import os
+import re
 import asyncio
 import base64
 import subprocess
@@ -4399,6 +4400,66 @@ def create_app(hub):
         except Exception as e:
             logger.error(f"Error reading documentation section {section}: {e}")
             raise HTTPException(status_code=500, detail=f"Error retrieving documentation: {str(e)}")
+
+    # ── Canonical documentation (single source of truth) ─────────────────────
+    # The WebUI in-app Help drawer pulls from ``lm/docs/*.md`` — the SAME
+    # canonical, hand-authored docs referenced everywhere else (per-repo copies
+    # are downstream mirrors). No second doc set: the tooltip/help panel renders
+    # these files directly. ``/docs`` lists them; ``/docs/{name}`` returns one.
+    _DOCS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../docs"))
+
+    def _safe_doc_path(name: str) -> str:
+        """Resolve ``name`` to a .md file strictly inside _DOCS_DIR (no traversal)."""
+        stem = (name or "").strip().lower()
+        if stem.endswith(".md"):
+            stem = stem[:-3]
+        # Canonical doc names are kebab-case ascii; reject anything else outright.
+        if not stem or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", stem):
+            raise HTTPException(status_code=400, detail="Invalid document name.")
+        path = os.path.abspath(os.path.join(_DOCS_DIR, f"{stem}.md"))
+        if os.path.dirname(path) != _DOCS_DIR or not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail=f"Document '{stem}' not found.")
+        return path
+
+    @app.get("/docs")
+    async def list_docs():
+        """List the canonical docs (name + first-heading title) for the Help index."""
+        out = []
+        try:
+            for fn in sorted(os.listdir(_DOCS_DIR)):
+                if not fn.endswith(".md"):
+                    continue
+                name = fn[:-3]
+                title = name
+                try:
+                    with open(os.path.join(_DOCS_DIR, fn), "r", encoding="utf-8") as f:
+                        for line in f:
+                            if line.startswith("# "):
+                                title = line[2:].strip()
+                                break
+                except Exception:  # noqa: BLE001
+                    pass
+                out.append({"name": name, "title": title})
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Docs directory not found.")
+        return {"docs": out}
+
+    @app.get("/docs/{name}")
+    async def get_doc(name: str):
+        """Return one canonical doc as raw markdown (rendered client-side)."""
+        path = _safe_doc_path(name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                markdown = f.read()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error reading doc {name}: {e}")
+            raise HTTPException(status_code=500, detail="Error reading document.")
+        title = os.path.basename(path)[:-3]
+        for line in markdown.splitlines():
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+        return {"name": os.path.basename(path)[:-3], "title": title, "markdown": markdown}
 
     @app.get("/setup/appearance")
     async def get_appearance():

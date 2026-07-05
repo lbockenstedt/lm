@@ -416,8 +416,13 @@
             </div>
         </div>
 
-        <!-- Right: user chip + sign out -->
+        <!-- Right: help + user chip + sign out -->
         <div class="flex items-center gap-4">
+            <button onclick="helpForCurrentView()" title="Open documentation for this view"
+                    class="flex items-center gap-1.5 text-xs text-slate-300 hover:text-white transition-colors font-medium">
+                <span class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-current text-[10px] font-bold">?</span>
+                Help
+            </button>
             <div id="user-chip" class="hidden items-center gap-2 text-xs text-slate-300">
                 <span id="user-chip-name" class="font-medium"></span>
                 <!-- Tenant badge / switcher — populated by _initApp() -->
@@ -516,5 +521,6 @@
     <script src="main.js?v=0.2578"></script>
     <script src="sim-views.js?v=0.33"></script>
     <script src="update_handler.js?v=0.29"></script>
+    <script src="help.js?v=0.1"></script>
 </body>
 </html>
