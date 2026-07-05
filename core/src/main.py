@@ -40,6 +40,7 @@ import json
 import logging
 import threading
 import time
+import sys
 import subprocess
 import httpx
 import psutil
@@ -481,6 +482,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         log_handler = HubLogHandler(self)
         log_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
         logger.addHandler(log_handler)
+
+        # Route uncaught SYNC exceptions through the "Hub" logger so they land in
+        # self.logs → Error Log tab (collect_error_logs) + BugFixer, instead of
+        # only local stderr. The asyncio-task counterpart is set at the top of
+        # start(). See logging-observability-contract.md req 4.
+        _prev_excepthook = sys.excepthook
+
+        def _hub_excepthook(exc_type, exc, tb):
+            try:
+                if not issubclass(exc_type, KeyboardInterrupt):
+                    logger.error("Uncaught exception", exc_info=(exc_type, exc, tb))
+            finally:
+                _prev_excepthook(exc_type, exc, tb)
+
+        sys.excepthook = _hub_excepthook
 
         # { spoke_id: websocket_connection } — StarletteWSAdapter wrapping a
         # FastAPI/uvicorn WebSocket on the unified :443 /ws/spoke route (the
@@ -3618,10 +3634,28 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception:
             pass
 
+    def _asyncio_exception_relay(self, loop, context) -> None:
+        """asyncio loop exception handler — logs unhandled task exceptions via
+        the Hub logger (→ self.logs → Error Log + BugFixer) then defers to the
+        default handler. See logging-observability-contract.md req 4."""
+        exc = context.get("exception")
+        msg = context.get("message") or "unhandled asyncio exception"
+        if exc is not None:
+            logger.error("Uncaught asyncio exception: %s", msg, exc_info=exc)
+        else:
+            logger.error("asyncio error: %s", msg)
+        loop.default_exception_handler(context)
+
     async def start(self):
         """
         Starts the WebSocket server and background tasks.
         """
+        # Route unhandled asyncio-task exceptions through the Hub logger → its
+        # error log (sync excepthook installed in __init__). See req 4.
+        try:
+            asyncio.get_running_loop().set_exception_handler(self._asyncio_exception_relay)
+        except Exception:  # noqa: BLE001
+            pass
         version = "unknown"
         try:
             version_path = os.path.join(os.path.dirname(__file__), "../../VERSION")

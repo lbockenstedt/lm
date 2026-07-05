@@ -12,6 +12,7 @@ import queue
 import os
 import socket
 import ssl
+import sys
 from typing import Dict, Any, Type
 from .protocol import Message, MessageHeader, MessagePayload
 from ..security.signer import MessageSigner
@@ -47,7 +48,21 @@ class _SpokeLogRelayHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
             entry = f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{record.levelname}] {record.name}: {self.format(record)}"
-            self._queue.put_nowait(entry)
+            try:
+                self._queue.put_nowait(entry)
+            except queue.Full:
+                # Ring-buffer semantics: on a full queue (a long hub outage),
+                # drop the OLDEST line to make room for the newest — the most
+                # recent lines are the ones worth keeping for the hub / BugFixer
+                # (a crash's last words), not the start of the backlog.
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    self._queue.put_nowait(entry)
+                except queue.Full:
+                    pass
         except Exception:
             pass
 
@@ -89,6 +104,12 @@ class BaseControlPlane:
         self._log_relay_queue: queue.Queue = queue.Queue(maxsize=500)
         self._log_relay_handler = _SpokeLogRelayHandler(self._log_relay_queue)
         logging.getLogger().addHandler(self._log_relay_handler)
+        # Route uncaught SYNC exceptions through the logger (→ relay handler →
+        # hub Error Log + BugFixer) before the interpreter's default handler.
+        # The asyncio-task counterpart is set at the top of run(). Without both,
+        # a genuine crash / unhandled task exception reaches only local stderr,
+        # never the hub — see logging-observability-contract.md req 4.
+        self._install_uncaught_exception_relay()
         # Active hub websocket — set while connected so subclasses can relay messages up.
         self._hub_ws = None
         # Event loop running _connect_and_serve; captured so the updater thread (a
@@ -513,8 +534,44 @@ class BaseControlPlane:
             logger.warning("send_to_hub(%s) failed: %s", payload_type, e)
             return False
 
+    def _install_uncaught_exception_relay(self) -> None:
+        """Route uncaught SYNC exceptions through the module logger (→ relay
+        handler → hub Error Log + BugFixer) before the interpreter's default
+        handler runs. The asyncio-task counterpart is set in run(). Without
+        both, a genuine crash reaches only local stderr, never the hub — see
+        logging-observability-contract.md req 4."""
+        _prev = sys.excepthook
+
+        def _hook(exc_type, exc, tb):
+            try:
+                if not issubclass(exc_type, KeyboardInterrupt):
+                    logger.error("Uncaught exception", exc_info=(exc_type, exc, tb))
+            finally:
+                _prev(exc_type, exc, tb)
+
+        sys.excepthook = _hook
+
+    def _asyncio_exception_relay(self, loop, context) -> None:
+        """asyncio loop exception handler — logs unhandled task exceptions via
+        the module logger (→ relay → hub) then defers to the default handler for
+        local reporting."""
+        exc = context.get("exception")
+        msg = context.get("message") or "unhandled asyncio exception"
+        if exc is not None:
+            logger.error("Uncaught asyncio exception: %s", msg, exc_info=exc)
+        else:
+            logger.error("asyncio error: %s", msg)
+        loop.default_exception_handler(context)
+
     async def run(self):
         """Main loop for the control plane."""
+        # Route unhandled asyncio-task exceptions through the logger → hub relay
+        # (sync excepthook was installed in __init__). Set here because the loop
+        # is now running. See logging-observability-contract.md req 4.
+        try:
+            asyncio.get_running_loop().set_exception_handler(self._asyncio_exception_relay)
+        except Exception:  # noqa: BLE001
+            pass
         # Clear any stale healthy marker from a prior boot — a fresh start must
         # re-prove health (re-auth with the hub) before the update watchdog treats
         # it as the "new code booted OK" signal. Without this, a crash-looping new
