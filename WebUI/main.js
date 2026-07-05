@@ -386,7 +386,8 @@ const MODULE_CLASSES = {
     'DHCP': ['dhcp'],
     'Network': ['nw'],
     'Simulations': ['cs'],
-    'Certificates': ['le']
+    'Certificates': ['le'],
+    'Console': ['console']
 };
 
 // Header module label: maps the active view/product to the nav class name shown
@@ -459,6 +460,7 @@ const PRODUCT_MAP = {
     'dhcp': 'dhcp',
     'nw': 'nw',
     'le': 'le',
+    'console': 'console',
 };
 
 // module_type -> nav product. A spoke's REGISTERED module_type is the
@@ -479,6 +481,7 @@ const MODULE_TYPE_PRODUCT = {
     dhcp: 'dhcp',
     nw: 'nw',
     certificates: 'le',
+    console: 'console',
 };
 
 // spoke_id prefix -> product, used ONLY as a fallback when a spoke's module_type
@@ -2179,6 +2182,7 @@ const VIEW_LOADERS = {
     dhcp:     loadDHCPData,
     nw:       loadNwData,
     le:       loadLEData,
+    console:  loadConsoleData,
     cs:       (subMenu) => loadCSData(subMenu, currentSubChild),
     setup:    _renderSetupSection,
     settings: _renderSettingsSection,
@@ -2322,6 +2326,13 @@ function _viewTemplate(viewId) {
   </div>
 </div>`;
 
+        case 'console':
+            return `<div class="space-y-4">
+  <div id="console-container" class="${card}">
+    <div class="py-12 text-center text-slate-400 italic">Loading serial consoles…</div>
+  </div>
+</div>`;
+
         case 'ldap':
             return `<div class="space-y-6">
   <div class="flex justify-end mb-2"><button onclick="showLDAPModal(currentSubView)" class="${btn}">+ Add</button></div>
@@ -2456,6 +2467,9 @@ function initView(viewId, subView) {
             break;
         case 'nw':
             loadNwData(subView || 'Devices');
+            break;
+        case 'console':
+            loadConsoleData();
             break;
         case 'le':
             loadLEData(subView || 'Certificates');
@@ -7692,6 +7706,261 @@ async function pxmxCreateVmSubmit() {
         if (statusEl) statusEl.textContent = `Failed: ${e.message || e}`;
         if (goBtn) { goBtn.disabled = false; goBtn.textContent = '＋ Create VM'; }
     }
+}
+
+// ── Console module (serial console access) ─────────────────────────────────
+// Lists every connected Console spoke's serial ports and opens an xterm.js
+// terminal wired to the hub's /ws/console-serial/{session_id} byte relay. xterm
+// is dynamic-imported from CDN once (mirrors how noVNC is loaded below).
+let _consolePorts = [];
+let _xtermMod = null;
+
+async function loadConsoleData() {
+    const el = document.getElementById('console-container');
+    if (!el) return;
+    try {
+        const res = await fetch('/api/console/ports', { credentials: 'same-origin' });
+        if (!res.ok) {
+            el.innerHTML = `<div class="py-12 text-center text-red-400 italic">${res.status === 403 ? 'Console module access required.' : 'Failed to load console ports (' + res.status + ').'}</div>`;
+            return;
+        }
+        const data = await res.json();
+        _consolePorts = data.ports || [];
+        _renderConsolePorts(el, data);
+    } catch (e) {
+        el.innerHTML = `<div class="py-12 text-center text-red-400 italic">Error: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+function _renderConsolePorts(el, data) {
+    const ports = data.ports || [];
+    const consoles = data.consoles || [];
+    const admin = isAdmin();
+    if (consoles.length === 0) {
+        el.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No Console agents connected. Load the <b>Console</b> role on a generic agent (Setup → Spokes &amp; Agents → Load Role).</div>`;
+        return;
+    }
+    if (ports.length === 0) {
+        el.innerHTML = `<div class="py-12 text-center text-slate-400 italic">${consoles.length} Console agent(s) connected, but no serial ports detected.</div>`;
+        return;
+    }
+    const esc = s => (s || '').replace(/'/g, "\\'");
+    const rows = ports.map(p => {
+        const label = p.alias || p.product || p.device;
+        const baud = (p.settings && p.settings.baud) || '—';
+        const vendor = (p.probe && p.probe.vendor) || p.vendor || '';
+        const inUse = p.in_use ? ` <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase">In use</span>` : '';
+        const tenant = p.tenant_id
+            ? `<span class="font-mono text-xs text-slate-700">${escapeHtml(p.tenant_id)}</span>${p.tenant_override ? ' <span class="text-[9px] text-slate-400">(port)</span>' : ' <span class="text-[9px] text-slate-400">(agent)</span>'}`
+            : '<span class="italic text-slate-400 text-xs">unassigned</span>';
+        const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
+        const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-slate-50">Tenant</button>` : '';
+        return `<tr class="hover:bg-slate-50">
+            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}</div>
+              <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)} · ${escapeHtml(p.port_id)}</div>
+              ${vendor ? `<div class="text-xs text-slate-500">${escapeHtml(vendor)}</div>` : ''}</td>
+            <td class="px-4 py-3 text-center text-sm">${baud}</td>
+            <td class="px-4 py-3 text-xs font-mono text-slate-500">${escapeHtml(p.spoke_id || '')}</td>
+            <td class="px-4 py-3">${tenant}</td>
+            <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
+              <button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982] hover:bg-[#008c6a] text-white font-bold">🖥 Open</button>
+              <button onclick="consoleDetectBaud('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Detect baud</button>
+              <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
+              ${tenantBtn}
+            </td></tr>`;
+    }).join('');
+    el.innerHTML = `<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
+        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
+          <th class="px-4 py-3">Port</th><th class="px-4 py-3 text-center">Baud</th>
+          <th class="px-4 py-3">Console agent</th><th class="px-4 py-3">Tenant</th>
+          <th class="px-4 py-3 text-right">Actions</th></tr></thead>
+        <tbody class="divide-y divide-slate-200">${rows}</tbody></table></div>`;
+}
+
+async function _consoleLoadXterm() {
+    if (_xtermMod) return _xtermMod;
+    if (!document.getElementById('xterm-css')) {
+        const link = document.createElement('link');
+        link.id = 'xterm-css'; link.rel = 'stylesheet';
+        link.href = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css';
+        document.head.appendChild(link);
+    }
+    try {
+        _xtermMod = await import('https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/+esm');
+    } catch (e) {
+        console.error('xterm load failed', e);
+        return null;
+    }
+    return _xtermMod;
+}
+
+async function openConsoleTerminal(spokeId, portId) {
+    const mod = await _consoleLoadXterm();
+    if (!mod || !mod.Terminal) { showToast('Failed to load terminal (CDN unreachable)', 'error'); return; }
+    let session;
+    try {
+        const res = await fetch('/api/console/open', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, port_id: portId, mode: 'rw' }),
+        });
+        session = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(session.detail || 'Open failed', 'error'); return; }
+    } catch (e) { showToast('Open failed: ' + e.message, 'error'); return; }
+    _consoleShowTerminalModal(portId, session, mod.Terminal);
+}
+
+function _consoleShowTerminalModal(portId, session, Terminal) {
+    closeConsoleTerminal();
+    const modal = document.createElement('div');
+    modal.id = 'console-term-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-70 backdrop-blur-sm';
+    const ro = !!session.read_only;
+    modal.innerHTML = `<div class="bg-[#1e1e1e] rounded-xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col" style="height:72vh">
+        <div class="px-4 py-2 flex justify-between items-center bg-[#2d2d2d] text-slate-200">
+          <div class="text-sm font-mono">${escapeHtml(portId)}${ro ? ' <span class="text-[10px] px-2 py-0.5 rounded bg-amber-600 text-white">READ-ONLY</span>' : ''}${session.settings && session.settings.baud ? ' <span class="text-[10px] text-slate-400">@' + session.settings.baud + '</span>' : ''}</div>
+          <button onclick="closeConsoleTerminal()" class="text-slate-300 hover:text-white text-2xl leading-none">&times;</button>
+        </div>
+        <div id="console-term-body" class="flex-1 p-1 overflow-hidden bg-[#1e1e1e]"></div>
+      </div>`;
+    document.body.appendChild(modal);
+    const term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
+                                theme: { background: '#1e1e1e' } });
+    term.open(document.getElementById('console-term-body'));
+    term.focus();
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws/console-serial/${session.session_id}?token=${encodeURIComponent(session.ws_token)}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') term.write(ev.data);
+        else term.write(new Uint8Array(ev.data));
+    };
+    ws.onclose = (ev) => { try { term.write(`\r\n\x1b[33m[disconnected${ev.reason ? ': ' + ev.reason : ''}]\x1b[0m\r\n`); } catch (e) {} };
+    if (!ro) term.onData(d => { if (ws.readyState === 1) ws.send(d); });
+    window.__consoleTerm = { term, ws, modal };
+}
+
+function closeConsoleTerminal() {
+    const c = window.__consoleTerm;
+    if (c) {
+        try { c.ws.close(); } catch (e) {}
+        try { c.term.dispose(); } catch (e) {}
+        try { c.modal.remove(); } catch (e) {}
+        window.__consoleTerm = null;
+        if (typeof currentView !== 'undefined' && currentView === 'console') loadConsoleData();
+    }
+}
+
+async function consoleDetectBaud(spokeId, portId) {
+    showToast('Detecting baud rate…', 'info');
+    try {
+        const res = await fetch('/api/console/detect-baud', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, port_id: portId }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok && d.baud) { showToast(`Detected ${d.baud} baud (score ${d.score})`, 'success'); loadConsoleData(); }
+        else showToast(d.detail || d.message || 'No baud rate detected', 'error');
+    } catch (e) { showToast('Detect failed: ' + e.message, 'error'); }
+}
+
+function openConsoleSettingsModal(spokeId, portId) {
+    const p = _consolePorts.find(x => x.port_id === portId && x.spoke_id === spokeId) || {};
+    const s = p.settings || {};
+    const bauds = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400];
+    const baudOpts = bauds.map(b => `<option value="${b}" ${Number(s.baud) === b ? 'selected' : ''}>${b}</option>`).join('');
+    const parOpts = ['N', 'E', 'O'].map(x => `<option value="${x}" ${(s.parity || 'N') === x ? 'selected' : ''}>${x}</option>`).join('');
+    const flowOpts = ['none', 'rtscts', 'xonxoff'].map(x => `<option value="${x}" ${(s.flow || 'none') === x ? 'selected' : ''}>${x}</option>`).join('');
+    const modal = document.createElement('div');
+    modal.id = 'console-settings-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <h3 class="text-lg font-bold text-[#263040]">Port Settings</h3>
+          <button onclick="this.closest('#console-settings-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+        </div>
+        <div class="p-6 space-y-4">
+          <div class="text-xs font-mono text-slate-400">${escapeHtml(portId)}</div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Alias</label>
+            <input id="console-cfg-alias" value="${(p.alias || '').replace(/"/g, '&quot;')}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>
+          <div class="grid grid-cols-3 gap-3">
+            <div><label class="text-xs text-slate-500 uppercase font-bold">Baud</label><select id="console-cfg-baud" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${baudOpts}</select></div>
+            <div><label class="text-xs text-slate-500 uppercase font-bold">Parity</label><select id="console-cfg-parity" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${parOpts}</select></div>
+            <div><label class="text-xs text-slate-500 uppercase font-bold">Flow</label><select id="console-cfg-flow" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${flowOpts}</select></div>
+          </div>
+          <div class="pt-3 flex justify-end gap-3">
+            <button onclick="this.closest('#console-settings-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
+            <button onclick="saveConsoleSettings('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold">Save</button>
+          </div>
+        </div></div>`;
+    document.body.appendChild(modal);
+}
+
+async function saveConsoleSettings(spokeId, portId) {
+    const alias = document.getElementById('console-cfg-alias').value;
+    const body = {
+        spoke_id: spokeId, port_id: portId,
+        baud: parseInt(document.getElementById('console-cfg-baud').value, 10),
+        parity: document.getElementById('console-cfg-parity').value,
+        flow: document.getElementById('console-cfg-flow').value,
+    };
+    try {
+        // Alias is a separate command on the spoke; send it first if changed.
+        await fetch('/api/console/settings', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, port_id: portId, alias }),
+        });
+        const res = await fetch('/api/console/settings', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (res.ok) { showToast('Settings saved', 'success'); document.getElementById('console-settings-modal')?.remove(); loadConsoleData(); }
+        else { const d = await res.json().catch(() => ({})); showToast(d.detail || 'Save failed', 'error'); }
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
+}
+
+async function openConsolePortTenantModal(spokeId, portId, currentTenantId) {
+    const modal = document.createElement('div');
+    modal.id = 'console-port-tenant-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    let tenantOptions = '';
+    try {
+        const res = await setupFetch('/setup/tenants');
+        if (res.ok) {
+            const tenants = (await res.json()).tenants || [];
+            tenantOptions = tenants.map(t => `<option value="${t.id}" ${t.id === currentTenantId ? 'selected' : ''}>${escapeHtml(t.name)}</option>`).join('');
+        }
+    } catch (e) { console.error('tenant fetch failed', e); }
+    modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <h3 class="text-lg font-bold text-[#263040]">Assign Port to Tenant</h3>
+          <button onclick="this.closest('#console-port-tenant-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+        </div>
+        <div class="p-6 space-y-4">
+          <div class="text-xs font-mono text-slate-400">${escapeHtml(portId)}</div>
+          <p class="text-[11px] text-slate-400">A per-port override. Leave <b>(inherit agent)</b> to fall back to the whole console agent's tenant.</p>
+          <select id="console-port-tenant" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm">
+            <option value="" ${!currentTenantId ? 'selected' : ''}>(inherit agent)</option>${tenantOptions}
+          </select>
+          <div class="pt-3 flex justify-end gap-3">
+            <button onclick="this.closest('#console-port-tenant-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
+            <button onclick="saveConsolePortTenant('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold">Assign</button>
+          </div>
+        </div></div>`;
+    document.body.appendChild(modal);
+}
+
+async function saveConsolePortTenant(spokeId, portId) {
+    const tenantId = document.getElementById('console-port-tenant').value;
+    try {
+        const res = await fetch('/api/console/tenant', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, port_id: portId, tenant_id: tenantId }),
+        });
+        if (res.ok) { showToast('Port tenant updated', 'success'); document.getElementById('console-port-tenant-modal')?.remove(); loadConsoleData(); }
+        else { const d = await res.json().catch(() => ({})); showToast(d.detail || 'Assign failed', 'error'); }
+    } catch (e) { showToast('Assign failed: ' + e.message, 'error'); }
 }
 
 // VNC console opener (agent-terminates-WSS): POST /api/pxmx/console to mint a
