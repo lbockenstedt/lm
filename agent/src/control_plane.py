@@ -101,6 +101,15 @@ class RoleConnection(BaseControlPlane):
         # The role instance handles this connection's commands; registered under
         # the role name so BaseControlPlane's first-module fallback routes to it.
         self.register_module(role_name, role_instance)
+        # Back-reference so the role can push UNSOLICITED signed frames to the hub
+        # via send_to_hub — e.g. the console role's live serial output
+        # (CONSOLE_DATA_UP) from its reader thread, or LE_CERT_RENEWED. Mirrors how
+        # LEControlPlane / GenericAgent wire `.control_plane`; harmless for roles
+        # that never use it.
+        try:
+            role_instance.control_plane = self
+        except Exception:  # noqa: BLE001 - some inner instances may forbid attrs
+            pass
 
     def get_service_name(self) -> str:
         # Same systemd unit as the base agent (one process hosts all roles).

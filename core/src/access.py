@@ -246,6 +246,12 @@ def has_le_access(sess) -> bool:
     return has_module_access(sess, "le")
 
 
+def has_console_access(sess) -> bool:
+    """Console (``console``) module access gate (see ``has_module_access``).
+    Right key is ``"console"`` (set in User Management)."""
+    return has_module_access(sess, "console")
+
+
 def check_tenant_access(sess, tenant_id: str) -> bool:
     """True if the session user may access ``tenant_id``.
 

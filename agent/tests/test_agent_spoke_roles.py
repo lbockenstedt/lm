@@ -38,6 +38,7 @@ def test_role_map_has_all_roles_with_correct_module_types():
         "cppm":       "nac",
         "proxmox":    "hypervisor",
         "le":         "certificates",
+        "console":    "console",
     }
     assert set(_ROLE_MAP.keys()) == set(expected.keys()), \
         f"missing/extra roles: {set(_ROLE_MAP.keys()) ^ set(expected.keys())}"
@@ -46,7 +47,7 @@ def test_role_map_has_all_roles_with_correct_module_types():
         assert got_mtype == mtype, f"{role}: module_type {got_mtype!r} != {mtype!r}"
         assert cls_name, f"{role}: empty class name"
         # in-repo roles have no clone URL; the siblings do (incl. le).
-        if role in ("dns", "dhcp"):
+        if role in ("dns", "dhcp", "console"):
             assert repo_url is None, f"{role} should be in-repo (no repo_url)"
         else:
             assert isinstance(repo_url, str) and repo_url.startswith("https://"), \
