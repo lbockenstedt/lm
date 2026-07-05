@@ -12,6 +12,8 @@ A **bridge spoke**: connects the LM hub to one or more **pxmx host agents** runn
 - **Agent:** `python3 -m src.agent` (`ProxmoxAgent`), systemd `lm-pxmx-agent.service`, `User=root`, `WatchdogSec=60` + `NotifyAccess=main`. Installer `agent/install_agent.sh` (clones to `/opt/lm/pxmx/agent`, net-watchdog timer, kernel hang/panic sysctls, softdog, kdump-tools).
 - Other: `agent/retire_bash_agent.sh`, `agent/uninstall_agent.sh`, `agent/lm-pxmx-net-watchdog.{service,timer,sh}`.
 
+> **The bridge spoke is primarily a role now.** The pxmx **bridge spoke** runs mainly as the **`proxmox`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-proxmox` (module_type `hypervisor`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` — cloning `lbockenstedt/pxmx.git` + deps and running `install_pxmx.sh --infra-only` for the idempotent host prep (agent-host listener). The dedicated `lm-pxmx.service` / `install_pxmx.sh` `<hostname>-spoke` path is the **legacy/standalone** alternative. (Note: this is separate from the pxmx **per-host agent** `lm-pxmx-agent.service` described below, which still runs on each Proxmox node and does the actual `qm`/`pct` work regardless of how the bridge spoke is deployed.)
+
 ## Ports
 
 - Spoke dials hub on **443** (`/ws/spoke`, wss).

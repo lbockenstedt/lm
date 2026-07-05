@@ -7,7 +7,7 @@ Consolidated reference for every installer and its flags across the LM system. C
 | Flag | Meaning |
 |---|---|
 | `--hub <url>` | Hub WebSocket URL (often optional/`auto` → discover) |
-| `--id <id>` / `--name <id>` | Spoke ID (default `<hostname>-spoke` or `<hostname>-spoke-1`) |
+| `--id <id>` / `--name <id>` | Spoke ID. Unified default is the **agent** id `agent-<hostname>` (one generic agent hosting all module roles); the per-module `<hostname>-spoke` / `<hostname>-spoke-1` default is the **legacy/standalone** path |
 | `--secret <s>` | Spoke first secret (omit → pending-negotiation, await admin approval) |
 | `--hub-secret <s>` | Hub root secret for mutual auth |
 | `--tls-verify` | Enable hub TLS cert verification (sets `LM_HUB_TLS_VERIFY=1` + `LM_HUB_CA_CERT`) |

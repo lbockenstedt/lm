@@ -27,6 +27,7 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 - **Protocol-aware WS** — an `https:` page builds `wss://` (443 implicit); `http:` page falls back to `ws://<hub>:443` (no-cert).
 - **No direct spoke access** — all data flows through hub REST routes (`/setup/*`, `/api/*`, `/admin/*`, `/auth/*`, `/sim/api/*`); the browser only opens WS to the hub for VNC + cs telemetry.
 - **Per-route API bindings** are dispatched in `main.js` `VIEW_LOADERS`; adding a hub route usually means wiring a loader here.
+- **In-app Help drawer** — the WebUI ships a Help drawer (the "?" button / inline ⓘ icons, `help.js`) that renders these canonical `lm/docs/*.md` files **verbatim** as tooltips/panels. The docs in `lm/docs/` ARE the in-app help content — so keep them accurate; a docs edit is a UI-copy edit.
 
 ## Related pages
 

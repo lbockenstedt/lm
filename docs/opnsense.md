@@ -10,6 +10,8 @@ Firewall management + discovery spoke. Translates hub commands into OPNsense RES
 
 `python3 -m src.control_plane` (`OpnControlPlane`); spoke `OpnSpoke(BaseSpoke)`, module name `"opn"`. systemd `lm-opnsense.service`. Installer `install_opnsense.sh` (clones `lbockenstedt/opnsense.git` to `/opt/lm/opnsense`, venv, `.env`, unit).
 
+> **Primarily a role now.** This module runs mainly as the **`opnsense`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-opnsense` (module_type `firewall`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/opnsense.git` + deps). The dedicated `lm-opnsense.service` / `install_opnsense.sh` `opnsense-spoke-1` path is the **legacy/standalone** alternative. Connection config (host/key/secret) comes from the hub push (WebUI), not a per-module `.env`.
+
 ## Ports / backends
 
 OPNsense REST over HTTPS at `https://{host}:{port}` (`OpnsenseEngine`). Default `localhost:8443`. TLS verify **disabled** unless `LM_OPNSENSE_VERIFY_TLS=1`. No port served. Endpoints: `/api/interfaces/overview/interfaces_info`, `/api/diagnostics/systemhealth/get_system_health`, `/api/firewall/filter/*` (add/del/search/setRule/apply), `/api/firewall/alias/*` (+ `listCategories`), `/api/firewall/d_nat|source_nat|one_to_one/*`, `/api/unbound/settings/*` + `/api/unbound/service/reconfigure`, `/api/trust/cert/*`, `/api/kea/leases4/search` (DHCP), `/api/diagnostics/interface/search_arp` (ARP).

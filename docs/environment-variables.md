@@ -72,7 +72,7 @@ Consolidated reference for every environment variable read across the LM system.
 | `LM_HUB_TLS_VERIFY` / `LM_HUB_CA_CERT` | Client TLS verify | off | spoke |
 | `CS_TELEMETRY_INTERVAL_S` | Telemetry relay tick | 10 | `control_plane.py` |
 | `LM_ONBOARDING_PSK` / `LM_TENANT_ID_HINT` | PSK self-provisioning | — | spoke |
-| `DHCP_IFACE`/`DHCP_SUBNET`/`DHCP_PREFIX`/`DHCP_GATEWAY`/`DHCP_RANGE_START`/`DHCP_RANGE_END`/`DHCP_LEASE_TIME`/`DHCP_SKIP` | dnsmasq DHCP (installer) | — | `lm-spoke/install_cs.sh` |
+| `DHCP_IFACE`/`DHCP_SUBNET`/`DHCP_PREFIX`/`DHCP_GATEWAY`/`DHCP_RANGE_START`/`DHCP_RANGE_END`/`DHCP_LEASE_TIME`/`DHCP_SKIP` | cs-owned Kea sim instance — 2nd-NIC subnet/pool/lease-time (installer; `kea-dhcp4-sim`, distinct from the `dhcp` module's Kea) | — | `lm-spoke/install_cs.sh` |
 
 ## le
 

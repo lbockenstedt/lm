@@ -10,6 +10,8 @@ Manages a **fleet** of switches/gateways (one spoke → many devices). Per-devic
 
 `python3 -m src.control_plane` (`NwControlPlane`); spoke `NwSpoke(BaseSpoke)`, module name `"nw"`. systemd `lm-nw.service`. Installer `install_nw.sh` (clones to `/opt/lm/nw`, venv, `.env`, unit; equals-attached `--id=…` form so values starting with `-` don't trip argparse; clears `SPOKE_SECRET` to `""` when unset for zero-touch pending).
 
+> **Primarily a role now.** nw runs mainly as the **`network`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-network` (module_type `nw`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/nw.git` + deps). The dedicated `lm-nw.service` / `install_nw.sh` `nw-spoke-1` path is the **legacy/standalone** alternative. The device fleet still arrives via the hub push (`global_config["nw_devices"]` over `UPDATE_CONFIG`), not a per-module `.env`.
+
 ## Ports / backends
 
 No port served. Per-device transports (chosen by `object_type` + `transport`):

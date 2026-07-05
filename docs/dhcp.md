@@ -10,6 +10,8 @@ Wraps the Kea Control Agent REST API for subnet/lease/reservation listing and CR
 
 `python3 -m src.main` (`DHCPControlPlane`); spoke `DHCPSpoke(BaseSpoke)`. **No install script** in this repo; no systemd unit shipped here.
 
+> **Primarily a role now.** DHCP runs mainly as the **`dhcp`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dhcp` (module_type `dhcp`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Kea host prep). There is no dedicated `lm-dhcp` unit — the agent role is the standard path; a hand-rolled unit is the only standalone alternative. Config (`KEA_URL`) comes from the hub push (WebUI), not a per-module `.env`. (This module's Kea is the ctrl-agent :8001 instance — distinct from the cs `simulation` role's cs-owned `kea-dhcp4-sim` at :8002.)
+
 ## Ports / backends
 
 Talks to the **Kea Control Agent** REST (`DHCPManager`, `src/dhcp_manager.py`) via `httpx`. Default `KEA_URL=http://localhost:8000`. Sends Kea JSON commands (`{"command","service":["dhcp4"],"arguments"}`) and returns `arguments` from the first result item. Commands: `subnet4-list`, `lease4-get-all`, `reservation-get-all`, `reservation-add`, `reservation-del`, `status-get`. No port served.

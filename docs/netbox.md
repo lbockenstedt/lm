@@ -12,6 +12,8 @@ The IPAM/DCIM source-of-truth spoke. Owns NetBox REST access (sites, racks, devi
 - systemd `lm-netbox.service` (spoke); full-app mode also installs `netbox.service` (gunicorn) + `netbox-rq.service` + nginx, with a self-heal block that restarts gunicorn on 502/000.
 - Installers: `install.sh` (spoke + optional full app), `install_kea.sh` (Kea CA pinned to **8760**).
 
+> **Primarily a role now.** The netbox spoke runs mainly as the **`netbox`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-netbox` (module_type `ipam`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/netbox.git` + deps). The dedicated `lm-netbox.service` / `install.sh` `netbox-spoke-1` path is the **legacy/standalone** alternative; the NetBox *application* (gunicorn/nginx full-app) remains a separate install either way. Connection config (NetBox URL/token) comes from the hub push (WebUI), not a per-module `.env`.
+
 ## Ports / backends
 
 - NetBox REST via `pynetbox` (`NetboxEngine`). Default `http://localhost:8000`; gunicorn `127.0.0.1:8001` behind nginx :80 in full-app mode.

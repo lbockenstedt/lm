@@ -10,6 +10,8 @@ NAC spoke — endpoint auditing, session/access-tracker monitoring, and a hub-or
 
 `python3 -m src.control_plane` (`CPPMControlPlane`); spoke `CPPMSpoke` (**no base class** — not `BaseSpoke`); falls back to `run_standalone_mode()` (FastAPI `0.0.0.0:8000`, `/status`) if `--hub` omitted. systemd `lm-cppm.service`. Installer `install.sh` (clones to `/opt/lm/cppm`, venv, `.env`, unit; `PYTHONPATH=$INSTALL_DIR:$INSTALL_DIR/core/src:$INSTALL_DIR/cppm/src`). `src/main.py` is a standalone demo script, not the entrypoint.
 
+> **Primarily a role now.** cppm runs mainly as the **`cppm`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-cppm` (module_type `nac`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/cppm.git` + deps); because `CPPMSpoke` is non-BaseSpoke the role loader wraps it with `_RoleAdapter`. The dedicated `lm-cppm.service` / `install.sh` `cppm-spoke-1` path is the **legacy/standalone** alternative. Connection config (`CPPM_HOST`/creds) comes from the hub push (WebUI), not a per-module `.env`.
+
 ## Ports / backends
 
 Talks to ClearPass REST (`CPPMClient`, `src/client.py`, `requests.Session`, TLS verify off). Auth: OAuth2 (`POST /api/oauth`) with **password grant preferred over client_credentials** when user creds are available (inherits the user's operator profile vs the API client's restricted profile); falls back to basic auth. Token cached with expiry (`expires_in`, 30s skew). Endpoints: `/api/session` (access tracker / recent sessions / user sessions / NAC status), `/api/endpoint` (device DB, by-MAC, by-IP, upsert/sync), `/api/role`. Standalone mode serves :8000.

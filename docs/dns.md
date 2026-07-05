@@ -10,6 +10,8 @@ Manages a local **Unbound** resolver via the `unbound-control` CLI. Minimal repo
 
 `python3 -m src.main` (`DNSControlPlane`); spoke `DNSSpoke(BaseSpoke)`. **No install script** in this repo.
 
+> **Primarily a role now.** DNS runs mainly as the **`dns`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dns` (module_type `dns`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Unbound host prep). There is no dedicated `lm-dns` unit — the agent role is the standard path; a hand-rolled unit is the only standalone alternative. Config (`UNBOUND_CONTROL` etc.) comes from the hub push (WebUI), not a per-module `.env`.
+
 ## Ports / backends
 
 Talks to **Unbound** via the `unbound-control` CLI subprocess (`DNSManager`, `src/dns_manager.py`), 15s timeout. Commands: `status`, `list_local_data`, `local_data <entry>`, `local_data_remove <fqdn>`. No port served; no HTTP at all (the only spoke with neither httpx nor requests — `requirements.txt` is just `websockets, python-dotenv`).

@@ -10,6 +10,8 @@ A **producer** spoke that runs certbot ACME to issue/renew/revoke/list TLS certi
 
 `python3 -m src.control_plane` (`LEControlPlane`), systemd `lm-le.service`, `User=root` (root because certbot binds :80 for HTTP-01 and writes `/etc/letsencrypt`). Installer `install_le.sh` (clones lm core to `/opt/lm/core`, le to `/opt/lm/le`, apt `certbot python3-certbot-dns-cloudflare python3-certbot-dns-route53`, `/etc/lm-le` DNS-creds dir, `lm-le.service`).
 
+> **Primarily a role now.** le runs mainly as the **`le`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-le` (module_type `certificates`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/le.git` + deps). The dedicated `lm-le.service` / `install_le.sh` `le-<hostname>` path is the **legacy/standalone** alternative. Config (`renew_interval`, ACME/DNS settings) comes from the hub push (WebUI), not a per-module `.env`.
+
 ## Ports
 
 No listener. Spoke dials hub on **443** (`/ws/spoke`, wss). certbot transiently binds **:80** for HTTP-01 `--standalone` (or `--webroot -w <path>`).

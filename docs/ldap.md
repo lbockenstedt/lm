@@ -10,6 +10,8 @@ Directory spoke for an OpenLDAP/389-DS-style server (install targets `slapd`; `l
 
 `python3 -m src.main` (`LdapControlPlane`); spoke `LdapSpoke(BaseSpoke)`. systemd `lm-ldap.service` (`After=network.target slapd.service`). Installer `install_ldap.sh` (pre-seeds slapd debconf `slapd/domain string lm.local`, backend MDB, installs `slapd ldap-utils python3-pip python3-venv git curl jq libldap2-dev libsasl2-dev`, loads `base_structure.ldif` People/Groups OUs, `.env`, unit).
 
+> **Primarily a role now.** LDAP runs mainly as the **`ldap`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-ldap` (module_type `directory`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/ldap.git` + deps). The dedicated `lm-ldap.service` / `install_ldap.sh` `ldap-spoke-1` path is the **legacy/standalone** alternative. Connection config (`LDAP_SERVER_URL`/admin DN/PW/base DN) comes from the hub push (WebUI), not a per-module `.env`.
+
 ## Ports / backends
 
 Talks to the LDAP server via `python-ldap` (`ldap.initialize` + `simple_bind_s`), `src/ldap_manager.py`. Default `LDAP_SERVER_URL=ldap://localhost:389`. No port served.
