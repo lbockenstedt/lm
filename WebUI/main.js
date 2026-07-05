@@ -2215,10 +2215,20 @@ function renderTopNav(viewId) {
     // (see logsSubmenu). Every other view uses its fixed VIEW_SUBMENUS list.
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
     const subMenus = rawSubmenus.filter(m => !(m === 'Simulations' && !isAdmin()));
+    // Trailing help affordance for tabbed module views (esp. the table-tab
+    // modules — opnsense/netbox/nw/dns/dhcp/ldap/le — whose pages are just a
+    // table with no on-page section header to attach an inline icon to). Placed
+    // AFTER #top-nav-actions so view-specific action buttons that overwrite that
+    // container's innerHTML don't wipe it. helpForCurrentView() resolves the
+    // active view to its canonical doc. Shown only when a doc mapping exists.
+    const helpDoc = (window.LM_DOC_REGISTRY && window.LM_DOC_REGISTRY[viewId]) || null;
+    const helpBtn = (helpDoc && subMenus.length)
+        ? `<button type="button" class="lm-help-icon ml-1" title="Open documentation" aria-label="Open documentation" onclick="helpForCurrentView()">i</button>`
+        : '';
     topNav.innerHTML = subMenus.map((menu, i) => {
         const label = SUBMENU_LABELS[menu] || menu;
         return `<div class="sub-nav-item ${i === 0 ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer select-none" data-submenu="${menu}" onclick="setSubView('${menu}')">${label}</div>`;
-    }).join('') + '<div id="top-nav-actions" class="ml-auto flex items-center gap-2"></div>';
+    }).join('') + '<div id="top-nav-actions" class="ml-auto flex items-center gap-2"></div>' + helpBtn;
     // Keep the secondary child strip in sync with the active primary.
     renderSecondaryNav(viewId);
 }
