@@ -24,8 +24,7 @@ network-reachable serial console server — ConsolePi-inspired, natively integra
 `CONSOLE_SET_TENANT` · `CONSOLE_DETECT_BAUD` · `CONSOLE_OPEN` · `CONSOLE_DATA` (down, fire-and-forget) ·
 `CONSOLE_DATA_UP`/`CONSOLE_READY`/`CONSOLE_ERROR`/`CONSOLE_CLOSED` (up) · `CONSOLE_SEND_BREAK` ·
 `CONSOLE_RESIZE` · `CONSOLE_CLOSE` · `CONSOLE_SET_CREDENTIALS` (hub→spoke, signed) ·
-`CONSOLE_AUTOPROBE` + `CONSOLE_PROBE_RESULT` (up). *(Phase G adds `CONSOLE_GET_CONFIG` /
-`CONSOLE_PUSH_CONFIG`.)*
+`CONSOLE_AUTOPROBE` + `CONSOLE_PROBE_RESULT` (up) · `CONSOLE_GET_CONFIG` · `CONSOLE_PUSH_CONFIG`.
 
 ## Hub surface
 - Registry: `console_sessions` (+ register/get/unregister; a `connected` flag exempts live
@@ -57,7 +56,16 @@ network-reachable serial console server — ConsolePi-inspired, natively integra
   and full match-by-serial need a NetBox-side field mapping — flagged for real-device verification.
 - Disable auto-identify per agent with role config `auto_identify=false`.
 
-## Open / follow-up (Phase G — config read/push)
-Config read/backup + transactional write-push (verify before+after, save-on-pass, rollback-on-fail)
-is pending 4 decisions: post-push verification method, rollback default (reboot vs `no <command>`),
-a `console-write` permission tier, and backup destination. See `docs/console-role-design.md` §6c/§6d.
+## Config read / push (write access)
+A deliberate, admin/`console_write`-gated write path, separate from the read-only auto-probe:
+- `CONSOLE_GET_CONFIG` reads/backs up the running-config (`POST /api/console/config/get`).
+- `CONSOLE_PUSH_CONFIG` (`POST /api/console/config/push`) is **transactional, no post-request approval**:
+  login → backup → enter config mode → send lines (per-line error watch) → exit → **post-verify** the
+  pushed lines are in running-config → on PASS save (unless `save=false`); on FAIL **never save** and roll
+  back (default `no <command>` negation, or `reboot` to revert the unsaved running-config).
+- Gated by the **`console_write`** right (User-Management CW column; `/api/console/config/*` middleware).
+  Requires the device to have been Identified (the vendor profile carries the config verbs); respects the
+  one-writer lock. Config sources: paste/upload (v1); template/NetBox/API share the same push path (follow-up).
+- **Defaults chosen** (changeable): verify = pushed-lines-present recheck; rollback = negate (reboot optional);
+  backup = display/download (versioned lm archive is a follow-up). Reboot-rollback + on-device verify are
+  heuristic — verify on real hardware before relying on them.
