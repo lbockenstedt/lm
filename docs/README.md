@@ -36,6 +36,7 @@ The canonical doc set lives here in `lm/docs/`. Each separate repo also carries 
 
 - [environment-variables.md](environment-variables.md) — every `LM_*`/`HUB_*`/`CS_*`/`KEA_*`/`NETBOX_*`/`CPPM_*`/`LDAP_*`/`UNBOUND_*` var, what it does, default, where read.
 - [install-flags.md](install-flags.md) — every installer + its flags.
+- [logging-observability-contract.md](logging-observability-contract.md) — **MANDATORY** for every module/agent: relay all logs (INFO+ and uncaught exceptions) to the hub, installed once, buffered-while-disconnected + flushed on connect, so Setup → Logs + the BugFixer see everything without CLI access.
 
 ## Quick lookup
 
