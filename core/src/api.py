@@ -7180,6 +7180,19 @@ def create_app(hub):
         logger.debug("relay GET /api/dns/status")
         return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_STATUS", log_name="dns_status")
 
+    @app.get("/api/dns/stats")
+    async def dns_stats():
+        """Unbound query statistics (total/cache-hit/recursion + per-type) for
+        the DNS analytics panel."""
+        logger.debug("relay GET /api/dns/stats")
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_STATS", log_name="dns_stats")
+
+    @app.get("/api/dns/forwarders")
+    async def dns_forwarders():
+        """Configured upstream forwarders (per-zone upstream servers)."""
+        logger.debug("relay GET /api/dns/forwarders")
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_FORWARDERS", log_name="dns_forwarders")
+
     @app.post("/api/dns/sync")
     async def dns_sync_from_netbox():
         """
@@ -7389,6 +7402,13 @@ def create_app(hub):
         """Kea DHCP4 service status / health from the DHCP spoke."""
         logger.debug("relay GET /api/dhcp/status")
         return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_STATUS", log_name="dhcp_status")
+
+    @app.get("/api/dhcp/stats")
+    async def dhcp_stats():
+        """Kea DHCP4 statistics — global + per-subnet pool utilization and the
+        headline packet counters for the DHCP analytics panel."""
+        logger.debug("relay GET /api/dhcp/stats")
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_STATS", log_name="dhcp_stats")
 
     @app.post("/api/dhcp/sync")
     async def dhcp_sync_from_netbox():
