@@ -253,6 +253,9 @@ const CRUD_ROUTES = {
     openAgentConfigModal:   { m: 'GET',  p: '/api/pxmx/agents/{agentId}/config',             api: 'get_pxmx_agent_config',
                               m2: 'GET', p2: '/setup/tenants',                               api2: 'get_tenants' }, // (modal)
     saveAgentConfig:        { m: 'POST', p: '/api/pxmx/agents/{agentId}/config',             api: 'set_pxmx_agent_config' },
+    openAgentAssignModal:   { m: 'GET',  p: '/api/pxmx/agents/{agentId}/config',             api: 'get_pxmx_agent_config',
+                              m2: 'GET', p2: '/setup/tenants',                               api2: 'get_tenants' }, // (modal) dedicated Tenant button
+    saveAgentTenant:        { m: 'POST', p: '/api/pxmx/agents/{agentId}/config',             api: 'set_pxmx_agent_config' },
     deleteAgent:            { m: 'DELETE', p: '/api/pxmx/agents/{agentId}',                  api: 'delete_pxmx_agent' },
 
     // ── Tenants / users / sessions ──
@@ -5342,6 +5345,13 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 ],
                 actions: [
                     _mgmtBtn('Edit', `${editFn}('${eAid}','${eLabel}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
+                    // Dedicated Tenant button, mirroring the Spokes table. Generic
+                    // agents reuse the spoke assign modal (they bind via
+                    // approve_spoke); Proxmox node agents get their own modal that
+                    // writes client_simulation.tenant_id via the agent config API.
+                    _mgmtBtn('Tenant',
+                        isSpokeKind ? `openSpokeAssignModal('${eAid}','${eTenant}','Agent')` : `openAgentAssignModal('${eAid}','${eTenant}')`,
+                        'bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]'),
                     (isSpokeKind && !isPending)
                         ? _mgmtBtn('Load Role', `showLoadRoleModal('${eAid}')`, 'bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]')
                         : '',
@@ -5600,7 +5610,11 @@ async function openAgentConfigModal(agentId, currentLabel) {
     modal.id = 'agent-config-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
 
-    // Load the stored config and the tenant list in parallel.
+    // Load the stored config. Tenant binding is NOT edited here — it has its own
+    // "Tenant" button on the row (openAgentAssignModal), matching the Spokes
+    // table where Edit is metadata-only and tenant is a separate action. The
+    // current tenant is still read so we can show it read-only and preserve it
+    // on save (Edit must never silently drop the binding).
     let displayName = (currentLabel && currentLabel !== agentId) ? currentLabel : '';
     let csEnabled = false;
     let tenantId = '';
@@ -5616,18 +5630,8 @@ async function openAgentConfigModal(agentId, currentLabel) {
         }
     } catch (e) { console.error('Error fetching agent config:', e); }
 
-    let tenantOptions = '';
-    try {
-        const res = await setupFetch('/setup/tenants');
-        if (res.ok) {
-            const tenants = (await res.json()).tenants || [];
-            const sel = tenantId || currentTenant || 'default';
-            tenantOptions = tenants.map(t =>
-                `<option value="${t.id}" ${t.id === sel ? 'selected' : ''}>${t.name}</option>`).join('');
-        }
-    } catch (e) { console.error('Error fetching tenants:', e); }
-
     const safeName = (displayName || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeTenant = (tenantId || '').replace(/"/g, '&quot;');
 
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
@@ -5653,10 +5657,9 @@ async function openAgentConfigModal(agentId, currentLabel) {
                 </div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
-                    <select id="agent-cfg-tenant" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                        <option value="" ${!tenantId ? 'selected' : ''}>(default)</option>
-                        ${tenantOptions}
-                    </select>
+                    <input type="hidden" id="agent-cfg-tenant" value="${safeTenant}">
+                    <p class="text-sm text-slate-700">${tenantId ? `<span class="font-mono">${tenantId.replace(/</g, '&lt;')}</span>` : '<span class="italic text-slate-400">(unbound)</span>'}</p>
+                    <p class="text-[11px] text-slate-400">Use the <b>Tenant</b> button on the agent row to change this binding.</p>
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
                     <button onclick="this.closest('#agent-config-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
@@ -5695,6 +5698,100 @@ async function saveAgentConfig(agentId) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
+/* Dedicated "Tenant" modal for Proxmox node agents — the agent-side counterpart
+ * to openSpokeAssignModal, so every agent row has the same tenant action a spoke
+ * row does. A Proxmox agent's binding lives in client_simulation.tenant_id (per-
+ * agent config), not on a spoke approval, so this writes via the agent config
+ * API rather than /setup/approve_spoke. Generic (agent-type spoke) agents use
+ * openSpokeAssignModal directly. We read the current config first so saving the
+ * tenant preserves display_name + the CS-enabled flag (stashed in hidden inputs)
+ * — changing the tenant must never wipe the other config. */
+async function openAgentAssignModal(agentId, currentTenantId) {
+    const modal = document.createElement('div');
+    modal.id = 'agent-assign-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+
+    let displayName = '';
+    let csEnabled = false;
+    let tenantId = currentTenantId || '';
+    try {
+        const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/config`, { credentials: 'same-origin' });
+        if (res.ok) {
+            const cfg = (await res.json()).config || {};
+            displayName = cfg.display_name || '';
+            const cs = cfg.client_simulation || {};
+            csEnabled = !!cs.enabled;
+            tenantId = cs.tenant_id || tenantId;
+        }
+    } catch (e) { console.error('Error fetching agent config for tenant assign:', e); }
+
+    let tenantOptions = '';
+    try {
+        const res = await setupFetch('/setup/tenants');
+        if (res.ok) {
+            const tenants = (await res.json()).tenants || [];
+            const sel = tenantId || currentTenant || 'default';
+            tenantOptions = tenants.map(t =>
+                `<option value="${t.id}" ${t.id === sel ? 'selected' : ''}>${t.name}</option>`).join('');
+        }
+    } catch (e) { console.error('Error fetching tenants for agent assign:', e); }
+
+    const safeDn = (displayName || '').replace(/"/g, '&quot;');
+
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">Assign Agent to Tenant</h3>
+                <button onclick="this.closest('#agent-assign-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="text-xs text-slate-400 font-mono mb-2">Agent: ${agentId}</div>
+                <input type="hidden" id="agent-assign-dn" value="${safeDn}">
+                <input type="hidden" id="agent-assign-cs" value="${csEnabled ? '1' : '0'}">
+                <p class="text-[11px] text-slate-400">Binds this Proxmox node agent to a tenant so its telemetry appears in that tenant's VM Server. The agent's display name and Client-Simulation setting are preserved.</p>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
+                    <select id="agent-assign-tenant" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="" ${!tenantId ? 'selected' : ''}>(unbound)</option>
+                        ${tenantOptions}
+                    </select>
+                </div>
+                <div class="pt-4 flex justify-end gap-3">
+                    <button onclick="this.closest('#agent-assign-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                    <button onclick="saveAgentTenant('${agentId.replace(/'/g, "\\'")}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Assign</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(modal);
+}
+
+async function saveAgentTenant(agentId) {
+    const tenantId = document.getElementById('agent-assign-tenant').value;
+    const displayName = document.getElementById('agent-assign-dn').value;
+    const csEnabled = document.getElementById('agent-assign-cs').value === '1';
+    try {
+        const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/config`, {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                display_name: displayName || agentId,
+                client_simulation: { enabled: csEnabled, tenant_id: tenantId },
+            }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok) {
+            showToast(d.message || 'Agent tenant updated', d.queued ? 'info' : 'success');
+            document.getElementById('agent-assign-modal')?.remove();
+            loadSpokesAndAgents();
+        } else {
+            showToast(d.detail || 'Save failed', 'error');
+        }
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
 /* Admin assigns/rebinds ANY spoke to a tenant — a "Tenant" button on every row
  * in Setup → Spokes & Agents (_renderSpokesTable), plus Simulations → Spoke
  * Management for cs spokes specifically. Mirrors openAgentConfigModal but
@@ -5704,7 +5801,7 @@ async function saveAgentConfig(agentId) {
  * api.py), so an agent connecting to a tenant-bound spoke inherits it without
  * per-agent configuration. Only the admin UI renders the button that opens
  * this, so /setup/tenants (admin-only) is safe to call here. */
-async function openSpokeAssignModal(spokeId, currentTenantId) {
+async function openSpokeAssignModal(spokeId, currentTenantId, noun = 'Spoke') {
     const modal = document.createElement('div');
     modal.id = 'spoke-assign-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -5723,14 +5820,14 @@ async function openSpokeAssignModal(spokeId, currentTenantId) {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">Assign Spoke to Tenant</h3>
+                <h3 class="text-lg font-bold text-[#263040]">Assign ${noun} to Tenant</h3>
                 <button onclick="this.closest('#spoke-assign-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="text-xs text-slate-400 font-mono mb-2">Spoke: ${spokeId}</div>
-                <p class="text-[11px] text-slate-400">Approving (re-approving) this spoke with a tenant binds it so its telemetry appears in that tenant's VM Server. Idempotent — the spoke's session secret is preserved.</p>
+                <div class="text-xs text-slate-400 font-mono mb-2">${noun}: ${spokeId}</div>
+                <p class="text-[11px] text-slate-400">Approving (re-approving) this ${noun.toLowerCase()} with a tenant binds it so its telemetry appears in that tenant's VM Server. Idempotent — the session secret is preserved.</p>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
                     <select id="spoke-assign-tenant" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
