@@ -98,19 +98,26 @@ class KeaManager:
                     {"name": "domain-name-servers", "data": ", ".join(dns)}
                 )
 
-            # Attach reservations that belong to this subnet
-            subnet_res = [
-                {
-                    "ip-address":  r["ip"],
-                    "hw-address":  r["mac"].lower().replace("-", ":"),
-                    "hostname":    r.get("hostname", ""),
-                }
-                for r in reservations
-                if r.get("subnet") == subnet_str or net.overlaps(
-                    ipaddress.ip_network(f"{r['ip']}/32")
-                )
-                if r.get("mac")
-            ]
+            # Attach reservations that belong to this subnet. Guard ip/mac with
+            # .get and wrap ip_network in try — one malformed reservation (missing
+            # or invalid ip) must be skipped, not KeyError/ValueError out of the
+            # whole sync (which would then config-set the subnet with NO reservations).
+            subnet_res = []
+            for r in reservations:
+                ip, mac = r.get("ip"), r.get("mac")
+                if not ip or not mac:
+                    continue
+                try:
+                    in_subnet = (r.get("subnet") == subnet_str
+                                 or net.overlaps(ipaddress.ip_network(f"{ip}/32")))
+                except ValueError:
+                    continue  # malformed reservation IP
+                if in_subnet:
+                    subnet_res.append({
+                        "ip-address": ip,
+                        "hw-address": mac.lower().replace("-", ":"),
+                        "hostname": r.get("hostname", ""),
+                    })
             if subnet_res:
                 kea_subnet["reservations"] = subnet_res
 
