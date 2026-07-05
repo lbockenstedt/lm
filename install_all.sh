@@ -942,110 +942,59 @@ else:
     print(f"  '{first_uid}' already correct — no changes needed")
 PYEOF
 
-# Pre-approve all known spoke IDs so they are accepted immediately when they
-# connect without a secret. The hub will generate and push their session keys
-# automatically on first connection (zero-touch provisioning).
-log_c "✅ Pre-approving spoke IDs..."
-for sid in cs-spoke-1 pxmx-spoke-1 opn-spoke-1 cppm-spoke-1 netbox-spoke-1 ldap-spoke-1 dns-spoke-1 dhcp-spoke-1 nw-spoke-1 le-spoke-1; do
-    # Meaningful: a failed approval means the spoke won't be auto-accepted on
-    # first connect (an admin must approve it manually). Surface it so a silent
-    # hub-not-ready / 4xx doesn't hide a missing pre-approval from the log.
-    curl -sf -X POST "$HUB_API/setup/approve_spoke" \
-        -H "Content-Type: application/json" \
-        -d "{\"spoke_id\":\"$sid\",\"action\":\"approve\"}" > /dev/null \
-        || log_w "Pre-approval failed for $sid (spoke will need manual approval)"
-done
-
-MODULES_ORDER=("cs" "pxmx" "opnsense" "cppm" "netbox" "ldap" "dns" "dhcp" "nw" "le")
-declare -A MODULES=(
-    ["cs"]="install_cs.sh"
-    ["pxmx"]="install_pxmx.sh"
-    ["opnsense"]="install_opnsense.sh"
-    ["cppm"]="install.sh"
-    ["netbox"]="install.sh"
-    ["ldap"]="install_ldap.sh"
-    ["dns"]="install_dns.sh"
-    ["dhcp"]="install_dhcp.sh"
-    ["nw"]="install_nw.sh"
-    ["le"]="install_le.sh"
+# UNIFIED AGENT-SPOKE MODEL: this all-in-one box runs ONE generic agent that
+# hosts every module as a ROLE (sub-spoke {agent}-{role}), instead of ten
+# dedicated spokes. The hub is co-located here and owns :443, so the agent
+# installs with --loopback: the pxmx role's agent-host listener binds
+# 127.0.0.1:8443 (hub /ws/agent byte-proxies) and the cs role's :443 listener is
+# suppressed. Each module maps to its _ROLE_MAP role; install_agent.sh clones
+# each role's repo + deps, and the agent's _role_post_install runs each heavy
+# role's `--infra-only` host prep (cs Kea/NIC + cert; pxmx agent-host).
+# NOTE (behavioural change): connection config (NetBox URL/token, OPNsense
+# host/key, …) now comes from the hub push (configure it in the WebUI), not from
+# a per-module .env. The NetBox *application* (Postgres/nginx) remains a separate
+# install — the netbox role only talks to it.
+AGENT_ID="agent-$(hostname -s)"
+declare -A MODULE_ROLE=(
+    ["cs"]="simulation" ["pxmx"]="proxmox" ["opnsense"]="opnsense"
+    ["cppm"]="cppm" ["netbox"]="netbox" ["ldap"]="ldap"
+    ["dns"]="dns" ["dhcp"]="dhcp" ["nw"]="network" ["le"]="le"
 )
-declare -A SPOKE_IDS=(
-    ["cs"]="cs-spoke-1"
-    ["pxmx"]="pxmx-spoke-1"
-    ["opnsense"]="opn-spoke-1"
-    ["cppm"]="cppm-spoke-1"
-    ["netbox"]="netbox-spoke-1"
-    ["ldap"]="ldap-spoke-1"
-    ["dns"]="dns-spoke-1"
-    ["dhcp"]="dhcp-spoke-1"
-    ["nw"]="nw-spoke-1"
-    ["le"]="le-spoke-1"
-)
-
-for mod in "${MODULES_ORDER[@]}"; do
-    # Skip modules listed in --exclude
+ROLES=()
+for mod in cs pxmx opnsense cppm netbox ldap dns dhcp nw le; do
     skip=false
-    for ex in "${EXCLUDE[@]}"; do
-        [[ "$mod" == "$ex" ]] && skip=true && break
-    done
+    for ex in "${EXCLUDE[@]}"; do [[ "$mod" == "$ex" ]] && skip=true && break; done
     if $skip; then
-        log_c "⏭️  Skipping $mod (excluded)"
+        log_c "⏭️  Skipping ${MODULE_ROLE[$mod]} role (module $mod excluded)"
         continue
     fi
-
-    installer=${MODULES[$mod]}
-    SPOKE_ID=${SPOKE_IDS[$mod]}
-    log_c "Setting up $mod (spoke: $SPOKE_ID)..."
-
-    # Build the argument list for this module's installer.
-    # netbox: always spoke-only when run from install_all.sh — the hub server
-    # does not host the NetBox application (PostgreSQL/Redis/gunicorn). Without
-    # --spoke-only the installer's set -euo pipefail aborts on any app-install
-    # failure and leaves the spoke venv deleted but not recreated.
-    # Preserve existing NETBOX_URL and NETBOX_API_TOKEN across reinstalls.
-    MOD_ARGS=(--hub "$HUB_WS" --id "$SPOKE_ID")
-    # pxmx: this is the all-in-one / co-located path — the hub and the pxmx spoke
-    # run on the SAME box, so the hub already owns :443. The pxmx spoke's agent
-    # listener MUST therefore run in loopback mode (bind 127.0.0.1:8443 plaintext;
-    # the hub /ws/agent route byte-proxies to it → agent → hub → spoke). A
-    # standalone pxmx spoke (separate box, agent → spoke → hub) is installed
-    # directly via install_pxmx.sh WITHOUT --loopback. See docs/pxmx.md
-    # "Agent listener modes".
-    if [[ "$mod" == "pxmx" ]]; then
-        MOD_ARGS+=(--loopback)
-    fi
-    if [[ "$mod" == "netbox" ]]; then
-        MOD_ARGS+=(--spoke-only)
-        _NB_ENV="$BASE_DIR/netbox/.env"
-        if [ -f "$_NB_ENV" ]; then
-            _NB_URL=$(grep "^NETBOX_URL=" "$_NB_ENV" | cut -d= -f2- | tr -d '"')
-            _NB_TOK=$(grep "^NETBOX_API_TOKEN=" "$_NB_ENV" | cut -d= -f2- | tr -d '"')
-            [ -n "$_NB_URL" ] && [ "$_NB_URL" != "http://localhost" ] && \
-                MOD_ARGS+=(--netbox-url "$_NB_URL")
-            [ -n "$_NB_TOK" ] && MOD_ARGS+=(--netbox-token "$_NB_TOK")
-        fi
-    fi
-
-    # Run in a subshell so a module failure doesn't abort the whole install.
-    if ( bash "$BASE_DIR/$mod/$installer" "${MOD_ARGS[@]}" ); then
-        log_c "  ✅ $mod installed"
-    else
-        log_e "  ⚠️  $mod installer exited non-zero — spoke may need manual attention"
-    fi
-
-    # Reap any orphaned/stale control_plane process for this spoke (e.g. from a
-    # prior install using a different unit/invocation) before restarting, so a
-    # stale instance can't hold the spoke's agent port while the new one reaches
-    # the hub with no agents — the split-brain that hides agents from the UI.
-    pkill -f "control_plane.*--id ${SPOKE_IDS[$mod]}" 2>/dev/null || true
-    # Meaningful: a failed post-install spoke restart leaves the spoke dark and
-    # the hub reporting it offline. Surface it instead of swallowing so the
-    # operator sees which unit to check (journalctl -u lm-$mod) rather than a
-    # silent install that looks healthy. The 2>/dev/null suppresses only
-    # systemctl's own stderr noise; the log_e fires on the real non-zero exit.
-    systemctl restart "lm-$mod" 2>/dev/null \
-        || log_e "lm-$mod failed to restart after install — check journalctl -u lm-$mod"
+    ROLES+=("${MODULE_ROLE[$mod]}")
 done
+ROLES_CSV="$(IFS=,; printf '%s' "${ROLES[*]}")"
+
+# Pre-approve the AGENT id so it connects zero-touch; its role sub-spokes
+# ({agent}-{role}) auto-approve via the parent — no per-role pre-approval.
+log_c "✅ Pre-approving agent '$AGENT_ID'..."
+curl -sf -X POST "$HUB_API/setup/approve_spoke" \
+    -H "Content-Type: application/json" \
+    -d "{\"spoke_id\":\"$AGENT_ID\",\"action\":\"approve\"}" > /dev/null \
+    || log_w "Pre-approval failed for $AGENT_ID (agent will need manual approval)"
+
+if [[ -z "$ROLES_CSV" ]]; then
+    log_c "No roles to install (all modules excluded)."
+else
+    log_c "Installing unified agent '$AGENT_ID' with roles: $ROLES_CSV"
+    # Reap any stale agent control_plane before (re)install so it can't hold a
+    # role's listener port while the new one comes up.
+    pkill -f "agent/src/control_plane.*--id ${AGENT_ID}" 2>/dev/null || true
+    if ( bash "$BASE_DIR/agent/install_agent.sh" --hub "$HUB_WS" --id "$AGENT_ID" --roles "$ROLES_CSV" --loopback ); then
+        log_c "  ✅ agent installed (roles: $ROLES_CSV)"
+    else
+        log_e "  ⚠️  agent installer exited non-zero — check journalctl -u lm-agent"
+    fi
+    systemctl restart lm-agent 2>/dev/null \
+        || log_e "lm-agent failed to restart after install — check journalctl -u lm-agent"
+fi
 
 # 6. Log rotation — cap each log file at 10 MB, keep 5 compressed copies
 log_c "🔄 Configuring log rotation..."

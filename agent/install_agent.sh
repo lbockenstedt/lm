@@ -35,6 +35,11 @@ HUB_URL=""; SPOKE_ID=""; SPOKE_SECRET=""; HUB_SECRET=""; STARTUP_ROLE=""; STARTU
 CLONE_ONLY=false
 TLS_VERIFY=false
 TLS_CA_CERT=""
+# --loopback = this agent is CO-LOCATED with the hub (same box, hub owns :443).
+# Drives the agent-listener modes of heavy roles: pxmx binds 127.0.0.1:8443
+# (hub /ws/agent byte-proxies), and the cs role's own :443 listener is
+# SUPPRESSED (it can't bind :443 there). Off = standalone node, listeners on :443.
+AGENT_COLOCATED=false
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -45,6 +50,7 @@ while [[ "$#" -gt 0 ]]; do
         --role)       STARTUP_ROLE="$2"; shift ;;
         --roles)      STARTUP_ROLES="$2"; shift ;;
         --clone)      CLONE_ONLY=true; shift ;;
+        --loopback)   AGENT_COLOCATED=true ;;
         --tls-verify) TLS_VERIFY=true; shift ;;
         --tls-ca-cert) TLS_CA_CERT="$2"; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
@@ -267,6 +273,29 @@ HUB_URL=$HUB_URL
 STARTUP_ROLES=$STARTUP_ROLES_CSV
 LOADED_ROLES=$STARTUP_ROLES_CSV
 EOF
+
+# Role-conditional runtime env for IN-PROCESS role sub-spokes. Hosted as roles
+# there is no per-role .env, so the agent carries what each spoke's dedicated
+# .env used to provide; in-process RoleConnections inherit this EnvironmentFile.
+# The --infra-only prep (agent_spoke._role_post_install) created the referenced
+# certs/host bits. Co-location (--loopback) decides the agent-listener modes.
+if [[ ",$STARTUP_ROLES_CSV," == *,simulation,* ]]; then
+    if $AGENT_COLOCATED; then
+        echo "ℹ️  Co-located: CS role's :443 agent-listener suppressed (hub owns :443)."
+    else
+        cat >> "$ENV_FILE" <<EOF
+LM_CS_AGENT_LISTENER=1
+LM_TLS_CERT=/opt/lm/cs/certs/hub.crt
+LM_TLS_KEY=/opt/lm/cs/certs/hub.key
+EOF
+    fi
+fi
+if [[ ",$STARTUP_ROLES_CSV," == *,proxmox,* ]] && $AGENT_COLOCATED; then
+    cat >> "$ENV_FILE" <<EOF
+LM_PXMX_AGENT_LOOPBACK=1
+LM_PXMX_AGENT_PORT=8443
+EOF
+fi
 chmod 600 "$ENV_FILE"
 
 # Pass --roles (comma-list) to the unit. The agent's AgentControlPlane reads

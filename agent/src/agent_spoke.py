@@ -297,6 +297,23 @@ class GenericAgent(BaseSpoke):
                 subprocess.run(["systemctl", "enable", "--now",
                                 "kea-ctrl-agent", "kea-dhcp4-server"],
                                check=False, timeout=60)
+            elif role_name in ("simulation", "proxmox"):
+                # Heavy roles carry OS infra the dedicated installers set up (cs:
+                # sim-client Kea/NIC + agent-listener cert; pxmx: agent-host prep).
+                # Each installer exposes an idempotent, non-interactive --infra-only
+                # mode that does JUST that host prep (no unit, no .env, no spoke
+                # code) — invoke it. The role's runtime env (LM_CS_AGENT_LISTENER /
+                # LM_PXMX_AGENT_LOOPBACK etc.) comes from the agent .env, inherited
+                # by this in-process sub-spoke — see install_agent.sh.
+                _script = {
+                    "simulation": self._lm_root() / "cs" / "lm-spoke" / "install_cs.sh",
+                    "proxmox":    self._lm_root() / "pxmx" / "install_pxmx.sh",
+                }[role_name]
+                if _script.exists():
+                    logger.info("Running %s --infra-only for role '%s'…",
+                                _script.name, role_name)
+                    subprocess.run(["bash", str(_script), "--infra-only"],
+                                   check=False, timeout=600)
         except Exception as e:  # noqa: BLE001
             logger.warning("post-install OS config for role '%s' failed "
                            "(non-fatal): %s", role_name, e)
