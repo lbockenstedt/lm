@@ -4685,9 +4685,14 @@ async function loadDiscoveredUsb() {
         else if (d.is_global_ignored) badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-200 text-slate-600">Ignored globally</span>';
         else if (d.locally_ignored) badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-700">Locally ignored</span>';
         else badge = '<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-500">Unapproved</span>';
+        // Dongle-type picker paired with the approve button — the chosen type
+        // becomes the device's certified `type` (wireless/wired/…), which the
+        // pxmx agent uses as each provisioned VM's sim_phy. Defaults to
+        // wireless (the agent's own default); hidden once already global.
         const approveBtn = d.is_global
             ? ''
-            : `<button onclick="approveGlobalUsb('${vp}')" class="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">Approve globally</button>`;
+            : `<select id="gusbt-${esc(vp)}" title="Dongle type" class="text-xs bg-white border border-slate-300 rounded-md px-2 py-1 outline-none focus:ring-2 focus:ring-green-500 text-slate-800"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
+               <button onclick="approveGlobalUsb('${vp}')" class="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">Approve globally</button>`;
         const ignoreBtn = d.is_global_ignored
             ? ''
             : `<button onclick="ignoreGlobalUsb('${vp}')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded text-xs font-bold">Ignore globally</button>`;
@@ -4768,10 +4773,13 @@ async function removeGlobalUsbIgnore(vp) {
 async function approveGlobalUsb(vp) {
     if (!_vpValid(vp)) { if (typeof showToast === 'function') showToast('Bad VID:PID', 'error'); return; }
     const label = _discoveredUsbByName[vp] || vp;
+    // Read the per-row dongle-type picker (wireless/wired/…); default wireless
+    // to match the pxmx agent's own default when a type is unset.
+    const type = document.getElementById(`gusbt-${vp}`)?.value || 'wireless';
     try {
         const rc = await fetch('/sim/api/superadmin/global-usb-vidpids', { credentials: 'same-origin' });
         const cert = rc.ok ? (await rc.json()).usb_vidpids || [] : [];
-        const next = [...cert.filter(d => d.vidpid !== vp), { vidpid: vp, type: 'other', label: label || vp }];
+        const next = [...cert.filter(d => d.vidpid !== vp), { vidpid: vp, type, label: label || vp }];
         const pc = await fetch('/sim/api/superadmin/global-usb-vidpids', {
             method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ usb_vidpids: next }),
