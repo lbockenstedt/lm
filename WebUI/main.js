@@ -626,7 +626,7 @@ function showToast(message, type = 'info') {
         box-shadow:0 4px 12px rgba(0,0,0,.2);opacity:0;
         transition:opacity .2s ease;max-width:20rem;`;
     const text = document.createElement('span');
-    text.style.cssText = 'flex:1;';
+    text.style.cssText = 'flex:1;white-space:pre-line;';
     text.textContent = message;
     toast.appendChild(text);
     const dismiss = () => {
@@ -5243,6 +5243,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             display_name: dn,
             hostname: s.hostname || '',
             identity_change: s.identity_change || null,
+            tenant_id: s.tenant_id || '',
             _status: s.approved ? 'connected' : 'pending',
             _kind: 'spoke',
             _module_type: String(s.module_type || '').toLowerCase(),
@@ -5283,6 +5284,12 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
             const eAid = aid.replace(/'/g, "\\'");
             const eLabel = label.replace(/'/g, "\\'");
+            // Tenant binding, surfaced + editable per agent to mirror the Spokes
+            // table. Generic agents ARE agent-type spokes so their binding lives
+            // on tenant_id (set via the same approve_spoke path); Proxmox node
+            // agents carry it in client_simulation.tenant_id (per-agent config).
+            const rowTenant = isSpokeKind ? (a.tenant_id || '') : (a.client_simulation?.tenant_id || '');
+            const eTenant = rowTenant.replace(/'/g, "\\'");
             // Active Role line: a keyed placeholder for connected generic agents
             // that is filled async after paint (no barrier). Proxmox node agents
             // have no roles; pending generic agents show an em-dash.
@@ -5323,6 +5330,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 identityBanner: _identityChangeBanner(ic, ackClick),
                 metaLines: [
                     a.hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${a.hostname}</div>` : '',
+                    `<div class="text-xs text-slate-500 pl-6">tenant: ${rowTenant ? `<span class="font-mono text-slate-700">${escapeHtml(rowTenant)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</div>`,
                     rolesLine,
                     ...(extras ? extras.metaLines : []),
                 ],
@@ -6599,7 +6607,8 @@ async function loadRole(spokeId) {
         }
     }
     document.getElementById('load-role-modal')?.remove();
-    alert(`Role activation on ${spokeId}:\n\n${results.join('\n')}`);
+    const anyFailed = results.some(r => r.startsWith('✗'));
+    showToast(`Role activation on ${spokeId}:\n${results.join('\n')}`, anyFailed ? 'error' : 'success');
     // Refresh the Spokes & Agents table so the Active Role column updates
     // (generic nodes are now managed there, not a separate Generic Nodes tile).
     if (currentView === 'setup') loadSpokesAndAgents();
