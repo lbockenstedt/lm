@@ -563,6 +563,11 @@ function isAdmin() {
     return p.admin === true || p.role === 'admin';
 }
 
+function hasConsoleWrite() {
+    const p = currentUser?.permissions || {};
+    return isAdmin() || p.console_write === true;
+}
+
 // ─── Session-expiry guard ───────────────────────────────────────────────────
 // This is a single-page client-rendered app: after the server session dies
 // (8h TTL, or an admin revoke), every gated fetch returns 401 JSON, but the
@@ -2886,7 +2891,7 @@ function _renderSetupUserAccessTile(content) {
                 </div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">User ID</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">HV</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">NAC</th><th class="px-4 py-3 text-center">NW</th><th class="px-4 py-3 text-center">IPAM</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3 text-center">CON</th><th class="px-4 py-3"></th></tr></thead>
+                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">User ID</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">HV</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">NAC</th><th class="px-4 py-3 text-center">NW</th><th class="px-4 py-3 text-center">IPAM</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3 text-center">CON</th><th class="px-4 py-3 text-center">CW</th><th class="px-4 py-3"></th></tr></thead>
                         <tbody id="user-permissions-body" class="divide-y divide-slate-200"><tr><td colspan="14" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading users…</td></tr></tbody>
                     </table>
                 </div>
@@ -6091,7 +6096,7 @@ async function loadUsers() {
         const users = data.users || {};
 
         if (Object.keys(users).length === 0) {
-            bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-400 italic"><td colspan="15">No users configured.</td></tr>`;
+            bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-400 italic"><td colspan="16">No users configured.</td></tr>`;
             return;
         }
 
@@ -6136,6 +6141,7 @@ async function loadUsers() {
                     <td class="px-4 py-3 text-center">${check('ipam')}</td>
                     <td class="px-4 py-3 text-center">${check('cs')}</td>
                     <td class="px-4 py-3 text-center">${check('console')}</td>
+                    <td class="px-4 py-3 text-center">${check('console_write')}</td>
                     <td class="px-4 py-3 text-right whitespace-nowrap">${actions}</td>
                 </tr>
             `;
@@ -7763,6 +7769,7 @@ function _renderConsolePorts(el, data) {
             : '<span class="italic text-slate-400 text-xs">unassigned</span>';
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
         const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-slate-50">Tenant</button>` : '';
+        const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}</div>
               <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)} · ${escapeHtml(p.port_id)}</div>
@@ -7777,6 +7784,7 @@ function _renderConsolePorts(el, data) {
               <button onclick="consoleDetectBaud('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Detect baud</button>
               <button onclick="consoleIdentify('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Identify</button>
               <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
+              ${configBtn}
               ${tenantBtn}
             </td></tr>`;
     }).join('');
@@ -8053,6 +8061,79 @@ async function saveConsolePortTenant(spokeId, portId) {
         if (res.ok) { showToast('Port tenant updated', 'success'); document.getElementById('console-port-tenant-modal')?.remove(); loadConsoleData(); }
         else { const d = await res.json().catch(() => ({})); showToast(d.detail || 'Assign failed', 'error'); }
     } catch (e) { showToast('Assign failed: ' + e.message, 'error'); }
+}
+
+function openConsoleConfigModal(spokeId, portId) {
+    const eS = spokeId.replace(/'/g, "\\'"), eP = portId.replace(/'/g, "\\'");
+    const modal = document.createElement('div');
+    modal.id = 'console-config-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col" style="max-height:85vh">
+        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <h3 class="text-lg font-bold text-[#263040]">Device Config — ${escapeHtml(portId)}</h3>
+          <button onclick="this.closest('#console-config-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+        </div>
+        <div class="p-6 space-y-3 overflow-y-auto">
+          <p class="text-[11px] text-slate-400">Requires the device to have been Identified. Push is transactional — verify before + after, save on success, roll back on failure (a failed push is never saved).</p>
+          <button onclick="consoleConfigBackup('${eS}','${eP}')" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">⤓ Read / backup running-config</button>
+          <textarea id="console-config-text" rows="10" placeholder="Paste config to push (one command per line)…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"></textarea>
+          <div class="flex items-center gap-4 text-sm flex-wrap">
+            <label class="flex items-center gap-2"><input type="checkbox" id="console-config-save" checked class="rounded border-slate-300"> Save to startup on success</label>
+            <label class="flex items-center gap-2">Rollback on fail:
+              <select id="console-config-rollback" class="border border-slate-300 rounded px-2 py-1 text-sm"><option value="negate">no &lt;command&gt;</option><option value="reboot">reboot</option></select></label>
+          </div>
+          <pre id="console-config-output" class="text-xs bg-slate-900 text-slate-100 rounded-md p-3 overflow-auto hidden" style="max-height:240px"></pre>
+          <div class="pt-2 flex justify-end gap-3">
+            <button onclick="this.closest('#console-config-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button>
+            <button onclick="consoleConfigPush('${eS}','${eP}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold">Push config</button>
+          </div>
+        </div></div>`;
+    document.body.appendChild(modal);
+}
+
+function _consoleConfigOut(text, isErr) {
+    const el = document.getElementById('console-config-output');
+    if (!el) return;
+    el.classList.remove('hidden');
+    el.textContent = text;
+    el.classList.toggle('text-red-300', !!isErr);
+}
+
+async function consoleConfigBackup(spokeId, portId) {
+    _consoleConfigOut('Reading running-config…', false);
+    try {
+        const res = await fetch('/api/console/config/get', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, port_id: portId }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok && d.status === 'SUCCESS') _consoleConfigOut(d.config || '(empty)', false);
+        else _consoleConfigOut(d.message || d.detail || 'Backup failed', true);
+    } catch (e) { _consoleConfigOut('Backup failed: ' + e.message, true); }
+}
+
+async function consoleConfigPush(spokeId, portId) {
+    const config = document.getElementById('console-config-text').value;
+    if (!config.trim()) { showToast('Nothing to push', 'error'); return; }
+    _consoleConfigOut('Pushing + verifying…', false);
+    try {
+        const res = await fetch('/api/console/config/push', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                spoke_id: spokeId, port_id: portId, config,
+                save: document.getElementById('console-config-save').checked,
+                rollback: document.getElementById('console-config-rollback').value,
+            }),
+        });
+        const d = await res.json().catch(() => ({}));
+        const summary = `status: ${d.status}\nverify_ok: ${d.verify_ok}   saved: ${d.saved}   rolled_back: ${d.rolled_back}\n`
+            + ((d.errors && d.errors.length) ? `errors:\n${d.errors.map(e => '  ' + e.line + ' → ' + (e.output || '')).join('\n')}\n` : '')
+            + ((d.missing && d.missing.length) ? `missing after push:\n  ${d.missing.join('\n  ')}\n` : '')
+            + (d.message ? '\n' + d.message : '');
+        _consoleConfigOut(summary, d.status !== 'SUCCESS');
+        showToast(d.status === 'SUCCESS' ? 'Config pushed + saved' : 'Push failed — rolled back',
+                  d.status === 'SUCCESS' ? 'success' : 'error');
+    } catch (e) { _consoleConfigOut('Push failed: ' + e.message, true); }
 }
 
 // VNC console opener (agent-terminates-WSS): POST /api/pxmx/console to mint a
@@ -10542,6 +10623,7 @@ async function showAddUserModal() {
                     <div><label class="text-xs text-slate-500 uppercase font-bold">IPAM</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-ipam" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Simulations</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-cs" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Console</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold">Console Write</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console_write" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                 </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
@@ -10575,6 +10657,7 @@ async function saveUser() {
         ipam: document.getElementById('perm-ipam').checked,
         cs: document.getElementById('perm-cs').checked,
         console: document.getElementById('perm-console').checked,
+        console_write: document.getElementById('perm-console_write').checked,
     };
     const auth_type = document.getElementById('new-user-auth-type')?.value || 'local';
     const password = document.getElementById('new-user-password')?.value || '';
@@ -10635,6 +10718,7 @@ async function editUser(userId) {
             {id: 'ipam', label: 'IPAM'},
             {id: 'cs', label: 'Simulations'},
             {id: 'console', label: 'Console'},
+            {id: 'console_write', label: 'Console Write'},
         ];
 
         const permHtml = permFields.map(p => {
@@ -10705,6 +10789,7 @@ async function saveUserEdits(userId) {
             ipam: document.getElementById('edit-perm-ipam').checked,
             cs: document.getElementById('edit-perm-cs').checked,
             console: document.getElementById('edit-perm-console').checked,
+            console_write: document.getElementById('edit-perm-console_write').checked,
         };
 
         const tenantCheckboxes = document.querySelectorAll('input[id^="edit-tenant-"]');

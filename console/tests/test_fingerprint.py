@@ -77,6 +77,63 @@ def test_run_identify_cisco_noauth():
     assert res["identity"]["ip"] == "10.0.0.5"
 
 
+class _ConfigChan:
+    """Scripted config device: an exec prompt, config-mode prompt, a running-config
+    that reflects pushed lines (so post-verify passes/fails deterministically)."""
+    def __init__(self, running_has=True):
+        self.buf = bytearray(b"\r\nSwitch#")
+        self.mode = "exec"
+        self.running_has = running_has  # does 'show run' echo the pushed line?
+        self.pushed = []
+
+    def read(self):
+        out = bytes(self.buf[:256])
+        del self.buf[:256]
+        return out
+
+    def write(self, b):
+        s = b.decode(errors="replace").strip()
+        if s == "configure terminal":
+            self.mode = "config"
+            self.buf += b"\r\nSwitch(config)#"
+        elif s == "end":
+            self.mode = "exec"
+            self.buf += b"\r\nSwitch#"
+        elif s == "write memory":
+            self.buf += b"\r\nBuilding configuration...\r\nOK\r\nSwitch#"
+        elif s == "show running-config":
+            body = "\r\n".join(self.pushed) if (self.running_has and self.pushed) else "!"
+            self.buf += ("\r\n" + body + "\r\nSwitch#").encode()
+        elif s in ("terminal length 0", ""):
+            self.buf += b"\r\nSwitch#"
+        elif self.mode == "config" and s:
+            self.pushed.append(s)
+            self.buf += b"\r\nSwitch(config)#"
+        else:
+            self.buf += b"\r\nSwitch#"
+
+
+def test_push_config_success_saves():
+    prof = fp.detect_vendor("Cisco IOS")
+    chan = _ConfigChan(running_has=True)
+    res = fp.push_config(chan.read, chan.write, prof, [], "hostname CORE-SW\nvlan 10", save=True)
+    assert res["status"] == "SUCCESS"
+    assert res["verify_ok"] is True
+    assert res["saved"] is True
+    assert res["rolled_back"] is False
+
+
+def test_push_config_verify_fail_rolls_back_no_save():
+    prof = fp.detect_vendor("Cisco IOS")
+    chan = _ConfigChan(running_has=False)  # running-config does NOT reflect pushes
+    res = fp.push_config(chan.read, chan.write, prof, [], "hostname CORE-SW", save=True, rollback="negate")
+    assert res["status"] == "ERROR"
+    assert res["verify_ok"] is False
+    assert res["saved"] is False       # never save a failed push
+    assert res["rolled_back"] is True
+    assert "no hostname CORE-SW" in " ".join(chan.pushed[-3:] + [x for x in chan.pushed])
+
+
 def test_run_identify_login_then_harvest():
     banner = "\r\nCisco IOS Software\r\nUsername: "
     responses = [

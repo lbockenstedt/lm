@@ -27,12 +27,12 @@ try:
     from serial_manager import (
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
-    from fingerprint import run_identify
+    from fingerprint import run_identify, read_running_config, push_config, PROFILES
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
-    from .fingerprint import run_identify  # type: ignore
+    from .fingerprint import run_identify, read_running_config, push_config, PROFILES  # type: ignore
 
 logger = logging.getLogger("ConsoleSpoke")
 
@@ -172,6 +172,29 @@ class ConsoleSpoke(BaseSpoke):
                     "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
                     "identity": res.get("identity") or {}}
 
+        if cmd == "CONSOLE_GET_CONFIG":
+            pid = data.get("port_id")
+            dev = self._port_device(pid) if pid else None
+            if not dev:
+                return {"status": "ERROR", "message": f"port {pid} not found"}
+            if self.sessions.is_open(pid):
+                return {"status": "ERROR", "message": "port is in use; close sessions first"}
+            return await asyncio.to_thread(self._read_config_blocking, pid, dev)
+
+        if cmd == "CONSOLE_PUSH_CONFIG":
+            pid = data.get("port_id")
+            dev = self._port_device(pid) if pid else None
+            if not dev:
+                return {"status": "ERROR", "message": f"port {pid} not found"}
+            if self.sessions.is_open(pid):
+                return {"status": "ERROR", "message": "port is in use; close sessions first"}
+            config = data.get("config") or ""
+            if not config.strip():
+                return {"status": "ERROR", "message": "config is empty"}
+            save = bool(data.get("save", True))
+            rollback = data.get("rollback") or "negate"
+            return await asyncio.to_thread(self._push_config_blocking, pid, dev, config, save, rollback)
+
         if cmd == "CONSOLE_DETECT_BAUD":
             pid = data.get("port_id")
             dev = self._port_device(pid) if pid else None
@@ -275,6 +298,50 @@ class ConsoleSpoke(BaseSpoke):
         if detected:
             res["detected_baud"] = detected
         return res
+
+    def _profile_for(self, port_id: str):
+        """The vendor profile a port was last identified as (None if never
+        identified — config read/push requires a known device type)."""
+        vendor = (self.store.get(port_id).get("probe") or {}).get("vendor")
+        if not vendor:
+            return None
+        return next((p for p in PROFILES if p["name"] == vendor), None)
+
+    def _read_config_blocking(self, port_id: str, dev: str) -> Dict[str, Any]:
+        prof = self._profile_for(port_id)
+        if not prof:
+            return {"status": "ERROR", "message": "device not identified — run Identify first", "config": ""}
+        baud = self.store.settings(port_id).get("baud") or 9600
+        try:
+            ser = open_raw(dev, baud, 0.3)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"open failed: {e}", "config": ""}
+        try:
+            return read_running_config(lambda: ser.read(256), ser.write, prof, self._credentials)
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _push_config_blocking(self, port_id: str, dev: str, config: str,
+                              save: bool, rollback: str) -> Dict[str, Any]:
+        prof = self._profile_for(port_id)
+        if not prof:
+            return {"status": "ERROR", "message": "device not identified — run Identify first"}
+        baud = self.store.settings(port_id).get("baud") or 9600
+        try:
+            ser = open_raw(dev, baud, 0.3)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"open failed: {e}"}
+        try:
+            return push_config(lambda: ser.read(256), ser.write, prof, self._credentials,
+                               config, save=save, rollback=rollback)
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def _emit_probe_result(self, port_id: str, res: Dict[str, Any]) -> None:
         """Persist the probe + push CONSOLE_PROBE_RESULT up (hub → NetBox)."""

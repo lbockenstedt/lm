@@ -675,10 +675,16 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Certificate module access required"})
 
+        # /api/console/config/* (device config read/push) requires the higher
+        # ``console_write`` right OR admin — checked BEFORE the general console gate.
+        if path.startswith("/api/console/config"):
+            if not (_is_admin(sess) or _has_console_write_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Console write access required"})
         # /api/console/* (Console module) requires the ``console`` right OR admin.
         # Mirrors the cs/nw/netbox/le gate; frontend hides the Console nav on the
         # same right. The /ws/console-serial relay is gated separately by ws_token.
-        if path.startswith("/api/console/"):
+        elif path.startswith("/api/console/"):
             if not (_is_admin(sess) or _has_console_access(sess)):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Console module access required"})
@@ -4065,6 +4071,44 @@ def create_app(hub):
                 "settings": data.get("settings", {}), "read_only": bool(data.get("read_only")),
                 "writer": data.get("writer"), "expires_in": 60}
 
+    @app.post("/api/console/config/get")
+    async def console_config_get(request: Request):
+        """Read/back up a port's running-config. Gated by console_write (middleware)."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = _console_spoke_or_none(hub, body)
+        if not sid:
+            raise HTTPException(status_code=503, detail="No Console spoke connected")
+        await _console_seed_credentials(hub, [sid])
+        r = await hub.request_response(sid, "CONSOLE_GET_CONFIG",
+                                       {"port_id": (body or {}).get("port_id")}, timeout=90.0)
+        return _console_unwrap(r)
+
+    @app.post("/api/console/config/push")
+    async def console_config_push(request: Request):
+        """Transactional config push (verify → save-on-pass → rollback-on-fail).
+        No post-request approval. Gated by console_write (middleware)."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = _console_spoke_or_none(hub, body)
+        if not sid:
+            raise HTTPException(status_code=503, detail="No Console spoke connected")
+        if not str((body or {}).get("config", "")).strip():
+            raise HTTPException(status_code=400, detail="config is required")
+        await _console_seed_credentials(hub, [sid])
+        r = await hub.request_response(sid, "CONSOLE_PUSH_CONFIG", {
+            "port_id": body.get("port_id"), "config": body.get("config"),
+            "save": bool(body.get("save", True)),
+            "rollback": body.get("rollback") or "negate",
+        }, timeout=180.0)
+        return _console_unwrap(r)
+
     @app.websocket("/ws/console-serial/{session_id}")
     async def console_serial_ws(websocket: WebSocket, session_id: str):
         """Browser↔serial byte relay for the Console role. Gated by the one-shot
@@ -6425,6 +6469,9 @@ def create_app(hub):
 
     def _has_console_access(sess):
         return access.has_console_access(sess)
+
+    def _has_console_write_access(sess):
+        return access.has_console_write_access(sess)
 
     def _check_tenant_access(sess, tenant_id):
         return access.check_tenant_access(sess, tenant_id)

@@ -220,3 +220,153 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     result["outputs"] = outputs
     result["identity"] = parse_identity(profile, outputs)
     return result
+
+
+# ── Config read / transactional push (Phase G) ─────────────────────────────────
+
+def login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+          profile: Dict[str, Any], credentials: List[Dict[str, str]],
+          sample_secs: float = 2.0):
+    """Reach an exec prompt on an already-woken line. Returns (logged_in, idx).
+    Tries each credential once; no re-hammering."""
+    def at_exec(t: str) -> bool:
+        return bool(profile["prompt"].search(t) and not (
+            profile["login_prompt"].search(t) or profile["password_prompt"].search(t)))
+
+    tail = _read_until(read_fn, [profile["login_prompt"], profile["password_prompt"],
+                                 profile["prompt"]], sample_secs)[-200:]
+    if at_exec(tail):
+        return True, None
+    if not (profile["login_prompt"].search(tail) or profile["password_prompt"].search(tail)):
+        write_fn(b"\r")
+        tail = _read_until(read_fn, [profile["login_prompt"], profile["password_prompt"],
+                                     profile["prompt"]], sample_secs)[-200:]
+        if at_exec(tail):
+            return True, None
+    for idx, cred in enumerate(credentials or []):
+        if profile["password_prompt"].search(tail) and not profile["login_prompt"].search(tail):
+            write_fn((cred.get("password", "") + "\r").encode())
+        else:
+            write_fn((cred.get("username", "") + "\r").encode())
+            out = _read_until(read_fn, [profile["password_prompt"], profile["prompt"]], 3.0)
+            if profile["password_prompt"].search(out[-200:]):
+                write_fn((cred.get("password", "") + "\r").encode())
+        tail = _read_until(read_fn, [profile["prompt"], profile["login_prompt"],
+                                     profile["password_prompt"]], 4.0)[-200:]
+        if at_exec(tail):
+            return True, idx
+    return False, None
+
+
+def _disable_pager(read_fn, write_fn, profile, cmd_secs: float) -> None:
+    """Send the profile's pure setup commands (terminal length 0 / no page) so a
+    long show doesn't stall on a pager. These are the commands with no `fields`."""
+    for spec in profile.get("commands", []):
+        if "fields" not in spec:
+            write_fn((spec["cmd"] + "\r").encode())
+            _read_until(read_fn, [profile["prompt"]], cmd_secs)
+
+
+def read_running_config(read_fn, write_fn, profile, credentials,
+                        cmd_secs: float = 12.0) -> Dict[str, Any]:
+    """Log in (if needed) and capture the device's running-config (backup/read)."""
+    write_fn(b"\r\n")
+    ok, _ = login(read_fn, write_fn, profile, credentials)
+    if not ok:
+        return {"status": "ERROR", "message": "login failed", "config": ""}
+    show = (profile.get("config") or {}).get("show_running")
+    if not show:
+        return {"status": "ERROR", "message": "no running-config command for this device type",
+                "config": ""}
+    _disable_pager(read_fn, write_fn, profile, 3.0)
+    write_fn((show + "\r").encode())
+    cfg = _read_until(read_fn, [profile["prompt"]], cmd_secs)
+    return {"status": "SUCCESS", "config": cfg}
+
+
+_CFG_ERR = re.compile(r"%\s|Invalid input|Unknown command|Incomplete command|syntax error|"
+                      r"not found|rejected|Error:", re.I)
+
+
+def push_config(read_fn, write_fn, profile, credentials, config_text: str,
+                save: bool = True, rollback: str = "negate",
+                cmd_secs: float = 4.0) -> Dict[str, Any]:
+    """Transactional config push (Phase G): login → backup → enter config mode →
+    send lines (watch per-line errors) → exit → POST-VERIFY the pushed lines are
+    in running-config → on PASS save (unless save=False); on FAIL do NOT save and
+    roll back (``negate`` = ``no <line>`` in reverse, or ``reboot`` = reload the
+    unsaved running-config). No post-request approval (decision: transactional).
+    """
+    conf = profile.get("config") or {}
+    enter, exit_, save_cmd, show = (conf.get("enter"), conf.get("exit"),
+                                    conf.get("save"), conf.get("show_running"))
+    result: Dict[str, Any] = {"status": "ERROR", "logged_in": False, "applied": [],
+                              "errors": [], "verify_ok": False, "saved": False,
+                              "rolled_back": False, "baseline": "", "missing": []}
+    write_fn(b"\r\n")
+    ok, _ = login(read_fn, write_fn, profile, credentials)
+    result["logged_in"] = ok
+    if not ok:
+        result["message"] = "login failed"
+        return result
+    if not enter:
+        result["message"] = "device type has no config mode (read-only)"
+        return result
+    _disable_pager(read_fn, write_fn, profile, 3.0)
+    if show:  # 1. pre-verify backup
+        write_fn((show + "\r").encode())
+        result["baseline"] = _read_until(read_fn, [profile["prompt"]], 12.0)
+    lines = [l.rstrip() for l in config_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    # 2. enter config mode + send line-by-line
+    write_fn((enter + "\r").encode())
+    _read_until(read_fn, [profile["prompt"]], cmd_secs)
+    for ln in lines:
+        if not ln.strip():
+            continue
+        write_fn((ln + "\r").encode())
+        out = _read_until(read_fn, [profile["prompt"]], cmd_secs)
+        result["applied"].append(ln)
+        if _CFG_ERR.search(out):
+            result["errors"].append({"line": ln, "output": out[-160:]})
+    if exit_:
+        write_fn((exit_ + "\r").encode())
+        _read_until(read_fn, [profile["prompt"]], cmd_secs)
+    # 3. post-verify: pushed (non-comment) lines present in running-config
+    running = ""
+    if show:
+        write_fn((show + "\r").encode())
+        running = _read_until(read_fn, [profile["prompt"]], 12.0)
+    check = [l.strip() for l in lines if l.strip() and not l.strip().startswith("!")]
+    missing = [l for l in check if l not in running] if running else check
+    result["missing"] = missing[:20]
+    result["verify_ok"] = (not result["errors"]) and (not missing)
+    # 4. save on pass; rollback on fail (never save a failed push)
+    if result["verify_ok"]:
+        if save and save_cmd:
+            write_fn((save_cmd + "\r").encode())
+            _read_until(read_fn, [profile["prompt"]], cmd_secs + 4)
+            result["saved"] = True
+        result["status"] = "SUCCESS"
+    else:
+        if rollback == "reboot":
+            # running-config is unsaved → a reload reverts to startup.
+            write_fn(b"reload\r")
+            _read_until(read_fn, [re.compile(r"\[confirm\]|\[yes/no\]|\?\s*$")], 3.0)
+            write_fn(b"no\r")   # 'System configuration modified. Save? [yes/no]:' → no
+            write_fn(b"\r")     # confirm reload
+            result["rolled_back"] = True
+        elif enter:
+            write_fn((enter + "\r").encode())
+            _read_until(read_fn, [profile["prompt"]], cmd_secs)
+            for ln in reversed(result["applied"]):
+                s = ln.strip()
+                if s and not s.startswith("!") and not s.lower().startswith("no "):
+                    write_fn(("no " + s + "\r").encode())
+                    _read_until(read_fn, [profile["prompt"]], cmd_secs)
+            if exit_:
+                write_fn((exit_ + "\r").encode())
+                _read_until(read_fn, [profile["prompt"]], cmd_secs)
+            result["rolled_back"] = True
+        result["status"] = "ERROR"
+        result["message"] = "verification failed — not saved; rolled back (%s)" % rollback
+    return result

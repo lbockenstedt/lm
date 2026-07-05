@@ -252,6 +252,13 @@ def has_console_access(sess) -> bool:
     return has_module_access(sess, "console")
 
 
+def has_console_write_access(sess) -> bool:
+    """Console config-WRITE gate — pushing/reading device configs (Phase G) is a
+    higher tier than viewing/interacting. Admins pass; otherwise the user needs
+    the explicit ``console_write`` right."""
+    return has_module_access(sess, "console_write")
+
+
 def check_tenant_access(sess, tenant_id: str) -> bool:
     """True if the session user may access ``tenant_id``.
 
