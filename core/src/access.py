@@ -550,13 +550,13 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
         cats = [t.get("name"), t.get("slug"), t.get("netbox_tenant_slug"), tid]
         tenant_cat = sorted({str(c).strip() for c in cats if c}) or None
     before = _list_len(data)
-    logger.warning("DIAG filter_fw[%s] tid=%r enabled=%s prefixes=%d "
+    logger.debug("DIAG filter_fw[%s] tid=%r enabled=%s prefixes=%d "
                    "items_before=%d mode=%s tenant_cat=%r", endpoint, tid, True,
                    len(prefixes), before, mode, tenant_cat)
     if mode == "fw":
         alias_map = await _fw_alias_map(hub, firewall_id) if firewall_id else None
         out = filter_firewall_rules(data, prefixes, alias_map, tenant_category=tenant_cat)
-        logger.warning("DIAG filter_fw[%s] filtered %d -> %d alias_map=%s",
+        logger.debug("DIAG filter_fw[%s] filtered %d -> %d alias_map=%s",
                        endpoint, before, _list_len(out), bool(alias_map))
         return out
     # NAT port forwards are normally public-facing (source=any) with a target
@@ -571,7 +571,7 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     drop_no_ip = endpoint != "nat"
     out = filter_items_by_prefixes(data, prefixes, fields,
                                    drop_no_ip=drop_no_ip, tenant_category=tenant_cat)
-    logger.warning("DIAG filter_fw[%s] filtered %d -> %d drop_no_ip=%s",
+    logger.debug("DIAG filter_fw[%s] filtered %d -> %d drop_no_ip=%s",
                    endpoint, before, _list_len(out), drop_no_ip)
     return out
 
@@ -608,7 +608,7 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
     drop_no_ip = endpoint not in ("macs", "arp")
     before = _list_len(data)
     out = filter_items_by_prefixes(data, prefixes, fields, drop_no_ip=drop_no_ip)
-    logger.warning("DIAG filter_nw[%s] tid=%r prefixes=%d filtered %d -> %d "
+    logger.debug("DIAG filter_nw[%s] tid=%r prefixes=%d filtered %d -> %d "
                    "drop_no_ip=%s", endpoint, tid, len(prefixes), before,
                    _list_len(out), drop_no_ip)
     return out
@@ -690,7 +690,7 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
         before = _list_len(data)
         # DIAG: pinpoints where the admin-switcher filter diverges. Remove once
         # the cross-tenant leak is resolved.
-        logger.warning("DIAG filter_tenant[%s] explicit=%r tid=%r enabled=%s "
+        logger.debug("DIAG filter_tenant[%s] explicit=%r tid=%r enabled=%s "
                        "prefixes=%d items_before=%d ip_fields=%s", module, explicit_tenant,
                        tid, enabled, len(prefixes), before, ip_fields)
         if not enabled or not prefixes:
@@ -701,7 +701,7 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
                                         tenant_tags=_tenant_tag_set(hub, tid))
         else:
             out = filter_items_by_prefixes(data, prefixes, ip_fields)
-        logger.warning("DIAG filter_tenant[%s] filtered %d -> %d prefixes=%s",
+        logger.debug("DIAG filter_tenant[%s] filtered %d -> %d prefixes=%s",
                        module, before, _list_len(out), prefixes)
         return out
     # Hypervisor with no explicit tenant: still apply the template-pool + tag
@@ -718,7 +718,7 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
         return filter_hypervisor_vms(data, prefixes,
                                      template_pools=_template_pools(hub),
                                      tenant_tags=_tenant_tag_set(hub, scope_tid))
-    logger.warning("DIAG filter_tenant[%s] FALLBACK legacy (explicit=%r tid=%r) "
+    logger.debug("DIAG filter_tenant[%s] FALLBACK legacy (explicit=%r tid=%r) "
                    "-> admin-bypass/no-op path", module, explicit_tenant, tid)
     return await filter_session(hub, sessions, request, data, module, ip_fields)
 

@@ -665,7 +665,13 @@ def create_app(hub):
         #   /api/ldap/*    — directory user/group/OU CRUD + reset ANY user's password
         #   /api/pxmx/agents/*/…  — revoke/rename/config/cs-command (agent mutations;
         #                            the bare GET /api/pxmx/agents list stays authed-read)
-        _ADMIN_API_PREFIXES = ("/api/agent/", "/api/generic/", "/api/ldap/", "/api/pxmx/agents/")
+        #   /api/cppm/probe        — arbitrary path+method relay to the ClearPass API
+        #                            (an authed SSRF-style relay); test-auth/refresh/health
+        #                            are diagnostic spoke relays unused by the WebUI. The
+        #                            real cppm *data* routes (devices/sessions/nac-status/…)
+        #                            stay authed-read for tenant users.
+        _ADMIN_API_PREFIXES = ("/api/agent/", "/api/generic/", "/api/ldap/", "/api/pxmx/agents/",
+                               "/api/cppm/probe", "/api/cppm/test-auth", "/cppm/refresh", "/cppm/health")
         if any(path.startswith(p) for p in _ADMIN_API_PREFIXES):
             if not _is_admin(sess):
                 return JSONResponse(status_code=403, content={"detail": "Admin access required"})
@@ -6171,46 +6177,29 @@ def create_app(hub):
             if not module_id:
                 raise HTTPException(status_code=400, detail="Missing module_id")
 
-            modules = {
-                "cppm":     "cppm/install.sh",
-                "cs":       "cs/install_cs.sh",
-                "dhcp":     "dhcp/install_dhcp.sh",
-                "dns":      "dns/install_dns.sh",
-                "ldap":     "ldap/install_ldap.sh",
-                "netbox":   "netbox/install.sh",
-                "opnsense": "opnsense/install_opnsense.sh",
-                "pxmx":     "pxmx/install_pxmx.sh",
+            # Unified agent model: on-demand "install a module" on the
+            # co-located node = loading its ROLE on the local generic agent,
+            # which self-installs the role's repo + deps + host infra
+            # (_install_role / --infra-only). Replaces the old per-module
+            # dedicated installer + {module}-spoke-1 registration; reuses the
+            # same LOAD_ROLE path as the WebUI Load Role action, so the module
+            # runs as a sub-spoke {agent}-{role} (parent-auto-approved).
+            _MODULE_ROLE = {
+                "cppm": "cppm", "cs": "simulation", "dhcp": "dhcp", "dns": "dns",
+                "ldap": "ldap", "netbox": "netbox", "opnsense": "opnsense",
+                "pxmx": "proxmox", "nw": "network", "le": "le", "console": "console",
             }
-
-            script_path = modules.get(module_id)
-            if not script_path:
-                raise HTTPException(status_code=404, detail="Module not found")
-
-            # Co-located module spokes target the hub's unified loopback surface
-            # (wss://127.0.0.1:443/ws/spoke when TLS is on, ws://…:443/ws/spoke
-            # otherwise) — NOT the retired ws://0.0.0.0:8765 bare listener. The
-            # spoke connects to this URL verbatim; LM_HUB_TLS_VERIFY=0 (set in
-            # each co-located spoke's .env by its installer) skips self-signed
-            # cert verification on the loopback wss.
-            scheme = "wss" if getattr(hub, "tls_enabled", False) else "ws"
-            hub_port = getattr(hub, "tls_port", 443)
-            hub_url = f"{scheme}://127.0.0.1:{hub_port}/ws/spoke"
-
-            spoke_id = custom_spoke_id if custom_spoke_id else f"{module_id}-spoke-1"
-
-            hub.state.register_module(spoke_id, approved=False, display_name=display_name or spoke_id)
-            hub.known_modules = hub.state.system_state["known_modules"]
-
-            first_secret = hub.key_manager.generate_first_secret(spoke_id)
-
-            subprocess.Popen(
-                ["bash", script_path, "--hub", hub_url, "--id", spoke_id,
-                 "--secret", first_secret, "--all-prereqs"],
-                shell=False,
-                cwd=os.path.join(os.path.dirname(__file__), "../../.."),
-            )
-
-            return {"status": "ok", "message": f"Installation of {module_id} triggered for {spoke_id} in background."}
+            role = _MODULE_ROLE.get(module_id, module_id)
+            agent_id = hub.get_spoke_by_type("agent")
+            if not agent_id:
+                raise HTTPException(status_code=409,
+                    detail="No generic agent connected to host the role — install the "
+                           "agent first (install_all.sh / install_agent.sh).")
+            result = await hub.request_response(agent_id, "LOAD_ROLE", {"role": role})
+            rdata = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            return {"status": "ok",
+                    "message": f"Loading role '{role}' on agent {agent_id}.",
+                    "agent_id": agent_id, "role": role, "result": rdata}
         except HTTPException:
             raise  # 4xx/503 must propagate as-is, not be re-wrapped as 500
         except Exception as e:
@@ -6989,30 +6978,21 @@ def create_app(hub):
             custom_spoke_id = data.get("spoke_id")
             display_name = data.get("display_name")
 
-            if not agent_id or not module_id or not repo_url:
-                raise HTTPException(status_code=400, detail="Missing agent_id, module_id, or repo_url")
+            if not agent_id or not module_id:
+                raise HTTPException(status_code=400, detail="Missing agent_id or module_id")
 
             if agent_id not in hub.active_connections:
                 raise HTTPException(status_code=503, detail=f"Generic agent {agent_id} not connected")
 
-            spoke_id = custom_spoke_id if custom_spoke_id else f"{module_id}-spoke-1"
-
-            hub.state.register_module(spoke_id, approved=False, display_name=display_name or spoke_id)
-            hub.known_modules = hub.state.system_state["known_modules"]
-
-            secret = hub.key_manager.generate_first_secret(spoke_id)
-            hub_secret = hub.key_manager.hub_secret
-
-            provision_data = {
-                "module_id": module_id,
-                "repo_url": repo_url,
-                "hub_url": f"ws://{hub.host}:{hub.port}",
-                "spoke_id": spoke_id,
-                "secret": secret,
-                "hub_secret": hub_secret
-            }
-
-            result = await hub.request_response(agent_id, "PROVISION_MODULE", provision_data)
+            # Unified model: provisioning a module on an agent = loading its ROLE
+            # (the agent self-installs from _ROLE_MAP — the caller's repo_url is no
+            # longer needed). The module runs as a sub-spoke {agent}-{role}.
+            role = {
+                "cppm": "cppm", "cs": "simulation", "dhcp": "dhcp", "dns": "dns",
+                "ldap": "ldap", "netbox": "netbox", "opnsense": "opnsense",
+                "pxmx": "proxmox", "nw": "network", "le": "le", "console": "console",
+            }.get(module_id, module_id)
+            result = await hub.request_response(agent_id, "LOAD_ROLE", {"role": role})
             return result
         except Exception as e:
             logger.error(f"Provisioning failed: {e}", exc_info=True)
