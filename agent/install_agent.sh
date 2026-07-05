@@ -49,9 +49,9 @@ while [[ "$#" -gt 0 ]]; do
         --hub-secret) HUB_SECRET="$2";   shift ;;
         --role)       STARTUP_ROLE="$2"; shift ;;
         --roles)      STARTUP_ROLES="$2"; shift ;;
-        --clone)      CLONE_ONLY=true; shift ;;
+        --clone)      CLONE_ONLY=true ;;
         --loopback)   AGENT_COLOCATED=true ;;
-        --tls-verify) TLS_VERIFY=true; shift ;;
+        --tls-verify) TLS_VERIFY=true ;;
         --tls-ca-cert) TLS_CA_CERT="$2"; shift ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac; shift
