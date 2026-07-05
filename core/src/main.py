@@ -2421,13 +2421,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 }
                 self.record_spoke_event(spoke_id, "connection_error", str(e))
         finally:
-            # Only clean up the registry if it still points at THIS websocket.
-            # An evicted/zombie connection's finally must not delete the entry
-            # that now belongs to the live replacement connection.
-            if spoke_id and self.active_connections.get(spoke_id) is websocket:
+            # Only clean up shared registry state if THIS websocket still owns the
+            # spoke's slot. An evicted/zombie connection (replaced by a live
+            # reconnect via _install_active_connection) whose recv() later unblocks
+            # must NOT wipe the live replacement's module_type / auth / parent map /
+            # hosted-agent index — that is the cs-spoke-1 zombie class, and the
+            # `is websocket` guard below (previously only on active_connections)
+            # now covers the sibling state too. Capture ownership BEFORE deleting
+            # the entry (the delete would otherwise make the later check False).
+            owns_slot = bool(spoke_id and self.active_connections.get(spoke_id) is websocket)
+            if owns_slot:
                 del self.active_connections[spoke_id]
                 self.active_connection_key_ids.pop(spoke_id, None)
-            if spoke_id:
                 self.spoke_module_types.pop(spoke_id, None)
                 self.spoke_parent_map.pop(spoke_id, None)
                 self.spoke_authenticated.pop(spoke_id, None)
