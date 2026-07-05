@@ -1135,6 +1135,33 @@ async function scanGitHubRepos() {
     }
 }
 
+// Populate a <select> with the branches of `repo` (a module key like 'hub',
+// an "owner/name", or a full git URL) from the hub's git-ls-remote endpoint,
+// preserving `currentVal` as the selected option even if it isn't in the list
+// (a custom/feature branch). Degrades gracefully: on any fetch failure the
+// select just holds the current value so the branch isn't lost.
+async function populateBranchSelect(selectId, repo, currentVal) {
+    const el = document.getElementById(selectId);
+    if (!el) return;
+    const cur = currentVal || 'main';
+    let branches = null;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 9000);
+    try {
+        const res = await setupFetch('/setup/repo-branches?repo=' + encodeURIComponent(repo), { signal: ctrl.signal });
+        if (res.ok) {
+            const data = await res.json();
+            if (Array.isArray(data.branches) && data.branches.length) branches = data.branches;
+        }
+    } catch (err) { console.warn('populateBranchSelect: could not list branches for', repo, err); }
+    finally { clearTimeout(timer); }
+    if (!branches) branches = [cur];
+    if (cur && !branches.includes(cur)) branches = [cur, ...branches];
+    el.innerHTML = branches.map(b =>
+        `<option value="${escapeHtml(b)}" ${b === cur ? 'selected' : ''}>${escapeHtml(b)}</option>`).join('');
+    el.value = cur;
+}
+
 async function saveUpdateSources() {
     const sources = {
         hub: document.getElementById('update-source-hub').value,
@@ -1187,9 +1214,10 @@ async function loadSetupConfig() {
         // in the field (and a re-save persists it under the key the hub reads).
         if (sources.opn && !sources.opnsense) sources.opnsense = sources.opn;
         const globalBranch = config.global_branch || 'main';
-        if (document.getElementById('global-branch')) {
-            document.getElementById('global-branch').value = globalBranch;
-        }
+        // Populate the Global Branch dropdown from the configured hub repo's
+        // live branch list (via git ls-remote on the hub); keeps the saved
+        // branch selected even if listing fails or it's a custom branch.
+        populateBranchSelect('global-branch', sources.hub || 'hub', globalBranch);
         const sourceFields = {
             'hub': 'update-source-hub',
             'pxmx': 'update-source-pxmx',
@@ -3382,7 +3410,7 @@ function _renderSetupGeneralTile(content) {
             </div>
             <div class="grid grid-cols-2 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Hub Repo URL</label><div class="flex gap-2"><input type="text" id="update-source-hub" class="${inputCls}"><button onclick="scanGitHubRepos()" class="${btnSecCls} whitespace-nowrap">Scan GH</button></div></div>
-                <div class="space-y-1"><label class="${labelCls}">Global Branch</label><input type="text" id="global-branch" class="${inputCls}" placeholder="main"></div>
+                <div class="space-y-1"><label class="${labelCls}">Global Branch</label><select id="global-branch" class="${inputCls}"><option value="main">main</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">Proxmox Repo</label><input type="text" id="update-source-pxmx" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">OPNsense Repo</label><input type="text" id="update-source-opn" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Client Sim Repo</label><input type="text" id="update-source-cs" class="${inputCls}"></div>

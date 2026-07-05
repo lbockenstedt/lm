@@ -6349,6 +6349,60 @@ def create_app(hub):
             logger.exception("get_github_branches failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # Canonical branch lister for the WebUI's "Repo Branch" dropdowns. Uses
+    # `git ls-remote --heads` on the ACTUAL configured remote (update_sources)
+    # rather than the GitHub REST API, so it: works for private repos + non-
+    # GitHub remotes (honors the box's git credentials), never hits GitHub's
+    # unauthenticated 60/hr rate limit, and lists branches for exactly the URL
+    # updates resolve against (mirrors get_remote_commit's ls-remote approach).
+    # `repo` may be a full git URL, an "owner/name", or a bare module key
+    # (dns/pxmx/cs/…) resolved via update_sources → default lbockenstedt/<key>.
+    @app.get("/setup/repo-branches")
+    async def get_repo_branches(repo: str):
+        raw = (repo or "").strip()
+        if not raw:
+            raise HTTPException(status_code=400, detail="repo is required")
+        # Resolve a module key to its configured/derived remote URL. A value
+        # that already looks like a URL or "owner/name" is used as-is.
+        if "://" in raw or raw.startswith("git@") or "/" in raw:
+            url = raw
+        else:
+            sources = app.state.hub.state.get_global_config().get("update_sources", {}) or {}
+            url = sources.get(raw) or f"https://github.com/lbockenstedt/{raw}"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "ls-remote", "--heads", url,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=20)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                raise HTTPException(status_code=504,
+                                    detail=f"Timed out listing branches for {url}")
+            if proc.returncode != 0:
+                raise HTTPException(status_code=502,
+                                    detail=f"git ls-remote failed for {url}: "
+                                           f"{err.decode(errors='replace').strip()[:300]}")
+            names = []
+            for line in out.decode(errors="replace").splitlines():
+                # "<sha>\trefs/heads/<branch>"
+                parts = line.split("refs/heads/", 1)
+                if len(parts) == 2 and parts[1].strip():
+                    names.append(parts[1].strip())
+            # Surface the conventional trunk branches first, then the rest A→Z.
+            priority = {"main": 0, "master": 1, "develop": 2}
+            names = sorted(set(names), key=lambda n: (priority.get(n, 3), n.lower()))
+            return {"repo": url, "branches": names}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("get_repo_branches failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/config")
     async def get_global_config():
         hub = app.state.hub

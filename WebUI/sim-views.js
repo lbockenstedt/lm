@@ -1884,7 +1884,7 @@ window.CS_CHILD_RENDERERS['Config::Simulation'] = csRenderConfigSimulation;
  * so saving this card does not wipe the Auto-Provisioning card's keys (and vice
  * versa). Empty fields are omitted from the collected patch (as in webui-hub). */
 const CS_HUB_CONFIG_FIELDS = [
-    { key: 'repo_branch',                 label: 'Repo Branch',                type: 'text' },
+    { key: 'repo_branch',                 label: 'Repo Branch',                type: 'branch', repo: 'pxmx' },
     { key: 'reclone_schedule_enabled',    label: 'Reclone Schedule',           type: 'onoff' },
     { key: 'reclone_schedule_cron',       label: 'Reclone Cron',               type: 'text',   ph: 'sunday 02:00' },
     // NOTE: the provisioning-behavior knobs (usb_auto_provision, usb_missing_timeout,
@@ -1929,10 +1929,64 @@ function _csHcOnOff(id, val, onChangeFn) {
     </select>`;
 }
 
+// Fetch the branch list for a repo (module key like 'pxmx'/'cs', an
+// "owner/name", or a full git URL) from the hub's git-ls-remote endpoint.
+// Returns an array of branch names, or null on any failure — the caller then
+// falls back to a plain text input so a branch can still be typed (and so the
+// cs standalone dashboard, which has no hub /setup route, degrades cleanly).
+async function csFetchBranches(repo) {
+    if (!repo) return null;
+    // Client-side timeout so a slow/unreachable remote can't block the card
+    // render for the backend's full git-ls-remote budget — fall back to a text
+    // input quickly instead.
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 9000);
+    try {
+        const res = await fetch('/setup/repo-branches?repo=' + encodeURIComponent(repo),
+                                { headers: { 'Content-Type': 'application/json' }, signal: ctrl.signal });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return Array.isArray(data.branches) && data.branches.length ? data.branches : null;
+    } catch (e) {
+        console.warn('csFetchBranches: could not list branches for', repo, e);
+        return null;
+    } finally {
+        clearTimeout(t);
+    }
+}
+
+// Render a branch picker: a <select> of the fetched branches when available,
+// else a plain text input (so nothing is lost when GitHub/the remote is
+// unreachable). The current value is always preserved as a selectable option
+// even if it isn't in the fetched list (a custom/feature branch, or a typo the
+// admin still wants to see) so saving never silently drops it.
+function _csBranchSelect(id, currentVal, branches, onChangeFn) {
+    const cur = currentVal != null ? String(currentVal) : '';
+    // onChangeFn is optional: cards that auto-save (Hub Config) pass their save
+    // fn; cards with an explicit Save button (GitHub) omit it so the picker
+    // just holds its value until the user clicks Save.
+    if (!branches) {
+        const onblur = onChangeFn ? ` onblur="${onChangeFn}()"` : '';
+        return `<input id="${id}" type="text" value="${csEscape(cur)}" placeholder="main"${onblur} class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
+    }
+    const onchange = onChangeFn ? ` onchange="${onChangeFn}()"` : '';
+    const list = branches.includes(cur) || !cur ? branches.slice() : [cur, ...branches];
+    const opts = list.map(b =>
+        `<option value="${csEscape(b)}" ${b === cur ? 'selected' : ''}>${csEscape(b)}</option>`).join('');
+    return `<select id="${id}"${onchange} class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">${opts}</select>`;
+}
+
 async function csHubConfigCard(path) {
     const data = await csFetch(path);
     const enabled = !!(data && data.hub_config_enabled);
     const hc = (data && data.hub_config) || {};
+    // Pre-fetch branch lists once per distinct repo for any 'branch' fields, so
+    // the synchronous field map below can build a populated <select> (falls
+    // back to a text input per-field when a repo's branches can't be listed).
+    const branchRepos = [...new Set(CS_HUB_CONFIG_FIELDS
+        .filter(c => c.type === 'branch').map(c => c.repo))];
+    const branchMap = {};
+    await Promise.all(branchRepos.map(async r => { branchMap[r] = await csFetchBranches(r); }));
     const fields = CS_HUB_CONFIG_FIELDS.map(col => {
         const valRaw = hc[col.key];
         const valStr = (valRaw != null && typeof valRaw !== 'object') ? String(valRaw)
@@ -1940,6 +1994,7 @@ async function csHubConfigCard(path) {
         const label = `<label class="text-xs text-slate-500 ${col.full ? 'md:col-span-3' : ''}">${csEscape(col.label)}`;
         let input;
         if (col.type === 'onoff') input = _csHcOnOff('cs-hc-' + col.key, valRaw, 'csSaveHubConfig');
+        else if (col.type === 'branch') input = _csBranchSelect('cs-hc-' + col.key, valStr, branchMap[col.repo], 'csSaveHubConfig');
         else if (col.type === 'number') input = `<input id="cs-hc-${col.key}" type="number" value="${csEscape(valStr)}" ${col.min != null ? `min="${col.min}"` : ''} ${col.max != null ? `max="${col.max}"` : ''} placeholder="${csEscape(col.ph || '')}" onblur="csSaveHubConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         else input = `<input id="cs-hc-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" onblur="csSaveHubConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         return `${label}${input}</label>`;
@@ -2466,11 +2521,17 @@ async function csRenderSetupGithub() {
     cfg = cfg || {};
     const f = (id, label, val, type) => `<label class="text-xs text-slate-500">${csEscape(label)}
       <input id="${id}" ${type === 'password' ? 'type="password"' : `value="${csEscape(val != null ? val : '')}"`} class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
+    // List branches for the actually-configured repo URL (falls back to the
+    // 'cs' module key when no URL is set yet), so the Repo Branch field is a
+    // dropdown; degrades to a text field when the remote can't be listed.
+    const branches = await csFetchBranches(cfg.repo_url || 'cs');
+    const branchField = `<label class="text-xs text-slate-500">Repo Branch${
+        _csBranchSelect('cs-gh-branch', cfg.repo_branch, branches, null)}</label>`;
     csSet(`<div class="max-w-2xl space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">GitHub</h3>
         <div class="grid grid-cols-1 gap-3">
-          ${f('cs-gh-url', 'Repo URL', cfg.repo_url)}${f('cs-gh-branch', 'Repo Branch', cfg.repo_branch)}
+          ${f('cs-gh-url', 'Repo URL', cfg.repo_url)}${branchField}
           ${f('cs-gh-token', 'GitHub Token ' + (cfg.has_token ? '(set — leave blank to keep)' : '(new)'), '', 'password')}
         </div>
         <div class="flex gap-2 mt-4">
