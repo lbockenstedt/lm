@@ -11102,15 +11102,15 @@ async function saveDevice() {
             body: JSON.stringify(payload),
         });
         if (r.ok) {
-            alert(`Device ${id ? 'updated' : 'added'} successfully!`);
+            showToast(`Device ${id ? 'updated' : 'added'} successfully`, 'success');
             closeDeviceModal();
             loadAllDevices();
         } else {
             const err = await r.json().catch(() => ({}));
-            alert('Failed to save device: ' + (err.detail || r.status));
+            showToast('Failed to save device: ' + (err.detail || r.status), 'error');
         }
     } catch (e) {
-        alert('Error saving device: ' + e.message);
+        showToast('Error saving device: ' + e.message, 'error');
     }
 }
 
