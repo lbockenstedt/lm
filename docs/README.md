@@ -26,6 +26,7 @@ The canonical doc set lives here in `lm/docs/`. Each separate repo also carries 
 - [dhcp.md](dhcp.md) — DHCP (`dhcp`): thin Kea DHCP4 spoke; subnets/leases/reservations.
 - [dns.md](dns.md) — DNS (`dns`): Unbound via `unbound-control`.
 - [le.md](le.md) — Certificate Management (`certificates`): certbot ACME producer + ledger.
+- [console.md](console.md) — Console (`console`): serial console access (USB + UART), baud auto-detect, xterm relay, auto-identify/fingerprint → NetBox, per-port + per-agent tenant binding.
 
 ## Agents
 
