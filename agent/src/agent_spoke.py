@@ -223,6 +223,13 @@ class GenericAgent(BaseSpoke):
             except subprocess.CalledProcessError as e:
                 return {"status": "ERROR", "message": f"Package install failed: {e}"}
 
+        # 2b. Module-specific OS bootstrapping the DEDICATED installers used to
+        #     do, so a freshly-loaded role reaches parity with install_<mod>.sh
+        #     (dns needs unbound remote-control enabled+started; dhcp needs a
+        #     non-interactive kea-ctrl-agent config + the kea daemons started).
+        #     Idempotent + best-effort; a config hiccup must not fail the load.
+        self._role_post_install(role_name)
+
         # 3. Python deps. requirements.txt sits at role_file.parent.parent for
         #    every role (repo root for most; cs/lm-spoke/ for simulation).
         req_file = role_file.parent.parent / "requirements.txt"
@@ -238,6 +245,61 @@ class GenericAgent(BaseSpoke):
                 logger.warning("pip install for role '%s' failed: %s", role_name, e)
 
         return {"status": "SUCCESS"}
+
+    # kea-ctrl-agent config mirrored from dhcp/install_dhcp.sh — loopback-only,
+    # port 8001, no auth (the default Debian package config may prompt for HTTP
+    # auth; this replaces it so the role load is fully non-interactive).
+    _KEA_CTRL_AGENT_CONF = (
+        '{\n'
+        '    "Control-agent": {\n'
+        '        "http-host": "127.0.0.1",\n'
+        '        "http-port": 8001,\n'
+        '        "control-sockets": {\n'
+        '            "dhcp4": {\n'
+        '                "socket-type": "unix",\n'
+        '                "socket-name": "/run/kea/kea4-ctrl-socket"\n'
+        '            }\n'
+        '        },\n'
+        '        "loggers": [{\n'
+        '            "name": "kea-ctrl-agent",\n'
+        '            "output_options": [{"output": "syslog"}],\n'
+        '            "severity": "WARN"\n'
+        '        }]\n'
+        '    }\n'
+        '}\n'
+    )
+
+    def _role_post_install(self, role_name: str) -> None:
+        """Module-specific OS config the dedicated installers did, so a loaded
+        role reaches parity. Idempotent + best-effort (never fails the load).
+        Pure-API roles (opnsense/netbox/cppm/ldap/le/nw/pxmx) need nothing here.
+        Runs as root (the lm-agent unit is User=root)."""
+        try:
+            if role_name == "dns":
+                conf = Path("/etc/unbound/unbound.conf")
+                existing = conf.read_text() if conf.exists() else ""
+                if "control-enable: yes" not in existing:
+                    with conf.open("a") as f:
+                        f.write("\n\nremote-control:\n    control-enable: yes\n"
+                                "    control-interface: 127.0.0.1\n"
+                                "    control-port: 8953\n")
+                Path("/etc/unbound/conf.d").mkdir(parents=True, exist_ok=True)
+                if "conf.d" not in existing:
+                    with conf.open("a") as f:
+                        f.write('include-toplevel: "/etc/unbound/conf.d/*.conf"\n')
+                subprocess.run(["unbound-control-setup"], check=False, timeout=60,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["systemctl", "enable", "--now", "unbound"],
+                               check=False, timeout=60)
+            elif role_name == "dhcp":
+                Path("/etc/kea").mkdir(parents=True, exist_ok=True)
+                Path("/etc/kea/kea-ctrl-agent.conf").write_text(self._KEA_CTRL_AGENT_CONF)
+                subprocess.run(["systemctl", "enable", "--now",
+                                "kea-ctrl-agent", "kea-dhcp4-server"],
+                               check=False, timeout=60)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("post-install OS config for role '%s' failed "
+                           "(non-fatal): %s", role_name, e)
 
     # ── Background deployment (deploy roles) ──────────────────────────────────
 
