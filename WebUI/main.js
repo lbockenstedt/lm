@@ -6310,6 +6310,15 @@ function escapeHtml(s) {
         .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// Safe interpolation of a value into an onclick="fn('...')" JS-STRING that sits
+// inside an HTML attribute. escapeHtml ALONE is wrong here: the browser decodes
+// &#39; back to ' BEFORE the JS parser runs, so a value with an apostrophe breaks
+// the handler (or injects). JS-escape backslash + single-quote first, THEN
+// HTML-escape for the attribute context.
+function escJsAttr(s) {
+    return escapeHtml(String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+}
+
 // Watchdog recovery badge for a spoke. The hub's run_spoke_recovery_loop
 // restarts stranded units (reset-failed + restart, backoff 60/120/180s) and
 // exposes per-spoke state via GET_SPOKE_STATUS + /setup/diagnostics. This maps
@@ -6895,11 +6904,11 @@ async function lookupVMDetails() {
         } else {
             if (tableBody) tableBody.innerHTML = rules.map(rule => `
                 <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-4 py-3 font-mono text-xs text-slate-600">${rule.source || 'any'}</td>
-                    <td class="px-4 py-3 text-slate-600">${rule.destination || '-'}</td>
-                    <td class="px-4 py-3 text-slate-600">${rule.protocol || 'TCP'}</td>
-                    <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${rule.action === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">${rule.action}</span></td>
-                    <td class="px-4 py-3 text-slate-600 text-xs">${rule.description || '-'}</td>
+                    <td class="px-4 py-3 font-mono text-xs text-slate-600">${escapeHtml(rule.source || 'any')}</td>
+                    <td class="px-4 py-3 text-slate-600">${escapeHtml(rule.destination || '-')}</td>
+                    <td class="px-4 py-3 text-slate-600">${escapeHtml(rule.protocol || 'TCP')}</td>
+                    <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${rule.action === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">${escapeHtml(rule.action)}</span></td>
+                    <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(rule.description || '-')}</td>
                 </tr>
             `).join('');
         }
@@ -7056,18 +7065,19 @@ async function loadOpnsenseManagement() {
             _opnCurrentItems[idx] = item;
             const cells = keys.map(k => {
                 const val = item[k] !== undefined ? String(item[k]) : '-';
+                const eVal = escapeHtml(val);  // OPNsense-editable (alias/rule/NAT names + descriptions) → escape
                 if (k === 'action' && typeof item[k] === 'string') {
                     const color = item[k] === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600';
-                    return `<td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${color}">${val}</span></td>`;
+                    return `<td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${color}">${eVal}</span></td>`;
                 }
                 if (k === 'status') {
                     const color = val === 'up' ? 'text-green-600' : 'text-slate-400';
-                    return `<td class="px-4 py-3 font-mono text-xs ${color}">${val}</td>`;
+                    return `<td class="px-4 py-3 font-mono text-xs ${color}">${eVal}</td>`;
                 }
                 if (k === 'firewall') {
-                    return `<td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${val}</td>`;
+                    return `<td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${eVal}</td>`;
                 }
-                return `<td class="px-4 py-3 text-slate-600 font-mono text-xs max-w-[200px] truncate" title="${val.replace(/"/g,'&quot;')}">${val}</td>`;
+                return `<td class="px-4 py-3 text-slate-600 font-mono text-xs max-w-[200px] truncate" title="${eVal}">${eVal}</td>`;
             }).join('');
 
             const hideCell = subMenu === 'Firewall Rules' ? `
@@ -7175,8 +7185,8 @@ async function loadNwData(subMenu) {
                         ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
                         : `<span class="text-slate-400 text-xs">—</span>`;
                 const cfg = isAdmin()
-                    ? `<button onclick="pollNwDevice('${escapeHtml(it.id)}','${escapeHtml(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>` +
-                      `<button onclick="showNwConfigModal('${escapeHtml(it.id)}','${escapeHtml(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
+                    ? `<button onclick="pollNwDevice('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>` +
+                      `<button onclick="showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
                     : '';
                 return `<tr class="hover:bg-slate-50 transition-colors">
                     <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
@@ -8595,8 +8605,8 @@ async function loadNetboxData(subMenu) {
             const rows = prefixes.map(p => {
                 const statusCls = p.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500';
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                    <td class="px-4 py-2 font-mono font-medium">${p.prefix}</td>
-                    <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${p.status}</span></td>
+                    <td class="px-4 py-2 font-mono font-medium">${escapeHtml(p.prefix)}</td>
+                    <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${escapeHtml(p.status)}</span></td>
                     <td class="px-4 py-2 text-xs">${p.site || '—'}</td>
                     <td class="px-4 py-2 text-xs">${p.vrf || 'Global'}</td>
                     <td class="px-4 py-2 text-center text-xs">${p.is_pool ? '✓' : ''}</td>
@@ -8624,8 +8634,8 @@ async function loadNetboxData(subMenu) {
             const rows = ips.map(ip => {
                 const statusCls = ip.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500';
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                    <td class="px-4 py-2 font-mono font-medium">${ip.address}</td>
-                    <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${ip.status}</span></td>
+                    <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip.address)}</td>
+                    <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${escapeHtml(ip.status)}</span></td>
                     <td class="px-4 py-2 text-xs">${ip.dns_name || '—'}</td>
                     <td class="px-4 py-2 text-xs">${ip.description || '—'}</td>
                     <td class="px-4 py-2 text-xs">${ip.assigned_to || '—'}</td>
@@ -9446,10 +9456,10 @@ async function loadDNSData(subMenu) {
             const eName = String(r.name).replace(/'/g, "\\'");
             const eType = String(r.type).replace(/'/g, "\\'");
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                <td class="px-4 py-2 font-mono font-medium">${r.name}</td>
-                <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${r.type}</span></td>
-                <td class="px-4 py-2 font-mono text-xs">${r.value}</td>
-                <td class="px-4 py-2 text-center text-xs">${r.ttl}</td>
+                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(r.name)}</td>
+                <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${escapeHtml(r.type)}</span></td>
+                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.value)}</td>
+                <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(r.ttl))}</td>
                 <td class="px-4 py-2 whitespace-nowrap">
                     <button onclick="editDnsRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
                     <button onclick="deleteDnsRecord('${eName}','${eType}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
