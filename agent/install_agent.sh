@@ -130,10 +130,22 @@ retire_legacy_agent() {
     # role-capable unit ($SERVICE_NAME) — the install (re)writes it below.
     local names="lm-generic-agent"
     local f
-    for f in /etc/systemd/system/*.service /etc/systemd/system/*/*.service; do
+    # Scan ALL standard systemd unit dirs, not just /etc — older builders dropped
+    # the unit under /lib or /usr/lib, so an /etc-only grep misses it entirely.
+    for f in /etc/systemd/system/*.service /etc/systemd/system/*/*.service \
+             /run/systemd/system/*.service \
+             /lib/systemd/system/*.service /usr/lib/systemd/system/*.service; do
         [ -e "$f" ] || continue
         if grep -qE "/opt/lm/generic-agent" "$f" 2>/dev/null; then
             names="$names $(basename "$f" .service)"
+        fi
+    done
+    # Also ask systemd directly which unit (if any) currently has a process whose
+    # ExecStart is the legacy path — catches a unit in a non-standard location.
+    local u
+    for u in $(systemctl list-units --type=service --state=running,failed --no-legend --plain 2>/dev/null | awk '{print $1}'); do
+        if systemctl show "$u" -p ExecStart 2>/dev/null | grep -q "/opt/lm/generic-agent"; then
+            names="$names ${u%.service}"
         fi
     done
     local svc purged=0
