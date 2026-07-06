@@ -9671,7 +9671,7 @@ async function loadLEData(subMenu) {
             const certbot = d.certbot_present ? 'present' : 'not installed';
             const certbotColor = d.certbot_present ? 'text-green-600' : 'text-amber-500';
             bar.innerHTML =
-                `<span><b class="text-sm text-slate-700">v${d.version || '—'}</b> le</span>` +
+                `<span><b class="text-sm text-slate-700">le</b></span>` +
                 `<span>certbot: <b class="text-sm ${certbotColor}">${certbot}</b></span>` +
                 `<span><b class="text-sm text-slate-700">${d.certs_managed ?? 0}</b> managed</span>`;
         } else if (bar) {
@@ -9862,7 +9862,12 @@ async function removeLeTarget(domain, idx) {
 
 // DNS-01 providers supported by the le spoke (le/src/acme.py:_DNS_PLUGIN_APT).
 // cloudflare + route53 are preinstalled by install_le.sh; the rest are
-// apt-installed on demand by the spoke's ensure_dns_plugin().
+// apt-installed on demand by the spoke's ensure_dns_plugin(). Entries whose
+// value is an alias (LE_DNS_PROVIDER_ALIAS) map to a different certbot plugin
+// name at submit time — e.g. Hurricane Electric's free DNS (dns.he.net) does
+// dynamic updates over RFC 2136 + TSIG, so it uses the certbot-dns-rfc2136
+// plugin and the spoke receives dns_provider="rfc2136" (so certbot gets
+// --dns-rfc2136 and creds land at /etc/lm-le/dns-rfc2136.ini).
 const LE_DNS_PROVIDERS = [
     ['cloudflare', 'Cloudflare'],
     ['route53', 'AWS Route 53'],
@@ -9870,10 +9875,18 @@ const LE_DNS_PROVIDERS = [
     ['digitalocean', 'DigitalOcean'],
     ['linode', 'Linode'],
     ['rfc2136', 'RFC 2136 (BIND)'],
+    ['he', 'Hurricane Electric (RFC 2136)'],
     ['hetzner', 'Hetzner'],
     ['inwx', 'INWX'],
     ['transip', 'TransIP'],
 ];
+
+// Frontend-only provider aliases → the certbot plugin name the spoke must
+// receive. Keys are LE_DNS_PROVIDERS entries; values are the real
+// _DNS_PLUGIN_APT name in le/src/acme.py.
+const LE_DNS_PROVIDER_ALIAS = {
+    he: 'rfc2136',
+};
 
 // Per-provider INI key shown as the DNS creds placeholder. The le spoke writes
 // the raw content to /etc/lm-le/dns-<provider>.ini at 0600 (write_dns_creds).
@@ -9884,6 +9897,12 @@ const LE_DNS_CREDS_HINT = {
     digitalocean: 'dns_digitalocean_token = ...',
     linode:     'dns_linode_api_key = ...',
     rfc2136:    'dns_rfc2136_server = ...\ndns_rfc2136_key_name = ...\ndns_rfc2136_key_secret = ...',
+    he:         '# Hurricane Electric dns.he.net — TSIG dynamic update\n' +
+                'dns_rfc2136_server = ns1.he.net\n' +
+                'dns_rfc2136_port = 53\n' +
+                'dns_rfc2136_key_name = YOUR_KEY_NAME\n' +
+                'dns_rfc2136_key_secret = YOUR_TSIG_SECRET\n' +
+                'dns_rfc2136_algorithm = hmac-sha256',
     hetzner:    'dns_hetzner_api_token = ...',
     inwx:       'dns_inwx_url = https://api.domrobot.com/xmlrpc/\ndns_inwx_username = ...\ndns_inwx_password = ...',
     transip:    'dns_transip_username = ...\ndns_transip_api_key = ...',
@@ -9900,6 +9919,10 @@ function leIssueToggleChallenge() {
     set('le-issue-webroot-row', ch === 'http-webroot');
     set('le-issue-dns-provider-row', ch === 'dns');
     set('le-issue-dns-creds-row', ch === 'dns');
+    // Populate the textarea placeholder for the (default) provider as soon as
+    // the DNS-01 row appears, so the sample format is visible without requiring
+    // a provider re-select.
+    if (ch === 'dns') leIssueUpdateDnsHint();
 }
 
 function leIssueAddTarget() {
@@ -9978,9 +10001,8 @@ function showLeIssueModal() {
                 <select id="le-issue-dns-provider" onchange="leIssueUpdateDnsHint()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${dnsOpts}</select>
             </div>
             <div id="le-issue-dns-creds-row" class="flex flex-col hidden">
-                <label class="text-xs text-slate-500 mb-1">DNS credentials INI <span class="text-slate-400">(written to /etc/lm-le/dns-&lt;provider&gt;.ini at 0600)</span></label>
-                <textarea id="le-issue-dns-creds" rows="3" placeholder="" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500"></textarea>
-                <p id="le-issue-dns-creds-hint" class="text-[11px] text-slate-400 mt-1 font-mono"></p>
+                <label class="text-xs text-slate-500 mb-1">DNS credentials INI <span class="text-slate-400">(written to /etc/lm-le/dns-&lt;provider&gt;.ini at 0600 — sample format shown in the field)</span></label>
+                <textarea id="le-issue-dns-creds" rows="5" placeholder="" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500 placeholder:text-slate-400 placeholder:font-mono placeholder:text-xs"></textarea>
             </div>
             <div class="flex items-center gap-4">
                 <label class="flex items-center gap-2 text-sm text-slate-700">
@@ -10011,12 +10033,13 @@ function showLeIssueModal() {
     </div>`;
     document.body.appendChild(modal);
     leIssueRenderTargets();
+    leIssueUpdateDnsHint();
 }
 
 function leIssueUpdateDnsHint() {
     const p = document.getElementById('le-issue-dns-provider')?.value;
-    const hint = document.getElementById('le-issue-dns-creds-hint');
-    if (p && hint) hint.textContent = LE_DNS_CREDS_HINT[p] || '';
+    const ta = document.getElementById('le-issue-dns-creds');
+    if (ta && p) ta.placeholder = LE_DNS_CREDS_HINT[p] || '';
 }
 
 async function leIssueCert() {
@@ -10040,7 +10063,12 @@ async function leIssueCert() {
 
     const body = { domain, email, challenge, staging, key_type: keyType };
     if (chSel === 'http-webroot') body.webroot = webroot;
-    if (challenge === 'dns') { body.dns_provider = dnsProvider; body.dns_creds = dnsCreds; }
+    // Resolve frontend provider aliases (e.g. Hurricane Electric → rfc2136) so
+    // the spoke receives the real certbot plugin name.
+    if (challenge === 'dns') {
+        body.dns_provider = LE_DNS_PROVIDER_ALIAS[dnsProvider] || dnsProvider;
+        body.dns_creds = dnsCreds;
+    }
     if (_leIssueTargets.length) body.targets = _leIssueTargets;
 
     const btn = document.querySelector('#le-issue-modal button.bg-\\[\\#01A982\\]');
