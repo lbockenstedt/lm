@@ -1,9 +1,12 @@
 import asyncio
 import argparse
+import json
 import logging
 import os
+import secrets
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List
 
@@ -25,8 +28,10 @@ if _LM_ROOT not in sys.path:
 
 try:
     from core.src.messaging.control_plane import BaseControlPlane
+    from core.src.messaging.agent_hosting import AgentHostingControlPlane
 except ImportError:
     from messaging.control_plane import BaseControlPlane
+    from messaging.agent_hosting import AgentHostingControlPlane
 
 import agent_spoke
 from agent_spoke import GenericAgent, _ROLE_MAP
@@ -61,8 +66,19 @@ def _lm_root_for(path: str) -> Path:
 _LM_REPO_URL = "https://github.com/lbockenstedt/lm.git"
 
 
-class RoleConnection(BaseControlPlane):
+class RoleConnection(AgentHostingControlPlane):
     """One independent hub connection per loaded role (multi-role agent).
+
+    Subclasses ``AgentHostingControlPlane`` so the **proxmox** (hypervisor)
+    role can serve a real ``/ws/agent`` listener — a pxmx node-agent dials the
+    box running the pxmx role (``--spoke-ip <box>`` → ``ws://<box>:8766`` or
+    ``wss://<box>:443``), and ``ProxmoxSpoke`` commands (``GET_AGENTS``,
+    ``PXMX_LIST_VMS``, ``GET_NODE_STATS``, VNC…) read the inherited
+    ``connected_agents`` / ``pending_agents`` / ``broadcast_to_agents`` /
+    ``send_to_agent`` populated from that listener. Non-pxmx roles are gated
+    off (``_agent_listener_enabled`` returns False) so they never bind a
+    port; for them the agent-hosting state stays empty (inherited init), so
+    any role module reading it still gets a clean empty result.
 
     The base ``AgentControlPlane`` keeps its primary connection as
     ``module_type "agent"`` (the Generic Node control channel). Each loaded role
@@ -100,38 +116,35 @@ class RoleConnection(BaseControlPlane):
         self.base_id = base_id
         self.module_type = mtype
         self.parent_spoke_id = base_id
-        # Agent-hosting shim: the pxmx (hypervisor) role module reads
-        # ``self.control_plane.connected_agents`` in _get_agents / _list_vms /
-        # _get_node_stats. A standalone pxmx spoke's control plane is an
-        # AgentHostingControlPlane that populates this from inbound /ws/agent
-        # connections; a RoleConnection is a plain BaseControlPlane with no
-        # agent listener, so the attribute is absent and every hypervisor
-        # command 500s with "'RoleConnection' object has no attribute
-        # 'connected_agents'" (a per-poll traceback storm). Expose an empty dict
-        # so those commands degrade to a clean empty result — this node hosts no
-        # node-agents of its own (they dial the cs/pxmx spoke that owns the
-        # listener). Harmless for non-pxmx roles.
-        self.connected_agents: dict = {}
-        # Agent-hosting shims (same class as connected_agents above): the pxmx
-        # role module also reads ``self.control_plane.pending_agents`` in
-        # _get_agents (iterating it for the pending list) and calls
-        # ``self.control_plane.broadcast_to_agents("GET_VM_LIST", {})`` in
-        # _list_vms when the telemetry cache is empty. Both live on
-        # AgentHostingControlPlane (the standalone pxmx spoke's control plane)
-        # but are absent on a plain BaseControlPlane, so a RoleConnection
-        # 500s with "'RoleConnection' object has no attribute 'pending_agents'"
-        # / 'broadcast_to_agents' on every GET_AGENTS / PXMX_LIST_VMS — a
-        # per-poll traceback storm across every agent host running the pxmx
-        # role. Expose an empty dict + a no-op async broadcast returning [] so
-        # those commands degrade to a clean empty result: this node hosts no
-        # node-agents of its own (they dial the cs/pxmx spoke that owns the
-        # listener). Harmless for non-pxmx roles.
-        self.pending_agents: dict = {}
+        # connected_agents / pending_agents / agent_signer / _agent_server_task
+        # are initialized by AgentHostingControlPlane.__init__ (the mixin). The
+        # pxmx (hypervisor) role binds a /ws/agent listener (see
+        # _agent_listener_enabled + run); other roles never bind, so those
+        # dicts stay empty — any role module reading them gets a clean empty
+        # result.
         # Sub-spokes must NOT carry the base's install UUID (see class docstring).
         self.install_uuid = ""
         # Suppress the one-time "Hub secrets not configured" warning per role —
         # sub-spokes intentionally run zero-touch and re-provision via the parent.
         self._hub_secret_warned = True
+        # Disk cache for the proxmox role's agent telemetry (survives a process
+        # restart; served by ProxmoxSpoke as stale data until agents reconnect).
+        # Mirrors PxmxControlPlane.__init__ (pxmx/src/control_plane.py);
+        # harmless for non-pxmx roles (disk_cache stays {}).
+        self._disk_cache_path = str(
+            Path(__file__).resolve().parent.parent / "pxmx_agent_cache.json")
+        self.disk_cache: dict = {}
+        self._load_disk_cache()
+        # The proxmox role authenticates inbound node-agents with an agent_secret
+        # (the spoke-side PSK; approve_pending_agent provisions it to the agent on
+        # approval). A standalone pxmx gets it from install_pxmx.sh writing
+        # /etc/lm-agent/config.json; a generic-agent box loading the pxmx role has
+        # no such install, so self-provision + persist one here. Without it the
+        # zero-touch approval loop never completes (the agent only saves a truthy
+        # provisioned secret — see pxmx agent _save_secret), pinning the agent in
+        # APPROVAL_REQUIRED forever.
+        if self._agent_listener_enabled():
+            self._ensure_agent_secret()
         # The role instance handles this connection's commands; registered under
         # the role name so BaseControlPlane's first-module fallback routes to it.
         self.register_module(role_name, role_instance)
@@ -145,11 +158,160 @@ class RoleConnection(BaseControlPlane):
         except Exception:  # noqa: BLE001 - some inner instances may forbid attrs
             pass
 
-    async def broadcast_to_agents(self, cmd_type: str,
-                                  data: dict) -> list:
-        """No-op shim (see __init__): a RoleConnection hosts no node-agents,
-        so fanning out returns no results."""
-        return []
+    # ── Agent listener (proxmox role only) ───────────────────────────────────
+
+    def _agent_listener_enabled(self) -> bool:
+        """Only the pxmx (hypervisor) role hosts node-agents. Other roles
+        (dns/dhcp/ldap/…) never bind a /ws/agent listener — the inherited
+        AgentHostingControlPlane gate (always-on for pxmx) is overridden so a
+        multi-role agent doesn't bind :8766/:443 for non-agent-hosting roles."""
+        return self.role_name == "proxmox"
+
+    async def run(self):
+        """Start the hub WS connection (BaseControlPlane.run) and, for the
+        proxmox role, the self-healing /ws/agent listener so pxmx node-agents
+        can dial this box (``--spoke-ip <box>``). Mirrors
+        PxmxControlPlane.run (pxmx/src/control_plane.py)."""
+        if self._agent_listener_enabled():
+            self._start_agent_server_task()
+        await super().run()
+
+    # ── Disk cache (proxmox role) — mirrors PxmxControlPlane ─────────────────
+
+    def _load_disk_cache(self):
+        """Load persisted agent telemetry from disk on startup."""
+        try:
+            if os.path.exists(self._disk_cache_path):
+                with open(self._disk_cache_path) as f:
+                    data = json.load(f)
+                self.disk_cache = data.get("agents", {})
+                age_h = (time.time() - data.get("saved_at", 0)) / 3600
+                logger.info(
+                    f"Loaded agent disk cache: {len(self.disk_cache)} agent(s), "
+                    f"{age_h:.1f}h old")
+        except Exception as e:
+            logger.warning(f"Could not load agent disk cache: {e}")
+
+    def _save_disk_cache(self):
+        """Persist connected agent telemetry to disk (atomic write)."""
+        try:
+            payload = {
+                "saved_at": time.time(),
+                "agents": {
+                    aid: {
+                        "hostname":      info.get("hostname", aid),
+                        "cluster_name":  info.get("cluster_name", aid),
+                        "last_seen":     info.get("last_seen", 0),
+                        "nodes":         info.get("nodes", []),
+                        "vms":           info.get("vms", []),
+                        "agent_metrics": info.get("agent_metrics", {}),
+                    }
+                    for aid, info in self.connected_agents.items()
+                },
+            }
+            tmp = self._disk_cache_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp, self._disk_cache_path)
+            self.disk_cache = payload["agents"]
+        except Exception as e:
+            logger.warning(f"Could not write agent disk cache: {e}")
+
+    def _ensure_agent_secret(self):
+        """Self-provision + persist an ``agent_secret`` for the proxmox role's
+        /ws/agent listener if none is configured.
+
+        ``AgentHostingControlPlane.__init__`` loads ``agent_secret`` from
+        ``AGENT_CONFIG_PATH`` (``/etc/lm-agent/config.json``). A standalone
+        pxmx has install_pxmx.sh write that file; a generic-agent box loading
+        the pxmx role does not, so ``agent_secret`` is None and the zero-touch
+        approval loop never completes (the agent rejects a falsy provisioned
+        secret). Generate a 32-byte token, persist it (chmod 600) so a process
+        restart reuses the SAME secret and already-approved agents reconnect
+        cleanly, and re-arm the HMAC signer. On any write failure fall back to
+        an in-memory secret for this session (survives reconnects within the
+        process; a restart re-provisions) — never fatal: the listener still
+        binds, agents still connect zero-touch and would re-approve after a
+        restart that lost the secret.
+        """
+        if self.agent_secret:
+            return
+        new_secret = secrets.token_urlsafe(32)
+        config_path = self.AGENT_CONFIG_PATH
+        try:
+            os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
+            existing: dict = {}
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path) as f:
+                        existing = json.load(f)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"Could not read existing {config_path} (will overwrite "
+                        f"agent_secret only): {e}")
+            existing["agent_secret"] = new_secret
+            tmp = config_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(existing, f)
+            os.replace(tmp, config_path)
+            try:
+                os.chmod(config_path, 0o600)
+            except Exception:  # noqa: BLE001
+                pass
+            self.agent_secret = new_secret
+            self.agent_signer = self._build_agent_signer(new_secret)
+            self.config = existing
+            logger.info(f"Self-provisioned proxmox agent_secret → {config_path}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"Could not persist proxmox agent_secret to {config_path} "
+                f"(using in-memory secret for this session): {e}")
+            self.agent_secret = new_secret
+            self.agent_signer = self._build_agent_signer(new_secret)
+
+    def _build_agent_signer(self, secret: str):
+        """Rebuild the agent HMAC signer with ``secret`` (mirrors
+        AgentHostingControlPlane.__init__'s ``MessageSigner(self.agent_secret)``).
+        Imports MessageSigner the same way agent_hosting does."""
+        try:
+            from core.src.security.signer import MessageSigner
+        except ImportError:
+            from security.signer import MessageSigner  # type: ignore
+        return MessageSigner(secret)
+
+    # ── Subclass hooks (AgentHostingControlPlane) — proxmox telemetry ─────────
+
+    async def _on_agent_registered(self, agent_id: str) -> None:
+        """Re-push stored PVE credentials to a freshly-connected agent so a
+        reconnect after a spoke restart picks up its saved config. Parameterized
+        by self.role_name (the module is registered under the role name, not the
+        hardcoded "pxmx" the standalone PxmxControlPlane uses)."""
+        mod = self.modules.get(self.role_name)
+        stored_cfg = mod.agent_configs.get(agent_id) if mod else None
+        if stored_cfg:
+            try:
+                await self.send_to_agent("UPDATE_CONFIG", stored_cfg,
+                                         agent_id=agent_id)
+                logger.info(f"Re-pushed stored config to agent '{agent_id}'")
+            except Exception as _e:
+                logger.warning(
+                    f"Failed to re-push config to agent '{agent_id}': {_e}")
+
+    async def _on_agent_telemetry(self, agent_id: str, rec, data: dict) -> None:
+        """Cache Proxmox nodes/vms/cluster + agent_metrics, persist the disk
+        cache (proxmox role only), and mirror the raw telemetry into the role
+        module's telemetry_cache (served for fast UI reads). Parameterized by
+        self.role_name — mirrors PxmxControlPlane._on_agent_telemetry."""
+        if rec is not None:
+            rec["cluster_name"] = data.get("cluster_name", agent_id)
+            rec["nodes"]        = data.get("nodes", {}).get("nodes", [])
+            rec["vms"]          = data.get("vms", {}).get("vms", [])
+            rec["agent_metrics"] = data.get("metrics", {})
+            if self._agent_listener_enabled():  # proxmox role → persist
+                self._save_disk_cache()
+        mod = self.modules.get(self.role_name)
+        if mod is not None and hasattr(mod, "telemetry_cache"):
+            mod.telemetry_cache[agent_id] = data
 
     def get_service_name(self) -> str:
         # Same systemd unit as the base agent (one process hosts all roles).
