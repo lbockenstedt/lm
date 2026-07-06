@@ -6,6 +6,12 @@ NetBox spoke. Repo: `netbox`. `module_type = "ipam"`. See [architecture-topology
 
 The IPAM/DCIM source-of-truth spoke. Owns NetBox REST access (sites, racks, devices, prefixes, IPs, VMs, tenants) and a background NetBox→Kea DHCP scope sync. It is the **sink** for every discovery sync (firewall DHCP/ARP via opnsense, switch ARP/MAC via nw, hypervisor VMs via pxmx, NAC sessions via cppm) and where staleness sweeps age objects out. Hub-colocated by default (the hub owns :443 on the same box).
 
+## What it does
+
+This module connects Lab Manager to a NetBox instance and makes NetBox the shared source of truth for "what devices, VMs, IPs, and prefixes exist in this lab." In the WebUI it shows up as the **IPAM** section (sites, racks, devices, prefixes, IP addresses, tenants), and its connection is configured under **Setup → IPAM**.
+
+You rarely have to enter data into NetBox by hand: this module is the landing zone every other discovery source writes to — the firewall's DHCP/ARP data, switch ARP/MAC tables, Proxmox VM inventories, and NAC (ClearPass) sessions all get synced in here automatically, so a device that shows up anywhere in the lab tends to show up in IPAM without anyone typing it in. It also ages out and eventually deletes records for things that stop being seen, so IPAM doesn't accumulate stale ghosts forever.
+
 ## Entrypoints
 
 - `python3 -m src.control_plane` (`NetboxControlPlane`); spoke `NetboxSpoke(BaseSpoke)`, module name `"netbox"`.
@@ -58,6 +64,40 @@ Plus `GET_VERSION`, `UPDATE_CONFIG`, `SPOKE_UPDATE`.
 - **sync_devices fresh-fetch** — create branch re-sent unprovisioned custom_fields on primary_ip4 save → 400 killed the upsert; fixed by fresh `devices.get` + best-effort save so a missing cf degrades to "field not set".
 - **Kea port trap** — KEA CA must be 8760, not 8000 (the unified hub owns :443, but NetBox/the legacy webui-spoke can occupy :8000 on a co-located box); KEA on 8000 fails to bind there and the sync loop POSTs the hub → 405.
 - **Custom validators** — `ProxmoxRangeValidator` (tenant ranges non-overlapping) + `ProxmoxVmidInRangeValidator` (VM VMID within tenant range), lenient when a range is unset. NetBox v4.2+.
+
+## How it works
+
+**Command path.** Whether it runs standalone (`lm-netbox.service`) or as the `netbox` role on a generic agent, this module is a WebSocket spoke that dials the hub over `/ws/spoke`. WebUI pages under IPAM never talk to NetBox directly: an action becomes a JSON command (the `NETBOX_*` names listed under "Key commands" above), sent hub → spoke, dispatched by `netbox_spoke.handle_command`, and executed against the NetBox REST API through `pynetbox`/`NetboxEngine` — most calls run in a thread pool (`_run_sync`) so a slow NetBox request never blocks the spoke's event loop.
+
+**How the connection gets configured.** The spoke connects to `NETBOX_URL`/`NETBOX_API_TOKEN` from its environment at boot (or NetBox is provisioned locally by `install.sh`), but from then on the connection is **hub-managed**: saving NetBox URL/token in the WebUI's **Setup → IPAM** page sends an `UPDATE_CONFIG` command that calls `engine.reconnect(url, token)` and re-runs the custom-field self-heal — it is not something you hand-edit in a per-module `.env` on an ongoing basis (though the spoke does write the new value back to its local `.env` via `_persist_env` so a restart picks up the same config). The one exception is the KEA Control Agent URL (`kea_ctrl_url`), which can also be pushed the same way.
+
+**Custom fields — why syncs sometimes need "provisioning".** Every discovery sync writes to NetBox custom fields (things like `proxmox_unique_id`, `proxmox_vmid`, `discovered_from`, `nw_device_id`, `mac_address`, `last_seen`, `decommissioned_at`, tenant `vmid_start`/`vmid_end`, etc. — the full list lives in `custom_fields_spec.py`). The spoke self-heals these at startup (best-effort — a restricted API token just logs a debug line rather than crashing the spoke), but a NetBox instance that was never provisioned, or that fell behind after a schema change, will reject a sync with a 400 error until the fields exist. The WebUI's "Apply schema changes" button (Setup → IPAM → edit the NetBox instance) calls this same provisioning logic with `force=True` and is always safe to re-run — it only adds what's missing.
+
+**Data flow in.** Every other module hands NetBox data the same general way: the hub collects records from a discovery source (opnsense DHCP/ARP, nw switch ARP/MAC, pxmx VM inventories, cppm NAC sessions) and relays them here as one of the `NETBOX_SYNC_*` commands. Each sync family has its own matching/replace rules (see "Notable behaviors" below and each sync's description in "Key commands"), but the shared idea is: match an existing record first (by a stable identifier like a Proxmox unique ID, a MAC address, or an IP), only create a new one if nothing matches, and only delete records the same source previously created if that source's `replace=True` pass no longer sees them.
+
+**Source of truth.** Most syncs accept a `source_of_truth` of `"external"` (the discovery feed is authoritative — it can overwrite fields and rename things) or `"netbox"` (NetBox's existing data wins — the sync only fills in what's missing, never overwrites). This is set per-sync from the hub's configuration (source-of-truth selector in the WebUI), not hard-coded in this module.
+
+**Staleness sweep.** A background/scheduled job (`NETBOX_STALENESS_SWEEP`, hub-triggered) ages out anything a sync previously touched (identified by having a `last_seen` custom field — hand-entered inventory has none and is never swept): not seen for `stale_days` (default **7**) → marked offline + `decommissioned_at` stamped; still offline after `delete_days` (default **30**) → deleted outright, which frees any IP addresses it held. This is why a device that unplugged a week ago shows "offline" rather than vanishing immediately, and why it eventually disappears entirely after a month of continued absence.
+
+**KEA DHCP sync.** Independently of the discovery syncs, a background loop (`_kea_sync_loop`, every **300s**) reads DHCP-eligible prefixes out of NetBox and pushes them to a KEA Control Agent as `subnet4-add` calls (with a derived pool range and the prefix's gateway as the `routers` option) — this is how a prefix you allocate in IPAM becomes an actual DHCP scope.
+
+## How to use it
+
+- **Point Lab Manager at a NetBox instance.** If NetBox is being installed fresh, `install.sh` provisions it and registers the token with the hub automatically. To point at an existing/external NetBox, or to change the URL/token later, go to **Setup → IPAM**, enter the **NetBox URL** and **API Token**, and save — the hub pushes it to the spoke immediately.
+- **Provision or refresh the custom fields NetBox needs.** Setup → IPAM → edit the NetBox instance → **Apply schema changes**. Safe to click any time (it's idempotent); do this after connecting a pre-existing NetBox for the first time, or after upgrading Lab Manager if a sync starts complaining about a missing field.
+- **Let discovery fill in devices/VMs for you.** You generally don't add devices/VMs by hand for anything that's already visible to the firewall, a switch, Proxmox, or NAC — those show up in IPAM on their own via the sync loops described above. Manual add/claim (`NETBOX_ADD_DEVICE`/`NETBOX_CLAIM_DEVICE`, etc.) is for inventory nothing else can see yet.
+- **Allocate a prefix or IP.** IPAM → Prefixes/IPs → allocate; you can search for available space within a parent block or claim a specific prefix/IP directly.
+- **Force a staleness sweep or check why something is offline.** The staleness sweep normally runs on the hub's own schedule; if you need to check sooner, look at a device/VM's `last_seen` value — anything older than the configured stale-days threshold will show (or shortly become) offline.
+
+## Troubleshooting / common questions
+
+- **A sync fails with 400 / "field does not exist for this object type."** The custom fields this sync needs were never provisioned on this NetBox (a stale deploy, or an externally-managed NetBox that was connected without provisioning). Fix: Setup → IPAM → edit the instance → **Apply schema changes**, or rerun `install.sh` on the module side. This is safe and idempotent.
+- **The NetBox / IPAM page shows offline or "NetBox spoke not connected."** Verify the NetBox URL and API Token under Setup → IPAM first — a wrong token or URL leaves the spoke unable to reach NetBox. If those look right, the `netbox` role/spoke itself may not be connected to the hub (check spoke/agent status in Setup).
+- **KEA DHCP sync isn't working / DHCP scopes aren't appearing.** Check `KEA_CTRL_URL` (or the `kea_ctrl_url` pushed via config) — the Kea Control Agent must be on port **8760**, not 8000, whenever it's co-located with a hub/NetBox box, since the hub itself can own port 8000 there; Kea trying to bind or being reached on 8000 causes the sync loop's POST to fail (commonly surfacing as a 405).
+- **The same device shows up twice, or a device's IP moved and it created a duplicate.** Device sync matching is tiered: it tries to match an existing record by **IP** first, then by **MAC address**, then by **bare hostname** only (never on a fully-qualified name, to avoid merging unrelated hosts that happen to share a short name). If a genuine duplicate appears, it usually means none of those three matched (e.g. both IP and MAC changed at once) — a follow-up sync pass with an updated identifier (MAC or IP) usually reconciles it.
+- **Why did a device/VM go offline or get deleted on its own?** The staleness sweep: not seen for the configured `stale_days` (default 7) marks it offline; still offline after `delete_days` (default 30) deletes it and frees its IPs. Only records a sync previously touched (they carry a `last_seen` custom field) are eligible — anything you entered by hand and that no sync ever touched is never swept.
+- **Should the discovery feed overwrite what's already in NetBox, or just fill gaps?** That's the `source_of_truth` setting per sync: `"external"` lets the discovery feed (Proxmox, firewall, switch) overwrite/rename; `"netbox"` treats NetBox's existing data as authoritative and only adds what's missing. Check the relevant sync's source-of-truth selector in the WebUI if data isn't updating the way you expect.
+- **Hypervisor VM interfaces 404 / "vminterfaces not found."** This is an internal detail (the module uses the `nb.virtualization.interfaces` endpoint, not `vminterfaces`) rather than something to fix from the WebUI — if you see a raw 404 referencing `vminterfaces`, it indicates the module needs updating, not a NetBox configuration problem.
 
 ## Related pages
 
