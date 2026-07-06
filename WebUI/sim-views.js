@@ -27,6 +27,19 @@
 function csEl(id) { return document.getElementById(id); }
 
 function csSet(html) {
+    // Auto-refresh chokepoint: while a telemetry-driven refresh cycle is in
+    // flight (csRefreshInFlight, set only by csWsRefresh) AND the user is
+    // actively editing a form control anywhere on the page, refuse to replace
+    // #cs-content's innerHTML — that would wipe the field's value + focus/
+    // cursor out from under an in-progress edit. The pre-fetch guard in
+    // csWsRefresh can't see a user who focuses a field DURING an awaited
+    // csFetch/csVmLoad inside a renderer (e.g. csRenderSetupCentralApi's two
+    // fetches before this csSet); this gate closes that race for EVERY
+    // renderer in one place. The next telemetry pulse (~10s, debounced)
+    // retries once the user is done. Explicit renders (tab switch, Save/Test
+    // buttons, post-action reloads) never set csRefreshInFlight, so they are
+    // never blocked here.
+    if (csRefreshInFlight && csUserIsEditing()) return;
     const el = csEl('cs-content');
     if (el) el.innerHTML = html;
 }
@@ -311,6 +324,11 @@ function csJsonDump(obj) {
  * ------------------------------------------------------------------------- */
 
 let csWs = null, csWsReconnect = null, csWsRefreshTimer = null;
+// True only while a telemetry-driven refresh cycle (csWsRefresh → loadCSData →
+// renderer → csSet) is in flight. Gates csSet's innerHTML replace so a user who
+// focuses a field DURING a renderer's awaited fetch doesn't get stomped — see
+// csSet. Explicit loadCSData calls (Save/post-action reloads) leave this false.
+let csRefreshInFlight = false;
 
 function connectCSWebSocket() {
     if (typeof currentView === 'undefined' || currentView !== 'cs') return;
@@ -377,7 +395,13 @@ function csWsRefresh() {
         // page) — skip this cycle and let the next telemetry pulse (~10s
         // later, debounced above) retry once the user is done.
         if (csUserIsEditing()) return;
-        loadCSData(currentSubView, currentSubChild, true);
+        // Mark the refresh cycle in flight so csSet's innerHTML replace also
+        // bails if the user focuses a field DURING a renderer's awaited fetch
+        // (the pre-check above can't see that). Cleared in finally so a
+        // thrown renderer still resets the gate.
+        csRefreshInFlight = true;
+        loadCSData(currentSubView, currentSubChild, true).finally(
+            () => { csRefreshInFlight = false; });
     }, 1500);
 }
 
