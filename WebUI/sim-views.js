@@ -959,7 +959,8 @@ async function csRenderClients(tier) {
     csSetToolbar(`<input id="cs-client-search" oninput="csClientFilter()" placeholder="Search clients…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
       <select id="cs-client-status" onchange="csClientFilter()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
-      </select>`);
+      </select>
+      <button id="cs-purge-clients-btn" onclick="csPurgeClients(this)" title="Remove all client records from memory and disk" class="ml-auto bg-white border border-red-300 text-red-600 hover:bg-red-50 rounded-md px-3 py-1.5 text-sm font-semibold">🗑 Purge Clients</button>`);
     const data = await csFetch(`/aggregate/clients?tenant_id=${csTenant()}`);
     const rows = csNormalizeClients(data);
     csClientCache = rows;
@@ -974,6 +975,33 @@ async function csRenderClients(tier) {
     csSet(`<div class="space-y-4">${demoCard}${pills}<div id="cs-client-body"></div></div>`);
     csClientFilter();
 }
+
+// "Purge Clients" — ports the original solutions-hpe cs-webui button
+// (DELETE /api/clients/history → clients_purged WS). Clears every client
+// record from the spoke's registry (memory + clients.json on disk). Hits the
+// tenant's cs spoke via the hub relay DELETE /sim/api/{tenant}/clients (or the
+// spoke's own local_ui_routes equivalent when run from the cs standalone
+// dashboard — same /sim/api/* contract). The hub also drops its cached
+// `clients` for the spoke, so re-rendering shows empty immediately.
+window.csPurgeClients = async function (btn) {
+    if (!confirm('Clear all client history? Records on disk will also be deleted. This cannot be undone.'))
+        return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Purging…';
+    try {
+        const r = await csFetch(`/${csTenant()}/clients`, { method: 'DELETE' });
+        const n = (r && r.purged != null) ? r.purged : '?';
+        if (typeof showToast === 'function') showToast(`Purged ${n} client record(s)`, 'success');
+        // Re-render the Clients tab so the now-empty list shows immediately.
+        await csRenderClients(csClientTier);
+    } catch (e) {
+        console.error('csPurgeClients: purge failed', e);
+        if (typeof showToast === 'function') showToast('Purge failed: ' + (e.message || e), 'error');
+        btn.disabled = false;
+        btn.textContent = orig;
+    }
+};
 
 function csNormalizeClients(data) {
     if (!data) return [];
