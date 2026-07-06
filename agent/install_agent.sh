@@ -107,6 +107,35 @@ STARTUP_ROLES_CSV="$(IFS=,; printf '%s' "${_ROLE_LIST[*]}")"
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv python3-pip git curl
 
+# Retire the LEGACY Generic Leaf Agent (lm-generic-agent.service) — run EARLY,
+# before the LM clone / entrypoint checks below that `exit 1` on a network or
+# missing-entrypoint failure. The legacy leaf (GenericLeafAgent,
+# /opt/lm/generic-agent/src/agent.py — removed from the repo, no longer
+# installable) is protocol-INCOMPATIBLE: it has no SPOKE_UPDATE_SESSION_KEY /
+# LOAD_ROLE handlers, so it connects + passes mutual auth but can NEVER adopt a
+# session key or sign a frame — the hub logs "connected … without adopting its
+# session key". If it stays enabled while a role-capable lm-agent is also
+# present, both dial the hub as the same hostname-derived spoke_id and race for
+# the single active_connections slot; if the legacy wins, role activation 503s.
+# It also crash-loops on this box (missing psutil, /opt/lm/generic-agent/logs
+# perms). Purging it here — stop+disable+mask+remove unit & install dir — GUARANTEES
+# that even if this install later aborts, the broken legacy can't keep
+# zombie-connecting under this box's identity. Idempotent + non-fatal if absent.
+retire_legacy_agent() {
+    local LEGACY_SERVICE="lm-generic-agent"
+    if systemctl list-unit-files 2>/dev/null | grep -qE "\\b${LEGACY_SERVICE}\\.service"; then
+        systemctl stop    "$LEGACY_SERVICE" 2>/dev/null || true
+        systemctl disable "$LEGACY_SERVICE" 2>/dev/null || true
+        systemctl mask    "$LEGACY_SERVICE" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${LEGACY_SERVICE}.service"
+        rm -rf "/opt/lm/generic-agent"
+        systemctl daemon-reload
+        echo "🧹  Purged legacy ${LEGACY_SERVICE}.service (stopped, masked, unit + install dir removed)."
+        echo "    The role-capable ${SERVICE_NAME} now owns this box's spoke connection."
+    fi
+}
+retire_legacy_agent
+
 # Clone or update the LM repo (contains agent + all roles).
 # A real prior install is a git checkout at $INSTALL_DIR (has .git + agent/).
 # NOTE: a bare /opt/lm/core with NO .git is the cs-spoke base_spoke extraction
@@ -350,32 +379,11 @@ EOF
 
 systemctl daemon-reload
 
-# Retire the LEGACY Generic Leaf Agent (lm-generic-agent.service) if it's
-# installed on this box. The legacy leaf (formerly generic_agent/, removed from
-# the lm repo — no longer installable) is protocol-INCOMPATIBLE with the hub:
-# it dispatches on top-level `type` and has no SPOKE_UPDATE_SESSION_KEY /
-# LOAD_ROLE / GET_AVAILABLE_ROLES handlers, so it can never adopt a session
-# key. If BOTH this role-capable lm-agent AND the legacy lm-generic-agent run
-# on the same box, both dial the hub as the SAME spoke_id (derived from
-# hostname) and race for the hub's single active_connections slot. Whichever
-# connects first wins; when an admin then approves, approve_and_bind_spoke
-# pushes the session key to THAT ws — if it's the legacy one, it ignores the
-# push, the role-capable agent never adopts its key, and LOAD_ROLE 503s with
-# "connected but not authenticated". Stop + mask (not just disable) so it
-# can't be started again even by hand, and remove the unit + install dir
-# entirely — this is a full purge, not a temporary disable, since the legacy
-# leaf is no longer shipped or supported. Non-fatal if it isn't present.
-LEGACY_SERVICE="lm-generic-agent"
-if systemctl list-unit-files 2>/dev/null | grep -qE "\\${LEGACY_SERVICE}\\.service"; then
-    systemctl stop "$LEGACY_SERVICE" 2>/dev/null || true
-    systemctl disable "$LEGACY_SERVICE" 2>/dev/null || true
-    systemctl mask "$LEGACY_SERVICE" 2>/dev/null || true
-    rm -f "/etc/systemd/system/${LEGACY_SERVICE}.service"
-    rm -rf "/opt/lm/generic-agent"
-    systemctl daemon-reload
-    echo "🧹  Purged legacy ${LEGACY_SERVICE}.service (stopped, masked, unit + install dir removed)."
-    echo "    The role-capable ${SERVICE_NAME} now owns this box's spoke connection."
-fi
+# The legacy Generic Leaf Agent was already purged early (retire_legacy_agent,
+# before the LM clone step) so an aborted install can't leave it zombie-
+# connecting. Re-assert here as a belt-and-suspenders no-op in case the unit was
+# (re)created between then and now — idempotent.
+retire_legacy_agent
 
 # Enable so a CLONED disk auto-starts on first boot and onboards under its own
 # hostname (carryover: retains the template's PSK so it can be approved without
