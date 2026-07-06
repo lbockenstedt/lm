@@ -1090,17 +1090,51 @@ function csClientSimBar(c, host) {
     </div>`;
 }
 
+// Persist a single flag override into the [username] section of
+// user-overrides.conf (mirrors csCtlSaveUO for one flag) so Config/Simulations
+// "User Overrides" reflects the same change. Best-effort: a failure here must
+// NOT undo the runtime registry toggle already sent, so it logs + toasts and
+// never throws.
+async function csPersistFlagToUserOverrides(host, flag, value) {
+    const user = String(host || '').split('-')[0] || host;
+    if (!user) return;
+    try {
+        const cur = await csFetch(`/${csTenant()}/config/user-overrides-conf`);
+        const state = csParseIni((cur && cur.content) || '');
+        const merged = Object.assign({}, state[user] || {});
+        merged[flag] = value;
+        state[user] = merged;
+        let text = '';
+        for (const [u, kv] of Object.entries(state)) {
+            text += `[${u}]\n`;
+            for (const [k, v] of Object.entries(kv)) {
+                if (v === '' || v === null || v === undefined) continue;
+                text += `${k}=${v}\n`;
+            }
+            text += '\n';
+        }
+        await csFetch(`/${csTenant()}/config/user-overrides-conf`,
+            { method: 'PUT', body: JSON.stringify({ content: text.trim() }) });
+    } catch (e) {
+        console.error('csPersistFlagToUserOverrides failed', e);
+        if (typeof showToast === 'function') showToast(`user-overrides save failed: ${e.message || 'error'}`, 'error');
+    }
+}
+
 window.csSimToggle = async function (btn) {
     const host = btn.dataset.csSimHost, flag = btn.dataset.csSimFlag;
     if (!host || !flag) return;
     const next = btn.dataset.csSimOn === '1' ? 'off' : 'on';
     // Set just THIS flag's override — the endpoint merges it into the client's
     // persisted overrides (registry.set_overrides), so toggling one sim doesn't
-    // disturb the others. "Clear" drops all overrides for the client.
+    // disturb the others. Also mirror the flag into user-overrides.conf so the
+    // Config/Simulations "User Overrides" card stays in sync. "Clear" drops all
+    // overrides for the client.
     csCtlMsg(host, `${next === 'on' ? 'Enabling' : 'Disabling'} ${flag}…`, true);
     try {
         await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
             { method: 'POST', body: JSON.stringify({ overrides: { [flag]: next } }) });
+        await csPersistFlagToUserOverrides(host, flag, next);
         btn.dataset.csSimOn = next === 'on' ? '1' : '0';
         btn.className = csSimBtnClass(next === 'on');
         btn.title = `Click to ${next === 'on' ? 'disable' : 'enable'} ${flag} on ${host}`;
