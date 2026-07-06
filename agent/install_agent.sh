@@ -122,15 +122,44 @@ apt-get install -y -qq python3 python3-venv python3-pip git curl
 # that even if this install later aborts, the broken legacy can't keep
 # zombie-connecting under this box's identity. Idempotent + non-fatal if absent.
 retire_legacy_agent() {
-    local LEGACY_SERVICE="lm-generic-agent"
-    if systemctl list-unit-files 2>/dev/null | grep -qE "\\b${LEGACY_SERVICE}\\.service"; then
-        systemctl stop    "$LEGACY_SERVICE" 2>/dev/null || true
-        systemctl disable "$LEGACY_SERVICE" 2>/dev/null || true
-        systemctl mask    "$LEGACY_SERVICE" 2>/dev/null || true
-        rm -f "/etc/systemd/system/${LEGACY_SERVICE}.service"
-        rm -rf "/opt/lm/generic-agent"
-        systemctl daemon-reload
-        echo "🧹  Purged legacy ${LEGACY_SERVICE}.service (stopped, masked, unit + install dir removed)."
+    # Match the legacy leaf by BOTH its historical unit name AND — crucially —
+    # by any unit whose definition ExecStarts the legacy path
+    # (/opt/lm/generic-agent/src/agent.py). Older template-menu builders named
+    # the unit variously (not always lm-generic-agent), so a name-only purge
+    # silently misses it and the zombie keeps connecting. Never touch the
+    # role-capable unit ($SERVICE_NAME) — the install (re)writes it below.
+    local names="lm-generic-agent"
+    local f
+    for f in /etc/systemd/system/*.service /etc/systemd/system/*/*.service; do
+        [ -e "$f" ] || continue
+        if grep -qE "/opt/lm/generic-agent" "$f" 2>/dev/null; then
+            names="$names $(basename "$f" .service)"
+        fi
+    done
+    local svc purged=0
+    for svc in $(printf '%s\n' $names | sort -u); do
+        [ -n "$svc" ] || continue
+        [ "$svc" = "$SERVICE_NAME" ] && continue   # protect the new role-capable unit
+        if [ -e "/etc/systemd/system/${svc}.service" ] \
+           || systemctl list-unit-files "${svc}.service" 2>/dev/null | grep -qE "^${svc}\.service"; then
+            systemctl stop    "$svc" 2>/dev/null || true
+            systemctl disable "$svc" 2>/dev/null || true
+            rm -f "/etc/systemd/system/${svc}.service"
+            systemctl mask    "$svc" 2>/dev/null || true   # after rm → mask sticks (blocks manual restart)
+            echo "🧹  Purged legacy leaf unit ${svc}.service."
+            purged=1
+        fi
+    done
+    # Also stop any live process still exec'ing the legacy path (belt-and-
+    # suspenders if it was launched outside systemd), then remove the dir.
+    if [ -d /opt/lm/generic-agent ]; then
+        pkill -f "/opt/lm/generic-agent/src/agent.py" 2>/dev/null || true
+        rm -rf /opt/lm/generic-agent
+        echo "🧹  Removed legacy leaf dir /opt/lm/generic-agent."
+        purged=1
+    fi
+    if [ "$purged" = 1 ]; then
+        systemctl daemon-reload 2>/dev/null || true
         echo "    The role-capable ${SERVICE_NAME} now owns this box's spoke connection."
     fi
 }
