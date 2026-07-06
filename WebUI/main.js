@@ -3461,7 +3461,7 @@ function _renderSetupModuleMgmtTile(content) {
 }
 
 // Setup → Simulations tile. Sim admin overview: global + per-tenant USB
-// approvals, cs spoke dnsmasq DHCP status. Served by the Simulations sub-module
+// approvals, cs spoke Kea DHCP status. Served by the Simulations sub-module
 // routes under /sim/api/* (core/src/simulations/routes.py), kicked off via
 // loadSimAdminOverview() in sim-views.js. (The Tenant Subnet Filtering toggle
 // used to live here; it has moved to System → General — see
@@ -3504,8 +3504,8 @@ function _renderSetupSimulationsTile(content) {
                 <div id="tenant-usb-list" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">DHCP Server (dnsmasq) ${helpIcon('cs', null, 'Simulations help')}</h3>
-                <p class="text-xs text-slate-500 mb-3">Isolated sim-client DHCP on each cs spoke's second NIC (provisioned by install_cs.sh). Shows whether dnsmasq is running and how full the lease pool is. A spoke without dnsmasq shows "Not configured".</p>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">DHCP Server (Kea) ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <p class="text-xs text-slate-500 mb-3">Isolated sim-client DHCP (Kea <span class="font-mono">kea-dhcp4-sim</span>) on each cs spoke's second NIC (provisioned by install_cs.sh). Shows whether Kea is running and how full the lease pool is. A spoke without Kea shows "Not configured".</p>
                 <div id="cs-dhcp-server-status" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>`;
     loadSimAdminOverview();
@@ -3674,7 +3674,7 @@ async function loadDhcpServerStatus() {
         return;
     }
     const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    // Flatten tenant → spoke rows (each row carries its cached dnsmasq status block).
+    // Flatten tenant → spoke rows (each row carries its cached Kea status block).
     const rows = [];
     for (const t of (data.tenants || [])) {
         for (const sp of (t.spokes || [])) {
@@ -3688,12 +3688,12 @@ async function loadDhcpServerStatus() {
     wrap.innerHTML = rows.map(({ tenant, spoke }) => {
         const d = spoke.dhcp || {};
         const head = `<span class="text-sm font-bold text-slate-700">${esc(tenant)} <span class="text-xs font-mono text-slate-400">${esc(spoke.spoke_id)}</span></span>`;
-        // dnsmasq not installed → "Not configured" (ignore, per requirement).
+        // Kea not installed → "Not configured" (ignore, per requirement).
         if (d.installed === false) {
             return `<div class="border border-slate-200 rounded-md p-3">
                 <div class="flex items-center justify-between mb-1">${head}
                     <span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">Not configured</span>
-                </div><p class="text-xs text-slate-400">dnsmasq not installed on this spoke.</p></div>`;
+                </div><p class="text-xs text-slate-400">Kea (kea-dhcp4-sim) not installed on this spoke.</p></div>`;
         }
         // No dhcp block → spoke offline / hasn't reported.
         if (d.installed !== true) {
