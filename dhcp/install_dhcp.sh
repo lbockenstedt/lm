@@ -22,6 +22,22 @@ done
 SPOKE_ID="${SPOKE_ID:-${SERVICE_NAME}-$(hostname -s)}"
 mkdir -p /var/log/lm
 
+# Circular logging: cap /var/log/lm/*.log so it can't fill the disk (copytruncate
+# keeps the inode → the running spoke's O_APPEND FileHandler + systemd stderr
+# keep appending). Belt-and-suspenders alongside logging_setup's RotatingFileHandler.
+cat > /etc/logrotate.d/lm <<'LOGROTATE'
+/var/log/lm/*.log /var/log/client-sim-*.log {
+    su root root
+    size 50M
+    rotate 5
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+LOGROTATE
+
 # Kea DHCP4 + Control Agent — noninteractive prevents credential prompts
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq kea-dhcp4-server kea-ctrl-agent
 
