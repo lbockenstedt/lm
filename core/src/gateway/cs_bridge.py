@@ -140,6 +140,13 @@ class CSBridgePoller:
                 if not aid:
                     continue
                 cfg_key, ac_entry = self._agent_config_entry(aid, hostname)
+                # Heal a hostname-keyed (or otherwise stale-keyed) entry to the
+                # runtime agent_id ONCE, so this stops recurring and the tolerant
+                # lookup becomes belt-and-suspenders. Safe no-op when already
+                # keyed by agent_id or when nothing is stored.
+                if cfg_key != aid and ac_entry:
+                    self._migrate_agent_config_key(cfg_key, aid)
+                    cfg_key, ac_entry = self._agent_config_entry(aid, hostname)
                 cs_cfg = ac_entry.get("client_simulation") or {}
                 enabled = bool(cs_cfg.get("enabled"))
                 tenant_id = cs_cfg.get("tenant_id") or self._spoke_tenant(host_spoke)
@@ -212,6 +219,38 @@ class CSBridgePoller:
     def _client_simulation(self, agent_id: str, hostname: str = None) -> Dict[str, Any]:
         _key, entry = self._agent_config_entry(agent_id, hostname)
         return entry.get("client_simulation") or {}
+
+    def _migrate_agent_config_key(self, old_key: str, new_key: str) -> None:
+        """Permanently re-key an ``agent_config`` entry from a hostname (or other
+        stale id) to the runtime ``agent_id``, then persist. Load-time can't do
+        this — the hostname→agent_id map only exists once a live ``GET_AGENTS``
+        returns — so the bridge heals it on the first cycle it sees the mismatch.
+        After this the tolerant ``_agent_config_entry`` lookup is belt-and-
+        suspenders, not load-bearing. On the rare case both keys exist, the
+        stale entry's explicit client_simulation (the operator's enable/tenant)
+        wins, but any usb_config already on the agent_id entry is preserved."""
+        try:
+            store = self.hub.state.system_state.get("agent_config", {}) or {}
+            if old_key == new_key or old_key not in store:
+                return
+            src = store.pop(old_key)
+            dst = store.get(new_key) or {}
+            merged = {**dst, **src}  # operator-set src wins on collisions
+            src_cs = src.get("client_simulation") or {}
+            dst_cs = dst.get("client_simulation") or {}
+            cs = {**dst_cs, **src_cs}
+            if "usb_config" not in src_cs and dst_cs.get("usb_config"):
+                cs["usb_config"] = dst_cs["usb_config"]
+            if cs:
+                merged["client_simulation"] = cs
+            store[new_key] = merged
+            self.hub.state.save_state()
+            logger.info("[cs-bridge] migrated agent_config key %r → %r "
+                        "(runtime agent_id) — hostname-keyed enable normalized",
+                        old_key, new_key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[cs-bridge] agent_config re-key %r→%r failed: %s",
+                           old_key, new_key, exc)
 
     def _log_agent_diag(self, host_spoke: str, agent_id: str,
                         hostname: str, decision: str) -> None:
