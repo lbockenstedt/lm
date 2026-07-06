@@ -1962,6 +1962,8 @@ function _rebuildMainNav(allSpokes, connections) {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12.5a7 7 0 0114 0M8.5 12.5a3.5 3.5 0 017 0M2 12.5h2M20 12.5h2M12 19.5v2"></path></svg>';
         } else if (className === 'Network') {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18M12 21a9 9 0 110-18 9 9 0 010 18z"></path></svg>';
+        } else if (className === 'Certificates') {
+            icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m-6-8h6M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.5 19.5l1.5 1.5 2.5-2.5"></path></svg>';
         } else if (firstProduct && window.VIEWS && window.VIEWS[firstProduct]) {
             icon = window.VIEWS[firstProduct].icon || '';
         }
