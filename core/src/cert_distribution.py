@@ -26,8 +26,12 @@ logger = logging.getLogger("CertDistribution")
 # runs `pvenode cert set` on its local pveproxy) + ldap (directory — the spoke
 # writes PEM to /etc/ldap/tls, points slapd's olcTLS* via ldapmodify -Y EXTERNAL
 # over ldapi, restarts slapd; runs as root). Adding a spoke = implement
-# INSTALL_CERT on it + add its module_type here.
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory"}
+# INSTALL_CERT on it + add its module_type here. ``"hub"`` is special: the hub
+# is not a spoke, so it has no get_spoke_by_type resolution — instead the hub
+# installs the cert on ITSELF (writes LM_TLS_CERT/LM_TLS_KEY + schedules
+# lm-self-restart) via the ``install_on_hub`` callable threaded in by the
+# HubCertDistributionMixin._distribute_one_cert wrapper.
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub"}
 
 
 def _unwrap(result: Any) -> Dict[str, Any]:
@@ -37,14 +41,21 @@ def _unwrap(result: Any) -> Dict[str, Any]:
 
 async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                                      capable: Set[str], le_spoke_id: str,
-                                     domain: str, targets: List[Dict[str, Any]]
+                                     domain: str, targets: List[Dict[str, Any]],
+                                     install_on_hub: Optional[Callable] = None
                                      ) -> List[Dict[str, Any]]:
     """Pull cert material for ``domain`` from the le spoke (``rr``) and push
     ``INSTALL_CERT`` to each target spoke (resolved by ``get_by_type``). Returns
     a per-target summary. Self-filters: a target whose ``last_pushed_hash``
     already equals the current ``material_hash`` (and ``last_status`` SUCCESS) is
     skipped, so both the inline issue/renew path (fresh targets → pushed) and the
-    hourly loop (stale-only) can call this with the full target list."""
+    hourly loop (stale-only) can call this with the full target list.
+
+    ``install_on_hub`` is the special-case callable for a ``module_type == "hub"``
+    target (the hub installing a cert on ITSELF — there is no hub spoke to
+    resolve). Signature: ``async def(domain, fullchain, privkey, chain,
+    identifier) -> {"status", "message"}``. When None, a hub target records an
+    ERROR (so the absence is visible rather than silently dropped)."""
     summary: List[Dict[str, Any]] = []
     if not targets or not domain:
         return summary
@@ -74,6 +85,24 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
         if mt not in capable:
             entry.update(status="ERROR",
                          message=f"module type '{mt}' does not support cert install yet")
+        elif mt == "hub":
+            # The hub is not a spoke — install on itself via the threaded
+            # callable. No get_by_type resolution; no INSTALL_CERT relay.
+            if install_on_hub is None:
+                entry.update(status="ERROR",
+                             message="hub self-install not wired on this hub")
+            else:
+                try:
+                    hret = await install_on_hub(domain, fullchain, privkey, chain, ident)
+                except Exception as e:  # never let a self-install crash distribution
+                    hret = {"status": "ERROR", "message": str(e)}
+                if isinstance(hret, dict) and hret.get("status") == "SUCCESS":
+                    entry.update(status="SUCCESS",
+                                 message=hret.get("message") or "installed on hub")
+                else:
+                    entry.update(status="ERROR",
+                                 message=(hret.get("message") if isinstance(hret, dict)
+                                          else "hub self-install failed"))
         else:
             target_sid = get_by_type(mt)
             if not target_sid:
@@ -105,7 +134,8 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
 
 
 async def distribute_all_certs(rr: Callable, get_by_type: Callable,
-                               capable: Set[str], le_spoke_id: str) -> None:
+                               capable: Set[str], le_spoke_id: str,
+                               install_on_hub: Optional[Callable] = None) -> None:
     """Distribute every managed cert whose targets are stale. Skips the
     ``LE_GET_CERT`` pull entirely when every target of a cert is current."""
     res = await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0)
@@ -122,4 +152,5 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
                             and t.get("last_status") == "SUCCESS" for t in targets):
             continue  # every target current — skip the LE_GET_CERT pull
         await distribute_cert_to_targets(rr, get_by_type, capable,
-                                         le_spoke_id, domain, targets)
+                                         le_spoke_id, domain, targets,
+                                         install_on_hub=install_on_hub)

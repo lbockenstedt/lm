@@ -151,6 +151,71 @@ def test_distribute_empty_targets_returns_empty():
     assert summary == []
 
 
+# ── hub self-install target (module_type == "hub") ────────────────────────────
+
+def test_distribute_hub_target_calls_install_on_hub():
+    """A "hub" target is handled by the install_on_hub callable (the hub
+    installing a cert on itself), NOT by get_spoke_by_type / INSTALL_CERT."""
+    rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
+    get_by_type = lambda mt: (_FW if mt == "firewall" else None)
+    installs = []
+
+    async def install_on_hub(domain, fullchain, privkey, chain, identifier):
+        installs.append({"domain": domain, "fullchain": fullchain,
+                         "privkey": privkey, "chain": chain, "identifier": identifier})
+        return {"status": "SUCCESS", "message": "installed to /opt/lm/tls/fullchain.pem"}
+
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
+        [{"module_type": "hub"}], install_on_hub=install_on_hub))
+    assert summary[0]["status"] == "SUCCESS"
+    assert "installed to /opt/lm/tls/fullchain.pem" in summary[0]["message"]
+    # install_on_hub received the material pulled from the le spoke.
+    assert installs and installs[0]["fullchain"] == _PEM and installs[0]["privkey"] == "KEY"
+    # No INSTALL_CERT relay + no get_spoke_by_type("hub") resolution happened.
+    assert not [c for c in calls if c["cmd"] == "INSTALL_CERT"]
+    # The push is recorded on the ledger like any other target.
+    marks = [c for c in calls if c["cmd"] == "LE_MARK_DISTRIBUTED"]
+    assert len(marks) == 1 and marks[0]["data"]["module_type"] == "hub" \
+        and marks[0]["data"]["status"] == "SUCCESS"
+
+
+def test_distribute_hub_target_without_callable_records_error():
+    """No install_on_hub wired → a hub target records a clear ERROR (visible,
+    not silently dropped). "hub" is in CERT_CAPABLE_MODULES so it does NOT take
+    the 'does not support cert install' branch."""
+    rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
+    get_by_type = lambda mt: None
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
+        [{"module_type": "hub"}]))
+    assert summary[0]["status"] == "ERROR"
+    assert "hub self-install not wired" in summary[0]["message"]
+    assert "does not support" not in summary[0]["message"]
+
+
+def test_distribute_hub_target_install_error_surfaces_message():
+    async def install_on_hub(domain, fullchain, privkey, chain, identifier):
+        return {"status": "ERROR", "message": "permission denied writing /opt/lm/tls"}
+    rr, _ = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, lambda mt: None, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
+        [{"module_type": "hub"}], install_on_hub=install_on_hub))
+    assert summary[0]["status"] == "ERROR"
+    assert "permission denied" in summary[0]["message"]
+
+
+def test_distribute_hub_target_callable_raise_is_caught():
+    async def install_on_hub(domain, fullchain, privkey, chain, identifier):
+        raise RuntimeError("boom")
+    rr, _ = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, lambda mt: None, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
+        [{"module_type": "hub"}], install_on_hub=install_on_hub))
+    assert summary[0]["status"] == "ERROR"
+    assert "boom" in summary[0]["message"]
+
+
 # ── distribute_all_certs ─────────────────────────────────────────────────────
 
 def test_distribute_all_skips_current_and_pushes_stale():

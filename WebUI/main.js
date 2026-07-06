@@ -9770,6 +9770,7 @@ async function leDistributeNow() {
 // slapd's olcTLS* via ldapmodify -Y EXTERNAL over ldapi, restarts slapd). Other
 // module types record an ERROR ("does not support cert install yet") until wired.
 const LE_MODULE_TYPES = [
+    ['hub', 'hub (LM WebUI)'],
     ['firewall', 'firewall (OPNsense)'],
     ['ipam', 'ipam (NetBox)'],
     ['hypervisor', 'hypervisor (Proxmox)'],
@@ -9908,6 +9909,17 @@ const LE_DNS_CREDS_HINT = {
     transip:    'dns_transip_username = ...\ndns_transip_api_key = ...',
 };
 
+// RFC 2136 family — providers whose certbot plugin is --dns-rfc2136 and whose
+// only user-supplied secrets are a TSIG key name + key secret. For these we
+// show a friendly two-field form (server/port/algorithm under "Advanced") and
+// assemble the INI ourselves, instead of the raw textarea. Hurricane Electric
+// (he) is an alias of rfc2136 (LE_DNS_PROVIDER_ALIAS above).
+const LE_RFC2136_PROVIDERS = new Set(['rfc2136', 'he']);
+
+// Default server pre-fill for the Advanced "Server" field, by provider. Empty
+// string = leave the placeholder visible (user fills it).
+const LE_RFC2136_DEFAULT_SERVER = { he: 'ns1.he.net', rfc2136: '' };
+
 // Initial-targets picker state for the issue modal. Array of {module_type, identifier}.
 let _leIssueTargets = [];
 
@@ -9919,10 +9931,10 @@ function leIssueToggleChallenge() {
     set('le-issue-webroot-row', ch === 'http-webroot');
     set('le-issue-dns-provider-row', ch === 'dns');
     set('le-issue-dns-creds-row', ch === 'dns');
-    // Populate the textarea placeholder for the (default) provider as soon as
-    // the DNS-01 row appears, so the sample format is visible without requiring
-    // a provider re-select.
-    if (ch === 'dns') leIssueUpdateDnsHint();
+    // Populate the DNS fields for the (default) provider as soon as the DNS-01
+    // row appears, so the right input shape is visible without a provider
+    // re-select.
+    if (ch === 'dns') leIssueUpdateDnsFields();
 }
 
 function leIssueAddTarget() {
@@ -9998,10 +10010,49 @@ function showLeIssueModal() {
             </div>
             <div id="le-issue-dns-provider-row" class="flex flex-col hidden">
                 <label class="text-xs text-slate-500 mb-1">DNS provider</label>
-                <select id="le-issue-dns-provider" onchange="leIssueUpdateDnsHint()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${dnsOpts}</select>
+                <select id="le-issue-dns-provider" onchange="leIssueUpdateDnsFields()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${dnsOpts}</select>
             </div>
             <div id="le-issue-dns-creds-row" class="flex flex-col hidden">
-                <label class="text-xs text-slate-500 mb-1">DNS credentials INI <span class="text-slate-400">(written to /etc/lm-le/dns-&lt;provider&gt;.ini at 0600 — sample format shown in the field)</span></label>
+                <label class="text-xs text-slate-500 mb-1">DNS credentials <span class="text-slate-400">(written to /etc/lm-le/dns-&lt;provider&gt;.ini at 0600)</span></label>
+                <!-- RFC 2136 family (rfc2136, Hurricane Electric): structured
+                     key name + key secret — the only two values you actually
+                     need. Server/port/algorithm are behind "Advanced". -->
+                <div id="le-issue-dns-structured" class="space-y-2 hidden">
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="flex flex-col">
+                            <label class="text-[11px] text-slate-500 mb-0.5">Key name <span class="text-red-500">*</span></label>
+                            <input id="le-issue-dns-keyname" type="text" placeholder="YOUR_KEY_NAME" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
+                        </div>
+                        <div class="flex flex-col">
+                            <label class="text-[11px] text-slate-500 mb-0.5">Key secret <span class="text-red-500">*</span></label>
+                            <input id="le-issue-dns-keysecret" type="password" placeholder="YOUR_TSIG_SECRET" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
+                        </div>
+                    </div>
+                    <details class="text-xs">
+                        <summary class="cursor-pointer text-slate-500 hover:text-slate-700 select-none">Advanced — server / port / algorithm</summary>
+                        <div class="grid grid-cols-3 gap-2 mt-2">
+                            <div class="flex flex-col">
+                                <label class="text-[11px] text-slate-400 mb-0.5">Server</label>
+                                <input id="le-issue-dns-server" type="text" placeholder="ns1.he.net" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
+                            </div>
+                            <div class="flex flex-col">
+                                <label class="text-[11px] text-slate-400 mb-0.5">Port</label>
+                                <input id="le-issue-dns-port" type="text" value="53" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
+                            </div>
+                            <div class="flex flex-col">
+                                <label class="text-[11px] text-slate-400 mb-0.5">Algorithm</label>
+                                <select id="le-issue-dns-algo" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500">
+                                    <option value="hmac-sha256">hmac-sha256</option>
+                                    <option value="hmac-sha512">hmac-sha512</option>
+                                    <option value="hmac-sha1">hmac-sha1</option>
+                                    <option value="hmac-md5">hmac-md5</option>
+                                </select>
+                            </div>
+                        </div>
+                    </details>
+                </div>
+                <!-- Non-rfc2136 providers: raw INI textarea (field shapes vary
+                     per provider — sample shown as a grey placeholder). -->
                 <textarea id="le-issue-dns-creds" rows="5" placeholder="" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500 placeholder:text-slate-400 placeholder:font-mono placeholder:text-xs"></textarea>
             </div>
             <div class="flex items-center gap-4">
@@ -10033,13 +10084,48 @@ function showLeIssueModal() {
     </div>`;
     document.body.appendChild(modal);
     leIssueRenderTargets();
-    leIssueUpdateDnsHint();
+    leIssueUpdateDnsFields();
 }
 
-function leIssueUpdateDnsHint() {
+// Toggle the DNS-01 input shape for the selected provider. RFC 2136 family
+// (rfc2136, Hurricane Electric) gets the friendly key-name + key-secret form
+// (server/port/algorithm under "Advanced"); every other provider gets the raw
+// INI textarea with a per-provider sample placeholder.
+function leIssueUpdateDnsFields() {
     const p = document.getElementById('le-issue-dns-provider')?.value;
-    const ta = document.getElementById('le-issue-dns-creds');
-    if (ta && p) ta.placeholder = LE_DNS_CREDS_HINT[p] || '';
+    if (!p) return;
+    const structured = LE_RFC2136_PROVIDERS.has(p);
+    const setShown = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
+    setShown('le-issue-dns-structured', structured);
+    setShown('le-issue-dns-creds', !structured);
+    if (structured) {
+        // Pre-fill the Advanced "Server" field with the provider default when
+        // it's empty (Hurricane Electric → ns1.he.net) so the user only types
+        // the two secrets. Don't clobber a value they already entered.
+        const srv = document.getElementById('le-issue-dns-server');
+        const def = LE_RFC2136_DEFAULT_SERVER[p] || '';
+        if (srv && !srv.value) srv.value = def;
+    } else {
+        const ta = document.getElementById('le-issue-dns-creds');
+        if (ta) ta.placeholder = LE_DNS_CREDS_HINT[p] || '';
+    }
+}
+
+// Assemble the rfc2136 INI from the structured fields. Sent as `dns_creds` —
+// the le spoke writes it to /etc/lm-le/dns-rfc2136.ini at 0600 (write_dns_creds).
+function leIssueBuildRfc2136Ini() {
+    const kn = document.getElementById('le-issue-dns-keyname')?.value?.trim() || '';
+    const ks = document.getElementById('le-issue-dns-keysecret')?.value || '';
+    const srv = document.getElementById('le-issue-dns-server')?.value?.trim() || '';
+    const port = document.getElementById('le-issue-dns-port')?.value?.trim() || '53';
+    const algo = document.getElementById('le-issue-dns-algo')?.value || 'hmac-sha256';
+    let ini = '';
+    if (srv) ini += `dns_rfc2136_server = ${srv}\n`;
+    ini += `dns_rfc2136_port = ${port}\n`;
+    ini += `dns_rfc2136_key_name = ${kn}\n`;
+    ini += `dns_rfc2136_key_secret = ${ks}\n`;
+    ini += `dns_rfc2136_algorithm = ${algo}\n`;
+    return { ini, keyName: kn, keySecret: ks };
 }
 
 async function leIssueCert() {
@@ -10049,7 +10135,13 @@ async function leIssueCert() {
     const challenge = chSel === 'http-webroot' ? 'http' : chSel;
     const webroot = chSel === 'http-webroot' ? (document.getElementById('le-issue-webroot')?.value?.trim() || '') : '';
     const dnsProvider = chSel === 'dns' ? (document.getElementById('le-issue-dns-provider')?.value || '') : '';
-    const dnsCreds = chSel === 'dns' ? (document.getElementById('le-issue-dns-creds')?.value || '') : '';
+    // For rfc2136-family providers the creds come from the structured key-name
+    // / key-secret fields (assembled into an INI below); otherwise from the
+    // raw INI textarea.
+    const _rfc = chSel === 'dns' && dnsProvider && LE_RFC2136_PROVIDERS.has(dnsProvider);
+    const _rfcIni = _rfc ? leIssueBuildRfc2136Ini() : null;
+    const dnsCreds = _rfc ? _rfcIni.ini
+        : (chSel === 'dns' ? (document.getElementById('le-issue-dns-creds')?.value || '') : '');
     const staging = !!document.getElementById('le-issue-staging')?.checked;
     const keyType = document.getElementById('le-issue-keytype')?.value || 'rsa';
 
@@ -10058,7 +10150,12 @@ async function leIssueCert() {
     if (chSel === 'http-webroot' && !webroot) { alert('Webroot path is required for HTTP-01 webroot'); return; }
     if (challenge === 'dns') {
         if (!dnsProvider) { alert('Pick a DNS provider for DNS-01'); return; }
-        if (!dnsCreds.trim()) { alert('DNS credentials INI is required for DNS-01'); return; }
+        if (_rfc) {
+            if (!_rfcIni.keyName) { alert('TSIG key name is required'); return; }
+            if (!_rfcIni.keySecret) { alert('TSIG key secret is required'); return; }
+        } else if (!dnsCreds.trim()) {
+            alert('DNS credentials INI is required for DNS-01'); return;
+        }
     }
 
     const body = { domain, email, challenge, staging, key_type: keyType };

@@ -58,8 +58,13 @@ class _Hub:
         self._rr = rr
         self._get = get_by_type
         self.CERT_CAPABLE_MODULES = cd.CERT_CAPABLE_MODULES
-        # Bind the REAL _distribute_one_cert (only uses the 3 attrs above).
+        # Bind the REAL _distribute_one_cert (only uses the 3 attrs above) +
+        # _install_cert_on_hub (referenced by _distribute_one_cert for the
+        # module_type=="hub" target branch; never CALLED for firewall targets
+        # in these tests, just attribute-accessed, so binding the real method
+        # is harmless).
         self._distribute_one_cert = main.LabManagerHub._distribute_one_cert.__get__(self)
+        self._install_cert_on_hub = main.LabManagerHub._install_cert_on_hub.__get__(self)
 
     async def request_response(self, spoke_id, cmd, data, timeout=5.0):
         return await self._rr(spoke_id, cmd, data, timeout)

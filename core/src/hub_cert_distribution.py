@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import ssl
+import subprocess
+import tempfile
 
 # Pure transport helpers live in cert_distribution.py (no heavy imports, so they
 # are unit-testable without constructing a LabManagerHub, which pulls in at-rest
@@ -17,6 +21,13 @@ from cert_distribution import (
 )
 
 logger = logging.getLogger("Hub")
+
+# Path to the sudoers-allowed hub self-restart helper (provisioned by
+# install_all.sh). Schedules `systemctl restart lm` from a transient systemd
+# unit owned by PID 1 — OUTSIDE lm.service's cgroup — so the restart command
+# survives the hub being stopped and completes cleanly. Non-blocking (`sleep 3`
+# inside the helper) so the caller's response can return first.
+_LM_SELF_RESTART = "/usr/local/bin/lm-self-restart"
 
 
 class HubCertDistributionMixin:
@@ -35,14 +46,98 @@ class HubCertDistributionMixin:
         target spoke (resolved by module_type). See _distribute_cert_to_targets."""
         return await _distribute_cert_to_targets(
             self.request_response, self.get_spoke_by_type,
-            self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets)
+            self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets,
+            install_on_hub=self._install_cert_on_hub)
 
     async def _distribute_all_certs(self, le_spoke_id: str) -> None:
         """Distribute every managed cert whose targets are stale. See
         _distribute_all_certs_impl."""
         await _distribute_all_certs_impl(
             self.request_response, self.get_spoke_by_type,
-            self.CERT_CAPABLE_MODULES, le_spoke_id)
+            self.CERT_CAPABLE_MODULES, le_spoke_id,
+            install_on_hub=self._install_cert_on_hub)
+
+    async def _install_cert_on_hub(self, domain: str, fullchain: str,
+                                   privkey: str, chain: str,
+                                   identifier: str = "") -> dict:
+        """Install a cert on the HUB ITSELF (module_type == "hub" target).
+
+        Writes fullchain → ``LM_TLS_CERT`` and privkey → ``LM_TLS_KEY`` (the
+        paths the hub's uvicorn + WS TLS context already read at startup), then
+        schedules ``lm-self-restart`` so the new cert is loaded. The cert is
+        VALIDATED first (loaded into a throwaway ssl context) so a malformed
+        cert can't brick the hub — uvicorn's ``ssl_certfile`` has no plaintext
+        fallback at boot, unlike the WS context's try/except.
+
+        Returns ``{"status", "message"}``. Best-effort restart: if the helper is
+        missing or sudo denies, the cert is still written (next hub restart
+        picks it up) and the message notes the restart didn't schedule.
+        ``identifier`` is ignored (there's only one hub TLS endpoint)."""
+        cert_path = os.environ.get("LM_TLS_CERT", "").strip()
+        key_path = os.environ.get("LM_TLS_KEY", "").strip()
+        if not cert_path or not key_path:
+            return {"status": "ERROR",
+                    "message": "hub TLS paths not configured — set LM_TLS_CERT + "
+                               "LM_TLS_KEY env on the hub to a writable location"}
+        if not fullchain or not privkey:
+            return {"status": "ERROR", "message": "missing cert material"}
+
+        # Validate BEFORE touching the live paths: load_cert_chain into a
+        # throwaway context. A bad cert here returns ERROR and leaves the
+        # running hub's TLS untouched (so it stays up on its current cert).
+        try:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as cf:
+                cf.write(fullchain)
+                cf_path = cf.name
+            with tempfile.NamedTemporaryFile("w", suffix=".pem", delete=False) as kf:
+                kf.write(privkey)
+                kf_path = kf.name
+            try:
+                ctx.load_cert_chain(cf_path, kf_path)
+            finally:
+                os.unlink(cf_path)
+                os.unlink(kf_path)
+        except Exception as e:
+            return {"status": "ERROR",
+                    "message": f"cert validation failed (not written): {e}"}
+
+        # Atomic write (temp + os.replace). Key 0600, chain 0644.
+        try:
+            self._atomic_write(cert_path, fullchain, 0o644)
+            self._atomic_write(key_path, privkey, 0o600)
+        except Exception as e:
+            return {"status": "ERROR",
+                    f"message": f"write to {cert_path}/{key_path} failed: {e}"}
+
+        # Schedule a non-blocking self-restart so uvicorn reloads the cert.
+        restart_msg = "lm.service restarting to apply"
+        try:
+            subprocess.Popen(["sudo", "-n", _LM_SELF_RESTART],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            restart_msg = f"cert written; could not schedule self-restart ({e}) — restart lm.service manually"
+        logger.info("[cert] installed %s on hub (%s) — %s", domain, cert_path, restart_msg)
+        return {"status": "SUCCESS", "message": f"installed to {cert_path}; {restart_msg}"}
+
+    @staticmethod
+    def _atomic_write(path: str, content: str, mode: int) -> None:
+        """Write content to path atomically (temp in the same dir + os.replace)
+        at the given mode. Same-dir temp is required for os.replace to stay on
+        one filesystem (rename across filesystems raises EXDEV)."""
+        d = os.path.dirname(os.path.abspath(path)) or "."
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+            os.chmod(tmp, mode)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     async def run_cert_distribution_loop(self):
         """Hourly: push renewed cert material from the le spoke to each cert's
