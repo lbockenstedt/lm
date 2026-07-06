@@ -1197,7 +1197,30 @@ class BaseControlPlane:
             # is single-threaded. That looked like the whole spoke going
             # unresponsive (in-flight requests timing out at the hub) each time
             # a new commit landed. See _perform_spoke_update_sync.
-            return await asyncio.to_thread(self._perform_spoke_update_sync, repo_url)
+            #
+            # Single-flight guard: the hub's mailbox retries UNACKED commands
+            # at 5s/15s/60s (messaging/mailbox.py retry_intervals). Because the
+            # ack only returns when the full git pull completes, a slow link
+            # makes the mailbox re-deliver SPOKE_UPDATE — and without this
+            # guard each re-delivery spawned a CONCURRENT git pull in
+            # /opt/lm/<mod> (the "Performing update ... 3× in 20s" storm seen
+            # on cs-svr-02). to_thread frees the event loop while the first
+            # run executes, so a re-delivered duplicate arrives here while
+            # the flag is set and short-circuits with an immediate ack —
+            # which the mailbox read as the original being delivered, ending
+            # the retry loop. The first call still returns its real result
+            # (or os._exit(3)s the process); the flag is a no-op across a
+            # hard exit.
+            if getattr(self, "_spoke_update_in_progress", False):
+                logger.info("SPOKE_UPDATE already in progress; "
+                            "ignoring duplicate re-delivery.")
+                return {"status": "SUCCESS",
+                        "message": "update already in progress"}
+            self._spoke_update_in_progress = True
+            try:
+                return await asyncio.to_thread(self._perform_spoke_update_sync, repo_url)
+            finally:
+                self._spoke_update_in_progress = False
 
         if cmd_type == "SPOKE_SET_HUB_SECRET":
             new_secret = data.get("hub_secret")
