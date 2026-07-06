@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import logging
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -340,6 +341,27 @@ class GenericAgent(BaseSpoke):
 
     # ── Background deployment (deploy roles) ──────────────────────────────────
 
+    def _build_deploy_cmd(self, role_name: str, spec: dict, config: dict) -> list:
+        """Build a deploy role's command, injecting per-load config.
+
+        For netbox-server the LM WebUI collects the desired admin username +
+        password on role load and passes them in LOAD_ROLE `config`; append them
+        as install.sh args (shlex.quoted so any characters are safe). Without a
+        password the installer auto-generates one, as before.
+        """
+        cmd = list(spec["cmd"])
+        if role_name == "netbox-server" and config:
+            extra = ""
+            user = config.get("admin_user") or config.get("admin_username")
+            pw = config.get("admin_password")
+            if user:
+                extra += " --admin-user " + shlex.quote(str(user))
+            if pw:
+                extra += " --admin-password " + shlex.quote(str(pw))
+            if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
+                cmd[-1] = cmd[-1] + extra
+        return cmd
+
     async def _run_deploy(self, role_name: str, cmd: list) -> None:
         """Run a deploy role's install script in the background and track status.
 
@@ -407,8 +429,10 @@ class GenericAgent(BaseSpoke):
                             "deploy_status": self._deploy_status}
                 spec = _DEPLOY_ROLES[role_name]
                 self._deploy_role = role_name
+                deploy_cmd = self._build_deploy_cmd(role_name, spec,
+                                                    data.get("config") or {})
                 self._deploy_task = asyncio.create_task(
-                    self._run_deploy(role_name, list(spec["cmd"])))
+                    self._run_deploy(role_name, deploy_cmd))
                 return {"status": "SUCCESS", "role": role_name,
                         "module_type": spec["module_type"], "deploy": True,
                         "message": f"Deployment of '{role_name}' started in background"}
@@ -456,6 +480,39 @@ class GenericAgent(BaseSpoke):
         if cmd == "GET_DEPLOY_STATUS":
             return {"status": "SUCCESS", "deploy": self._deploy_status,
                     "active_role": self._deploy_role}
+
+        if cmd == "NETBOX_RESET_ADMIN_PASSWORD":
+            # Reset the admin password on the NetBox app this agent deployed
+            # (netbox-server role). Runs install.sh's fast --reset-admin-password
+            # path (no reinstall) and returns the result inline for the WebUI.
+            pw = data.get("password") or (data.get("config") or {}).get("admin_password")
+            user = (data.get("username") or (data.get("config") or {}).get("admin_user")
+                    or "admin")
+            if not pw:
+                return {"status": "ERROR", "message": "password is required"}
+            reset_cmd = ["bash", "-c",
+                         "exec </dev/null; curl -sSL "
+                         "https://raw.githubusercontent.com/lbockenstedt/netbox/main/install.sh "
+                         "| bash -s -- --reset-admin-password " + shlex.quote(str(pw))
+                         + " --admin-user " + shlex.quote(str(user))]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *reset_cmd, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT)
+                stdout, _ = await proc.communicate()
+                rc = proc.returncode
+                tail = (stdout or b"").decode(errors="replace")[-1500:]
+                if rc == 0:
+                    logger.info("NetBox admin password reset for '%s'.", user)
+                    return {"status": "SUCCESS",
+                            "message": f"Admin password reset for '{user}'.", "tail": tail}
+                logger.error("NetBox admin password reset failed (rc=%s):\n%s", rc, tail)
+                return {"status": "ERROR",
+                        "message": f"Reset failed (rc={rc}) — is NetBox installed on this node?",
+                        "tail": tail}
+            except Exception as e:
+                logger.error("NetBox admin password reset raised: %s", e)
+                return {"status": "ERROR", "message": str(e)}
 
         if cmd == "UNLOAD_ROLE":
             role_name = data.get("role")
