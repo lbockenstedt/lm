@@ -63,6 +63,17 @@ _UPDATE_SOURCE_PREFIX_MAP = {
     'le': 'le',
 }
 
+# module_types whose code lives INSIDE the lm/hub clone at /opt/lm — the generic
+# agent itself ("agent") and the in-repo roles (dns/dhcp/console, which are
+# repo_url=None in agent_spoke._ROLE_MAP). Their update source is the lm repo
+# (the "agent" update_sources key), NEVER a spoke_id substring. Without this a
+# sub-spoke id like "lm-opnsense-dns" substring-matches "opn" → the opnsense repo,
+# and the resulting SPOKE_UPDATE repoints the checkout + hard-resets, wiping the
+# tree (the class of bug that broke lm-opnsense). Role sub-spokes that DO have
+# their own repo (firewall→opnsense, ipam→netbox, …) resolve via
+# _UPDATE_SOURCE_MODULE_KEY above and are unaffected.
+_IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "console"}
+
 
 def _ver(v: str):
     """Parse a dotted-numeric VERSION string into a comparable tuple, or
@@ -393,16 +404,16 @@ class UpdatePipelineMixin:
         does not resolve — it draws its repo_url directly from
         ``update_sources["agent"]``, so it does not call this helper.
         """
-        # A generic role-capable agent (module_type "agent") IS the lm/hub clone
-        # at /opt/lm; its update source is the "agent" key — NEVER a spoke_id
-        # substring match. Without this guard a name like "lm-opnsense"
-        # substring-matches "opn" → the opnsense repo, and the resulting
-        # SPOKE_UPDATE repoints /opt/lm's git origin to opnsense.git + hard-resets,
-        # wiping agent/src/control_plane.py — the recurring "can't open
-        # control_plane.py" crash-loop. (If "agent" isn't in update_sources the
-        # caller's `if repo_url:` guard simply skips the push — the agent
-        # self-updates from the lm repo via its own updater_worker anyway.)
-        if mtype == "agent":
+        # The generic agent AND the in-repo roles (dns/dhcp/console) live in the
+        # lm/hub clone at /opt/lm; their update source is the "agent" key (the lm
+        # repo) — NEVER a spoke_id substring match. Without this a name like
+        # "lm-opnsense" (or a sub-spoke "lm-opnsense-dns") substring-matches "opn"
+        # → the opnsense repo, and the resulting SPOKE_UPDATE repoints the
+        # checkout's git origin + hard-resets, wiping the tree (the recurring
+        # "can't open control_plane.py" crash-loop). See _IN_LM_REPO_MODULE_TYPES.
+        # (If "agent" isn't in update_sources the caller's `if repo_url:` guard
+        # simply skips the push — these self-update from the lm repo anyway.)
+        if mtype in _IN_LM_REPO_MODULE_TYPES:
             return "agent"
         module_key = _UPDATE_SOURCE_MODULE_KEY.get(mtype)
         if not module_key:
