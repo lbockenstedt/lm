@@ -57,6 +57,17 @@ while [[ "$#" -gt 0 ]]; do
     esac; shift
 done
 
+# Accept a bare hub IP/host for --hub (e.g. `--hub 172.16.1.31` == `--hub
+# wss://172.16.1.31:443`). A ws://|wss:// scheme or the "auto" sentinel is left
+# as-is; host:port gets a scheme; a bare host defaults to the unified :443.
+if [ -n "${HUB_URL:-}" ] && [ "$HUB_URL" != "auto" ]; then
+    case "$HUB_URL" in
+        ws://*|wss://*) : ;;
+        *:[0-9]*)       HUB_URL="wss://${HUB_URL}" ;;
+        *)              HUB_URL="wss://${HUB_URL}:443" ;;
+    esac
+fi
+
 # --hub is optional: omit it (or pass "auto") and the agent auto-discovers the
 # hub (same-box wss://127.0.0.1:443/ws/spoke, remote wss://<hub>:443 via
 # mDNS/DNS) — BaseControlPlane._resolve_hub_url handles the "auto" sentinel.
