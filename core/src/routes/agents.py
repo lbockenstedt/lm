@@ -81,7 +81,15 @@ def register(app, hub, ctx):
             payload = data.get("data", {})
             if not command:
                 raise HTTPException(status_code=400, detail="command is required")
-            result = await hub.request_response(spoke_id, command, payload)
+            # Long-running agent ops (curl+install/manage.py) blow past the 5s
+            # default request_response timeout — give them the 120s window used by
+            # load-role. NETBOX_RESET_ADMIN_PASSWORD fetches install.sh + runs a
+            # Django shell on the deployed NetBox.
+            _LONG_OPS = {"NETBOX_RESET_ADMIN_PASSWORD"}
+            if command in _LONG_OPS:
+                result = await hub.request_response(spoke_id, command, payload, timeout=180.0)
+            else:
+                result = await hub.request_response(spoke_id, command, payload)
             return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         except HTTPException:
             raise

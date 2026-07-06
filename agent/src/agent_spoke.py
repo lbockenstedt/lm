@@ -478,8 +478,12 @@ class GenericAgent(BaseSpoke):
                     "message": f"Role '{role_name}' hosted as sub-spoke {sub_spoke_id} ({mtype})"}
 
         if cmd == "GET_DEPLOY_STATUS":
+            # netbox_installed survives an agent reload (which clears the live
+            # _deploy_status), so the WebUI can persistently offer the "reset
+            # NetBox admin password" knob on nodes that ran the netbox-server role.
             return {"status": "SUCCESS", "deploy": self._deploy_status,
-                    "active_role": self._deploy_role}
+                    "active_role": self._deploy_role,
+                    "netbox_installed": os.path.exists("/opt/netbox-app/venv/bin/python3")}
 
         if cmd == "NETBOX_RESET_ADMIN_PASSWORD":
             # Reset the admin password on the NetBox app this agent deployed

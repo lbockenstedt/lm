@@ -717,6 +717,72 @@ function showConfirmToast(message, opts = {}) {
     });
 }
 
+// Like showConfirmToast but with a text/password input. Resolves the entered
+// string on confirm, or null on cancel/timeout. Used for the NetBox admin
+// password reset knob.
+function showPromptToast(message, opts = {}) {
+    const { confirmLabel = 'OK', cancelLabel = 'Cancel', type = 'text', placeholder = '' } = opts;
+    return new Promise((resolve) => {
+        const toast = document.createElement('div');
+        toast.className = 'lm-toast';
+        const stack = document.querySelectorAll('.lm-toast').length;
+        const topOffset = 1.5 + stack * 4.0;
+        toast.style.cssText = `
+            position:fixed;top:${topOffset}rem;right:1.5rem;z-index:9999;
+            display:flex;flex-direction:column;gap:.6rem;
+            background:#263040;color:#fff;
+            padding:.85rem 1rem;border-radius:.5rem;font-size:.875rem;
+            box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;
+            transition:opacity .2s ease;max-width:22rem;`;
+        const text = document.createElement('div');
+        text.style.cssText = 'white-space:pre-line;line-height:1.35;';
+        text.textContent = message;
+        toast.appendChild(text);
+
+        const input = document.createElement('input');
+        input.type = type;
+        input.placeholder = placeholder;
+        input.autocomplete = 'new-password';
+        input.style.cssText = 'width:100%;box-sizing:border-box;padding:.4rem .6rem;border-radius:.35rem;' +
+            'border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.1);color:#fff;font-size:.85rem;';
+        toast.appendChild(input);
+
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:.5rem;justify-content:flex-end;';
+        let settled = false, timer;
+        const close = (val) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            toast.style.opacity = '0';
+            toast.addEventListener('transitionend', () => toast.remove());
+            resolve(val);
+        };
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = cancelLabel;
+        cancelBtn.style.cssText = 'background:rgba(255,255,255,.15);border:none;color:#fff;' +
+            'cursor:pointer;font-size:.8rem;font-weight:600;padding:.35rem .8rem;border-radius:.35rem;';
+        cancelBtn.addEventListener('click', () => close(null));
+        const okBtn = document.createElement('button');
+        okBtn.textContent = confirmLabel;
+        okBtn.style.cssText = 'background:#01A982;border:none;color:#fff;' +
+            'cursor:pointer;font-size:.8rem;font-weight:700;padding:.35rem .8rem;border-radius:.35rem;';
+        okBtn.addEventListener('click', () => close(input.value));
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') close(input.value);
+            else if (e.key === 'Escape') close(null);
+        });
+        row.appendChild(cancelBtn);
+        row.appendChild(okBtn);
+        toast.appendChild(row);
+
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => { toast.style.opacity = '1'; });
+        input.focus();
+        timer = setTimeout(() => close(null), window.PROMPT_TOAST_DURATION_MS || 30000);
+    });
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // "File a Bug" — footer button. Collects the user's explanation plus a
 // browser-console buffer (window.__lmBugBuffer, installed at top of file),
@@ -5479,11 +5545,33 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
         all.forEach(a => {
             if (a._kind !== 'spoke' || a._status !== 'connected') return;
             const aid = a.agent_id;
-            fetchLoadedRoles(aid).then(active => {
+            // Fetch hosted roles AND deploy status together so the cell reflects
+            // both (a deploy role like netbox-server hosts NO sub-role, so without
+            // this it always read "none (idle)" with no sign it deployed anything).
+            Promise.all([fetchLoadedRoles(aid), fetchDeployStatus(aid)]).then(([active, ds]) => {
                 const cell = agentsWrap.querySelector(`.lm-agent-role-cell[data-role-cell="${CSS.escape(aid)}"]`);
                 if (!cell) return;
-                cell.outerHTML = (Array.isArray(active) && active.length > 0)
-                    ? active.map(r => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${escapeHtml(r.sub_spoke_id || '')}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`).join(' ')
+                const parts = [];
+                if (Array.isArray(active) && active.length > 0) {
+                    parts.push(...active.map(r => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${escapeHtml(r.sub_spoke_id || '')}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`));
+                }
+                // Live deploy-role badge (ephemeral — cleared on agent reload).
+                const dep = ds && ds.deploy;
+                if (dep && dep.role && dep.state) {
+                    const st = dep.state;
+                    const cls = st === 'completed' ? 'bg-green-100 text-green-700'
+                              : st === 'failed' || st === 'error' ? 'bg-red-100 text-red-700'
+                              : 'bg-amber-100 text-amber-700';
+                    const word = st === 'running' ? 'deploying…' : st;
+                    parts.push(`<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${cls}" title="deploy role">${escapeHtml((AGENT_ROLES[dep.role] || {}).name || dep.role)}: ${escapeHtml(word)}</span>`);
+                }
+                // Durable NetBox-server marker + reset-admin-password knob.
+                if (ds && ds.netbox_installed) {
+                    parts.push(`<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600" title="NetBox application deployed on this node">NetBox</span>`);
+                    parts.push(`<button onclick="resetNetboxAdmin('${escapeHtml(aid)}')" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-white text-[#01A982] border border-[#01A982] hover:bg-green-50 transition-colors" title="Reset the NetBox admin password">Reset admin pw</button>`);
+                }
+                cell.outerHTML = parts.length
+                    ? `<span class="inline-flex flex-wrap items-center gap-1">${parts.join(' ')}</span>`
                     : '<span class="text-slate-400 italic">none (idle)</span>';
             });
         });
@@ -6701,6 +6789,47 @@ async function fetchLoadedRoles(spokeId) {
     } catch (e) { return []; }
 }
 
+// Deploy-role status for a generic agent (netbox-server, bugfixer). Returns
+// { deploy, active_role, netbox_installed } or null. netbox_installed survives
+// an agent reload, so it's the durable gate for the reset-admin-password knob.
+async function fetchDeployStatus(spokeId) {
+    try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'GET_DEPLOY_STATUS' }),
+        });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (e) { return null; }
+}
+
+// Prompt for a new NetBox admin password and reset it on the node that ran the
+// netbox-server role (via the agent's NETBOX_RESET_ADMIN_PASSWORD command).
+async function resetNetboxAdmin(spokeId) {
+    const pw = await showPromptToast(
+        `New NetBox admin password for ${spokeId}:`,
+        { type: 'password', placeholder: 'new admin password', confirmLabel: 'Reset' });
+    if (pw === null) return;                 // cancelled
+    if (!pw || pw.length < 4) { showToast('Password must be at least 4 characters.', 'error'); return; }
+    showToast(`Resetting NetBox admin password on ${spokeId}…`, 'info');
+    try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'NETBOX_RESET_ADMIN_PASSWORD', data: { password: pw } }),
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'SUCCESS') {
+            showToast(data.message || 'NetBox admin password reset.', 'success');
+        } else {
+            showToast(`Reset failed: ${data.detail || data.message || JSON.stringify(data)}`, 'error');
+        }
+    } catch (err) {
+        showToast(`Reset failed: ${err.message}`, 'error');
+    }
+}
+
 async function showLoadRoleModal(spokeId) {
     const existing = document.getElementById('load-role-modal');
     if (existing) existing.remove();
@@ -6723,6 +6852,14 @@ async function showLoadRoleModal(spokeId) {
                 <p class="text-xs text-slate-500">A generic agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">${spokeId}-&lt;role&gt;</code>) that auto-approves via this agent.</p>
                 <div id="role-list" class="space-y-2 max-h-72 overflow-y-auto">
                     <p class="text-xs text-slate-400 italic">Loading roles…</p>
+                </div>
+                <div id="netbox-admin-creds" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
+                    <p class="text-xs font-semibold text-slate-700">NetBox admin account</p>
+                    <input id="nb-admin-user" type="text" value="admin" placeholder="admin username" autocomplete="off"
+                        class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    <input id="nb-admin-pass" type="password" placeholder="admin password (blank = auto-generate)" autocomplete="new-password"
+                        class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    <p class="text-[11px] text-slate-500">Sets the NetBox WebUI login. Leave blank to auto-generate (shown in the deploy log).</p>
                 </div>
                 <p id="role-desc" class="text-xs text-slate-500 italic min-h-[1.5rem]"></p>
                 <div id="role-note" class="p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
@@ -6764,7 +6901,16 @@ async function showLoadRoleModal(spokeId) {
     list.innerHTML = rows || '<p class="text-xs text-slate-400 italic">No roles available.</p>';
 }
 
+// Show the NetBox admin-account inputs only while the netbox-server role is
+// checked — the deploy passes them through to install.sh as the admin login.
+function syncNetboxCreds() {
+    const cb = document.querySelector('.role-check[value="netbox-server"]');
+    const creds = document.getElementById('netbox-admin-creds');
+    if (creds) creds.classList.toggle('hidden', !(cb && cb.checked));
+}
+
 function updateRoleDesc(roleId) {
+    syncNetboxCreds();
     const r = AGENT_ROLES[roleId];
     const desc = document.getElementById('role-desc');
     if (desc) desc.textContent = r?.desc || '';
@@ -6785,13 +6931,28 @@ async function loadRole(spokeId) {
     const btn = document.querySelector('#load-role-modal button[onclick^="loadRole"]');
     if (btn) { btn.disabled = true; btn.textContent = 'Activating…'; }
 
+    // Collect the NetBox admin account (if the netbox-server role is selected)
+    // BEFORE the loop removes the modal; passed as LOAD_ROLE config → install.sh.
+    let netboxCfg = null;
+    if (checked.includes('netbox-server')) {
+        const u = document.getElementById('nb-admin-user')?.value.trim();
+        const p = document.getElementById('nb-admin-pass')?.value;
+        netboxCfg = {};
+        if (u) netboxCfg.admin_user = u;
+        if (p) netboxCfg.admin_password = p;
+    }
+
     const results = [];
     for (const roleId of checked) {
         try {
+            const body = { role: roleId };
+            if (roleId === 'netbox-server' && netboxCfg && Object.keys(netboxCfg).length) {
+                body.config = netboxCfg;
+            }
             const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/load-role`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ role: roleId }),
+                body: JSON.stringify(body),
             });
             const data = await res.json();
             const name = AGENT_ROLES[roleId]?.name || roleId;
