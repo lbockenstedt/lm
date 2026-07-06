@@ -2491,6 +2491,8 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-6">
   <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
   <div class="flex justify-end gap-2">
+    <button onclick="showLeIssueModal()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-3 py-1 rounded-md text-xs font-medium transition-all">＋ Issue certificate</button>
+    <button onclick="leRenewAll()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">↻ Renew all</button>
     <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
     <button onclick="loadLEData()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200">↻ Refresh</button>
   </div>
@@ -9698,7 +9700,7 @@ async function loadLEData(subMenu) {
             else { cls = 'bg-green-100 text-green-700'; label = `${days}d left`; }
             return { text: `${dt.toISOString().slice(0, 10)} · ${label}`, cls, days };
         };
-        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Targets'];
+        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Targets', 'Actions'];
         const rows = certs.map(c => {
             const dEsc = escJsAttr(c.domain || '');
             const tgts = c.targets || [];
@@ -9713,6 +9715,10 @@ async function loadLEData(subMenu) {
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls}">${exp.text}</span></td>
                 <td class="px-4 py-2"><div class="flex items-center gap-2">${tgtCell}<button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium">manage</button></div></td>
+                <td class="px-4 py-2"><div class="flex items-center gap-3 whitespace-nowrap">
+                    <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
+                    <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
+                </div></td>
             </tr>`;
         }).join('');
         // Top-of-card banner if any cert is expiring soon / expired / stuck
@@ -9729,7 +9735,7 @@ async function loadLEData(subMenu) {
         })();
         const note = body.message ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${body.message}</p>` : '';
         container.innerHTML = certs.length === 0
-            ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet. Issue one via POST /api/le/issue (API) — a WebUI issue form is a follow-up.</p>`
+            ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet. Click <b class="text-slate-600 not-italic">＋ Issue certificate</b> above to configure an ACME account (email + challenge type) and issue your first cert.</p>`
             : expBanner + note + tw(th(cols) + `<tbody>${rows}</tbody>`);
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
@@ -9836,6 +9842,278 @@ async function removeLeTarget(domain, idx) {
         await loadLEData();
         showLeTargetsModal(domain);
     } catch (e) { alert('Remove target failed: ' + e.message); }
+}
+
+// ── le action UI: issue / renew / revoke ─────────────────────────────────────
+// All four spoke endpoints (/api/le/issue, /renew, /revoke, /distribute) already
+// exist — this is the WebUI write/action half that was deferred when the read
+// half (list + targets modal) was built. The issue modal's email field is the
+// "configure certbot/acme account" entry point: certbot keeps the ACME account
+// in /etc/letsencrypt/accounts/ keyed by the email supplied per-issue.
+
+// DNS-01 providers supported by the le spoke (le/src/acme.py:_DNS_PLUGIN_APT).
+// cloudflare + route53 are preinstalled by install_le.sh; the rest are
+// apt-installed on demand by the spoke's ensure_dns_plugin().
+const LE_DNS_PROVIDERS = [
+    ['cloudflare', 'Cloudflare'],
+    ['route53', 'AWS Route 53'],
+    ['google', 'Google Domains'],
+    ['digitalocean', 'DigitalOcean'],
+    ['linode', 'Linode'],
+    ['rfc2136', 'RFC 2136 (BIND)'],
+    ['hetzner', 'Hetzner'],
+    ['inwx', 'INWX'],
+    ['transip', 'TransIP'],
+];
+
+// Per-provider INI key shown as the DNS creds placeholder. The le spoke writes
+// the raw content to /etc/lm-le/dns-<provider>.ini at 0600 (write_dns_creds).
+const LE_DNS_CREDS_HINT = {
+    cloudflare: 'dns_cloudflare_api_token = YOUR_TOKEN',
+    route53:    'dns_route53_access_key_id = ...\ndns_route53_secret_access_key = ...',
+    google:     'dns_google_domains_access_token = ...',
+    digitalocean: 'dns_digitalocean_token = ...',
+    linode:     'dns_linode_api_key = ...',
+    rfc2136:    'dns_rfc2136_server = ...\ndns_rfc2136_key_name = ...\ndns_rfc2136_key_secret = ...',
+    hetzner:    'dns_hetzner_api_token = ...',
+    inwx:       'dns_inwx_url = https://api.domrobot.com/xmlrpc/\ndns_inwx_username = ...\ndns_inwx_password = ...',
+    transip:    'dns_transip_username = ...\ndns_transip_api_key = ...',
+};
+
+// Initial-targets picker state for the issue modal. Array of {module_type, identifier}.
+let _leIssueTargets = [];
+
+function leIssueToggleChallenge() {
+    const sel = document.getElementById('le-issue-challenge');
+    if (!sel) return;
+    const ch = sel.value;                       // http | http-webroot | dns | tls-alpn
+    const set = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
+    set('le-issue-webroot-row', ch === 'http-webroot');
+    set('le-issue-dns-provider-row', ch === 'dns');
+    set('le-issue-dns-creds-row', ch === 'dns');
+}
+
+function leIssueAddTarget() {
+    const mt = document.getElementById('le-issue-tgt-mt')?.value;
+    const identifier = document.getElementById('le-issue-tgt-id')?.value?.trim() || '';
+    if (!mt) { alert('Pick a module type first'); return; }
+    _leIssueTargets.push({ module_type: mt, identifier });
+    document.getElementById('le-issue-tgt-id').value = '';
+    leIssueRenderTargets();
+}
+
+function leIssueRemoveTarget(i) {
+    _leIssueTargets.splice(i, 1);
+    leIssueRenderTargets();
+}
+
+function leIssueRenderTargets() {
+    const cell = document.getElementById('le-issue-targets-list');
+    if (!cell) return;
+    cell.innerHTML = _leIssueTargets.length === 0
+        ? `<span class="text-xs text-slate-400 italic">none — add below (optional)</span>`
+        : `<div class="flex flex-wrap gap-1">${_leIssueTargets.map((t, i) =>
+            `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-700">
+                ${t.module_type}${t.identifier ? '/' + escapeHtml(t.identifier) : ''}
+                <button onclick="leIssueRemoveTarget(${i})" class="text-slate-400 hover:text-red-600" type="button">✕</button>
+            </span>`).join('')}</div>`;
+}
+
+function showLeIssueModal() {
+    _leIssueTargets = [];
+    const mtOpts = LE_MODULE_TYPES.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('');
+    const dnsOpts = LE_DNS_PROVIDERS.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('');
+    // Remove any prior modal (e.g. left over from a previous open).
+    document.getElementById('le-issue-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'le-issue-modal';
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50 overflow-y-auto py-6';
+    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6 my-auto">
+        <h3 class="text-lg font-bold mb-1">Issue a certificate</h3>
+        <p class="text-xs text-slate-500 mb-4">Runs <code>certbot certonly</code> on the le spoke. The ACME account email below is registered with Let's Encrypt on first use and reused after. Staging issues an untrusted cert — use it to validate the flow before going live.</p>
+        <div class="space-y-3">
+            <div class="grid grid-cols-2 gap-3">
+                <div class="flex flex-col">
+                    <label class="text-xs text-slate-500 mb-1">Domain <span class="text-red-500">*</span></label>
+                    <input id="le-issue-domain" type="text" placeholder="www.example.com" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                </div>
+                <div class="flex flex-col">
+                    <label class="text-xs text-slate-500 mb-1">ACME account email <span class="text-red-500">*</span></label>
+                    <input id="le-issue-email" type="email" placeholder="admin@example.com" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+                <div class="flex flex-col">
+                    <label class="text-xs text-slate-500 mb-1">Challenge type</label>
+                    <select id="le-issue-challenge" onchange="leIssueToggleChallenge()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="http">HTTP-01 (standalone)</option>
+                        <option value="http-webroot">HTTP-01 (webroot)</option>
+                        <option value="dns">DNS-01</option>
+                        <option value="tls-alpn">TLS-ALPN-01</option>
+                    </select>
+                </div>
+                <div class="flex flex-col">
+                    <label class="text-xs text-slate-500 mb-1">Key type</label>
+                    <select id="le-issue-keytype" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="rsa">RSA</option>
+                        <option value="ecdsa">ECDSA</option>
+                    </select>
+                </div>
+            </div>
+            <div id="le-issue-webroot-row" class="flex flex-col hidden">
+                <label class="text-xs text-slate-500 mb-1">Webroot path</label>
+                <input id="le-issue-webroot" type="text" placeholder="/var/www/html" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+            </div>
+            <div id="le-issue-dns-provider-row" class="flex flex-col hidden">
+                <label class="text-xs text-slate-500 mb-1">DNS provider</label>
+                <select id="le-issue-dns-provider" onchange="leIssueUpdateDnsHint()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${dnsOpts}</select>
+            </div>
+            <div id="le-issue-dns-creds-row" class="flex flex-col hidden">
+                <label class="text-xs text-slate-500 mb-1">DNS credentials INI <span class="text-slate-400">(written to /etc/lm-le/dns-&lt;provider&gt;.ini at 0600)</span></label>
+                <textarea id="le-issue-dns-creds" rows="3" placeholder="" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500"></textarea>
+                <p id="le-issue-dns-creds-hint" class="text-[11px] text-slate-400 mt-1 font-mono"></p>
+            </div>
+            <div class="flex items-center gap-4">
+                <label class="flex items-center gap-2 text-sm text-slate-700">
+                    <input id="le-issue-staging" type="checkbox" class="rounded border-slate-300" />
+                    Use Let's Encrypt <b>staging</b> (untrusted — for testing)
+                </label>
+            </div>
+            <div class="border-t border-slate-200 pt-3">
+                <label class="text-xs text-slate-500 mb-1 block">Initial distribution targets (optional)</label>
+                <div id="le-issue-targets-list" class="mb-2"></div>
+                <div class="flex flex-wrap items-end gap-2">
+                    <div class="flex flex-col">
+                        <label class="text-[11px] text-slate-400 mb-0.5">Module type</label>
+                        <select id="le-issue-tgt-mt" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
+                    </div>
+                    <div class="flex flex-col flex-1 min-w-[160px]">
+                        <label class="text-[11px] text-slate-400 mb-0.5">Identifier (optional)</label>
+                        <input id="le-issue-tgt-id" type="text" placeholder="e.g. edge-1" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" onkeydown="if(event.key==='Enter'){event.preventDefault();leIssueAddTarget();}" />
+                    </div>
+                    <button onclick="leIssueAddTarget()" type="button" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-md text-sm font-medium">Add</button>
+                </div>
+            </div>
+        </div>
+        <div class="flex justify-end gap-2 mt-5">
+            <button onclick="document.getElementById('le-issue-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Cancel</button>
+            <button onclick="leIssueCert()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+    leIssueRenderTargets();
+}
+
+function leIssueUpdateDnsHint() {
+    const p = document.getElementById('le-issue-dns-provider')?.value;
+    const hint = document.getElementById('le-issue-dns-creds-hint');
+    if (p && hint) hint.textContent = LE_DNS_CREDS_HINT[p] || '';
+}
+
+async function leIssueCert() {
+    const domain = document.getElementById('le-issue-domain')?.value?.trim();
+    const email = document.getElementById('le-issue-email')?.value?.trim();
+    const chSel = document.getElementById('le-issue-challenge')?.value || 'http';
+    const challenge = chSel === 'http-webroot' ? 'http' : chSel;
+    const webroot = chSel === 'http-webroot' ? (document.getElementById('le-issue-webroot')?.value?.trim() || '') : '';
+    const dnsProvider = chSel === 'dns' ? (document.getElementById('le-issue-dns-provider')?.value || '') : '';
+    const dnsCreds = chSel === 'dns' ? (document.getElementById('le-issue-dns-creds')?.value || '') : '';
+    const staging = !!document.getElementById('le-issue-staging')?.checked;
+    const keyType = document.getElementById('le-issue-keytype')?.value || 'rsa';
+
+    if (!domain) { alert('Domain is required'); return; }
+    if (!email) { alert('ACME account email is required'); return; }
+    if (chSel === 'http-webroot' && !webroot) { alert('Webroot path is required for HTTP-01 webroot'); return; }
+    if (challenge === 'dns') {
+        if (!dnsProvider) { alert('Pick a DNS provider for DNS-01'); return; }
+        if (!dnsCreds.trim()) { alert('DNS credentials INI is required for DNS-01'); return; }
+    }
+
+    const body = { domain, email, challenge, staging, key_type: keyType };
+    if (chSel === 'http-webroot') body.webroot = webroot;
+    if (challenge === 'dns') { body.dns_provider = dnsProvider; body.dns_creds = dnsCreds; }
+    if (_leIssueTargets.length) body.targets = _leIssueTargets;
+
+    const btn = document.querySelector('#le-issue-modal button.bg-\\[\\#01A982\\]');
+    if (btn) { btn.disabled = true; btn.textContent = 'Issuing…'; }
+    try {
+        const { ok, data, detail } = await _spokeFetch('/api/le/issue', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!ok) {
+            alert('Issue failed: ' + (detail || ''));
+            if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
+            return;
+        }
+        // The spoke returns nested {status, data:{...}}; the hub adds
+        // data.distribution (per-target push summary from net_services.py:le_issue_cert).
+        const inner = (data && data.data) ? data.data : (data || {});
+        const dist = inner.distribution || [];
+        const distMsg = dist.length
+            ? '\n\nDistribution:\n' + dist.map(d => {
+                const st = d.status === 'SUCCESS' ? '✓' : '✗';
+                return `  ${st} ${d.module_type || ''}${d.identifier ? '/' + d.identifier : ''}${d.message ? ' — ' + d.message : ''}`;
+            }).join('\n')
+            : '';
+        alert('Issued ' + domain + (staging ? ' (staging)' : '') + '.' + distMsg);
+        document.getElementById('le-issue-modal')?.remove();
+        await loadLEData();
+    } catch (e) {
+        alert('Issue failed: ' + e.message);
+        if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
+    }
+}
+
+async function leRenewCert(domain) {
+    if (!confirm(`Renew ${domain} now? This runs "certbot renew" on the le spoke and re-pushes new material to its targets.`)) return;
+    try {
+        const { ok, data, detail } = await _spokeFetch('/api/le/renew', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain }),
+        });
+        if (!ok) { alert('Renew failed: ' + (detail || '')); return; }
+        const inner = (data && data.data) ? data.data : (data || {});
+        const r = (inner.renewed || [])[0] || {};
+        if (r.renewed) alert(`Renewed ${domain}.` + (r.error ? '' : ''));
+        else alert(`Renewal did not complete for ${domain}: ${r.error || inner.message || 'unknown error'}`);
+        await loadLEData();
+    } catch (e) { alert('Renew failed: ' + e.message); }
+}
+
+async function leRenewAll() {
+    const cnt = (window._leCerts || []).length;
+    if (cnt === 0) { alert('No managed certificates to renew.'); return; }
+    if (!confirm(`Renew all ${cnt} managed certificate(s) now? This runs "certbot renew" for each on the le spoke and re-pushes new material to their targets.`)) return;
+    try {
+        const { ok, data, detail } = await _spokeFetch('/api/le/renew', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        if (!ok) { alert('Renew all failed: ' + (detail || '')); return; }
+        const inner = (data && data.data) ? data.data : (data || {});
+        const r = inner.renewed || [];
+        const okN = r.filter(x => x.renewed).length;
+        const failN = r.length - okN;
+        let msg = `Renewed ${okN}/${r.length} certificate(s).`;
+        if (failN > 0) msg += `\n${failN} failed:\n` + r.filter(x => !x.renewed).map(x => `  ${x.domain}: ${x.error || 'unknown'}`).join('\n');
+        alert(msg);
+        await loadLEData();
+    } catch (e) { alert('Renew all failed: ' + e.message); }
+}
+
+async function leRevokeCert(domain) {
+    const del = confirm(`Revoke ${domain}?\n\nThis revokes the certificate with Let's Encrypt and removes it from the managed list. The certbot cert material on the le spoke is deleted.\n\nNote: revocation does NOT un-install the cert from existing distribution targets — they keep serving it until it expires. Remove the targets first if you want them to stop serving it immediately.`);
+    if (!del) return;
+    try {
+        const { ok, detail } = await _spokeFetch('/api/le/revoke', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain, delete: true }),
+        });
+        if (!ok) { alert('Revoke failed: ' + (detail || '')); return; }
+        alert(`Revoked ${domain}.`);
+        await loadLEData();
+    } catch (e) { alert('Revoke failed: ' + e.message); }
 }
 
 function editDnsRecord(name, rtype) {
