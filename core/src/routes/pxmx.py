@@ -1,8 +1,141 @@
 """Proxmox agents/nodes/VMs + aggregate + VM-detail + console-create routes."""
+import asyncio
+
 from api import (
     HTTPException, Request, _cache_entry, access, get_tenant_scoping, logger, secrets, time,
     uuid,
 )
+
+# ── /api/pxmx/agents cache (stale-while-revalidate) ─────────────────────────
+# The Agents tile + the Setup → Spokes & Agents page fans GET_AGENTS out to
+# EVERY agent-hosting spoke (hypervisor + simulation) with a 5s request_timeout
+# EACH, sequentially — on a slow/stressed lab that's N×5s per page load, and a
+# spoke in a reconnect loop (the pxmx agent-spoke churn) blocks the whole tile.
+# Cache the aggregated payload and serve stale-while-revalidate: instant
+# returns from cache, a single background refresh at the fresh-TTL boundary,
+# and a CONCURRENT fan-out (asyncio.gather) so a forced refresh costs
+# max(5s) instead of N×5s. One hub per process → a module-level cache is fine.
+_AGENTS_CACHE: dict = {"data": None, "ts": 0.0, "refreshing": False}
+_AGENTS_FRESH_S = 5.0    # serve cached payload verbatim while younger than this
+_AGENTS_STALE_S = 30.0   # still servable (background refresh kicks in here)
+# Per-loop lock: a module-level asyncio.Lock() binds to the first event loop
+# that acquires it, which breaks across ``asyncio.run()`` (tests) and would
+# break a hub that ever recreates its loop. One lock per running loop gives
+# correct mutual exclusion within a loop (one uvicorn loop in production)
+# without cross-loop coupling.
+_agents_locks: dict = {}
+
+
+def _agents_lock() -> "asyncio.Lock":
+    loop = asyncio.get_running_loop()
+    lk = _agents_locks.get(id(loop))
+    if lk is None:
+        lk = asyncio.Lock()
+        _agents_locks[id(loop)] = lk
+    return lk
+
+
+async def _aggregate_agents(hub, agent_spokes):
+    """Fan GET_AGENTS out to every agent-hosting spoke CONCURRENTLY and merge
+    the responses into one tile payload. One dead/slow spoke (the pxmx
+    agent-spoke reconnect loop) no longer blocks the others — each request
+    still has its 5s request_timeout, but with ``asyncio.gather`` the
+    wall-clock cost is max(5s), not N×5s. Never raises; a per-spoke failure
+    logs a warning and is skipped so the tile stays populated.
+
+    Module-level (not a route closure) so it depends only on ``hub`` and the
+    spoke list, and is unit-testable with a stub hub.
+    """
+    agent_cfg = hub.state.system_state.get("agent_config", {})
+    names = hub.state.system_state.get("agent_display_names", {})
+    now = time.time()
+
+    def _agent_identity_change_for(hub, parent_spoke, aid, cfg):
+        """Latest unacked rename/reimage event for an agent.
+
+        Agent identity events are recorded on the PARENT spoke's timeline
+        (with ``"agent "`` in the detail), so scan that and return the newest
+        one newer than the agent's ``change_acked_ts``.
+        """
+        acked_ts = float(cfg.get("change_acked_ts") or 0.0)
+        for ev in hub.get_spoke_events(parent_spoke, limit=30):
+            if ev.get("event") in ("identity_changed", "hostname_changed", "reimaged"):
+                detail = ev.get("detail", "") or ""
+                if "agent " in detail and aid in detail and ev.get("ts", 0) > acked_ts:
+                    return ev
+        return None
+
+    async def _one(parent_spoke):
+        try:
+            return await hub.request_response(parent_spoke, "GET_AGENTS", {})
+        except Exception as exc:  # noqa: BLE001 — one dead spoke shouldn't blank the tile
+            logger.warning("GET_AGENTS failed for spoke %s: %s", parent_spoke, exc)
+            return None
+
+    results = await asyncio.gather(*[_one(s) for s in agent_spokes])
+    all_agents: list = []
+    all_pending: list = []
+    for parent_spoke, result in zip(agent_spokes, results):
+        if result is None:
+            continue
+        data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        if not isinstance(data, dict):
+            continue
+        for a in data.get("agents", []) or []:
+            aid = a["agent_id"]
+            a["spoke_id"] = parent_spoke
+            cfg = agent_cfg.get(aid, {})
+            if cfg.get("display_name"):
+                a["display_name"] = cfg["display_name"]
+            elif aid in names:
+                a["display_name"] = names[aid]
+            if cfg.get("client_simulation"):
+                a["client_simulation"] = cfg["client_simulation"]
+            # Hub-tracked per-agent heartbeat (keyed spoke_id:agent_id, fed by
+            # the owning spoke relaying AGENT_HEARTBEAT up).
+            hb_key = f"{parent_spoke}:{aid}"
+            hb_last = hub.heartbeat.last_seen.get(hb_key)
+            a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
+            a["heartbeat_status"] = str(hub.heartbeat.get_status(hb_key).value)
+            a["hostname"] = cfg.get("hostname", "") or a.get("hostname", "") or aid
+            a["install_uuid"] = cfg.get("install_uuid", "")
+            a["identity_change"] = _agent_identity_change_for(hub, parent_spoke, aid, cfg)
+            all_agents.append(a)
+        for p in data.get("pending_agents", []) or []:
+            p["spoke_id"] = parent_spoke
+            all_pending.append(p)
+    return {"agents": all_agents, "pending_agents": all_pending, "spoke_connected": True}
+
+
+async def _maybe_refresh_agents(hub, agent_spokes, force=False):
+    """Under ``_agents_lock``: serve the cached payload if it's still fresh
+    (unless ``force``); otherwise recompute it concurrently and store.
+    Serializing here collapses N simultaneous page-loads into a single
+    GET_AGENTS fan-out — later waiters re-check under the lock and return the
+    just-refreshed payload instead of re-fanning. Returns the served payload
+    (fresh, recomputed, or stale-on-failure). Module-level for testability.
+
+    ``force`` means "the caller already decided the cache is unservable and
+    wants a refresh" — but it does NOT bypass a genuinely-fresh result. If a
+    concurrent caller refreshed while this one waited on the lock, the cache
+    is now fresh and serving it (rather than re-fanning) is the whole point
+    of serializing here. So the fresh-cache re-check below is unconditional."""
+    async with _agents_lock():
+        cached = _AGENTS_CACHE["data"]
+        age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
+        if cached is not None and age is not None and age < _AGENTS_FRESH_S:
+            return cached
+        _AGENTS_CACHE["refreshing"] = True
+        try:
+            result = await _aggregate_agents(hub, agent_spokes)
+            _AGENTS_CACHE["data"] = result
+            _AGENTS_CACHE["ts"] = time.time()
+            return result
+        except Exception:
+            logger.exception("agents cache refresh failed")
+            return cached  # serve stale rather than blanking the tile
+        finally:
+            _AGENTS_CACHE["refreshing"] = False
 
 
 def register(app, hub, ctx):
@@ -162,69 +295,35 @@ def register(app, hub, ctx):
         those agents were previously invisible here entirely — the tile only
         ever asked the pxmx spoke. Each agent is tagged with its own owning
         spoke_id so approve/revoke route correctly regardless of which spoke
-        it's actually connected to."""
+        it's actually connected to.
+
+        Serves a stale-while-revalidate cache (``_AGENTS_CACHE``): fresh
+        within ``_AGENTS_FRESH_S`` (instant serve), servable-stale until
+        ``_AGENTS_STALE_S`` (instant serve + one background refresh), and a
+        forced refresh only when there's no servable cache. This keeps Setup →
+        Spokes & Agents instant on repeat loads and stops a single slow /
+        reconnecting spoke from blocking the tile every page view."""
         hub = app.state.hub
         agent_spokes = list(dict.fromkeys(
             hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
         ))
         if not agent_spokes:
             return {"agents": [], "pending_agents": [], "spoke_connected": False}
-        try:
-            agent_cfg = hub.state.system_state.get("agent_config", {})
-            names = hub.state.system_state.get("agent_display_names", {})
-            now = time.time()
 
-            def _agent_identity_change_for(hub, parent_spoke, aid, cfg):
-                """Latest unacked rename/reimage event for an agent.
+        cached = _AGENTS_CACHE["data"]
+        age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
 
-                Agent identity events are recorded on the PARENT spoke's
-                timeline (with ``"agent "`` in the detail), so scan that and
-                return the newest one newer than the agent's ``change_acked_ts``.
-                """
-                acked_ts = float(cfg.get("change_acked_ts") or 0.0)
-                for ev in hub.get_spoke_events(parent_spoke, limit=30):
-                    if ev.get("event") in ("identity_changed", "hostname_changed", "reimaged"):
-                        detail = ev.get("detail", "") or ""
-                        if "agent " in detail and aid in detail and ev.get("ts", 0) > acked_ts:
-                            return ev
-                return None
+        # Inside the stale window → serve instantly; past fresh-TTL, kick ONE
+        # background refresh (the ``not refreshing`` guard avoids a pile-up).
+        if cached is not None and age is not None and age < _AGENTS_STALE_S:
+            if age >= _AGENTS_FRESH_S and not _AGENTS_CACHE["refreshing"]:
+                asyncio.create_task(_maybe_refresh_agents(hub, agent_spokes))
+            return cached
 
-            all_agents: list = []
-            all_pending: list = []
-            for parent_spoke in agent_spokes:
-                try:
-                    result = await hub.request_response(parent_spoke, "GET_AGENTS", {})
-                except Exception as exc:  # noqa: BLE001 — one dead spoke shouldn't blank the tile
-                    logger.warning("GET_AGENTS failed for spoke %s: %s", parent_spoke, exc)
-                    continue
-                data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-                for a in data.get("agents", []) or []:
-                    aid = a["agent_id"]
-                    a["spoke_id"] = parent_spoke
-                    cfg = agent_cfg.get(aid, {})
-                    if cfg.get("display_name"):
-                        a["display_name"] = cfg["display_name"]
-                    elif aid in names:
-                        a["display_name"] = names[aid]
-                    if cfg.get("client_simulation"):
-                        a["client_simulation"] = cfg["client_simulation"]
-                    # Hub-tracked per-agent heartbeat (keyed spoke_id:agent_id,
-                    # fed by the owning spoke relaying AGENT_HEARTBEAT up).
-                    hb_key = f"{parent_spoke}:{aid}"
-                    hb_last = hub.heartbeat.last_seen.get(hb_key)
-                    a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
-                    a["heartbeat_status"] = str(hub.heartbeat.get_status(hb_key).value)
-                    a["hostname"] = cfg.get("hostname", "") or a.get("hostname", "") or aid
-                    a["install_uuid"] = cfg.get("install_uuid", "")
-                    a["identity_change"] = _agent_identity_change_for(hub, parent_spoke, aid, cfg)
-                    all_agents.append(a)
-                for p in data.get("pending_agents", []) or []:
-                    p["spoke_id"] = parent_spoke
-                    all_pending.append(p)
-            return {"agents": all_agents, "pending_agents": all_pending, "spoke_connected": True}
-        except Exception as e:
-            logger.exception("get_pxmx_agents failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        # No servable cache → forced refresh. The lock serializes concurrent
+        # first-loaders into a single fan-out; each re-checks under the lock.
+        result = await _maybe_refresh_agents(hub, agent_spokes, force=True)
+        return result or {"agents": [], "pending_agents": [], "spoke_connected": True}
 
     @app.post("/api/pxmx/agents/{agent_id}/revoke")
     async def revoke_pxmx_agent(agent_id: str):
