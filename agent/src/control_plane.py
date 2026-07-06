@@ -100,6 +100,18 @@ class RoleConnection(BaseControlPlane):
         self.base_id = base_id
         self.module_type = mtype
         self.parent_spoke_id = base_id
+        # Agent-hosting shim: the pxmx (hypervisor) role module reads
+        # ``self.control_plane.connected_agents`` in _get_agents / _list_vms /
+        # _get_node_stats. A standalone pxmx spoke's control plane is an
+        # AgentHostingControlPlane that populates this from inbound /ws/agent
+        # connections; a RoleConnection is a plain BaseControlPlane with no
+        # agent listener, so the attribute is absent and every hypervisor
+        # command 500s with "'RoleConnection' object has no attribute
+        # 'connected_agents'" (a per-poll traceback storm). Expose an empty dict
+        # so those commands degrade to a clean empty result — this node hosts no
+        # node-agents of its own (they dial the cs/pxmx spoke that owns the
+        # listener). Harmless for non-pxmx roles.
+        self.connected_agents: dict = {}
         # Sub-spokes must NOT carry the base's install UUID (see class docstring).
         self.install_uuid = ""
         # Suppress the one-time "Hub secrets not configured" warning per role —

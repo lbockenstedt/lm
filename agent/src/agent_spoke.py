@@ -214,6 +214,12 @@ class GenericAgent(BaseSpoke):
             "le":   ["apt-get", "install", "-y", "-qq", "certbot",
                      "python3-certbot-dns-cloudflare", "python3-certbot-dns-route53",
                      "openssl"],
+            # ldap: BUILD deps for python-ldap (the pip wheel compiles against
+            # these). Without them `pip install python-ldap` fails and the role
+            # crashes on load with "No module named 'ldap.filter'" — the role
+            # never loads. Must run BEFORE the pip step below. The slapd SERVER
+            # (interactive debconf) is set up in _role_post_install, not here.
+            "ldap": ["apt-get", "install", "-y", "-qq", "libldap2-dev", "libsasl2-dev"],
         }
         cmds = install_cmds.get(role_name)
         if cmds:
