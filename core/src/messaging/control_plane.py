@@ -1054,9 +1054,13 @@ class BaseControlPlane:
         -> SPOKE_LOG -> Hub agent_logs[spoke_id] — so BugFixer actually sees it.
         Zero Hub-side relay changes are needed. Every spoke inherits this from
         BaseControlPlane, so all modules emit the same signal uniformly."""
-        interval = 60
+        # 15 min by default — the [heartbeat] line is a coarse module-alive signal
+        # for BugFixer, not liveness (the 30s transport HEARTBEAT drives the hub's
+        # spoke-down traffic light + alerting). A once-a-minute line was just log
+        # noise. Override with LM_HEARTBEAT_INTERVAL_S if faster triage is wanted.
+        interval = 900
         try:
-            interval = max(10, int(os.environ.get("LM_HEARTBEAT_INTERVAL_S", "60")))
+            interval = max(10, int(os.environ.get("LM_HEARTBEAT_INTERVAL_S", "900")))
         except Exception:
             pass
         start = time.time()
