@@ -1857,13 +1857,13 @@ function _updateSpokeCount(approvedSpokes) {
 }
 
 // Rebuild #main-nav from the active module classes. Nav class items are driven
-// by CONNECTED + APPROVED spokes only (connectedProducts), so neither a stale
-// approved-but-offline registry entry nor a freshly-connected still-pending
-// (unapproved) spoke can ghost a nav item — the module menu appears only once
-// a module of that class has been approved. window.activeProducts (used by the
-// Logs submenu + setView product picker) still includes approved-but-offline
-// modules so their historical logs stay reachable while briefly down. Drops
-// classes the user can't see (canSeeModule).
+// by APPROVED spokes (activeProducts) — online OR offline — so a registered role
+// keeps its left-menu item instead of vanishing on disconnect. Approval is still
+// required: a freshly-connected still-pending (unapproved) spoke can't ghost a
+// nav item, because activeProducts is approved-only. Offline classes render
+// dimmed (opacity-50 + "(offline)" title) so the nav still reads status at a
+// glance; connectedProducts is retained to compute that online/offline styling.
+// Drops classes the user can't see (canSeeModule).
 function _rebuildMainNav(allSpokes, connections) {
     // Tenant scoping (additive, non-admin only). For a tenant-scoped user, drop
     // spokes bound to a tenant they can't access before deriving the nav, so a
@@ -1920,9 +1920,15 @@ function _rebuildMainNav(allSpokes, connections) {
 
     window.activeProducts = activeProducts;
 
+    // Show a class nav item once ANY module of that class is APPROVED/registered,
+    // even while it is offline — a registered role keeps its left-menu item
+    // instead of vanishing on disconnect. activeProducts is approved-only, so the
+    // approval gate is preserved: a PENDING/unapproved spoke still can't light the
+    // menu. (Was connectedProducts, which required a LIVE connection and dropped
+    // the item the moment the spoke/agent/module went offline.)
     const activeClasses = [];
     for (const [className, products] of Object.entries(MODULE_CLASSES)) {
-        if (products.some(p => connectedProducts.has(p))) {
+        if (products.some(p => activeProducts.has(p))) {
             activeClasses.push(className);
         }
     }
@@ -1944,7 +1950,13 @@ function _rebuildMainNav(allSpokes, connections) {
         const isActive = (currentView === className
             || (MODULE_CLASSES[className] || []).includes(currentView))
             ? 'active' : '';
-        const firstProduct = MODULE_CLASSES[className].find(p => connectedProducts.has(p));
+        // Prefer a connected product for the icon; fall back to any approved
+        // (offline) product so the icon still resolves while the module is offline.
+        const firstProduct = MODULE_CLASSES[className].find(p => connectedProducts.has(p))
+            || MODULE_CLASSES[className].find(p => activeProducts.has(p));
+        // Dim the item when NO product of this class is currently connected, so an
+        // approved-but-offline module reads as reachable-but-offline in the nav.
+        const classOnline = MODULE_CLASSES[className].some(p => connectedProducts.has(p));
         let icon = '';
 
         if (className === 'Firewalls') {
@@ -1970,7 +1982,7 @@ function _rebuildMainNav(allSpokes, connections) {
         }
 
         return `
-            <div onclick="setView('${className}')" id="nav-${className}" class="nav-item ${isActive} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
+            <div onclick="setView('${className}')" id="nav-${className}" title="${className}${classOnline ? '' : ' (offline)'}" class="nav-item ${isActive} ${classOnline ? '' : 'opacity-50'} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
                 <div>${icon}</div>
                 <span>${className}</span>
             </div>
