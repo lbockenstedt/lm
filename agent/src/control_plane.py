@@ -521,8 +521,15 @@ if __name__ == "__main__":
     # leaf agent's clone-name fix) instead of inheriting the template's pinned
     # id. A pinned --id (full install) stays frozen.
     parser.add_argument("--id",     default=None)
-    parser.add_argument("--secret", default=None,
-                        help="Session secret. Omit for zero-touch provisioning — the hub will send it after admin approval.")
+    # Default to the persisted SPOKE_SECRET from the systemd EnvironmentFile
+    # (.env). After zero-touch approval the hub pushes a session key that gets
+    # written there; without this env fallback the baked ExecStart (which has NO
+    # --secret for a zero-touch install) meant every reload reconnected with no
+    # secret → "zero-touch" again → the hub minted yet another key. Reading the
+    # persisted key here makes reconnects authenticate with the existing key
+    # (no re-negotiation, no key-window growth, no zero-touch event spam).
+    parser.add_argument("--secret", default=(os.environ.get("SPOKE_SECRET") or None),
+                        help="Session secret. Omit for zero-touch provisioning — the hub will send it after admin approval (persisted to SPOKE_SECRET and reused on restart).")
     parser.add_argument("--hub-secret", nargs='?', default="", const="")
     parser.add_argument("--hub",    required=True)
     parser.add_argument("--role",   default=os.environ.get("STARTUP_ROLE", ""),
