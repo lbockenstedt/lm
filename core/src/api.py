@@ -933,7 +933,7 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant,
     )
     setup.register(app, hub, ctx)
     firewall.register(app, hub, ctx)
@@ -953,6 +953,7 @@ def create_app(hub):
     agents.register(app, hub, ctx)
     net_services.register(app, hub, ctx)
     admin_cache.register(app, hub, ctx)
+    help_assistant.register(app, hub, ctx)
 
     # --- Static File Serving ---
     ui_path = os.path.join(os.path.dirname(__file__), "../../WebUI")
