@@ -1436,12 +1436,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             mode = (data or {}).get("mode", "local") if isinstance(data, dict) else "local"
             source = "spoke"
         except HTTPException as exc:
-            # Spoke offline/refused — fall back to the stored override text so
-            # the editor still loads (read-only feel; save will re-push).
+            # Round-trip failed — fall back to the stored override text so the
+            # editor still loads (read-only feel; save will re-push).
             logger.info("sim-conf-parsed: CS_GET_CONFIG fell back to stored override (%s)", exc.detail)
             raw = await store.get_sim_conf_content(tenant_id)
+        # Distinguish a truly-offline spoke from one that IS connected but whose
+        # live CS_GET_CONFIG round-trip failed/timed out (e.g. its event loop was
+        # momentarily busy) — the editor mislabeled the latter as "spoke offline".
+        spoke_connected = False
+        try:
+            _sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
+            spoke_connected = bool(_sid and _sid in getattr(hub, "active_connections", {}))
+        except Exception:
+            spoke_connected = False
         return {"sections": _parse_ini_sections(raw), "raw": raw,
                 "mode": mode, "source": source,
+                "spoke_connected": spoke_connected,
                 "fetched_at": _now_iso()}
 
     @app.get("/sim/api/{tenant}/config/user-overrides-conf")

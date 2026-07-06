@@ -1679,6 +1679,7 @@ async function csRenderConfigSimulation() {
 
     const fetchedSim = (sim && sim.fetched_at) ? csFmtFetched(sim.fetched_at) : '—';
     const simSource = (sim && sim.source) || 'spoke';
+    const simConnected = !!(sim && sim.spoke_connected);
     const sections = (sim && sim.sections) || {};
     const raw = (sim && sim.raw) || '';
 
@@ -1731,7 +1732,9 @@ async function csRenderConfigSimulation() {
         <div class="flex items-center gap-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Config ${helpIcon('cs', null, 'Simulations help')}</h3>
           <span class="inline-block bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 text-[10px] font-bold">Hub-managed override (no GitHub API key)</span>
-          ${simSource === 'spoke' ? '' : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke offline — showing stored override</span>'}
+          ${simSource === 'spoke' ? '' : (simConnected
+            ? '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke online — live config fetch timed out, showing stored override</span>'
+            : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke offline — showing stored override</span>')}
         </div>
         <span class="text-[10px] text-slate-400">Last fetched: ${csEscape(fetchedSim)}</span>
       </div>
