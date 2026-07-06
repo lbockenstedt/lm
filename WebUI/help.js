@@ -361,15 +361,104 @@
             '" onclick="openHelp(\'' + name + '\',' + sec + ');return false;">i</button>';
     }
 
+    // ── LLM "Ask AI" assistant (backed by the bugfixer agent) ────────────────
+    function _askFormHtml(prefill) {
+        return '<form id="lm-ask-form" style="display:flex;gap:.5rem;margin-bottom:1rem">' +
+            '<input id="lm-ask-input" type="text" placeholder="Ask about Lab Manager…" value="' +
+            esc(prefill || '') + '" style="flex:1;border:1px solid #cbd5e1;border-radius:.5rem;' +
+            'padding:.5rem .75rem;font-size:.85rem;outline:none">' +
+            '<button type="submit" style="background:#01A982;color:#fff;border:none;border-radius:.5rem;' +
+            'padding:.5rem .9rem;font-size:.8rem;font-weight:600;cursor:pointer">Ask</button></form>';
+    }
+    function _wireAskForm() {
+        const f = document.getElementById('lm-ask-form');
+        if (f) f.addEventListener('submit', function (e) {
+            e.preventDefault();
+            _runAsk(document.getElementById('lm-ask-input').value);
+        });
+        const i = document.getElementById('lm-ask-input');
+        if (i) i.focus();
+    }
+    async function _runAsk(question) {
+        const q = String(question || '').trim();
+        if (!q) return;
+        ensureDom(); openDrawer();
+        document.getElementById('lm-help-title').textContent = 'Ask AI';
+        const body = document.querySelector('#lm-help-body .lm-doc');
+        body.innerHTML = _askFormHtml(q) + '<p style="color:#94a3b8">Thinking…</p>';
+        _wireAskForm();
+        try {
+            const res = await fetch('/api/help/ask', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ question: q }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+            // Strip raw [doc:x] citation markers from the prose; render chips below.
+            const answerHtml = renderMarkdown(String(data.answer || '(no answer)')
+                .replace(/\[doc:[a-z0-9-]+\]/gi, ''));
+            let footer = '';
+            const cites = data.citations || [];
+            if (cites.length) {
+                footer += '<div style="margin-top:1.25rem;padding-top:.75rem;border-top:1px solid #e2e8f0">' +
+                    '<div style="font-size:.65rem;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;font-weight:700;margin-bottom:.4rem">Sources</div>' +
+                    cites.map(function (n) {
+                        return '<a href="#" class="lm-help-icon" style="width:auto;padding:.15rem .5rem;border-radius:.35rem;margin:0 .3rem .3rem 0" onclick="openHelp(\'' +
+                            n + '\');return false;">' + esc(n) + '</a>';
+                    }).join('') + '</div>';
+            }
+            if ((data.used_tools || []).length) {
+                footer += '<div style="margin-top:.6rem;font-size:.72rem;color:#94a3b8">Checked live: ' +
+                    esc(data.used_tools.join(', ')) + '</div>';
+            }
+            body.innerHTML = _askFormHtml('') + answerHtml + footer;
+            _wireAskForm();
+        } catch (err) {
+            body.innerHTML = _askFormHtml(q) + '<p style="color:#e53e3e">' + esc(err.message) + '</p>';
+            _wireAskForm();
+        }
+    }
+    function openHelpAsk() {
+        ensureDom(); openDrawer();
+        document.getElementById('lm-help-title').textContent = 'Ask AI';
+        const body = document.querySelector('#lm-help-body .lm-doc');
+        body.innerHTML = '<p style="color:#64748b;margin-bottom:1rem">Ask a question about Lab ' +
+            'Manager — answers come from the docs, and I can check live spoke/device state.</p>' +
+            _askFormHtml('');
+        _wireAskForm();
+    }
+    // Inject the header "Ask AI" button ONLY when the assistant is available
+    // (bugfixer connected), beside the existing "?" Help button.
+    async function _initAsk() {
+        try {
+            const res = await fetch('/api/help/available');
+            if (!res.ok) return;
+            const data = await res.json();
+            if (!data.available) return;
+            const helpBtn = document.querySelector('button[onclick*="helpForCurrentView"]');
+            if (!helpBtn || document.getElementById('lm-ask-btn')) return;
+            const btn = document.createElement('button');
+            btn.id = 'lm-ask-btn';
+            btn.className = helpBtn.className;
+            btn.title = 'Ask the AI assistant';
+            btn.innerHTML = '<span class="inline-flex items-center justify-center w-4 h-4 rounded-full ' +
+                'border border-current text-[10px] font-bold">✨</span> Ask AI';
+            btn.addEventListener('click', openHelpAsk);
+            helpBtn.parentNode.insertBefore(btn, helpBtn);
+        } catch (e) { /* unavailable — leave the button absent */ }
+    }
+
     window.openHelp = openHelp;
     window.closeHelp = closeHelp;
     window.helpForCurrentView = helpForCurrentView;
     window.helpIcon = helpIcon;
+    window.openHelpAsk = openHelpAsk;
     window.renderHelpMarkdown = renderMarkdown; // exposed for reuse/testing
 
+    function _boot() { ensureDom(); _initAsk(); }
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', ensureDom);
+        document.addEventListener('DOMContentLoaded', _boot);
     } else {
-        ensureDom();
+        _boot();
     }
 })();
