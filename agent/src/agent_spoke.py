@@ -59,6 +59,20 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
                 "| bash"],
         "module_type": "agent",
     },
+    # NetBox SERVER: deploy the NetBox application (PostgreSQL/Redis/gunicorn/
+    # nginx + WebUI on :80) via the netbox installer's --infra-only mode, which
+    # stands up the app but NOT an lm-netbox spoke unit. The IPAM module that
+    # talks to this server is the SEPARATE "netbox" role (module_type "ipam")
+    # in _ROLE_MAP — load that too and point its connection settings at this
+    # server. Split so the heavy app deploy and the lightweight API spoke are
+    # independent (server on one node, IPAM spoke here or elsewhere).
+    "netbox-server": {
+        "cmd": ["bash", "-c",
+                "exec </dev/null; curl -sSL "
+                "https://raw.githubusercontent.com/lbockenstedt/netbox/main/install.sh "
+                "| bash -s -- --infra-only"],
+        "module_type": "agent",
+    },
 }
 
 
