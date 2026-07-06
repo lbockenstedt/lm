@@ -104,6 +104,10 @@ class SimulationsService:
                     "last_seen": c.get("last_seen") or "—",
                     "error_count": c.get("error_count") or 0,
                     "recent_errors": c.get("recent_errors") or [],
+                    # Per-client sim overrides + config so the Clients tab's per-sim
+                    # override buttons reflect what's SET and stay across refreshes.
+                    "config": c.get("config") or {},
+                    "overrides": c.get("overrides") or {},
                 })
         return {"tenant_id": tenant_id, "clients": rows}
 

@@ -1039,8 +1039,15 @@ function csClientSimBar(c, host) {
     const active = new Set((Array.isArray(c.active_simulations) ? c.active_simulations : [])
         .map(s => String(s).toLowerCase()));
     const cfg = c.effective_config || c.config || {};
-    const isOn = f => active.has(f) ||
-        ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
+    const ov = c.overrides || {};
+    // A per-client override WINS (so a set override reflects + stays across
+    // refreshes); otherwise fall back to what the client is actually running.
+    const isOn = f => {
+        if (Object.prototype.hasOwnProperty.call(ov, f))
+            return ['on', 'true', '1'].includes(String(ov[f]).toLowerCase());
+        return active.has(f) ||
+            ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
+    };
     const btns = CS_CONTROL_FLAGS.map(f => {
         const on = isOn(f);
         return `<button data-cs-sim-host="${csEscape(host)}" data-cs-sim-flag="${csEscape(f)}" data-cs-sim-on="${on ? '1' : '0'}"
@@ -1059,18 +1066,13 @@ window.csSimToggle = async function (btn) {
     const host = btn.dataset.csSimHost, flag = btn.dataset.csSimFlag;
     if (!host || !flag) return;
     const next = btn.dataset.csSimOn === '1' ? 'off' : 'on';
-    // The control endpoint REPLACES the override map, so send every sim button's
-    // current state with the clicked one flipped (preserves the other overrides).
-    const scope = btn.closest('td') || document;
-    const overrides = {};
-    scope.querySelectorAll('button[data-cs-sim-host]').forEach(b => {
-        if (b.dataset.csSimHost !== host) return;
-        overrides[b.dataset.csSimFlag] = (b === btn) ? next : (b.dataset.csSimOn === '1' ? 'on' : 'off');
-    });
+    // Set just THIS flag's override — the endpoint merges it into the client's
+    // persisted overrides (registry.set_overrides), so toggling one sim doesn't
+    // disturb the others. "Clear" drops all overrides for the client.
     csCtlMsg(host, `${next === 'on' ? 'Enabling' : 'Disabling'} ${flag}…`, true);
     try {
         await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
-            { method: 'POST', body: JSON.stringify({ overrides }) });
+            { method: 'POST', body: JSON.stringify({ overrides: { [flag]: next } }) });
         btn.dataset.csSimOn = next === 'on' ? '1' : '0';
         btn.className = csSimBtnClass(next === 'on');
         btn.title = `Click to ${next === 'on' ? 'disable' : 'enable'} ${flag} on ${host}`;
