@@ -2326,10 +2326,18 @@ function renderSecondaryNav(viewId) {
         return;
     }
     const activeChild = currentSubChild || kids[0];
-    sec.innerHTML = kids.map((child) =>
+    const tabs = kids.map((child) =>
         `<div class="sub-nav-item ${child === activeChild ? 'active' : ''} px-2 py-1 cursor-pointer select-none" data-subchild="${child}" onclick="setSubChild('${child.replace(/'/g, "\\'")}')">${child}</div>`
     ).join('');
+    // Pin the sim kill-switch to the far right of the Clients child strip (moved
+    // out of the client-view content banner) so it sits alongside All/T1/T2.
+    const ksSlot = (viewId === 'cs' && currentSubView === 'Clients')
+        ? '<span id="cs-ks-chip" class="ml-auto flex items-center"></span>' : '';
+    sec.innerHTML = tabs + ksSlot;
     sec.classList.remove('hidden');
+    if (ksSlot && typeof window.csKillSwitchMountChip === 'function') {
+        window.csKillSwitchMountChip('cs-ks-chip');
+    }
 }
 
 // Select a child tab within the current cs primary (two-tier nav). Sets

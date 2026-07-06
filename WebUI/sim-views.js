@@ -568,7 +568,30 @@ window.csToggleKillSwitch = async function (on) {
             { method: 'POST', body: JSON.stringify({ on }) });
         if (typeof showToast === 'function') showToast(on ? 'Kill switch ON — sims halted' : 'Kill switch OFF — sims resumed', on ? 'error' : 'success');
         loadCSData(currentSubView, currentSubChild, true);
+        if (typeof window.csKillSwitchMountChip === 'function') window.csKillSwitchMountChip('cs-ks-chip');
     } catch (e) { console.error('csToggleKillSwitch: toggle failed', e); if (typeof showToast === 'function') showToast('Kill-switch toggle failed: ' + (e.message || e), 'error'); }
+};
+
+// Compact kill-switch control mounted into the Clients child strip (All/T1/T2),
+// pinned far right by renderSecondaryNav. Reads the same GET /kill-switch state
+// as the banner and toggles via csToggleKillSwitch. Spoke-offline → a muted label.
+window.csKillSwitchMountChip = async function (elId) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    let ks = false, connected = false;
+    try {
+        const r = await csFetch(`/${csTenant()}/kill-switch?tenant_id=${csTenant()}`);
+        ks = r && r.kill_switch; connected = !!(r && r.spoke_connected);
+    } catch (e) { console.warn('csKillSwitchMountChip: read failed', e); }
+    if (!connected) {
+        el.innerHTML = `<span class="text-[10px] normal-case tracking-normal text-slate-400">Kill switch: spoke offline</span>`;
+        return;
+    }
+    el.innerHTML = ks
+        ? `<button onclick="csToggleKillSwitch(false)" title="Simulations halted — click to resume"
+             class="normal-case tracking-normal bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-md text-xs font-bold">▶ Resume Sims</button>`
+        : `<button onclick="csToggleKillSwitch(true)" title="Emergency stop all simulations on this tenant"
+             class="normal-case tracking-normal bg-white hover:bg-red-50 text-red-600 border border-red-300 px-3 py-1 rounded-md text-xs font-bold">⛔ Emergency Stop</button>`;
 };
 
 async function csRenderSimulations() {
@@ -943,9 +966,10 @@ async function csRenderClients(tier) {
     const t2 = rows.filter(c => csClassifyClient(c) === 't2').length;
     const online = rows.filter(c => c.online).length;
     const pills = csSummaryRow([[all, 'Clients'], [t1, 'T1'], [t2, 'T2'], [online, 'Online']]);
-    const ksBanner = await csKillSwitchBanner();
     const demoCard = await csDemoCard();
-    csSet(`<div class="space-y-4">${ksBanner}${demoCard}${pills}<div id="cs-client-body"></div></div>`);
+    // Kill switch moved to the All/T1/T2 child strip (renderSecondaryNav →
+    // csKillSwitchMountChip), pinned far right — no longer a content banner here.
+    csSet(`<div class="space-y-4">${demoCard}${pills}<div id="cs-client-body"></div></div>`);
     csClientFilter();
 }
 
