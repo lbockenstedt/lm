@@ -488,8 +488,74 @@ def _cli_markbadcommit(args) -> int:
     return 0
 
 
+_LM_UNIT_PATH = "/etc/systemd/system/lm.service"
+
+
+def heal_hub_service_unit(unit_path: str = _LM_UNIT_PATH) -> bool:
+    """Idempotently migrate lm.service from the legacy ``Type=oneshot`` +
+    ``start_all.sh`` form (which nohup-detached the hub → ``MainPID=0``, no
+    Restart/watchdog, and ``systemctl restart`` couldn't cleanly cycle it) to
+    ``Type=exec`` running ``main.py`` directly so systemd tracks the hub.
+
+    Runs best-effort from the ``clearpending`` CLI, which ``lm-update-restart``
+    invokes AS ROOT after every successful self-update — so this fix reaches
+    existing hubs via normal auto-update with no manual step and no change to the
+    install-time helper. No-op when the unit is missing, already migrated, or we
+    lack permission (invoked as svc_lm, not root — only the root call heals).
+    The rewrite takes effect on the NEXT restart. Returns True if it rewrote."""
+    try:
+        with open(unit_path) as f:
+            unit = f.read()
+    except Exception:
+        return False
+    if "Type=oneshot" not in unit:
+        return False  # already migrated, or never the legacy form
+    try:
+        import re
+        base = "/opt/lm"
+        m = re.search(r"(?m)^WorkingDirectory=(.+)$", unit)
+        if m and m.group(1).strip():
+            base = m.group(1).strip()
+        py = f"{base}/core/venv/bin/python3"
+        main = f"{base}/core/src/main.py"
+        s = re.sub(r"(?m)^Type=oneshot\s*$", "Type=exec", unit)
+        s = re.sub(r"(?m)^RemainAfterExit=.*\n", "", s)
+        s = re.sub(r"(?m)^ExecStart=.*$",
+                   f"ExecStart={py} {main}\n"
+                   f"StandardOutput=append:/var/log/lm/hub.log\n"
+                   f"StandardError=append:/var/log/lm/hub.log", s)
+        s = re.sub(r"(?m)^ExecStop=.*\n", "", s)
+        tmp = unit_path + ".heal.tmp"
+        with open(tmp, "w") as f:
+            f.write(s)
+        os.replace(tmp, unit_path)  # atomic — the unit is now healed
+    except PermissionError:
+        return False  # not root — the root clearpending invocation will heal
+    except Exception as e:  # noqa: BLE001
+        logger.warning("lm.service heal skipped: %s", e)
+        return False
+    # Reload is best-effort and separate so a missing/failed systemctl can't mask
+    # the successful rewrite (the next restart picks up the file regardless).
+    try:
+        subprocess.run(["systemctl", "daemon-reload"], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.info("Healed lm.service: Type=oneshot → Type=exec (systemd now tracks "
+                "the hub as MainPID; effective on the next restart).")
+    return True
+
+
 def _cli_clearpending(args) -> int:
     clear_pending(state_dir=args.state_dir)
+    # Piggyback the one-time lm.service migration here: clearpending is the
+    # root-executed step lm-update-restart runs after a successful update, so
+    # this self-heals every hub via auto-update. Best-effort; never fails the
+    # clearpending contract.
+    try:
+        heal_hub_service_unit()
+    except Exception:
+        pass
     return 0
 
 
