@@ -112,6 +112,21 @@ class RoleConnection(BaseControlPlane):
         # node-agents of its own (they dial the cs/pxmx spoke that owns the
         # listener). Harmless for non-pxmx roles.
         self.connected_agents: dict = {}
+        # Agent-hosting shims (same class as connected_agents above): the pxmx
+        # role module also reads ``self.control_plane.pending_agents`` in
+        # _get_agents (iterating it for the pending list) and calls
+        # ``self.control_plane.broadcast_to_agents("GET_VM_LIST", {})`` in
+        # _list_vms when the telemetry cache is empty. Both live on
+        # AgentHostingControlPlane (the standalone pxmx spoke's control plane)
+        # but are absent on a plain BaseControlPlane, so a RoleConnection
+        # 500s with "'RoleConnection' object has no attribute 'pending_agents'"
+        # / 'broadcast_to_agents' on every GET_AGENTS / PXMX_LIST_VMS — a
+        # per-poll traceback storm across every agent host running the pxmx
+        # role. Expose an empty dict + a no-op async broadcast returning [] so
+        # those commands degrade to a clean empty result: this node hosts no
+        # node-agents of its own (they dial the cs/pxmx spoke that owns the
+        # listener). Harmless for non-pxmx roles.
+        self.pending_agents: dict = {}
         # Sub-spokes must NOT carry the base's install UUID (see class docstring).
         self.install_uuid = ""
         # Suppress the one-time "Hub secrets not configured" warning per role —
@@ -129,6 +144,12 @@ class RoleConnection(BaseControlPlane):
             role_instance.control_plane = self
         except Exception:  # noqa: BLE001 - some inner instances may forbid attrs
             pass
+
+    async def broadcast_to_agents(self, cmd_type: str,
+                                  data: dict) -> list:
+        """No-op shim (see __init__): a RoleConnection hosts no node-agents,
+        so fanning out returns no results."""
+        return []
 
     def get_service_name(self) -> str:
         # Same systemd unit as the base agent (one process hosts all roles).
