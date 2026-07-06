@@ -93,6 +93,8 @@ class CSBridgePoller:
         self._last_usb_cfg: Dict[str, str] = {}   # agent_id -> canonical blob sig
         self._last_usb_push: Dict[str, float] = {}  # agent_id -> ts (last check)
         self._last_actual_push: Dict[str, float] = {}  # agent_id -> ts (last SEND)
+        self._last_diag: Dict[str, str] = {}  # agent_id -> last [cs-bridge] decision (throttle)
+        self._last_cycle_diag: str = ""  # last [cs-bridge] cycle summary (throttle)
 
     # ── main loop ──────────────────────────────────────────────────────────
 
@@ -125,31 +127,60 @@ class CSBridgePoller:
         agent_spokes = list(dict.fromkeys(
             hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
         ))
-        if not agent_spokes:
-            return
-
         now = time.time()
+        n_agents = n_active = 0
         for host_spoke in agent_spokes:
             agents = await self._connected_agents(host_spoke)
             if not agents:
                 continue
             for a in agents:
+                n_agents += 1
                 aid = a.get("agent_id")
                 hostname = a.get("hostname") or aid
                 if not aid:
                     continue
-                cs_cfg = self._client_simulation(aid)
-                if not cs_cfg.get("enabled"):
-                    continue
+                cfg_key, ac_entry = self._agent_config_entry(aid, hostname)
+                cs_cfg = ac_entry.get("client_simulation") or {}
+                enabled = bool(cs_cfg.get("enabled"))
                 tenant_id = cs_cfg.get("tenant_id") or self._spoke_tenant(host_spoke)
-                cs_spoke = hub.get_client_sim_spoke(tenant_id)
-                if not cs_spoke:
+                cs_spoke = hub.get_client_sim_spoke(tenant_id) if enabled else None
+
+                # Emit the provisioning decision (and WHY it skipped) as a
+                # greppable [cs-bridge] line, relayed to the hub log / WebUI Logs
+                # so "CS-enabled agents: N but nothing provisions" is diagnosable
+                # WITHOUT SSH+jq. Throttled to state-changes (INFO on change,
+                # DEBUG when steady) so it doesn't spam every 60s cycle.
+                if not enabled:
+                    decision = (f"SKIP not-enabled — client_simulation.enabled not set "
+                                f"under agent_config key {aid!r} or {hostname!r} "
+                                f"(if the UI shows CS-enabled>0 it was saved under a "
+                                f"different key)")
+                elif not cs_spoke:
+                    decision = (f"SKIP no-cs-spoke — client_simulation.enabled=on but no "
+                                f"client-sim spoke is bound to tenant {tenant_id!r}")
+                else:
+                    keynote = "" if cfg_key == aid else f" [config keyed by {cfg_key!r}, not agent_id — re-save to normalize]"
+                    decision = f"ACTIVE — tenant={tenant_id} cs_spoke={cs_spoke}{keynote}"
+                self._log_agent_diag(host_spoke, aid, hostname, decision)
+
+                if not enabled or not cs_spoke:
                     continue
+                n_active += 1
 
                 await self._relay_inbox(host_spoke, cs_spoke, aid, hostname)
 
                 if now - self._last_usb_push.get(aid, 0.0) >= self.usb_interval:
                     await self._sync_usb_config(host_spoke, cs_spoke, aid, hostname, now)
+
+        # Cycle heartbeat so "the bridge saw N agents, M active" is visible in the
+        # hub log / WebUI Logs even when it does nothing (0 spokes / 0 agents /
+        # all skipped) — throttled to changes so a steady fleet doesn't spam.
+        cyc = f"spokes={len(agent_spokes)} agents={n_agents} active={n_active}"
+        if cyc != self._last_cycle_diag:
+            self._last_cycle_diag = cyc
+            logger.info("[cs-bridge] cycle: %s", cyc)
+        else:
+            logger.debug("[cs-bridge] cycle: %s", cyc)
 
     # ── helpers ────────────────────────────────────────────────────────────
 
@@ -159,12 +190,42 @@ class CSBridgePoller:
         agents = data.get("agents", []) if isinstance(data, dict) else []
         return [a for a in agents if isinstance(a, dict) and a.get("agent_id")]
 
-    def _client_simulation(self, agent_id: str) -> Dict[str, Any]:
+    def _agent_config_entry(self, agent_id: str, hostname: str = None):
+        """Return ``(key, entry)`` for an agent's stored ``agent_config``, tolerant
+        of the entry being keyed by the runtime ``agent_id`` OR the ``hostname``.
+
+        Historically the bridge keyed strictly by ``agent_id`` while the WebUI
+        count (simulations/routes.py) scans values — so a per-agent enable saved
+        under the hostname (or an older id) showed "CS-enabled agents: 1" yet the
+        bridge never matched it, so usb_config never reached the agent and
+        auto-provision reported "no dongle_vidpids configured". Prefer an exact
+        agent_id match; fall back to hostname. Returns ``(agent_id, {})`` on miss."""
         try:
-            ac = (self.hub.state.system_state.get("agent_config", {}) or {}).get(agent_id, {})
-            return ac.get("client_simulation") or {}
+            store = self.hub.state.system_state.get("agent_config", {}) or {}
         except Exception:
-            return {}
+            return agent_id, {}
+        for key in (agent_id, hostname):
+            if key and isinstance(store.get(key), dict):
+                return key, store[key]
+        return agent_id, {}
+
+    def _client_simulation(self, agent_id: str, hostname: str = None) -> Dict[str, Any]:
+        _key, entry = self._agent_config_entry(agent_id, hostname)
+        return entry.get("client_simulation") or {}
+
+    def _log_agent_diag(self, host_spoke: str, agent_id: str,
+                        hostname: str, decision: str) -> None:
+        """Emit the per-agent CS-provisioning decision as a greppable
+        ``[cs-bridge]`` line so the WHOLE gate (enabled? tenant? cs spoke? key
+        mismatch?) is visible in the hub log / WebUI Logs without SSH+jq.
+        INFO on a state change (so a broken agent is loud), DEBUG when steady
+        (so a healthy fleet doesn't spam every 60s cycle)."""
+        line = f"[cs-bridge] {agent_id} (host {hostname} via {host_spoke}): {decision}"
+        if self._last_diag.get(agent_id) != decision:
+            self._last_diag[agent_id] = decision
+            logger.info(line)
+        else:
+            logger.debug(line)
 
     def _spoke_tenant(self, spoke_id: str) -> Optional[str]:
         try:
@@ -254,6 +315,9 @@ class CSBridgePoller:
         data = _unwrap(resp)
         cfg = data.get("usb_config") if isinstance(data, dict) else None
         if not isinstance(cfg, dict):
+            self._log_agent_diag(host_spoke, agent_id, hostname,
+                                 f"SKIP no-usb-config — CS_GET_USB_CONFIG on {cs_spoke} "
+                                 f"returned no usb_config (spoke has no dongle config yet)")
             self._last_usb_push[agent_id] = now
             return
 
@@ -270,7 +334,7 @@ class CSBridgePoller:
         # and merge the fresh usb_config into client_simulation. The cs spoke is
         # authoritative for USB knobs; the hub store is not modified (the spoke
         # persists the merged config spoke-side for reconnect re-push).
-        ac = (hub.state.system_state.get("agent_config", {}) or {}).get(agent_id, {})
+        _key, ac = self._agent_config_entry(agent_id, hostname)
         merged = dict(ac) if isinstance(ac, dict) else {}
         cs_cfg = dict(merged.get("client_simulation") or {})
         cs_cfg["usb_config"] = cfg
@@ -286,9 +350,12 @@ class CSBridgePoller:
                                        timeout=5.0)
             self._last_usb_cfg[agent_id] = sig
             self._last_actual_push[agent_id] = now
-            logger.info("CS bridge: pushed usb_config to %s (tenant cs spoke %s)",
-                        agent_id, cs_spoke)
+            _nvid = len(cfg.get("vidpids") or []) if isinstance(cfg, dict) else 0
+            logger.info("[cs-bridge] %s: PUSHED usb_config from %s (%d dongle vidpid(s), "
+                        "auto_provision=%s) — host should flip AUTO-PROV on within ~60s",
+                        agent_id, cs_spoke, _nvid, cfg.get("auto_provision"))
         except Exception as exc:  # noqa: BLE001
-            logger.warning("CS bridge: usb_config push to %s failed: %s", agent_id, exc)
+            logger.warning("[cs-bridge] %s: usb_config PUSH FAILED to spoke %s: %s",
+                           agent_id, host_spoke, exc)
         finally:
             self._last_usb_push[agent_id] = now
