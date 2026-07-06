@@ -300,7 +300,7 @@ stage_role() {
         network)    ROLE_REPO="https://github.com/lbockenstedt/nw.git";        ROLE_CLONE_DIR="nw";       ROLE_REQ="$INSTALL_DIR/nw/requirements.txt" ;;
         netbox)     ROLE_REPO="https://github.com/lbockenstedt/netbox.git";    ROLE_CLONE_DIR="netbox";   ROLE_REQ="$INSTALL_DIR/netbox/requirements.txt" ;;
         opnsense)   ROLE_REPO="https://github.com/lbockenstedt/opnsense.git";  ROLE_CLONE_DIR="opnsense"; ROLE_REQ="$INSTALL_DIR/opnsense/requirements.txt" ;;
-        ldap)       ROLE_REPO="https://github.com/lbockenstedt/ldap.git";      ROLE_CLONE_DIR="ldap";     ROLE_REQ="$INSTALL_DIR/ldap/requirements.txt" ;;
+        ldap)       ROLE_REPO="https://github.com/lbockenstedt/ldap.git";      ROLE_CLONE_DIR="ldap";     ROLE_REQ="$INSTALL_DIR/ldap/requirements.txt"; ROLE_APT="libldap2-dev libsasl2-dev" ;;  # python-ldap compiles from source — needs these or the role's pip install fails and (set -e) aborts the whole agent install
         simulation) ROLE_REPO="https://github.com/lbockenstedt/cs.git";        ROLE_CLONE_DIR="cs";       ROLE_REQ="$INSTALL_DIR/cs/lm-spoke/requirements.txt" ;;
         cppm)       ROLE_REPO="https://github.com/lbockenstedt/cppm.git";      ROLE_CLONE_DIR="cppm";     ROLE_REQ="$INSTALL_DIR/cppm/requirements.txt" ;;
         proxmox)    ROLE_REPO="https://github.com/lbockenstedt/pxmx.git";      ROLE_CLONE_DIR="pxmx";     ROLE_REQ="$INSTALL_DIR/pxmx/requirements.txt" ;;

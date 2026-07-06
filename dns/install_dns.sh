@@ -77,7 +77,10 @@ mkdir -p /etc/unbound/conf.d
 grep -q "conf\.d" /etc/unbound/unbound.conf 2>/dev/null \
     || echo 'include-toplevel: "/etc/unbound/conf.d/*.conf"' >> /etc/unbound/unbound.conf
 unbound-control-setup 2>/dev/null || true
-systemctl enable --now unbound
+# Non-fatal: if unbound refuses to start (e.g. a config it rejects on some
+# version), still install/start the lm-dns spoke below instead of aborting the
+# whole install under `set -e` — the spoke must reach --hub regardless.
+systemctl enable --now unbound || echo "⚠️  unbound failed to start — DNS spoke will still install; check 'unbound-checkconf'"
 
 # Python venv
 cd "$INSTALL_DIR/dns"

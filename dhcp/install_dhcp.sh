@@ -76,7 +76,10 @@ cat > "$KEA_CA_CONF" <<'KEACONF'
 }
 KEACONF
 
-systemctl enable --now kea-ctrl-agent kea-dhcp4-server
+# Non-fatal: the distro Kea often fails to start on a fresh box (no subnets/
+# interfaces yet), but the lm-dhcp spoke talks to the ctrl-agent at RUNTIME and
+# doesn't need Kea already up at install time — don't abort under `set -e`.
+systemctl enable --now kea-ctrl-agent kea-dhcp4-server || echo "⚠️  Kea failed to start — DHCP spoke will still install; configure Kea via the module"
 
 # Python venv
 cd "$INSTALL_DIR/dhcp"
