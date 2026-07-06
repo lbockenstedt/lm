@@ -1858,12 +1858,12 @@ function _updateSpokeCount(approvedSpokes) {
 
 // Rebuild #main-nav from the active module classes. Nav class items are driven
 // by APPROVED spokes (activeProducts) — online OR offline — so a registered role
-// keeps its left-menu item instead of vanishing on disconnect. Approval is still
-// required: a freshly-connected still-pending (unapproved) spoke can't ghost a
-// nav item, because activeProducts is approved-only. Offline classes render
-// dimmed (opacity-50 + "(offline)" title) so the nav still reads status at a
-// glance; connectedProducts is retained to compute that online/offline styling.
-// Drops classes the user can't see (canSeeModule).
+// keeps its left-menu item, rendered normally (no offline dimming), instead of
+// vanishing on disconnect. Approval is still required: a freshly-connected
+// still-pending (unapproved) spoke can't ghost a nav item, because
+// activeProducts is approved-only. connectedProducts is retained only to prefer
+// a live product for the class icon. Drops classes the user can't see
+// (canSeeModule).
 function _rebuildMainNav(allSpokes, connections) {
     // Tenant scoping (additive, non-admin only). For a tenant-scoped user, drop
     // spokes bound to a tenant they can't access before deriving the nav, so a
@@ -1954,9 +1954,6 @@ function _rebuildMainNav(allSpokes, connections) {
         // (offline) product so the icon still resolves while the module is offline.
         const firstProduct = MODULE_CLASSES[className].find(p => connectedProducts.has(p))
             || MODULE_CLASSES[className].find(p => activeProducts.has(p));
-        // Dim the item when NO product of this class is currently connected, so an
-        // approved-but-offline module reads as reachable-but-offline in the nav.
-        const classOnline = MODULE_CLASSES[className].some(p => connectedProducts.has(p));
         let icon = '';
 
         if (className === 'Firewalls') {
@@ -1982,7 +1979,7 @@ function _rebuildMainNav(allSpokes, connections) {
         }
 
         return `
-            <div onclick="setView('${className}')" id="nav-${className}" title="${className}${classOnline ? '' : ' (offline)'}" class="nav-item ${isActive} ${classOnline ? '' : 'opacity-50'} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
+            <div onclick="setView('${className}')" id="nav-${className}" class="nav-item ${isActive} p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
                 <div>${icon}</div>
                 <span>${className}</span>
             </div>
