@@ -1178,6 +1178,28 @@ class BaseControlPlane:
 
     async def handle_system_command(self, cmd_type: str, data: Dict[str, Any]) -> Any:
         """Handles commands that affect the entire spoke system rather than a specific module."""
+        # The hub's Agents tile / cs-bridge fan GET_AGENTS out to spokes. Answer it
+        # HERE for every spoke so it's never routed to a module — a non-agent
+        # module (nw/netbox/dns/dhcp/ldap/...) or a role sub-spoke would otherwise
+        # return "not supported by <module>" as an ERROR that spams the hub Error
+        # Log. Genuine agent hosts have a populated connected_agents; module/role
+        # spokes have {} or a shim → a benign empty list. Fields are preserved
+        # verbatim (minus the non-serializable ws), so agent-hosting spokes report
+        # the same data their module handler did.
+        if cmd_type == "GET_AGENTS":
+            ca = getattr(self, "connected_agents", None) or {}
+            pa = getattr(self, "pending_agents", None) or {}
+            agents = []
+            for aid, info in ca.items():
+                entry = {k: v for k, v in (info or {}).items() if k != "ws"}
+                entry["agent_id"] = aid
+                entry.setdefault("hostname", aid)
+                entry.setdefault("version", "unknown")
+                entry.setdefault("status", "connected")
+                agents.append(entry)
+            pending = [{"agent_id": aid, "status": "pending"} for aid in pa]
+            return {"status": "SUCCESS", "agents": agents, "pending_agents": pending}
+
         if cmd_type in ("SPOKE_SET_LOG_LEVEL", "SET_LOG_LEVEL"):
             enabled = data.get("enabled", False)
             level = set_log_level(enabled)
