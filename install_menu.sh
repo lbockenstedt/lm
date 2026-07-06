@@ -102,6 +102,12 @@ locate_clone() {
     fi
     CLONE_ROOT="$clone_dir"
     CLONE_SRC="fresh clone ($clone_dir)"
+    # Capture the version/commit just cloned so the operator can confirm they're
+    # installing the latest copy (shown in the summary + after install).
+    CLONE_VERSION="$(cat "$clone_dir/VERSION" 2>/dev/null || echo unknown)"
+    CLONE_COMMIT="$(git -C "$clone_dir" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    CLONE_SRC="fresh clone ($clone_dir) — v${CLONE_VERSION} @ ${CLONE_COMMIT}"
+    echo "${C_DIM}Cloned lm v${CLONE_VERSION} (commit ${CLONE_COMMIT}, branch ${BRANCH}).${C_RESET}"
     [ -f "$CLONE_ROOT/install_all.sh" ] || { echo "install_menu: install_all.sh not found in clone" >&2; exit 1; }
 }
 

@@ -429,4 +429,10 @@ if [ "$CLONE_ONLY" = true ]; then
 else
     systemctl restart "$SERVICE_NAME"
 fi
+# Report the exact code this box is now running so the operator can confirm it
+# matches the latest (VERSION file + short git commit of the /opt/lm checkout).
+LM_VERSION="$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo unknown)"
+LM_COMMIT="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
+LM_COMMIT_DATE="$(git -C "$INSTALL_DIR" log -1 --format=%cd --date=short 2>/dev/null || echo '')"
 echo "Generic agent installed (ID: $ID_DISP, roles: ${STARTUP_ROLES_CSV:-none})"
+echo "Version: ${LM_VERSION} (commit ${LM_COMMIT}${LM_COMMIT_DATE:+, $LM_COMMIT_DATE}) — branch ${LM_BRANCH}"
