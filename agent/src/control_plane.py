@@ -54,6 +54,13 @@ def _lm_root_for(path: str) -> Path:
     return Path(path).resolve().parent.parent.parent
 
 
+# The base agent's checkout (INSTALL_DIR, e.g. /opt/lm) is ALWAYS the lm repo —
+# it hosts role sub-spokes but its own code only ever comes from here. Its
+# SPOKE_UPDATE self-update is pinned to this repo regardless of the repo_url the
+# hub sends (see AgentControlPlane.handle_system_command).
+_LM_REPO_URL = "https://github.com/lbockenstedt/lm.git"
+
+
 class RoleConnection(BaseControlPlane):
     """One independent hub connection per loaded role (multi-role agent).
 
@@ -137,6 +144,13 @@ class RoleConnection(BaseControlPlane):
                 clone_dir = _ROLE_MAP[self.role_name][0].split("/")[0]
                 return await self._update_sibling_repo(
                     repo_url, self._lm_root() / clone_dir)
+            # In-repo role (dns/dhcp/console, repo_url None): its code ships in
+            # the lm repo, so its self-update updates the shared /opt/lm checkout
+            # via the base handler. Pin the repo_url to the lm repo (same
+            # rationale as AgentControlPlane) so a mis-resolved hub repo_url — a
+            # sub-spoke id like "lm-opnsense-dns" substring-mapping to
+            # opnsense.git — can't repoint /opt/lm and wipe the tree.
+            data = {**data, "repo_url": _LM_REPO_URL}
             return await super().handle_system_command(cmd_type, data)
         return await super().handle_system_command(cmd_type, data)
 
@@ -231,6 +245,31 @@ class AgentControlPlane(BaseControlPlane):
         # (RoleConnection). Routing/approval/signing/SPOKE_UPDATE all key on
         # spoke_id per sub-spoke, so the hub needs no core change.
         self.module_type = "agent"
+
+    async def handle_system_command(self, cmd_type: str, data: dict) -> object:
+        """Pin the base agent's SPOKE_UPDATE to the lm repo.
+
+        The base handler updates ``os.getcwd()``'s git repo (the shared
+        INSTALL_DIR checkout, e.g. /opt/lm) from ``data["repo_url"]``. If the hub
+        ever resolves a role repo for this agent — the classic
+        ``"lm-opnsense"`` spoke_id substring-mapping to ``opnsense.git`` when the
+        agent's module_type isn't known (offline / post-hub-restart) — that
+        repoints /opt/lm's origin and hard-resets it to the role tree, deleting
+        ``agent/src/control_plane.py`` and crash-looping/flapping the agent. The
+        base agent's checkout is ALWAYS the lm repo, so force the repo_url to it
+        (mirrors RoleConnection forcing its sibling repo). Defense-in-depth for
+        the hub-side resolver fix, and it drains a poison SPOKE_UPDATE already
+        sitting in the durable mailbox: the next delivery becomes a correct
+        lm-repo pull (a no-op once current) instead of a re-corruption."""
+        if cmd_type == "SPOKE_UPDATE":
+            sent = (data.get("repo_url") or "").strip()
+            if sent and _LM_REPO_URL.removesuffix(".git") not in sent:
+                logger.warning(
+                    "SPOKE_UPDATE for base agent carried non-lm repo_url %r; "
+                    "pinning self-update to the lm repo %s (agent checkout is "
+                    "always the lm repo).", sent, _LM_REPO_URL)
+            data = {**data, "repo_url": _LM_REPO_URL}
+        return await super().handle_system_command(cmd_type, data)
 
     def _resolve_startup_roles(self) -> List[str]:
         """Durable loaded-roles set for boot.

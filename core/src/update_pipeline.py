@@ -391,6 +391,28 @@ class UpdatePipelineMixin:
     # inline tails (better a clean shared core + 3 small inline tails than 3
     # forced-fit bugs).
 
+    def _effective_module_type(self, spoke_id: str) -> str:
+        """module_type for update-source resolution, resilient to disconnects.
+
+        ``self.spoke_module_types`` is the LIVE map and is POPPED when a spoke
+        disconnects (see main.py handle_connection cleanup). An approved-but-
+        offline agent — or any spoke whose type has not re-registered yet after a
+        hub restart — therefore resolves to ``""`` here. That empty type MISSES
+        the ``_IN_LM_REPO_MODULE_TYPES`` guard in ``_resolve_module_key`` and
+        falls through to the spoke_id substring map, so an id like
+        ``"lm-opnsense"`` substring-matches ``"opn"`` → the opnsense repo. The
+        resulting SPOKE_UPDATE is queued into the agent's DURABLE mailbox and, on
+        the next reconnect, repoints the shared ``/opt/lm`` checkout's git origin
+        to the role repo + hard-resets it — deleting ``agent/src/control_plane.py``
+        and crash-looping/flapping the agent. Falling back to the module_type
+        persisted in ``module_metadata`` (written on every registration) keeps
+        ``agent`` → the lm repo across disconnects and hub restarts."""
+        live = self.spoke_module_types.get(spoke_id)
+        if live:
+            return live
+        return (self.state.system_state.get("module_metadata", {})
+                .get(spoke_id, {}).get("module_type", "")) or ""
+
     def _resolve_module_key(
         self, spoke_id: str, mtype: str, prefix_map: Dict[str, str]
     ) -> Optional[str]:
@@ -598,7 +620,11 @@ class UpdatePipelineMixin:
             if not approved:
                 continue
 
-            mtype = self.spoke_module_types.get(spoke_id, "")
+            # Persisted-fallback type (not the raw live map) so an offline /
+            # not-yet-re-registered agent still resolves as "agent" → the lm
+            # repo and never substring-maps to a role repo. See
+            # _effective_module_type for the poison-mailbox flap this prevents.
+            mtype = self._effective_module_type(spoke_id)
             # update-source config-key space — see _UPDATE_SOURCE_MODULE_KEY /
             # _UPDATE_SOURCE_PREFIX_MAP (firewall → "opnsense", NOT "opn"). The
             # prefix loop uses the dict VALUES (unlike push_config's loop, which
@@ -679,7 +705,7 @@ class UpdatePipelineMixin:
         for spoke_id, approved in self.approved_modules.items():
             if not approved:
                 continue
-            mtype = self.spoke_module_types.get(spoke_id, "")
+            mtype = self._effective_module_type(spoke_id)
             module_key = self._resolve_module_key(spoke_id, mtype, _upd_prefix_map)
             if not module_key:
                 skipped.append(f"{spoke_id}: unknown module type")
@@ -740,7 +766,7 @@ class UpdatePipelineMixin:
             for spoke_id, approved in self.approved_modules.items():
                 if not approved:
                     continue
-                if self.spoke_module_types.get(spoke_id, "") == "agent":
+                if self._effective_module_type(spoke_id) == "agent":
                     skipped.append(f"{spoke_id}: no update_sources.agent repo_url")
             msg = "Skipped all agents: update_sources.agent not configured" if skipped else "No approved agents"
             logger.info(f"update_agents_only complete — {msg}")
@@ -749,7 +775,7 @@ class UpdatePipelineMixin:
         for spoke_id, approved in self.approved_modules.items():
             if not approved:
                 continue
-            if self.spoke_module_types.get(spoke_id, "") != "agent":
+            if self._effective_module_type(spoke_id) != "agent":
                 continue
             err = await self._push_spoke_update(spoke_id, repo_url, branch)
             if err is None:
