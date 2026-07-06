@@ -5698,12 +5698,15 @@ async function loadSpokesAndAgents() {
     await _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy);
 }
 
-// _renderSpokesSummary(diagData) — the Hub/WebUI version + recovery-count bar
-// that sat at the top of the former Diagnostics tile, hoisted above the Spokes
-// card now that the diagnostics telemetry lives inline in the management cards.
-// `diagData` is the /setup/diagnostics JSON (or null when the fetch failed /
-// viewer is non-admin — bar clears so a broken telemetry fetch doesn't leave a
-// stale summary). Stashes hub/webui version on window for File-a-Bug context.
+// _renderSpokesSummary(diagData) — the spoke-update recovery-count bar that sat
+// at the top of the former Diagnostics tile, hoisted above the Spokes card now
+// that the diagnostics telemetry lives inline in the management cards. The bar
+// shows Recovering/Gave up/Paused pills only when there are recovery events and
+// hides otherwise (the Hub/WebUI version pills + Heartbeat/SKEW/ALERT legend
+// were removed by request). `diagData` is the /setup/diagnostics JSON (or null
+// when the fetch failed / viewer is non-admin — bar clears so a broken telemetry
+// fetch doesn't leave a stale summary). Stashes hub/webui version on window for
+// File-a-Bug context.
 function _renderSpokesSummary(diagData) {
     const el = document.getElementById('spokes-summary');
     if (!el) return;
@@ -5719,13 +5722,18 @@ function _renderSpokesSummary(diagData) {
         else if (r.gave_up) gaveUp++;
         else if (r.in_progress) recovering++;
     }
+    // The Hub/WebUI version pills + the Heartbeat/SKEW/ALERT legend were removed
+    // by request — the bar now surfaces only spoke-update recovery counts and
+    // hides entirely when nothing is recovering/gave-up/paused. hub/webui version
+    // is still stashed on window above for File-a-Bug context.
+    if (!recovering && !gaveUp && !paused) {
+        el.innerHTML = '';
+        return;
+    }
     el.innerHTML = `
-        <span class="px-2 py-1 rounded-md bg-slate-100 text-slate-600 font-mono">Hub ${escapeHtml(hubVersion)}</span>
-        <span class="px-2 py-1 rounded-md bg-slate-100 text-slate-600 font-mono">WebUI ${escapeHtml(webuiVersion)}</span>
         ${recovering ? `<span class="px-2 py-1 rounded-md bg-amber-100 text-amber-700 font-medium">Recovering: ${recovering}</span>` : ''}
         ${gaveUp ? `<span class="px-2 py-1 rounded-md bg-red-100 text-red-700 font-medium">Gave up: ${gaveUp}</span>` : ''}
         ${paused ? `<span class="px-2 py-1 rounded-md bg-slate-200 text-slate-600 font-medium">Paused: ${paused}</span>` : ''}
-        <span class="text-slate-400">Heartbeat = time since last beat (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s). <span class="font-bold uppercase">skew</span> = not on current .NN. <span class="font-bold uppercase">alert</span> = forgiving out-of-contact tier (≥5m / ≥30m).</span>
     `;
 }
 
