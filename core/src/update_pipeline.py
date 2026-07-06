@@ -393,6 +393,17 @@ class UpdatePipelineMixin:
         does not resolve — it draws its repo_url directly from
         ``update_sources["agent"]``, so it does not call this helper.
         """
+        # A generic role-capable agent (module_type "agent") IS the lm/hub clone
+        # at /opt/lm; its update source is the "agent" key — NEVER a spoke_id
+        # substring match. Without this guard a name like "lm-opnsense"
+        # substring-matches "opn" → the opnsense repo, and the resulting
+        # SPOKE_UPDATE repoints /opt/lm's git origin to opnsense.git + hard-resets,
+        # wiping agent/src/control_plane.py — the recurring "can't open
+        # control_plane.py" crash-loop. (If "agent" isn't in update_sources the
+        # caller's `if repo_url:` guard simply skips the push — the agent
+        # self-updates from the lm repo via its own updater_worker anyway.)
+        if mtype == "agent":
+            return "agent"
         module_key = _UPDATE_SOURCE_MODULE_KEY.get(mtype)
         if not module_key:
             for prefix, key in prefix_map.items():

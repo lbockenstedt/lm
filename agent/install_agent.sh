@@ -416,14 +416,16 @@ EnvironmentFile=$ENV_FILE
 Environment="PYTHONPATH=$INSTALL_DIR:$INSTALL_DIR/core/src:$INSTALL_DIR/agent/src"
 Environment=$_TLS_ENV
 WorkingDirectory=$INSTALL_DIR/agent/src
-# Self-heal a MISSING entrypoint before every start. A corrupted / half-synced
-# /opt/lm (the recurring "can't open control_plane.py" crash-loop) otherwise
-# crash-loops forever: ExecStart can't open the file, the process exits, systemd
-# relaunches into the same broken tree. If the entrypoint is gone, hard-reset the
-# checkout to origin first. The leading '-' makes it best-effort (a network blip
-# never blocks start); paired with StartLimitIntervalSec=0 the box recovers on a
+# Self-heal a MISSING entrypoint before every start. A corrupted /opt/lm (the
+# recurring "can't open control_plane.py" crash-loop) otherwise loops forever:
+# ExecStart can't open the file, the process exits, systemd relaunches into the
+# same broken tree. The usual cause was a role SPOKE_UPDATE repointing
+# /opt/lm's git origin to a role repo (e.g. opnsense.git) and hard-resetting —
+# so we FORCE origin back to the lm repo before fetch+reset, restoring the agent
+# tree regardless of what origin drifted to. Leading '-' = best-effort (a network
+# blip never blocks start); with StartLimitIntervalSec=0 the box recovers on a
 # later restart instead of staying dark. No-op once the tree is intact.
-ExecStartPre=-/bin/sh -c 'test -f $INSTALL_DIR/agent/src/control_plane.py || { git -C $INSTALL_DIR fetch origin $LM_BRANCH && git -C $INSTALL_DIR reset --hard origin/$LM_BRANCH; }'
+ExecStartPre=-/bin/sh -c 'test -f $INSTALL_DIR/agent/src/control_plane.py || { git -C $INSTALL_DIR remote set-url origin https://github.com/lbockenstedt/lm.git && git -C $INSTALL_DIR fetch origin $LM_BRANCH && git -C $INSTALL_DIR reset --hard origin/$LM_BRANCH; }'
 ExecStart=$INSTALL_DIR/agent/venv/bin/python3 control_plane.py $ID_ARG $SECRET_ARG --hub \$HUB_URL $ROLES_ARG
 StandardOutput=append:/var/log/lm/lm-agent.log
 StandardError=append:/var/log/lm/lm-agent.log
