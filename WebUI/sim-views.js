@@ -1046,7 +1046,6 @@ function csClientSimBar(c, host) {
           class="${csSimBtnClass(on)}">${csEscape(f)}</button>`;
     }).join('');
     return `<div class="flex flex-wrap items-center gap-1.5">
-      <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Sims</span>
       ${btns}
       <button data-cs-ctl-host="${csEscape(host)}" onclick="csCtlClear(this)"
         class="ml-2 px-2 py-0.5 rounded-md text-[11px] font-bold bg-red-50 text-red-600 hover:bg-red-100 border border-red-200">Clear</button>
