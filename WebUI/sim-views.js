@@ -330,6 +330,20 @@ let csWs = null, csWsReconnect = null, csWsRefreshTimer = null;
 // csSet. Explicit loadCSData calls (Save/post-action reloads) leave this false.
 let csRefreshInFlight = false;
 
+// Pages that telemetry must NEVER auto-refresh, even when the user is idle.
+// These are form-heavy / config pages where a silent innerHTML replace is
+// disruptive (wipes un-saved local state, re-mounts widgets, drops scroll
+// position) and the data is either static or has its own explicit Refresh
+// button. Keyed by `${currentSubView}::${currentSubChild}` (matches the
+// CS_CHILD_RENDERERS registry). Only the telemetry-driven csWsRefresh path
+// honors this — explicit loadCSData calls (tab switch, Save, post-action
+// reload, the Refresh button) always render.
+const CS_NO_REFRESH = new Set([
+    'Setup::Proxmox',   // Proxmox hypervisor config — manual Refresh only
+    'Config::API',      // Config → API
+    'Config::Simulation', // Config → Simulation (form-heavy)
+]);
+
 function connectCSWebSocket() {
     if (typeof currentView === 'undefined' || currentView !== 'cs') return;
     if (csWs && (csWs.readyState === WebSocket.OPEN || csWs.readyState === WebSocket.CONNECTING)) return;
@@ -390,6 +404,10 @@ function csWsRefresh() {
     if (csWsRefreshTimer) return; // debounce
     csWsRefreshTimer = setTimeout(() => {
         csWsRefreshTimer = null;
+        // Page-level denylist: never auto-refresh these even when idle.
+        // Explicit renders (tab switch / Save / Refresh button) bypass this.
+        const childKey = (typeof currentSubChild !== 'undefined' ? currentSubChild : '');
+        if (CS_NO_REFRESH.has(currentSubView + '::' + childKey)) return;
         // Don't stomp an in-progress edit on ANY page (Config, Auto-
         // Provisioning, Central API Setup, or a search box on a live-data
         // page) — skip this cycle and let the next telemetry pulse (~10s
