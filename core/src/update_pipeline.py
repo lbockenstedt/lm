@@ -616,35 +616,63 @@ class UpdatePipelineMixin:
         sources = config.get("update_sources", {})
         branch = config.get("global_branch", "main")
 
+        # Gate the spoke fan-out PER REPO: only push SPOKE_UPDATE to spokes whose
+        # repo's remote tip actually advanced since we last pushed it. This loop
+        # used to run UNCONDITIONALLY every repo-sync cycle — pinging every spoke
+        # every interval regardless of whether anything changed. For a generic
+        # agent's role sub-spokes (which pin their update to the lm repo), a
+        # cs/opnsense/... bump then kept nudging them, forcing a pointless lm
+        # re-pull + "SPOKE_UPDATE carried non-lm repo_url" churn / reconnect flap.
+        # Group spokes by resolved repo, check each repo's tip once, push on change.
+        last_pushed = dict(config.get("last_spoke_repo_commits", {}) or {})
+        repo_spokes: Dict[str, list] = {}
         for spoke_id, approved in self.approved_modules.items():
             if not approved:
                 continue
-
             # Persisted-fallback type (not the raw live map) so an offline /
-            # not-yet-re-registered agent still resolves as "agent" → the lm
-            # repo and never substring-maps to a role repo. See
-            # _effective_module_type for the poison-mailbox flap this prevents.
+            # not-yet-re-registered agent still resolves as "agent" → the lm repo
+            # and never substring-maps to a role repo. See _effective_module_type
+            # for the poison-mailbox flap this prevents. update-source config-key
+            # space — see _UPDATE_SOURCE_MODULE_KEY / _UPDATE_SOURCE_PREFIX_MAP
+            # (firewall → "opnsense", NOT "opn").
             mtype = self._effective_module_type(spoke_id)
-            # update-source config-key space — see _UPDATE_SOURCE_MODULE_KEY /
-            # _UPDATE_SOURCE_PREFIX_MAP (firewall → "opnsense", NOT "opn"). The
-            # prefix loop uses the dict VALUES (unlike push_config's loop, which
-            # uses the keys) — so "opn" → "opnsense" is a real mapping here.
             module_key = self._resolve_module_key(spoke_id, mtype, _UPDATE_SOURCE_PREFIX_MAP)
-
-            if module_key:
-                repo_url = sources.get(module_key)
-                if repo_url:
-                    logger.info(f"Triggering update for spoke {spoke_id} from {repo_url} on branch {branch}...")
-                    err = await self._push_spoke_update(spoke_id, repo_url, branch)
-                    if err is None:
-                        update_results.append(f"{spoke_id}: triggered")
-                    else:
-                        logger.error(f"Failed to push update for {spoke_id}: {err}")
-                        update_results.append(f"{spoke_id}: failed")
-                else:
-                    update_results.append(f"{spoke_id}: no repo configured")
-            else:
+            if not module_key:
                 update_results.append(f"{spoke_id}: unknown module type")
+                continue
+            repo_url = sources.get(module_key)
+            if not repo_url:
+                update_results.append(f"{spoke_id}: no repo configured")
+                continue
+            repo_spokes.setdefault(repo_url, []).append(spoke_id)
+
+        commits_changed = False
+        for repo_url, spoke_ids in repo_spokes.items():
+            tip = await self.get_remote_commit(repo_url, branch)
+            # Push when forced, when this repo has never been pushed, or when its
+            # remote tip advanced. A known tip equal to what we last pushed → skip
+            # (no churn). An unresolvable tip ("unknown") is only pushed on force.
+            changed = force or (tip != "unknown" and tip != last_pushed.get(repo_url))
+            if not changed:
+                for sid in spoke_ids:
+                    update_results.append(f"{sid}: up-to-date ({repo_url})")
+                continue
+            for sid in spoke_ids:
+                logger.info(f"Triggering update for spoke {sid} from {repo_url}@{branch}"
+                            + (f" (tip {tip[:10]})" if tip != "unknown" else "") + "...")
+                err = await self._push_spoke_update(sid, repo_url, branch)
+                if err is None:
+                    update_results.append(f"{sid}: triggered")
+                else:
+                    logger.error(f"Failed to push update for {sid}: {err}")
+                    update_results.append(f"{sid}: failed")
+            if tip != "unknown":
+                last_pushed[repo_url] = tip
+                commits_changed = True
+
+        if commits_changed:
+            self.state.update_global_config({"last_spoke_repo_commits": last_pushed})
+            self.state.save_state()
 
         logger.info(f"Spoke update results: {update_results}")
 
