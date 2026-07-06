@@ -16,11 +16,48 @@ every named logger between DEBUG and INFO.
 """
 
 import logging
+import logging.handlers
 import os
 import sys
 
 DEFAULT_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 DEFAULT_DATEFMT = '%Y-%m-%d %H:%M:%S'
+
+# Circular (size-capped) logging so a component's /var/log/lm/<x>.log can't grow
+# unbounded and fill the box's disk. Every entrypoint routes through
+# configure_logging(), so capping here gives ALL modules/spokes/agents rotation
+# at once. Tunable via env; LM_LOG_MAX_BYTES=0 disables rotation (plain append).
+# Default: 20 MB × 5 backups = ~120 MB max per component.
+_DEFAULT_LOG_MAX_BYTES = 20 * 1024 * 1024
+_DEFAULT_LOG_BACKUPS = 5
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        v = int(str(os.getenv(name) or "").strip())
+        return v if v >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _build_file_handler(log_file: str) -> logging.Handler:
+    """A size-capped RotatingFileHandler for ``log_file`` (falls back to a plain
+    FileHandler when rotation is disabled via ``LM_LOG_MAX_BYTES=0`` or if the
+    handlers module is somehow unavailable). ``delay=True`` so the file isn't
+    opened until the first record — cheap when a component logs elsewhere.
+
+    NOTE on systemd ``StandardError=append:`` co-writers: the entrypoint drops
+    the stderr StreamHandler for the canonical /var/log/lm file, so this handler
+    owns the bulk log stream and rotates it; only rare uncaught-traceback stderr
+    (captured by systemd) may trail into the last rotated file — bounded and
+    acceptable. Boxes that also install the /etc/logrotate.d/lm copytruncate
+    drop-in get belt-and-suspenders coverage of that stderr stream too."""
+    max_bytes = _int_env("LM_LOG_MAX_BYTES", _DEFAULT_LOG_MAX_BYTES)
+    backups = _int_env("LM_LOG_BACKUPS", _DEFAULT_LOG_BACKUPS)
+    if max_bytes <= 0:
+        return logging.FileHandler(log_file)
+    return logging.handlers.RotatingFileHandler(
+        log_file, maxBytes=max_bytes, backupCount=backups, delay=True)
 
 
 def _resolve_level(default_level: int) -> int:
@@ -61,7 +98,7 @@ def configure_logging(default_level: int = logging.INFO, *,
             os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
         except Exception:
             pass
-        handlers = [logging.FileHandler(log_file), logging.StreamHandler()]
+        handlers = [_build_file_handler(log_file), logging.StreamHandler()]
     logging.basicConfig(level=level, format=fmt, datefmt=datefmt,
                         handlers=handlers, force=True)
     if line_buffered:
