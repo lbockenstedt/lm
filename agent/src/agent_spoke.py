@@ -362,7 +362,12 @@ class GenericAgent(BaseSpoke):
                 self._deploy_status = {"state": "completed", "role": role_name,
                                        "returncode": rc, "tail": tail}
             else:
-                logger.error("Deployment of '%s' failed (rc=%s).", role_name, rc)
+                # Dump the install script's own output to the log — without this
+                # a failed deploy only recorded "rc=N" and the real cause (DNS,
+                # apt, postgres, gunicorn…) lived only in _deploy_status["tail"],
+                # which is lost the moment the agent reloads on a SPOKE_UPDATE.
+                logger.error("Deployment of '%s' failed (rc=%s). Install output (last 2KB):\n%s",
+                             role_name, rc, tail or "<no output captured>")
                 self._deploy_status = {"state": "failed", "role": role_name,
                                        "returncode": rc, "tail": tail}
         except Exception as e:
