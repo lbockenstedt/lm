@@ -5541,13 +5541,31 @@ async function loadSpokesAndAgents() {
     // agent-id prefix is the closest parent; the suffix after it is the role
     // name (== the _ROLE_MAP key the agent's UNLOAD_ROLE expects).
     const _agentIds = genericAgents.map(a => a.spoke_id);
+    // Known role suffixes ("{agentBase}-{role}") from the role registry, longest
+    // first so e.g. a compound key wins over a shorter prefix of it.
+    const _roleKeys = Object.keys(AGENT_ROLES).sort((a, b) => b.length - a.length);
     trueSpokes.forEach(s => {
-        const parent = _agentIds
+        // Primary: the closest CURRENTLY-CONNECTED generic agent whose id is a
+        // prefix of this sub-spoke id.
+        let parent = _agentIds
             .filter(aid => s.spoke_id !== aid && s.spoke_id.startsWith(aid + '-'))
             .sort((a, b) => b.length - a.length)[0];
-        if (parent) {
+        let roleName = parent ? s.spoke_id.slice(parent.length + 1) : '';
+        // Fallback: identify a role sub-spoke by a trailing "-<knownRole>" even
+        // when its parent agent isn't in the connected list right now (agent
+        // flapping / not yet re-approved). This keeps "Unload Role" available on
+        // the role's own row regardless of the parent's live state.
+        if (!roleName) {
+            const match = _roleKeys.find(role =>
+                s.spoke_id.endsWith('-' + role) && s.spoke_id.length > role.length + 1);
+            if (match) {
+                roleName = match;
+                parent = s.spoke_id.slice(0, s.spoke_id.length - match.length - 1);
+            }
+        }
+        if (parent && roleName) {
             s._roleParent = parent;
-            s._roleName = s.spoke_id.slice(parent.length + 1);
+            s._roleName = roleName;
         }
     });
 
