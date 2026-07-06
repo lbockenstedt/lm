@@ -2878,13 +2878,6 @@ function _renderSetupSpokesTile(content) {
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
                 <div id="agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
-            </div>
-            <div class="${card}">
-                <div class="flex justify-between items-center mb-3">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Generic Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <span class="text-xs text-slate-400 italic">idle until a role is loaded</span>
-                </div>
-                <div id="generic-agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>`;
     loadSpokesAndAgents();
 }
@@ -5206,7 +5199,7 @@ function _mgmtBtn(label, onclick, extraCls) {
 // whose narrow columns wrapped text and stacked buttons awkwardly. Each entry
 // is a vertical card: a header line (status dot + name/id + badges), optional
 // meta lines (hostname, roles), and an actions row that wraps freely. Shared
-// by _renderSpokesTable, _renderAgentsTable, _renderGenericAgentsTable.
+// by _renderSpokesTable and _renderAgentsTable.
 //
 // o = { dot, name, sid, identityBanner, metaLines: [html], badges: [html],
 //       actions: [html] }
@@ -5363,7 +5356,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     // skips (querySelector returns null) if it has since dropped off.
 
     if (all.length === 0) {
-        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No active agents. Load a role on a generic node (it moves here from Generic Agents) or install the agent on a Proxmox node to begin.</p>`;
+        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected yet. Install the generic agent on a node (it appears here to be approved, then load a role) or install the agent on a Proxmox node to begin.</p>`;
     } else {
         agentsWrap.innerHTML = `<div class="space-y-2">${all.map(a => {
             const aid = a.agent_id;
@@ -5474,68 +5467,10 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     }
 }
 
-// _renderGenericAgentsTable() — renders the Generic Agents tile: generic
-// Hub-direct agents (module_type "agent") that are IDLE — they have no role
-// sub-spoke ({base}-{role}) registered yet. Once a role is loaded the agent
-// moves to the Agents tile (handled by the caller splitting on sub-spoke
-// presence); idle ones stay here until then. A generic node has no module of
-// its own, so this card intentionally shows NO Module badge (the blank-module
-// problem that prompted the dedicated tile). No Active Role line either — an
-// idle agent has none, and we skip the per-agent GET_AVAILABLE_ROLES round-trip
-// entirely (the tile's membership already tells us it is idle). Edit +
-// Load Role + Approve/Un-approve keep generic-node management in one place.
-function _renderGenericAgentsTable(genericWrap, idleGenericAgents, diagBy) {
-    if (!genericWrap) return;
-    if (!Array.isArray(idleGenericAgents) || idleGenericAgents.length === 0) {
-        genericWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No idle generic agents. Approve a generic node (module_type "agent") and it appears here until you load a role on it.</p>`;
-        return;
-    }
-    genericWrap.innerHTML = `<div class="space-y-2">${idleGenericAgents.map(s => {
-        const sid = s.spoke_id;
-        const name = s.display_name || sid;
-        const isPending = !s.approved;
-        const hostname = s.hostname || '';
-        const ic = s.identity_change;
-        const eSid = sid.replace(/'/g, "\\'");
-        const eName = escJsAttr(name);
-        const ackClick = `_ackIdentityChange('/setup/spokes/${encodeURIComponent(sid)}/ack-change')`;
-        // Telemetry extras from the diagnostics map (same merge as the Spokes
-        // tile). Heartbeat dot overrides the approval dot only when approved.
-        const extras = diagBy && diagBy.has(sid) ? _diagTelemetryExtras(diagBy.get(sid)) : null;
-        const dot = (extras && !isPending) ? extras.dot
-                  : (isPending ? 'bg-amber-400' : 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]');
-        return _mgmtEntryCard({
-            dot,
-            name: escapeHtml(name), sid,
-            identityBanner: _identityChangeBanner(ic, ackClick),
-            metaLines: [
-                hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${escapeHtml(hostname)}</div>` : '',
-                `<div class="text-xs text-slate-500 pl-6">roles: <span class="text-slate-400 italic">none (idle)</span></div>`,
-                ...(extras ? extras.metaLines : []),
-            ],
-            badges: [
-                `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">Generic Agent</span>`,
-                `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${isPending ? 'Pending' : 'Approved'}</span>`,
-                ...(extras ? extras.badges : []),
-            ],
-            actions: [
-                _mgmtBtn('Edit', `openSpokeMetadataModal('${eSid}','${eName}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
-                !isPending
-                    ? _mgmtBtn('Load Role', `showLoadRoleModal('${eSid}')`, 'bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]')
-                    : '',
-                isPending
-                    ? _mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
-                    : _mgmtBtn('Un-approve', `unapproveSpoke('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200'),
-                ...(extras ? extras.actions : []),
-            ],
-        }) + (extras ? extras.eventsPanel : '');
-    }).join('')}</div>`;
-}
 
 async function loadSpokesAndAgents() {
     const spokesWrap = document.getElementById('spokes-table-wrap');
     const agentsWrap = document.getElementById('agents-table-wrap');
-    const genericWrap = document.getElementById('generic-agents-table-wrap');
 
     // Fetch the full known-module list once and split it by module_type.
     // Treated as agents (shown in the Agents/Generic Agents sections, not
@@ -5625,12 +5560,13 @@ async function loadSpokesAndAgents() {
     // GET_AVAILABLE_ROLES round-trip — the sub-spoke presence in the already-
     // fetched known-modules list is the signal (mirrors how the multi-role
     // design registers each role as its own spoke). hasRole is defined above.
-    const idleGenericAgents    = genericAgents.filter(s => !hasRole(s.spoke_id));
-    const activeGenericAgents = genericAgents.filter(s =>  hasRole(s.spoke_id));
-
     _renderSpokesTable(spokesWrap, trueSpokes, diagBy);
-    _renderGenericAgentsTable(genericWrap, idleGenericAgents, diagBy);
-    await _renderAgentsTable(agentsWrap, activeGenericAgents, pxmxAgents, diagBy);
+    // An agent is an agent — idle (no role yet) and active (role-loaded) generic
+    // agents both render in the single Agents table alongside the Proxmox node
+    // agents. (The former separate "Generic Agents" tile was removed — splitting
+    // by idle/active gave no useful signal and just hid freshly-onboarded agents
+    // in a second card.) Load Role + Approve affordances live in _renderAgentsTable.
+    await _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy);
 }
 
 // _renderSpokesSummary(diagData) — the Hub/WebUI version + recovery-count bar
