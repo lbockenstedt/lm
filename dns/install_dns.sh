@@ -47,6 +47,21 @@ remote-control:
     control-interface: 127.0.0.1
     control-port: 8953
 UNBOUNDCFG
+
+# Listen on all interfaces + allow LAN clients. Unbound defaults to 127.0.0.1
+# ONLY and REFUSES non-local queries, so the DNS role would never answer a query
+# sent to its LAN IP — it looks like "no response / firewall" even with the
+# firewall off. Idempotent: guarded on the interface line.
+grep -q "interface: 0.0.0.0" /etc/unbound/unbound.conf 2>/dev/null || cat >> /etc/unbound/unbound.conf <<'UNBOUNDSRV'
+
+server:
+    interface: 0.0.0.0
+    access-control: 127.0.0.0/8 allow
+    access-control: 10.0.0.0/8 allow
+    access-control: 172.16.0.0/12 allow
+    access-control: 192.168.0.0/16 allow
+    access-control: 169.254.0.0/16 allow
+UNBOUNDSRV
 mkdir -p /etc/unbound/conf.d
 grep -q "conf\.d" /etc/unbound/unbound.conf 2>/dev/null \
     || echo 'include-toplevel: "/etc/unbound/conf.d/*.conf"' >> /etc/unbound/unbound.conf
