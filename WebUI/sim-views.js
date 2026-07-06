@@ -597,7 +597,9 @@ window.csKillSwitchMountChip = async function (elId) {
 async function csRenderSimulations() {
     // Simulations → Checks child (default).
     csSetToolbar('');
-    const ksBanner = await csKillSwitchBanner();
+    // Kill switch moved to the Checks/Hardware/Client Count child strip
+    // (renderSecondaryNav → csKillSwitchMountChip), pinned far right — no longer
+    // a content banner here.
     const data = await csSimLoadCentral();
     const spokes = csSimSpokes(data);
     if (!spokes) return;
@@ -628,7 +630,7 @@ async function csRenderSimulations() {
             window._csSimCheckRows.push({ spoke: name, site: w, check: c, status: cell && cell.status, detail: cell });
         }));
     });
-    csSet(`<div class="space-y-4">${ksBanner}${pills}<div id="cs-sim-checks-body"></div></div>`);
+    csSet(`<div class="space-y-4">${pills}<div id="cs-sim-checks-body"></div></div>`);
     csSimChecksFilter();
 }
 
