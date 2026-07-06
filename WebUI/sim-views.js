@@ -957,6 +957,14 @@ function csNormalizeClients(data) {
     return [];
 }
 
+// Clients render as TWO rows each (ported from webui-hub's client + control-row
+// pair): a data row — no Spoke column — plus a second "sim bar" row of clickable
+// per-simulation override buttons. The original hid the override panel behind a
+// "Control" button; here the sim buttons are always visible inline on line 2,
+// each showing whether that sim is currently running and toggling a per-client
+// override on click. Columns: Hostname, Platform, Status, Tier, SSID, Last Seen,
+// Errors, Demo.
+const CS_CLIENT_COLS = 8;
 function csRenderClientRows(rows) {
     const body = csEl('cs-client-body') || csEl('cs-content');
     if (!rows || rows.length === 0) {
@@ -965,29 +973,86 @@ function csRenderClientRows(rows) {
         return;
     }
     const rowHtml = rows.map(c => {
-        const sims = Array.isArray(c.active_simulations) ? c.active_simulations.join(', ') : (c.simulation_id || '—');
         const t = csClassifyClient(c);
         const host = c.hostname || c.id || '';
-        return `<tr>
-          <td class="px-4 py-2 text-slate-600">${csEscape(c.spoke_name || c.spoke_id || '—')}</td>
+        const line1 = `<tr class="border-t border-slate-100">
           <td class="px-4 py-2 font-mono text-xs">${csEscape(host || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.platform || c.hw_type || '—')}</td>
           <td class="px-4 py-2">${csOnlineBadge(c.online)}</td>
           <td class="px-4 py-2"><span class="text-[10px] font-bold px-2 py-0.5 rounded ${t === 't2' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'}">${t.toUpperCase()}</span></td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.connected_ssid || '—')}</td>
-          <td class="px-4 py-2 text-slate-500">${csEscape(sims)}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(csLastSeen(c.last_seen))}</td>
           <td class="px-4 py-2 ${c.error_count > 0 ? 'text-amber-600 font-bold' : 'text-slate-400'}">${csEscape(c.error_count || 0)}</td>
           ${host ? csDemoCell(host) : '<td class="px-4 py-2 text-slate-300">—</td>'}
-          ${host ? csControlCell(host) : '<td class="px-4 py-2 text-slate-300">—</td>'}
-        </tr>
-        ${host ? csControlPanelRow(host) : ''}`;
+        </tr>`;
+        const line2 = host ? `<tr>
+          <td colspan="${CS_CLIENT_COLS}" class="px-4 pb-3 pt-0">${csClientSimBar(c, host)}</td>
+        </tr>` : '';
+        return line1 + line2;
     }).join('');
     body.innerHTML = csTable(
-        ['Spoke', 'Hostname', 'Platform', 'Status', 'Tier', 'SSID', 'Simulations', 'Last Seen', 'Errors', 'Demo', 'Control'],
+        ['Hostname', 'Platform', 'Status', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
         rowHtml
     );
 }
+
+// The second line under each client: one clickable button per simulation (the
+// original webui-hub FLAG_ORDER set). A button is highlighted when that sim is
+// currently on (in the client's active_simulations or effective config).
+// Clicking toggles a per-client override; the server REPLACES the whole override
+// map, so csSimToggle sends every flag for the host with the clicked one flipped
+// (POST /clients/{host}/control {overrides:{flag:on/off}} — same endpoint the
+// original Apply used). "Clear" removes all overrides for the client.
+function csSimBtnClass(on) {
+    return 'px-2 py-0.5 rounded-md text-[11px] font-bold border transition-colors ' +
+        (on ? 'bg-purple-100 text-purple-700 border-purple-300'
+            : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-100');
+}
+
+function csClientSimBar(c, host) {
+    const active = new Set((Array.isArray(c.active_simulations) ? c.active_simulations : [])
+        .map(s => String(s).toLowerCase()));
+    const cfg = c.effective_config || c.config || {};
+    const isOn = f => active.has(f) ||
+        ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
+    const btns = CS_CONTROL_FLAGS.map(f => {
+        const on = isOn(f);
+        return `<button data-cs-sim-host="${csEscape(host)}" data-cs-sim-flag="${csEscape(f)}" data-cs-sim-on="${on ? '1' : '0'}"
+          onclick="csSimToggle(this)" title="Click to ${on ? 'disable' : 'enable'} ${csEscape(f)} on ${csEscape(host)}"
+          class="${csSimBtnClass(on)}">${csEscape(f)}</button>`;
+    }).join('');
+    return `<div class="flex flex-wrap items-center gap-1.5">
+      <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Sims</span>
+      ${btns}
+      <button data-cs-ctl-host="${csEscape(host)}" onclick="csCtlClear(this)"
+        class="ml-2 px-2 py-0.5 rounded-md text-[11px] font-bold bg-red-50 text-red-600 hover:bg-red-100 border border-red-200">Clear</button>
+      <span id="${csEscape(csCtlId(host, 'msg'))}" class="text-[11px] text-slate-400 ml-1"></span>
+    </div>`;
+}
+
+window.csSimToggle = async function (btn) {
+    const host = btn.dataset.csSimHost, flag = btn.dataset.csSimFlag;
+    if (!host || !flag) return;
+    const next = btn.dataset.csSimOn === '1' ? 'off' : 'on';
+    // The control endpoint REPLACES the override map, so send every sim button's
+    // current state with the clicked one flipped (preserves the other overrides).
+    const scope = btn.closest('td') || document;
+    const overrides = {};
+    scope.querySelectorAll('button[data-cs-sim-host]').forEach(b => {
+        if (b.dataset.csSimHost !== host) return;
+        overrides[b.dataset.csSimFlag] = (b === btn) ? next : (b.dataset.csSimOn === '1' ? 'on' : 'off');
+    });
+    csCtlMsg(host, `${next === 'on' ? 'Enabling' : 'Disabling'} ${flag}…`, true);
+    try {
+        await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
+            { method: 'POST', body: JSON.stringify({ overrides }) });
+        btn.dataset.csSimOn = next === 'on' ? '1' : '0';
+        btn.className = csSimBtnClass(next === 'on');
+        btn.title = `Click to ${next === 'on' ? 'disable' : 'enable'} ${flag} on ${host}`;
+        csCtlMsg(host, `${flag} ${next}`, true);
+        if (typeof showToast === 'function') showToast(`${flag} ${next} on ${host}`, 'success');
+    } catch (e) { console.error('csSimToggle failed', e); csCtlMsg(host, e.message || 'failed', false); }
+};
 
 // ── Demo scenarios (named per-client failure presets, 120-min TTL) ───────────
 // Ports the legacy cs webui-spoke demo system. Trigger a named failure on one
