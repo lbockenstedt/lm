@@ -57,6 +57,11 @@ class StateManager:
         self.system_path = os.path.join(self.data_dir, system_path)
         self.tenants_path = os.path.join(self.data_dir, tenants_path)
 
+        # Set by _load_file when a state file decrypted only via a FALLBACK
+        # (previous/legacy) Fernet key; load_state re-saves to migrate it to the
+        # current key so a rotated LM_FERNET_KEY can't strand it later.
+        self._needs_rekey = False
+
         # System-level state: Hardware, Global Config, Modules, Auth
         self.system_state: Dict[str, Any] = {
             "global_config": {},
@@ -118,8 +123,18 @@ class StateManager:
                 if not content:
                     return None
                 try:
-                    # Try decrypting
-                    decrypted = hub_encryption.decrypt(content)
+                    # Try decrypting (current key → previous rotation keys →
+                    # legacy). If a FALLBACK key succeeded, flag a re-key so
+                    # load_state re-encrypts under the current key — otherwise a
+                    # rotated LM_FERNET_KEY leaves system.json/tenants.json
+                    # readable only by the old key, and a later rotation strands
+                    # them (the incident this guards against).
+                    decrypted, used_primary = hub_encryption.decrypt_with_meta(content)
+                    if not used_primary:
+                        self._needs_rekey = True
+                        logger.warning("State file %s decrypted with a FALLBACK key "
+                                       "(previous/legacy); will re-encrypt under the "
+                                       "current key on next save.", path)
                     return json.loads(decrypted)
                 except Exception as e:
                     logger.warning(f"Decryption failed for {path}, trying plain text: {e}")
@@ -232,6 +247,18 @@ class StateManager:
             logger.info(f"Tenant state loaded successfully from {self.tenants_path}")
         else:
             logger.info("No valid tenant state found, using defaults.")
+
+        # A state file decrypted via a fallback (previous/legacy) key — re-save
+        # NOW to re-encrypt everything under the current key so the old key can
+        # be retired safely and a future rotation can't strand these files.
+        if self._needs_rekey:
+            logger.warning("Re-encrypting state under the current key (fallback-key "
+                           "load detected) …")
+            try:
+                self.save_state()
+            except Exception as e:  # noqa: BLE001
+                logger.error("Re-key save failed: %s", e)
+            self._needs_rekey = False
 
     def save_state(self):
         """Saves memory state to dual JSON disk caches with atomic writes.

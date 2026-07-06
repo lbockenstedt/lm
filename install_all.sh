@@ -1094,8 +1094,14 @@ Description=Lab Manager Orchestrator
 After=network.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+# Type=exec + a direct ExecStart so systemd TRACKS the hub as MainPID. The old
+# Type=oneshot + `ExecStart=start_all.sh` (which `nohup … main.py &` detached)
+# left MainPID=0: no Restart/watchdog, `systemctl status` showed no process, and
+# `systemctl restart lm` couldn't cleanly cycle the hub. start_all.sh launched
+# only this one process on the hub box, so running main.py directly is
+# equivalent (the hub's own self-restart path uses lm-update-restart /
+# systemd-run and is unaffected).
+Type=exec
 User=$SvcUser
 WorkingDirectory=$BASE_DIR
 EnvironmentFile=-$BASE_DIR/.env
@@ -1111,15 +1117,12 @@ EnvironmentFile=-$BASE_DIR/.env
 Environment=LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443 LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV$_TLS_CA_UNIT
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-ExecStart=/bin/bash $BASE_DIR/start_all.sh
-# Stop ONLY the Hub process — never every Python on the host. A bare
-# `pkill -f python` here killed gunicorn, netbox-rq, and every lm-* spoke on
-# each `systemctl stop lm` (run at the top of every install), and because
-# those units use Restart=on-failure they never came back from a clean exit
-# — leaving NetBox (and the spokes) dead with a 502 until manually restarted.
-# The hub's cmdline is the only one containing core/src/main.py, so this is
-# precise: spokes use src/control_plane, gunicorn uses netbox.wsgi.
-ExecStop=/usr/bin/pkill -f "core/src/main.py"
+ExecStart=$BASE_DIR/core/venv/bin/python3 $BASE_DIR/core/src/main.py
+StandardOutput=append:$LOG_DIR/hub.log
+StandardError=append:$LOG_DIR/hub.log
+# No ExecStop needed: Type=exec makes systemd SIGTERM MainPID (and reap the
+# cgroup) on stop — precise, and it no longer nukes gunicorn/netbox-rq/spokes
+# the way the old `pkill` sweep risked.
 Restart=on-failure
 RestartSec=10
 

@@ -43,6 +43,32 @@ class HubEncryption:
     def __init__(self):
         self._legacy_fernet = self._derive_machine_id_fernet()
         self.fernet = self._load_primary_fernet()
+        self._previous_fernets = self._load_previous_fernets()
+        # Decrypt attempt order: current primary key, then any PREVIOUS
+        # (post-rotation) keys, then the legacy machine-id key. A blob that only
+        # decrypts via a non-primary key is re-encrypted under the primary the
+        # next time it's written (state manager re-key on load) so the fleet
+        # migrates off old keys instead of stranding files — the exact failure
+        # that left system.json/tenants.json unreadable after a rotation.
+        self._decrypt_chain = [self.fernet] + self._previous_fernets + [self._legacy_fernet]
+
+    def _load_previous_fernets(self) -> list:
+        """Old Fernet keys kept ONLY for decrypt fallback after a key rotation,
+        from ``LM_FERNET_KEY_PREVIOUS`` (comma- or space-separated list of full
+        base64 Fernet keys). Set it to the OLD key(s) when you rotate
+        ``LM_FERNET_KEY`` so the hub can still read state encrypted under them;
+        those blobs migrate to the current key on their next save. Invalid
+        entries are skipped with a warning (never fatal)."""
+        raw = os.getenv("LM_FERNET_KEY_PREVIOUS", "") or ""
+        out = []
+        for tok in raw.replace(",", " ").split():
+            try:
+                out.append(Fernet(tok.strip().encode()))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Ignoring invalid key in LM_FERNET_KEY_PREVIOUS: %s", e)
+        if out:
+            logger.info("Loaded %d previous Fernet key(s) for decrypt fallback.", len(out))
+        return out
 
     def _derive_machine_id_fernet(self) -> Fernet:
         """Legacy key derivation from the machine-id (INSECURE; fallback only)."""
@@ -109,15 +135,26 @@ class HubEncryption:
         return self.fernet.encrypt(data.encode())
 
     def decrypt(self, ciphertext: bytes) -> str:
-        """Decrypts ciphertext bytes and returns the original string.
-        Falls back to the legacy machine-id key for blobs encrypted before
-        LM_FERNET_KEY was configured (transparent migration)."""
-        try:
-            return self.fernet.decrypt(ciphertext).decode()
-        except Exception:
-            if self.fernet is not self._legacy_fernet:
-                return self._legacy_fernet.decrypt(ciphertext).decode()
-            raise
+        """Decrypts ciphertext, trying the current key, then PREVIOUS (rotation)
+        keys, then the legacy machine-id key (transparent migration)."""
+        return self.decrypt_with_meta(ciphertext)[0]
+
+    def decrypt_with_meta(self, ciphertext: bytes):
+        """Like ``decrypt`` but returns ``(plaintext, used_primary)``.
+
+        Tries every key in ``_decrypt_chain`` in order (current → previous →
+        legacy). ``used_primary`` is False when a fallback key succeeded, which
+        signals the caller (state manager) to re-encrypt the blob under the
+        current key so it stops depending on the old key. Raises the primary
+        key's error if NONE succeed (preserving the original failure surface)."""
+        first_err = None
+        for f in self._decrypt_chain:
+            try:
+                return f.decrypt(ciphertext).decode(), (f is self.fernet)
+            except Exception as e:  # noqa: BLE001
+                if first_err is None:
+                    first_err = e
+        raise first_err
 
 # Singleton instance for the process
 hub_encryption = HubEncryption()
