@@ -1,8 +1,8 @@
 """Firewall (OPNsense) data + rule/alias/NAT/DNS CRUD routes."""
 from api import (
     HTTPException, Request, _FW_FETCH_TIMEOUTS, _FW_FETCH_TIMEOUT_DEFAULT, _FW_MODULES,
-    _FW_WRITE_TIMEOUT, _cache_entry, _fetch_module, _hub_msg, _invalidate_tenant_module,
-    _tenant_cache, asyncio, logger, uuid,
+    _FW_WRITE_TIMEOUT, _cache_entry, _fetch_module, _hub_msg, _invalidate_module_all_tenants,
+    _invalidate_tenant_module, _tenant_cache, asyncio, logger, uuid,
 )
 
 
@@ -285,6 +285,12 @@ def register(app, hub, ctx):
 
         hub.state.system_state["global_config"] = global_config
         hub.state.save_state()
+        # Drop orphaned per-firewall cache entries ({rules,nat,dhcp,dns,
+        # interfaces}:{firewall_id}) from every tenant's cache so a deleted
+        # firewall doesn't leave stale data that would render until the 300s
+        # tick (and would never be re-fetched — the firewall no longer exists).
+        for _fw_mod in _FW_MODULES:
+            _invalidate_module_all_tenants(f"{_fw_mod}:{firewall_id}")
         return {"status": "ok", "message": f"Firewall {firewall_id} deleted."}
 
     # ── Network Devices: data + CRUD (/api/nw/*, /setup/nw-devices) ───────────

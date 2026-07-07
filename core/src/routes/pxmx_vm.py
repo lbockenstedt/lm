@@ -1,6 +1,7 @@
 """Proxmox VM lifecycle routes: action, pools, ISOs, storages, create, clone."""
 from api import (
-    HTTPException, Request, _cache_entry, access, get_tenant_scoping, logger, vmid_alloc,
+    HTTPException, Request, _cache_entry, _refresh_module_all_tenants,
+    access, get_tenant_scoping, logger, vmid_alloc,
 )
 
 
@@ -49,6 +50,10 @@ def register(app, hub, ctx):
             # may change the NetBox VM-record view (status at minimum), so re-sync
             # the acting tenant's VMs to NetBox when the VM sync is enabled.
             _trigger_vm_sync_after_pxmx_edit(hub, request, body)
+            # Drop + re-fetch the pxmx_vms tenant cache so a non-admin viewer
+            # (whose VM list reads the cache, not a live relay) sees the new
+            # state immediately instead of waiting up to 300s for the next tick.
+            _refresh_module_all_tenants(hub, "pxmx_vms")
             return data
         except Exception as e:
             logger.exception("pxmx_vm_action failed")
@@ -211,6 +216,7 @@ def register(app, hub, ctx):
             if isinstance(data, dict) and data.get("status") == "ERROR":
                 raise HTTPException(status_code=502, detail=data.get("message", "create failed"))
             _trigger_vm_sync_after_pxmx_edit(hub, request, body)
+            _refresh_module_all_tenants(hub, "pxmx_vms")
             return data
         except HTTPException:
             raise
@@ -341,6 +347,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=502, detail=data.get("message", "clone failed"))
             # Re-sync the acting tenant's VMs to NetBox so the new VM is picked up.
             _trigger_vm_sync_after_pxmx_edit(hub, request, body)
+            _refresh_module_all_tenants(hub, "pxmx_vms")
             return data
         except HTTPException:
             raise

@@ -594,6 +594,10 @@ class NwDiscoverySyncMixin:
             logger.info("nw discovery sync cycle: %d records, %d tenants, %d pushed, "
                         "%d dropped unattributed, %d mac-only unscoped",
                         len(records), len(out), pushed, dropped, len(mac_only))
+        # Upserted NW-discovered devices into NetBox — refresh netbox_devices so
+        # a non-admin viewer sees them immediately. Only when the cycle pushed.
+        if pushed > 0:
+            self.refresh_module_cache("netbox_devices")
         return {"results": out, "dropped_unattributed": dropped,
                 "discovered_total": len(records),
                 "mac_only_total": len(mac_only),

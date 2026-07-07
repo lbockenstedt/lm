@@ -331,6 +331,13 @@ class EndpointSyncMixin:
                                 logger.debug("endpoint sync gather tenant=%s: %s", tid, e)
 
                     await asyncio.gather(*(_one(tid) for tid in tenants))
+                    # The cycle just pushed endpoint tags into CPPM — drop + re-fetch
+                    # the cppm_devices / cppm_sessions tenant caches so a non-admin
+                    # viewer sees the updated endpoint attribution immediately
+                    # instead of waiting up to 300s for the next cache tick. Best-
+                    # effort; refresh_module_cache swallows errors.
+                    self.refresh_module_cache("cppm_devices")
+                    self.refresh_module_cache("cppm_sessions")
                 delay = self._endpoint_sync_next_delay(cfg) if cfg.get("enabled", False) else 60
                 await asyncio.sleep(delay)
             except Exception as e:

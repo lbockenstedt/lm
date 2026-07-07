@@ -68,7 +68,7 @@ from state.manager import StateManager
 from simulations.broadcaster import SimulationsBroadcaster
 from simulations.store import SimulationsStore
 from security.auth_manager import AuthManager, LDAPAuthProvider
-from api import build_server, _save_sessions
+from api import build_server, _save_sessions, _refresh_module_all_tenants
 from update_recovery import (
     snapshot_code, write_pending, clear_pending,
     is_version_bad, clear_bad_versions_older_than,
@@ -1067,6 +1067,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         firewalls = self.state.get_global_config().get("firewalls", [])
         fw = next((f for f in firewalls if f["id"] == firewall_id), None)
         return fw.get("spoke_id") if fw else None
+
+    def refresh_module_cache(self, key: str) -> None:
+        """Drop + background re-fetch a tenant-cache module for ALL tenants.
+
+        Thin hub-method wrapper around api._refresh_module_all_tenants so the
+        background-sync mixins (endpoint_sync / vm_sync / realtime_ipam_nac /
+        nw_discovery / fw_discovery) — which deliberately avoid importing api to
+        dodge an import cycle — can refresh the cache at sync completion without
+        a local import. Called after a sync cycle that actually changed spoke
+        data so a non-admin viewer (whose list reads the tenant cache, not a
+        live relay) sees the new state immediately instead of waiting up to 300s
+        for the next cache tick.
+        """
+        try:
+            _refresh_module_all_tenants(self, key)
+        except Exception as e:  # noqa: BLE001 — never let a cache refresh kill a sync loop
+            logger.debug("refresh_module_cache(%s) failed: %s", key, e)
 
     async def push_config_to_spoke(self, spoke_id: str):
         """Pushes the module-specific configuration from global state to the spoke."""

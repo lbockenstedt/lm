@@ -424,6 +424,10 @@ class FwDiscoverySyncMixin:
         else:
             logger.info("fw discovery sync cycle: %d records, %d tenants, %d pushed, "
                         "%d dropped unattributed", len(records), len(out), pushed, dropped)
+        # Pushed firewall interface/IP facts into NetBox — refresh netbox_devices
+        # so a non-admin viewer sees them immediately. Only when the cycle pushed.
+        if pushed > 0:
+            self.refresh_module_cache("netbox_devices")
         return {"results": out, "dropped_unattributed": dropped,
                 "discovered_total": len(records)}
 

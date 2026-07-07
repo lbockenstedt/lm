@@ -328,6 +328,14 @@ class RealtimeIpamNacSyncMixin:
         else:
             logger.info("realtime nac sync cycle: %d sessions, %d tenants, %d pushed, "
                         "%d dropped unattributed", len(sessions), len(out), pushed, dropped)
+        # The cycle upserted CPPM-derived sessions into NetBox (only-add-missing)
+        # — drop + re-fetch the netbox_ips / netbox_devices tenant caches so a
+        # non-admin viewer sees the new IP/device records immediately. Only when
+        # the cycle actually pushed something (avoids a per-cycle fetch when the
+        # loop has nothing to do). Best-effort; refresh_module_cache swallows.
+        if pushed > 0:
+            self.refresh_module_cache("netbox_ips")
+            self.refresh_module_cache("netbox_devices")
         return {"results": out, "dropped_unattributed": dropped,
                 "sessions_total": len(sessions),
                 "pull_errors": pull.get("errors", [])}

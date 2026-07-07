@@ -447,6 +447,12 @@ class VmSyncMixin:
                         "deleted=%d errors=%d rows=%d",
                         overall, len(vms), pushed, skipped, deleted, errors,
                         len(results))
+        # The sync just upserted hypervisor VMs into NetBox (replace=True) — drop
+        # + re-fetch the netbox_devices tenant cache so a non-admin viewer sees
+        # new/removed/re-tagged VM-backed devices immediately. Only when the
+        # sync actually touched NetBox (pushed or deleted > 0). Best-effort.
+        if pushed > 0 or deleted > 0:
+            self.refresh_module_cache("netbox_devices")
         return {"status": overall, "pushed": pushed, "errors": errors,
                 "skipped": skipped, "deleted": deleted, "vms_total": len(vms),
                 "per_tenant": per_tenant, "results": results,

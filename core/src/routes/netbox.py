@@ -298,8 +298,13 @@ def register(app, hub, ctx):
             logger.exception("netbox_claim_device failed")
             raise HTTPException(status_code=500, detail=str(e))
         if isinstance(result, dict) and result.get("status") == "SUCCESS":
-            _invalidate_module_all_tenants("netbox_devices")
-            _invalidate_module_all_tenants("cppm_devices")
+            # Refresh (drop + background re-fetch), not invalidate-only, so a
+            # non-admin viewer sees the claimed device appear / re-attribute
+            # immediately. claim-device also re-tags the CPPM endpoint, so
+            # refresh cppm_devices too (the endpoint sync below is best-effort
+            # and async; this guarantees the cache is dropped now).
+            _refresh_module_all_tenants(hub, "netbox_devices")
+            _refresh_module_all_tenants(hub, "cppm_devices")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, {"tenant": requested_slug} if requested_slug else None)
         return result
 
