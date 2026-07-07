@@ -597,6 +597,51 @@ mkdir -p "$BASE_DIR"
 chown -R $SvcUser:$SvcUser "$BASE_DIR"
 cd "$BASE_DIR"
 
+# ── Retire the legacy Generic Leaf Agent (lm-bootstrap / lm-generic-agent) ──
+# A hub VM cloned from an OLD image can carry a crash-looping generic-agent unit
+# whose ExecStart is /opt/lm/generic-agent/src/agent.py (removed from the repo).
+# It's protocol-incompatible + useless on the hub and spams the journal on a 10s
+# restart loop. The AGENT installer purges this (agent/install_agent.sh
+# retire_legacy_agent), but a HUB install never ran that — so do it here too.
+# Match by unit NAME and by any unit whose ExecStart references the legacy path
+# (older builders named it variously, e.g. lm-bootstrap). KEEP IN SYNC WITH
+# agent/install_agent.sh retire_legacy_agent. Idempotent + non-fatal.
+retire_legacy_leaf() {
+    local names="lm-generic-agent lm-bootstrap"
+    local f u svc purged=0
+    for f in /etc/systemd/system/*.service /etc/systemd/system/*/*.service \
+             /run/systemd/system/*.service \
+             /lib/systemd/system/*.service /usr/lib/systemd/system/*.service; do
+        [ -e "$f" ] || continue
+        grep -qE "/opt/lm/generic-agent" "$f" 2>/dev/null && names="$names $(basename "$f" .service)"
+    done
+    for u in $(systemctl list-units --type=service --state=running,failed --no-legend --plain 2>/dev/null | awk '{print $1}'); do
+        systemctl show "$u" -p ExecStart 2>/dev/null | grep -q "/opt/lm/generic-agent" && names="$names ${u%.service}"
+    done
+    for svc in $(printf '%s\n' $names | sort -u); do
+        [ -n "$svc" ] || continue
+        [ "$svc" = "lm" ] && continue   # never touch the hub's own unit
+        if [ -e "/etc/systemd/system/${svc}.service" ] \
+           || systemctl list-unit-files "${svc}.service" 2>/dev/null | grep -qE "^${svc}\.service"; then
+            systemctl stop    "$svc" 2>/dev/null || true
+            systemctl disable "$svc" 2>/dev/null || true
+            rm -f "/etc/systemd/system/${svc}.service"
+            systemctl mask    "$svc" 2>/dev/null || true
+            systemctl reset-failed "$svc" 2>/dev/null || true
+            log_c "🧹 Purged legacy leaf unit ${svc}.service."
+            purged=1
+        fi
+    done
+    if [ -d /opt/lm/generic-agent ] || [ -d /opt/lm/generic_agent ]; then
+        pkill -f "/opt/lm/generic-agent/src/agent.py" 2>/dev/null || true
+        rm -rf /opt/lm/generic-agent /opt/lm/generic_agent
+        log_c "🧹 Removed legacy leaf dir /opt/lm/generic-agent."
+        purged=1
+    fi
+    [ "$purged" = 1 ] && systemctl daemon-reload 2>/dev/null || true
+}
+retire_legacy_leaf
+
 # Clone core components (Hub and WebUI)
 log_c "🌐 Cloning Core Repository..."
 rm -rf lm_tmp

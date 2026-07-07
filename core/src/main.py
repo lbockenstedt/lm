@@ -3372,6 +3372,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         _scheme = "wss" if self.tls_enabled else "ws"
         logger.info(f"Hub {version} unified surface on {_scheme}://{self.host}:{listen_port} "
                     f"(/ws/spoke, /ws/agent, /ws/console + WebUI/REST)")
+        # Capture the VERSION this process booted with so the update-health check
+        # can detect process-vs-disk drift (code updated on disk but not restarted).
+        self._startup_version = version
 
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())

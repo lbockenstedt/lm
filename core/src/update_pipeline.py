@@ -31,7 +31,7 @@ import asyncio
 import subprocess
 import datetime as _dt
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -112,6 +112,25 @@ def _update_available(local_commit, remote_commit, stored_commit,
         "commit_ahead": bool(commit_ahead),
         "ver_ahead": bool(ver_ahead),
     }
+
+
+def _detect_legacy_leaf() -> List[str]:
+    """Names of any leftover legacy Generic Leaf Agent units (the crash-looping
+    lm-bootstrap / lm-generic-agent zombie that a hub VM can inherit from an old
+    image). Read-only — the hub process (svc_lm) can't purge units, but it CAN
+    surface them so install_all.sh's retire_legacy_leaf (or a manual purge) is
+    prompted. Matches the well-known names + any unit whose ExecStart references
+    the removed /opt/lm/generic-agent path."""
+    found: List[str] = []
+    try:
+        for name in ("lm-bootstrap", "lm-generic-agent"):
+            if os.path.exists(f"/etc/systemd/system/{name}.service"):
+                found.append(name)
+        if os.path.isdir("/opt/lm/generic-agent") and "legacy-dir:/opt/lm/generic-agent" not in found:
+            found.append("legacy-dir:/opt/lm/generic-agent")
+    except Exception:  # noqa: BLE001
+        pass
+    return found
 
 
 class UpdatePipelineMixin:
@@ -228,6 +247,75 @@ class UpdatePipelineMixin:
             return result.returncode == 0 and result.stdout.strip() == "true"
         except Exception:
             return False
+
+    async def check_update_health(self) -> Dict[str, Any]:
+        """Self-diagnose the hub's OWN update/git path so a broken updater is LOUD
+        instead of silent — the failure mode behind a hub that quietly serves
+        stale code (no .git → fragile tarball; unresolved HEAD → button git pull
+        fails; running-version ≠ on-disk → updated-but-not-restarted; missing
+        restart helper → pulls but never restarts; leftover legacy leaf zombie).
+        Returns ``{ok, checks, warnings}``; never raises (best-effort)."""
+        warnings: List[str] = []
+        checks: Dict[str, Any] = {}
+        try:
+            hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+
+            is_git = self._is_git_repo(hub_root)
+            checks["git_checkout"] = is_git
+            if not is_git:
+                warnings.append(
+                    f"{hub_root} is NOT a git checkout — updates use the fragile "
+                    f"tarball path; re-run install_all.sh to restore .git.")
+            else:
+                local = await self.get_local_commit()
+                checks["local_commit"] = local
+                if local == "unknown":
+                    warnings.append(
+                        f"git HEAD unresolved in {hub_root} (dubious ownership / .git "
+                        f"unreadable by the service user?) — the Update button's git pull will fail.")
+                config = self.state.get_global_config()
+                hub_repo = (config.get("update_sources", {}) or {}).get("hub")
+                branch = config.get("global_branch", "main")
+                if hub_repo:
+                    remote = await self.get_remote_commit(hub_repo, branch)
+                    checks["remote_commit"] = remote
+                    if remote == "unknown":
+                        warnings.append(
+                            f"cannot reach {hub_repo}@{branch} (git ls-remote failed) — "
+                            f"update checks can't see new versions.")
+                    elif local != "unknown" and remote != local:
+                        warnings.append(
+                            f"hub code is BEHIND {branch} (local {local[:10]} vs "
+                            f"remote {remote[:10]}) — an update is pending.")
+
+            # Process-vs-disk drift: running version != on-disk VERSION → the code
+            # was updated on disk but this process never restarted (THE stale-hub bug).
+            disk_v = await self.get_local_version()
+            run_v = getattr(self, "_startup_version", None)
+            checks["running_version"] = run_v
+            checks["disk_version"] = disk_v
+            if run_v and disk_v and run_v not in ("unknown",) and run_v != disk_v:
+                warnings.append(
+                    f"process is STALE: running v{run_v} but on-disk is v{disk_v} — "
+                    f"code updated without a restart (systemctl restart lm.service).")
+
+            helper = "/usr/local/bin/lm-update-restart"
+            checks["restart_helper"] = os.path.isfile(helper) and os.access(helper, os.X_OK)
+            if not checks["restart_helper"]:
+                warnings.append(
+                    f"{helper} missing/not executable — the Update button can pull but "
+                    f"never RESTART (would leave a stale process).")
+
+            legacy = _detect_legacy_leaf()
+            if legacy:
+                checks["legacy_leaf"] = legacy
+                warnings.append(
+                    f"legacy generic-agent unit(s) present: {', '.join(legacy)} — "
+                    f"crash-looping zombie; retire it (install_all.sh now purges it, "
+                    f"or: systemctl disable --now <unit> && rm the unit file).")
+        except Exception as e:  # noqa: BLE001 — health check must never raise
+            warnings.append(f"update health check error: {e}")
+        return {"ok": not warnings, "checks": checks, "warnings": warnings}
 
     async def _download_update(self, hub_root: str, repo_url: str, branch: str) -> bool:
         """

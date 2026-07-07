@@ -167,6 +167,18 @@ class RepoSyncMixin:
             logger.warning("[sync-error] repo_sync perform_update failed: %s", e)
             hub_result = {"status": "error", "message": str(e)[:300]}
 
+        # ── Update-path self-diagnosis ─────────────────────────────────────
+        # Verify the hub's OWN git/update machinery is functional so a broken
+        # updater is LOUD, not silent (the failure mode behind a hub quietly
+        # serving stale code). Each warning → [sync-error] so it lands in the
+        # hub error log + GET_ERROR_LOGS (bugfixer) and the repo-sync status.
+        try:
+            update_health = await self.check_update_health()
+        except Exception as e:  # noqa: BLE001 — never fatal to the loop
+            update_health = {"ok": False, "checks": {}, "warnings": [f"health check crashed: {e}"]}
+        for w in update_health.get("warnings", []):
+            logger.warning("[sync-error] update-health: %s", w)
+
         ok_count = sum(1 for r in repo_results if r.get("status") == "ok")
         err_count = sum(1 for r in repo_results if r.get("status") == "error")
         skip_count = sum(1 for r in repo_results if r.get("status") == "skipped")
@@ -174,17 +186,20 @@ class RepoSyncMixin:
         hub_status = str(hub_result.get("status") or "")
         message = (f"hub={hub_status}; provisioning_repos: {ok_count} ok, "
                    f"{err_count} error, {skip_count} skipped"
-                   + (f"; changed: {', '.join(changed)}" if changed else ""))
+                   + (f"; changed: {', '.join(changed)}" if changed else "")
+                   + ("" if update_health.get("ok") else
+                      f"; update-health: {len(update_health.get('warnings', []))} warning(s)"))
 
         # Hub-authoritative sync log: errors → [sync-error] WARNING so the
         # cause lands in the hub log + GET_ERROR_LOGS (bugfixer).
-        if err_count or hub_status == "error":
+        if err_count or hub_status == "error" or not update_health.get("ok"):
             logger.warning("[sync-error] repo_sync — %s", message)
         else:
             logger.info("repo_sync: %s", message)
 
         status = {"last_sync_ts": now, "hub": hub_result,
-                  "provisioning_repos": repo_results, "message": message}
+                  "provisioning_repos": repo_results, "message": message,
+                  "update_health": update_health}
         try:
             await self.simulations_store.set_repo_sync_status(status)
         except Exception as e:  # noqa: BLE001 — store failure must not kill the loop
