@@ -990,7 +990,16 @@ async function csRenderClients(tier) {
       <select id="cs-client-status" onchange="csClientFilter()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
       </select>`);
-    const data = await csFetch(`/aggregate/clients?tenant_id=${csTenant()}`);
+    // Initial load: fan out the clients fetch and the demo card together.
+    // /aggregate/clients is a fast hub cache read, but csDemoCard() does two
+    // relay round-trips to the spoke (/demo/active + /demo/scenarios) — running
+    // them serially after the cache read made the page feel slow on first
+    // access. Parallelizing cuts initial paint to max(fast read, relay) instead
+    // of their sum.
+    const [data, demoCard] = await Promise.all([
+        csFetch(`/aggregate/clients?tenant_id=${csTenant()}`),
+        csDemoCard(),
+    ]);
     const rows = csNormalizeClients(data);
     csClientCache = rows;
     const all = rows.length;
@@ -999,7 +1008,6 @@ async function csRenderClients(tier) {
     const t3 = rows.filter(c => csClassifyClient(c) === 't3').length;
     const online = rows.filter(c => c.online).length;
     const pills = csSummaryRow([[all, 'Clients'], [t1, 'T1'], [t2, 'T2'], [t3, 'T3'], [online, 'Online']]);
-    const demoCard = await csDemoCard();
     // Kill switch moved to the All/T1/T2 child strip (renderSecondaryNav →
     // csKillSwitchMountChip), pinned far right — no longer a content banner here.
     csSet(`<div class="space-y-4">${demoCard}${pills}<div id="cs-client-body"></div></div>`);
