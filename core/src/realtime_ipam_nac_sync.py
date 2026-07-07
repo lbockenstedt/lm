@@ -346,7 +346,8 @@ class RealtimeIpamNacSyncMixin:
         while True:
             try:
                 cfg = self._rt_nac_cfg()
-                nac_up = bool(self._rt_nac_spoke())
+                nac = self._rt_nac_spoke()
+                nac_up = bool(nac) and nac not in self._nac_unconfigured_spokes
                 ipam_up = bool(self._rt_ipam_spoke())
                 if cfg.get("enabled", False) and nac_up and ipam_up:
                     await self.run_realtime_nac_sync_all()

@@ -132,15 +132,23 @@ class DnsDhcpSyncMixin:
         nb = self.get_spoke_by_type("ipam")
         if not nb:
             raise RuntimeError("NetBox spoke not connected")
-        return _unwrap(await self.request_response(nb, "NETBOX_GET_IPS", {}))
+        # NETBOX_GET_IPS paginates the full IP set (up to 100k records via
+        # _api_get_all) and is serialized through the engine's HTTP semaphore
+        # alongside any concurrent NETBOX_GET_PREFIXES (see
+        # _netbox_prefixes_and_ips). The bare 5.0s request_response default
+        # routinely fires on any non-trivial fleet → the recurring
+        # "Request Timeout from lm-svcs-netbox after 5.0s" in the hub log. The
+        # other IPAM read loops (endpoint_sync/vm_sync/staleness_sweep/...) all
+        # pass 30s+; this loop was the lone outlier. 30s matches them.
+        return _unwrap(await self.request_response(nb, "NETBOX_GET_IPS", {}, timeout=30.0))
 
     async def _netbox_prefixes_and_ips(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         nb = self.get_spoke_by_type("ipam")
         if not nb:
             raise RuntimeError("NetBox spoke not connected")
         pfx_raw, ips_raw = await asyncio.gather(
-            self.request_response(nb, "NETBOX_GET_PREFIXES", {}),
-            self.request_response(nb, "NETBOX_GET_IPS", {}),
+            self.request_response(nb, "NETBOX_GET_PREFIXES", {}, timeout=30.0),
+            self.request_response(nb, "NETBOX_GET_IPS", {}, timeout=30.0),
         )
         return _unwrap(pfx_raw), _unwrap(ips_raw)
 

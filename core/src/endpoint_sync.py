@@ -172,7 +172,7 @@ class EndpointSyncMixin:
         se = self._endpoint_sync_source()
         ipam = self.get_spoke_by_type(se.get("module_type", "ipam"))
         nac = self.get_spoke_by_type("nac")
-        if not ipam or not nac:
+        if not ipam or not nac or nac in self._nac_unconfigured_spokes:
             logger.info("endpoint sync tenant=%s(%s) SKIP tenant: %s or CPPM spoke not connected "
                         "(ipam=%r nac=%r)", tenant_id, tenant_name, se.get('label', 'IPAM'),
                         bool(ipam), bool(nac))
@@ -288,7 +288,8 @@ class EndpointSyncMixin:
         """
         if not self._endpoint_sync_cfg().get("enabled", False):
             return
-        if not self.get_spoke_by_type("nac"):
+        nac = self.get_spoke_by_type("nac")
+        if not nac or nac in self._nac_unconfigured_spokes:
             return
         try:
             asyncio.create_task(self.sync_tenant_endpoints(tenant_id))
@@ -309,9 +310,10 @@ class EndpointSyncMixin:
             try:
                 cfg = self._endpoint_sync_cfg()
                 se = self._endpoint_sync_source()
+                nac = self.get_spoke_by_type("nac")
                 if cfg.get("enabled", False) and \
                         self.get_spoke_by_type(se.get("module_type", "ipam")) and \
-                        self.get_spoke_by_type("nac"):
+                        nac and nac not in self._nac_unconfigured_spokes:
                     # Fan tenants out concurrently with a bounded semaphore.
                     # Sequential await at hundreds of tenants × (30s IPAM + 60s
                     # CPPM) per tenant made a full cycle take longer than the

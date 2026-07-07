@@ -445,10 +445,18 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
         elif module_key == "cppm_sessions":
             spoke = hub.get_spoke_by_type("nac")
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
+            # Skip the query while the spoke is connected-but-unconfigured — the
+            # spoke would just return "CPPM host not configured" every cycle.
+            # push_config_to_spoke sets this flag once (one WARN) when no host is
+            # bound; clears it the moment a usable instance is pushed.
+            if spoke in hub._nac_unconfigured_spokes:
+                _set_cache_status(tenant_id, cache_key, "error"); return False
             result = await hub.request_response(spoke, "CPPM_GET_ACCESS_TRACKER", {})
         elif module_key == "cppm_devices":
             spoke = hub.get_spoke_by_type("nac")
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
+            if spoke in hub._nac_unconfigured_spokes:
+                _set_cache_status(tenant_id, cache_key, "error"); return False
             result = await hub.request_response(spoke, "LIST_ENDPOINTS", {})
         elif module_key in ("netbox_racks", "netbox_devices", "netbox_ips", "netbox_prefixes"):
             spoke = hub.get_spoke_by_type("ipam")
@@ -460,7 +468,12 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
                 "netbox_ips":      "NETBOX_GET_IPS",
                 "netbox_prefixes": "NETBOX_GET_PREFIXES",
             }[module_key]
-            result = await hub.request_response(spoke, cmd, {"tenant": slug} if slug else {})
+            # 30s, not the 5.0s default: the netbox paginated GETs
+            # (NETBOX_GET_IPS/PREFIXES/DEVICES/RACKS) routinely exceed 5s on a
+            # real fleet and the bare default produced recurring
+            # "Request Timeout from lm-svcs-netbox after 5.0s" on cache refresh.
+            # Matches dns_dhcp_sync / endpoint_sync / vm_sync's 30s budget.
+            result = await hub.request_response(spoke, cmd, {"tenant": slug} if slug else {}, timeout=30.0)
         elif module_key == "pxmx_vms":
             spoke = hub.get_hypervisor_spoke()
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False

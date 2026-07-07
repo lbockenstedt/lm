@@ -513,6 +513,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # (or a reconnect that's still broken) emits a fresh ERROR rather than
         # silently suppressing it after the first one.
         self._unauth_warned_spokes: Set[str] = set()
+        # NAC (CPPM) spokes that are CONNECTED but UNCONFIGURED — i.e. no
+        # nac_instances entry is bound to this spoke (or the bound instance has
+        # no 'host'), so push_config_to_spoke never delivered an UPDATE_CONFIG
+        # with a usable host and the spoke's CPPMClient.host stays "". Querying
+        # it every cycle returns "CPPM host not configured" forever, which the
+        # endpoint_sync / realtime_ipam_nac_sync / cache_refresh loops would
+        # otherwise spam into the hub log every cycle. Set in
+        # push_config_to_spoke (the single point the gap is detectable); cleared
+        # when a host-bearing config is pushed; read by the three nac query
+        # loops to skip the spoke — one WARN at push time, not per-cycle INFO.
+        self._nac_unconfigured_spokes: Set[str] = set()
         # { spoke_id: ConnectionTelemetry }
         self.spoke_telemetry: Dict[str, Dict[str, Any]] = {}
         # { spoke_id: TokenBucket } for rate limiting non-heartbeat messages
@@ -1144,6 +1155,33 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     config = gc.get(module_key, {})
             else:
                 config = self.state.get_global_config().get(module_key, {})
+
+            # NAC/CPPM config-delivery gate. A connected-but-unconfigured CPPM
+            # spoke (CPPMClient.host == "") returns "CPPM host not configured"
+            # for EVERY query, and the three nac query loops would spam that
+            # into the hub log every cycle. The gap is detectable right here —
+            # the resolved instance has no usable 'host' (or no instance is
+            # bound at all) — so mark the spoke unconfigured so those loops skip
+            # it (one WARN here, not per-cycle INFO) and skip pushing a hostless
+            # UPDATE_CONFIG (which would only keep the spoke returning the same
+            # error). Clear the flag only when a host-bearing config is pushed.
+            if module_key == "cppm":
+                cppm_host = (config or {}).get("host") if isinstance(config, dict) else None
+                if not cppm_host:
+                    if spoke_id not in self._nac_unconfigured_spokes:
+                        logger.warning(
+                            "CPPM not configured for %s — no nac_instances entry "
+                            "bound to this spoke, or the bound instance has no "
+                            "'host'. NAC queries (endpoint sync, realtime NAC, "
+                            "dashboard cache) will be skipped until an instance "
+                            "with a host is bound in Setup → CPPM/NAC.",
+                            spoke_id)
+                        self._nac_unconfigured_spokes.add(spoke_id)
+                    return  # nothing useful to push — hostless config would keep
+                            # the spoke returning "CPPM host not configured"
+                # A usable host is available — clear any prior unconfigured flag
+                # so the query loops resume on the next cycle.
+                self._nac_unconfigured_spokes.discard(spoke_id)
 
             if not config:
                 return

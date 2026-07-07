@@ -335,7 +335,7 @@ async def fetch_tenant_prefixes(hub, tenant_id) -> list:
     if not spoke_id:
         return []
     try:
-        result = await hub.request_response(spoke_id, "NETBOX_GET_PREFIXES", {"tenant": nb_slug})
+        result = await hub.request_response(spoke_id, "NETBOX_GET_PREFIXES", {"tenant": nb_slug}, timeout=30.0)
         data = unwrap_spoke(result)
         return [p["prefix"] for p in (data.get("prefixes", []) if isinstance(data, dict) else []) if p.get("prefix")]
     except Exception as e:
