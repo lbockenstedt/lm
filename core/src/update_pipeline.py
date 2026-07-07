@@ -532,6 +532,7 @@ class UpdatePipelineMixin:
         self.state.save_state()
 
         hub_updated = False
+        update_failed = False  # update was available + attempted, but did NOT apply
         if update_available:
             try:
                 hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
@@ -600,6 +601,7 @@ class UpdatePipelineMixin:
                         # Pull failed — local code is unchanged, so there is
                         # nothing to roll back to. Drop the pending manifest.
                         clear_pending()
+                        update_failed = True
                         logger.warning(
                             f"Hub update did NOT succeed. Local version remains {local_v} "
                             f"(target: {remote_v}). Will retry on next cycle."
@@ -607,6 +609,7 @@ class UpdatePipelineMixin:
             except Exception as e:
                 logger.error(f"Unexpected error during Hub update: {e}", exc_info=True)
                 hub_updated = False
+                update_failed = True
                 clear_pending()
         else:
             logger.info("Hub is already up to date. Skipping Hub pull.")
@@ -709,6 +712,17 @@ class UpdatePipelineMixin:
                 logger.warning(f"Could not schedule hub self-restart: {_e}")
             return {"status": "success", "message": f"Updated Hub to {remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."}
 
+        if update_failed:
+            # An update WAS available and we tried to apply it, but the code did
+            # not change (git/download failed, or the merge couldn't be verified).
+            # Do NOT report success — return "error" so the route maps it to HTTP
+            # 500 and the button surfaces the failure, instead of the old
+            # "Hub is current" message that made every failed update look like a
+            # no-op success (the reason a stale hub could sit un-updated silently).
+            return {"status": "error",
+                    "message": (f"Hub update FAILED — still at {local_v}, target was {remote_v}. "
+                                f"Check hub logs (update_pipeline). "
+                                f"{len(update_results)} spoke update(s) attempted.")}
         return {"status": "checked", "message": f"Update successful. Hub is current at {local_v}. {len(update_results)} spoke(s) updating to latest."}
 
     async def update_spokes_only(self):

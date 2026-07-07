@@ -618,25 +618,32 @@ if [ "$REINSTALL" = false ]; then
     snapshot_hub_code "$_FROM_V" "$_TO_V"
 fi
 
+# Keep $BASE_DIR as a real GIT CHECKOUT (do NOT discard the clone's .git). This
+# is what lets the WebUI "Update" button + the 15-min auto-update loop use the
+# verified git-pull path (update_pipeline._is_git_repo → _git_update, which
+# checks the HEAD actually advanced) instead of the fragile download/tarball
+# fallback that reports success even when nothing changed. Relocate the clone's
+# .git into $BASE_DIR and let git materialize the whole tracked tree in place
+# (core/, WebUI/, dns/, dhcp/, root scripts, VERSION, docs). Untracked paths
+# (cs/, pxmx/, venv/, .env, certs/, data/) are left untouched by reset --hard.
 rm -rf "$BASE_DIR/core" "$BASE_DIR/WebUI" "$BASE_DIR/dns" "$BASE_DIR/dhcp"
-mv lm_tmp/core "$BASE_DIR/core"
-mv lm_tmp/WebUI "$BASE_DIR/WebUI"
-[[ -d lm_tmp/dns ]]  && mv lm_tmp/dns  "$BASE_DIR/dns"
-[[ -d lm_tmp/dhcp ]] && mv lm_tmp/dhcp "$BASE_DIR/dhcp"
+rm -rf "$BASE_DIR/.git"
+mv lm_tmp/.git "$BASE_DIR/.git"
+rm -rf lm_tmp
+git config --global --add safe.directory "$BASE_DIR" 2>/dev/null || true
+if ( cd "$BASE_DIR" && git reset --hard HEAD ); then
+    log_c "✅ Hub laid down as a git checkout (Update button + auto-update will use git pull)."
+else
+    log_e "git checkout of the hub tree failed — hub may not be updatable via the button."
+fi
 
-# Restore data directory
+# Restore data directory (core/data is not tracked; the rm -rf core above
+# removed it, so restore the pre-update copy).
 if [ -d "$DATA_BACKUP_DIR" ]; then
     log "Restoring preserved data directory..."
     rm -rf "$BASE_DIR/core/data"
     mv "$DATA_BACKUP_DIR" "$BASE_DIR/core/data"
 fi
-
-# Spread any remaining top-level files (sync_secrets.sh, verify_auth.sh,
-# VERSION, *.md, etc.) from the clone into $BASE_DIR. Optional: the core
-# install only needs core/ + WebUI/ (already moved above), so a failure here
-# (e.g. no extra files present) is safe to ignore — safe to ignore.
-cp -r lm_tmp/* "$BASE_DIR/" 2>/dev/null || true
-rm -rf lm_tmp
 
 # Sync other spokes
 # NOTE: this loop MUST respect --exclude. The per-module installer that
