@@ -1907,7 +1907,28 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         the timeout — check the hub log for the warning below and the spoke log
         for the CentralPoller test_connection entry."""
         out = []
-        for sid, data in _tenant_cache(tenant_id).items():
+        cache = _tenant_cache(tenant_id)
+        # Registered Client-Sim spokes for this tenant (approved + bound, or
+        # unassigned → claimable), looked up from module_metadata INDEPENDENT of
+        # the CS_TELEMETRY cache. A stalled/flapping spoke that stopped relaying
+        # telemetry drops out of `cache` but stays registered — without this
+        # union the route returns an empty spokes list and the UI shows "No
+        # spokes reporting central state" instead of a per-spoke "Spoke
+        # unreachable" row that actually names the culprit spoke.
+        md = hub.state.system_state.get("module_metadata", {}) or {}
+        cs_types = {"Client-Sim", "simulation"}
+        reg_sids = []
+        for sid, meta in md.items():
+            if not isinstance(meta, dict) or meta.get("module_type") not in cs_types:
+                continue
+            if not getattr(hub, "approved_modules", {}).get(sid, False):
+                continue
+            tid = meta.get("tenant_id")
+            if tid == tenant_id or not tid:
+                reg_sids.append(sid)
+        all_sids = list(dict.fromkeys(list(cache.keys()) + reg_sids))
+        for sid in all_sids:
+            data = cache.get(sid, {})
             cached_central = data.get("central") or {}
             live_entry: dict | None = None
             try:
@@ -1927,7 +1948,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             "status": live_entry.get("status")})
             else:
                 # Spoke unreachable (stalled/disconnected) — surface cached
-                # relayed state so the UI renders a row, not a 502.
+                # relayed state so the UI renders a row, not a 502. A registered
+                # spoke with no cached telemetry (never relayed / evicted) shows
+                # "Spoke unreachable — see hub log." so the operator knows WHICH
+                # spoke is the culprit instead of a generic "No spokes reporting".
                 out.append({"spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
                             "token_state": cached_central.get("token_state"),
                             "token_valid": cached_central.get("token_valid"),

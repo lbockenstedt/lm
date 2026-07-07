@@ -10854,6 +10854,13 @@ async function loadDHCPData(subMenu) {
             }
             const g = d.global || {};
             const subnets = d.subnets || [];
+            // Kea CA not running on this spoke → the spoke returns a SUCCESS
+            // idle result (kea_running:false + note) instead of an ERROR, so
+            // show a neutral info banner rather than the red "Error: Kea CA
+            // unreachable …" the stats-ERROR path used to render. Empty stats
+            // tiles + "No subnets configured." follow naturally below.
+            const idleNote = (d.kea_running === false && d.note)
+                ? `<div class="mb-4 p-3 rounded-lg bg-slate-50 border border-slate-200 text-sm text-slate-500">${escapeHtml(d.note)}</div>` : '';
             const syncLine = await _ddSyncStatusLine('dhcp');
             const tiles = [
                 _ddTile('Pool Utilization', `${g.utilization_pct || 0}%`, `${(g.assigned_addresses || 0).toLocaleString()} / ${(g.total_addresses || 0).toLocaleString()} addresses`,
@@ -10871,6 +10878,7 @@ async function loadDHCPData(subMenu) {
                     ${_ddBar(s.utilization_pct)}
                 </div>`).join('');
             container.innerHTML = `
+                ${idleNote}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
                 <div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Scope Utilization</div>
