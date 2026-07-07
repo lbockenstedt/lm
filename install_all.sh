@@ -681,6 +681,13 @@ if ( cd "$BASE_DIR" && git reset --hard HEAD ); then
 else
     log_e "git checkout of the hub tree failed — hub may not be updatable via the button."
 fi
+# The git ops above ran as root, so .git/objects + the tree are root-owned. The
+# hub runs as $SvcUser and the Update button / auto-update do `git pull` as that
+# user — root-owned .git/objects → "insufficient permission for adding an object"
+# and every update fails silently. Hand the checkout back to $SvcUser and make it
+# trust the dir (the safe.directory add above went into ROOT's gitconfig).
+chown -R "$SvcUser:$SvcUser" "$BASE_DIR/.git" 2>/dev/null || true
+runuser -u "$SvcUser" -- git config --global --add safe.directory "$BASE_DIR" 2>/dev/null || true
 
 # Restore data directory (core/data is not tracked; the rm -rf core above
 # removed it, so restore the pre-update copy).
