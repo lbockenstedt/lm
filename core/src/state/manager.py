@@ -73,6 +73,18 @@ class StateManager:
             "active_sessions": {},
             "active_tenant": "default",
             "users": {},
+            # Named permission GROUPS (RBAC). Keyed by group_id. Each:
+            #   { "name": str, "description": str,
+            #     "permissions": { <right-key>: bool, ... },   # same keys as a
+            #                                                   # user's permissions
+            #     "ldap_group": str,   # optional DN/cn for phase-2 LDAP linkage
+            #     "protected": bool, "updated_at": float }
+            # A user's effective permissions = union of the permissions of every
+            # group in user["groups"] OR'd with the user's own per-user
+            # permissions overrides (resolve_effective_permissions in access.py).
+            # _merge_defaults back-fills this on existing encrypted state with no
+            # migration.
+            "permission_groups": {},
             # Per-Proxmox-agent config (unified agent). Shape:
             #   { agent_id: { display_name: str,
             #                 client_simulation: { enabled: bool, tenant_id: str|None, usb_config: {} } } }

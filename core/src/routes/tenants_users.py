@@ -3,6 +3,7 @@ from api import (
     HTTPException, Request, _hash_password, _hub_msg, _unwrap_spoke, get_tenant_scoping,
     logger, time,
 )
+from access import ENFORCED_RIGHTS, resolve_effective_permissions
 
 
 def register(app, hub, ctx):
@@ -336,8 +337,15 @@ def register(app, hub, ctx):
     async def get_users():
         hub = app.state.hub
         raw = hub.state.system_state.get("users", {})
-        # Strip password hashes before returning
-        safe = {uid: {k: v for k, v in u.items() if k != "password_hash"} for uid, u in raw.items()}
+        # Strip password hashes; surface the RBAC-resolved effective permissions
+        # (group + per-user union) alongside the stored per-user overrides so the
+        # UI can show what a user actually gets vs. what's set directly on them.
+        safe = {}
+        for uid, u in raw.items():
+            rec = {k: v for k, v in u.items() if k != "password_hash"}
+            rec["groups"] = u.get("groups", [])
+            rec["effective_permissions"] = resolve_effective_permissions(hub, u)
+            safe[uid] = rec
         return {"users": safe}
 
     @app.post("/setup/users")
@@ -350,6 +358,7 @@ def register(app, hub, ctx):
             password = data.get("password", "")
             auth_type = data.get("auth_type", "local")
             tenant_id = data.get("tenant_id")
+            groups = data.get("groups")  # None = leave unchanged; list = replace
 
             if not user_id:
                 raise HTTPException(status_code=400, detail="Missing user_id")
@@ -384,6 +393,14 @@ def register(app, hub, ctx):
                 "auth_type": auth_type,
                 "updated_at": time.time(),
             }
+            # Group membership (RBAC). Only touched when the caller sends a
+            # `groups` list, so older edit payloads that omit it don't wipe it.
+            # Protected accounts stay admin regardless, so groups are moot there.
+            if groups is not None and not existing.get("protected"):
+                if not isinstance(groups, list):
+                    raise HTTPException(status_code=400, detail="groups must be a list")
+                valid = hub.state.system_state.get("permission_groups", {})
+                entry["groups"] = [g for g in groups if g in valid]
             if password:
                 entry["password_hash"] = _hash_password(password)
             if tenant_id:
@@ -418,4 +435,96 @@ def register(app, hub, ctx):
             raise
         except Exception as e:
             logger.exception("set_user_password failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Permission groups (RBAC) ────────────────────────────────────────────
+    # All /setup/* is admin-only via the access-control middleware, so these
+    # need no extra gate. A group bundles the same right-keys a user carries;
+    # a user's effective perms = union(their groups) OR per-user overrides.
+
+    def _slug_group_id(name: str) -> str:
+        """Derive a stable id from a group name (lowercase, non-alnum→-)."""
+        import re
+        base = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+        return base or "group"
+
+    @app.get("/setup/groups")
+    async def get_groups():
+        hub = app.state.hub
+        groups = hub.state.system_state.get("permission_groups", {})
+        # Report membership counts so the UI can warn before deleting a group
+        # that still has members.
+        users = hub.state.system_state.get("users", {})
+        counts = {}
+        for u in users.values():
+            for gid in u.get("groups", []) or []:
+                counts[gid] = counts.get(gid, 0) + 1
+        enriched = {gid: {**g, "member_count": counts.get(gid, 0)}
+                    for gid, g in groups.items()}
+        return {"groups": enriched, "enforced_rights": list(ENFORCED_RIGHTS)}
+
+    @app.post("/setup/groups")
+    async def upsert_group(request: Request):
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            group_id = (data.get("group_id") or "").strip()
+            name = (data.get("name") or "").strip()
+            if not name and not group_id:
+                raise HTTPException(status_code=400, detail="Group name required")
+            groups = hub.state.system_state.setdefault("permission_groups", {})
+            # New group → derive an id from the name (avoid clobbering an
+            # existing id); edit → the client sends the existing group_id.
+            if not group_id:
+                group_id = _slug_group_id(name)
+                if group_id in groups:
+                    n = 2
+                    while f"{group_id}-{n}" in groups:
+                        n += 1
+                    group_id = f"{group_id}-{n}"
+            existing = groups.get(group_id, {})
+            # Only persist recognised right-keys (+ admin) so a group can't smuggle
+            # an arbitrary/unknown flag into a user's effective permissions.
+            raw_perms = data.get("permissions", {}) or {}
+            allowed = set(ENFORCED_RIGHTS) | {"admin"}
+            perms = {k: True for k, v in raw_perms.items() if v and k in allowed}
+            if perms.get("admin"):
+                perms["role"] = "admin"
+            groups[group_id] = {
+                **existing,
+                "name": name or existing.get("name", group_id),
+                "description": data.get("description", existing.get("description", "")),
+                "permissions": perms,
+                "ldap_group": (data.get("ldap_group") or existing.get("ldap_group", "")).strip(),
+                "updated_at": time.time(),
+            }
+            hub.state.save_state()
+            return {"status": "ok", "group_id": group_id}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("upsert_group failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/setup/groups/{group_id}")
+    async def delete_group(group_id: str):
+        hub = app.state.hub
+        try:
+            groups = hub.state.system_state.setdefault("permission_groups", {})
+            if group_id not in groups:
+                raise HTTPException(status_code=404, detail="Group not found")
+            if groups[group_id].get("protected"):
+                raise HTTPException(status_code=403, detail="Group is protected")
+            # Detach the group from every member so no user keeps a dangling id.
+            users = hub.state.system_state.get("users", {})
+            for u in users.values():
+                if group_id in (u.get("groups", []) or []):
+                    u["groups"] = [g for g in u["groups"] if g != group_id]
+            del groups[group_id]
+            hub.state.save_state()
+            return {"status": "ok"}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("delete_group failed")
             raise HTTPException(status_code=500, detail=str(e))

@@ -4,6 +4,7 @@ from api import (
     _sessions, _start_cache_for_tenant, _stop_cache_for_tenant, _verify_password,
     get_netbox_spoke, get_tenant_scoping, logger, secrets, time,
 )
+from access import resolve_effective_permissions
 
 
 def register(app, hub, ctx):
@@ -36,8 +37,9 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=401, detail="Invalid credentials")
             if not _verify_password(password, user["password_hash"]):
                 raise HTTPException(status_code=401, detail="Invalid credentials")
-            # Always read the live record so migrations/admin changes take effect on next login
-            perms   = user.get("permissions", {})
+            # Always read the live record so migrations/admin changes take effect on next login.
+            # Effective perms = group-derived rights unioned with per-user overrides (RBAC).
+            perms   = resolve_effective_permissions(hub, user)
             tenants = user.get("tenants", [])
             protected = user.get("protected", False)
             # Protected accounts have no tenant assignment regardless of stored value
@@ -96,9 +98,13 @@ def register(app, hub, ctx):
         # without requiring a logout/login cycle.
         user_id = sess.get("user_id") or sess["user"].get("user_id")
         live = hub.state.system_state.get("users", {}).get(user_id, {})
+        # Re-derive effective (group + per-user) perms live so group membership
+        # or group-permission edits take effect without a re-login.
+        _eff_perms = (resolve_effective_permissions(hub, live) if live
+                      else sess["user"].get("permissions", {}))
         merged = {
             **sess["user"],
-            "permissions": live.get("permissions", sess["user"].get("permissions", {})),
+            "permissions": _eff_perms,
             "tenants":     live.get("tenants",     sess["user"].get("tenants", [])),
             "tenant_id":   live.get("tenants", [sess["user"].get("tenant_id")])[0]
                            if live.get("tenants") else None,

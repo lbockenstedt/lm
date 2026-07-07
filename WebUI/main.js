@@ -3048,12 +3048,27 @@ function _renderSetupUserAccessTile(content) {
                 </div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">User ID</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">HV</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">NAC</th><th class="px-4 py-3 text-center">NW</th><th class="px-4 py-3 text-center">IPAM</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3 text-center">CON</th><th class="px-4 py-3 text-center">CW</th><th class="px-4 py-3"></th></tr></thead>
-                        <tbody id="user-permissions-body" class="divide-y divide-slate-200"><tr><td colspan="14" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading users…</td></tr></tbody>
+                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">User ID</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3">Groups</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">HV</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">NAC</th><th class="px-4 py-3 text-center">NW</th><th class="px-4 py-3 text-center">IPAM</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3 text-center">CON</th><th class="px-4 py-3 text-center">CW</th><th class="px-4 py-3"></th></tr></thead>
+                        <tbody id="user-permissions-body" class="divide-y divide-slate-200"><tr><td colspan="17" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading users…</td></tr></tbody>
+                    </table>
+                </div>
+                <p class="text-[11px] text-slate-400 mt-2">Check-marks show <em>effective</em> access (permission groups ∪ per-user grants). Manage bundles below.</p>
+            </div>
+            <div class="${card} mt-4">
+                <div class="flex justify-between items-center">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Permission Groups</h3>
+                    <button onclick="showGroupModal()" class="${btnCls}">+ New Group</button>
+                </div>
+                <p class="text-[11px] text-slate-400 mb-2">A group bundles module permissions; assign users to groups instead of setting each flag per user. Optionally map an LDAP group for directory-driven access.</p>
+                <div class="overflow-hidden rounded-md border border-slate-200">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">Group</th><th class="px-4 py-3">Permissions</th><th class="px-4 py-3">LDAP Group</th><th class="px-4 py-3 text-center">Members</th><th class="px-4 py-3"></th></tr></thead>
+                        <tbody id="permission-groups-body" class="divide-y divide-slate-200"><tr><td colspan="5" class="px-4 py-6 text-center text-slate-400 italic animate-pulse">Loading groups…</td></tr></tbody>
                     </table>
                 </div>
             </div>`;
     loadUsers();
+    loadGroups();
 }
 
 // Setup → Firewalls tile. GET /api/firewalls (core/src/api.py get_firewalls).
@@ -6363,12 +6378,17 @@ async function loadUsers() {
         const users = data.users || {};
 
         if (Object.keys(users).length === 0) {
-            bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-400 italic"><td colspan="16">No users configured.</td></tr>`;
+            bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-400 italic"><td colspan="17">No users configured.</td></tr>`;
             return;
         }
 
+        // Cache group id→name for the Groups column badges.
+        window._permGroupNames = window._permGroupNames || {};
         bodyEl.innerHTML = Object.entries(users).map(([userId, user]) => {
-            const perms = user.permissions || {};
+            // Show EFFECTIVE access (groups ∪ per-user) so the table reflects
+            // what the user actually gets; fall back to per-user perms if the
+            // backend predates RBAC enrichment.
+            const perms = user.effective_permissions || user.permissions || {};
             // Admin is stored in two equivalent forms (permissions.admin boolean
             // and permissions.role == "admin"); honor both so a role-only admin
             // (e.g. the first-run bootstrap admin) renders as checked.
@@ -6384,6 +6404,9 @@ async function loadUsers() {
             const tenantBadges = (user.tenants || []).map(t =>
                 `<span class="text-[10px] bg-green-50 text-green-700 border border-green-200 px-1.5 py-0.5 rounded font-mono cursor-pointer hover:bg-green-100" onclick="viewAsTenant('${t}')">${t}</span>`
             ).join(' ') || '<span class="text-[10px] text-slate-300 italic">none</span>';
+            const groupBadges = (user.groups || []).map(g =>
+                `<span class="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-200 px-1.5 py-0.5 rounded font-medium">${window._permGroupNames[g] || g}</span>`
+            ).join(' ') || '<span class="text-[10px] text-slate-300 italic">none</span>';
 
             const isProtected = !!user.protected;
             const lockIcon = `<svg class="w-3 h-3 inline-block text-slate-400 ml-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/></svg>`;
@@ -6397,6 +6420,7 @@ async function loadUsers() {
                     <td class="px-4 py-3 font-mono text-xs font-medium text-slate-700">${userId}${isProtected ? lockIcon : ''}</td>
                     <td class="px-4 py-3">${authBadge}</td>
                     <td class="px-4 py-3 max-w-[140px]"><div class="flex flex-wrap gap-1">${tenantBadges}</div></td>
+                    <td class="px-4 py-3 max-w-[140px]"><div class="flex flex-wrap gap-1">${groupBadges}</div></td>
                     <td class="px-4 py-3 text-center">${adminCell}</td>
                     <td class="px-4 py-3 text-center">${check('view')}</td>
                     <td class="px-4 py-3 text-center">${check('edit')}</td>
@@ -6432,6 +6456,187 @@ async function deleteUser(userId) {
     } catch (err) {
         alert('Error deleting user: ' + err.message);
     }
+}
+
+// ── Permission Groups (RBAC) ───────────────────────────────────────────────
+// Right-key → display label for the group editor + user-assignment checklists.
+// Kept in sync with access.ENFORCED_RIGHTS on the backend.
+const _RBAC_RIGHT_LABELS = {
+    admin: 'System Admin',
+    cs: 'Simulations',
+    nw: 'Network Devices',
+    ipam: 'IPAM',
+    le: 'Certificates',
+    console: 'Console',
+    console_write: 'Console Write',
+};
+
+async function loadGroups() {
+    const bodyEl = document.getElementById('permission-groups-body');
+    try {
+        const resp = await setupFetch('/setup/groups');
+        if (!resp.ok) throw new Error('Failed to fetch groups');
+        const data = await resp.json();
+        const groups = data.groups || {};
+        // Cache for the users table Groups column + the modal checklists.
+        window._permGroups = groups;
+        window._permGroupNames = Object.fromEntries(
+            Object.entries(groups).map(([gid, g]) => [gid, g.name || gid]));
+        if (!bodyEl) return;
+        if (Object.keys(groups).length === 0) {
+            bodyEl.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-slate-400 italic">No groups yet — create one to bundle module access.</td></tr>`;
+            return;
+        }
+        bodyEl.innerHTML = Object.entries(groups).map(([gid, g]) => {
+            const perms = g.permissions || {};
+            const isAdmin = perms.admin === true || perms.role === 'admin';
+            const permBadges = isAdmin
+                ? `<span class="text-[10px] bg-amber-100 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded font-bold">System Admin</span>`
+                : (Object.keys(perms).filter(k => k !== 'role' && perms[k]).map(k =>
+                    `<span class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">${_RBAC_RIGHT_LABELS[k] || k}</span>`
+                  ).join(' ') || '<span class="text-[10px] text-slate-300 italic">none</span>');
+            const ldap = g.ldap_group
+                ? `<span class="font-mono text-xs text-blue-600">${g.ldap_group}</span>`
+                : '<span class="text-[10px] text-slate-300 italic">—</span>';
+            return `
+                <tr class="hover:bg-slate-50 transition-colors">
+                    <td class="px-4 py-3"><div class="font-medium text-slate-700 text-sm">${g.name || gid}</div><div class="text-[11px] text-slate-400">${g.description || ''}</div></td>
+                    <td class="px-4 py-3"><div class="flex flex-wrap gap-1">${permBadges}</div></td>
+                    <td class="px-4 py-3">${ldap}</td>
+                    <td class="px-4 py-3 text-center text-slate-600">${g.member_count || 0}</td>
+                    <td class="px-4 py-3 text-right whitespace-nowrap">
+                        <button onclick="showGroupModal('${gid}')" class="text-blue-400 hover:text-blue-600 text-xs font-bold mr-3">Edit</button>
+                        <button onclick="deleteGroup('${gid}')" class="text-red-400 hover:text-red-600 text-xs font-bold">Delete</button>
+                    </td>
+                </tr>`;
+        }).join('');
+    } catch (err) {
+        console.error('Error loading groups:', err);
+        if (bodyEl) bodyEl.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-red-500 text-xs">Error loading groups: ${err.message}</td></tr>`;
+    }
+}
+
+function showGroupModal(groupId) {
+    const groups = window._permGroups || {};
+    const g = groupId ? (groups[groupId] || {}) : {};
+    const perms = g.permissions || {};
+    const isAdmin = perms.admin === true || perms.role === 'admin';
+    const rightRows = Object.entries(_RBAC_RIGHT_LABELS).map(([key, label]) => {
+        const checked = key === 'admin' ? isAdmin : !!perms[key];
+        return `<div><label class="text-xs text-slate-500 uppercase font-bold">${label}</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="grp-perm-${key}" ${checked ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"></div></div>`;
+    }).join('');
+    const modal = document.createElement('div');
+    modal.id = 'group-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">${groupId ? 'Edit' : 'New'} Permission Group</h3>
+                <button onclick="closeGroupModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+            </div>
+            <div class="p-6 space-y-4">
+                <input type="hidden" id="grp-id" value="${groupId || ''}">
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name</label><input type="text" id="grp-name" value="${g.name || ''}" placeholder="e.g. NOC Operators" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Description</label><input type="text" id="grp-desc" value="${g.description || ''}" placeholder="Optional" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">LDAP Group <span class="text-slate-400 normal-case font-normal">(optional — maps a directory group to this bundle)</span></label><input type="text" id="grp-ldap" value="${g.ldap_group || ''}" placeholder="cn=noc,ou=groups,dc=example,dc=com" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 font-mono"></div>
+                <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Permissions</label><div class="grid grid-cols-2 gap-2 mt-2">${rightRows}</div></div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+                <button onclick="closeGroupModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+                <button onclick="saveGroup()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${groupId ? 'Save' : 'Create'} Group</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+}
+
+function closeGroupModal() {
+    const modal = document.getElementById('group-modal');
+    if (modal) modal.remove();
+}
+
+async function saveGroup() {
+    const name = document.getElementById('grp-name').value.trim();
+    if (!name) { alert('Please enter a group name'); return; }
+    const permissions = {};
+    Object.keys(_RBAC_RIGHT_LABELS).forEach(key => {
+        if (document.getElementById('grp-perm-' + key)?.checked) permissions[key] = true;
+    });
+    const body = {
+        group_id: document.getElementById('grp-id').value || '',
+        name,
+        description: document.getElementById('grp-desc').value.trim(),
+        ldap_group: document.getElementById('grp-ldap').value.trim(),
+        permissions,
+    };
+    try {
+        const resp = await setupFetch('/setup/groups', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        if (resp.ok) {
+            closeGroupModal();
+            await loadGroups();
+            await loadUsers();  // effective perms may have shifted
+        } else {
+            const d = await resp.json().catch(() => ({}));
+            alert(d.detail || 'Failed to save group');
+        }
+    } catch (err) {
+        alert('Error saving group: ' + err.message);
+    }
+}
+
+async function deleteGroup(groupId) {
+    const g = (window._permGroups || {})[groupId] || {};
+    const n = g.member_count || 0;
+    const warn = n > 0 ? `\n\n${n} user(s) are in this group and will be detached.` : '';
+    if (!await showConfirmToast(`Delete permission group "${g.name || groupId}"?${warn}`)) return;
+    try {
+        const resp = await setupFetch(`/setup/groups/${groupId}`, { method: 'DELETE' });
+        if (resp.ok) {
+            await loadGroups();
+            await loadUsers();
+        } else {
+            const d = await resp.json().catch(() => ({}));
+            alert(d.detail || 'Failed to delete group');
+        }
+    } catch (err) {
+        alert('Error deleting group: ' + err.message);
+    }
+}
+
+// Fill a checklist container (add-user modal) with a checkbox per group.
+async function _populateUserGroupChecklist(containerId, selectedIds) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+    let groups = window._permGroups;
+    if (!groups) {
+        try {
+            const resp = await setupFetch('/setup/groups');
+            groups = resp.ok ? (await resp.json()).groups || {} : {};
+            window._permGroups = groups;
+        } catch { groups = {}; }
+    }
+    const sel = new Set(selectedIds || []);
+    const entries = Object.entries(groups);
+    if (entries.length === 0) {
+        el.innerHTML = '<span class="text-[11px] text-slate-400 italic">No groups defined — create one below.</span>';
+        return;
+    }
+    el.classList.remove('italic', 'text-slate-400');
+    el.innerHTML = entries.map(([gid, g]) => `
+        <label class="flex items-center gap-2 px-2 py-1 border border-slate-200 rounded-md cursor-pointer hover:bg-slate-50">
+            <input type="checkbox" data-grp="${gid}" ${sel.has(gid) ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">
+            <span class="text-xs text-slate-700">${g.name || gid}</span>
+        </label>`).join('');
+}
+
+function _collectCheckedGroups(containerId) {
+    const el = document.getElementById(containerId);
+    if (!el) return [];
+    return Array.from(el.querySelectorAll('input[data-grp]'))
+        .filter(cb => cb.checked).map(cb => cb.getAttribute('data-grp'));
 }
 
 async function loadActiveSessions() {
@@ -11550,6 +11755,10 @@ async function showAddUserModal() {
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Console</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Console Write</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console_write" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                 </div>
+                <div class="space-y-2 border-t border-slate-200 pt-3">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Permission Groups <span class="text-slate-400 normal-case font-normal">(bundle access; unioned with the flags above)</span></label>
+                    <div id="new-user-groups" class="flex flex-wrap gap-2 text-sm text-slate-400 italic">Loading groups…</div>
+                </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeAddUserModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
@@ -11558,6 +11767,7 @@ async function showAddUserModal() {
         </div>
     `;
     document.body.appendChild(modal);
+    _populateUserGroupChecklist('new-user-groups', []);
 }
 
 function closeAddUserModal() {
@@ -11586,12 +11796,13 @@ async function saveUser() {
     };
     const auth_type = document.getElementById('new-user-auth-type')?.value || 'local';
     const password = document.getElementById('new-user-password')?.value || '';
+    const groups = _collectCheckedGroups('new-user-groups');
 
     try {
         const response = await setupFetch('/setup/users', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_id: userId, permissions, auth_type, password, create: true })
+            body: JSON.stringify({ user_id: userId, permissions, auth_type, password, groups, create: true })
         });
         if (response.ok) {
             alert('User created successfully');
@@ -11608,14 +11819,16 @@ async function saveUser() {
 
 async function editUser(userId) {
     try {
-        const [userResp, tenantResp] = await Promise.all([
+        const [userResp, tenantResp, groupResp] = await Promise.all([
             setupFetch('/setup/users'),
-            setupFetch('/setup/tenants')
+            setupFetch('/setup/tenants'),
+            setupFetch('/setup/groups')
         ]);
         if (!userResp.ok || !tenantResp.ok) throw new Error('Failed to load user or tenant data');
 
         const userData = await userResp.json();
         const tenantData = await tenantResp.json();
+        const groupData = groupResp.ok ? await groupResp.json() : { groups: {} };
 
         const users = userData.users || {};
         const user = users[userId];
@@ -11624,6 +11837,8 @@ async function editUser(userId) {
 
         const tenants = tenantData.tenants || [];
         const userTenants = user.tenants || [];
+        const allGroups = groupData.groups || {};
+        const userGroups = user.groups || [];
 
         const modal = document.createElement('div');
         modal.id = 'edit-user-modal';
@@ -11669,6 +11884,13 @@ async function editUser(userId) {
             </div>
         `).join('');
 
+        const groupHtml = Object.entries(allGroups).map(([gid, g]) => `
+            <div class="flex items-center gap-3 p-2 hover:bg-slate-100 rounded-md transition-colors cursor-pointer">
+                <input type="checkbox" id="edit-grp-${gid}" ${userGroups.includes(gid) ? 'checked' : ''} value="${gid}" class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">
+                <label for="edit-grp-${gid}" class="text-sm text-slate-700 cursor-pointer flex-1">${g.name || gid}<span class="text-[10px] text-slate-400 ml-1">${Object.keys(g.permissions || {}).filter(k => k !== 'role').join(', ')}</span></label>
+            </div>
+        `).join('');
+
         modal.innerHTML = `
             <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
                 <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -11677,7 +11899,10 @@ async function editUser(userId) {
                 </div>
                 <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-8">
                     <div class="space-y-6"><div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Permissions</h4><div class="grid grid-cols-2 gap-4">${permHtml}</div></div></div>
-                    <div class="space-y-6"><div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Tenant Associations</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-64 overflow-y-auto p-2 space-y-1">${tenantHtml || '<div class="text-xs text-slate-400 italic p-2">No tenants available.</div>'}</div></div></div>
+                    <div class="space-y-6">
+                        <div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Permission Groups</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${groupHtml || '<div class="text-xs text-slate-400 italic p-2">No groups defined.</div>'}</div></div>
+                        <div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Tenant Associations</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${tenantHtml || '<div class="text-xs text-slate-400 italic p-2">No tenants available.</div>'}</div></div>
+                    </div>
                 </div>
                 <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-between items-center gap-3">
                     <button onclick="promptSetPassword('${userId}')" class="text-xs text-slate-500 hover:text-blue-600 transition-colors">Set Password</button>
@@ -11720,10 +11945,13 @@ async function saveUserEdits(userId) {
         const tenantCheckboxes = document.querySelectorAll('input[id^="edit-tenant-"]');
         const selectedTenants = Array.from(tenantCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
 
+        const groupCheckboxes = document.querySelectorAll('input[id^="edit-grp-"]');
+        const selectedGroups = Array.from(groupCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
+
         const updateResp = await setupFetch('/setup/users', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_id: userId, permissions: permissions })
+            body: JSON.stringify({ user_id: userId, permissions: permissions, groups: selectedGroups })
         });
         if (!updateResp.ok) throw new Error('Failed to update user permissions');
 

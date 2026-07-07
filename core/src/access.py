@@ -193,6 +193,89 @@ def session_user(sessions: dict, request: "Request"):
     return sess
 
 
+# ── RBAC: permission groups → effective permissions ────────────────────────
+# Enforced right-keys — the permissions actually checked server-side. Group
+# editors and the effective-permission union operate over this set (plus the
+# admin flag). Kept here so the UI, routes, and resolver agree on one list.
+ENFORCED_RIGHTS = ("cs", "nw", "ipam", "le", "console", "console_write")
+
+
+def resolve_effective_permissions(hub, user_record: dict) -> dict:
+    """Union a user's group-derived rights with their per-user overrides.
+
+    A user belongs to zero or more permission GROUPS (``user_record["groups"]``,
+    a list of group ids into ``system_state["permission_groups"]``). Effective
+    permissions = the boolean-OR of every group's ``permissions`` dict, OR'd
+    with the user's own ``permissions`` dict (per-user grants are additive and
+    still work for pre-RBAC users who have no groups). Admin is set if ANY
+    source carries ``admin`` or ``role == "admin"``; when admin, both forms are
+    normalised on so every downstream check (which honours either) agrees.
+
+    Returns a fresh flat ``{right: True}`` dict suitable to drop straight into
+    ``sess["user"]["permissions"]`` — so all existing middleware/frontend gates
+    keep working unchanged. Never mutates the stored record."""
+    user_record = user_record or {}
+    groups_store = {}
+    try:
+        groups_store = hub.state.system_state.get("permission_groups", {}) or {}
+    except Exception:  # noqa: BLE001 — hub without state (tests) → no groups
+        groups_store = {}
+
+    eff: dict = {}
+    is_adm = False
+
+    def _absorb(perms: dict):
+        nonlocal is_adm
+        for k, v in (perms or {}).items():
+            if k == "role":
+                if v == "admin":
+                    is_adm = True
+                continue
+            if k == "admin":
+                if v:
+                    is_adm = True
+                continue
+            if v:  # only True grants; a False in one source never revokes another
+                eff[k] = True
+
+    # Groups first, then per-user overrides (order is immaterial for an OR).
+    for gid in user_record.get("groups", []) or []:
+        grp = groups_store.get(gid)
+        if grp:
+            _absorb(grp.get("permissions", {}))
+    _absorb(user_record.get("permissions", {}))
+
+    if is_adm:
+        eff["admin"] = True
+        eff["role"] = "admin"
+    return eff
+
+
+def groups_for_ldap_membership(hub, member_of) -> list:
+    """Map a directory user's LDAP group memberships → hub group ids.
+
+    ``member_of`` is the list of LDAP group DNs/cns from the directory
+    (``memberOf``). Returns the ids of every permission group whose
+    ``ldap_group`` matches one of them (case-insensitive, exact string).
+
+    Phase-2 hook: the storage + mapping live here now, but local ``/auth/login``
+    does not consult LDAP, and ``LDAPAuthProvider.get_user_groups`` is still a
+    stub — wiring this into the login flow is the remaining phase-2 step."""
+    member_of = [str(m).strip().lower() for m in (member_of or []) if m]
+    if not member_of:
+        return []
+    try:
+        groups_store = hub.state.system_state.get("permission_groups", {}) or {}
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for gid, grp in groups_store.items():
+        lg = str(grp.get("ldap_group") or "").strip().lower()
+        if lg and lg in member_of:
+            out.append(gid)
+    return out
+
+
 def is_admin(sess) -> bool:
     """True if this session belongs to an admin user.
 
