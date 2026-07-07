@@ -1,101 +1,25 @@
 #!/bin/bash
-set -e
-
-# Default Configuration
-HUB_URL="wss://localhost:443/ws/spoke"
-SPOKE_ID="${SPOKE_ID:-opn-$(hostname -s)}"
-SPOKE_SECRET="lm-secret"
-
-# Parse arguments
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --hub) HUB_URL="$2"; shift ;;
-        --id) SPOKE_ID="$2"; shift ;;
-        --secret) SPOKE_SECRET="$2"; shift ;;
-        --hub-secret) HUB_SECRET="$2"; shift ;;
-        *) echo "Unknown parameter passed: $1"; exit 1 ;;
-    esac
-    shift
-done
-
-echo "🚀 Installing OPNsense Manager Module (Native)..."
-
-if [ "$(id -u)" -ne 0 ]; then
-    echo "⚠️  This script must be run as root."
-    exit 1
-fi
-
-apt-get update
-apt-get install -y python3-pip python3-venv git curl
-
-INSTALL_DIR="/opt/lm"
-mkdir -p "$INSTALL_DIR"
-cd "$INSTALL_DIR"
-
-if [ ! -d "core/.git" ]; then
-    echo "🌐 Cloning required Hub repository..."
-    git clone https://github.com/lbockenstedt/lm.git core
-fi
-
-if [ -d "opnsense/.git" ]; then
-    echo "📂 OPNsense repository already exists. Updating..."
-    cd opnsense && git pull --rebase --autostash && cd ..
-else
-    echo "🌐 Cloning OPNsense Manager repository..."
-    git clone https://github.com/lbockenstedt/opnsense.git
-fi
-
-echo "🛠️ Setting up OPNsense Manager..."
-cd opnsense
-
-# Always remove existing venv to ensure clean local environment (prevents cross-platform path issues)
-echo "♻️ Resetting virtual environment..."
-rm -rf venv
-
-python3 -m venv venv
-if [ ! -f "venv/bin/python3" ]; then
-    echo "❌ Critical Error: venv creation failed."
-    exit 1
-fi
-
-echo "Installing requirements..."
-./venv/bin/python3 -m pip install --upgrade pip
-if [ -f "requirements.txt" ]; then
-    ./venv/bin/python3 -m pip install -r requirements.txt
-fi
-
-# --- Persistence Configuration ---
-echo "⚙️ Configuring Spoke Identity..."
-cat <<EOF > .env
-HUB_URL=$HUB_URL
-SPOKE_ID=$SPOKE_ID
-SPOKE_SECRET=$SPOKE_SECRET
-HUB_SECRET=$HUB_SECRET
-EOF
-
-# --- Systemd Service (For Remote/Independent Deployment) ---
-echo "⚙️ Creating systemd service for auto-start..."
-cat <<EOF > /etc/systemd/system/lm-opnsense.service
-[Unit]
-Description=Lab Manager Spoke - OPNsense Manager
-After=network.target
-
-[Service]
-Type=simple
-User=svc_lm
-WorkingDirectory=$INSTALL_DIR/opnsense
-ExecStart=/usr/bin/env PYTHONPATH=$INSTALL_DIR/core/src $INSTALL_DIR/opnsense/venv/bin/python3 -m src.control_plane --id $SPOKE_ID --secret=$SPOKE_SECRET --hub $HUB_URL
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable lm-opnsense
-
-echo "🎉 OPNsense Manager installation complete!"
-echo "🌐 Hub Target: $HUB_URL"
-echo "🆔 Spoke ID: $SPOKE_ID"
-echo "📦 Version: 0.08"
+#
+# DEPRECATED / RETIRED — do not use.
+#
+# This lm-root wrapper was a standalone root installer that cloned/pulled
+# repos as root and never chowned the resulting .git back to the service
+# user (svc_lm). That left /opt/lm/*/.git root-owned while the service ran
+# as svc_lm, so the in-service self-update ("git pull") failed with
+# "insufficient permission for adding an object to repository database" and
+# the module could not update itself. It is superseded and left unused by
+# all live code (the hub/agent install flow uses opnsense/install_opnsense.sh
+# in the module repo, and full deploys use install_all.sh).
+#
+# It performs NO git operations now, so it can no longer reintroduce that
+# permission drift.
+#
+# Use instead:
+#   * Full/coordinated deploy (keeps .git, chowns to svc_lm):
+#         sudo ./install_all.sh
+#   * Single OPNsense module (what the hub/agent flow invokes):
+#         sudo opnsense/install_opnsense.sh --hub wss://<hub>:443/ws/spoke ...
+#
+echo "install_opnsense.sh (lm root) is RETIRED — see the header of this file." >&2
+echo "Run 'sudo ./install_all.sh' or the module-repo 'opnsense/install_opnsense.sh' instead." >&2
+exit 1
