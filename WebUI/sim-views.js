@@ -1060,7 +1060,7 @@ function csNormalizeClients(data) {
 // each showing whether that sim is currently running and toggling a per-client
 // override on click. Columns: Hostname, Platform, Status, Tier, SSID, Last Seen,
 // Errors, Demo.
-const CS_CLIENT_COLS = 8;
+const CS_CLIENT_COLS = 11;
 function csRenderClientRows(rows) {
     const body = csEl('cs-client-body') || csEl('cs-content');
     if (!rows || rows.length === 0) {
@@ -1071,8 +1071,12 @@ function csRenderClientRows(rows) {
     const rowHtml = rows.map(c => {
         const t = csClassifyClient(c);
         const host = c.hostname || c.id || '';
+        const cfg = c.config || {};
         const line1 = `<tr class="border-t border-slate-100">
           <td class="px-4 py-2 font-mono text-xs">${csEscape(host || '—')}</td>
+          <td class="px-4 py-2 text-slate-500">${csEscape(cfg.wsite || '—')}</td>
+          <td class="px-4 py-2 font-mono text-xs text-slate-500">${csEscape(c.simulation_id || '—')}</td>
+          <td class="px-4 py-2 text-slate-500">${csEscape(cfg.sim_phy || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.platform || c.hw_type || '—')}</td>
           <td class="px-4 py-2">${csOnlineBadge(c.online)}</td>
           <td class="px-4 py-2"><span class="text-[10px] font-bold px-2 py-0.5 rounded ${t === 't2' ? 'bg-purple-100 text-purple-700' : t === 't3' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}">${t.toUpperCase()}</span></td>
@@ -1087,7 +1091,7 @@ function csRenderClientRows(rows) {
         return line1 + line2;
     }).join('');
     body.innerHTML = csTable(
-        ['Hostname', 'Platform', 'Status', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
+        ['Hostname', 'Site', 'Sim-ID', 'PHY', 'Platform', 'Status', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
         rowHtml
     );
 }
