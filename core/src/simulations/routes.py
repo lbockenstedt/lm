@@ -1893,16 +1893,45 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.post("/sim/api/{tenant}/test-central")
     async def test_central(tenant: str, tenant_id: str = Depends(get_tenant_id)):
-        """Best-effort central connectivity check. Reads the spoke's cached
-        central telemetry (token_state/token_valid) — a full spoke-side probe is
-        a later wave; this surfaces the live relayed state."""
+        """Live central connectivity check. Fans ``CS_TEST_CENTRAL`` out to each of
+        the tenant's cs spokes — the spoke's ``central_poller.test_connection``
+        runs a real token exchange against Aruba Central / HPE SSO and logs the
+        outcome (incl. failure detail) to the spoke log. Falls back to the spoke's
+        last relayed ``central`` telemetry when the spoke is unreachable
+        (stalled/disconnected) so the UI still renders a row instead of 502-ing.
+
+        Previously this route only read cached relayed telemetry, so the Setup →
+        Central API "Test Connection" button showed all-— on a hub-connected
+        deployment (it never ran a live probe). A row that still shows all-—
+        after this change means the spoke didn't respond to the fan-out within
+        the timeout — check the hub log for the warning below and the spoke log
+        for the CentralPoller test_connection entry."""
         out = []
         for sid, data in _tenant_cache(tenant_id).items():
-            central = data.get("central") or {}
-            out.append({"spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
-                         "token_state": central.get("token_state"),
-                         "token_valid": central.get("token_valid"),
-                         "status": central.get("status")})
+            cached_central = data.get("central") or {}
+            live_entry: dict | None = None
+            try:
+                result = await hub.request_response(sid, "CS_TEST_CENTRAL", {}, timeout=8.0)
+                payload = (result.get("payload", {}) or {}).get("data", result) if isinstance(result, dict) else result
+                spokes = (payload or {}).get("spokes") if isinstance(payload, dict) else None
+                if spokes:
+                    live_entry = spokes[0]
+            except Exception as exc:
+                logger.warning("test_central: CS_TEST_CENTRAL fan-out to %s failed: %s",
+                               sid, exc)
+            if live_entry:
+                out.append({"spoke_id": sid,
+                            "spoke_name": live_entry.get("spoke_name") or data.get("spoke_name") or sid,
+                            "token_state": live_entry.get("token_state"),
+                            "token_valid": live_entry.get("token_valid"),
+                            "status": live_entry.get("status")})
+            else:
+                # Spoke unreachable (stalled/disconnected) — surface cached
+                # relayed state so the UI renders a row, not a 502.
+                out.append({"spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
+                            "token_state": cached_central.get("token_state"),
+                            "token_valid": cached_central.get("token_valid"),
+                            "status": cached_central.get("status") or "Spoke unreachable — see hub log."})
         return {"spokes": out}
 
     @app.get("/sim/api/{tenant}/troubleshooting")
