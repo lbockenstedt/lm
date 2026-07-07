@@ -36,6 +36,12 @@ _DEFAULT_HUB_CONFIG: Dict[str, Any] = {
     "cpu_delete_threshold": 90,
     "mem_provision_threshold": 80,
     "mem_delete_threshold": 90,
+    # Tier classification by PCI passthrough (T1/T3 are PCI, T2 is USB). A VM
+    # whose hostpciN device matches one of these VID:PIDs is that tier. Defaults
+    # match the solutions-hpe originals; edited in the Hub Config card. NOT in
+    # preserve-on-reset: reset restores these canonical tier IDs.
+    "t1_pci_vidpids": ["1912:0015"],
+    "t3_pci_vidpids": ["168c:0034"],
     # VM Templates (clone-source VMIDs + image1 mix)
     "vm_image_1_template_id": 100,
     "vm_image_2_template_id": 200,

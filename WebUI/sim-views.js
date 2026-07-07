@@ -2116,6 +2116,8 @@ const CS_HUB_CONFIG_FIELDS = [
     { key: 'watchdog_reboot_enabled',               label: 'Watchdog Reboot',         type: 'onoff' },
     { key: 'usb_vidpids',                 label: 'USB Certified VID:PIDs (JSON array of {vidpid,type,label})',  type: 'json',   ph: '[{"vidpid":"1a2b:3c4d","type":"wireless","label":"1a2b:3c4d"}]', full: true },
     { key: 'usb_ignored_vidpids',         label: 'USB Ignored VID:PIDs (JSON array of "vid:pid")', type: 'json', ph: '["1a2b:3c4d"]', full: true },
+    { key: 't1_pci_vidpids',              label: 'T1 PCI VID:PIDs (JSON array of "vid:pid" — VM whose PCI passthrough matches → T1)', type: 'json', ph: '["1912:0015"]', full: true },
+    { key: 't3_pci_vidpids',              label: 'T3 PCI VID:PIDs (JSON array of "vid:pid" — VM whose PCI passthrough matches → T3)', type: 'json', ph: '["168c:0034"]', full: true },
     { key: 'ignored_hostnames',           label: 'Ignored Hostnames (JSON array)', type: 'json', ph: '["sim-rpi-0000"]', full: true },
 ];
 
