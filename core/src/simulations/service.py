@@ -104,6 +104,13 @@ class SimulationsService:
                     "last_seen": c.get("last_seen") or "—",
                     "error_count": c.get("error_count") or 0,
                     "recent_errors": c.get("recent_errors") or [],
+                    # Tier signals — csClassifyClient reads these to render T1/T2/T3.
+                    # The spoke's relay carries them (control_plane tier join); this
+                    # row rebuild MUST pass them through or every client falls to the
+                    # 't1' default (has_usb/vmid/tier dropped → Clients tab all T1).
+                    "has_usb": c.get("has_usb"),
+                    "vmid": c.get("vmid"),
+                    "tier": c.get("tier"),
                     # Per-client sim overrides + config so the Clients tab's per-sim
                     # override buttons reflect what's SET and stay across refreshes.
                     "config": c.get("config") or {},
