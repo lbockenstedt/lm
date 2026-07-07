@@ -560,14 +560,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/superadmin/dhcp-status")
     async def sim_superadmin_dhcp_status(request: Request):
-        """Admin DHCP overview: each tenant's cs-spoke dnsmasq status block,
+        """Admin DHCP overview: each tenant's cs-spoke Kea DHCP status block,
         projected from the cached CS_TELEMETRY payload (no spoke round-trip).
         Each spoke's ``dhcp`` block (built by ``cs/lm-spoke/src/dhcp_status.py``
         and carried on the 10 s telemetry frame) is ``{installed, running, iface,
         subnet, pool_start, pool_end, pool_size, leases_used, leases_free,
-        utilization_pct, leases[], ...}``. A spoke that isn't running dnsmasq
-        reports ``installed: false``; an offline cs spoke simply has no ``dhcp``
-        key → empty. Feeds the Setup → Simulations "DHCP Server" card.
+        utilization_pct, leases[], ...}``. A spoke that isn't running the cs
+        Kea instance reports ``installed: false``; an offline cs spoke simply has
+        no ``dhcp`` key → empty. Feeds the Setup → Simulations "DHCP Server" card.
         """
         _require_admin(request)
         rows = []
