@@ -1,8 +1,8 @@
 """Auth routes: login, me, logout, first-run setup, session prefixes."""
 from api import (
     HTTPException, JSONResponse, Request, _SESSION_TTL, _hash_password, _save_sessions,
-    _start_cache_for_tenant, _stop_cache_for_tenant, _verify_password, get_netbox_spoke,
-    get_tenant_scoping, logger, secrets, time,
+    _sessions, _start_cache_for_tenant, _stop_cache_for_tenant, _verify_password,
+    get_netbox_spoke, get_tenant_scoping, logger, secrets, time,
 )
 
 
