@@ -490,13 +490,38 @@ class SimulationsStore:
     async def set_global_usb_ignored_vidpids(self, vidpids: List[Any]) -> None:
         with self._lock:
             g = self._global()
-            norm: List[str] = []
-            for d in (vidpids or []):
-                vp = (d.get("vidpid") if isinstance(d, dict) else d)
-                vp = str(vp or "").strip().lower()
-                if vp and vp not in norm:
-                    norm.append(vp)
-            g["usb_ignored_vidpids"] = norm
+            g["usb_ignored_vidpids"] = self._bare_vidpid_list(vidpids)
+            self._save()
+
+    # ── Global PCI-passthrough tier VID:PIDs (superadmin, platform-wide) ──────
+    # T1/T3 are PCI passthrough. These platform-wide lists are merged (union)
+    # with each tenant's t1_pci_vidpids/t3_pci_vidpids and pushed to every
+    # tenant's spoke → agent, exactly like the global USB certified/ignored
+    # lists. Bare lowercased ``vid:pid`` strings.
+    @staticmethod
+    def _bare_vidpid_list(vidpids: List[Any]) -> List[str]:
+        out: List[str] = []
+        for d in (vidpids or []):
+            vp = (d.get("vidpid") if isinstance(d, dict) else d)
+            vp = str(vp or "").strip().lower()
+            if vp and vp not in out:
+                out.append(vp)
+        return out
+
+    async def get_global_t1_pci_vidpids(self) -> List[str]:
+        return self._bare_vidpid_list(self._global().get("t1_pci_vidpids"))
+
+    async def set_global_t1_pci_vidpids(self, vidpids: List[Any]) -> None:
+        with self._lock:
+            self._global()["t1_pci_vidpids"] = self._bare_vidpid_list(vidpids)
+            self._save()
+
+    async def get_global_t3_pci_vidpids(self) -> List[str]:
+        return self._bare_vidpid_list(self._global().get("t3_pci_vidpids"))
+
+    async def set_global_t3_pci_vidpids(self, vidpids: List[Any]) -> None:
+        with self._lock:
+            self._global()["t3_pci_vidpids"] = self._bare_vidpid_list(vidpids)
             self._save()
 
     # ── staleness sweep last-run status (Setup → Sync, cluster-wide) ──────────

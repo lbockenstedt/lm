@@ -3561,6 +3561,28 @@ function _renderSetupSimulationsTile(content) {
                 </div>
             </div>
             <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Global Tier PCI VID:PIDs ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <p class="text-xs text-slate-500 mb-3">Platform-wide PCI-passthrough device IDs that classify a VM's tier — applies to every tenant (merged with each tenant's own list). <b>T1</b> = physical / base PCI (e.g. <span class="font-mono">1912:0015</span>); <b>T3</b> = the IoT adapter (e.g. <span class="font-mono">168c:0034</span>). T2 = USB dongle (above). Only T2 is ever auto-deleted under resource pressure; T1/T3 are never torn down.</p>
+                <div class="grid grid-cols-2 gap-6">
+                    <div>
+                        <p class="${labelCls} mb-1">T1 PCI (never torn down)</p>
+                        <div id="global-t1-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <div class="flex gap-1">
+                            <input id="gt1-vp" placeholder="1912:0015" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
+                            <button onclick="addGlobalTierPci('t1')" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                        </div>
+                    </div>
+                    <div>
+                        <p class="${labelCls} mb-1">T3 PCI (never torn down)</p>
+                        <div id="global-t3-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <div class="flex gap-1">
+                            <input id="gt3-vp" placeholder="168c:0034" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
+                            <button onclick="addGlobalTierPci('t3')" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Discovered USB Devices ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Every USB VID:PID seen across all tenants' spokes (plus tenant-certified/ignored entries not yet in telemetry). Approve or ignore a device type globally — applies to every tenant.</p>
                 <div id="global-usb-discovered" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
@@ -3576,6 +3598,61 @@ function _renderSetupSimulationsTile(content) {
                 <div id="cs-dhcp-server-status" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>`;
     loadSimAdminOverview();
+    loadGlobalTierPci();
+}
+
+// ── Global Tier PCI VID:PIDs (T1/T3) — superadmin, platform-wide ──────────
+// Mirrors the Global USB ignored-list handlers (bare vid:pid strings). Each PUT
+// merges global+tenant and pushes to every tenant's spoke (routes.py
+// _push_usb_to_tenant), and the agent classifies a VM whose PCI passthrough
+// matches → that tier. See /sim/api/superadmin/global-{t1,t3}-pci-vidpids.
+function _tierPciEndpoint(tier) { return `/sim/api/superadmin/global-${tier}-pci-vidpids`; }
+
+async function loadGlobalTierPci() {
+    for (const tier of ['t1', 't3']) {
+        const el = document.getElementById(`global-${tier}-pci`);
+        if (!el) continue;
+        try {
+            const r = await fetch(_tierPciEndpoint(tier), { credentials: 'same-origin' });
+            const list = r.ok ? (await r.json()).vidpids || [] : [];
+            el.innerHTML = list.length
+                ? list.map(vp => `<span class="inline-flex items-center gap-1 text-[11px] font-mono bg-slate-100 text-slate-700 rounded px-2 py-0.5">${vp}<button onclick="removeGlobalTierPci('${tier}','${vp}')" class="text-slate-400 hover:text-red-500" title="Remove">×</button></span>`).join('')
+                : '<p class="text-xs text-slate-400 italic">None</p>';
+        } catch (e) {
+            el.innerHTML = '<p class="text-xs text-red-400 italic">Failed to load</p>';
+        }
+    }
+}
+
+async function addGlobalTierPci(tier) {
+    const inp = document.getElementById(`g${tier}-vp`);
+    const vp = (inp.value || '').trim().toLowerCase();
+    if (!_vpValid(vp)) { if (typeof showToast === 'function') showToast('VID:PID must be 4-hex:4-hex (e.g. 168c:0034)', 'error'); return; }
+    try {
+        const r = await fetch(_tierPciEndpoint(tier), { credentials: 'same-origin' });
+        const cur = r.ok ? (await r.json()).vidpids || [] : [];
+        if (!cur.includes(vp)) cur.push(vp);
+        const pr = await fetch(_tierPciEndpoint(tier), {
+            method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vidpids: cur }),
+        });
+        if (!pr.ok) throw new Error(`${pr.status}`);
+        inp.value = '';
+        loadGlobalTierPci();
+    } catch (e) { if (typeof showToast === 'function') showToast('Failed: ' + e.message, 'error'); }
+}
+
+async function removeGlobalTierPci(tier, vp) {
+    try {
+        const r = await fetch(_tierPciEndpoint(tier), { credentials: 'same-origin' });
+        const cur = r.ok ? (await r.json()).vidpids || [] : [];
+        const next = cur.filter(x => x !== vp);
+        await fetch(_tierPciEndpoint(tier), {
+            method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ vidpids: next }),
+        });
+        loadGlobalTierPci();
+    } catch (e) { if (typeof showToast === 'function') showToast('Failed: ' + e.message, 'error'); }
 }
 
 // Setup → General (default) tile. Cache config + update sources + appearance.

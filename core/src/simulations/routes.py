@@ -521,6 +521,46 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         pushed = await _push_usb_to_all_tenants()
         return {"status": "saved", "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
+    @app.get("/sim/api/superadmin/global-t1-pci-vidpids")
+    async def sim_get_global_t1_pci(request: Request):
+        """Admin-only: platform-wide T1 PCI-passthrough VID:PID list."""
+        _require_admin(request)
+        return {"vidpids": await store.get_global_t1_pci_vidpids()}
+
+    @app.put("/sim/api/superadmin/global-t1-pci-vidpids")
+    async def sim_put_global_t1_pci(request: Request):
+        """Replace the platform-wide T1 PCI list, then push the effective
+        (global+tenant) list to every tenant's spoke."""
+        _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        vidpids = _normalize_usb_ignored((body or {}).get("vidpids"))
+        await store.set_global_t1_pci_vidpids(vidpids)
+        pushed = await _push_usb_to_all_tenants()
+        return {"status": "saved", "pushed_to_spokes": pushed}
+
+    @app.get("/sim/api/superadmin/global-t3-pci-vidpids")
+    async def sim_get_global_t3_pci(request: Request):
+        """Admin-only: platform-wide T3 PCI-passthrough VID:PID list."""
+        _require_admin(request)
+        return {"vidpids": await store.get_global_t3_pci_vidpids()}
+
+    @app.put("/sim/api/superadmin/global-t3-pci-vidpids")
+    async def sim_put_global_t3_pci(request: Request):
+        """Replace the platform-wide T3 PCI list, then push the effective
+        (global+tenant) list to every tenant's spoke."""
+        _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        vidpids = _normalize_usb_ignored((body or {}).get("vidpids"))
+        await store.set_global_t3_pci_vidpids(vidpids)
+        pushed = await _push_usb_to_all_tenants()
+        return {"status": "saved", "pushed_to_spokes": pushed}
+
     @app.get("/sim/api/superadmin/discovered-usb-vidpids")
     async def sim_get_discovered_usb(request: Request):
         """Approval queue: every unique VID:PID seen in spoke telemetry across
@@ -718,14 +758,34 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             s.update(_normalize_usb_ignored((hc.get("hub_config") or {}).get("usb_ignored_vidpids")))
         return sorted(s)
 
+    async def _effective_t1_pci(tenant_id: str) -> list:
+        """Merged T1 PCI VID:PID list = global ∪ tenant (sorted bare strings)."""
+        s: set = set(await store.get_global_t1_pci_vidpids())
+        if tenant_id:
+            hc = await store.get_hub_config(tenant_id)
+            s.update(_normalize_usb_ignored((hc.get("hub_config") or {}).get("t1_pci_vidpids")))
+        return sorted(s)
+
+    async def _effective_t3_pci(tenant_id: str) -> list:
+        """Merged T3 PCI VID:PID list = global ∪ tenant (sorted bare strings)."""
+        s: set = set(await store.get_global_t3_pci_vidpids())
+        if tenant_id:
+            hc = await store.get_hub_config(tenant_id)
+            s.update(_normalize_usb_ignored((hc.get("hub_config") or {}).get("t3_pci_vidpids")))
+        return sorted(s)
+
     async def _push_usb_to_tenant(tenant_id: str) -> int:
-        """Push the effective (global+tenant) USB certified/ignored lists to the
-        tenant's cs speak. Returns the number of spokes pushed (0 or 1)."""
+        """Push the effective (global+tenant) USB certified/ignored + T1/T3 PCI
+        tier lists to the tenant's cs speak. Returns spokes pushed (0 or 1)."""
         cert = await _effective_usb_vidpids(tenant_id)
         ign = await _effective_usb_ignored(tenant_id)
+        t1 = await _effective_t1_pci(tenant_id)
+        t3 = await _effective_t3_pci(tenant_id)
         return await _push_config(tenant_id, {
             "usb_vidpids": json.dumps(cert),
             "usb_ignored_vidpids": json.dumps(ign),
+            "t1_pci_vidpids": json.dumps(t1),
+            "t3_pci_vidpids": json.dumps(t3),
         })
 
     async def _discovered_usb() -> list:
