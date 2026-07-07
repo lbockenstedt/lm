@@ -141,3 +141,62 @@ def test_classic_missing_refresh_token_raises():
             return await client._ensure_token(http)
     with pytest.raises(ValueError, match="incomplete"):
         asyncio.run(go())
+
+
+# ── available_checks (centralized-mode check catalog) ─────────────────────
+
+def test_available_checks_new_central_returns_static_catalog():
+    # new_central needs no cluster_url and makes NO API call — the catalog is static.
+    client = ArubaClient({"api_version": "new_central", "client_id": "cid", "client_secret": "sec"})
+    cat = asyncio.run(client.available_checks())
+    assert cat["warning"] is None
+    assert len(cat["alerts"]) == 5  # DEFAULT_NEW_CENTRAL_MONITORED_CHECKS
+    assert any(a["id"] == "AP_DOWN" for a in cat["alerts"])
+    assert cat["insights"] == []
+    assert len(cat["hardware"]) == 3  # DEFAULT_NEW_CENTRAL_HARDWARE_CHECKS
+
+
+def test_available_checks_not_configured_returns_warning():
+    # classic with no cluster_url is not configured → "Central not configured."
+    client = ArubaClient({"api_version": "classic"})
+    cat = asyncio.run(client.available_checks())
+    assert cat["alerts"] == [] and cat["insights"] == [] and cat["hardware"] == []
+    assert cat["warning"] == "Central not configured."
+
+
+def test_available_checks_classic_falls_back_to_known_types_on_empty(monkeypatch):
+    # classic cluster returns empty alerts/insights → fallback to KNOWN_CLASSIC_*.
+    cfg = {"cluster_url": "https://cluster.example", "api_version": "classic",
+           "client_id": "cid", "client_secret": "sec", "refresh_token": "RT", "customer_id": "cust"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "T", "refresh_token": "RT2", "expires_in": 3600})
+        return httpx.Response(200, json={"alerts": [], "insights": []})
+
+    # available_checks builds its own httpx.AsyncClient internally; patch the class
+    # the aruba module sees so that internal client uses a MockTransport.
+    import simulations.aruba as _a
+
+    class _Client(_a.httpx.AsyncClient):
+        def __init__(self, *a, **k):
+            k["transport"] = httpx.MockTransport(handler)
+            super().__init__(*a, **k)
+    monkeypatch.setattr(_a.httpx, "AsyncClient", _Client)
+
+    client = ArubaClient(cfg)
+    cat = asyncio.run(client.available_checks())
+    assert len(cat["alerts"]) > 0  # KNOWN_CLASSIC_ALERT_TYPES fallback
+    assert "AP_DOWN" in {a["id"] for a in cat["alerts"]}
+    assert len(cat["insights"]) > 0  # KNOWN_CLASSIC_INSIGHT_CATEGORIES fallback
+    assert "No live checks returned by Central" in (cat["warning"] or "")
+
+
+def test_get_central_available_from_config_surfaces_failure(monkeypatch):
+    async def boom(self):
+        raise RuntimeError("catalog exploded")
+    monkeypatch.setattr(ArubaClient, "available_checks", boom)
+    from simulations.aruba import get_central_available_from_config
+    cat = asyncio.run(get_central_available_from_config({"api_version": "new_central"}))
+    assert cat["alerts"] == [] and cat["hardware"] == []
+    assert "catalog fetch failed" in (cat["warning"] or "").lower()

@@ -22,7 +22,7 @@ import logging
 import re
 from .service import SimulationsService
 from .store import SimulationsStore
-from .aruba import test_central_from_config
+from .aruba import test_central_from_config, get_central_available_from_config
 
 logger = logging.getLogger("SimRoutes")
 
@@ -1883,10 +1883,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/{tenant}/central/available")
     async def get_central_available(tenant: str, tenant_id: str = Depends(get_tenant_id)):
-        """Available-checks catalog (alerts/insights) from the tenant's spoke —
-        feeds the Central API editor's monitored-check picker. Forwards to the
-        spoke via CS_GET_CENTRAL_AVAILABLE; degrades to an empty catalog when no
-        spoke is connected (the editor still works with manual checks)."""
+        """Available-checks catalog (alerts/insights/hardware) for the Central API
+        editor's monitored-check picker. Behavior depends on the tenant's
+        ``processing_modes.central_api``:
+
+        - **centralized** — the HUB fetches the catalog itself via
+          ``aruba.get_central_available_from_config`` (new_central returns a
+          static default catalog with no API call; classic live-fetches alert/
+          insight types from the cluster gateway with a known-types fallback).
+          The cs spoke is not contacted.
+        - **distributed** (or unset) — forwards to the tenant's spoke via
+          CS_GET_CENTRAL_AVAILABLE; degrades to an empty catalog when no spoke is
+          connected (the editor still works with manual checks)."""
+        modes = await store.get_processing_modes(tenant_id)
+        if modes.get("central_api") == "centralized":
+            cc = await store.get_central_config(tenant_id)
+            return await get_central_available_from_config(cc or {})
         try:
             return await _cs_forward(tenant_id, "CS_GET_CENTRAL_AVAILABLE", {}, timeout=15.0)
         except HTTPException:
