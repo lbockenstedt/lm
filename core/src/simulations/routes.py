@@ -22,6 +22,7 @@ import logging
 import re
 from .service import SimulationsService
 from .store import SimulationsStore
+from .aruba import test_central_from_config
 
 logger = logging.getLogger("SimRoutes")
 
@@ -1893,21 +1894,36 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.post("/sim/api/{tenant}/test-central")
     async def test_central(tenant: str, tenant_id: str = Depends(get_tenant_id)):
-        """Live central connectivity check. Fans ``CS_TEST_CENTRAL`` out to each of
-        the tenant's cs spokes — the spoke's ``central_poller.test_connection``
-        runs a real token exchange against Aruba Central / HPE SSO and logs the
-        outcome (incl. failure detail) to the spoke log. Falls back to the spoke's
-        last relayed ``central`` telemetry when the spoke is unreachable
-        (stalled/disconnected) so the UI still renders a row instead of 502-ing.
+        """Live central connectivity check. Behavior depends on the tenant's
+        ``processing_modes.central_api``:
 
-        Previously this route only read cached relayed telemetry, so the Setup →
-        Central API "Test Connection" button showed all-— on a hub-connected
-        deployment (it never ran a live probe). A row that still shows all-—
-        after this change means the spoke didn't respond to the fan-out within
-        the timeout — check the hub log for the warning below and the spoke log
-        for the CentralPoller test_connection entry."""
+        - **centralized** — the HUB holds the Aruba Central creds (Setup →
+          Central API → ``central_config``) and runs a real token exchange
+          itself via ``aruba.test_central_from_config`` (the hub's own minimal
+          ArubaClient). Returns a single ``Hub (centralized)`` row.
+        - **distributed** (or unset) — fans ``CS_TEST_CENTRAL`` out to each of
+          the tenant's cs spokes; the spoke's ``central_poller.test_connection``
+          runs the token exchange and logs the outcome to the spoke log. Falls
+          back to the spoke's last relayed ``central`` telemetry when it is
+          unreachable (stalled/disconnected) so the UI renders a row, not a 502.
+
+        Previously this route only read cached relayed telemetry, so the button
+        showed all-— on a hub-connected deployment (it never ran a live probe).
+        A distributed-mode row that still shows all-— after this change means
+        the spoke didn't respond within the fan-out timeout — check the hub log
+        for the warning below and the spoke log for the CentralPoller entry."""
         out = []
         cache = _tenant_cache(tenant_id)
+        # Centralized processing mode → the HUB holds the Aruba Central creds
+        # (Setup → Central API → central_config) and makes the call itself; the
+        # cs spoke is just a telemetry relay. Run a real token exchange on the
+        # hub directly (the hub historically had no Aruba client, so this button
+        # could never validate the creds the operator typed into the hub form).
+        # Distributed mode → fan CS_TEST_CENTRAL out to the tenant's cs spokes.
+        modes = await store.get_processing_modes(tenant_id)
+        if modes.get("central_api") == "centralized":
+            cc = await store.get_central_config(tenant_id)
+            return {"spokes": [await test_central_from_config(cc or {}, spoke_id="hub")]}
         # Registered Client-Sim spokes for this tenant (approved + bound, or
         # unassigned → claimable), looked up from module_metadata INDEPENDENT of
         # the CS_TELEMETRY cache. A stalled/flapping spoke that stopped relaying
