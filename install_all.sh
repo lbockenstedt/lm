@@ -544,12 +544,35 @@ esac
 HELPER
 chown root:root /usr/local/bin/lm-spoke-recover
 chmod 0755 /usr/local/bin/lm-spoke-recover
+
+# Update-path permission-repair helper (self-heal for ownership drift). If a
+# person or a faulty install leaves /opt/lm/.git/objects or /var/log/lm root-
+# owned, the svc_lm-run Update button / 15-min auto-update git pull fails with
+# "insufficient permission for adding an object to repository database .git/
+# objects". The hub health check (update_pipeline.check_update_health, run each
+# repo-sync cycle) detects it and invokes this via
+#   sudo -n /usr/local/bin/lm-fix-perms
+# to hand the checkout + logs back to the service user. Idempotent, least-priv
+# (fixed paths baked in, no args).
+cat > /usr/local/bin/lm-fix-perms <<HELPER
+#!/bin/bash
+# See lm/install_all.sh. Restores $SvcUser ownership of the hub checkout + log
+# dir so the service user's git pull can write .git/objects.
+set -e
+chown -R $SvcUser:$SvcUser /opt/lm /var/log/lm 2>/dev/null || true
+runuser -u $SvcUser -- git config --global --add safe.directory /opt/lm 2>/dev/null || true
+echo "lm-fix-perms: restored $SvcUser ownership of /opt/lm + /var/log/lm"
+HELPER
+chown root:root /usr/local/bin/lm-fix-perms
+chmod 0755 /usr/local/bin/lm-fix-perms
+
 cat > /etc/sudoers.d/lm <<SUDOERS
 $SvcUser ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lm
 $SvcUser ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart lm-*
 $SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-self-restart
 $SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-update-restart
 $SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-spoke-recover *
+$SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-fix-perms
 SUDOERS
 chmod 440 /etc/sudoers.d/lm
 

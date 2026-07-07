@@ -267,6 +267,27 @@ class UpdatePipelineMixin:
                     f"{hub_root} is NOT a git checkout — updates use the fragile "
                     f"tarball path; re-run install_all.sh to restore .git.")
             else:
+                # Permission-drift SELF-HEAL. A person or faulty install can leave
+                # .git/objects root-owned; the svc_lm-run git pull then fails with
+                # "insufficient permission for adding an object". Detect it (can
+                # this process write .git/objects?) and auto-repair via the root
+                # helper (sudo -n lm-fix-perms) so the drift never sits silently.
+                git_objects = os.path.join(hub_root, ".git", "objects")
+                if os.path.isdir(git_objects) and not os.access(git_objects, os.W_OK):
+                    repaired = await self._repair_update_perms()
+                    if repaired and os.access(git_objects, os.W_OK):
+                        checks["git_writable"] = "repaired"
+                        logger.warning("[sync-error] update-health: .git ownership had "
+                                       "drifted (root-owned objects) — auto-repaired via lm-fix-perms.")
+                    else:
+                        checks["git_writable"] = False
+                        warnings.append(
+                            f"{git_objects} not writable by the hub user — git pull will "
+                            f"fail ('insufficient permission for adding an object'). "
+                            f"Auto-repair {'unavailable (lm-fix-perms/sudoers missing)' if not repaired else 'did not resolve it'}; "
+                            f"run: chown -R svc_lm:svc_lm {hub_root} /var/log/lm")
+                else:
+                    checks["git_writable"] = True
                 local = await self.get_local_commit()
                 checks["local_commit"] = local
                 if local == "unknown":
@@ -316,6 +337,37 @@ class UpdatePipelineMixin:
         except Exception as e:  # noqa: BLE001 — health check must never raise
             warnings.append(f"update health check error: {e}")
         return {"ok": not warnings, "checks": checks, "warnings": warnings}
+
+    async def _repair_update_perms(self) -> bool:
+        """Best-effort self-heal for update-path permission drift (root-owned
+        .git/objects or /var/log/lm — what a person or faulty install
+        re-introduces). Runs `git config safe.directory` (doable as the hub user)
+        + the root `lm-fix-perms` helper via `sudo -n` (installed by
+        install_all.sh with a sudoers grant, like lm-update-restart). Returns True
+        if the helper ran successfully; never raises."""
+        hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+        try:
+            p = await asyncio.create_subprocess_shell(
+                f"git config --global --add safe.directory {hub_root}",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await p.communicate()
+        except Exception:
+            pass
+        helper = "/usr/local/bin/lm-fix-perms"
+        if not (os.path.isfile(helper) and os.access(helper, os.X_OK)):
+            return False
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "-n", helper,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            _out, err = await proc.communicate()
+            if proc.returncode == 0:
+                return True
+            logger.warning("update-health: lm-fix-perms failed rc=%s: %s",
+                           proc.returncode, err.decode(errors="replace")[:200])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("update-health: perm repair invocation failed: %s", e)
+        return False
 
     async def _download_update(self, hub_root: str, repo_url: str, branch: str) -> bool:
         """
