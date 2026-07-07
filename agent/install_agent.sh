@@ -344,6 +344,7 @@ done
 # Preserve an existing secret + LOADED_ROLES so re-installs don't break a
 # running multi-role agent (LOADED_ROLES is the durable set the agent re-spawns
 # on every boot; preserving it keeps runtime-loaded roles across a reinstall).
+INSTALL_UUID_LINE=""
 if [[ -f "$ENV_FILE" ]]; then
     if grep -q "^SPOKE_SECRET=" "$ENV_FILE"; then
         EXISTING=$(grep "^SPOKE_SECRET=" "$ENV_FILE" | cut -d= -f2-)
@@ -356,6 +357,16 @@ if [[ -f "$ENV_FILE" ]]; then
     if [[ -z "$STARTUP_ROLES_CSV" ]] && grep -q "^LOADED_ROLES=" "$ENV_FILE"; then
         STARTUP_ROLES_CSV=$(grep "^LOADED_ROLES=" "$ENV_FILE" | cut -d= -f2-)
         [[ -n "$STARTUP_ROLES_CSV" ]] && echo "Preserving existing LOADED_ROLES: $STARTUP_ROLES_CSV"
+    fi
+    # Preserve the minted INSTALL_UUID so a re-install / update keeps the same
+    # hub-side fingerprint (install_uuid). Without this the cat > below wipes the
+    # line and the agent mints a fresh UUID on next start → hub records a
+    # `reimaged` (fingerprint-changed) event for a box that was only updated.
+    # _ensure_install_uuid mints on first start only when this line is absent.
+    if grep -q "^INSTALL_UUID=" "$ENV_FILE"; then
+        EXISTING_UUID=$(grep "^INSTALL_UUID=" "$ENV_FILE" | cut -d= -f2-)
+        [[ -n "$EXISTING_UUID" ]] && INSTALL_UUID_LINE="INSTALL_UUID=$EXISTING_UUID" \
+            && echo "Preserving existing install UUID (hub fingerprint)."
     fi
 fi
 
@@ -371,6 +382,7 @@ HUB_SECRET=$HUB_SECRET
 HUB_URL=$HUB_URL
 STARTUP_ROLES=$STARTUP_ROLES_CSV
 LOADED_ROLES=$STARTUP_ROLES_CSV
+${INSTALL_UUID_LINE}
 EOF
 
 # Role-conditional runtime env for IN-PROCESS role sub-spokes. Hosted as roles

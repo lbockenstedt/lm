@@ -95,11 +95,24 @@ elif [[ -z "$SPOKE_SECRET" ]]; then
     echo "ℹ️  No pre-shared secret — spoke will connect unauthenticated and await admin approval."
 fi
 
+# Preserve the minted INSTALL_UUID so a re-install keeps the same hub-side
+# fingerprint (install_uuid). Without this the cat > below wipes the line and
+# the spoke mints a fresh UUID on next start → hub records a `reimaged`
+# (fingerprint-changed) event for a box that was only updated.
+# _ensure_install_uuid mints on first start only when this line is absent.
+INSTALL_UUID_LINE=""
+if [[ -f "$ENV_FILE" ]] && grep -q "^INSTALL_UUID=.\+" "$ENV_FILE"; then
+    EXISTING_UUID=$(grep "^INSTALL_UUID=" "$ENV_FILE" | cut -d= -f2-)
+    [[ -n "$EXISTING_UUID" ]] && INSTALL_UUID_LINE="INSTALL_UUID=$EXISTING_UUID" \
+        && echo "Preserving existing install UUID (hub fingerprint)."
+fi
+
 cat > "$ENV_FILE" <<EOF
 SPOKE_ID=$SPOKE_ID
 SPOKE_SECRET=$SPOKE_SECRET
 HUB_URL=$HUB_URL
 KEA_CA_URL=http://localhost:8001
+${INSTALL_UUID_LINE}
 EOF
 chmod 600 "$ENV_FILE"
 
