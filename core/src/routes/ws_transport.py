@@ -47,7 +47,11 @@ def register(app, hub, ctx):
                             os.environ.get("LM_PXMX_AGENT_PORT", "8443"))
         upstream_uri = f"ws://127.0.0.1:{loopback_port}/ws/agent"
         try:
-            upstream = await websockets.connect(upstream_uri)
+            # perf-scan C3a: bound the loopback dial so a hung/absent listener
+            # can't stall the hub loop. C5d: cap frame size (16 MiB) so an
+            # oversized loopback frame can't blow memory on recv.
+            upstream = await websockets.connect(
+                upstream_uri, open_timeout=5, max_size=16 * 1024 * 1024)
         except Exception as exc:  # noqa: BLE001 — any connect failure → close
             logger.warning("agent /ws/agent proxy: loopback unreachable (%s): %s",
                            upstream_uri, exc)
