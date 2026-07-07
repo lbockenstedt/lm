@@ -2558,12 +2558,39 @@ async function csRenderSetupCentralApi() {
       <option value="central" ${mode === 'central' ? 'selected' : ''}>Central (OAuth client)</option>
     </select>`;
 
+    // Known Aruba Central API regional gateways (new Central platform). Rendered as a
+    // <datalist> so Cluster URL is a dropdown of known clusters AND still accepts a typed
+    // custom URL (private clusters, classic /oauth2/token hosts, future regions).
+    // Source: developer.arubanetworks.com new-central docs "Making API Calls".
+    const CENTRAL_CLUSTERS = [
+        ['US-1 (prod)', 'https://us1.api.central.arubanetworks.com'],
+        ['US-2', 'https://us2.api.central.arubanetworks.com'],
+        ['US-West-4', 'https://us4.api.central.arubanetworks.com'],
+        ['US-West-5', 'https://us5.api.central.arubanetworks.com'],
+        ['US-East-1', 'https://us6.api.central.arubanetworks.com'],
+        ['Canada-1', 'https://ca1.api.central.arubanetworks.com'],
+        ['EU-1', 'https://de1.api.central.arubanetworks.com'],
+        ['EU-Central-2', 'https://de2.api.central.arubanetworks.com'],
+        ['EU-Central-3', 'https://de3.api.central.arubanetworks.com'],
+        ['UK', 'https://gb1.api.central.arubanetworks.com'],
+        ['APAC-1 (India)', 'https://in1.api.central.arubanetworks.com'],
+        ['APAC-East-1 (Japan)', 'https://jp1.api.central.arubanetworks.com'],
+        ['APAC-South-1 (Australia)', 'https://au1.api.central.arubanetworks.com'],
+        ['UAE-North-1', 'https://ae1.api.central.arubanetworks.com'],
+        ['China', 'https://cn1.api.central.arubanetworks.com.cn'],
+        ['Internal', 'https://internal.api.central.arubanetworks.com'],
+    ];
+    const clusterField = `<label class="text-xs text-slate-500">Cluster URL
+      <input id="cs-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      <datalist id="cs-central-clusters">${CENTRAL_CLUSTERS.map(([region, url]) => `<option value="${url}" label="${csEscape(region)}">`).join('')}</datalist>
+    </label>`;
+
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Central API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Aruba Central cluster credentials. Pushed to the spoke as <code>central_config</code>; the spoke sentinel-merges them — secrets only overwrite when non-empty.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="text-xs text-slate-500">Mode${modeSel}</label>
-        ${f('cs-csc-cluster', 'Cluster URL', hc.cluster_url)}
+        ${clusterField}
         ${f('cs-csc-clientid', 'Client ID', hc.client_id)}
         ${f('cs-csc-customerid', 'Customer ID', hc.customer_id)}
         ${f('cs-csc-clientsecret', 'Client Secret', hc.client_secret, 'password')}
