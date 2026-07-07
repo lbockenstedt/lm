@@ -6410,7 +6410,24 @@ function spokeStatusMessage(s) {
         case 'DISCONNECTED':    return { text: 'Disconnected (clean exit) — likely self-update restart that systemd did not revive', tone: 'text-red-600' };
         case 'ERROR':           return { text: `Connection error: ${s.last_error || 'see hub logs'}`, tone: 'text-red-600' };
         case 'CONNECTED':       return { text: 'Briefly connected then dropped (see event log)', tone: 'text-amber-600' };
-        default:                return { text: 'Never connected — service may not be running', tone: 'text-red-600' };
+        default:
+            // After a hub reboot, spoke_telemetry is empty so last_status is
+            // UNKNOWN and we land here — but a persisted last_seen (re-seeded
+            // into heartbeat.last_seen at startup) still gives a real
+            // heartbeat_age_s. Distinguish "was connected recently, hub just
+            // rebooted" (amber) from "truly stale / never seen" (red). 15-min
+            // (900s) threshold per operator request: red only if last contact
+            // was more than 15 minutes ago.
+            if (s.heartbeat_age_s != null) {
+                const mins = Math.floor(s.heartbeat_age_s / 60);
+                const secs = s.heartbeat_age_s % 60;
+                const ago = mins > 0 ? `${mins}m ${secs}s ago` : `${secs}s ago`;
+                if (s.heartbeat_age_s >= 900) {
+                    return { text: `Last seen ${ago} — service may not be running`, tone: 'text-red-600' };
+                }
+                return { text: `Last seen ${ago} — reconnecting after hub reboot`, tone: 'text-amber-600' };
+            }
+            return { text: 'Never connected — service may not be running', tone: 'text-red-600' };
     }
 }
 
@@ -6548,7 +6565,13 @@ function _diagTelemetryExtras(s, fns) {
     // telemetry is available AND the spoke is approved/connected — a pending
     // spoke keeps its amber approval dot (heartbeat is meaningless pre-approval)
     // but an approved-but-silent spoke goes red even though it is approved.
-    const dot = !s.authenticated ? 'bg-red-500'
+    const dot = !s.authenticated
+              // Offline: red only if we have NO recent last-seen, or last contact
+              // was >15 min ago. A spoke that was connected seconds before a hub
+              // reboot (persisted last_seen re-seeded at startup → real
+              // heartbeat_age_s) shows amber, not red — it's almost certainly
+              // reconnecting, not dead.
+              ? ((s.heartbeat_age_s != null && s.heartbeat_age_s < 900) ? 'bg-amber-400' : 'bg-red-500')
               : hbStatus === 'GREEN' ? 'bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]'
               : hbStatus === 'YELLOW' ? 'bg-amber-400'
               : hbStatus === 'RED' ? 'bg-red-500'

@@ -396,6 +396,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # State is now managed via StateManager methods
         self.approved_modules = self.state.get_approved_modules()
         self.known_modules = self.state.system_state.get("known_modules", [])
+        # Re-seed the in-memory heartbeat last-seen from the persisted copy so
+        # an approved spoke that WAS connected before this hub (re)start doesn't
+        # flip to RED / "Never connected" — heartbeat.last_seen is in-memory and
+        # wiped on restart, but spoke_last_seen survives in system.json. The
+        # 15-min staleness threshold the UI uses tolerates the at-most-60s
+        # granularity of the persisted copy (set via _mark_dirty, flushed by the
+        # 60s persistence_loop). See state/manager.set_spoke_last_seen.
+        for sid, ts in (self.state.get_spoke_last_seen() or {}).items():
+            try:
+                self.heartbeat.last_seen[sid] = float(ts)
+            except (TypeError, ValueError):
+                pass
         # install_uuid → id reverse index, rebuilt from persisted module_metadata +
         # agent_config on load and maintained on every connect. Lets the hub detect
         # a clone-and-rename (same install UUID, new spoke/agent id) and carry over
@@ -805,6 +817,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.spoke_recovery.pop(spoke_id, None)
         self.agent_logs.pop(spoke_id, None)
         self.heartbeat.last_seen.pop(spoke_id, None)  # else grows unbounded across delete/recreate
+        # Also drop the persisted last-seen so a deleted spoke doesn't keep a
+        # stale timestamp that would surface as a ghost "last seen" entry.
+        self.state.clear_spoke_last_seen(spoke_id)
 
     def _mark_spoke_disconnected(self, spoke_id: str) -> None:
         """Record a clean-WS-close disconnect in ``spoke_telemetry``.
@@ -2160,6 +2175,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 if payload.get("type") == "HEARTBEAT":
                     self.message_count += 1
                     self.heartbeat.update_heartbeat(spoke_id)
+                    # Persist last-contacted so a hub reboot doesn't reset this
+                    # spoke to "Never connected / RED". _mark_dirty (no disk
+                    # write here) — the 60s persistence_loop flushes. Cheap
+                    # enough to run every heartbeat tick.
+                    self.state.set_spoke_last_seen(spoke_id, self.heartbeat.last_seen[spoke_id])
                     # A heartbeat means the spoke is in contact — clear any
                     # never-seen absent clock so the alert loop doesn't keep a
                     # stale _spoke_absent_since entry around after first contact.

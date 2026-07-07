@@ -78,7 +78,17 @@ class StateManager:
             #                 client_simulation: { enabled: bool, tenant_id: str|None, usb_config: {} } } }
             # `display_name` is the new home for the rename value; `agent_display_names`
             # (below) is kept as a read fallback for one release during migration.
-            "agent_config": {}
+            "agent_config": {},
+            # Per-spoke last-contacted unix epoch, persisted across hub reboots
+            # so an approved spoke that WAS connected doesn't reset to "Never
+            # connected / RED" the moment the hub restarts (in-memory
+            # heartbeat.last_seen / spoke_telemetry are lost on reboot; this
+            # survives in the Fernet-encrypted system.json). Seeded back into
+            # hub.heartbeat.last_seen at startup. Written via _mark_dirty (the
+            # 60s persistence_loop flushes) — NOT save_state — so a heartbeat
+            # tick never costs a disk write. Stale entries are pruned when a
+            # spoke is deleted (delete_module).
+            "spoke_last_seen": {},
         }
 
         # Tenant-level state: User settings, Quotas, Mappings
@@ -443,6 +453,48 @@ class StateManager:
     def get_approved_modules(self) -> Dict[str, bool]:
         """Return the ``{module_id: approved}`` map for all registered modules."""
         return self.system_state.get("approved_modules", {})
+
+    # --- Spoke last-seen (persisted across hub reboots) ---
+
+    def get_spoke_last_seen(self) -> Dict[str, float]:
+        """Return the persisted ``{spoke_id: unix_epoch}`` map.
+
+        Source of truth for ``hub.heartbeat.last_seen`` re-seeding at startup:
+        the in-memory heartbeat dict is wiped on a hub reboot, which made every
+        approved spoke flip to RED / "Never connected" even though it was
+        connected seconds before the restart. This dict lives in the
+        Fernet-encrypted ``system.json`` so it survives.
+        """
+        return self.system_state.get("spoke_last_seen", {}) or {}
+
+    def set_spoke_last_seen(self, spoke_id: str, ts: float) -> None:
+        """Record ``spoke_id``'s last-contacted epoch.
+
+        Marks the state dirty so the 60s persistence_loop flushes it — does NOT
+        call save_state(), so a heartbeat tick (the hot-path caller) never
+        triggers an encrypt+fsync+backup disk write. Best-effort: a crash
+        within the 60s window loses at most one minute of last_seen granularity,
+        which is fine for the 15-min staleness threshold the UI uses.
+        """
+        if not spoke_id:
+            return
+        try:
+            ts = float(ts)
+        except (TypeError, ValueError):
+            return
+        ls = self.system_state.setdefault("spoke_last_seen", {})
+        if ls.get(spoke_id) != ts:
+            ls[spoke_id] = ts
+            self._mark_dirty()
+
+    def clear_spoke_last_seen(self, spoke_id: str) -> None:
+        """Drop a spoke's persisted last-seen (on delete/recreate)."""
+        if not spoke_id:
+            return
+        ls = self.system_state.get("spoke_last_seen", {}) or {}
+        if spoke_id in ls:
+            ls.pop(spoke_id, None)
+            self._mark_dirty()
 
     # --- Tenant Management ---
 
