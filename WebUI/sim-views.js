@@ -3156,7 +3156,7 @@ async function csRenderVmServerVms() {
     cats.forEach(c => grouped[c] = vms.filter(v => csVmCategory(v) === c));
     const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-md text-xs font-bold ${i === 0 ? 'bg-[#01A982] text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
     const rows = (grouped['Simulation Clients'] || []).map(csVmRow).join('');
-    csSet(`<div>${csVmHostBanner()}${tabs}
+    csSet(`<div>${csVmHostBanner()}${csAutoProvPanel(h)}${tabs}
       <div class="flex items-center gap-2 my-3 text-xs text-slate-500">
         <button onclick="csVmBulk('start_vm')" class="bg-green-100 text-green-700 px-2 py-1 rounded font-bold">Start</button>
         <button onclick="csVmBulk('stop_vm')" class="bg-amber-100 text-amber-700 px-2 py-1 rounded font-bold">Stop</button>
@@ -3191,14 +3191,140 @@ window.csVmSelUpdateHeader = function () {
     if (header) header.checked = boxes.length > 0 && boxes.every(cb => cb.checked);
 };
 
+// ── Live auto-provisioning status (ported from solutions-hpe/cs-webui) ───────
+// Per-VM transient state for the VM list: the pxmx agent stamps prov_status
+// ('provisioning'/'tearing_down') + pending_checkin onto each VM (relayed via
+// the cs spoke ingest). 🔴 deleting wins over 🔵 provisioning wins over the
+// steady running/paused/stopped state.
+function csVmStatusBadge(v) {
+    const ps = String(v.prov_status || '').toLowerCase();
+    if (ps === 'tearing_down') {
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700"><span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>Deleting…</span>`;
+    }
+    if (ps === 'provisioning' || v.pending_checkin === true) {
+        const label = (String(v.status || '').toLowerCase() === 'running') ? 'Configuring' : 'Provisioning';
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-sky-100 text-sky-700"><span class="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>${label}</span>`;
+    }
+    return csStatusBadge(v.status || 'unknown');
+}
+
+function csAutoProvPhaseMeta(status) {
+    switch (String(status || '').toLowerCase()) {
+        case 'cloning':
+        case 'provisioning':    return { label: 'Cloning', cls: 'bg-sky-100 text-sky-700' };
+        case 'configuring':     return { label: 'Configuring', cls: 'bg-cyan-100 text-cyan-700' };
+        case 'pending_checkin': return { label: 'Waiting for check-in', cls: 'bg-cyan-100 text-cyan-700' };
+        case 'done':            return { label: 'Done', cls: 'bg-green-100 text-green-700' };
+        case 'failed':          return { label: 'Failed', cls: 'bg-red-100 text-red-700' };
+        default:                return { label: 'Pending', cls: 'bg-slate-100 text-slate-500' };
+    }
+}
+
+// Normalize the live run into {running,total,completed,failed,items[]}. Prefer
+// the authoritative prov_run the agent emits; otherwise derive it from per-VM
+// prov_status/pending_checkin (so the feed still works on older agents).
+function csAutoProvRunState(px, vms) {
+    const run = px && px.prov_run;
+    if (run && Array.isArray(run.items) && run.items.length) {
+        const items = run.items
+            .filter(it => it && it.vmid != null)
+            .map(it => ({ vmid: it.vmid, vm_name: it.vm_name || null, bus: it.bus || null,
+                          status: String(it.status || 'pending').toLowerCase() }));
+        return {
+            running: Boolean(run.running),
+            total: Number.isFinite(+run.total) ? +run.total : items.length,
+            completed: Number.isFinite(+run.completed) ? +run.completed : items.filter(i => i.status === 'done').length,
+            failed: Number.isFinite(+run.failed) ? +run.failed : items.filter(i => i.status === 'failed').length,
+            startedAt: run.started_at || null,
+            items,
+        };
+    }
+    const provItems = (vms || [])
+        .filter(v => String(v.prov_status || '').toLowerCase() === 'provisioning')
+        .map(v => ({ vmid: v.vmid, vm_name: v.name || null, bus: null,
+                     status: String(v.status || '').toLowerCase() === 'running' ? 'configuring' : 'cloning' }));
+    const pendItems = (vms || [])
+        .filter(v => v.pending_checkin === true && String(v.prov_status || '').toLowerCase() !== 'provisioning')
+        .map(v => ({ vmid: v.vmid, vm_name: v.name || null, bus: null, status: 'pending_checkin' }));
+    const items = [...provItems, ...pendItems];
+    return { running: items.length > 0, total: items.length, completed: 0, failed: 0, startedAt: null, items };
+}
+
+// The live status tile mounted above the VM list — a status pill (Off / Idle /
+// Provisioning… X/Y / Deleting N), a progress bar, and a per-VM phase feed.
+function csAutoProvPanel(h) {
+    const px = (h && h.proxmox) || {};
+    const vms = (h && h.proxmox_vms) || [];
+    const prov = px.provision || {};
+    const autoOn = prov.auto_provision_on === true || String(prov.auto_provision_on || '').toLowerCase() === 'on';
+    const run = csAutoProvRunState(px, vms);
+    const deleting = vms.filter(v => String(v.prov_status || '').toLowerCase() === 'tearing_down');
+    const active = run.running && run.total > 0;
+    const halt = prov.halt || null;
+
+    let pill;
+    if (deleting.length) {
+        pill = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-50 text-red-700 text-xs font-bold"><span class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>Deleting ${deleting.length} VM${deleting.length > 1 ? 's' : ''}…</span>`;
+    } else if (active) {
+        const bits = [`Provisioning… ${Math.min(run.completed, run.total)}/${run.total}`];
+        if (run.failed) bits.push(`${run.failed} failed`);
+        pill = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-sky-50 text-sky-700 text-xs font-bold"><span class="animate-spin w-3 h-3 rounded-full border-2 border-sky-500 border-t-transparent"></span>${bits.join(' · ')}</span>`;
+    } else if (!autoOn) {
+        pill = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-500 text-xs font-bold"><span class="w-2 h-2 rounded-full bg-slate-400"></span>Auto-Provisioning: Off</span>`;
+    } else {
+        pill = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 text-xs font-bold"><span class="w-2 h-2 rounded-full bg-slate-400"></span>Auto-Provisioning: Idle</span>`;
+    }
+
+    // Idle + nothing deleting → compact pill + last-pass reason only.
+    if (!active && !deleting.length) {
+        const reason = prov.reason ? `<span class="text-xs text-slate-400 truncate">${csEscape(prov.reason)}</span>` : '';
+        return `<div class="hpe-card rounded-lg p-3 mb-3 flex items-center justify-between gap-3">${pill}${reason}</div>`;
+    }
+
+    const pct = run.total > 0 ? Math.round((Math.min(run.completed, run.total) / run.total) * 100) : 0;
+    const feedItems = [
+        ...deleting.map(v => ({ vmid: v.vmid, vm_name: v.name, bus: null, status: 'deleting' })),
+        ...run.items.filter(i => i.status !== 'done'),
+    ];
+    const feed = feedItems.map(it => {
+        const meta = it.status === 'deleting'
+            ? { label: 'Deleting', cls: 'bg-red-100 text-red-700' }
+            : csAutoProvPhaseMeta(it.status);
+        const name = it.vm_name || (it.vmid != null ? `VM ${it.vmid}` : (it.bus ? `Bus ${it.bus}` : 'Slot —'));
+        return `<div class="flex items-center justify-between gap-2 py-1 border-b border-slate-100 last:border-0">
+            <span class="text-xs font-mono text-slate-600 truncate">${csEscape(name)}</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${meta.cls}">${meta.label}</span>
+        </div>`;
+    }).join('') || `<div class="text-xs text-slate-400 py-1">No active items.</div>`;
+
+    const haltLine = (halt && halt.reason)
+        ? `<div class="text-[11px] text-amber-600 mt-2">⏸ Paused — ${csEscape(halt.reason)} (CPU ${halt.cpu_pct}% ≥ ${halt.cpu_threshold}%, Mem ${halt.mem_pct}% ≥ ${halt.mem_threshold}%)</div>`
+        : '';
+
+    return `<div class="hpe-card rounded-lg p-4 mb-3">
+        <div class="flex items-center justify-between gap-3 mb-2">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">VM Auto-Provisioning</h3>
+            ${pill}
+        </div>
+        ${active ? `<div class="flex items-center justify-between text-xs text-slate-500 mb-1"><span>${Math.min(run.completed, run.total)} of ${run.total} complete${run.failed ? ` · ${run.failed} failed` : ''}</span><span>${pct}%</span></div>
+        <div class="h-2 rounded-full bg-slate-100 overflow-hidden mb-2"><div class="h-full bg-gradient-to-r from-[#01A982] to-sky-400" style="width:${pct}%"></div></div>` : ''}
+        <div class="max-h-48 overflow-y-auto">${feed}</div>
+        ${haltLine}
+    </div>`;
+}
+
 function csVmRow(v) {
     const vid = csEscape(v.vmid);
-    const act = (label, action, cls) => `<button onclick="csVmAction(${v.vmid},'${action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${cls}">${label}</button>`;
+    // Disable actions on a VM that's being torn down — it's about to vanish.
+    const busy = String(v.prov_status || '').toLowerCase() === 'tearing_down';
+    const act = (label, action, cls) => busy
+        ? `<button disabled title="VM is being deleted" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">${label}</button>`
+        : `<button onclick="csVmAction(${v.vmid},'${action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${cls}">${label}</button>`;
     return `<tr>
       <td class="px-3 py-2 font-mono text-xs"><input type="checkbox" class="cs-vm-sel" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}</td>
       <td class="px-3 py-2 text-sm">${csEscape(v.name || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(v.is_template ? 'template' : (v.type || '—'))}</td>
-      <td class="px-3 py-2">${csStatusBadge(v.status || (v.pending_checkin ? 'pending' : 'unknown'))}</td>
+      <td class="px-3 py-2">${csVmStatusBadge(v)}</td>
       <td class="px-3 py-2"><div class="flex flex-wrap gap-1">
         ${act('Start','start_vm','bg-green-100 text-green-700')}
         ${act('Stop','stop_vm','bg-amber-100 text-amber-700')}
