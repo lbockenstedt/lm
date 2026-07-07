@@ -68,7 +68,8 @@ from state.manager import StateManager
 from simulations.broadcaster import SimulationsBroadcaster
 from simulations.store import SimulationsStore
 from security.auth_manager import AuthManager, LDAPAuthProvider
-from api import build_server, _save_sessions, _refresh_module_all_tenants
+from api import (build_server, _save_sessions, _refresh_module_all_tenants,
+                 _invalidate_tenant_module, _fetch_module)
 from update_recovery import (
     snapshot_code, write_pending, clear_pending,
     is_version_bad, clear_bad_versions_older_than,
@@ -438,6 +439,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # spoke) instead of assuming every agent is on the pxmx spoke. Evicted
         # when the owning spoke disconnects. See get_spoke_for_agent.
         self.agent_info: Dict[str, Dict[str, Any]] = {}
+        # Per-tenant debounced VM-cache refresh (pxmx_vms + netbox_vms) for
+        # agent-originated VM mutations. When an agent reports a VM-mutating
+        # CS_COMMAND_RESULT (delete_vm / reclone_vm / clone_lxc /
+        # provision_unassigned), the hub drops + re-fetches that tenant's cached
+        # VM lists so the Hypervisors view doesn't stay stale up to the 300s TTL
+        # tick. Coalesced to ≤1 refresh / _VM_REFRESH_MIN_INTERVAL (5s) with a
+        # trailing refresh after a burst — a 100-delete storm collapses to a
+        # refresh at t=0 then one every 5s + a final trailing refresh. See
+        # _schedule_vm_cache_refresh / _run_vm_cache_refresh.
+        self._vm_refresh_last: Dict[str, float] = {}      # tenant_id → last refresh ts
+        self._vm_refresh_pending: Dict[str, bool] = {}    # tenant_id → refresh requested during inflight
+        self._vm_refresh_inflight: set = set()            # tenant_ids with a refresh task running
         # Per-spoke connection lifecycle events. Lets the WebUI distinguish
         # "never dialed" / "flapping every few seconds" / "clean-exit after
         # self-update" / "auth failed" — all of which previously collapsed to a
@@ -1010,6 +1023,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         "CS_EXPIRE_PENDING_COMMANDS": "CS_CLEAR_COMMANDS",
     }
 
+    # Agent CS_COMMAND_RESULT actions that mutate a tenant's Proxmox VM set and
+    # therefore invalidate the hub's cached pxmx_vms (and the NetBox VM-sync
+    # view, netbox_vms). Used by _schedule_vm_cache_refresh to gate the
+    # debounced per-tenant refresh — non-mutating results (status beacons,
+    # progress, failures) are ignored so a busy sim doesn't trigger refreshes.
+    _VM_MUTATING_ACTIONS = frozenset({
+        "delete_vm", "reclone_vm", "clone_lxc", "provision_unassigned",
+    })
+    # Coalesce VM-cache refreshes to at most one per tenant per this interval.
+    _VM_REFRESH_MIN_INTERVAL = 5.0
+
     async def _relay_cs_event(self, spoke_id: str, agent_id: str,
                               cs_type: str, data: Dict[str, Any]) -> None:
         """Forward a relayed CS_* agent event to the tenant's cs spoke (best-effort).
@@ -1043,6 +1067,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 tenant_id = self.state.get_spoke_tenant(spoke_id)
             except Exception:
                 tenant_id = None
+        # A VM-mutating command result (delete_vm / reclone_vm / clone_lxc /
+        # provision_unassigned) invalidates this tenant's cached pxmx_vms +
+        # netbox_vms — the agent already changed Proxmox, so re-read the lists
+        # instead of serving a stale view up to the 300s TTL tick. Triggered
+        # before the cs-spoke dispatch so it fires even if the cs spoke is
+        # offline (the VM mutation is independent of it). Best-effort + scoped
+        # to the acting tenant + coalesced to ≤1 refresh / 5s (trailing refresh
+        # after a burst). Skipped on explicit failures (status == "failed"):
+        # a failed delete changed nothing, so a refresh would be wasted work.
+        if cs_type == "CS_COMMAND_RESULT" and tenant_id:
+            action = (data or {}).get("action")
+            status = (data or {}).get("status")
+            if action in self._VM_MUTATING_ACTIONS and status != "failed":
+                try:
+                    self._schedule_vm_cache_refresh(tenant_id)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("vm cache refresh schedule failed: %s", e)
         cs_spoke = self.get_client_sim_spoke(tenant_id)
         if not cs_spoke:
             logger.debug("CS_* relay: no cs spoke for tenant=%s (agent=%s, %s) — dropping",
@@ -1084,6 +1125,54 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             _refresh_module_all_tenants(self, key)
         except Exception as e:  # noqa: BLE001 — never let a cache refresh kill a sync loop
             logger.debug("refresh_module_cache(%s) failed: %s", key, e)
+
+    # --- Agent-result → debounced per-tenant VM-cache refresh ──────────────
+    # An agent mass-delete (CS_COMMAND action=delete_vm) reports completion via
+    # CS_COMMAND_RESULT up AGENT_RELAY_UP, but that path never invalidated the
+    # hub's _tenant_cache[*]["pxmx_vms"] (only hub-originated routes did, via
+    # _refresh_module_all_tenants). So the Hypervisors VM list stayed stale up
+    # to the 300s TTL tick. This debounced refresh closes that gap, scoped to
+    # the acting tenant (pxmx_vms + netbox_vms) and coalesced to ≤1 / 5s with a
+    # trailing refresh after a burst. See _VM_MUTATING_ACTIONS.
+    def _schedule_vm_cache_refresh(self, tenant_id: str) -> None:
+        if not tenant_id:
+            return
+        if tenant_id in self._vm_refresh_inflight:
+            # A refresh is already running — request one more trailing refresh
+            # so the final state (after the whole burst) is re-read, then return.
+            self._vm_refresh_pending[tenant_id] = True
+            return
+        # Mark inflight NOW (before create_task) so a rapid follow-up schedule
+        # call — which runs synchronously before the coroutine even starts —
+        # sees inflight set and coalesces into pending instead of spawning a
+        # second task. Without this, a tight burst of N schedules would spawn N
+        # tasks (each marks inflight only once its coroutine runs).
+        self._vm_refresh_inflight.add(tenant_id)
+        asyncio.create_task(self._run_vm_cache_refresh(tenant_id))
+
+    async def _run_vm_cache_refresh(self, tenant_id: str) -> None:
+        try:
+            while True:
+                # Rate-limit: never refresh more often than the min interval. The
+                # first call (last unset) waits 0 → leading-edge immediate refresh.
+                now = time.time()
+                wait = self._VM_REFRESH_MIN_INTERVAL - (now - self._vm_refresh_last.get(tenant_id, 0.0))
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                for key in ("pxmx_vms", "netbox_vms"):
+                    try:
+                        _invalidate_tenant_module(tenant_id, key)
+                        await _fetch_module(self, tenant_id, key)
+                    except Exception as e:  # noqa: BLE001 — best-effort, never break the loop
+                        logger.debug("vm cache refresh %s/%s failed: %s", tenant_id, key, e)
+                self._vm_refresh_last[tenant_id] = time.time()
+                # Trailing edge: if another mutating result arrived during this
+                # refresh, loop once more (rate-limited by the interval above) so
+                # the post-burst state is re-read. Else the task exits.
+                if not self._vm_refresh_pending.pop(tenant_id, False):
+                    break
+        finally:
+            self._vm_refresh_inflight.discard(tenant_id)
 
     async def push_config_to_spoke(self, spoke_id: str):
         """Pushes the module-specific configuration from global state to the spoke."""
