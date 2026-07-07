@@ -944,7 +944,10 @@ let csClientTier = 'all'; // 'all' | 't1' | 't2'
 // Mirrors webui-hub classifyClient (app.js:2275). Falls back to t1 when no signal.
 function csClassifyClient(c) {
     if (!c) return 't1';
-    if (c.tier === 't2' || c.tier === 't1') return c.tier;
+    // Tier by PASSTHROUGH (authoritative, from the agent's compute_vm_tiers):
+    // T2 = USB dongle; T1/T3 = PCI passthrough. Prefer the agent-computed
+    // c.tier; fall back to has_usb (T2/T1) when the VM wasn't classified.
+    if (c.tier === 't1' || c.tier === 't2' || c.tier === 't3') return c.tier;
     if (c.has_usb === true) return 't2';
     if (c.has_usb === false) return 't1';
     if (c.vm_type === 't2' || c.client_type === 't2') return 't2';
@@ -955,7 +958,7 @@ function csClassifyClient(c) {
 async function csRenderClients(tier) {
     // tier may come in as a boolean `force` arg from the legacy primary-switch
     // fallback; only accept real tier strings.
-    if (tier === 't1' || tier === 't2' || tier === 'all') csClientTier = tier;
+    if (tier === 't1' || tier === 't2' || tier === 't3' || tier === 'all') csClientTier = tier;
     csSetToolbar(`<input id="cs-client-search" oninput="csClientFilter()" placeholder="Search clients…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
       <select id="cs-client-status" onchange="csClientFilter()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
@@ -967,8 +970,9 @@ async function csRenderClients(tier) {
     const all = rows.length;
     const t1 = rows.filter(c => csClassifyClient(c) === 't1').length;
     const t2 = rows.filter(c => csClassifyClient(c) === 't2').length;
+    const t3 = rows.filter(c => csClassifyClient(c) === 't3').length;
     const online = rows.filter(c => c.online).length;
-    const pills = csSummaryRow([[all, 'Clients'], [t1, 'T1'], [t2, 'T2'], [online, 'Online']]);
+    const pills = csSummaryRow([[all, 'Clients'], [t1, 'T1'], [t2, 'T2'], [t3, 'T3'], [online, 'Online']]);
     const demoCard = await csDemoCard();
     // Kill switch moved to the All/T1/T2 child strip (renderSecondaryNav →
     // csKillSwitchMountChip), pinned far right — no longer a content banner here.
@@ -1033,7 +1037,7 @@ function csRenderClientRows(rows) {
           <td class="px-4 py-2 font-mono text-xs">${csEscape(host || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.platform || c.hw_type || '—')}</td>
           <td class="px-4 py-2">${csOnlineBadge(c.online)}</td>
-          <td class="px-4 py-2"><span class="text-[10px] font-bold px-2 py-0.5 rounded ${t === 't2' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600'}">${t.toUpperCase()}</span></td>
+          <td class="px-4 py-2"><span class="text-[10px] font-bold px-2 py-0.5 rounded ${t === 't2' ? 'bg-purple-100 text-purple-700' : t === 't3' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}">${t.toUpperCase()}</span></td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.connected_ssid || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(csLastSeen(c.last_seen))}</td>
           <td class="px-4 py-2 ${c.error_count > 0 ? 'text-amber-600 font-bold' : 'text-slate-400'}">${csEscape(c.error_count || 0)}</td>
@@ -3626,6 +3630,7 @@ window.CS_CHILD_RENDERERS['Dashboard::Client Count'] = csRenderSimClientCount;
 window.CS_CHILD_RENDERERS['Clients::All'] = function () { return csRenderClients('all'); };
 window.CS_CHILD_RENDERERS['Clients::T1']  = function () { return csRenderClients('t1'); };
 window.CS_CHILD_RENDERERS['Clients::T2']  = function () { return csRenderClients('t2'); };
+window.CS_CHILD_RENDERERS['Clients::T3']  = function () { return csRenderClients('t3'); };
 
 window.csOpenVmConsole = function (spokeId) {
     if (typeof showToast === 'function') showToast(`VM console for ${spokeId} is wired in Phase 5 (noVNC over /sim/ws/console/{sessionId}).`, 'info');

@@ -1115,7 +1115,7 @@ const VIEW_SUBMENUS = {
 const VIEW_CHILDREN = {
     cs: {
         'Dashboard': ['Checks', 'Hardware', 'Client Count'],
-        'Clients':     ['All', 'T1', 'T2'],
+        'Clients':     ['All', 'T1', 'T2', 'T3'],
         'Central':     ['Sites', 'Alerts', 'Clients'],
         'VM Server':   ['Overview', 'VMs', 'Console', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
         'Config':      ['API', 'Simulation'],
