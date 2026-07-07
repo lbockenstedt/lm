@@ -650,7 +650,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             }
             json_payload = json.dumps(payload, separators=(',', ':'))
             self.bytes_count += len(json_payload.encode())
-            await ws.send(json_payload)
+            try:
+                await ws.send(json_payload)
+            except (websockets.ConnectionClosed, RuntimeError, ConnectionError) as e:
+                # The socket was closed/evicted between the active_connections
+                # lookup above and this send (the eviction path swaps sockets;
+                # a concurrent sender can catch the closing one mid-swap, or a
+                # duplicate-process flap can replace it). Surface as a clean
+                # ConnectionError so push_or_queue_to_spoke queues the message
+                # for redelivery on reconnect instead of bubbling up as a
+                # "connection_error — Need to call accept first" event.
+                raise ConnectionError(
+                    f"Spoke {spoke_id} connection closed mid-send: {e}") from e
             self.message_count += 1
         else:
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
@@ -1957,14 +1968,64 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 except Exception:
                     pass
                 return False
-            # Newer/current connection wins — close the previous socket so its
-            # frame loop ends (it may be a zombie from a prior outage).
-            logger.warning(f"Spoke {spoke_id} reconnected; closing previous connection.")
-            self.record_spoke_event(spoke_id, "replaced_connection", "newer connection took over")
+            # Both auth'd with the same current key — this is either a normal
+            # reconnect after a blip (the existing socket is a TCP-half-open
+            # zombie whose process already moved on) OR a DUPLICATE spoke
+            # process / clone sharing the same spoke_id + secret (the existing
+            # socket is alive and actively serving). The two are
+            # indistinguishable by key alone, so probe the existing connection's
+            # liveness with a ping before deciding:
+            #   • alive (pongs within 2s) → duplicate/needless reconnect. Keep
+            #     the live existing connection and REJECT the new one, so the
+            #     two processes can't mutually evict each other into a
+            # reconnect flap (the "newer connection took over" repeats in the
+            #     spoke event log). The rejected duplicate backs off and retries,
+            #     but never displaces the live connection — flap stops.
+            #   • dead (no pong) → zombie; evict it and take over.
+            alive = False
+            try:
+                await asyncio.wait_for(existing.ping(), timeout=2.0)
+                alive = True
+            except Exception:
+                alive = False
+            if alive:
+                logger.warning(
+                    f"Spoke {spoke_id} connected but an existing live connection "
+                    f"is already active; rejecting the duplicate to prevent a "
+                    f"mutual-eviction reconnect flap. This usually means a second "
+                    f"spoke process or a cloned LXC is sharing {spoke_id}'s "
+                    f"secret — find and remove it on the spoke host "
+                    f"(pgrep -af control_plane; systemctl status lm-cs)."
+                )
+                self.record_spoke_event(
+                    spoke_id, "duplicate_rejected",
+                    "existing connection is live — rejecting duplicate connect "
+                    "(likely a second spoke process / clone sharing the secret)",
+                )
+                try:
+                    await websocket.close(1008, "Duplicate connection — existing is live")
+                except Exception:
+                    pass
+                return False
+            # Existing is a zombie — install the NEW connection FIRST so any
+            # concurrent sender (push_config_to_spoke, flush_mailbox, mailbox
+            # retry_loop, key-rotation push) reads the live socket from
+            # active_connections instead of the one we're about to close. This
+            # closes the read-then-send TOCTOU that surfaced as
+            # "WebSocket is not connected. Need to call 'accept' first" errors
+            # during the swap window.
+            logger.warning(f"Spoke {spoke_id} reconnected; closing previous (zombie) connection.")
+            self.record_spoke_event(
+                spoke_id, "replaced_connection",
+                "newer connection took over (previous was unresponsive)",
+            )
+            self.active_connections[spoke_id] = websocket
+            self.active_connection_key_ids[spoke_id] = key_id
             try:
                 await existing.close(1008, "Replaced by newer connection")
             except Exception:
                 pass
+            return True
         self.active_connections[spoke_id] = websocket
         self.active_connection_key_ids[spoke_id] = key_id
         return True

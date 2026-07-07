@@ -50,17 +50,29 @@ def _key(kid: str, secret: str) -> ManagedKey:
 
 
 class _FakeWS:
-    """Minimal stand-in for a websocket: identity + an async close()."""
+    """Minimal stand-in for a websocket: identity + an async close() + ping().
 
-    def __init__(self):
+    ``alive`` controls the liveness probe ``_install_active_connection`` pings
+    the existing connection with before deciding whether to evict: an alive
+    socket pongs (ping() resolves), a dead/zombie socket doesn't (ping()
+    raises). Defaults to dead (the zombie-reconnect case)."""
+
+    def __init__(self, alive=False):
         self.closed = False
         self.close_code = None
         self.close_reason = None
+        self._alive = alive
 
     async def close(self, code, reason):
         self.closed = True
         self.close_code = code
         self.close_reason = reason
+
+    async def ping(self):
+        if not self._alive:
+            raise ConnectionError("dead socket — no pong")
+        # alive: pong received → awaitable completes
+        return None
 
 
 class _ConnHub:
@@ -190,6 +202,54 @@ async def test_install_same_websocket_no_close():
     assert ok is True
     assert ws.closed is False
     assert hub.active_connection_key_ids["s1"] == "cur"
+
+
+async def test_install_rejects_duplicate_when_existing_alive():
+    """A second process (same current key) connecting while the existing
+    connection is LIVE (responds to ping) is REJECTED — this is the duplicate-
+    spoke-process case that caused the cs-svr-02 mutual-eviction flap. The
+    live connection is kept untouched; the duplicate is closed with 1008."""
+    km = _make_km()
+    km.keys["s1"] = _key("cur", "current-secret")
+    hub = _ConnHub(km)
+
+    live = _FakeWS(alive=True)  # pongs → existing is alive
+    hub.active_connections["s1"] = live
+    hub.active_connection_key_ids["s1"] = "cur"
+
+    dup = _FakeWS()
+    ok = await _install(hub, "s1", dup, "cur")  # same current key
+    assert ok is False
+    assert dup.closed is True                    # duplicate rejected
+    assert dup.close_code == 1008
+    assert live.closed is False                   # existing untouched
+    assert hub.active_connections["s1"] is live
+    assert hub.active_connection_key_ids["s1"] == "cur"
+    # A duplicate_rejected event is recorded so the operator can see the flap.
+    assert any(ev[1] == "duplicate_rejected" for ev in hub.events)
+
+
+async def test_install_evicts_zombie_when_existing_unresponsive():
+    """A reconnect over an existing connection that does NOT respond to ping
+    (zombie — socket still in the table but the peer is gone, e.g. after a
+    crash) evicts the zombie and installs the new connection BEFORE closing
+    the old (closes the TOCTOU window where a stale socket could briefly be
+    the registered one)."""
+    km = _make_km()
+    km.keys["s1"] = _key("cur", "current-secret")
+    hub = _ConnHub(km)
+
+    zombie = _FakeWS(alive=False)  # no pong → dead
+    hub.active_connections["s1"] = zombie
+    hub.active_connection_key_ids["s1"] = "cur"
+
+    fresh = _FakeWS()
+    ok = await _install(hub, "s1", fresh, "cur")
+    assert ok is True
+    assert hub.active_connections["s1"] is fresh  # installed BEFORE close
+    assert hub.active_connection_key_ids["s1"] == "cur"
+    assert zombie.closed is True                  # zombie closed after install
+    assert zombie.close_code == 1008
 
 # ── key-delivery signing (sign SPOKE_UPDATE_SESSION_KEY with the PRE-rotation
 #    secret so the spoke can verify it before installing the new key) ──────────
