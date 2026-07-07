@@ -600,11 +600,21 @@ window.csKillSwitchMountChip = async function (elId) {
         el.innerHTML = `<span class="text-[10px] normal-case tracking-normal text-slate-400">Kill switch: spoke offline</span>`;
         return;
     }
-    el.innerHTML = ks
+    const ksBtn = ks
         ? `<button onclick="csToggleKillSwitch(false)" title="Simulations halted — click to resume"
              class="normal-case tracking-normal bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded-md text-xs font-bold">▶ Resume Sims</button>`
         : `<button onclick="csToggleKillSwitch(true)" title="Emergency stop all simulations on this tenant"
              class="normal-case tracking-normal bg-white hover:bg-red-50 text-red-600 border border-red-300 px-3 py-1 rounded-md text-xs font-bold">⛔ Emergency Stop</button>`;
+    // Purge Clients lives next to the Emergency Stop chip in this same strip,
+    // sized identically to it (px-3 py-1 rounded-md text-xs font-bold, outline
+    // red). Shown only on the Clients child strip — purge is client-specific.
+    // Moved here from the csRenderClients toolbar so the destructive action sits
+    // with the other emergency control at the top of the view.
+    const purgeBtn = (typeof currentSubView !== 'undefined' && currentSubView === 'Clients')
+        ? `<button id="cs-purge-clients-btn" onclick="csPurgeClients(this)" title="Remove all client records from memory and disk"
+             class="normal-case tracking-normal bg-white hover:bg-red-50 text-red-600 border border-red-300 px-3 py-1 rounded-md text-xs font-bold">🗑 Purge Clients</button>`
+        : '';
+    el.innerHTML = ksBtn + purgeBtn;
 };
 
 async function csRenderSimulations() {
@@ -979,8 +989,7 @@ async function csRenderClients(tier) {
     csSetToolbar(`<input id="cs-client-search" oninput="csClientFilterKey()" placeholder="Search clients…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
       <select id="cs-client-status" onchange="csClientFilter()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
-      </select>
-      <button id="cs-purge-clients-btn" onclick="csPurgeClients(this)" title="Remove all client records from memory and disk" class="ml-auto bg-white border border-red-300 text-red-600 hover:bg-red-50 rounded-md px-3 py-1.5 text-sm font-semibold">🗑 Purge Clients</button>`);
+      </select>`);
     const data = await csFetch(`/aggregate/clients?tenant_id=${csTenant()}`);
     const rows = csNormalizeClients(data);
     csClientCache = rows;
@@ -1016,6 +1025,10 @@ window.csPurgeClients = async function (btn) {
         if (typeof showToast === 'function') showToast(`Purged ${n} client record(s)`, 'success');
         // Re-render the Clients tab so the now-empty list shows immediately.
         await csRenderClients(csClientTier);
+        // The Purge button now lives in the kill-switch chip (secondary nav),
+        // which csRenderClients doesn't touch — re-mount it so the button
+        // resets from its disabled "⏳ Purging…" state.
+        if (typeof window.csKillSwitchMountChip === 'function') window.csKillSwitchMountChip('cs-ks-chip');
     } catch (e) {
         console.error('csPurgeClients: purge failed', e);
         if (typeof showToast === 'function') showToast('Purge failed: ' + (e.message || e), 'error');

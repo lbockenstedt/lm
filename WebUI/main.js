@@ -2417,7 +2417,7 @@ function renderSecondaryNav(viewId) {
     // Dashboard (Checks/Hardware/Client Count) child strips — moved out of those
     // views' content banners.
     const ksSlot = (viewId === 'cs' && (currentSubView === 'Clients' || currentSubView === 'Dashboard'))
-        ? '<span id="cs-ks-chip" class="ml-auto flex items-center"></span>' : '';
+        ? '<span id="cs-ks-chip" class="ml-auto flex items-center gap-2"></span>' : '';
     sec.innerHTML = tabs + ksSlot;
     sec.classList.remove('hidden');
     if (ksSlot && typeof window.csKillSwitchMountChip === 'function') {
