@@ -2434,8 +2434,15 @@ async function csProcessingModesCard() {
     const data = await csFetch('/' + csTenant() + '/settings');
     const modes = (data && data.processing_modes) || {};
     const features = [['central_api', 'Central API'], ['teams', 'Teams'], ['email', 'Email']];
-    const opts = (cur) => ['centralized', 'distributed'].map(v =>
-        `<option value="${v}" ${cur === v ? 'selected' : ''}>${v.charAt(0).toUpperCase() + v.slice(1)}</option>`).join('');
+    // Unset == distributed at runtime (routes.py test_central: `modes.get("central_api") == "centralized"`
+    // is False when unset → distributed branch). Show that truth in the dropdown instead of letting the
+    // browser default-display the first option ("Centralized"), which misleads operators into thinking
+    // centralized is active when nothing has been persisted.
+    const opts = (cur) => {
+        if (!cur) cur = 'distributed';
+        return ['centralized', 'distributed'].map(v =>
+            `<option value="${v}" ${cur === v ? 'selected' : ''}>${v.charAt(0).toUpperCase() + v.slice(1)}</option>`).join('');
+    };
     const fields = features.map(([k, label]) => `<label class="text-xs text-slate-500">${csEscape(label)}
       <select id="cs-pm-${k}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">${opts(modes[k])}</select>
     </label>`).join('');
