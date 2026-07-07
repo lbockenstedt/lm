@@ -77,7 +77,7 @@ class RepoSyncMixin:
             proc = await asyncio.create_subprocess_exec(
                 "git", "-C", repo_dir, "rev-parse", "HEAD",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            out, _ = await proc.communicate()
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
             if proc.returncode == 0:
                 return out.decode("utf-8", "replace").strip()
         except Exception as e:  # noqa: BLE001 — best-effort, never fatal
@@ -99,7 +99,7 @@ class RepoSyncMixin:
             proc = await asyncio.create_subprocess_exec(
                 "git", "-C", repo_dir, "pull", "--ff-only",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            out, err = await proc.communicate()
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=120.0)
             after = await self._git_head(repo_dir)
             ok = proc.returncode == 0
             tail = (out.decode("utf-8", "replace").strip()

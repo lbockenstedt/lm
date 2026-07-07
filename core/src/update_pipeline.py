@@ -197,7 +197,7 @@ class UpdatePipelineMixin:
                 "git", "-C", hub_root, "rev-parse", "HEAD",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            out, _ = await proc.communicate()
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
             if proc.returncode == 0:
                 return out.decode().strip() or "unknown"
         except Exception as e:
@@ -221,7 +221,7 @@ class UpdatePipelineMixin:
                 "git", "ls-remote", repo, f"refs/heads/{ref}",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            out, err = await proc.communicate()
+            out, err = await asyncio.wait_for(proc.communicate(), timeout=30.0)
             if proc.returncode == 0:
                 # `ls-remote` prints "<sha>\trefs/heads/main"; take the first token.
                 line = out.decode().strip().splitlines()
@@ -360,7 +360,7 @@ class UpdatePipelineMixin:
             proc = await asyncio.create_subprocess_exec(
                 "sudo", "-n", helper,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            _out, err = await proc.communicate()
+            _out, err = await asyncio.wait_for(proc.communicate(), timeout=60.0)
             if proc.returncode == 0:
                 return True
             logger.warning("update-health: lm-fix-perms failed rc=%s: %s",
@@ -481,7 +481,7 @@ class UpdatePipelineMixin:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await process.communicate()
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300.0)
 
             err_msg = stderr.decode().strip()
             out_msg = stdout.decode().strip()
@@ -704,10 +704,15 @@ class UpdatePipelineMixin:
                     # the spoke's own BaseControlPlane rollback).
                     try:
                         ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-                        backup_dir = snapshot_code(
-                            hub_root, ts,
-                            tree_list=["core/src", "WebUI", "dns", "dhcp"])
-                        write_pending(backup_dir, local_v, remote_v, ts)
+                        # snapshot_code does recursive shutil.copytree of core/src
+                        # + WebUI + dns + dhcp (synchronous I/O) — run it on a
+                        # thread so the hub loop keeps serving heartbeats /
+                        # request_response during the snapshot (this is the hourly
+                        # repo_sync path; a stall here times out every spoke).
+                        backup_dir = await asyncio.to_thread(
+                            snapshot_code, hub_root, ts,
+                            ["core/src", "WebUI", "dns", "dhcp"])
+                        await asyncio.to_thread(write_pending, backup_dir, local_v, remote_v, ts)
                     except Exception as _e:
                         logger.warning(
                             f"Pre-update snapshot failed (rollback disabled): {_e}"

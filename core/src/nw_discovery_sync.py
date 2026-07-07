@@ -187,6 +187,13 @@ class NwDiscoverySyncMixin:
         if not spokes:
             return [], {"errors": ["no nw spoke connected"]}
 
+        # Bound the fetch phase so a single spoke backing M devices doesn't get
+        # M concurrent request_response calls (2M if mac_command set: ARP+MAC).
+        # The push phase at the bottom already uses this semaphore; the fetch
+        # phase didn't — that was the only true stampede-to-one-spoke in the
+        # codebase.
+        fetch_sem = asyncio.Semaphore(self._nw_discovery_concurrency())
+
         async def _fetch(sid: str, device: Dict[str, Any]) -> None:
             did = device.get("id", "")
             dname = device.get("name", did)
@@ -202,8 +209,9 @@ class NwDiscoverySyncMixin:
                 if not cmd:
                     continue
                 try:
-                    r = await self.request_response(sid, cmd, {"device_id": did},
-                                                    timeout=30.0)
+                    async with fetch_sem:
+                        r = await self.request_response(sid, cmd, {"device_id": did},
+                                                        timeout=30.0)
                     d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
                     if isinstance(d, dict) and d.get("status") == "ERROR":
                         errors.append(f"{cmd}({dname}@{sid}): "

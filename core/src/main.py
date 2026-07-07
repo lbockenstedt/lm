@@ -2544,10 +2544,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         req_type = req.get("type", "") if isinstance(req, dict) else ""
         try:
             if req_type == "GET_LOGS":
-                return self.collect_all_logs()
+                return await asyncio.to_thread(self.collect_all_logs)
 
             if req_type == "GET_ERROR_LOGS":
-                return self.collect_error_logs()
+                return await asyncio.to_thread(self.collect_error_logs)
 
             if req_type == "TRIGGER_UPDATE":
                 return await self.perform_update(force=bool(req.get("force", False)))
@@ -2607,7 +2607,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
             if req_type == "GET_BUG_REPORT":
                 rid = req.get("id", "")
-                rep = self._get_bug_report(rid)
+                rep = await asyncio.to_thread(self._get_bug_report, rid)
                 logger.info(
                     f"[bug-report] GET_BUG_REPORT id={rid} from {spoke_id}: "
                     f"{'hit' if rep else 'miss'}"
@@ -2617,7 +2617,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             if req_type == "MARK_BUG_FILED":
                 rid = req.get("id", "")
                 issue_url = req.get("issue_url", "")
-                ok = self._mark_bug_filed(rid, issue_url)
+                ok = await asyncio.to_thread(self._mark_bug_filed, rid, issue_url)
                 logger.info(
                     f"[bug-report] MARK_BUG_FILED id={rid} url={issue_url} "
                     f"from {spoke_id}: {'ok' if ok else 'not_found'}"
@@ -3103,7 +3103,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return False
 
         try:
-            result = await self.request_response(spoke_id, "OPNSENSE_GET_ALL_RULES", {})
+            # 30s, not the 5.0s default: the spoke answers via a curl subprocess
+            # with --max-time 15, so the 5s default guaranteed a timeout on any
+            # cold/WAN spoke and left the forensic cache empty.
+            result = await self.request_response(spoke_id, "OPNSENSE_GET_ALL_RULES", {}, timeout=30.0)
 
             data = {}
             if isinstance(result, dict):
@@ -3129,13 +3132,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # in-memory `firewall_caches`/`opnsense_cache` dicts were write-only
             # dead state and have been removed.
             try:
-                if not os.path.exists(self.cache_dir):
-                    os.makedirs(self.cache_dir, exist_ok=True)
-
                 cache_filename = f"rules_{cache_key}.json"
                 cache_path = os.path.join(self.cache_dir, cache_filename)
-                with open(cache_path, "w") as f:
-                    json.dump(data, f)
+
+                def _write_cache():
+                    if not os.path.exists(self.cache_dir):
+                        os.makedirs(self.cache_dir, exist_ok=True)
+                    with open(cache_path, "w") as f:
+                        json.dump(data, f)
+
+                # Offload the synchronous makedirs + json.dump off the hub loop
+                # (a large ruleset can take long enough to stall heartbeats /
+                # request_response — same class as the cs-svr-02 I/O starvation).
+                await asyncio.to_thread(_write_cache)
                 logger.info(f"OPNsense rules cached to {cache_path}")
             except Exception as e:
                 logger.error(f"Failed to persist OPNsense cache to disk for {cache_key}: {e}")
@@ -3235,7 +3244,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         while True:
             try:
                 config = self.state.get_global_config()
-                interval_hours = config.get("opnsense_poll_interval", 1)
+                # Clamp >= 1h: a 0 (or negative) config value would make the
+                # loop sleep(0) and busy-loop poll_opnsense_rules across every
+                # firewall as fast as the event loop allows. Every sync mixin
+                # clamps >= 60s; this loop is the lone one that didn't.
+                try:
+                    interval_hours = max(1, int(config.get("opnsense_poll_interval", 1)))
+                except (TypeError, ValueError):
+                    interval_hours = 1
 
                 firewalls = config.get("firewalls", [])
                 opn_firewalls = [fw for fw in firewalls if fw.get("model") == "opnsense"]

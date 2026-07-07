@@ -103,6 +103,19 @@ class Mailbox:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Mailbox persist failed ({self._path}): {e}")
 
+    async def _asave(self) -> None:
+        """Async wrapper around the synchronous encrypted JSON write.
+
+        ``_save`` does a ``json.dumps`` of every pending/offline message + an
+        fsync'd atomic file replace on every ``acknowledge``/``push``/
+        ``retry_loop``/``flush_mailbox`` — the hub-side COMMAND_RESULT /
+        command-dispatch fan-in. Doing that inline on the hub's asyncio loop
+        is the same I/O-starvation pattern that stalled cs-svr-02's WS link
+        (sync disk writes on the shared loop → 5s Request Timeout). Offload it
+        to a thread so heartbeats / ``request_response`` keep flowing while the
+        mailbox persists."""
+        await asyncio.to_thread(self._save)
+
     def _load(self) -> None:
         """Restore pending_ack/spoke_queues from disk (warm start after a hub
         restart). Best-effort: any failure just starts empty — never fatal."""
@@ -151,7 +164,7 @@ class Mailbox:
             # If it fails here, it's already in the queue for the retry loop to handle if we add it
 
         self.pending_ack[message.header.message_id] = (message, time.time(), 0)
-        self._save()
+        await self._asave()
 
     async def acknowledge(self, ack: Acknowledgement):
         """
@@ -160,7 +173,7 @@ class Mailbox:
         if ack.correlation_id in self.pending_ack:
             logger.info(f"Message {ack.correlation_id} acknowledged with status: {ack.status}")
             del self.pending_ack[ack.correlation_id]
-            self._save()
+            await self._asave()
         else:
             # Unknown ack: the original message is no longer in pending_ack
             # (already acked, expired, or never sent by this Hub), so we cannot
@@ -176,7 +189,7 @@ class Mailbox:
                 f"status={ack.status})"
             )
 
-    def queue_for_spoke(self, spoke_id: str, message: Message):
+    async def queue_for_spoke(self, spoke_id: str, message: Message):
         """
         Queues a message for a spoke that is currently offline.
         """
@@ -192,7 +205,7 @@ class Mailbox:
 
         self.spoke_queues[spoke_id].append(message)
         logger.info(f"Queued message {message.header.message_id} for offline spoke {spoke_id}")
-        self._save()
+        await self._asave()
 
     async def flush_mailbox(self, spoke_id: str, send_func):
         """
@@ -206,7 +219,7 @@ class Mailbox:
                 await self.push(msg, send_func)
 
             self.spoke_queues[spoke_id] = []
-            self._save()
+            await self._asave()
 
     async def retry_loop(self, send_func_map):
         """
@@ -260,15 +273,15 @@ class Mailbox:
                 else:
                     # Spoke is offline, move to offline queue if not already there
                     logger.info(f"Spoke {spoke_id} offline. Moving message {msg_id} to offline queue.")
-                    self.queue_for_spoke(spoke_id, msg)  # saves its own change
+                    await self.queue_for_spoke(spoke_id, msg)  # saves its own change
                     del self.pending_ack[msg_id]
 
             if changed:
-                self._save()
+                await self._asave()
 
             await asyncio.sleep(1)
 
-    def clear_spoke(self, spoke_id: str) -> int:
+    async def clear_spoke(self, spoke_id: str) -> int:
         """Drop ALL queued/pending messages destined for ``spoke_id``.
 
         Called when an admin deletes a spoke, resets its secret, or un-approves
@@ -290,7 +303,7 @@ class Mailbox:
             del self.spoke_queues[spoke_id]
         if dropped:
             logger.info(f"Cleared {dropped} queued message(s) for spoke {spoke_id}.")
-            self._save()
+            await self._asave()
         return dropped
 
     def get_all_pending(self) -> list:

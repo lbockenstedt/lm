@@ -25,6 +25,11 @@ _AGENTS_STALE_S = 30.0   # still servable (background refresh kicks in here)
 # without cross-loop coupling.
 _agents_locks: dict = {}
 
+# Bounded fan-out for the aggregate /agents, /vms, hypervisor-tile gathers so
+# the hub doesn't open N simultaneous request_response calls when the fleet of
+# agent-hosting / opnsense / hypervisor spokes grows.
+_FANOUT_SEM = asyncio.Semaphore(8)
+
 
 def _agents_lock() -> "asyncio.Lock":
     loop = asyncio.get_running_loop()
@@ -67,7 +72,8 @@ async def _aggregate_agents(hub, agent_spokes):
 
     async def _one(parent_spoke):
         try:
-            return await hub.request_response(parent_spoke, "GET_AGENTS", {})
+            async with _FANOUT_SEM:
+                return await hub.request_response(parent_spoke, "GET_AGENTS", {})
         except Exception as exc:  # noqa: BLE001 — one dead spoke shouldn't blank the tile
             logger.warning("GET_AGENTS failed for spoke %s: %s", parent_spoke, exc)
             return None
@@ -218,10 +224,11 @@ def register(app, hub, ctx):
                 # Health + interface status are independent — fetch both at once
                 # per spoke, and all spokes run concurrently so the dashboard
                 # latency is one round-trip, not N×2.
-                health_raw, int_raw = await _asyncio.gather(
-                    hub.request_response(sid, "GET_SYSTEM_HEALTH", {}),
-                    hub.request_response(sid, "GET_INTERFACE_STATUS", {}),
-                )
+                async with _FANOUT_SEM:
+                    health_raw, int_raw = await _asyncio.gather(
+                        hub.request_response(sid, "GET_SYSTEM_HEALTH", {}),
+                        hub.request_response(sid, "GET_INTERFACE_STATUS", {}),
+                    )
                 health_data = health_raw.get("payload", {}).get("data", {}) if isinstance(health_raw, dict) else {}
                 int_data = int_raw.get("payload", {}).get("data", {}) if isinstance(int_raw, dict) else {}
                 return {"spoke_id": sid, "spoke_online": True,
@@ -239,7 +246,8 @@ def register(app, hub, ctx):
 
         async def _one(sid):
             try:
-                res_raw = await hub.request_response(sid, "GET_VM_INFO", {"vm_id": "all"})
+                async with _FANOUT_SEM:
+                    res_raw = await hub.request_response(sid, "GET_VM_INFO", {"vm_id": "all"})
                 res_data = res_raw.get("payload", {}).get("data", {}) if isinstance(res_raw, dict) else {}
                 return {"spoke_id": sid, "spoke_online": True, "data": res_data, "status": "ONLINE"}
             except Exception as e:

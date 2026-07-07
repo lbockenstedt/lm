@@ -26,6 +26,8 @@ Audience: Hub developers.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -165,7 +167,7 @@ class DnsDhcpSyncMixin:
                                        reason=f"{missing} spoke not connected")
         try:
             records = build_dns_records(await self._netbox_ips())
-            result = await self.request_response(dns_spoke, "DNS_SYNC", {"records": records})
+            result = await self.request_response(dns_spoke, "DNS_SYNC", {"records": records}, timeout=30.0)
             return self._record_status("dns", status="ok",
                                        records_synced=len(records),
                                        spoke_result=_unwrap(result))
@@ -184,7 +186,7 @@ class DnsDhcpSyncMixin:
             pfx_data, ips_data = await self._netbox_prefixes_and_ips()
             subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
             result = await self.request_response(dhcp_spoke, "DHCP_SYNC", {
-                "subnets": subnets, "reservations": reservations})
+                "subnets": subnets, "reservations": reservations}, timeout=30.0)
             return self._record_status("dhcp", status="ok",
                                        subnets_synced=len(subnets),
                                        reservations_synced=len(reservations),
@@ -192,6 +194,95 @@ class DnsDhcpSyncMixin:
         except Exception as e:  # noqa: BLE001
             logger.warning("DHCP auto-sync failed: %s", e)
             return self._record_status("dhcp", status="error", error=str(e))
+
+    async def _sync_dns_dhcp_once(self) -> None:
+        """One loop tick: fetch NetBox prefixes+IPs ONCE, build both payloads,
+        and skip the spoke push entirely when neither changed since the last
+        tick.
+
+        The previous loop called ``sync_dns_from_netbox`` then
+        ``sync_dhcp_from_netbox`` sequentially, each fetching the full NetBox IP
+        set independently (2 paginated 100k-row fetches per cycle) and pushing
+        unconditionally — so an idle fleet still paid 2 NetBox fetches + an
+        ``unbound-control reload`` (10s) + 3 Kea RPCs every 300s. Hashing the
+        payloads and skipping the push when unchanged removes the expensive
+        spoke-side write/reload/RPC storm on idle fleets. NetBox is still
+        fetched each tick (it's the change signal), but only once.
+        """
+        ipam = self.get_spoke_by_type("ipam")
+        if not ipam:
+            return
+        dns_spoke = self.get_spoke_by_type("dns")
+        dhcp_spoke = self.get_spoke_by_type("dhcp")
+        if not dns_spoke and not dhcp_spoke:
+            return
+        try:
+            pfx_data, ips_data = await self._netbox_prefixes_and_ips()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("DNS/DHCP sync: NetBox fetch failed: %s", e)
+            self._record_status("dns", status="error", error=str(e))
+            self._record_status("dhcp", status="error", error=str(e))
+            return
+
+        records = build_dns_records(ips_data)
+        subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
+
+        dns_hash = hashlib.sha256(json.dumps(records, sort_keys=True,
+                                             default=str).encode()).hexdigest()
+        dhcp_hash = hashlib.sha256(json.dumps(
+            {"subnets": subnets, "reservations": reservations},
+            sort_keys=True, default=str).encode()).hexdigest()
+
+        last = getattr(self, "_last_sync_hashes", None) or {}
+        dns_changed = last.get("dns") != dns_hash
+        dhcp_changed = last.get("dhcp") != dhcp_hash
+
+        pushes = []
+        if dns_spoke and dns_changed:
+            pushes.append(self.request_response(dns_spoke, "DNS_SYNC",
+                                                {"records": records}, timeout=30.0))
+        if dhcp_spoke and dhcp_changed:
+            pushes.append(self.request_response(dhcp_spoke, "DHCP_SYNC", {
+                "subnets": subnets, "reservations": reservations}, timeout=30.0))
+
+        if not pushes:
+            # Nothing changed — record a "skipped (unchanged)" status so the UI
+            # status card reflects that the loop is alive without a spoke push.
+            self._record_status("dns", status="ok", records_synced=len(records),
+                                skipped_unchanged=True)
+            self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
+                                reservations_synced=len(reservations),
+                                skipped_unchanged=True)
+            self._last_sync_hashes = {"dns": dns_hash, "dhcp": dhcp_hash}
+            return
+
+        results = await asyncio.gather(*pushes, return_exceptions=True)
+        ri = 0
+        if dns_spoke and dns_changed:
+            r = results[ri]; ri += 1
+            if isinstance(r, Exception):
+                logger.warning("DNS auto-sync push failed: %s", r)
+                self._record_status("dns", status="error", error=str(r))
+            else:
+                self._record_status("dns", status="ok", records_synced=len(records),
+                                    spoke_result=_unwrap(r))
+        else:
+            self._record_status("dns", status="ok", records_synced=len(records),
+                                skipped_unchanged=True)
+        if dhcp_spoke and dhcp_changed:
+            r = results[ri]
+            if isinstance(r, Exception):
+                logger.warning("DHCP auto-sync push failed: %s", r)
+                self._record_status("dhcp", status="error", error=str(r))
+            else:
+                self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
+                                    reservations_synced=len(reservations),
+                                    spoke_result=_unwrap(r))
+        else:
+            self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
+                                reservations_synced=len(reservations),
+                                skipped_unchanged=True)
+        self._last_sync_hashes = {"dns": dns_hash, "dhcp": dhcp_hash}
 
     async def run_dns_dhcp_sync_loop(self):
         """Background loop: reconcile Unbound + Kea to NetBox every ``interval`` s.
@@ -208,10 +299,11 @@ class DnsDhcpSyncMixin:
                 cfg = self._dds_cfg()
                 interval = cfg["interval"]
                 if cfg["enabled"]:
-                    # Best-effort: each side records its own status; a failure in
-                    # one never blocks the other.
-                    await self.sync_dns_from_netbox()
-                    await self.sync_dhcp_from_netbox()
+                    # Single NetBox fetch + skip-if-unchanged (see
+                    # _sync_dns_dhcp_once). The manual /api/dns|dhcp/sync buttons
+                    # still call the per-side methods directly (they re-fetch,
+                    # which is correct for an explicit button press).
+                    await self._sync_dns_dhcp_once()
             except Exception as e:  # noqa: BLE001 — loop must survive anything
                 logger.error("Error in DNS/DHCP auto-sync loop: %s", e)
             await asyncio.sleep(max(30, interval))

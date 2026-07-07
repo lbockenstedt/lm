@@ -552,10 +552,16 @@ class AgentHostingControlPlane(BaseControlPlane):
         """Fan out a command to every connected agent; collect all results."""
         if not self.connected_agents:
             return []
-        tasks = [
-            self.send_to_agent(cmd_type, data, agent_id=aid)
-            for aid in list(self.connected_agents)
-        ]
+        # Bound the fan-out so a large agent fleet doesn't open N simultaneous
+        # sends (SET_LOG_LEVEL broadcasts to every agent on the Enable-Debug
+        # toggle, key rotations broadcast to every agent, etc.).
+        sem = asyncio.Semaphore(16)
+
+        async def _one(aid):
+            async with sem:
+                return await self.send_to_agent(cmd_type, data, agent_id=aid)
+
+        tasks = [_one(aid) for aid in list(self.connected_agents)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         out = []
         for aid, res in zip(self.connected_agents, results):

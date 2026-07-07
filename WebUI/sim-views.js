@@ -26,6 +26,19 @@
 
 function csEl(id) { return document.getElementById(id); }
 
+// Debounce a keystroke-driven filter so a fast typist doesn't re-render the
+// whole list (csRenderClientRows / cs-sim-checks table) on every keypress.
+// The select-driven filters (onchange) keep calling the immediate function —
+// a single dropdown change should apply instantly, not on a 200ms delay.
+function csDebounce(fn, wait) {
+    let t = null;
+    return function () {
+        clearTimeout(t);
+        const ctx = this, args = arguments;
+        t = setTimeout(() => fn.apply(ctx, args), wait);
+    };
+}
+
 function csSet(html) {
     // Auto-refresh chokepoint: while a telemetry-driven refresh cycle is in
     // flight (csRefreshInFlight, set only by csWsRefresh) AND the user is
@@ -615,7 +628,7 @@ async function csRenderSimulations() {
         }));
     });
     const ids = Array.from(checkIds).sort();
-    csSetToolbar(`<input id="cs-sim-q" oninput="csSimChecksFilter()" placeholder="Filter by site or check…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-72">
+    csSetToolbar(`<input id="cs-sim-q" oninput="csSimChecksFilterKey()" placeholder="Filter by site or check…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-72">
       <select id="cs-sim-bucket" onchange="csSimChecksFilter()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All buckets</option><option value="failing">Failing</option><option value="warning">Warning</option><option value="functional">Functional</option><option value="unknown">Unknown</option>
       </select>`);
@@ -653,6 +666,10 @@ window.csSimChecksFilter = function () {
     </tr>`).join('');
     body.innerHTML = csTable(['Spoke', 'Site', 'Check', 'Status', 'Detail'], rh);
 };
+
+// Keystroke-debounced entry point for the free-text filter input (the bucket
+// <select> stays on the immediate onchange= above). See csDebounce.
+window.csSimChecksFilterKey = csDebounce(window.csSimChecksFilter, 200);
 
 async function csRenderSimHardware() {
     csSetToolbar('');
@@ -959,7 +976,7 @@ async function csRenderClients(tier) {
     // tier may come in as a boolean `force` arg from the legacy primary-switch
     // fallback; only accept real tier strings.
     if (tier === 't1' || tier === 't2' || tier === 't3' || tier === 'all') csClientTier = tier;
-    csSetToolbar(`<input id="cs-client-search" oninput="csClientFilter()" placeholder="Search clients…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
+    csSetToolbar(`<input id="cs-client-search" oninput="csClientFilterKey()" placeholder="Search clients…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
       <select id="cs-client-status" onchange="csClientFilter()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
       </select>
@@ -1413,6 +1430,10 @@ window.csClientFilter = function () {
     });
     csRenderClientRows(filtered);
 };
+
+// Keystroke-debounced entry point for the free-text search input (the status
+// <select> stays on the immediate onchange= above). See csDebounce.
+window.csClientFilterKey = csDebounce(window.csClientFilter, 200);
 
 /* ===========================================================================
  * 3. Central — sites / alerts / clients + save form
@@ -3199,12 +3220,20 @@ window.csVmBulk = async function (action) {
     if (!ids.length) { if (typeof showToast === 'function') showToast('Select one or more VMs first.', 'info'); return; }
     if (action === 'delete_vm') await csExpirePendingForTarget();
     try {
-        for (const vmid of ids) {
+        // Bounded concurrency (4 at a time) instead of a sequential await per
+        // VM — a 24-VM bulk action previously issued 24 back-to-back round
+        // trips; chunked Promise.all keeps the same fail-fast semantics
+        // (first error rejects the chunk) while cutting wall-clock to ~N/4.
+        const buildReq = (vmid) => {
             const v = (window._csVmByVmid && window._csVmByVmid[vmid]) || {};
             const args = { vmid: Number(vmid) };
             if (v.type) args.vm_type = v.type;
-            await csFetch(`/${csTenant()}/spokes/${encodeURIComponent(csVmSelectedSpoke)}/proxmox-command?tenant_id=${csTenant()}`,
+            return csFetch(`/${csTenant()}/spokes/${encodeURIComponent(csVmSelectedSpoke)}/proxmox-command?tenant_id=${csTenant()}`,
                 { method: 'POST', body: JSON.stringify({ action, args }) });
+        };
+        const CHUNK = 4;
+        for (let i = 0; i < ids.length; i += CHUNK) {
+            await Promise.all(ids.slice(i, i + CHUNK).map(buildReq));
         }
         csVmFlash(`${action} queued for ${ids.length} VM(s)`);
         setTimeout(() => loadCSData('VM Server', currentSubChild, true), 1000);

@@ -1,4 +1,5 @@
 """Setup admin: debug-mode, docs, appearance, logs, diagnostics, recovery, bug reports."""
+import asyncio
 from api import (
     HTTPException, Request, logger, os, re, set_log_level, time,
 )
@@ -179,7 +180,12 @@ def register(app, hub, ctx):
     @app.get("/setup/logs/all")
     async def get_all_logs():
         hub = app.state.hub
-        return hub.collect_all_logs()
+        # collect_all_logs does os.listdir + per-file open + deque over
+        # /var/log/lm then an inline json.dumps binary search to fit the
+        # payload — off the hub loop so BugFixer's periodic poll can't stall
+        # heartbeats / request_response (the in-code comment notes a prior
+        # version "stalled the event loop on every BugFixer poll").
+        return await asyncio.to_thread(hub.collect_all_logs)
 
     @app.get("/setup/logs")
     async def get_hub_logs():
@@ -187,9 +193,12 @@ def register(app, hub, ctx):
         try:
             log_path = "/var/log/lm/hub.log"
             if os.path.exists(log_path):
+                # deque(f, maxlen=500) caps memory: readlines() loads the WHOLE
+                # file (hub.log can be many MB) before slicing the last 500.
+                from collections import deque
                 with open(log_path, "r") as f:
-                    file_lines = f.readlines()
-                return {"logs": [l.strip() for l in file_lines[-500:]]}
+                    tail = deque(f, maxlen=500)
+                return {"logs": [l.strip() for l in tail]}
             # No file — fall back to in-memory deque (deques don't support slicing)
             mem_logs = list(hub.logs)[-500:] if hasattr(hub, "logs") else []
             return {"logs": [str(l) for l in mem_logs]}
@@ -208,7 +217,8 @@ def register(app, hub, ctx):
             if module == "errors":
                 # Error Log tab: every error-level line across all sources
                 # (hub deque, agent_logs, /var/log/lm/*.log), one list.
-                return hub.collect_error_logs()
+                # Off the hub loop — same I/O reason as get_all_logs.
+                return await asyncio.to_thread(hub.collect_error_logs)
 
             if module == "agents":
                 flat = []
@@ -269,9 +279,11 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=404, detail=f"Log file for {module} not found at {log_path}.")
 
             with open(log_path, "r") as f:
-                logs = f.readlines()
+                # deque caps memory — readlines() loads the whole file first.
+                from collections import deque
+                logs = deque(f, maxlen=500)
 
-            return {"logs": [log.strip() for log in logs[-500:]]}
+            return {"logs": [log.strip() for log in logs]}
         except HTTPException:
             raise
         except Exception as e:
@@ -542,7 +554,7 @@ def register(app, hub, ctx):
                 f"console={len(str(data.get('console_logs') or ''))} "
                 f"html={len(str(data.get('html') or ''))} screenshot={shot_kind}"
             )
-            rid = hub._store_bug_report(data)
+            rid = await asyncio.to_thread(hub._store_bug_report, data)
             if not rid:
                 logger.error("bug-report: _store_bug_report returned no id (data keys=%s)", list(data.keys()))
                 raise HTTPException(status_code=500, detail="Failed to store bug report")
@@ -576,7 +588,7 @@ def register(app, hub, ctx):
     @app.get("/setup/bug-reports/{rid}")
     async def get_bug_report(rid: str):
         hub = app.state.hub
-        rep = hub._get_bug_report(rid)
+        rep = await asyncio.to_thread(hub._get_bug_report, rid)
         if not rep:
             raise HTTPException(status_code=404, detail="Bug report not found")
         return rep

@@ -1037,6 +1037,13 @@ async function loadTenantPrefixes() {
 let logRefreshInterval = null;
 let _cacheStatusPoller = null;
 
+// 60s TTL cache of the pxmx agents list for the dashboard sidebar —
+// _renderDashboardLists runs on every 10s updateStatus() poll, and re-fetching
+// /api/pxmx/agents each tick is wasted work (pxmx agent topology changes
+// rarely). loadSpokesAndAgents (Setup → Spokes & Agents Refresh) fetches
+// directly and doesn't read this cache, so a manual refresh stays live.
+let _pxmxAgentsCache = null;
+
 const _CACHE_MODULE_LABELS = {
     rules: 'Firewall Rules', nat: 'NAT Policies', dhcp: 'DHCP Leases',
     dns: 'DNS Records', interfaces: 'Interfaces', cppm_sessions: 'Access Tracker',
@@ -2156,18 +2163,29 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
         ...approvedHubAgents.map(a => ({ id: a.spoke_id, label: a.display_name || a.spoke_id, status: connections.includes(a.spoke_id) ? 'online' : 'offline', mod: moduleLabel(a.module_type) })),
         ...pendingHubAgents.map(a => ({ id: a.spoke_id, label: a.display_name || a.spoke_id, status: 'pending', mod: moduleLabel(a.module_type) })),
     ];
-    // Proxmox node agents relayed through the pxmx hypervisor spoke (best-effort).
+    // Proxmox node agents relayed through the pxmx hypervisor spoke
+    // (best-effort). This runs on every 10s updateStatus() poll, so cache the
+    // pxmx agents response for ~60s (pxmx agent connect/disconnect is rare) —
+    // avoids a round-trip per poll tick while still picking up new agents
+    // within a minute. Manual Refresh in Setup → Spokes & Agents bypasses this
+    // cache (loadSpokesAndAgents fetches /api/pxmx/agents directly).
     let pxmxRows = [];
-    try {
-        const agentRes = await fetch('/api/pxmx/agents', { credentials: 'same-origin' });
-        if (agentRes.ok) {
-            const agentData = await agentRes.json();
-            pxmxRows = [
-                ...(agentData.agents || []).map(a => ({ id: a.agent_id, label: a.display_name || a.hostname || a.agent_id, status: 'online', mod: 'Proxmox' })),
-                ...(agentData.pending_agents || []).map(a => ({ id: a.agent_id, label: a.display_name || a.agent_id, status: 'pending', mod: 'Proxmox' })),
-            ];
-        }
-    } catch (err) { console.error('updateStatus: pxmx agents fetch failed — generic agents still render', err); }
+    const now = Date.now();
+    if (_pxmxAgentsCache && (now - _pxmxAgentsCache.ts) < 60000) {
+        pxmxRows = _pxmxAgentsCache.rows;
+    } else {
+        try {
+            const agentRes = await fetch('/api/pxmx/agents', { credentials: 'same-origin' });
+            if (agentRes.ok) {
+                const agentData = await agentRes.json();
+                pxmxRows = [
+                    ...(agentData.agents || []).map(a => ({ id: a.agent_id, label: a.display_name || a.hostname || a.agent_id, status: 'online', mod: 'Proxmox' })),
+                    ...(agentData.pending_agents || []).map(a => ({ id: a.agent_id, label: a.display_name || a.agent_id, status: 'pending', mod: 'Proxmox' })),
+                ];
+                _pxmxAgentsCache = { ts: now, rows: pxmxRows };
+            }
+        } catch (err) { console.error('updateStatus: pxmx agents fetch failed — generic agents still render', err); }
+    }
 
     const all = [...hubAgentRows, ...pxmxRows];
     // Cache agent presence so the Logs submenu (logsSubmenu) can gate the
@@ -5668,11 +5686,31 @@ async function loadSpokesAndAgents() {
     // Spokes section (its Proxmox node agents are fetched separately into the
     // Agents section).
     let spokes = [];
-    try {
-        const res = await setupFetch('/setup/pending_spokes');
-        if (res.ok) spokes = (await res.json()).spokes || [];
-    } catch (err) {
-        if (spokesWrap) spokesWrap.innerHTML = `<p class="py-6 text-center text-red-400 italic text-xs">Error: ${err.message}</p>`;
+    let pxmxAgents = [];
+    const pxmxAgentIds = new Set();
+    let diagBy = null;
+    let diagData = null;
+
+    // Three independent fetches (pending spokes, pxmx agents, diagnostics) were
+    // sequential — each awaited before the next started. Fan them out
+    // concurrently with Promise.all so the Spokes & Agents view resolves in one
+    // round-trip instead of three; each branch keeps its own try/catch so a
+    // single failure degrades the same as before (best-effort).
+    const [spokesRes, agentsRes, diagRes] = await Promise.allSettled([
+        (async () => setupFetch('/setup/pending_spokes'))(),
+        (async () => fetch('/api/pxmx/agents', { credentials: 'same-origin' }))(),
+        (async () => setupFetch('/setup/diagnostics'))(),
+    ]);
+
+    if (spokesRes.status === 'fulfilled') {
+        try {
+            const res = spokesRes.value;
+            if (res.ok) spokes = (await res.json()).spokes || [];
+        } catch (err) {
+            if (spokesWrap) spokesWrap.innerHTML = `<p class="py-6 text-center text-red-400 italic text-xs">Error: ${err.message}</p>`;
+        }
+    } else if (spokesWrap) {
+        spokesWrap.innerHTML = `<p class="py-6 text-center text-red-400 italic text-xs">Error: ${spokesRes.reason?.message || spokesRes.reason}</p>`;
     }
 
     // Proxmox node agents are relayed through the pxmx hypervisor spoke. Fetch
@@ -5680,18 +5718,18 @@ async function loadSpokesAndAgents() {
     // older approval leaked them into known_modules and rendered a bogus
     // spoke row, since the hub has no direct WebSocket for them — and (b)
     // render them in the Agents table below.
-    let pxmxAgents = [];
-    const pxmxAgentIds = new Set();
-    try {
-        const agentsRes = await fetch('/api/pxmx/agents', { credentials: 'same-origin' });
-        if (agentsRes.ok) {
-            const agentsData = await agentsRes.json();
-            const connected = (agentsData.agents || []).map(a => ({ ...a, _status: 'connected', _kind: 'pxmx', _module: 'Proxmox' }));
-            const pending   = (agentsData.pending_agents || []).map(a => ({ ...a, _status: 'pending', _kind: 'pxmx', _module: 'Proxmox' }));
-            pxmxAgents = [...connected, ...pending];
-            pxmxAgents.forEach(a => pxmxAgentIds.add(a.agent_id));
-        }
-    } catch (err) { console.error('loadSpokesAndAgents: pxmx agents fetch failed — generic agents still render', err); }
+    if (agentsRes.status === 'fulfilled') {
+        try {
+            const res = agentsRes.value;
+            if (res.ok) {
+                const agentsData = await res.json();
+                const connected = (agentsData.agents || []).map(a => ({ ...a, _status: 'connected', _kind: 'pxmx', _module: 'Proxmox' }));
+                const pending   = (agentsData.pending_agents || []).map(a => ({ ...a, _status: 'pending', _kind: 'pxmx', _module: 'Proxmox' }));
+                pxmxAgents = [...connected, ...pending];
+                pxmxAgents.forEach(a => pxmxAgentIds.add(a.agent_id));
+            }
+        } catch (err) { console.error('loadSpokesAndAgents: pxmx agents fetch failed — generic agents still render', err); }
+    }
 
     // Diagnostics telemetry (the former standalone Diagnostics tile, now folded
     // into the three management cards). Fetched once here and keyed by spoke_id
@@ -5699,15 +5737,15 @@ async function loadSpokesAndAgents() {
     // via _diagTelemetryExtras. Best-effort: a failed/non-admin fetch leaves
     // diagBy empty and the tiles degrade to their approval-only rows. The same
     // response drives the summary bar (Hub/WebUI version + recovery counts).
-    let diagBy = null;
-    let diagData = null;
-    try {
-        const diagRes = await setupFetch('/setup/diagnostics');
-        if (diagRes.ok) {
-            diagData = await diagRes.json();
-            diagBy = new Map((diagData.spokes || []).map(s => [s.spoke_id, s]));
-        }
-    } catch (err) { console.error('loadSpokesAndAgents: diagnostics fetch failed — telemetry badges skipped', err); }
+    if (diagRes.status === 'fulfilled') {
+        try {
+            const res = diagRes.value;
+            if (res.ok) {
+                diagData = await res.json();
+                diagBy = new Map((diagData.spokes || []).map(s => [s.spoke_id, s]));
+            }
+        } catch (err) { console.error('loadSpokesAndAgents: diagnostics fetch failed — telemetry badges skipped', err); }
+    }
     _renderSpokesSummary(diagData);
 
     // A loaded role registers a sub-spoke "{agentBase}-{role}", so a spoke that

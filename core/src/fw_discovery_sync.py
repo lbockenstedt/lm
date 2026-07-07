@@ -210,9 +210,15 @@ class FwDiscoverySyncMixin:
         if not spokes:
             return [], {"errors": ["no firewall spoke connected"]}
 
+        # Bound the fetch phase to match the push phase (which already uses
+        # _fw_discovery_concurrency); without this the fetch gather fires every
+        # firewall spoke's DHCP+ARP fetch concurrently with no cap.
+        fetch_sem = asyncio.Semaphore(self._fw_discovery_concurrency())
+
         async def _fetch(sid: str, cmd: str, payload: Dict[str, Any], tag: str) -> None:
             try:
-                r = await self.request_response(sid, cmd, payload, timeout=30.0)
+                async with fetch_sem:
+                    r = await self.request_response(sid, cmd, payload, timeout=30.0)
                 d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
                 if isinstance(d, dict) and d.get("status") == "ERROR":
                     errors.append(f"{tag}({sid}): {d.get('message', 'error')}")

@@ -142,11 +142,22 @@ class BaseControlPlane:
         return os.path.dirname(cwd) if cwd.endswith("src") else cwd
 
     def _ensure_git_pull_strategy(self, cwd: str) -> None:
-        subprocess.run(["git", "config", "pull.rebase", "true"], cwd=cwd, check=False)
-        subprocess.run(["git", "config", "rebase.autoStash", "true"], cwd=cwd, check=False)
+        subprocess.run(["git", "config", "pull.rebase", "true"], cwd=cwd, check=False, timeout=15)
+        subprocess.run(["git", "config", "rebase.autoStash", "true"], cwd=cwd, check=False, timeout=15)
 
     def _run_git(self, args, cwd: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git"] + args, cwd=cwd, text=True, capture_output=True, check=False)
+        # All git sub-commands (rev-parse/rev-list/pull/rebase/reset) run via
+        # this helper in the SPOKE_UPDATE path, awaited through to_thread — a
+        # stalled remote could hang any of them forever without a deadline.
+        # Pull/fetch get 120s; lightweight config/rev-parse gets 60s.
+        timeout = 120 if args and args[0] in ("pull", "fetch", "rebase") else 60
+        try:
+            return subprocess.run(["git"] + args, cwd=cwd, text=True,
+                                  capture_output=True, check=False, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            logger.warning("git %s timed out after %ss in %s", args[0] if args else "?",
+                           timeout, cwd)
+            return subprocess.CompletedProcess(args, 124, "", str(e))
 
     def _prepare_service_restart(self, reason: str = "update") -> bool:
         """Signal that this spoke should restart to load new code.
@@ -373,7 +384,7 @@ class BaseControlPlane:
             venv_pip = os.path.join(cwd, "venv", "bin", "pip")
             if os.path.exists(req_file) and os.path.exists(venv_pip):
                 pip_r = subprocess.run([venv_pip, "install", "-r", req_file, "-q"],
-                                       capture_output=True, check=False)
+                                       capture_output=True, check=False, timeout=300)
                 if pip_r.returncode != 0:
                     logger.warning("Self-update: pip install failed: %s", (pip_r.stderr or b"").decode())
                 else:
@@ -1108,11 +1119,11 @@ class BaseControlPlane:
             logger.info(f"Performing update in {cwd} from {repo_url}...")
 
             # 1. Update remote origin
-            subprocess.run(["git", "remote", "set-url", "origin", repo_url], cwd=cwd, check=True)
+            subprocess.run(["git", "remote", "set-url", "origin", repo_url], cwd=cwd, check=True, timeout=15)
 
             # 2. Configure pull strategy
-            subprocess.run(["git", "config", "pull.rebase", "true"], cwd=cwd, check=True)
-            subprocess.run(["git", "config", "rebase.autoStash", "true"], cwd=cwd, check=True)
+            subprocess.run(["git", "config", "pull.rebase", "true"], cwd=cwd, check=True, timeout=15)
+            subprocess.run(["git", "config", "rebase.autoStash", "true"], cwd=cwd, check=True, timeout=15)
 
             # 3. Abort any interrupted rebase before pulling
             self._run_git(["rebase", "--abort"], cwd=cwd)
@@ -1124,13 +1135,13 @@ class BaseControlPlane:
             backup_dir = self._snapshot_for_update(head_before, cwd)
 
             # 5. Fetch + pull; on rebase conflict reset hard to origin
-            subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True)
+            subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True, timeout=120)
             pull = self._run_git(["pull", "--rebase", "--autostash", "origin"], cwd=cwd)
             if pull.returncode != 0:
                 logger.warning(f"git pull --rebase failed (rc={pull.returncode}); resetting hard to origin")
                 branch = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd).stdout.strip() or "main"
-                subprocess.run(["git", "rebase", "--abort"], cwd=cwd, check=False)
-                subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=cwd, check=True)
+                subprocess.run(["git", "rebase", "--abort"], cwd=cwd, check=False, timeout=60)
+                subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=cwd, check=True, timeout=60)
 
             head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
 
@@ -1275,14 +1286,16 @@ class BaseControlPlane:
 
             try:
                 logger.info(f"Updating system hostname to: {new_hostname}")
-                # 1. Set the hostname
-                subprocess.run(["sudo", "hostnamectl", "set-hostname", new_hostname], check=True)
+                # 1. Set the hostname (timeout — a stuck sudo/hostnamectl would
+                # otherwise block this async handler on the spoke loop indefinitely).
+                subprocess.run(["sudo", "hostnamectl", "set-hostname", new_hostname],
+                                check=True, timeout=15)
 
                 # 2. Update /etc/hosts to prevent sudo/etc lag (replace 127.0.1.1 entry)
                 # This is a simple sed replacement for the 127.0.1.1 line commonly found in Debian/Ubuntu
                 subprocess.run(
                     ["sudo", "sed", "-i", f"s/127.0.1.1[[:space:]]*.*/127.0.1.1 {new_hostname}/", "/etc/hosts"],
-                    check=True
+                    check=True, timeout=10
                 )
 
                 return {"status": "SUCCESS", "message": f"Hostname updated to {new_hostname}"}

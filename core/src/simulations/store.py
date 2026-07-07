@@ -7,6 +7,7 @@ back without a spoke round-trip, and what the hub pushes down to the spoke via
 
 Persisted to ``simulations_store.json`` in the hub data dir with atomic saves.
 """
+import asyncio
 import json
 import logging
 import os
@@ -101,6 +102,19 @@ class SimulationsStore:
         except Exception as exc:
             logger.warning("SimulationsStore: save failed (%s): %s", self._path, exc)
 
+    async def _asave(self) -> None:
+        """Async wrapper around the synchronous atomic JSON write.
+
+        ``_save`` runs on every setter (hub-config, overrides, sync-status, psk,
+        processing-mode, …) — the Simulations UI save paths. Doing the fsync'd
+        atomic replace inline on the hub's asyncio loop is the same
+        I/O-starvation pattern that stalled cs-svr-02's WS link (sync disk
+        writes on the shared loop → 5s Request Timeout). The ``_lock`` is held
+        across the await by the caller, which serializes setters (intent) and
+        keeps ``_data`` stable for the worker thread; ``_save`` itself doesn't
+        touch the lock."""
+        await asyncio.to_thread(self._save)
+
     def _tenant(self, tenant_id: str) -> Dict[str, Any]:
         t = self._data.get(tenant_id)
         if t is None:
@@ -117,14 +131,14 @@ class SimulationsStore:
         """Replace the tenant's user-override bucket and persist."""
         with self._lock:
             self._tenant(tenant_id)["user_overrides"] = overrides
-            self._save()
+            await self._asave()
 
     # ── simulation.conf override content (raw INI pushed as sim_conf_override) ──
     async def set_sim_conf_content(self, tenant_id: str, content: str) -> None:
         """Store the raw simulation.conf override INI for the tenant and persist."""
         with self._lock:
             self._tenant(tenant_id)["sim_conf_content"] = content
-            self._save()
+            await self._asave()
 
     async def get_sim_conf_content(self, tenant_id: str) -> str:
         """Return the stored raw simulation.conf override INI ('' if unset)."""
@@ -139,7 +153,7 @@ class SimulationsStore:
         """Store the raw user-overrides.conf override INI for the tenant and persist."""
         with self._lock:
             self._tenant(tenant_id)["user_overrides_content"] = content
-            self._save()
+            await self._asave()
 
     async def get_user_overrides_content(self, tenant_id: str) -> str:
         """Return the stored raw user-overrides.conf override INI ('' if unset)."""
@@ -174,7 +188,7 @@ class SimulationsStore:
             t = self._tenant(tenant_id)
             t["hub_config_enabled"] = bool(enabled)
             t["hub_config"] = hub_config or {}
-            self._save()
+            await self._asave()
 
     async def reset_hub_config(self, tenant_id: str) -> Dict[str, Any]:
         """Reset the tenant's Setup/Proxmox knobs to ``_DEFAULT_HUB_CONFIG``,
@@ -200,7 +214,7 @@ class SimulationsStore:
             })
             new_cfg.update(preserved)
             t["hub_config"] = new_cfg
-            self._save()
+            await self._asave()
             return {"hub_config_enabled": bool(t.get("hub_config_enabled", False)),
                     "hub_config": dict(new_cfg)}
 
@@ -213,7 +227,7 @@ class SimulationsStore:
         """Replace the tenant's Central API config and persist."""
         with self._lock:
             self._tenant(tenant_id)["central_config"] = cfg or {}
-            self._save()
+            await self._asave()
 
     # ── central sites config (Setup → Central API / Central) ────────────────
     async def get_central_sites_config(self, tenant_id: str) -> Dict[str, Any]:
@@ -224,7 +238,7 @@ class SimulationsStore:
         """Replace the tenant's Central sites config and persist."""
         with self._lock:
             self._tenant(tenant_id)["central_sites_config"] = cfg or {}
-            self._save()
+            await self._asave()
 
     # ── github config (Setup → GitHub: per-spoke repo + token) ───────────────
     async def get_github_config(self, tenant_id: str) -> Dict[str, Any]:
@@ -235,7 +249,7 @@ class SimulationsStore:
         """Replace the tenant's GitHub config and persist."""
         with self._lock:
             self._tenant(tenant_id)["github_config"] = cfg or {}
-            self._save()
+            await self._asave()
 
     # ── security config (Setup → Security: spoke-local dashboard auth) ──────
     async def get_security_config(self, tenant_id: str) -> Dict[str, Any]:
@@ -246,7 +260,7 @@ class SimulationsStore:
         """Replace the tenant's security config and persist."""
         with self._lock:
             self._tenant(tenant_id)["security_config"] = cfg or {}
-            self._save()
+            await self._asave()
 
     # ── NetBox → CPPM endpoint-sync last-run status (Setup → Security/NAC) ──
     # Per-tenant result of the most recent endpoint sync cycle (background loop
@@ -262,7 +276,7 @@ class SimulationsStore:
         """Replace the tenant's endpoint-sync status and persist."""
         with self._lock:
             self._tenant(tenant_id)["endpoint_sync"] = status or {}
-            self._save()
+            await self._asave()
 
     def get_all_endpoint_sync_status(self) -> Dict[str, Dict[str, Any]]:
         """Return {tenant_id: status} for every tenant that has a recorded sync.
@@ -294,7 +308,7 @@ class SimulationsStore:
         """Replace the tenant's VM-sync status and persist."""
         with self._lock:
             self._tenant(tenant_id)["vm_sync"] = status or {}
-            self._save()
+            await self._asave()
 
     def get_all_vm_sync_status(self) -> Dict[str, Dict[str, Any]]:
         """Return {tenant_id: status} for every tenant with a recorded VM sync.
@@ -324,7 +338,7 @@ class SimulationsStore:
         """Replace the tenant's firewall-discovery-sync status and persist."""
         with self._lock:
             self._tenant(tenant_id)["fw_discovery_sync"] = status or {}
-            self._save()
+            await self._asave()
 
     def get_all_fw_discovery_sync_status(self) -> Dict[str, Dict[str, Any]]:
         """Return {tenant_id: status} for every tenant with a recorded firewall-discovery sync.
@@ -354,7 +368,7 @@ class SimulationsStore:
         """Replace the tenant's nw-discovery-sync status and persist."""
         with self._lock:
             self._tenant(tenant_id)["nw_discovery_sync"] = status or {}
-            self._save()
+            await self._asave()
 
     def get_all_nw_discovery_sync_status(self) -> Dict[str, Dict[str, Any]]:
         """Return {tenant_id: status} for every tenant with a recorded nw-discovery sync."""
@@ -382,7 +396,7 @@ class SimulationsStore:
         """Replace the tenant's realtime-NAC-sync status and persist."""
         with self._lock:
             self._tenant(tenant_id)["realtime_nac_sync"] = status or {}
-            self._save()
+            await self._asave()
 
     def get_all_realtime_nac_sync_status(self) -> Dict[str, Dict[str, Any]]:
         """Return {tenant_id: status} for every tenant with a recorded realtime-NAC sync.
@@ -411,7 +425,7 @@ class SimulationsStore:
             if psk not in psks:
                 psks.append(psk)
             t["onboarding_psks"] = psks
-            self._save()
+            await self._asave()
 
     async def remove_psk(self, tenant_id: str, psk: str) -> bool:
         """Remove an onboarding PSK from the tenant; return True if it was present."""
@@ -421,7 +435,7 @@ class SimulationsStore:
             if psk in psks:
                 psks.remove(psk)
                 t["onboarding_psks"] = psks
-                self._save()
+                await self._asave()
                 return True
             return False
 
@@ -435,7 +449,7 @@ class SimulationsStore:
             modes = dict(t.get("processing_modes", {}))
             modes[feature] = value
             t["processing_modes"] = modes
-            self._save()
+            await self._asave()
 
     # ── notifications (smtp / teams / email) ───────────────────────────────
     async def get_notifications(self, tenant_id: str) -> Dict[str, Any]:
@@ -444,7 +458,7 @@ class SimulationsStore:
     async def set_notifications(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         with self._lock:
             self._tenant(tenant_id)["notifications"] = cfg or {}
-            self._save()
+            await self._asave()
 
     # ── /settings bundle (processing_modes + notifications) ────────────────
     async def get_settings(self, tenant_id: str) -> Dict[str, Any]:
@@ -474,7 +488,7 @@ class SimulationsStore:
         with self._lock:
             g = self._global()
             g["usb_vidpids"] = [dict(d) for d in (devices or []) if isinstance(d, dict)]
-            self._save()
+            await self._asave()
 
     async def get_global_usb_ignored_vidpids(self) -> List[str]:
         """Platform-wide ignored USB VID:PIDs — bare lowercased vidpid strings."""
@@ -491,7 +505,7 @@ class SimulationsStore:
         with self._lock:
             g = self._global()
             g["usb_ignored_vidpids"] = self._bare_vidpid_list(vidpids)
-            self._save()
+            await self._asave()
 
     # ── Global PCI-passthrough tier VID:PIDs (superadmin, platform-wide) ──────
     # T1/T3 are PCI passthrough. These platform-wide lists are merged (union)
@@ -514,7 +528,7 @@ class SimulationsStore:
     async def set_global_t1_pci_vidpids(self, vidpids: List[Any]) -> None:
         with self._lock:
             self._global()["t1_pci_vidpids"] = self._bare_vidpid_list(vidpids)
-            self._save()
+            await self._asave()
 
     async def get_global_t3_pci_vidpids(self) -> List[str]:
         return self._bare_vidpid_list(self._global().get("t3_pci_vidpids"))
@@ -522,7 +536,7 @@ class SimulationsStore:
     async def set_global_t3_pci_vidpids(self, vidpids: List[Any]) -> None:
         with self._lock:
             self._global()["t3_pci_vidpids"] = self._bare_vidpid_list(vidpids)
-            self._save()
+            await self._asave()
 
     # ── staleness sweep last-run status (Setup → Sync, cluster-wide) ──────────
     # Result of the most recent NetBox staleness sweep (background loop or
@@ -538,7 +552,7 @@ class SimulationsStore:
         with self._lock:
             g = self._global()
             g["staleness_sweep"] = status or {}
-            self._save()
+            await self._asave()
 
     # ── repo sync last-run status (Setup → Sync) ───────────────────────────
     # Result of the most recent GitHub repo sync (background loop or on-demand
@@ -555,4 +569,4 @@ class SimulationsStore:
         with self._lock:
             g = self._global()
             g["repo_sync"] = status or {}
-            self._save()
+            await self._asave()

@@ -77,7 +77,7 @@ def register(app, hub, ctx):
             # Drop any queued/pending messages for this spoke — without its key
             # they can no longer be signed and would retry against the keyless
             # spoke (log flood). Re-onboarding generates a fresh key + pushes.
-            hub.mailbox.clear_spoke(spoke_id)
+            await hub.mailbox.clear_spoke(spoke_id)
             return {"status": "ok", "message": f"Secret for spoke {spoke_id} has been reset. It can now be re-onboarded."}
         except Exception as e:
             logger.exception("reset_spoke_secret failed")
@@ -108,7 +108,7 @@ def register(app, hub, ctx):
             # gone, so they can no longer be signed and would retry against the
             # keyless spoke (log flood). The spoke must fully re-onboard to
             # return, at which point new messages get a fresh key.
-            hub.mailbox.clear_spoke(spoke_id)
+            await hub.mailbox.clear_spoke(spoke_id)
             # Drop per-spoke runtime caches (simulations_cache, telemetry,
             # rate_limiters, events, recovery, agent_logs). The disconnect
             # handler only clears active_connections/spoke_module_types, so
@@ -357,7 +357,7 @@ def register(app, hub, ctx):
                 # An un-approved spoke's session key is no longer valid for
                 # outbound commands; drop queued messages so they don't retry
                 # against it. Re-approval generates a fresh key + pushes.
-                hub.mailbox.clear_spoke(spoke_id)
+                await hub.mailbox.clear_spoke(spoke_id)
             else:
                 hub.state.register_module(spoke_id, approved=True)
                 hub.approved_modules[spoke_id] = True
