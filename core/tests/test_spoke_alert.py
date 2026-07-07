@@ -245,6 +245,90 @@ async def test_loop_disabled_is_noop_and_clears_stale(monkeypatch):
     assert h._spoke_alert_tier == {}
 
 
+@pytest.mark.asyncio
+async def test_relayed_agent_ids_skipped_and_selfhealed(monkeypatch):
+    """A relayed node-agent (pxmx proxmox agent) leaked into approved_modules
+    must NOT be flagged out-of-contact — its liveness lives under the COMPOSITE
+    heartbeat key shown in the AGENTS view, not the bare id the alert loop reads
+    (bare key → None → absent_since → false "error" while the agent is online).
+    The loop skips it, clears any stale alert, and self-heals it out of
+    approved_modules + known_modules (mirroring /setup/diagnostics, but without
+    requiring that page to be opened)."""
+    h = _AlertHub(global_config={"spoke_alert": {"enabled": True}},
+                  approved={"pxmx-agent": True, "s1": True},
+                  last_seen={"pxmx:pxmx-agent": 0.0, "s1": 0.0})
+    # Relay-agent registries: agent_config (persisted) + agent_info (in-memory).
+    h.state.system_state["agent_config"] = {"pxmx-agent": {"hostname": "pxmx"}}
+    h.state.system_state["known_modules"] = ["pxmx-agent", "s1"]
+    h.known_modules = ["pxmx-agent", "s1"]
+    h.agent_info = {"pxmx-agent": {"spoke_id": "pxmx", "last_seen": 0.0}}
+    saved = {"n": 0}
+    h.state.save_state = lambda: saved.__setitem__("n", saved["n"] + 1)  # type: ignore
+
+    # One body at a large clock: s1 (last_seen 0) → error; pxmx-agent would ALSO
+    # escalate if it weren't skipped (bare key absent, not in active_connections).
+    stages = [2000]
+    clock = {"t": 0.0}
+    iters = {"n": 0}
+
+    async def fake_sleep(t):
+        iters["n"] += 1
+        if iters["n"] <= len(stages):
+            clock["t"] = stages[iters["n"] - 1]
+            return
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(sa.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(sa.time, "time", lambda: clock["t"])
+
+    with pytest.raises(asyncio.CancelledError):
+        await h.run_spoke_alert_loop()
+
+    # pxmx-agent: skipped — no alert, popped from approved_modules, self-healed
+    # out of known_modules (persisted once).
+    assert "pxmx-agent" not in h._spoke_alerts
+    assert "pxmx-agent" not in h.approved_modules
+    assert "pxmx-agent" not in h.state.system_state["known_modules"]
+    assert "pxmx-agent" not in h.known_modules
+    assert saved["n"] == 1
+    # s1: still evaluated — escalates to error at 2000s (last_seen 0).
+    assert h._spoke_alerts["s1"]["tier"] == _TIER_ERROR
+
+
+@pytest.mark.asyncio
+async def test_relayed_agent_skip_is_change_gated(monkeypatch):
+    """Once the leaked relay id has been self-healed out, subsequent cycles do
+    NO work for it (no repeated save_state / no per-cycle write)."""
+    h = _AlertHub(global_config={"spoke_alert": {"enabled": True}},
+                  approved={"pxmx-agent": True, "s1": True},
+                  last_seen={"pxmx:pxmx-agent": 0.0, "s1": 0.0})
+    h.state.system_state["agent_config"] = {"pxmx-agent": {}}
+    h.state.system_state["known_modules"] = ["pxmx-agent", "s1"]
+    h.known_modules = ["pxmx-agent", "s1"]
+    h.agent_info = {"pxmx-agent": {}}
+    saved = {"n": 0}
+    h.state.save_state = lambda: saved.__setitem__("n", saved["n"] + 1)  # type: ignore
+
+    # Two bodies: first self-heals + saves; second finds nothing leaked → no save.
+    stages = [2000, 2010]
+    clock = {"t": 0.0}
+    iters = {"n": 0}
+
+    async def fake_sleep(t):
+        iters["n"] += 1
+        if iters["n"] <= len(stages):
+            clock["t"] = stages[iters["n"] - 1]
+            return
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(sa.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(sa.time, "time", lambda: clock["t"])
+
+    with pytest.raises(asyncio.CancelledError):
+        await h.run_spoke_alert_loop()
+
+    assert saved["n"] == 1, "self-heal must persist once, not every cycle"
+    assert "pxmx-agent" not in h.approved_modules
+
+
 # ── get_active_spoke_alerts ──────────────────────────────────────────────────
 
 def test_active_alerts_severity_ordering():

@@ -203,6 +203,50 @@ class SpokeAlertMixin:
                 now = time.time()
                 approved = {s for s, a in self.approved_modules.items() if a}
 
+                # Relayed node-agents (pxmx proxmox agents) are tracked under
+                # COMPOSITE heartbeat keys ("{parent_spoke}:{agent_id}") and in
+                # ``agent_info``, and are surfaced via /api/pxmx/agents — NOT as
+                # spokes. They leak into approved_modules (a known issue; the
+                # /setup/diagnostics route self-heals them out, but only when
+                # that page is opened). Evaluating them here reads
+                # ``heartbeat.last_seen[bare_id]`` → None (the real key is the
+                # composite) → not in active_connections (that's for spokes) →
+                # clocks absent_since → escalates to "error" out-of-contact for
+                # agents that are actually connected and fresh (the AGENTS view
+                # reads the composite key and shows them online — the exact
+                # "module out of contact but agent online" false positive).
+                # Skip them here, clear any stale alert already recorded, and
+                # self-heal them out of approved_modules (mirrors
+                # setup_admin.py:349-367 so the cleanup does not depend on the
+                # Diagnostics page being open).
+                relay_ids = {k.split(":", 1)[1] for k in self.heartbeat.last_seen
+                             if ":" in k}
+                relay_ids |= set((self.state.system_state.get("agent_config", {})
+                                  or {}).keys())
+                relay_ids |= set(getattr(self, "agent_info", {}).keys())
+                leaked = sorted(s for s in approved if s in relay_ids)
+                if leaked:
+                    for sid in leaked:
+                        self.approved_modules.pop(sid, None)
+                        self._spoke_alert_clear(sid)
+                        self._spoke_absent_since.pop(sid, None)
+                    # Persisted self-heal: drop from known_modules too so a hub
+                    # restart doesn't re-leak them. Change-gated → no per-cycle
+                    # write once clean.
+                    known = list(self.state.system_state.get("known_modules", [])
+                                 or [])
+                    cleaned = [m for m in known if m not in relay_ids]
+                    if cleaned != known:
+                        self.state.system_state["known_modules"] = cleaned
+                        self.known_modules = cleaned
+                        try:
+                            self.state.save_state()
+                        except Exception as e:
+                            logger.debug("[spoke-alert] self-heal save failed: %s", e)
+                    logger.info("[spoke-alert] skipped relayed agent id(s) "
+                                "leaked into approved_modules: %s", leaked)
+                    approved -= set(leaked)
+
                 for sid in sorted(approved):
                     duration, since_ts = self._spoke_alert_duration(sid, now)
                     tier = self._spoke_alert_tier_for(duration, warn_s, error_s)
