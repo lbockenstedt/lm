@@ -9023,6 +9023,13 @@ async function consoleConfigPush(spokeId, portId) {
 async function pxmxOpenConsole(uniqueId) {
     const vm = (window._pxmxVms || []).find(v => v.unique_id === uniqueId);
     if (!vm) { showToast('VM not found in cache', 'error'); return; }
+    // Immediate feedback — the agent opens the Proxmox vncwebsocket + mints the
+    // first-use VNC token, which can take several seconds on a busy host.
+    showToast(`Connecting to console for ${vm.name || vm.vmid}…`, 'info');
+    const _btn = document.getElementById('pxmx-vm-console-btn');
+    const _btnHtml = _btn ? _btn.innerHTML : null;
+    if (_btn) { _btn.disabled = true; _btn.innerHTML = '⏳ Connecting…'; }
+    const _restoreBtn = () => { if (_btn && _btnHtml != null) { _btn.disabled = false; _btn.innerHTML = _btnHtml; } };
     let session;
     try {
         const r = await setupFetch('/api/pxmx/console', {
@@ -9031,15 +9038,18 @@ async function pxmxOpenConsole(uniqueId) {
         });
         session = await r.json().catch(() => ({}));
         if (!r.ok || !session || !session.session_id) {
+            _restoreBtn();
             showToast('Console start failed: ' + (session && (session.detail || session.message) || r.status), 'error');
             return;
         }
     } catch (e) {
+        _restoreBtn();
         showToast('Console start failed: ' + (e.message || e), 'error');
         return;
     }
     const RFB = await pxmxLoadNoVNC();
-    if (!RFB) { showToast('Failed to load noVNC (CDN unreachable)', 'error'); return; }
+    if (!RFB) { _restoreBtn(); showToast('Failed to load noVNC (CDN unreachable)', 'error'); return; }
+    _restoreBtn();
     pxmxShowVncModal(vm, RFB, session);
 }
 

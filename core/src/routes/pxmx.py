@@ -670,7 +670,7 @@ def register(app, hub, ctx):
                 "node": node,
                 "type": str((body or {}).get("type", "qemu")),
                 "target_agent_id": agent_id,
-            }, timeout=30.0)
+            }, timeout=50.0)
         except Exception as e:
             hub.unregister_vnc_session(session_id)
             logger.exception("pxmx_create_console VNC_START failed")
