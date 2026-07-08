@@ -7014,11 +7014,18 @@ function _normalizePxmxAgent(a) {
 // line with its timestamp (copyLogs reads container._rawLogs, not innerText),
 // so the collapse is a display concern only — no data is lost.
 
-// Strip the leading `YYYY-MM-DD HH:MM:SS - ` timestamp so two lines that differ
-// only by emit time compare equal. Falls back to the whole line when there's no
-// leading timestamp (traceback continuations, non-canonical relay prefixes).
+// Strip the optional leading `[source] ` prefix (spoke/agent logs are served
+// as `[lm-svcs-netbox] 2026-07-08 ... - NetboxSpoke - INFO - msg`) AND the
+// `YYYY-MM-DD HH:MM:SS - ` timestamp so two lines that differ only by emit
+// time — or only by the per-source bracket prefix — compare equal. Without
+// stripping the prefix, the timestamp landed INSIDE the key and every
+// occurrence was unique, so spoke logs never collapsed. Falls back to the
+// whole line when there's no recognizable prefix/timestamp (traceback
+// continuations, non-canonical relay lines).
 function _logLineKey(log) {
-    return String(log).replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s*-\s*/, '');
+    return String(log)
+        .replace(/^\[[^\]]*\]\s*/, '')                       // leading [source] prefix
+        .replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s*-\s*/, '');  // timestamp
 }
 
 // One log line → a highlighted row. `count` (>1) adds a "×N" badge and wires the
@@ -7032,9 +7039,12 @@ function _renderLogLineRow(log, count, lineRowFn) {
     if (u.includes(' ERROR ') || u.includes(' CRITICAL ')) { cls = 'text-red-700 font-semibold'; bg = 'bg-red-50 hover:bg-red-100'; }
     else if (u.includes(' WARNING ') || u.includes(' WARN ')) { cls = 'text-amber-700'; bg = 'bg-amber-50 hover:bg-amber-100'; }
     else if (u.includes(' DEBUG ')) { cls = 'text-slate-400'; }
-    const tsMatch = log.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+?) - ([A-Z]+) - (.*)$/s);
+    // Highlight timestamp + source for both prefixed spoke logs
+    // (`[lm-svcs-netbox] <ts> - Source - LEVEL - msg`) and bare hub logs
+    // (`<ts> - Source - LEVEL - msg`).
+    const tsMatch = log.match(/^(?:\[([^\]]*)\]\s*)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+?) - ([A-Z]+) - (.*)$/s);
     const rendered = tsMatch
-        ? `<span class="text-slate-400">${tsMatch[1]}</span> <span class="text-indigo-500 font-semibold">${tsMatch[2].trim()}</span> <span class="opacity-60">${tsMatch[3]}</span> ${tsMatch[4]}`
+        ? `${tsMatch[1] ? `<span class="text-slate-400">[${tsMatch[1]}]</span> ` : ''}<span class="text-slate-400">${tsMatch[2]}</span> <span class="text-indigo-500 font-semibold">${tsMatch[3].trim()}</span> <span class="opacity-60">${tsMatch[4]}</span> ${tsMatch[5]}`
         : log;
     const badge = count && count > 1
         ? `<span class="ml-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-200 text-slate-600 align-middle whitespace-nowrap" title="${count} identical events (same except timestamp) — click to expand">×${count}</span>`
