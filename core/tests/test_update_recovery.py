@@ -225,3 +225,34 @@ def test_cli_markbadcommit_writes_file(tmp_path):
     rc = main(["markbadcommit", "deadbee", "--state-dir", state])
     assert rc == 0
     assert is_bad_commit("deadbee", state_dir=state) is True
+
+
+def test_cli_logging_emits_info_to_recovery_log(tmp_path, monkeypatch):
+    """The recovery CLI MUST configure logging — without it every logger.info
+    is dropped by the root lastResort handler (WARNING+ only), which is why
+    "the recovery log never logged anything". _configure_cli_logging() sets
+    root to INFO and attaches a best-effort FileHandler to recovery.log, so an
+    INFO record reaches the file in the canonical dashed format.
+    """
+    import logging
+    from update_recovery import _configure_cli_logging
+
+    log_file = tmp_path / "recovery.log"
+    monkeypatch.setattr("update_recovery._RECOVERY_LOG_FILE", str(log_file))
+    _configure_cli_logging()
+
+    # Root must be at INFO (or below) — the bug was root left at WARNING.
+    assert logging.getLogger().level <= logging.INFO
+
+    logging.getLogger("UpdateRecovery").info("RECOVERY_LOG_MARKER snapshot ok")
+    for h in logging.getLogger().handlers:
+        try:
+            h.flush()
+        except Exception:
+            pass
+
+    assert log_file.exists(), "recovery.log should be created on first INFO record"
+    text = log_file.read_text()
+    assert "RECOVERY_LOG_MARKER" in text
+    # Canonical dashed format, NOT the old dropped/lastResort "WARNING"-only form.
+    assert " - UpdateRecovery - INFO - " in text

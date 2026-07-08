@@ -1780,10 +1780,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if isinstance(entries, list):
             if spoke_id not in self.agent_logs:
                 self.agent_logs[spoke_id] = deque(maxlen=self.max_log_size)
-            ts = time.strftime('%Y-%m-%d %H:%M:%S')
+            # Entries arrive already canonical-formatted by the spoke's
+            # _SpokeLogRelayHandler (``<asctime> - <name> - <levelname> - <msg>``)
+            # — store verbatim. Re-stamping with the hub receive time would
+            # duplicate the timestamp (the record's original asctime is inside
+            # the entry) and desync the WebUI view from the spoke's local log.
             for entry in entries:
                 if isinstance(entry, str):
-                    self.agent_logs[spoke_id].append(f"{ts} - {entry}")
+                    self.agent_logs[spoke_id].append(entry)
             logger.debug(f"SPOKE_LOG: stored {len(entries)} entries for {spoke_id}")
 
     async def _handle_agent_relay_up(self, spoke_id: str, msg_data, payload) -> bool:
@@ -1837,11 +1841,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Handle Agent Logs
         if original_msg.get("payload", {}).get("type") == "AGENT_LOG":
             log_data = original_msg.get("payload", {}).get("data", {})
-            log_msg = f"[{log_data.get('hostname', 'unknown')}] ({log_data.get('agent_type', 'agent')}) {log_data.get('level', 'INFO')}: {log_data.get('message')}"
-
+            # The agent's WebSocketLogHandler sends ``message`` already
+            # canonical-formatted (``<asctime> - <name> - <levelname> - <msg>``)
+            # — store it verbatim so the line carries ONE timestamp (the
+            # record's emit time) and the canonical shape, matching the
+            # SPOKE_LOG path and the agent's local pxmx-agent.log. The prior
+            # ``[hostname] (agent_type) LEVEL:`` prefix + hub receive-time
+            # stamp duplicated the timestamp and the name/level already in the
+            # canonical record; the WebUI prepends the ``[agent_id]`` source
+            # label itself, so agent identity is not lost.
+            msg = log_data.get('message') or ''
             if agent_id not in self.agent_logs:
                 self.agent_logs[agent_id] = deque(maxlen=self.max_log_size)
-            self.agent_logs[agent_id].append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {log_msg}")
+            if msg:
+                self.agent_logs[agent_id].append(msg)
             return True
 
         # If the original message was a heartbeat, update heartbeat for that

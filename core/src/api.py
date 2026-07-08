@@ -998,6 +998,51 @@ def create_app(hub):
 
     return app
 
+def _uvicorn_log_config():
+    """A uvicorn ``log_config`` dict that emits the canonical LM format
+    ``%(asctime)s - %(name)s - %(levelname)s - %(message)s`` (dashes) — the same
+    shape every spoke/agent uses via ``logging_setup.configure_logging``.
+
+    Passing ``log_config=None`` makes uvicorn apply its DEFAULT_LOGGING
+    dictConfig, which mounts uvicorn's own ``DefaultFormatter`` /
+    ``AccessFormatter`` (``%(levelprefix)s %(message)s`` — no ``-`` separators,
+    no consistent asctime/name/level columns) on the ``uvicorn`` /
+    ``uvicorn.error`` / ``uvicorn.access`` loggers with ``propagate: False``.
+    The hub's own lines then render as ``<ts> <name> <level> <msg>`` (spaces),
+    visibly divergent from the spokes' canonical dashed lines. Building the
+    config here lets all three uvicorn loggers share the canonical formatter so
+    the hub's process logs align with the rest of the fleet.
+
+    ``disable_existing_loggers: False`` preserves the
+    ``_QuietSuccessAccessFilter`` / ``_QuietUvicornLifecycleFilter`` that
+    ``configure_logging`` attached to the ``uvicorn.access`` / ``uvicorn.error``
+    loggers (dictConfig only replaces a logger's ``handlers``/``propagate``/
+    ``filters`` when those keys are present; here we omit ``filters``, so the
+    noise-suppression filters survive). A single canonical ``StreamHandler``
+    on stderr matches uvicorn's default destination (systemd captures it into
+    ``/var/log/lm/hub.log``). ``uvicorn.access`` records carry their
+    ``client_addr`` / ``request_line`` / ``status_code`` in ``record.args``, so
+    ``record.getMessage()`` (the canonical ``%(message)s``) renders the full
+    access line — no need for uvicorn's ``AccessFormatter``.
+    """
+    fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    datefmt = '%Y-%m-%d %H:%M:%S'
+    return {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {"default": {"format": fmt, "datefmt": datefmt}},
+        "handlers": {
+            "default": {"class": "logging.StreamHandler",
+                         "formatter": "default", "stream": "ext://sys.stderr"},
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {"handlers": ["default"], "level": "INFO", "propagate": False},
+        },
+    }
+
+
 def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     """Build the awaitable uvicorn ``Server`` for the unified hub surface on a
     single port (443). ``Server.serve()`` is awaitable (vs blocking
@@ -1008,7 +1053,7 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     cert it serves plaintext on the same port (legacy no-TLS fallback).
     """
     app = create_app(hub)
-    cfg_kwargs = {"host": host, "port": port, "log_config": None}
+    cfg_kwargs = {"host": host, "port": port, "log_config": _uvicorn_log_config()}
     if tls_cert and tls_key:
         cfg_kwargs["ssl_certfile"] = tls_cert
         cfg_kwargs["ssl_keyfile"] = tls_key
@@ -1025,6 +1070,7 @@ def run_api_server(hub, port=443):
     cert = os.environ.get("LM_TLS_CERT", "").strip()
     key = os.environ.get("LM_TLS_KEY", "").strip()
     if cert and key:
-        uvicorn.run(app, host="0.0.0.0", port=port, ssl_certfile=cert, ssl_keyfile=key)
+        uvicorn.run(app, host="0.0.0.0", port=port, ssl_certfile=cert,
+                    ssl_keyfile=key, log_config=_uvicorn_log_config())
     else:
-        uvicorn.run(app, host="0.0.0.0", port=port)
+        uvicorn.run(app, host="0.0.0.0", port=port, log_config=_uvicorn_log_config())

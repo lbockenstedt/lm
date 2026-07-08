@@ -39,15 +39,29 @@ class _SpokeLogRelayHandler(logging.Handler):
     a process exit, which previously never reached the Hub because only
     WARNING+ was relayed. The root logger's effective level still gates what is
     actually produced; this handler simply does not further filter.
+
+    The entry is the canonical-formatted record (``<asctime> - <name> -
+    <levelname> - <message>``) — the SAME shape the spoke writes to its own
+    /var/log/lm/<x>.log via ``configure_logging``. The hub stores relayed
+    entries verbatim (no re-stamping) so each line carries exactly ONE
+    timestamp (the record's original emit time) and the WebUI Logs view is
+    byte-identical to the spoke's local log. The prior ``time.strftime`` +
+    ``[LEVEL] name:`` prefix added a second timestamp and duplicated the
+    name/level already in the canonical record.
     """
 
     def __init__(self, log_queue: queue.Queue):
         super().__init__(level=logging.DEBUG)
         self._queue = log_queue
+        # Canonical LM format — matches logging_setup.DEFAULT_FORMAT so a
+        # relayed line is indistinguishable from the spoke's local log line.
+        self.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'))
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            entry = f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{record.levelname}] {record.name}: {self.format(record)}"
+            entry = self.format(record)
             try:
                 self._queue.put_nowait(entry)
             except queue.Full:
