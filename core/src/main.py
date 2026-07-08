@@ -742,7 +742,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     settled = True
                     return result
 
-            logger.error(f"Request Timeout: {msg_id} from {spoke_id} after {timeout}s")
+            logger.error(f"Request Timeout: [{command_type}] {msg_id} from {spoke_id} after {timeout}s")
             return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
         finally:
             # Drop the waiter so a late ack can't leak a response_cache entry.
