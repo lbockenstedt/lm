@@ -490,6 +490,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.bytes_count = 0 # Total bytes sent/received in the current window
         self.throughput_mbps = 0.0 # Throughput in Mbps (or MB/s)
         self.message_history = deque(maxlen=10) # Last 10 seconds of counts
+        # Per-spoke inbound message rate: raw count in the current 1s window,
+        # a 10s history deque per spoke, and the computed msg/s — surfaced in
+        # the Spokes/Agents tiles alongside tenant + online/offline.
+        self.spoke_msg_count: Dict[str, int] = {}
+        self.spoke_msg_history: Dict[str, deque] = {}
+        self.spoke_mps: Dict[str, float] = {}
 
         class HubLogHandler(logging.Handler):
             def __init__(self, hub):
@@ -2429,6 +2435,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # Process Heartbeat (Always allowed for pending spokes to maintain connection)
                 payload = msg_data.get("payload", {})
                 self.bytes_count += len(message_json) # Track received bytes
+                # Per-spoke inbound rate (relayed agent frames count toward the
+                # hosting spoke) — reset + averaged each 1s tick in run_mps_loop.
+                if spoke_id:
+                    self.spoke_msg_count[spoke_id] = self.spoke_msg_count.get(spoke_id, 0) + 1
                 # Inbound trace: one line per frame so the full dispatch flow is
                 # greppable when DEBUG is on. Heartbeats are the bulk of traffic,
                 # so this stays at DEBUG (not INFO) to avoid flooding the log.
@@ -2983,6 +2993,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
                 self.throughput_mbps = self.bytes_count / (1024 * 1024)
 
+                # Per-spoke msg/s: push this tick's count into each spoke's 10s
+                # history and average. Prune history for spokes with no traffic
+                # and no live connection so the dicts don't grow unbounded.
+                live = set(getattr(self, "active_connections", {}) or {})
+                seen = set(self.spoke_msg_count) | set(self.spoke_msg_history)
+                for sid in seen:
+                    hist = self.spoke_msg_history.get(sid)
+                    if hist is None:
+                        hist = self.spoke_msg_history[sid] = deque(maxlen=10)
+                    hist.append(self.spoke_msg_count.get(sid, 0))
+                    if any(hist) or sid in live:
+                        self.spoke_mps[sid] = sum(hist) / len(hist)
+                    else:
+                        # Idle + disconnected → drop it entirely.
+                        self.spoke_msg_history.pop(sid, None)
+                        self.spoke_mps.pop(sid, None)
+                self.spoke_msg_count = {}
+
                 self.message_count = 0
                 self.bytes_count = 0
             except Exception as e:
@@ -3418,6 +3446,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # Backlog breakdown (by type / by spoke / oldest age) so a
                 # stuck backlog is diagnosable in System → Hub Status.
                 "backlog_stats": self.mailbox.backlog_stats(),
+                # Per-spoke inbound msg/s (for the Spokes/Agents tiles).
+                "spoke_mps": {sid: round(v, 1) for sid, v in self.spoke_mps.items()},
                 # Rate-limit drop counters (per spoke) + the live knob values.
                 "rate_limit_drops": dict(self.rate_limit_drops),
                 "rate_limit_drops_total": sum(self.rate_limit_drops.values()),
