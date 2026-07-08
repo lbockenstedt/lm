@@ -2750,11 +2750,20 @@ async function loadRecoveryLogs() {
             container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No [recovery] log lines yet. The watchdog logs here when it restarts a stranded spoke or gives up.</div>`;
             return;
         }
-        container.innerHTML = rec.map(log => {
+        // Collapse repeating [recovery] lines (same except timestamp) with a
+        // counter + expand-on-click, same as the main log view. GAVE_UP rows
+        // keep their red styling in both the header and the expanded rows.
+        container._rawLogs = rec;
+        const recoveryRow = (log, count) => {
             const isGiveUp = log.includes('GAVE_UP');
             const cls = isGiveUp ? 'text-red-700 font-semibold bg-red-50' : 'text-slate-600 hover:bg-slate-50';
-            return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls}">${escapeHtml(log)}</div>`;
-        }).join('');
+            const badge = count && count > 1
+                ? `<span class="ml-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-200 text-slate-600 align-middle whitespace-nowrap" title="${count} identical events — click to expand">×${count}</span>`
+                : '';
+            const clickAttrs = count && count > 1 ? ' cursor-pointer select-none onclick="toggleLogGroup(this)"' : '';
+            return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls}${clickAttrs}">${escapeHtml(log)}${badge}</div>`;
+        };
+        container.innerHTML = _renderGroupedLogs(rec, recoveryRow);
     } catch (err) {
         container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading recovery logs: ${err.message}</div>`;
     }
@@ -6993,6 +7002,76 @@ function _normalizePxmxAgent(a) {
     };
 }
 
+// ── Log collapse / counter ────────────────────────────────────────────────
+//
+// Repeating log lines (e.g. the per-minute `NetboxSpoke - INFO - NetBox
+// command: NETBOX_GET_PREFIXES` poll) are collapsed into a single row with a
+// "×N" counter so a chatty event doesn't drown the view. Two lines group
+// together when they are identical EXCEPT for the leading timestamp — the
+// operator's "same event, different timestamp" rule. Each group renders once,
+// at the position of its first (newest) occurrence; click the row to expand
+// and see every occurrence with its own timestamp. Copy still emits every raw
+// line with its timestamp (copyLogs reads container._rawLogs, not innerText),
+// so the collapse is a display concern only — no data is lost.
+
+// Strip the leading `YYYY-MM-DD HH:MM:SS - ` timestamp so two lines that differ
+// only by emit time compare equal. Falls back to the whole line when there's no
+// leading timestamp (traceback continuations, non-canonical relay prefixes).
+function _logLineKey(log) {
+    return String(log).replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s*-\s*/, '');
+}
+
+// One log line → a highlighted row. `count` (>1) adds a "×N" badge and wires the
+// click-to-expand handler used by grouped rows. `lineRowFn` override lets the
+// recovery view pass its own GAVE_UP styling while still collapsing repeats.
+function _renderLogLineRow(log, count, lineRowFn) {
+    if (lineRowFn) return lineRowFn(log, count);
+    const u = log.toUpperCase();
+    let cls = 'text-slate-600';
+    let bg = 'hover:bg-slate-50';
+    if (u.includes(' ERROR ') || u.includes(' CRITICAL ')) { cls = 'text-red-700 font-semibold'; bg = 'bg-red-50 hover:bg-red-100'; }
+    else if (u.includes(' WARNING ') || u.includes(' WARN ')) { cls = 'text-amber-700'; bg = 'bg-amber-50 hover:bg-amber-100'; }
+    else if (u.includes(' DEBUG ')) { cls = 'text-slate-400'; }
+    const tsMatch = log.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+?) - ([A-Z]+) - (.*)$/s);
+    const rendered = tsMatch
+        ? `<span class="text-slate-400">${tsMatch[1]}</span> <span class="text-indigo-500 font-semibold">${tsMatch[2].trim()}</span> <span class="opacity-60">${tsMatch[3]}</span> ${tsMatch[4]}`
+        : log;
+    const badge = count && count > 1
+        ? `<span class="ml-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-200 text-slate-600 align-middle whitespace-nowrap" title="${count} identical events (same except timestamp) — click to expand">×${count}</span>`
+        : '';
+    const clickAttrs = count && count > 1 ? ' cursor-pointer select-none onclick="toggleLogGroup(this)"' : '';
+    return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clickAttrs}">${rendered}${badge}</div>`;
+}
+
+// Group `logs` (newest-first) by message key; render each group once at its
+// first-occurrence position. Single-occurrence lines render as a plain row.
+function _renderGroupedLogs(logs, lineRowFn) {
+    const groups = [];
+    const byKey = new Map();
+    for (const log of logs) {
+        const key = _logLineKey(log);
+        let g = byKey.get(key);
+        if (!g) { g = { key, lines: [] }; byKey.set(key, g); groups.push(g); }
+        g.lines.push(log);
+    }
+    return groups.map(g => {
+        if (g.lines.length === 1) return _renderLogLineRow(g.lines[0], 1, lineRowFn);
+        // Header = newest occurrence + ×N badge; expand block = the remaining
+        // N-1 older occurrences (header already shows the newest, so no dup).
+        const header = _renderLogLineRow(g.lines[0], g.lines.length, lineRowFn);
+        const expanded = g.lines.slice(1).map(l => _renderLogLineRow(l, 1, lineRowFn)).join('');
+        return `<div class="log-group">${header}<div class="log-group-expanded hidden">${expanded}</div></div>`;
+    }).join('');
+}
+
+// Click handler for a grouped log header: toggle the sibling expand block.
+function toggleLogGroup(headerEl) {
+    const block = headerEl.nextElementSibling;
+    if (block && block.classList.contains('log-group-expanded')) {
+        block.classList.toggle('hidden');
+    }
+}
+
 async function loadModuleLogs(module, isRefresh = false) {
     const container = document.getElementById('system-logs-container');
     if (!container) return;
@@ -7015,6 +7094,9 @@ async function loadModuleLogs(module, isRefresh = false) {
         }
 
         if (module === 'agents' && !Array.isArray(logs)) {
+            // Flatten every agent's lines so copyLogs emits all of them with
+            // timestamps regardless of the per-agent collapse state below.
+            container._rawLogs = Object.values(logs).flat();
             container.innerHTML = Object.entries(logs).map(([agentId, agentLogs]) => `
                 <div class="mb-6">
                     <div class="px-4 py-2 bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-500 uppercase tracking-widest flex justify-between">
@@ -7022,25 +7104,15 @@ async function loadModuleLogs(module, isRefresh = false) {
                         <span class="opacity-60">Count: ${agentLogs.length}</span>
                     </div>
                     <div class="divide-y divide-slate-100">
-                        ${agentLogs.map(log => `<div class="px-4 py-1 text-xs font-mono text-slate-600 hover:bg-slate-50">${log}</div>`).join('')}
+                        ${_renderGroupedLogs(agentLogs)}
                     </div>
                 </div>
             `).join('');
         } else {
-            container.innerHTML = logs.map(log => {
-                const u = log.toUpperCase();
-                let cls = 'text-slate-600';
-                let bg = 'hover:bg-slate-50';
-                if (u.includes(' ERROR ') || u.includes(' CRITICAL ')) { cls = 'text-red-700 font-semibold'; bg = 'bg-red-50 hover:bg-red-100'; }
-                else if (u.includes(' WARNING ') || u.includes(' WARN ')) { cls = 'text-amber-700'; bg = 'bg-amber-50 hover:bg-amber-100'; }
-                else if (u.includes(' DEBUG ')) { cls = 'text-slate-400'; }
-                // Highlight timestamp and source: "2026-06-21 10:30:45 - Source - LEVEL - msg"
-                const tsMatch = log.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+?) - ([A-Z]+) - (.*)$/s);
-                const rendered = tsMatch
-                    ? `<span class="text-slate-400">${tsMatch[1]}</span> <span class="text-indigo-500 font-semibold">${tsMatch[2].trim()}</span> <span class="opacity-60">${tsMatch[3]}</span> ${tsMatch[4]}`
-                    : log;
-                return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}">${rendered}</div>`;
-            }).join('');
+            // Store the raw (timestamped) lines so copyLogs can emit every one
+            // — the collapsed view's innerText only shows one row per group.
+            container._rawLogs = logs;
+            container.innerHTML = _renderGroupedLogs(logs);
         }
 
     } catch (err) {
@@ -7055,7 +7127,12 @@ async function copyLogs() {
     const container = document.getElementById('system-logs-container');
     if (!container) return;
 
-    const text = container.innerText;
+    // Copy EVERY raw log line with its timestamp — not the collapsed view's
+    // innerText (which only shows one row per repeated group). The collapse is
+    // a display concern; Copy emits the full trail so an incident paste has all
+    // occurrences. Falls back to innerText for views that don't set _rawLogs.
+    const raw = container._rawLogs;
+    const text = Array.isArray(raw) ? raw.join('\n') : container.innerText;
     try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             await navigator.clipboard.writeText(text);
