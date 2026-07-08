@@ -2022,12 +2022,35 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             #     spoke event log). The rejected duplicate backs off and retries,
             #     but never displaces the live connection — flap stops.
             #   • dead (no pong) → zombie; evict it and take over.
+            # Both auth'd with the same current key — either a normal reconnect
+            # after a blip (the existing socket is a half-open zombie: TCP still
+            # ESTABLISHED but the peer died, so no frames arrive and last_seen
+            # goes stale) OR a DUPLICATE spoke process / clone sharing the same
+            # secret (the existing socket is alive and actively serving, so
+            # last_seen is fresh). Distinguish by last_seen freshness — a
+            # stronger signal than a single ping pong: a pong only confirms the
+            # peer's TCP stack replied, not that the spoke process is actively
+            # handling requests, and during a hub freeze a live duplicate's pong
+            # can be delayed >2s and false-evict it into a mutual-eviction flap
+            # (the regression that got the earlier pong-only probe reverted).
+            #   • last_seen fresh (<30s — a live spoke sends telemetry ~every
+            #     10s) → live duplicate; keep the existing connection, REJECT
+            #     the new one so the two processes can't mutually evict.
+            #   • last_seen stale/absent → half-open zombie; confirm with a pong
+            #     probe (awaiting the pong WAITER, not ping() — ping() returns
+            #     the instant the frame is BUFFERED, false-alive on a half-open
+            #     socket) and evict if no pong so the real reconnect takes over.
             alive = False
-            try:
-                await asyncio.wait_for(existing.ping(), timeout=2.0)
+            last_seen = self.heartbeat.last_seen.get(spoke_id)
+            if last_seen is not None and (time.time() - last_seen) < 30.0:
                 alive = True
-            except Exception:
-                alive = False
+            else:
+                try:
+                    pong_waiter = await existing.ping()
+                    await asyncio.wait_for(pong_waiter, timeout=2.0)
+                    alive = True
+                except Exception:
+                    alive = False
             if alive:
                 logger.warning(
                     f"Spoke {spoke_id} connected but an existing live connection "

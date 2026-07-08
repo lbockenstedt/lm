@@ -15,6 +15,7 @@ failed:
    current-key connection (prevents zombie takeover + reconnect ping-pong).
 """
 
+import asyncio
 import os
 import time
 
@@ -54,14 +55,16 @@ class _FakeWS:
 
     ``alive`` controls the liveness probe ``_install_active_connection`` pings
     the existing connection with before deciding whether to evict: an alive
-    socket pongs (ping() resolves), a dead/zombie socket doesn't (ping()
-    raises). Defaults to dead (the zombie-reconnect case)."""
+    socket pongs (ping() returns a resolved pong_waiter), a dead/zombie socket
+    doesn't (ping() raises). Defaults to dead (the zombie-reconnect case).
+    ``ping_count`` lets a test assert whether the probe ran at all."""
 
     def __init__(self, alive=False):
         self.closed = False
         self.close_code = None
         self.close_reason = None
         self._alive = alive
+        self.ping_count = 0
 
     async def close(self, code, reason):
         self.closed = True
@@ -69,10 +72,16 @@ class _FakeWS:
         self.close_reason = reason
 
     async def ping(self):
+        self.ping_count += 1
         if not self._alive:
             raise ConnectionError("dead socket — no pong")
-        # alive: pong received → awaitable completes
-        return None
+        # alive: return a pong_waiter future that resolves immediately. The real
+        # websockets API returns a future the caller must await to confirm the
+        # pong actually came back (awaiting only ping() returns the instant the
+        # frame is BUFFERED — false-alive on a half-open socket).
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(None)
+        return fut
 
 
 class _ConnHub:
@@ -83,6 +92,10 @@ class _ConnHub:
         self.active_connections = {}
         self.active_connection_key_ids = {}
         self.events = []
+        # last_seen freshness is the primary half-open signal: a live spoke
+        # updates it every authenticated frame; a half-open (dead-peer) socket
+        # stops receiving frames so it goes stale.
+        self.heartbeat = type("HB", (), {"last_seen": {}})()
 
     def record_spoke_event(self, spoke_id, event_type, detail=""):
         self.events.append((spoke_id, event_type, detail))
@@ -250,6 +263,83 @@ async def test_install_evicts_zombie_when_existing_unresponsive():
     assert hub.active_connection_key_ids["s1"] == "cur"
     assert zombie.closed is True                  # zombie closed after install
     assert zombie.close_code == 1008
+
+
+async def test_install_keeps_existing_when_last_seen_fresh_no_probe():
+    """A reconnect while the existing connection has a FRESH last_seen (it's
+    actively sending frames — a live duplicate) is REJECTED without even
+    probing ping. This is the half-open vs. live-duplicate discriminator: a
+    fresh last_seen can only happen if a frame arrived recently, which requires
+    a live peer, so the existing connection is alive and the new one is a
+    duplicate that must not evict it (the mutual-eviction flap the earlier
+    pong-only probe caused under hub freezes). No ping is sent — last_seen
+    short-circuits the probe."""
+    km = _make_km()
+    km.keys["s1"] = _key("cur", "current-secret")
+    hub = _ConnHub(km)
+
+    live = _FakeWS(alive=False)  # would NOT pong — but the probe must not run
+    hub.active_connections["s1"] = live
+    hub.active_connection_key_ids["s1"] = "cur"
+    hub.heartbeat.last_seen["s1"] = time.time()  # fresh → alive by frame recency
+
+    dup = _FakeWS()
+    ok = await _install(hub, "s1", dup, "cur")
+    assert ok is False
+    assert dup.closed is True
+    assert dup.close_code == 1008
+    assert live.closed is False
+    assert hub.active_connections["s1"] is live
+    assert live.ping_count == 0  # last_seen fresh → no probe needed
+
+
+async def test_install_evicts_halfopen_when_last_seen_stale_and_pong_dead():
+    """The half-open case: last_seen is STALE (no frames for a while → the peer
+    is gone) AND the pong probe fails (no pong within 2s) → the existing is a
+    half-open zombie; evict it and let the real reconnect take over. This is
+    the root-cause fix for the Request-Timeout flood: a keepalive drop leaves
+    a TCP-ESTABLISHED but dead socket that the OLD false-alive probe (awaiting
+    only ping(), which returns when buffered) wrongly kept, so the spoke's
+    reconnect was rejected and the hub kept routing into the black hole."""
+    km = _make_km()
+    km.keys["s1"] = _key("cur", "current-secret")
+    hub = _ConnHub(km)
+
+    zombie = _FakeWS(alive=False)  # no pong
+    hub.active_connections["s1"] = zombie
+    hub.active_connection_key_ids["s1"] = "cur"
+    hub.heartbeat.last_seen["s1"] = time.time() - 120  # stale → probe
+
+    fresh = _FakeWS()
+    ok = await _install(hub, "s1", fresh, "cur")
+    assert ok is True
+    assert hub.active_connections["s1"] is fresh
+    assert zombie.closed is True
+    assert zombie.ping_count == 1  # stale → probed
+
+
+async def test_install_keeps_existing_when_last_seen_stale_but_pongs():
+    """Stale last_seen alone does NOT evict: a live spoke that paused telemetry
+    >30s (e.g. a brief event-loop stall) but is still up still pongs, so the
+    pong-confirm keeps it and rejects the new connection. Eviction requires
+    BOTH stale last_seen AND a failed pong — the half-open signature. This
+    stops a momentary telemetry gap from false-evicting a live spoke."""
+    km = _make_km()
+    km.keys["s1"] = _key("cur", "current-secret")
+    hub = _ConnHub(km)
+
+    live = _FakeWS(alive=True)  # pongs
+    hub.active_connections["s1"] = live
+    hub.active_connection_key_ids["s1"] = "cur"
+    hub.heartbeat.last_seen["s1"] = time.time() - 120  # stale → probe runs
+
+    dup = _FakeWS()
+    ok = await _install(hub, "s1", dup, "cur")
+    assert ok is False
+    assert dup.closed is True
+    assert live.closed is False  # stale but pongs → kept
+    assert hub.active_connections["s1"] is live
+    assert live.ping_count == 1  # stale → probed, and it answered
 
 # ── key-delivery signing (sign SPOKE_UPDATE_SESSION_KEY with the PRE-rotation
 #    secret so the spoke can verify it before installing the new key) ──────────
