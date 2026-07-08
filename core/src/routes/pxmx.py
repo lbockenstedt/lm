@@ -675,6 +675,17 @@ def register(app, hub, ctx):
             hub.unregister_vnc_session(session_id)
             logger.exception("pxmx_create_console VNC_START failed")
             raise HTTPException(status_code=502, detail=f"failed to start console: {e}")
+        # request_response returns the ENVELOPE ({header, payload:{type, data}});
+        # status/ticket/message live in payload.data (spoke→agent may nest twice
+        # in the relay topology). Peel payload.data layers until we reach the
+        # status-bearing dict — reading the envelope's top-level .status was
+        # always None, so the "agent refused VNC_START" branch fired no matter
+        # what the agent actually returned. Mirrors aggregate_proxmox's unwrap.
+        for _ in range(3):
+            if isinstance(vnc_res, dict) and "status" not in vnc_res and "payload" in vnc_res:
+                vnc_res = vnc_res.get("payload", {}).get("data", vnc_res)
+            else:
+                break
         ticket = ""
         if isinstance(vnc_res, dict):
             if vnc_res.get("status") not in ("SUCCESS", "OK"):
