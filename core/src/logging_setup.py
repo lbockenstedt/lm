@@ -31,6 +31,50 @@ DEFAULT_DATEFMT = '%Y-%m-%d %H:%M:%S'
 _DEFAULT_LOG_MAX_BYTES = 20 * 1024 * 1024
 _DEFAULT_LOG_BACKUPS = 5
 
+# Liveness-poll endpoints whose successful (2xx/3xx) uvicorn.access lines are pure
+# noise — the hub/agents health-probe these per second, flooding spoke/hub logs.
+# 4xx/5xx responses still log (real failures), and all other requests log. In
+# debug mode the filter is bypassed so every access line shows. Tunable via env
+# (comma-separated); set LM_QUIET_ACCESS_PATHS="" to disable filtering.
+_DEFAULT_QUIET_ACCESS_PATHS = "/api/health,/api/status"
+
+
+class _QuietSuccessAccessFilter(logging.Filter):
+    """Drop uvicorn.access lines for noisy liveness endpoints, but only on
+    success (status < 400) — failing probes still log so troubleshooting isn't
+    lost. Bypassed entirely when the uvicorn.access logger is at DEBUG."""
+
+    def __init__(self, quiet_paths: tuple) -> None:
+        super().__init__()
+        self._quiet_paths = quiet_paths
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # In debug mode show every access line.
+        if logging.getLogger("uvicorn.access").getEffectiveLevel() <= logging.DEBUG:
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001 — never block a record on a format error
+            return True
+        if not any(p in msg for p in self._quiet_paths):
+            return True
+        # Status code is the trailing token in uvicorn's access format:
+        # `'<client> - "<request_line>" <status_code>'. Keep non-2xx/3xx.
+        tail = msg.rsplit(" ", 1)[-1] if " " in msg else ""
+        if tail.isdigit() and int(tail) < 400:
+            return False
+        return True
+
+
+def _quiet_access_paths() -> tuple:
+    """Resolve the quiet-access-path list. Unset env → defaults; empty env →
+    filtering disabled; otherwise the comma-separated list."""
+    raw = os.getenv("LM_QUIET_ACCESS_PATHS")
+    if raw is None:
+        raw = _DEFAULT_QUIET_ACCESS_PATHS
+    paths = tuple(p for p in (s.strip() for s in raw.split(",")) if p)
+    return paths
+
 
 def _int_env(name: str, default: int) -> int:
     try:
@@ -107,6 +151,15 @@ def configure_logging(default_level: int = logging.INFO, *,
                 stream.reconfigure(line_buffering=True)
             except Exception:
                 pass
+
+    # Suppress noisy successful liveness-poll access lines (per-second
+    # /api/health, /api/status) on the uvicorn.access logger. Bypassed in debug
+    # mode; failing probes (4xx/5xx) still log. Idempotent across re-inits.
+    quiet_paths = _quiet_access_paths()
+    if quiet_paths:
+        access_logger = logging.getLogger("uvicorn.access")
+        if not any(isinstance(f, _QuietSuccessAccessFilter) for f in access_logger.filters):
+            access_logger.addFilter(_QuietSuccessAccessFilter(quiet_paths))
     return level
 
 
