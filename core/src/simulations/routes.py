@@ -695,7 +695,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             return _PushResult(0)
 
     async def _cs_forward(tenant_id: str, cmd_type: str, payload: dict,
-                          timeout: float = 8.0) -> dict:
+                          timeout: float = 15.0) -> dict:
         """Forward a CS_* command to the tenant's Client-Sim spoke and unwrap the
         reply the way the command-queue routes do. Raises HTTPException on
         refusal (spoke returns status=ERROR) or transport failure. Returns the
@@ -709,7 +709,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             raise HTTPException(status_code=502, detail=f"{cmd_type} failed: {exc}")
         data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         if isinstance(data, dict) and data.get("status") == "ERROR":
-            raise HTTPException(status_code=403, detail=data.get("message", "refused"))
+            msg = str(data.get("message") or "refused")
+            # A request/agent TIMEOUT ("Timed out waiting for spoke response" /
+            # "Agent response timeout") is a stalled/busy spoke, NOT a safeguard
+            # refusal — surface 504 so the UI reads "spoke busy/timeout" instead
+            # of a misleading 403 "forbidden". Real refusals (protected vmid /
+            # below the sim floor) stay 403.
+            ml = msg.lower()
+            code = 504 if ("timed out" in ml or "timeout" in ml) else 403
+            raise HTTPException(status_code=code, detail=msg)
         return data if isinstance(data, dict) else {"status": "SUCCESS", "result": data}
 
     def _tenant_cache(tenant_id: str) -> dict:
@@ -1678,7 +1686,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not sid:
             return {"commands": [], "spoke_connected": False}
         try:
-            result = await hub.request_response(sid, "CS_GET_COMMANDS", {}, timeout=5.0)
+            result = await hub.request_response(sid, "CS_GET_COMMANDS", {}, timeout=15.0)
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"list failed: {exc}")
         data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result

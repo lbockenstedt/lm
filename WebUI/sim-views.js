@@ -355,6 +355,9 @@ const CS_NO_REFRESH = new Set([
     'Setup::Proxmox',   // Proxmox hypervisor config — manual Refresh only
     'Config::API',      // Config → API
     'Config::Simulation', // Config → Simulation (form-heavy)
+    'VM Server::Command Queue', // each load is a per-spoke request_response — a
+                                // stalled/busy spoke makes telemetry auto-refresh
+                                // loop on 5s timeouts; manual Refresh only.
 ]);
 
 function connectCSWebSocket() {
