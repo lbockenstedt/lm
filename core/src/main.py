@@ -699,7 +699,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         pre-rotation secret the spoke still holds).
         """
         msg_id = str(uuid.uuid4())
-        logger.info(f"Request: {msg_id} -> {spoke_id} [{command_type}] data={_redact(command_type, data)}")
+        logger.debug(f"Request: {msg_id} -> {spoke_id} [{command_type}] data={_redact(command_type, data)}")
         msg = Message(
             header=MessageHeader(
                 message_id=msg_id,
@@ -721,7 +721,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 await asyncio.sleep(0.1)
                 if msg_id in getattr(self, "response_cache", {}):
                     result = self.response_cache.pop(msg_id)
-                    logger.info(f"Response: {msg_id} received from {spoke_id}: {_redact(command_type, result)}")
+                    logger.debug(f"Response: {msg_id} received from {spoke_id}: {_redact(command_type, result)}")
                     settled = True
                     return result
 
@@ -1826,7 +1826,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "last_seen": time.time(),
             }
 
-        logger.info(f"Relayed message from Agent {agent_id} via Spoke {spoke_id}: {original_msg.get('payload', {}).get('type')}")
+        logger.debug(f"Relayed message from Agent {agent_id} via Spoke {spoke_id}: {original_msg.get('payload', {}).get('type')}")
 
         # Handle Agent Logs
         if original_msg.get("payload", {}).get("type") == "AGENT_LOG":
@@ -2896,7 +2896,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     snap["split_brain"] = True
 
                 # Emit on change, or a ~10min heartbeat (cycle % 20 == 0).
-                if snap != last or cycle % 20 == 0:
+                changed = snap != last
+                if changed or cycle % 20 == 0:
                     parts = [
                         f"conns={','.join(conns) or '-'}",
                         f"hyp={hyp_sid or 'none'}",
@@ -2912,7 +2913,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         parts.append(f"missing={','.join(snap['missing'])}")
                     if snap.get("split_brain"):
                         parts.append("SPLIT_BRAIN=pxmx_connected_but_not_hypervisor")
-                    logger.info("[spoke-diag] " + " ".join(parts))
+                    if changed:
+                        logger.info("[spoke-diag] " + " ".join(parts))
+                    else:
+                        logger.debug("[spoke-diag] (heartbeat) " + " ".join(parts))
                     last = snap
 
                 # USB-availability telemetry: where each cached cs spoke put USB
@@ -2958,12 +2962,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                             + ("" if (pres or unk or devs) else " NO_USB_DATA"))
                 if not usb_parts:
                     usb_parts = ["none (no cached cs spoke)"]
-                if usb_parts != last_usb or cycle % 20 == 0:
+                if usb_parts != last_usb:
                     logger.info("[usb-telemetry] " + " | ".join(usb_parts)
                                 + (" | NO_USB_DATA means the cs spoke reports VMs but no USB — "
                                    "it is not aggregating USB into its CS_TELEMETRY payload"
                                    if any("NO_USB_DATA" in p for p in usb_parts) else ""))
                     last_usb = usb_parts
+                elif cycle % 20 == 0:
+                    logger.debug("[usb-telemetry] (heartbeat) " + " | ".join(usb_parts))
             except Exception as e:
                 logger.warning(f"[spoke-diag] loop error: {e}")
             await asyncio.sleep(30)
@@ -3766,7 +3772,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         while True:
             try:
                 uptime = int(time.time() - start)
-                logger.info(
+                logger.debug(
                     "[heartbeat] ok module=hub spoke_id=hub hub=ok uptime_s=%s spokes=%d",
                     uptime, len(self.active_connections),
                 )

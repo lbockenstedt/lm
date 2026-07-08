@@ -154,7 +154,7 @@ class Mailbox:
         """
         Pushes a message via the provided send_func and adds it to the pending queue.
         """
-        logger.info(f"Pushing message {message.header.message_id} to {message.header.destination_id}")
+        logger.debug(f"Pushing message {message.header.message_id} to {message.header.destination_id}")
 
         # Try to send immediately
         try:
@@ -171,7 +171,7 @@ class Mailbox:
         Processes an acknowledgement and removes the corresponding message from the pending queue.
         """
         if ack.correlation_id in self.pending_ack:
-            logger.info(f"Message {ack.correlation_id} acknowledged with status: {ack.status}")
+            logger.debug(f"Message {ack.correlation_id} acknowledged with status: {ack.status}")
             del self.pending_ack[ack.correlation_id]
             await self._asave()
         else:
@@ -255,7 +255,7 @@ class Mailbox:
                 changed = True
 
                 if send_func:
-                    logger.info(f"Retrying message {msg_id} (Attempt {retries + 1})")
+                    logger.debug(f"Retrying message {msg_id} (Attempt {retries + 1})")
                     try:
                         await send_func(msg)
                         self.pending_ack[msg_id] = (msg, now, retries + 1)
@@ -272,7 +272,7 @@ class Mailbox:
                         self.pending_ack[msg_id] = (msg, now, retries + 1)
                 else:
                     # Spoke is offline, move to offline queue if not already there
-                    logger.info(f"Spoke {spoke_id} offline. Moving message {msg_id} to offline queue.")
+                    logger.debug(f"Spoke {spoke_id} offline. Moving message {msg_id} to offline queue.")
                     await self.queue_for_spoke(spoke_id, msg)  # saves its own change
                     del self.pending_ack[msg_id]
 

@@ -302,8 +302,11 @@ class RealtimeIpamNacSyncMixin:
         buckets, dropped = await self._rt_attribute(sessions)
         tids = list(buckets.keys())
         if not tids:
-            logger.info("realtime nac sync cycle: %d sessions pulled, 0 tenants matched, "
-                        "%d dropped unattributed", len(sessions), dropped)
+            if dropped:
+                logger.info("realtime nac sync cycle: %d sessions pulled, 0 tenants matched, "
+                            "%d dropped unattributed", len(sessions), dropped)
+            else:
+                logger.debug("realtime nac sync cycle: idle (0 sessions matched a tenant)")
             return {"results": [], "dropped_unattributed": dropped,
                     "sessions_total": len(sessions),
                     "pull_errors": pull.get("errors", [])}
@@ -325,9 +328,12 @@ class RealtimeIpamNacSyncMixin:
             logger.warning("[sync-error] realtime-nac cycle: %d sessions, %d tenants, "
                            "%d pushed, %d errors, %d dropped unattributed",
                            len(sessions), len(out), pushed, errs, dropped)
-        else:
+        elif pushed > 0 or dropped > 0:
             logger.info("realtime nac sync cycle: %d sessions, %d tenants, %d pushed, "
                         "%d dropped unattributed", len(sessions), len(out), pushed, dropped)
+        else:
+            logger.debug("realtime nac sync cycle: %d sessions, %d tenants, no-op (0 pushed, 0 dropped)",
+                         len(sessions), len(out))
         # The cycle upserted CPPM-derived sessions into NetBox (only-add-missing)
         # — drop + re-fetch the netbox_ips / netbox_devices tenant caches so a
         # non-admin viewer sees the new IP/device records immediately. Only when

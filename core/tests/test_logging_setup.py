@@ -87,9 +87,14 @@ def test_log_file_attaches_file_handler_alongside_stream():
             os.environ.pop("LOG_LEVEL", None)
             logging_setup.configure_logging(log_file=path, line_buffered=False)
         kinds = {type(h).__name__ for h in logging.getLogger().handlers}
-        assert "FileHandler" in kinds
+        # _build_file_handler returns a RotatingFileHandler (a FileHandler subclass)
+        # when rotation is enabled (the default); accept any FileHandler subclass.
+        file_handlers = [h for h in logging.getLogger().handlers if isinstance(h, logging.FileHandler)]
+        assert file_handlers, "expected a FileHandler attached to the root logger"
+        # delay=True means the file isn't opened until the first record; assert the
+        # handler is wired to the target path via baseFilename instead of os.path.exists.
+        assert os.path.basename(file_handlers[0].baseFilename) == os.path.basename(path)
         assert "StreamHandler" in kinds  # FileHandler subclasses StreamHandler; both present
-        assert os.path.exists(path)
     finally:
         if os.path.exists(path):
             os.remove(path)
