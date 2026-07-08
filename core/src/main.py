@@ -597,6 +597,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # module_metadata[spoke_id]["tenant_id"]. Mirrors spoke_telemetry's
         # in-memory pattern; not persisted (spoke re-pushes on reconnect).
         self.simulations_cache: Dict[str, dict] = {}
+        # Warm-load persistence for the Client-Sim telemetry cache: on a hub
+        # restart the Clients + VM Server views were blank until EVERY spoke
+        # reconnected and re-pushed CS_TELEMETRY (the cache was in-memory only).
+        # Persist it (encrypted, debounced by run_sim_cache_flush_loop) and
+        # reload here so those views seed from last-known data immediately —
+        # parity with nw_cache_load() below and the mailbox warm start. Reloaded
+        # rows read OFFLINE (spoke_online = not-in-active_connections) until the
+        # spoke reconnects, so stale data is visibly stale, never shown as live.
+        self._sim_cache_path = os.path.join(self.state.data_dir, "simulations_cache.json")
+        self._sim_cache_dirty = False
+        self._load_simulations_cache()
         # Simulations module: tenant-scoped browser broadcast + slim cs-config store.
         self.simulations_broadcaster = SimulationsBroadcaster()
         self.simulations_store = SimulationsStore(self.state.data_dir)
@@ -1714,6 +1725,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if not isinstance(cs_data, dict):
             return
         self.simulations_cache[spoke_id] = cs_data
+        self._sim_cache_dirty = True  # warm-load snapshot flushed by run_sim_cache_flush_loop
         # Fan out to browsers subscribed on /sim/ws (tenant-scoped).
         try:
             await self.simulations_broadcaster.broadcast(
@@ -2825,6 +2837,63 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             logger.error(f"HUB_REQUEST '{req_type}' from {spoke_id} failed: {e}")
             return {"status": "error", "message": str(e)}
 
+    _SIM_CACHE_FLUSH_INTERVAL_S = 30
+
+    def _load_simulations_cache(self) -> None:
+        """Warm-start simulations_cache from disk (best-effort; never fatal).
+        Mirrors Mailbox._load — decrypt + json.loads the last snapshot so the
+        Clients/VM Server views seed on a restart instead of blank-until-
+        reconnect."""
+        try:
+            if not os.path.exists(self._sim_cache_path):
+                return
+            from security.encryption import hub_encryption
+            with open(self._sim_cache_path, "rb") as f:
+                blob = f.read()
+            if not blob:
+                return
+            data = json.loads(hub_encryption.decrypt(blob)) or {}
+            if isinstance(data, dict):
+                self.simulations_cache = {str(k): v for k, v in data.items()
+                                          if isinstance(v, dict)}
+                if self.simulations_cache:
+                    logger.info("simulations_cache: warm-loaded %d spoke payload(s) from disk",
+                                len(self.simulations_cache))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("simulations_cache warm load failed (%s): %s — starting empty",
+                           self._sim_cache_path, e)
+
+    def _save_simulations_cache(self) -> None:
+        """Encrypted atomic write of simulations_cache (mirrors Mailbox._save).
+        Never raises — a failed persist must not break telemetry ingest."""
+        try:
+            from security.encryption import hub_encryption
+            encrypted = hub_encryption.encrypt(json.dumps(self.simulations_cache, default=str))
+            tmp = self._sim_cache_path + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(encrypted)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._sim_cache_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("simulations_cache persist failed (%s): %s", self._sim_cache_path, e)
+
+    async def run_sim_cache_flush_loop(self):
+        """Persist simulations_cache to disk when dirty, off the event loop.
+        Decoupled from the ~10s-per-spoke telemetry rate → one bounded write per
+        interval; the sync write is offloaded via asyncio.to_thread so it can't
+        reproduce the on-loop I/O starvation that stalled cs-svr-02's WS link."""
+        while True:
+            try:
+                await asyncio.sleep(self._SIM_CACHE_FLUSH_INTERVAL_S)
+                if self._sim_cache_dirty:
+                    self._sim_cache_dirty = False
+                    await asyncio.to_thread(self._save_simulations_cache)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.debug("sim cache flush loop error: %s", e)
+
     async def run_mps_loop(self):
         """
         Calculates messages per second and throughput using a 10-second moving average.
@@ -3751,6 +3820,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # spoke directly), acks terminal results, and syncs USB config down via
         # SET_AGENT_CONFIG. See gateway/cs_bridge.py (Phase D2).
         cs_bridge_task = asyncio.create_task(self.run_cs_bridge_loop())
+        # Warm-load persistence: periodically flush simulations_cache to disk so
+        # the Clients + VM Server views seed from last-known data on a hub
+        # restart instead of blanking until every spoke reconnects. Parity with
+        # nw_cache. See run_sim_cache_flush_loop.
+        sim_cache_task = asyncio.create_task(self.run_sim_cache_flush_loop())
         # Certificate distribution: the hub is the transport for cert material
         # from the le (Let's Encrypt) spoke to each cert's target spokes. For
         # every managed cert with stale targets it pulls fullchain+key from le
