@@ -5542,6 +5542,12 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     // pxmxAgents were fetched up front (to scope the Spokes table); reuse
     // them here rather than re-fetching.
     const all = [...hubAgents, ...pxmxAgents];
+    // Sort the Agents tile by display name (case-insensitive) so generic
+    // Hub-direct agents and Proxmox node agents interleave by name, not by
+    // fetch order. Falls back to hostname, then agent_id.
+    all.sort((a, b) =>
+        (a.display_name || a.hostname || a.agent_id || '').localeCompare(
+            (b.display_name || b.hostname || b.agent_id || ''), undefined, { sensitivity: 'base' }));
 
     // Active Role column (folded in from the former Generic Nodes tile):
     // each connected generic agent hosts 0..N role sub-spokes, surfaced via
@@ -5819,6 +5825,12 @@ async function loadSpokesAndAgents() {
     // GET_AVAILABLE_ROLES round-trip — the sub-spoke presence in the already-
     // fetched known-modules list is the signal (mirrors how the multi-role
     // design registers each role as its own spoke). hasRole is defined above.
+    // Sort the Spokes tile by display name (case-insensitive) so the admin
+    // view is browsable by name regardless of connect/approval order. Falls
+    // back to spoke_id when no display_name is set.
+    trueSpokes.sort((a, b) =>
+        (a.display_name || a.spoke_id || '').localeCompare(
+            (b.display_name || b.spoke_id || ''), undefined, { sensitivity: 'base' }));
     _renderSpokesTable(spokesWrap, trueSpokes, diagBy);
     // An agent is an agent — idle (no role yet) and active (role-loaded) generic
     // agents both render in the single Agents table alongside the Proxmox node
