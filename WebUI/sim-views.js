@@ -3082,7 +3082,12 @@ async function csRenderVmServer() {
     // with bg-green-50 ring-1 ring-green-300). A table also aligns the stat
     // columns vertically across rows.
     const sel = csVmSelectedSpoke;
-    const rows = hosts.map(h => {
+    // Sort hosts by display name (numeric-aware so …svr-02/-03/-10 order
+    // naturally, not lexically). Copy first — don't mutate the loaded array.
+    const _hname = h => (h.spoke_name || h.spoke_hostname || h.spoke_id || '');
+    const rows = hosts.slice()
+        .sort((a, b) => _hname(a).localeCompare(_hname(b), undefined, { numeric: true, sensitivity: 'base' }))
+        .map(h => {
         const px = h.proxmox || {};
         const vmN = h.vm_count || (h.proxmox_vms ? h.proxmox_vms.length : 0);
         const usbN = csUsbCount(h);
