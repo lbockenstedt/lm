@@ -1082,6 +1082,45 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return []
 
     # ── tenant-scoped config (literal "tenant" first segment) ──────────────
+    @app.get("/sim/api/tenant/{tenant}/hypervisors-config")
+    async def get_hypervisors_config(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Setup → Hypervisors config (backup/snapshot/per-host/confirm)."""
+        return {"hypervisors_config": await store.get_hypervisors_config(tenant_id)}
+
+    @app.put("/sim/api/tenant/{tenant}/hypervisors-config")
+    async def set_hypervisors_config(request: Request, tenant: str,
+                                     tenant_id: str = Depends(get_tenant_id)):
+        body = await request.json()
+        cfg = body.get("hypervisors_config") if isinstance(body, dict) else None
+        if not isinstance(cfg, dict):
+            raise HTTPException(status_code=400, detail="missing hypervisors_config")
+        await store.set_hypervisors_config(tenant_id, cfg)
+        return {"saved": True}
+
+    @app.get("/sim/api/tenant/{tenant}/hypervisor-storages")
+    async def list_hypervisor_storages(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Live backup-storage list per host: fan PXMX_LIST_STORAGE out to every
+        hypervisor/simulation spoke so the Setup dropdown offers real Proxmox
+        storages (content=backup). Best-effort — a spoke that errors/omits it
+        just contributes nothing. Returns {hosts:[{hostname, storages:[...]}]}."""
+        out: List[Dict[str, Any]] = []
+        seen_hosts = set()
+        for sid in (hub.get_all_spokes_by_type("hypervisor")
+                    + hub.get_all_spokes_by_type("simulation")):
+            if sid in seen_hosts:
+                continue
+            seen_hosts.add(sid)
+            try:
+                r = await hub.request_response(sid, "PXMX_LIST_STORAGE", {}, timeout=15.0)
+                data = r.get("payload", {}).get("data", {}) if isinstance(r, dict) else {}
+                for h in (data.get("hosts") or []):
+                    if isinstance(h, dict) and h.get("hostname"):
+                        out.append({"hostname": h["hostname"],
+                                    "storages": h.get("storages") or []})
+            except Exception as e:  # noqa: BLE001
+                logger.debug("PXMX_LIST_STORAGE %s failed: %s", sid, e)
+        return {"hosts": out}
+
     @app.get("/sim/api/tenant/{tenant}/hub-config")
     async def get_hub_config(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         return await store.get_hub_config(tenant_id)

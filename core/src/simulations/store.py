@@ -68,6 +68,22 @@ _DEFAULT_HUB_CONFIG: Dict[str, Any] = {
 }
 
 
+# Setup → Hypervisors tab config (VM actions: backup / snapshot / confirm /
+# per-host overrides). Tenant-scoped, stored under the tenant's
+# ``hypervisors_config`` key. Backup defaults to vzdump snapshot mode (no
+# downtime). ``per_host`` maps a Proxmox hostname → a partial override of the
+# same keys (your hosts aren't clustered, so backup storage differs per host).
+_DEFAULT_HYPERVISORS_CONFIG: Dict[str, Any] = {
+    "backup_storage": "",          # Proxmox storage id for vzdump (per-host overridable)
+    "backup_mode": "snapshot",     # snapshot | suspend | stop
+    "backup_keep": 3,              # keep-last=N pruning (0 = no prune)
+    "snapshot_keep": 5,            # informational retention target for the UI
+    "snapshot_prefix": "lm",       # auto-snapshot name prefix
+    "confirm_destructive": True,   # confirm prompt before stop/restart/backup/snapshot-delete
+    "per_host": {},                # {hostname: {backup_storage, backup_mode, backup_keep, ...}}
+}
+
+
 class SimulationsStore:
     """Per-tenant JSON store for hub-owned Client-Sim config (see module docstring).
 
@@ -188,6 +204,24 @@ class SimulationsStore:
             t = self._tenant(tenant_id)
             t["hub_config_enabled"] = bool(enabled)
             t["hub_config"] = hub_config or {}
+            await self._asave()
+
+    async def get_hypervisors_config(self, tenant_id: str) -> Dict[str, Any]:
+        """Setup → Hypervisors config for the tenant (backup/snapshot/per-host/
+        confirm). Seeds ``_DEFAULT_HYPERVISORS_CONFIG`` for unset fields (stored
+        values win). ``effective_for(hostname)`` merge happens at command time."""
+        t = self._data.get(tenant_id, {})
+        stored = t.get("hypervisors_config") or {}
+        merged = dict(_DEFAULT_HYPERVISORS_CONFIG)
+        merged.update(stored)
+        merged["per_host"] = dict(stored.get("per_host") or {})
+        return merged
+
+    async def set_hypervisors_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
+        """Persist the tenant's Hypervisors config (full GET-merge-PUT from the UI)."""
+        with self._lock:
+            t = self._tenant(tenant_id)
+            t["hypervisors_config"] = cfg or {}
             await self._asave()
 
     async def reset_hub_config(self, tenant_id: str) -> Dict[str, Any]:
