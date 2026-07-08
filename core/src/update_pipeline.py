@@ -772,7 +772,7 @@ class UpdatePipelineMixin:
         # cs/opnsense/... bump then kept nudging them, forcing a pointless lm
         # re-pull + "SPOKE_UPDATE carried non-lm repo_url" churn / reconnect flap.
         # Group spokes by resolved repo, check each repo's tip once, push on change.
-        last_pushed = dict(config.get("last_spoke_repo_commits", {}) or {})
+        last_pushed = dict(config.get("spoke_update_commits", {}) or {})
         repo_spokes: Dict[str, list] = {}
         for spoke_id, approved in self.approved_modules.items():
             if not approved:
@@ -795,31 +795,34 @@ class UpdatePipelineMixin:
             repo_spokes.setdefault(repo_url, []).append(spoke_id)
 
         commits_changed = False
+        _approved_ids = {sid for ss in repo_spokes.values() for sid in ss}
+        for _stale in [sid for sid in last_pushed if sid not in _approved_ids]:
+            last_pushed.pop(_stale, None)
+            commits_changed = True
         for repo_url, spoke_ids in repo_spokes.items():
             tip = await self.get_remote_commit(repo_url, branch)
-            # Push when forced, when this repo has never been pushed, or when its
-            # remote tip advanced. A known tip equal to what we last pushed → skip
-            # (no churn). An unresolvable tip ("unknown") is only pushed on force.
-            changed = force or (tip != "unknown" and tip != last_pushed.get(repo_url))
-            if not changed:
-                for sid in spoke_ids:
-                    update_results.append(f"{sid}: up-to-date ({repo_url})")
-                continue
             for sid in spoke_ids:
+                if not force and tip != "unknown" and last_pushed.get(sid) == tip:
+                    update_results.append(f"{sid}: up-to-date ({repo_url})")
+                    continue
+                connected = sid in getattr(self, "active_connections", {})
+                if not connected and not force:
+                    update_results.append(f"{sid}: offline - deferred ({repo_url})")
+                    continue
                 logger.info(f"Triggering update for spoke {sid} from {repo_url}@{branch}"
                             + (f" (tip {tip[:10]})" if tip != "unknown" else "") + "...")
                 err = await self._push_spoke_update(sid, repo_url, branch)
                 if err is None:
                     update_results.append(f"{sid}: triggered")
+                    if connected and tip != "unknown":
+                        last_pushed[sid] = tip
+                        commits_changed = True
                 else:
                     logger.error(f"Failed to push update for {sid}: {err}")
                     update_results.append(f"{sid}: failed")
-            if tip != "unknown":
-                last_pushed[repo_url] = tip
-                commits_changed = True
 
         if commits_changed:
-            self.state.update_global_config({"last_spoke_repo_commits": last_pushed})
+            self.state.update_global_config({"spoke_update_commits": last_pushed})
             self.state.save_state()
 
         logger.info(f"Spoke update results: {update_results}")
