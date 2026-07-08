@@ -2954,7 +2954,16 @@ window.CS_CHILD_RENDERERS['Setup::Troubleshooting'] = csRenderSetupTroubleshooti
  * ========================================================================= */
 
 let csVmHosts = [];
-let csVmSelectedSpoke = '';
+let csVmSelectedSpoke = '';       // spoke_id of the selected host (command routing)
+let csVmSelectedHostId = '';      // UNIQUE per-host key for selection — see csVmHostId
+// Unique id for a host ROW/pill. Several pxmx agents relayed by ONE cs spoke
+// share the same spoke_id, so selecting by spoke_id always resolved to the
+// first host (Overview link + Host pills appeared dead / stuck on one host).
+// Key on the agent hostname instead (falls back to spoke_id for the legacy
+// single-host-per-spoke shape, where spoke_id is already unique).
+function csVmHostId(h) {
+    return (h && (h.hostname || h.spoke_hostname || h.spoke_id)) || '';
+}
 
 async function csVmLoad() {
     const data = await csFetch(`/aggregate/proxmox?tenant_id=${csTenant()}`);
@@ -2968,9 +2977,9 @@ async function csVmLoad() {
 }
 
 function csVmSelectedHost() {
-    let h = csVmHosts.find(x => x.spoke_id === csVmSelectedSpoke);
+    let h = csVmHosts.find(x => csVmHostId(x) === csVmSelectedHostId);
     if (!h) h = csVmHosts.find(x => x.spoke_online) || csVmHosts[0] || null;
-    if (h) csVmSelectedSpoke = h.spoke_id;
+    if (h) { csVmSelectedHostId = csVmHostId(h); csVmSelectedSpoke = h.spoke_id; }
     return h;
 }
 
@@ -2978,10 +2987,10 @@ function csVmSelectedHost() {
 function csVmHostBanner() {
     if (!csVmHosts.length) return '';
     const pills = csVmHosts.map(h => {
-        const active = h.spoke_id === csVmSelectedSpoke;
+        const active = csVmHostId(h) === csVmSelectedHostId;
         const cls = active ? 'bg-[#01A982] text-white border-[#01A982]'
                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50';
-        return `<button onclick="csVmSelectHost('${csEscape(h.spoke_id)}')"
+        return `<button onclick="csVmSelectHost('${csEscape(csVmHostId(h))}')"
             class="px-3 py-1 rounded-full text-xs font-semibold border ${cls}">${csOnlineDot(h.spoke_online)} ${csEscape(h.spoke_name || h.spoke_id)}</button>`;
     }).join('');
     return `<div class="flex flex-wrap items-center gap-2 mb-4">
@@ -3081,7 +3090,7 @@ async function csRenderVmServer() {
     // border-slate-100, clickable, hover:bg-slate-50, selected row highlighted
     // with bg-green-50 ring-1 ring-green-300). A table also aligns the stat
     // columns vertically across rows.
-    const sel = csVmSelectedSpoke;
+    const sel = csVmSelectedHostId;
     // Sort hosts by display name (numeric-aware so …svr-02/-03/-10 order
     // naturally, not lexically). Copy first — don't mutate the loaded array.
     const _hname = h => (h.spoke_name || h.spoke_hostname || h.spoke_id || '');
@@ -3091,8 +3100,8 @@ async function csRenderVmServer() {
         const px = h.proxmox || {};
         const vmN = h.vm_count || (h.proxmox_vms ? h.proxmox_vms.length : 0);
         const usbN = csUsbCount(h);
-        const selCls = h.spoke_id === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
-        return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(h.spoke_id)}','VMs')">
+        const selCls = csVmHostId(h) === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
+        return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(csVmHostId(h))}','VMs')">
           <td class="px-4 py-2"><span class="font-medium text-slate-700">${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id)}</span></td>
           <td class="px-4 py-2 text-center">${csOnlineBadge(h.spoke_online)}</td>
           <td class="px-4 py-2 text-center">${vmN}</td>
@@ -3150,8 +3159,12 @@ async function csRefreshAutoProvStatus() {
     }
 }
 
-window.csVmSelectHost = function (spokeId, child) {
-    csVmSelectedSpoke = spokeId;
+window.csVmSelectHost = function (hostId, child) {
+    csVmSelectedHostId = hostId;
+    // Derive the spoke_id of the picked host for command routing (several hosts
+    // can share one spoke_id; the picked host disambiguates which one is viewed).
+    const h = csVmHosts.find(x => csVmHostId(x) === hostId);
+    if (h) csVmSelectedSpoke = h.spoke_id;
     if (child) { setSubChild(child); }
     else loadCSData('VM Server', currentSubChild || 'VMs', true);
 };
