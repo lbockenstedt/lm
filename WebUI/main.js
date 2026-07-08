@@ -8151,16 +8151,35 @@ function openVmDetail(uniqueId) {
             <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors">■ Stop</button>
             <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
             <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors">📷 Snapshot</button>
+            <button onclick="pxmxVmAction('${uid}','backup')" title="vzdump backup to the storage configured in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-colors">💾 Backup</button>
             <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" title="Open VNC console (noVNC)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982] hover:bg-[#008c6a] text-white transition-colors">🖥 Console</button>
             ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>` : ''; })()}
             <span id="pxmx-vm-action-status" class="text-xs text-slate-400"></span>
         </div>`;
 }
 
+// Cached Setup → Hypervisors config (confirm toggle + backup/snapshot settings).
+// Fetched once per view; pass force=true to refresh after a save.
+async function pxmxHvConfig(force) {
+    if (!force && window._pxmxHvConfig) return window._pxmxHvConfig;
+    try {
+        const r = await setupFetch(`/sim/api/tenant/${currentTenant}/hypervisors-config?tenant_id=${encodeURIComponent(currentTenant)}`);
+        const d = await r.json();
+        window._pxmxHvConfig = (d && d.hypervisors_config) || {};
+    } catch (e) { window._pxmxHvConfig = window._pxmxHvConfig || {}; }
+    return window._pxmxHvConfig;
+}
+
 async function pxmxVmAction(uniqueId, action) {
     const vms = window._pxmxVms || [];
     const vm = vms.find(v => v.unique_id === uniqueId);
     if (!vm) { showToast('VM not found in cache', 'error'); return; }
+    // Confirm destructive actions when Setup → Hypervisors asks for it (default on).
+    if (['stop', 'reboot', 'restart', 'backup'].includes(action)) {
+        const cfg = await pxmxHvConfig();
+        if (cfg.confirm_destructive !== false &&
+            !window.confirm(`${action.toUpperCase()} "${vm.name || vm.vmid}"?`)) return;
+    }
     const statusEl = document.getElementById('pxmx-vm-action-status');
     const setStat = (msg) => { if (statusEl) statusEl.textContent = msg; };
     setStat(`${action}…`);
@@ -8848,7 +8867,7 @@ async function pxmxOpenConsole(uniqueId) {
     try {
         const r = await setupFetch('/api/pxmx/console', {
             method: 'POST',
-            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type || 'qemu' }),
+            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type || 'qemu', agent_id: vm.agent_id || '' }),
         });
         session = await r.json().catch(() => ({}));
         if (!r.ok || !session || !session.session_id) {
