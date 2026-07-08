@@ -738,6 +738,12 @@ class UpdatePipelineMixin:
         hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
         branch = config.get("global_branch", "main")
         stored_commit = config.get("last_update_commit")
+        # Thread the lm/core source so each spoke also pulls its shared /opt/lm
+        # checkout on SPOKE_UPDATE (no CLI for lm/core deploys). RAW sources.get
+        # (no default) so an air-gapped deploy with update_sources.hub blank
+        # sends core_repo_url=None and the spoke skips core gracefully instead of
+        # pointing at the public repo.
+        core_extra = {"core_repo_url": sources.get("hub"), "core_branch": branch}
 
         local_commit = await self.get_local_commit()
         remote_commit = await self.get_remote_commit(hub_repo, branch)
@@ -918,7 +924,8 @@ class UpdatePipelineMixin:
                     continue
                 logger.info(f"Triggering update for spoke {sid} from {repo_url}@{branch}"
                             + (f" (tip {tip[:10]})" if tip != "unknown" else "") + "...")
-                err = await self._push_spoke_update(sid, repo_url, branch)
+                err = await self._push_spoke_update(sid, repo_url, branch,
+                                                    extra_data=core_extra)
                 if err is None:
                     update_results.append(f"{sid}: triggered")
                     pushed_ts[sid] = _now
@@ -991,6 +998,8 @@ class UpdatePipelineMixin:
         config = self.state.get_global_config()
         sources = config.get("update_sources", {})
         branch = config.get("global_branch", "main")
+        # Thread lm/core source alongside each spoke's own repo (see perform_update).
+        core_extra = {"core_repo_url": sources.get("hub"), "core_branch": branch}
 
         # update-source config-key space, same as perform_update. The prefix map
         # adds "qa" → "qa" so a QA harness spoke can be pointed at a "qa" repo via
@@ -1019,7 +1028,8 @@ class UpdatePipelineMixin:
             if not repo_url:
                 skipped.append(f"{spoke_id}: no repo_url in update_sources.{module_key}")
                 continue
-            err = await self._push_spoke_update(spoke_id, repo_url, branch)
+            err = await self._push_spoke_update(spoke_id, repo_url, branch,
+                                                extra_data=core_extra)
             if err is None:
                 triggered.append(spoke_id)
                 logger.info(f"SPOKE_UPDATE queued for {spoke_id} ({repo_url}@{branch})")
@@ -1057,6 +1067,12 @@ class UpdatePipelineMixin:
         sources = config.get("update_sources", {})
         branch = config.get("global_branch", "main")
         repo_url = sources.get("agent")
+        # Thread lm/core source. For agents the spoke's own repo is typically the
+        # lm repo itself (all-in-one /opt/lm layout), so core_repo_url == repo_url
+        # and the spoke's _resolve_core_root sees core_root == cwd → skips the
+        # duplicate core fetch (the spoke-repo pull already covers /opt/lm). RAW
+        # sources.get("hub") so air-gapped blank → None → graceful skip.
+        core_extra = {"core_repo_url": sources.get("hub"), "core_branch": branch}
 
         triggered = []
         skipped = []
@@ -1076,7 +1092,8 @@ class UpdatePipelineMixin:
                 continue
             if self._effective_module_type(spoke_id) != "agent":
                 continue
-            err = await self._push_spoke_update(spoke_id, repo_url, branch)
+            err = await self._push_spoke_update(spoke_id, repo_url, branch,
+                                                extra_data=core_extra)
             if err is None:
                 triggered.append(spoke_id)
                 logger.info(f"SPOKE_UPDATE queued for agent {spoke_id} ({repo_url}@{branch})")
