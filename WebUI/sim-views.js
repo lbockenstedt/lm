@@ -3064,7 +3064,7 @@ async function csRenderVmServer() {
     catch (e) { console.error('csRenderVmServer: fleet load failed', e); csSet(csErrorBox('Could not load VM Server fleet', e)); return; }
     if (!hosts.length) { csSet(csEmpty('No VM servers reporting yet.')); return; }
     const online = hosts.filter(h => h.spoke_online).length;
-    const vms = hosts.reduce((n, h) => n + (h.vm_count || (h.proxmox_vms ? h.proxmox_vms.length : 0)), 0);
+    const vms = hosts.reduce((n, h) => n + csSimVmCount(h), 0);
     const usbs = hosts.reduce((n, h) => n + csUsbCount(h), 0);
     const recloneRunning = hosts.filter(h => h.reclone_state && h.reclone_state.status === 'running').length;
     const summary = `<div class="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-xs text-slate-500">
@@ -3106,7 +3106,7 @@ async function csRenderVmServer() {
         .sort((a, b) => _hname(a).localeCompare(_hname(b), undefined, { numeric: true, sensitivity: 'base' }))
         .map(h => {
         const px = h.proxmox || {};
-        const vmN = h.vm_count || (h.proxmox_vms ? h.proxmox_vms.length : 0);
+        const vmN = csSimVmCount(h);
         const usbN = csUsbCount(h);
         const selCls = csVmHostId(h) === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
         return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(csVmHostId(h))}','VMs')">
@@ -3228,6 +3228,17 @@ function csVmCategory(v) {
     return 'Other';
 }
 
+// Count only simulation-client VMs for a host — the same bucket the VMs tab's
+// 'Simulation Clients' category shows (vmid >= 90000 / sim-* / *client*,
+// excluding templates and LXC containers). The overview's VMs column and the
+// fleet table used h.vm_count, which includes templates + containers. Falls
+// back to vm_count only when the full VM list isn't present (best-effort).
+function csSimVmCount(h) {
+    const list = h && h.proxmox_vms;
+    if (Array.isArray(list)) return list.filter(v => csVmCategory(v) === 'Simulation Clients').length;
+    return (h && h.vm_count) || 0;
+}
+
 async function csRenderVmServerVms() {
     csSetToolbar('');
     let hosts;
@@ -3272,7 +3283,19 @@ async function csRenderVmServerVms() {
     vms.forEach(v => { window._csVmByVmid[v.vmid] = v; });
 }
 
-const CS_VM_TABLE_HEADERS = ['VMID', 'Name', 'Type', 'Status', 'Actions'];
+const CS_VM_TABLE_HEADERS = ['VMID', 'Name', 'OS', 'Status', 'Actions'];
+
+// Friendly OS label from the agent's cached Proxmox ostype (l26 → Linux, win* →
+// Windows, etc.); falls back to the qemu/lxc type when ostype is unknown.
+function csVmOs(v) {
+    const t = String(v.ostype || v.os || '').toLowerCase();
+    if (!t) return v.is_template ? 'template' : (v.type === 'lxc' ? 'Linux (CT)' : '—');
+    if (t.startsWith('win')) return 'Windows';
+    if (t === 'l26' || t === 'l24' || t.startsWith('linux')) return 'Linux';
+    if (t.includes('solaris')) return 'Solaris';
+    if (t.includes('other')) return 'Other';
+    return v.ostype || v.os;
+}
 const CS_VM_TABLE_HEADER_HTML = [
     '<label class="inline-flex items-center gap-1.5 cursor-pointer"><input type="checkbox" id="cs-vm-selectall" onchange="csVmSelectAll(this.checked)"/> VMID</label>',
 ];
@@ -3460,13 +3483,12 @@ function csVmRow(v) {
     return `<tr>
       <td class="px-3 py-2 font-mono text-xs"><input type="checkbox" class="cs-vm-sel" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}</td>
       <td class="px-3 py-2 text-sm">${csEscape(v.name || '—')}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(v.is_template ? 'template' : (v.type || '—'))}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(csVmOs(v))}</td>
       <td class="px-3 py-2">${csVmStatusBadge(v)}</td>
       <td class="px-3 py-2"><div class="flex flex-wrap gap-1">
         ${act('Start','start_vm','bg-green-100 text-green-700')}
         ${act('Stop','stop_vm','bg-amber-100 text-amber-700')}
         ${act('Reboot','reboot_vm','bg-slate-200 text-slate-700')}
-        ${act('Snapshot','snapshot_vm','bg-blue-100 text-blue-700')}
         ${act('Reclone','reclone_vm','bg-indigo-100 text-indigo-700')}
         ${act('Delete','delete_vm','bg-red-100 text-red-700')}
       </div></td>
@@ -3483,6 +3505,16 @@ window.csVmVmsTab = function (cat) {
     });
 };
 
+// The proxmox-command `target` = the host the action runs on. Without it the hub
+// defaults to the spoke's PRIMARY host, so an action on a multi-host spoke can
+// hit the wrong host — e.g. a delete "succeeds" (destroy_vm finds the VM
+// already-gone there) while the real VM survives on the SELECTED host. Pin it to
+// the selected host so every action lands where the VM actually lives.
+function csVmTarget() {
+    const h = (typeof csVmSelectedHost === 'function' && csVmSelectedHost()) || {};
+    return h.hostname || h.spoke_hostname || undefined;
+}
+
 window.csVmAction = async function (vmid, action) {
     const v = (window._csVmByVmid && window._csVmByVmid[vmid]) || {};
     const args = { vmid: Number(vmid) };
@@ -3493,7 +3525,7 @@ window.csVmAction = async function (vmid, action) {
     if (action === 'delete_vm') await csExpirePendingForTarget();
     try {
         await csFetch(`/${csTenant()}/spokes/${sid}/proxmox-command?tenant_id=${csTenant()}`,
-            { method: 'POST', body: JSON.stringify({ action, args }) });
+            { method: 'POST', body: JSON.stringify({ action, args, target: csVmTarget() }) });
         csVmFlash(action + ' queued');
         setTimeout(() => loadCSData('VM Server', currentSubChild, true), 800);
     } catch (e) { console.error('csVmAction: ' + action + ' failed', e); if (typeof showToast === 'function') showToast(action + ' failed: ' + (e.message || e), 'error'); }
@@ -3513,7 +3545,7 @@ window.csVmBulk = async function (action) {
             const args = { vmid: Number(vmid) };
             if (v.type) args.vm_type = v.type;
             return csFetch(`/${csTenant()}/spokes/${encodeURIComponent(csVmSelectedSpoke)}/proxmox-command?tenant_id=${csTenant()}`,
-                { method: 'POST', body: JSON.stringify({ action, args }) });
+                { method: 'POST', body: JSON.stringify({ action, args, target: csVmTarget() }) });
         };
         const CHUNK = 4;
         for (let i = 0; i < ids.length; i += CHUNK) {
