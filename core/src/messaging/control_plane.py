@@ -13,7 +13,7 @@ import os
 import socket
 import ssl
 import sys
-from typing import Dict, Any, Type
+from typing import Dict, Any, Optional, Type
 from .protocol import Message, MessageHeader, MessagePayload
 from ..security.signer import MessageSigner
 
@@ -950,6 +950,21 @@ class BaseControlPlane:
             # (e.g. a telemetry relay loop) via this hook.
             _extra_tasks = self._create_spoke_tasks(websocket)
 
+            # Per-connection command concurrency. Each hub command is handled in
+            # its own task so a slow handler (cs SPOKE_RELAY awaiting a pxmx
+            # agent response for up to 15s; netbox 30s sync; dns/dhcp
+            # unbound-control) cannot block the receive loop from reading and
+            # acking the next command — the root cause of the hub's every-5s
+            # "Request Timeout from cs-svr-02-spoke after 5.0s" flood. Concurrency
+            # is bounded by a semaphore (backpressure); ack frames are serialized
+            # via a send-lock so the WS frame stream stays well-formed. The hub
+            # matches COMMAND_RESULTs by correlation_id, so out-of-order acks are
+            # safe, and request_response callers serialize dependent command
+            # sequences at the hub side (they await each ack before sending next).
+            cmd_send_lock = asyncio.Lock()
+            cmd_sem = asyncio.Semaphore(self._max_concurrent_commands())
+            cmd_tasks: set = set()
+
             # Main Message Loop
             try:
               async for message in websocket:
@@ -974,11 +989,96 @@ class BaseControlPlane:
                     logger.info("Spoke '%s' approved by admin. Ready for commands.", self.spoke_id)
                     continue
 
+                # Backpressure: cap in-flight handlers so a sustained overload
+                # can't grow unbounded. Reject with a fast ERROR ack so the hub
+                # doesn't pile up timed-out requests waiting on a stalled spoke.
+                if len(cmd_tasks) >= self._max_inflight_commands():
+                    logger.warning("command queue full (%d in-flight); rejected %s",
+                                   len(cmd_tasks), cmd_type)
+                    await self._send_cmd_result(
+                        websocket, corr_id,
+                        {"status": "ERROR", "message": "spoke command queue full"},
+                        cmd_send_lock)
+                    continue
+                # Handle + ack in a bounded concurrent task so the receive loop
+                # keeps draining the socket while a slow handler runs.
+                task = asyncio.create_task(self._handle_one_command(
+                    websocket, cmd_type, data, corr_id, cmd_send_lock, cmd_sem))
+                cmd_tasks.add(task)
+                task.add_done_callback(cmd_tasks.discard)
+            finally:
+                self._hub_ws = None
+                _hb_task.cancel()
+                _lr_task.cancel()
+                _hh_task.cancel()
+                for _t in _extra_tasks:
+                    _t.cancel()
+                for _t in list(cmd_tasks):
+                    _t.cancel()
+                await asyncio.gather(
+                    _hb_task, _lr_task, _hh_task, *_extra_tasks,
+                    *list(cmd_tasks), return_exceptions=True)
+
+    def _create_spoke_tasks(self, websocket) -> list:
+        """Subclasses override to add long-lived per-connection async tasks
+        (e.g. a telemetry relay loop) that run alongside the heartbeat/log-relay
+        tasks. Returned tasks are cancelled and awaited when the connection
+        closes. Default: no extra tasks."""
+        return []
+
+    # --- Per-command concurrency (see Main Message Loop above) --------------
+    # Tunable via env so an overloaded spoke can be adjusted without a code
+    # change. Defaults: 8 concurrent handlers, 64 in-flight (waiting + running).
+    def _max_concurrent_commands(self) -> int:
+        try:
+            return max(1, int(os.environ.get("LM_SPOKE_MAX_CONCURRENT_COMMANDS", "8")))
+        except Exception:
+            return 8
+
+    def _max_inflight_commands(self) -> int:
+        try:
+            return max(1, int(os.environ.get("LM_SPOKE_MAX_INFLIGHT_COMMANDS", "64")))
+        except Exception:
+            return 64
+
+    async def _send_cmd_result(self, websocket, corr_id, result, send_lock) -> None:
+        """Build + send one COMMAND_RESULT ack. Serialized by ``send_lock`` so
+        concurrent handlers don't interleave WS frames. A send failure (hub
+        disconnected mid-handle) is logged at DEBUG and swallowed — the receive
+        loop's outer finally owns teardown."""
+        ts = round(time.time(), 6)
+        resp = {
+            "correlation_id": corr_id,
+            "header": {"message_id": str(uuid.uuid4()), "timestamp": ts,
+                       "sender_id": self.spoke_id, "destination_id": "hub"},
+            "payload": {"type": "COMMAND_RESULT", "data": result}
+        }
+        resp["signature"] = self._sign(resp)
+        try:
+            async with send_lock:
+                await websocket.send(json.dumps(resp, separators=(',', ':')))
+        except Exception as e:  # noqa: BLE001 — socket closed mid-handle
+            logger.debug("failed to send COMMAND_RESULT for %s: %s", corr_id, e)
+
+    async def _handle_one_command(self, websocket, cmd_type, data, corr_id,
+                                  send_lock, sem) -> None:
+        """Handle one hub command concurrently and send its COMMAND_RESULT ack.
+
+        Isolated from the receive loop so a slow handler cannot block reading
+        or acking the next command. The semaphore bounds concurrent execution;
+        any exception is caught and returned as a clean ERROR ack so one bad
+        command can't tear down the hub websocket. Preserves the prior serial
+        dispatch order: system command → module match → first-module fallback →
+        ``*_GET_STATUS`` get_status() fallback.
+        """
+        async with sem:
+            result: Optional[Dict[str, Any]] = None
+            handled_by_module = None
+            try:
                 # First, try handling as a system command
                 result = await self.handle_system_command(cmd_type, data)
 
                 # Route to the appropriate module if not handled by system
-                handled_by_module = None
                 if result is None:
                     for module_name, module in self.modules.items():
                         # We check if the command_type is specific to this module
@@ -1043,31 +1143,12 @@ class BaseControlPlane:
                                     break
                             except Exception as e:
                                 logger.warning(f"get_status() fallback failed for a module: {e}")
-
-                ts = round(time.time(), 6)
-                resp = {
-                    "correlation_id": corr_id,
-                    "header": {"message_id": str(uuid.uuid4()), "timestamp": ts,
-                               "sender_id": self.spoke_id, "destination_id": "hub"},
-                    "payload": {"type": "COMMAND_RESULT", "data": result}
-                }
-                resp["signature"] = self._sign(resp)
-                await websocket.send(json.dumps(resp, separators=(',', ':')))
-            finally:
-                self._hub_ws = None
-                _hb_task.cancel()
-                _lr_task.cancel()
-                _hh_task.cancel()
-                for _t in _extra_tasks:
-                    _t.cancel()
-                await asyncio.gather(_hb_task, _lr_task, _hh_task, *_extra_tasks, return_exceptions=True)
-
-    def _create_spoke_tasks(self, websocket) -> list:
-        """Subclasses override to add long-lived per-connection async tasks
-        (e.g. a telemetry relay loop) that run alongside the heartbeat/log-relay
-        tasks. Returned tasks are cancelled and awaited when the connection
-        closes. Default: no extra tasks."""
-        return []
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.exception("Unhandled error dispatching %s", cmd_type)
+                result = {"status": "ERROR", "message": f"{type(e).__name__}: {e}"}
+            await self._send_cmd_result(websocket, corr_id, result, send_lock)
 
     async def _health_heartbeat_task(self, websocket):
         """Emit one greppable health line on a schedule so BugFixer (which reads
