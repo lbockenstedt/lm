@@ -1827,6 +1827,20 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
     const tenantChip = tenant
         ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-emerald-50 text-emerald-700" title="Tenant: ${escapeHtml(String(tenant))}">${escapeHtml(String(tenant))}</span>`
         : '';
+    // Live per-spoke/agent metrics (from /status metrics, stashed by
+    // _updateMetrics) shown on the SAME line as tenant + online/offline:
+    //   • msg/s — inbound message rate (blue)
+    //   • backlog — hub-side queued/unacked messages for this id (amber; hidden
+    //     when zero). A rising backlog = messages not draining to that spoke.
+    const _m = window.__lmHubMetrics || {};
+    const _mps = _m.spoke_mps ? _m.spoke_mps[label] : undefined;
+    const _bk = (_m.backlog_stats && _m.backlog_stats.by_spoke) ? _m.backlog_stats.by_spoke[label] : undefined;
+    const mpsChip = (_mps !== undefined && _mps !== null)
+        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-sky-50 text-sky-700" title="Inbound message rate">${Number(_mps).toFixed(1)}/s</span>`
+        : '';
+    const backlogChip = (_bk)
+        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-amber-50 text-amber-700" title="Hub-side backlog (queued/unacked) for this ${spokeVariant ? 'spoke' : 'agent'}">${_bk} queued</span>`
+        : '';
     return `
         <div class="${container}">
             <div class="flex items-center gap-3">
@@ -1835,7 +1849,9 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
                 <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-600">${mod}</span>
                 ${tenantChip}
             </div>
-            ${badge}
+            <div class="flex items-center gap-2">
+                ${mpsChip}${backlogChip}${badge}
+            </div>
         </div>`;
 }
 
@@ -1881,6 +1897,9 @@ async function updateStatus() {
 function _updateMetrics(statusData) {
     if (!statusData.metrics) return;
     const m = statusData.metrics;
+    // Stash for the per-spoke msg/s + backlog chips in the Spokes/Agents tiles
+    // (_renderSpokeAgentRow reads spoke_mps / backlog_stats.by_spoke by id).
+    window.__lmHubMetrics = m;
     const cpuEl = document.getElementById('sys-cpu');
     const memEl = document.getElementById('sys-mem');
     const diskEl = document.getElementById('sys-disk');
@@ -1920,6 +1939,13 @@ function _updateMetrics(statusData) {
                  &nbsp;·&nbsp;drops total <b>${m.rate_limit_drops_total ?? 0}</b></div>
             <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Drops by spoke</span><br>${kv(drops)}</div>`;
     }
+    // Populate the rate-limit knobs from live config — but skip a field while
+    // it's focused so the 10s status poll doesn't clobber what's being typed.
+    const rl = m.rate_limit || {};
+    const capIn = document.getElementById('rl-capacity');
+    const rateIn = document.getElementById('rl-fillrate');
+    if (capIn && document.activeElement !== capIn && rl.capacity != null) capIn.value = rl.capacity;
+    if (rateIn && document.activeElement !== rateIn && rl.fill_rate != null) rateIn.value = rl.fill_rate;
 
     const versionEl = document.getElementById('footer-sys-version');
     if (versionEl && m.version) {
@@ -1953,6 +1979,39 @@ async function dropHubBacklog() {
         else alert(`Drop backlog failed: ${e.message}`);
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Drop Backlog'; }
+    }
+}
+
+// Save the per-spoke rate-limit knob (System → Hub Status). Shallow-merges into
+// global_config["rate_limit"] via POST /setup/config; the hub applies it to each
+// spoke on its next (re)connect (main.py _rate_limit_params). Admin only.
+async function saveRateLimit() {
+    const capIn = document.getElementById('rl-capacity');
+    const rateIn = document.getElementById('rl-fillrate');
+    const btn = document.getElementById('rl-save-btn');
+    const capacity = Number(capIn && capIn.value);
+    const fill_rate = Number(rateIn && rateIn.value);
+    if (!(capacity >= 1) || !(fill_rate > 0)) {
+        const msg = 'Enter a burst ≥ 1 and a refill rate > 0.';
+        if (typeof showToast === 'function') showToast(msg, 'error'); else alert(msg);
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const res = await fetch('/setup/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { rate_limit: { capacity, fill_rate } } }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (typeof showToast === 'function')
+            showToast(`Rate limit saved (burst ${capacity}, ${fill_rate}/s). Applies as spokes reconnect.`, 'success');
+    } catch (e) {
+        if (typeof showToast === 'function') showToast(`Save rate limit failed: ${e.message}`, 'error');
+        else alert(`Save rate limit failed: ${e.message}`);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
     }
 }
 
@@ -2973,6 +3032,17 @@ function _renderSettingsSection(subMenu) {
                         <button onclick="dropHubBacklog()" id="drop-backlog-btn" class="text-xs px-3 py-1 rounded-md border border-red-300 text-red-600 hover:bg-red-50 transition-all">Drop Backlog</button>
                     </div>
                     <div id="sys-backlog-detail" class="text-xs text-slate-500 space-y-2"><p class="text-slate-400 italic">Loading…</p></div>
+                    <div class="mt-4 pt-3 border-t border-slate-100">
+                        <p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-2">Rate Limit (per spoke)</p>
+                        <div class="flex flex-wrap items-end gap-3">
+                            <label class="text-xs text-slate-500">Burst (capacity)<br>
+                                <input type="number" id="rl-capacity" min="1" step="1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                            <label class="text-xs text-slate-500">Refill (msg/s)<br>
+                                <input type="number" id="rl-fillrate" min="0.1" step="0.1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                            <button onclick="saveRateLimit()" id="rl-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button>
+                        </div>
+                        <p class="text-[10px] text-slate-400 mt-2">Applies to each spoke on its next (re)connect. Raise both for relay spokes hosting many agents / at scale.</p>
+                    </div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="${card} p-6">
