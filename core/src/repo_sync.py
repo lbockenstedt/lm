@@ -120,7 +120,7 @@ class RepoSyncMixin:
                     "commit_before": before, "commit_after": "",
                     "changed": False}
 
-    async def run_repo_sync_all(self) -> Dict[str, Any]:
+    async def run_repo_sync_all(self, force_spokes: bool = False) -> Dict[str, Any]:
         """Run one GitHub repo-sync cycle and record its status.
 
         Pulls ``provisioning_repos/*`` (hub-local) then delegates to
@@ -128,6 +128,13 @@ class RepoSyncMixin:
         status ``{last_sync_ts, hub, provisioning_repos, message}``. Idempotent
         + best-effort: any failure yields a per-entry error, never an unhandled
         exception (the background loop depends on this).
+
+        ``force_spokes`` is threaded through to ``perform_update`` so a MANUAL
+        "Update" click (footer button / Update All → /setup/update) bypasses the
+        per-spoke re-push cooldown and gate, while the scheduled background loop
+        calls with the default ``False`` (gated/cooldown-respecting). This is the
+        single shared code path for BOTH the scheduled sync and the manual
+        button — "update now" is just "run the scheduled cycle immediately".
 
         NOTE: when ``perform_update`` pulls a hub change it schedules a hub
         self-restart (via the transient unit) and returns a "restarting"
@@ -159,7 +166,7 @@ class RepoSyncMixin:
 
         # ── hub tree + spoke fan-out (version-gated, snapshot/rollback) ─────
         try:
-            hub_result = await self.perform_update()
+            hub_result = await self.perform_update(force_spokes=force_spokes)
             if not isinstance(hub_result, dict):
                 hub_result = {"status": "checked",
                               "message": str(hub_result)}

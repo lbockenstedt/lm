@@ -30,6 +30,36 @@ from .protocol import Message, MessageHeader, MessagePayload, Acknowledgement, M
 # Logging configured by the process entrypoint (hub main.py); see base_spoke.py.
 logger = logging.getLogger("Mailbox")
 
+# A SPOKE_UPDATE tells a spoke to git-pull its repo + restart. It carries only
+# {repo_url, branch} (NOT a target commit), so a spoke that flaps mid-update
+# never acks it → the durable queue re-flushes the SAME message on EVERY
+# reconnect, and the fan-out can queue several before one lands. Both produce a
+# storm of redundant pull/restart nudges at a device that may already be
+# current. Two guards below tame this:
+#   1. De-dup (coalesce): queue_for_spoke keeps at most ONE pending SPOKE_UPDATE
+#      per (repo_url, branch) per spoke — a newer one supersedes the older.
+#   2. Delivery cooldown: flush_mailbox will not re-deliver a SPOKE_UPDATE for
+#      the same (repo_url, branch) within this window; it DEFERS it (leaves it
+#      queued) so a genuinely-new tip still lands on a later reconnect but a
+#      stuck one cannot re-fire every reconnect.
+SPOKE_UPDATE_DELIVERY_COOLDOWN_S = 600
+
+
+def _is_spoke_update(message: Message) -> bool:
+    try:
+        return getattr(message.payload, "type", None) == "SPOKE_UPDATE"
+    except Exception:
+        return False
+
+
+def _spoke_update_key(spoke_id: str, message: Message) -> str:
+    """Coalesce/cooldown key: spoke + repo + branch (NOT message_id — a re-push
+    of the same repo tip must collide with the prior one)."""
+    data = getattr(message.payload, "data", None) or {}
+    repo = data.get("repo_url", "") if isinstance(data, dict) else ""
+    branch = data.get("branch", "") if isinstance(data, dict) else ""
+    return f"{spoke_id}|{repo}|{branch}"
+
 class Mailbox:
     def __init__(self, state_dir: Optional[str] = None):
         # Messages sent by the Hub that are awaiting an Ack
@@ -39,6 +69,13 @@ class Mailbox:
         # Mailboxes for spokes (messages queued while spoke is offline)
         # { spoke_id: [Message, ...] }
         self.spoke_queues: Dict[str, List[Message]] = {}
+
+        # Last time a SPOKE_UPDATE was actually delivered for a given
+        # (spoke|repo|branch) key — drives the delivery cooldown so a durable
+        # SPOKE_UPDATE that never gets acked cannot re-flush every reconnect.
+        # In-memory only (not persisted): a hub restart legitimately clears the
+        # cooldown so a pending update flushes promptly after the restart.
+        self._spoke_update_delivered: Dict[str, float] = {}
 
         self.retry_intervals = [5, 15, 60, 300, 900]  # Exponential backoff intervals in seconds
 
@@ -159,6 +196,12 @@ class Mailbox:
         # Try to send immediately
         try:
             await send_func(message)
+            # Record SPOKE_UPDATE delivery so flush_mailbox's cooldown sees this
+            # direct (online) push too — a spoke that just got nudged online must
+            # not be re-nudged again by a reconnect flush moments later.
+            if _is_spoke_update(message):
+                self._spoke_update_delivered[
+                    _spoke_update_key(message.header.destination_id, message)] = time.time()
         except Exception as e:
             logger.warning(f"Immediate push failed for {message.header.message_id}: {e}")
             # If it fails here, it's already in the queue for the retry loop to handle if we add it
@@ -203,6 +246,21 @@ class Mailbox:
             if (now - m.header.timestamp) < m.header.ttl
         ]
 
+        # De-dup (coalesce) SPOKE_UPDATE: keep at most ONE pending update per
+        # (repo_url, branch) for this spoke. A newer SPOKE_UPDATE supersedes the
+        # older queued one, so a flapping spoke can't accumulate a backlog of
+        # identical pull-and-restart nudges that all re-flush on reconnect.
+        if _is_spoke_update(message):
+            new_key = _spoke_update_key(spoke_id, message)
+            before = len(self.spoke_queues[spoke_id])
+            self.spoke_queues[spoke_id] = [
+                m for m in self.spoke_queues[spoke_id]
+                if not (_is_spoke_update(m) and _spoke_update_key(spoke_id, m) == new_key)
+            ]
+            dropped = before - len(self.spoke_queues[spoke_id])
+            if dropped:
+                logger.info(f"Coalesced {dropped} superseded SPOKE_UPDATE(s) for {spoke_id} ({new_key})")
+
         self.spoke_queues[spoke_id].append(message)
         logger.info(f"Queued message {message.header.message_id} for offline spoke {spoke_id}")
         await self._asave()
@@ -215,10 +273,29 @@ class Mailbox:
             messages = self.spoke_queues[spoke_id][:]
             logger.info(f"Flushing mailbox for spoke {spoke_id} ({len(messages)} messages)")
 
+            now = time.time()
+            deferred: List[Message] = []
             for msg in messages:
+                # Delivery cooldown: don't re-deliver a SPOKE_UPDATE for the same
+                # (repo|branch) within the window. DEFER it (keep it queued) so a
+                # stuck/never-acked update can't re-fire a pull+restart on every
+                # reconnect, while a genuinely-new tip still lands after the
+                # window. A hub restart clears _spoke_update_delivered, so a real
+                # pending update flushes promptly post-restart.
+                if _is_spoke_update(msg):
+                    key = _spoke_update_key(spoke_id, msg)
+                    last = self._spoke_update_delivered.get(key, 0.0)
+                    if (now - last) < SPOKE_UPDATE_DELIVERY_COOLDOWN_S:
+                        left = int(SPOKE_UPDATE_DELIVERY_COOLDOWN_S - (now - last))
+                        logger.info(f"Deferring SPOKE_UPDATE for {spoke_id} ({key}) — "
+                                    f"delivery cooldown {left}s remaining")
+                        deferred.append(msg)
+                        continue
                 await self.push(msg, send_func)
 
-            self.spoke_queues[spoke_id] = []
+            # Retain only the cooldown-deferred messages; everything else was
+            # pushed into pending_ack.
+            self.spoke_queues[spoke_id] = deferred
             await self._asave()
 
     async def retry_loop(self, send_func_map):

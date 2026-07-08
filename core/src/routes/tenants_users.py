@@ -11,32 +11,39 @@ def register(app, hub, ctx):
 
     @app.post("/setup/update")
     async def trigger_update(request: Request):
+        """Manual "Update now" (footer ↻ Update / Update All).
+
+        This runs the SAME process as the scheduled repo-sync
+        (``run_repo_sync_all``) — pull ``provisioning_repos/*`` + version-gated
+        hub tree pull + ``SPOKE_UPDATE`` fan-out — just triggered on demand
+        instead of on the WebUI-configured interval. There is exactly ONE
+        scheduler (Setup → Sync); this button is "run that cycle now".
+
+        A manual click sends ``force_spokes=true`` so the spoke fan-out bypasses
+        the per-spoke re-push cooldown/gate (the hub itself still only re-pulls
+        its own tree when genuinely behind).
+        """
         hub = app.state.hub
-        force_param = request.query_params.get("force", "false")
-        force = force_param.lower() == "true"
-        # A manual "Update All" click sends force_spokes=true so the spoke fan-out
-        # is not gate-skipped (the hub itself only re-pulls when genuinely behind).
         force_spokes = request.query_params.get("force_spokes", "false").lower() == "true"
-        logger.info(f"API: Triggering update force={force} force_spokes={force_spokes} (param: {force_param})")
-        success = await hub.perform_update(force=force, force_spokes=force_spokes)
-        if isinstance(success, dict):
-            if success.get("status") == "success":
-                return {"status": "success", "message": success["message"]}
-            elif success.get("status") == "checked":
-                # Hub is already current; spoke updates were triggered. This is a
-                # success outcome, not an error — returning 200 avoids the UI
-                # prefixing the message with "Critical Error:".
-                return {"status": "checked", "message": success["message"]}
-            elif success.get("status") == "no_update":
-                return {"status": "no_update", "message": success["message"]}
-            else:
-                logger.error("update-trigger: perform_update returned unexpected status=%s", success.get("status"))
-                raise HTTPException(status_code=500, detail=success.get("message", "Update failed"))
-        elif success:
-            return {"status": "success", "message": "Update triggered. The server is restarting..."}
-        else:
-            logger.error("update-trigger: perform_update returned falsy success (force=%s)", force)
-            raise HTTPException(status_code=500, detail="Update failed. Check Hub logs.")
+        logger.info(f"API: Manual update — run_repo_sync_all(force_spokes={force_spokes})")
+        result = await hub.run_repo_sync_all(force_spokes=force_spokes)
+        hub_r = result.get("hub") if isinstance(result, dict) else None
+        hub_r = hub_r if isinstance(hub_r, dict) else {}
+        status = hub_r.get("status") or "checked"
+        prov = (result.get("provisioning_repos") if isinstance(result, dict) else None) or []
+        prov_changed = sum(1 for r in prov if r.get("changed"))
+        message = (hub_r.get("message") or (result.get("message") if isinstance(result, dict) else None)
+                   or "Update cycle complete.")
+        if prov_changed:
+            message = f"{message} ({prov_changed} auxiliary repo(s) updated)"
+        # run_repo_sync_all is best-effort and never raises; a hub-tree error is
+        # reported as status=="error" in its sub-result. Surface that as 500 so
+        # the WebUI shows it, but success/checked/no_update stay 200 (avoids the
+        # UI "Critical Error:" prefix on a healthy up-to-date outcome).
+        if status == "error":
+            logger.error("manual update: hub sub-result error: %s", message)
+            raise HTTPException(status_code=500, detail=message)
+        return {"status": status, "message": message}
 
     @app.post("/setup/update/spokes")
     async def trigger_spoke_updates(request: Request):

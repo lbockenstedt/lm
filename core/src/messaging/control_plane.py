@@ -649,7 +649,22 @@ class BaseControlPlane:
         self._clear_healthy_marker()
         await self._resolve_hub_url()
         logger.info(f"Starting Control Plane in HUB MODE -> {self.hub_url}")
-        self.start_updater_worker()
+        # Single-scheduler policy: the HUB's WebUI-configured repo-sync
+        # (main.py run_repo_sync_loop, interval in global_config["repo_sync"])
+        # is the ONE authoritative update schedule. It fans SPOKE_UPDATE to
+        # every approved spoke, so a spoke pulling on its OWN independent 3600s
+        # timer here is a redundant second scheduler: it advances a spoke's real
+        # commit behind the hub's back, leaving the hub's per-spoke last-pushed
+        # marker stale → the hub re-fires SPOKE_UPDATE at an already-current
+        # device (the "blind send" + reconnect-flap driver). Disabled by
+        # default; set LM_SPOKE_SELF_UPDATE=1 to restore the autonomous timer
+        # (e.g. a spoke that must self-heal while its hub's repo-sync is off).
+        if os.environ.get("LM_SPOKE_SELF_UPDATE", "0").lower() in ("1", "true", "yes"):
+            logger.info("Spoke self-update timer ENABLED (LM_SPOKE_SELF_UPDATE).")
+            self.start_updater_worker()
+        else:
+            logger.info("Spoke self-update timer disabled; hub repo-sync is the "
+                        "single update scheduler (SPOKE_UPDATE fan-out).")
         _delay = 5
         while True:
             try:
