@@ -2989,7 +2989,12 @@ function csVmSelectedHost() {
 /** Host-selector banner shown atop every drill-in child (VMs … API Server). */
 function csVmHostBanner() {
     if (!csVmHosts.length) return '';
-    const pills = csVmHosts.map(h => {
+    // Numeric-aware sort by display name so pxmx-cs-svr-02/-03/-04 order
+    // naturally (mirrors the fleet table sort), not in load order.
+    const _hname = h => (h.spoke_name || h.spoke_hostname || h.spoke_id || '');
+    const pills = csVmHosts.slice()
+        .sort((a, b) => _hname(a).localeCompare(_hname(b), undefined, { numeric: true, sensitivity: 'base' }))
+        .map(h => {
         const active = csVmHostId(h) === csVmSelectedHostId;
         const cls = active ? 'bg-[#01A982] text-white border-[#01A982]'
                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50';
