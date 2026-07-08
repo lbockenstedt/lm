@@ -176,6 +176,18 @@ class SimulationsService:
                 continue
             # Legacy single-host shape (one Proxmox host per cs spoke).
             px = data.get("proxmox") or {}
+            # Skip a pure RELAY spoke: a cs spoke that only relays pxmx agents is
+            # not itself a Proxmox host, so it has no proxmox block / VMs of its
+            # own — its agents already surface as per-host rows via
+            # proxmox_hosts above. Emitting a spoke-level row for it put empty
+            # "<host>-spoke" rows (0 VMs, —, —, Auto-Prov defaulting to Active on
+            # no data) in the VM Server table next to the real agent rows. Only
+            # emit when the spoke actually carries hypervisor data (a genuine
+            # legacy direct-host cs spoke). This is the "show the agents, not the
+            # relay spokes" fix — a spoke can host many agents; the agents are
+            # the rows.
+            if not px and not data.get("proxmox_vms"):
+                continue
             hosts.append({
                 **self._meta(sid, data),
                 "vm_count": px.get("vm_count") or len(data.get("proxmox_vms") or []),
