@@ -3016,6 +3016,11 @@ function csProvThrottleBadge(px) {
     const halt = prov.halt || {};
     const pill = (cls, txt, title) =>
         `<span title="${csEscape(title || '')}" class="px-2 py-0.5 rounded text-[10px] font-bold uppercase ${cls}">${csEscape(txt)}</span>`;
+    // No provision telemetry (a row with no proxmox/agent data) → neutral "—",
+    // not a misleading "Active". Active/Idle/Off/throttled are only meaningful
+    // once the pxmx agent has actually reported a provision block.
+    if (!prov || Object.keys(prov).length === 0)
+        return '<span class="text-slate-400">—</span>';
     if (halt.halted) {
         const r = String(halt.reason || '').toLowerCase();
         const n = v => (v == null ? '?' : Number(v).toFixed(0));

@@ -205,6 +205,35 @@ class SimulationsService:
                 "ws_last_error": data.get("ws_last_error"),
                 "sim_conf_read_error": data.get("sim_conf_read_error"),
             })
+        # Dedup by agent hostname: one physical pxmx host can be relayed/cached
+        # by more than one cs spoke (redundant relay paths or overlapping
+        # telemetry caches), which listed the same host twice — with slightly
+        # different live stats since each spoke snapshotted it at a different
+        # moment. Collapse to one row per host, keeping the richest ONLINE entry
+        # (online first, then most VMs, then most USB) so the fleet count is
+        # accurate. Rows with no resolvable hostname are kept as-is (unique).
+        def _host_key(h: dict) -> str:
+            return str(h.get("hostname") or h.get("spoke_hostname")
+                       or h.get("spoke_name") or h.get("spoke_id") or "").strip().lower()
+
+        def _host_rank(h: dict):
+            return (1 if h.get("spoke_online") else 0,
+                    int(h.get("vm_count") or 0), int(h.get("usb_count") or 0))
+
+        best: Dict[str, dict] = {}
+        order: List[str] = []
+        extras: List[dict] = []
+        for h in hosts:
+            k = _host_key(h)
+            if not k:
+                extras.append(h)
+                continue
+            if k not in best:
+                best[k] = h
+                order.append(k)
+            elif _host_rank(h) > _host_rank(best[k]):
+                best[k] = h
+        hosts = [best[k] for k in order] + extras
         return {"tenant_id": tenant_id, "hosts": hosts}
 
     async def get_central_data(self, tenant_id: str) -> Dict[str, Any]:
