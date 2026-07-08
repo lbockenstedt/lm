@@ -2760,12 +2760,15 @@ async function loadRecoveryLogs() {
             const badge = count && count > 1
                 ? `<span class="ml-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-200 text-slate-600 align-middle whitespace-nowrap" title="${count} identical events — click to expand">×${count}</span>`
                 : '';
-            const clickAttrs = count && count > 1 ? ' cursor-pointer select-none onclick="toggleLogGroup(this)"' : '';
+            // onclick must be its own attribute, not embedded in the class string.
+            const isGroup = count && count > 1;
+            const clsExtra = isGroup ? ' cursor-pointer select-none' : '';
+            const onClick = isGroup ? ' onclick="toggleLogGroup(this)"' : '';
             const tsMatch = log.match(/^(?:\[([^\]]*)\]\s*)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+?) - ([A-Z]+) - (.*)$/s);
             const body = tsMatch
                 ? `${tsMatch[1] ? `<span class="text-slate-400">[${tsMatch[1]}]</span> ` : ''}<span class="text-slate-400">${tsMatch[2]}</span> <span class="font-semibold">${tsMatch[3].trim()}</span> <span class="opacity-60">${tsMatch[4]}</span>${badge}<div class="pl-4 mt-0.5 break-all">${escapeHtml(tsMatch[5])}</div>`
                 : `${escapeHtml(log)}${badge}`;
-            return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls}${clickAttrs}">${body}</div>`;
+            return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls}${clsExtra}"${onClick}>${body}</div>`;
         };
         container.innerHTML = _renderGroupedLogs(rec, recoveryRow);
     } catch (err) {
@@ -7050,16 +7053,21 @@ function _renderLogLineRow(log, count, lineRowFn) {
     const badge = count && count > 1
         ? `<span class="ml-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-200 text-slate-600 align-middle whitespace-nowrap" title="${count} identical events (same except timestamp) — click to expand">×${count}</span>`
         : '';
-    const clickAttrs = count && count > 1 ? ' cursor-pointer select-none onclick="toggleLogGroup(this)"' : '';
+    // Keep the onclick as its OWN attribute — embedding `onclick="..."` inside
+    // the double-quoted class attribute lets the inner `"` close class early so
+    // the handler is silently swallowed and clicks never fire.
+    const isGroup = count && count > 1;
+    const clsExtra = isGroup ? ' cursor-pointer select-none' : '';
+    const onClick = isGroup ? ' onclick="toggleLogGroup(this)"' : '';
     // Header (source + timestamp + logger + level + ×N badge) on the first
     // line, the message payload on a second indented line — easier to scan a
     // long trail than one long wrapped line. copyLogs reads the raw array, so
     // Copy still emits the original single-line `<ts> - Source - LEVEL - msg`.
     if (tsMatch) {
         const head = `${tsMatch[1] ? `<span class="text-slate-400">[${tsMatch[1]}]</span> ` : ''}<span class="text-slate-400">${tsMatch[2]}</span> <span class="text-indigo-500 font-semibold">${tsMatch[3].trim()}</span> <span class="opacity-60">${tsMatch[4]}</span>${badge}`;
-        return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clickAttrs}">${head}<div class="pl-4 mt-0.5 break-all">${tsMatch[5]}</div></div>`;
+        return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clsExtra}"${onClick}>${head}<div class="pl-4 mt-0.5 break-all">${tsMatch[5]}</div></div>`;
     }
-    return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clickAttrs}">${log}${badge}</div>`;
+    return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clsExtra}"${onClick}>${log}${badge}</div>`;
 }
 
 // Group `logs` (newest-first) by message key; render each group once at its
