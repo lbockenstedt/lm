@@ -13,6 +13,8 @@ import os
 import socket
 import ssl
 import sys
+import fcntl
+import contextlib
 from typing import Dict, Any, Optional, Type
 from .protocol import Message, MessageHeader, MessagePayload
 from ..security.signer import MessageSigner
@@ -320,16 +322,102 @@ class BaseControlPlane:
         except Exception:  # pragma: no cover
             pass
 
+    # ------------------------------------------------------------------
+    # Shared lm/core propagation (/opt/lm) — pulled alongside the spoke's
+    # own repo on every hub-driven SPOKE_UPDATE so lm/core changes reach
+    # remote spokes via the Update button / auto-update, no CLI required.
+    # ------------------------------------------------------------------
+
+    def _resolve_core_root(self) -> Optional[str]:
+        """Locate the shared lm/core git checkout this spoke imports at runtime
+        (the unit's PYTHONPATH points at ``$LM_DIR/core/src``).
+
+        - ``/opt/lm/.git`` present → ``/opt/lm`` (agent all-in-one layout and
+          the new cs layout from install_cs.sh — lm.git cloned to /opt/lm, so
+          ``core/src/base_spoke.py`` lives at ``/opt/lm/core/src/...``).
+        - ``/opt/lm/core/.git`` present → ``/opt/lm/core`` (le layout: a
+          standalone lm checkout nested under core).
+        - otherwise → ``None`` (old cs vendored /opt/lm/core without .git, or a
+          box where /opt/lm isn't provisioned yet). The caller logs a one-time
+          warning pointing at re-running the installer and skips core this
+          cycle — the spoke's own repo still updates (graceful, not a crash).
+        """
+        for path in ("/opt/lm", "/opt/lm/core"):
+            if os.path.isdir(os.path.join(path, ".git")):
+                return path
+        return None
+
+    @contextlib.contextmanager
+    def _core_update_lock(self, timeout: float = 300.0):
+        """Host-wide exclusive lock for pulls of the shared ``/opt/lm`` core
+        checkout. Every spoke on a host that shares /opt/lm serializes here so
+        two concurrent SPOKE_UPDATEs don't race the same .git index. Polls with
+        ``LOCK_NB`` so we can give up after ``timeout`` (warn + skip core this
+        cycle) instead of blocking the spoke's loop indefinitely. Never held
+        across ``os._exit(3)`` — the ``finally`` releases before the caller
+        exits. Falls back to a repo-local lock file when /var/lib/lm isn't
+        writable."""
+        lock_path = "/var/lib/lm/.lm-core-update.lock"
+        try:
+            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        except OSError:
+            lock_path = os.path.join(self._repo_root(), ".lm-state",
+                                     "core-update.lock")
+            try:
+                os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+            except OSError:
+                lock_path = os.path.join(self._repo_root(), ".lm-core-update.lock")
+        fd = None
+        acquired = False
+        deadline_ts = time.monotonic() + timeout
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except BlockingIOError:
+                    remaining = deadline_ts - time.monotonic()
+                    if remaining <= 0:
+                        logger.warning("core-update lock busy >%ss; skipping core "
+                                       "pull this cycle", int(timeout))
+                        yield False
+                        return
+                    time.sleep(min(1.0, remaining))
+            yield True
+        finally:
+            if acquired:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
     def _prepare_restart_with_watchdog(self, head_before: str, head_after: str,
                                        backup_dir, repo_root: str,
                                        reason: str = "update",
-                                       deadline: int = 90) -> bool:
+                                       deadline: int = 90,
+                                       core_repo: Optional[Dict[str, str]] = None) -> bool:
         """Write the pending-update manifest, schedule the external health-gate
         watchdog, and signal a service restart. Returns True; the caller MUST
         then flush queued logs (sync or async per its context) and
         ``os._exit(3)``. Best-effort watchdog: a missing script / no sudoers
         (pre-reinstall box) fails silently — we still restart via os._exit(3)
-        with no rollback, exactly the pre-rollback behavior."""
+        with no rollback, exactly the pre-rollback behavior.
+
+        ``core_repo`` (optional) records a SECOND repo — the shared ``/opt/lm``
+        core checkout — so the watchdog can roll *both* back on boot failure
+        (spoke first, then core). ``core_repo`` carries ``root`` /
+        ``from_commit`` / ``to_commit``. When omitted the manifest + watchdog
+        behave exactly as before (single-repo). v1 is non-atomic across the two
+        repos: a watchdog crash between the two ``git reset --hard``s leaves the
+        spoke rolled back but core forward — recoverable via the on-disk manifest
+        + ``writefailed`` marker. Atomic two-repo rollback is deferred."""
         state_dir = self._spoke_state_dir()
         service_unit = self.get_service_name()
         recovery_py = None
@@ -338,11 +426,15 @@ class BaseControlPlane:
             import update_recovery as _ur
             recovery_py = getattr(_ur, "__file__", None)
             ts = time.strftime("%Y%m%d-%H%M%S")
+            extra = {"from_commit": head_before, "to_commit": head_after,
+                     "service_unit": service_unit, "deadline": deadline}
+            if core_repo and core_repo.get("root"):
+                extra["core_root"] = core_repo["root"]
+                extra["core_from_commit"] = core_repo.get("from_commit", "")
+                extra["core_to_commit"] = core_repo.get("to_commit", "")
             write_pending(backup_dir or "", from_version=(head_before or "")[:12],
                           to_version=(head_after or "")[:12], ts=ts,
-                          state_dir=state_dir,
-                          extra={"from_commit": head_before, "to_commit": head_after,
-                                 "service_unit": service_unit, "deadline": deadline})
+                          state_dir=state_dir, extra=extra)
         except Exception as e:
             logger.warning("write_pending failed (rollback disabled): %s", e)
         try:
@@ -351,6 +443,8 @@ class BaseControlPlane:
                    "--repo-root", repo_root, "--deadline", str(deadline)]
             if recovery_py:
                 cmd += ["--recovery-py", recovery_py]
+            if core_repo and core_repo.get("root"):
+                cmd += ["--core-repo-root", core_repo["root"]]
             subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1242,13 +1336,26 @@ class BaseControlPlane:
         module_name = self.spoke_id.split("-")[0]
         return f"lm-{module_name}"
 
-    def _perform_spoke_update_sync(self, repo_url: str) -> Dict[str, Any]:
+    def _perform_spoke_update_sync(self, repo_url: str,
+                                   core_repo_url: Optional[str] = None,
+                                   core_branch: Optional[str] = None) -> Dict[str, Any]:
         """Blocking git-update body for the ``SPOKE_UPDATE`` command. Runs on a
         worker thread via ``asyncio.to_thread`` (see ``handle_system_command``)
         so the event loop — and every other in-flight spoke command — stays
         responsive while ``git fetch``/``pull`` run. Mirrors
         ``perform_self_update_check``'s existing thread-safe pattern (same
-        ``_flush_log_relay_sync`` + ``os._exit(3)`` combo)."""
+        ``_flush_log_relay_sync`` + ``os._exit(3)`` combo).
+
+        Two repos are pulled: the spoke's OWN repo (``cwd``) and, when the hub
+        sends ``core_repo_url``, the shared ``/opt/lm`` core checkout that every
+        spoke imports at runtime (``core.src.*``). The core pull is host-wide
+        locked (``_core_update_lock``) so concurrent spokes on one box don't
+        race the shared ``.git`` index. A restart fires if EITHER repo advanced
+        — so a core-only change (a ``BaseControlPlane`` log tweak) reaches
+        remote spokes with zero CLI, the case the user explicitly wants. The
+        watchdog rolls BOTH repos back on boot failure (spoke first, then core);
+        the core ``to_commit`` is marked bad so a crash-looping core isn't
+        re-pulled."""
         try:
             # Identify spoke root directory (assuming the control plane is running from src/...)
             # e.g. /opt/lm/pxmx/src/control_plane.py -> /opt/lm/pxmx
@@ -1258,6 +1365,87 @@ class BaseControlPlane:
                 cwd = os.path.dirname(cwd)
 
             logger.info(f"Performing update in {cwd} from {repo_url}...")
+
+            # 0. Pull the shared lm/core checkout (/opt/lm) BEFORE the spoke's
+            # own repo, so a boot-crashing core is caught by the watchdog along
+            # with the spoke update. Skipped when: no core_repo_url (air-gapped
+            # hub), no git root at /opt/lm (old non-git cs — graceful: log once
+            # and continue, the spoke's own repo still updates), or core_root
+            # == cwd (agent all-in-one: the spoke's own repo IS /opt/lm, so the
+            # spoke pull below already covers core — avoid a duplicate fetch).
+            core_changed = False
+            core_root = None
+            core_from_commit = ""
+            core_to_commit = ""
+            if core_repo_url:
+                core_root = self._resolve_core_root()
+                if core_root is None:
+                    logger.warning(
+                        "SPOKE_UPDATE: no git root at /opt/lm or /opt/lm/core — "
+                        "lm/core will NOT auto-update on this spoke. Re-run the "
+                        "installer (install_cs.sh / install_agent.sh) to convert "
+                        "/opt/lm to a real lm checkout. The spoke's own repo "
+                        "still updates.")
+                elif core_root == cwd:
+                    logger.debug("SPOKE_UPDATE: core root == spoke root (%s); "
+                                  "spoke-repo pull covers core — skipping duplicate.",
+                                  core_root)
+                    core_root = None  # don't double-record in the manifest
+                else:
+                    with self._core_update_lock() as got_lock:
+                        if not got_lock:
+                            logger.warning("SPOKE_UPDATE: could not acquire core "
+                                           "lock; skipping core pull this cycle.")
+                        else:
+                            try:
+                                self._run_git(["remote", "set-url", "origin",
+                                               core_repo_url], cwd=core_root)
+                                self._run_git(["config", "pull.rebase", "true"],
+                                              cwd=core_root)
+                                self._run_git(["config", "rebase.autoStash", "true"],
+                                              cwd=core_root)
+                                self._run_git(["rebase", "--abort"], cwd=core_root)
+                                core_from_commit = self._run_git(
+                                    ["rev-parse", "HEAD"], cwd=core_root).stdout.strip()
+                                fetch_core = self._run_git(["fetch", "origin"],
+                                                           cwd=core_root)
+                                if fetch_core.returncode == 0:
+                                    cbranch = core_branch or self._run_git(
+                                        ["rev-parse", "--abbrev-ref", "HEAD"],
+                                        cwd=core_root).stdout.strip() or "main"
+                                    pull_core = self._run_git(
+                                        ["pull", "--rebase", "--autostash", "origin",
+                                         cbranch], cwd=core_root)
+                                    if pull_core.returncode != 0:
+                                        logger.warning(
+                                            "core git pull --rebase failed (rc=%s); "
+                                            "resetting hard to origin/%s",
+                                            pull_core.returncode, cbranch)
+                                        self._run_git(["rebase", "--abort"], cwd=core_root)
+                                        self._run_git(["reset", "--hard",
+                                                       f"origin/{cbranch}"], cwd=core_root)
+                                    core_to_commit = self._run_git(
+                                        ["rev-parse", "HEAD"], cwd=core_root).stdout.strip()
+                                    if self._is_known_bad_commit(core_to_commit):
+                                        logger.warning(
+                                            "SPOKE_UPDATE: core HEAD %s is a "
+                                            "known-bad commit; resetting core to "
+                                            "%s and skipping core.",
+                                            core_to_commit[:8], core_from_commit[:8])
+                                        self._run_git(["reset", "--hard",
+                                                       core_from_commit], cwd=core_root)
+                                        core_to_commit = core_from_commit
+                                    else:
+                                        core_changed = (core_to_commit != core_from_commit)
+                                else:
+                                    logger.warning("SPOKE_UPDATE: core fetch failed: %s",
+                                                   (fetch_core.stderr or "").strip())
+                            except Exception as e:
+                                logger.warning("SPOKE_UPDATE: core pull failed (%s); "
+                                               "continuing with spoke-repo update only.", e)
+                                core_root = None
+            else:
+                core_root = None
 
             # 1. Update remote origin
             subprocess.run(["git", "remote", "set-url", "origin", repo_url], cwd=cwd, check=True, timeout=15)
@@ -1286,12 +1474,14 @@ class BaseControlPlane:
 
             head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
 
-            # 6. Only restart if new commits were pulled
-            if head_after != head_before:
-                # Skip a known-bad commit (rolled back before): reset to
+            spoke_changed = (head_after != head_before)
+            # 6. Restart if EITHER the spoke repo or the shared core advanced.
+            if spoke_changed or core_changed:
+                # Skip a known-bad SPOKE commit (rolled back before): reset to
                 # head_before and stay put rather than crash-looping into the
-                # same broken code.
-                if self._is_known_bad_commit(head_after):
+                # same broken code. (Core known-bad is handled in its own block
+                # above — a bad core alone doesn't trip this branch.)
+                if spoke_changed and self._is_known_bad_commit(head_after):
                     logger.warning(
                         "SPOKE_UPDATE: new HEAD %s is a known-bad commit "
                         "(rolled back before); resetting to %s and skipping.",
@@ -1308,9 +1498,16 @@ class BaseControlPlane:
                 # failure exit and Restart=on-failure reliably relaunches us.
                 # (The old `systemctl restart` child died in our own cgroup
                 # mid-restart, stranding the spoke offline — see
-                # _prepare_service_restart's docstring.)
+                # _prepare_service_restart's docstring.) When core advanced we
+                # also record it so the watchdog resets /opt/lm too.
+                core_repo = None
+                if core_changed and core_root:
+                    core_repo = {"root": core_root,
+                                 "from_commit": core_from_commit,
+                                 "to_commit": core_to_commit}
                 if self._prepare_restart_with_watchdog(
-                        head_before, head_after, backup_dir, cwd, reason="spoke-update"):
+                        head_before, head_after, backup_dir, cwd,
+                        reason="spoke-update", core_repo=core_repo):
                     self._flush_log_relay_sync()
                     os._exit(3)
                 return {"status": "SUCCESS",
@@ -1367,6 +1564,14 @@ class BaseControlPlane:
             repo_url = data.get("repo_url")
             if not repo_url:
                 return {"status": "ERROR", "message": "Missing repo_url for update"}
+            # lm/core source (optional). When the hub threads core_repo_url, the
+            # spoke also pulls its /opt/lm(.git|/core/.git) checkout in the same
+            # update so a core/src change reaches it via the button/auto-update
+            # instead of a CLI `git -C /opt/lm pull` + restart. Absent on older
+            # hubs / air-gapped deploys with update_sources.hub blank → no core
+            # pull (behavior == today). See _perform_spoke_update_sync.
+            core_repo_url = data.get("core_repo_url")
+            core_branch = data.get("core_branch")
             # The git fetch/pull below can take anywhere from seconds to minutes
             # on a slow/rate-limited link. Run it off the event loop thread —
             # this handler used to call subprocess.run(...) inline, which froze
@@ -1396,7 +1601,9 @@ class BaseControlPlane:
                         "message": "update already in progress"}
             self._spoke_update_in_progress = True
             try:
-                return await asyncio.to_thread(self._perform_spoke_update_sync, repo_url)
+                return await asyncio.to_thread(
+                    self._perform_spoke_update_sync, repo_url,
+                    core_repo_url=core_repo_url, core_branch=core_branch)
             finally:
                 self._spoke_update_in_progress = False
 
