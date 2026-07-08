@@ -1217,6 +1217,115 @@ systemctl daemon-reload
 systemctl enable lm
 systemctl restart lm
 
+# ── Auto-heal watchdog ──────────────────────────────────────────────────────
+# A root-owned supervisor (its OWN unit, outside lm.service's cgroup) that heals
+# two failures lm.service can't fix itself: (1) a WEDGED event loop — the process
+# stays "active" so Restart= never fires but :443 stops serving (and a hung loop
+# ignores SIGTERM, so `systemctl restart` hangs); (2) the legacy generic-agent
+# zombie the hub detects but can't remove as svc_lm. Force-restarts the hub
+# (SIGKILL + free the port) and purges the zombie, every 60s.
+# KEEP THE lm-watchdog BODY IN SYNC WITH scripts/install-lm-watchdog.sh.
+log_c "🩺 Installing hub auto-heal watchdog (lm-watchdog.timer)..."
+cat > /usr/local/bin/lm-watchdog <<'WD'
+#!/bin/bash
+# Lab Manager hub auto-heal. Runs every 60s as root via lm-watchdog.timer,
+# OUTSIDE lm.service's cgroup. KEEP IN SYNC WITH scripts/install-lm-watchdog.sh.
+set -uo pipefail
+MAX_FAILS="${LM_WATCHDOG_MAX_FAILS:-3}"
+STATE=/var/lib/lm/watchdog-fails
+LOG=/var/log/lm/watchdog.log
+log(){ printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG" 2>/dev/null; }
+hub_healthy(){
+  local url code
+  for url in "https://127.0.0.1:443/status" "http://127.0.0.1:443/status" "http://127.0.0.1:8000/status"; do
+    code=$(curl -sk -m 8 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo 000)
+    [ "$code" = 200 ] && return 0
+  done
+  return 1
+}
+if systemctl is-enabled --quiet lm.service 2>/dev/null; then
+  state=$(systemctl is-active lm.service 2>/dev/null || echo unknown)
+  case "$state" in
+    active)
+      if hub_healthy; then
+        [ -f "$STATE" ] && { rm -f "$STATE"; log "hub healthy again"; } || true
+      else
+        fails=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
+        echo "$fails" > "$STATE"
+        log "hub unresponsive: unit active but /status not 200 (strike $fails/$MAX_FAILS)"
+        if [ "$fails" -ge "$MAX_FAILS" ]; then
+          log "FORCE-RESTART: SIGKILL wedged hub + free :443/:8000, then restart"
+          systemctl kill -s KILL lm.service 2>/dev/null || true
+          command -v fuser >/dev/null 2>&1 && fuser -k -9 443/tcp 8000/tcp 2>/dev/null || true
+          sleep 2
+          timeout 60 systemctl restart lm.service 2>/dev/null \
+            || timeout 30 systemctl start lm.service 2>/dev/null || true
+          rm -f "$STATE"
+          log "hub restart issued"
+        fi
+      fi
+      ;;
+    failed)
+      log "lm.service FAILED (start-limit) — reset-failed + start"
+      systemctl reset-failed lm.service 2>/dev/null || true
+      timeout 30 systemctl start lm.service 2>/dev/null || true
+      rm -f "$STATE"
+      ;;
+    *) rm -f "$STATE" ;;
+  esac
+fi
+names="lm-generic-agent lm-bootstrap"
+for f in /etc/systemd/system/*.service /run/systemd/system/*.service \
+         /lib/systemd/system/*.service /usr/lib/systemd/system/*.service; do
+  [ -e "$f" ] || continue
+  grep -qE "/opt/lm/generic-agent" "$f" 2>/dev/null && names="$names $(basename "$f" .service)"
+done
+purged=0
+for svc in $(printf '%s\n' $names | sort -u); do
+  [ -n "$svc" ] || continue
+  [ "$svc" = lm ] && continue
+  if [ -e "/etc/systemd/system/${svc}.service" ] \
+     || systemctl list-unit-files "${svc}.service" 2>/dev/null | grep -qE "^${svc}\.service"; then
+    systemctl stop "$svc" 2>/dev/null || true
+    systemctl disable "$svc" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${svc}.service"
+    systemctl reset-failed "$svc" 2>/dev/null || true
+    log "purged legacy zombie unit ${svc}.service"
+    purged=1
+  fi
+done
+if [ -d /opt/lm/generic-agent ] || [ -d /opt/lm/generic_agent ]; then
+  pkill -f "/opt/lm/generic-agent/src/agent.py" 2>/dev/null || true
+  rm -rf /opt/lm/generic-agent /opt/lm/generic_agent
+  log "removed legacy /opt/lm/generic-agent"
+  purged=1
+fi
+[ "$purged" = 1 ] && systemctl daemon-reload 2>/dev/null || true
+exit 0
+WD
+chmod 0755 /usr/local/bin/lm-watchdog
+chown root:root /usr/local/bin/lm-watchdog
+cat > /etc/systemd/system/lm-watchdog.service <<'SVC'
+[Unit]
+Description=Lab Manager hub auto-heal watchdog (force-restart wedged hub + purge zombie)
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lm-watchdog
+SVC
+cat > /etc/systemd/system/lm-watchdog.timer <<'TMR'
+[Unit]
+Description=Run the Lab Manager hub watchdog every 60s
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=60
+AccuracySec=10
+[Install]
+WantedBy=timers.target
+TMR
+systemctl daemon-reload
+systemctl enable --now lm-watchdog.timer 2>/dev/null || true
+
 log_c "🔄 Restarting spoke services to connect with hub..."
 # Include the NetBox app units (netbox/netbox-rq) so the installer guarantees
 # the app is up at the end of a run, even if something earlier stopped them.
