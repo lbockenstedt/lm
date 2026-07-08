@@ -3515,11 +3515,21 @@ function csVmTarget() {
     return h.hostname || h.spoke_hostname || undefined;
 }
 
+// Present-tense label for a VM action, for immediate "…" feedback toasts.
+const CS_VM_ACTION_LABEL = {
+    delete_vm: 'Deleting', start_vm: 'Starting', stop_vm: 'Stopping',
+    reboot_vm: 'Rebooting', reclone_vm: 'Recloning', snapshot_vm: 'Snapshotting',
+};
+function csVmActionLabel(a) { return CS_VM_ACTION_LABEL[a] || a; }
+
 window.csVmAction = async function (vmid, action) {
     const v = (window._csVmByVmid && window._csVmByVmid[vmid]) || {};
     const args = { vmid: Number(vmid) };
     if (v.type) args.vm_type = v.type;
     const sid = encodeURIComponent(csVmSelectedSpoke);
+    // Immediate feedback — the command is queued to the host + relayed to the
+    // agent, which can take a few seconds; don't leave the user staring.
+    if (typeof showToast === 'function') showToast(`${csVmActionLabel(action)} VM ${vmid}…`, 'info');
     // Before destroying a VM, expire in-flight commands for its host so a
     // queued start/reclone doesn't fire against a gone VM (best-effort).
     if (action === 'delete_vm') await csExpirePendingForTarget();
@@ -3534,6 +3544,7 @@ window.csVmAction = async function (vmid, action) {
 window.csVmBulk = async function (action) {
     const ids = Array.from(document.querySelectorAll('.cs-vm-sel:checked')).map(c => c.dataset.vmid);
     if (!ids.length) { if (typeof showToast === 'function') showToast('Select one or more VMs first.', 'info'); return; }
+    if (typeof showToast === 'function') showToast(`${csVmActionLabel(action)} ${ids.length} VM(s)…`, 'info');
     if (action === 'delete_vm') await csExpirePendingForTarget();
     try {
         // Bounded concurrency (4 at a time) instead of a sequential await per
