@@ -334,6 +334,19 @@ def _usb_provisioning_status_payload(cfg: Dict[str, Any],
             "cs_enabled_agent_count": cs_enabled_agent_count}
 
 
+def _cached_command_queue(hub_obj, sid):
+    """The cs spoke's command queue from its cached CS_TELEMETRY payload, or
+    None if not cached (cold start / spoke reconnecting). The cs spoke includes
+    ``command_queue`` in every ~10s telemetry frame, so this lets the VM Server
+    → Command Queue view load instantly instead of a live 15s
+    ``request_response`` that stalls when the spoke is busy. Returns None for a
+    non-list so the caller falls back to the live fetch rather than rendering a
+    malformed queue."""
+    cached = (getattr(hub_obj, "simulations_cache", {}) or {}).get(sid) or {}
+    cq = cached.get("command_queue")
+    return cq if isinstance(cq, list) else None
+
+
 def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                   is_admin_fn, check_tenant_access_fn=None, sessions=None,
                                   has_cs_access_fn=None):
@@ -1681,10 +1694,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return data
 
     @app.get("/sim/api/{tenant}/proxmx/commands")
-    async def cs_list_commands(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+    async def cs_list_commands(tenant: str, tenant_id: str = Depends(get_tenant_id),
+                               live: bool = False):
         sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
         if not sid:
             return {"commands": [], "spoke_connected": False}
+        # Serve from the cached CS_TELEMETRY payload (the cs spoke includes its
+        # command queue in every ~10s telemetry frame) so the VM Server →
+        # Command Queue view loads instantly instead of a live 15s
+        # request_response that stalls when the spoke is busy. The WebUI passes
+        # live=1 after a Send/Delete/Clear (the spoke just responded, so the
+        # round-trip is fast) to reflect the mutation immediately; cold start
+        # (no cached queue yet) also falls back to the live fetch.
+        if not live:
+            cq = _cached_command_queue(hub, sid)
+            if cq is not None:
+                return {"commands": cq, "spoke_connected": True}
         try:
             result = await hub.request_response(sid, "CS_GET_COMMANDS", {}, timeout=15.0)
         except Exception as exc:

@@ -355,9 +355,10 @@ const CS_NO_REFRESH = new Set([
     'Setup::Proxmox',   // Proxmox hypervisor config — manual Refresh only
     'Config::API',      // Config → API
     'Config::Simulation', // Config → Simulation (form-heavy)
-    'VM Server::Command Queue', // each load is a per-spoke request_response — a
-                                // stalled/busy spoke makes telemetry auto-refresh
-                                // loop on 5s timeouts; manual Refresh only.
+    'VM Server::Command Queue', // loads serve from the cached CS_TELEMETRY
+                                // command_queue (instant); kept manual-refresh so
+                                // a busy spoke's live=1 re-fetch after a mutation
+                                // can't loop the telemetry auto-refresh.
 ]);
 
 function connectCSWebSocket() {
@@ -3802,11 +3803,16 @@ async function csRenderVmServerVh() {
 }
 
 // ── Command Queue ───────────────────────────────────────────────────────────
-async function csRenderVmServerQueue() {
+async function csRenderVmServerQueue(live) {
     csSetToolbar('');
     let cmds = [];
     try {
-        const data = await csFetch(`/${csTenant()}/proxmx/commands?tenant_id=${csTenant()}`);
+        // Default (live falsy) serves from the hub's cached CS_TELEMETRY
+        // (instant). After a Send/Delete/Clear we pass live=true so the page
+        // reflects the mutation immediately (the spoke just responded to the
+        // action, so the round-trip is fast).
+        const liveQs = live ? '&live=1' : '';
+        const data = await csFetch(`/${csTenant()}/proxmx/commands?tenant_id=${csTenant()}${liveQs}`);
         cmds = (data && data.commands) || [];
     } catch (e) { console.error('csRenderVmServerQueue: command queue load failed', e); csSet(csErrorBox('Could not load command queue', e)); return; }
     const rows = cmds.map(c => `<tr>
@@ -3847,7 +3853,7 @@ window.csSendCommand = async function () {
     const type = action.startsWith('proxmox_') || action === 'unlock_template' || action === 'update_agent' ? action : null;
     try {
         await csFetch(`/${csTenant()}/proxmx/command?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify({ action, target, args, type }) });
-        csRenderVmServerQueue();
+        csRenderVmServerQueue(true);
     } catch (e) { console.error('csSendCommand: send failed', e); if (typeof showToast === 'function') showToast('Send failed: ' + (e.message || e), 'error'); }
 };
 
@@ -3855,7 +3861,7 @@ window.csClearCommands = async function () {
     if (!confirm('Clear all pending/delivered commands?')) return;
     try {
         await csFetch(`/${csTenant()}/proxmx/commands?tenant_id=${csTenant()}`, { method: 'DELETE' });
-        csRenderVmServerQueue();
+        csRenderVmServerQueue(true);
     } catch (e) { console.error('csClearCommands: clear failed', e); if (typeof showToast === 'function') showToast('Clear failed: ' + (e.message || e), 'error'); }
 };
 
@@ -3865,7 +3871,7 @@ window.csCmdDelete = async function (btn) {
     if (!confirm('Delete this command?')) return;
     try {
         await csFetch(`/${csTenant()}/proxmx/commands/${encodeURIComponent(id)}?tenant_id=${csTenant()}`, { method: 'DELETE' });
-        csRenderVmServerQueue();
+        csRenderVmServerQueue(true);
     } catch (e) { console.error('csCmdDelete: delete failed', e); if (typeof showToast === 'function') showToast('Delete failed: ' + (e.message || e), 'error'); }
 };
 
