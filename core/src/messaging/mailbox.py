@@ -394,3 +394,66 @@ class Mailbox:
         for q in self.spoke_queues.values():
             all_pending.extend(q)
         return all_pending
+
+    def backlog_stats(self) -> Dict[str, Any]:
+        """Snapshot of the outbound backlog for the Hub Status UI. Splits the
+        two kinds (``pending_ack`` = sent-but-unacked; ``queued`` = waiting for
+        an offline/flapping spoke to reconnect) and breaks the total down by
+        message type and destination spoke, plus the oldest entry's age. A
+        backlog that won't drain shows up here: e.g. a pile of SPOKE_UPDATE to
+        one flapping spoke, or many entries all destined for the same spoke.
+        Non-raising (best-effort)."""
+        now = time.time()
+        by_type: Dict[str, int] = {}
+        by_spoke: Dict[str, int] = {}
+        oldest = 0.0
+
+        def _tally(m: Message) -> None:
+            t = getattr(m.payload, "type", None) or "?"
+            by_type[t] = by_type.get(t, 0) + 1
+            sid = getattr(m.header, "destination_id", None) or "?"
+            by_spoke[sid] = by_spoke.get(sid, 0) + 1
+
+        for msg, first_sent, _retries in self.pending_ack.values():
+            _tally(msg)
+            oldest = max(oldest, now - float(first_sent or now))
+        queued = 0
+        for q in self.spoke_queues.values():
+            for msg in q:
+                queued += 1
+                _tally(msg)
+                oldest = max(oldest, now - float(getattr(msg.header, "timestamp", now) or now))
+        pending = len(self.pending_ack)
+        return {
+            "total": pending + queued,
+            "pending_ack": pending,
+            "queued": queued,
+            "by_type": by_type,
+            "by_spoke": by_spoke,
+            "oldest_age_s": int(oldest),
+        }
+
+    async def purge_all(self, msg_type: Optional[str] = None) -> int:
+        """Diag: drop backlog messages — all, or only those of ``msg_type`` —
+        from BOTH ``pending_ack`` and the per-spoke offline queues. Returns the
+        count dropped. Backs the Hub Status 'Drop Backlog' button so an operator
+        can clear a stuck backlog (e.g. undeliverable SPOKE_UPDATE to a flapping
+        spoke) without deleting the spoke. Non-raising."""
+        dropped = 0
+        for mid in [m for m, (msg, _, _) in self.pending_ack.items()
+                    if msg_type is None or getattr(msg.payload, "type", None) == msg_type]:
+            del self.pending_ack[mid]
+            dropped += 1
+        for sid in list(self.spoke_queues.keys()):
+            keep: List[Message] = []
+            for msg in self.spoke_queues[sid]:
+                if msg_type is None or getattr(msg.payload, "type", None) == msg_type:
+                    dropped += 1
+                else:
+                    keep.append(msg)
+            self.spoke_queues[sid] = keep
+        if dropped:
+            logger.info("Purged %d backlog message(s)%s (diag).", dropped,
+                        f" of type {msg_type}" if msg_type else "")
+            await self._asave()
+        return dropped
