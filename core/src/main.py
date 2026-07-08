@@ -686,6 +686,45 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         else:
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
 
+    async def _reap_if_dead(self, spoke_id: str) -> bool:
+        """Probe a spoke's active connection with a ping; if no pong comes back
+        (a half-open / leaked socket — TCP still ESTABLISHED but the peer is
+        gone), drop it from ``active_connections`` and close it. Returns True if
+        it reaped a dead connection.
+
+        A keepalive-timeout flap leaves half-open sockets on the hub: every
+        ``send_to_spoke`` then buffers into that black hole WITHOUT raising (TCP
+        doesn't know the peer left), so ``request_response`` times out forever
+        while the spoke shows "connected". Reaping on the first timeout stops
+        the hub writing into it; the spoke's next reconnect installs a live
+        socket cleanly instead of being mistaken for a duplicate."""
+        ws = self.active_connections.get(spoke_id)
+        if ws is None:
+            return False
+        try:
+            pong_waiter = await ws.ping()
+            await asyncio.wait_for(pong_waiter, timeout=3.0)
+            return False  # pong received — the socket is genuinely live
+        except Exception:
+            pass
+        # No pong → dead. Reap only if it is STILL the active socket, so we don't
+        # clobber a concurrent reconnect that already swapped in a live one.
+        if self.active_connections.get(spoke_id) is ws:
+            self.active_connections.pop(spoke_id, None)
+            self.active_connection_key_ids.pop(spoke_id, None)
+            logger.warning(
+                "Reaped dead/half-open connection for %s (no pong after a request "
+                "timeout) — stops writing into a black-hole socket; the spoke's "
+                "next reconnect takes over cleanly.", spoke_id)
+            self.record_spoke_event(spoke_id, "connection_reaped",
+                                    "half-open socket reaped after request timeout")
+            try:
+                await ws.close(1011, "Reaped: unresponsive to ping after request timeout")
+            except Exception:
+                pass
+            return True
+        return False
+
     async def send_to_agent(self, spoke_id: str, agent_id: str, command_type: str, data: Dict[str, Any]):
         """
         Sends a command to a specific agent by relaying it through its parent spoke.
@@ -746,6 +785,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     return result
 
             logger.error(f"Request Timeout: [{command_type}] {msg_id} from {spoke_id} after {timeout}s")
+            # A timeout while the spoke shows "connected" is the half-open-socket
+            # signature — probe + reap the black-hole handle so we don't keep
+            # timing out on it (and so the spoke's next reconnect isn't mistaken
+            # for a duplicate of a "live" dead socket).
+            try:
+                await self._reap_if_dead(spoke_id)
+            except Exception:
+                pass
             return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
         finally:
             # Drop the waiter so a late ack can't leak a response_cache entry.
@@ -2018,7 +2065,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             #   • dead (no pong) → zombie; evict it and take over.
             alive = False
             try:
-                await asyncio.wait_for(existing.ping(), timeout=2.0)
+                # ws.ping() SENDS a ping and returns a pong_waiter future; we
+                # must await the WAITER to confirm a pong actually came back.
+                # Awaiting only ping() returns the instant the frame is BUFFERED
+                # — which succeeds on a half-open (dead-peer) socket — giving a
+                # false "alive" that then wrongly REJECTS the real reconnect and
+                # keeps routing requests into the black-hole socket (the stale
+                # ESTAB pileup + Request Timeout flood behind a keepalive flap).
+                pong_waiter = await existing.ping()
+                await asyncio.wait_for(pong_waiter, timeout=2.0)
                 alive = True
             except Exception:
                 alive = False
