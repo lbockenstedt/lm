@@ -24,6 +24,26 @@ def register(app, hub, ctx):
                 result[module_type] = {"ip": ip, "spoke_id": spoke_id}
         return {"hosts": result}
 
+    @app.post("/setup/hub-backlog/purge")
+    async def purge_hub_backlog(request: Request):
+        """Diag (System → Hub Status 'Drop Backlog'): drop the hub's outbound
+        message backlog — all, or only ``?type=SPOKE_UPDATE`` — from both
+        pending_ack and the per-spoke offline queues. For clearing a backlog
+        that won't drain (e.g. undeliverable SPOKE_UPDATE to a flapping spoke)
+        without deleting/re-approving the spoke. Admin only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        msg_type = request.query_params.get("type") or None
+        before = hub.mailbox.backlog_stats().get("total", 0)
+        dropped = await hub.mailbox.purge_all(msg_type=msg_type)
+        logger.warning("[diag] Hub backlog purge by %s: dropped %d%s (was %d)",
+                       (sess.get("username") if isinstance(sess, dict) else "?"),
+                       dropped, f" of type {msg_type}" if msg_type else "", before)
+        return {"dropped": dropped, "type": msg_type or "all",
+                "backlog": hub.mailbox.backlog_stats()}
+
     @app.get("/status")
     async def get_status():
         hub = app.state.hub
