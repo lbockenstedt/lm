@@ -7083,12 +7083,15 @@ function _renderGroupedLogs(logs, lineRowFn) {
     }).join('');
 }
 
-// Click handler for a grouped log header: toggle the sibling expand block.
+// Click handler for a grouped log header: toggle the expand block. Walk up to
+// the .log-group wrapper and find its .log-group-expanded child — robust to the
+// header row containing nested elements (badge span, second-line payload div)
+// and to the click landing on any of them.
 function toggleLogGroup(headerEl) {
-    const block = headerEl.nextElementSibling;
-    if (block && block.classList.contains('log-group-expanded')) {
-        block.classList.toggle('hidden');
-    }
+    const group = headerEl.closest ? headerEl.closest('.log-group') : null;
+    if (!group) return;
+    const block = group.querySelector('.log-group-expanded');
+    if (block) block.classList.toggle('hidden');
 }
 
 async function loadModuleLogs(module, isRefresh = false) {
