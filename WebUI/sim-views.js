@@ -800,7 +800,29 @@ function csProvisionCard(px) {
     const vr = cfg.vmid_range || {};
     const vrStr = (vr && (vr.start || vr.end)) ? `${csEscape(String(vr.start))}–${csEscape(String(vr.end))}` : '—';
     const active = (cfg.active_usb_vms != null) ? csEscape(String(cfg.active_usb_vms)) : '—';
-    const halt = prov.halt ? csEscape(String(prov.halt)) : '';
+    // provision_halt is an OBJECT {halted,reason,cpu_pct,cpu_threshold,...} —
+    // format it; String()'ing it yielded "Halt: [object Object]".
+    const h = prov.halt || null;
+    const halt = (h && h.halted)
+        ? `${csEscape(String(h.reason || 'load'))} — CPU ${h.cpu_pct}% ≥ ${h.cpu_threshold}%, Mem ${h.mem_pct}% ≥ ${h.mem_threshold}%`
+        : '';
+    // Delete-gate decision trace + the 1h averages the gate actually acts on
+    // (distinct from the display CPU 1H) — so you can see WHAT auto-prov decides
+    // on and WHY it did/didn't shed a VM.
+    const dg = (px && px.delete_gate) || {};
+    const ga = (px && px.gate_averages) || {};
+    let dgLine = '';
+    if (dg && dg.reason) {
+        const cd = dg.cooldown_remaining_s ? ` · cooldown ${dg.cooldown_remaining_s}s` : '';
+        const cand = (dg.eligible_candidates != null) ? ` · ${dg.eligible_candidates} eligible` : '';
+        const shed = (dg.last_torn_down && dg.last_torn_down.length);
+        dgLine = `<div class="${shed ? 'text-emerald-700' : 'text-slate-700'}"><b>Delete gate:</b> ${csEscape(String(dg.reason))}${cand}${cd}</div>`;
+    }
+    let gaLine = '';
+    if (ga && (ga.cpu_1h_avg != null || ga.mem_1h_avg != null)) {
+        const f = v => (v != null ? v + '%' : '—');
+        gaLine = `<div class="text-[11px] text-slate-500"><b>Gate uses (1h avg):</b> CPU ${f(ga.cpu_1h_avg)} · Mem ${f(ga.mem_1h_avg)}</div>`;
+    }
     // Status chips: CS-enabled, loop-running, auto-provision-on. Amber when a
     // gate is closed (the most common "enabled but nothing provisions" causes).
     const chip = (label, ok) => `<span class="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${csEscape(label)}</span>`;
@@ -812,6 +834,8 @@ function csProvisionCard(px) {
       <div class="text-sm text-slate-700 space-y-1">
         <div><b>Last pass:</b> ${reason}${loopOn ? '' : ' <span class="text-amber-600">(provision loop not running — check the pxmx agent log)</span>'}</div>
         ${halt ? `<div class="text-amber-600"><b>Halt:</b> ${halt}</div>` : ''}
+        ${dgLine}
+        ${gaLine}
         <div><b>Config:</b> dongle_vidpids=${vidpids} · image1=${img1} · image2=${img2} · max_slots=${maxSlots} · vmid_range=${vrStr} · active_usb_vms=${active}</div>
       </div>
     </div>`;
