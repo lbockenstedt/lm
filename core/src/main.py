@@ -483,6 +483,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.bug_reports: Dict[str, Dict[str, Any]] = {}
         self.bug_report_limit = 50
         self.message_count = 0
+        # Per-spoke count of messages dropped by the rate limiter (surfaced in
+        # System → Hub Status so an aggressive limiter is visible, not silent).
+        self.rate_limit_drops: Dict[str, int] = {}
         self.mps = 0.0
         self.bytes_count = 0 # Total bytes sent/received in the current window
         self.throughput_mbps = 0.0 # Throughput in Mbps (or MB/s)
@@ -2210,8 +2213,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.state.register_module(spoke_id, approved=False)
                 self.known_modules = self.state.system_state["known_modules"]
 
-            # Initialize rate limiter (e.g., 5 messages/sec burst of 10)
-            self.rate_limiters[spoke_id] = TokenBucket(capacity=10, fill_rate=5)
+            # Initialize the per-spoke rate limiter from config (applied on each
+            # (re)connect, so a knob change propagates as spokes reconnect). The
+            # default burst=10 / 5 msg/s is low for a RELAY spoke that fans many
+            # hosted agents and re-flushes its queue on reconnect — raise
+            # global_config["rate_limit"] as the fleet/scale grows.
+            _rl_cap, _rl_rate = self._rate_limit_params()
+            self.rate_limiters[spoke_id] = TokenBucket(capacity=_rl_cap, fill_rate=_rl_rate)
             if module_type:
                 self.spoke_module_types[spoke_id] = module_type
                 # Persist the type into module_metadata so the Spoke Management
@@ -2456,11 +2464,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     self.message_count += 1
                     continue
 
-                # Rate Limiting for non-heartbeat messages
-                limiter = self.rate_limiters.get(spoke_id)
-                if limiter and not limiter.consume():
-                    logger.warning(f"Rate limit exceeded for spoke {spoke_id}. Dropping message.")
-                    continue
+                # Rate Limiting for non-heartbeat messages.
+                # ACKs / replies (correlation_id present) are handled + `continue`
+                # ABOVE this block, so they are NEVER rate-limited/dropped. Belt-
+                # and-suspenders: even if reordered later, skip the limiter for a
+                # correlation-bearing frame so a reply can never be dropped.
+                if "correlation_id" not in msg_data:
+                    limiter = self.rate_limiters.get(spoke_id)
+                    if limiter and not limiter.consume():
+                        self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
+                        logger.warning(
+                            f"Rate limit exceeded for spoke {spoke_id} "
+                            f"(type={payload.get('type')}, total drops={self.rate_limit_drops[spoke_id]}). "
+                            f"Dropping message.")
+                        continue
 
                 # Handle other messages
                 self.message_count += 1
@@ -3312,6 +3329,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         out.reverse()
         return out
 
+    def _rate_limit_params(self) -> tuple:
+        """(capacity, fill_rate) for the per-spoke TokenBucket, read fresh from
+        ``global_config["rate_limit"]`` so the knob can be tuned for scale /
+        system resources without a code change. Defaults 10 / 5 (burst 10,
+        5 msg/s). Clamped to sane minimums so a bad config can't wedge delivery."""
+        try:
+            cfg = (self.state.get_global_config() or {}).get("rate_limit", {}) or {}
+            cap = float(cfg.get("capacity", 10))
+            rate = float(cfg.get("fill_rate", 5))
+        except Exception:
+            cap, rate = 10.0, 5.0
+        return (max(1.0, cap), max(0.1, rate))
+
     async def get_system_metrics(self) -> Dict[str, Any]:
         """
         Collects CPU, Memory, and Disk metrics.
@@ -3330,6 +3360,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "disk_total": disk.total // (1024 * 1024), # MB
                 "queue_size": len(self.mailbox.get_all_pending()),
                 "backlog": len(self.mailbox.get_all_pending()),
+                # Backlog breakdown (by type / by spoke / oldest age) so a
+                # stuck backlog is diagnosable in System → Hub Status.
+                "backlog_stats": self.mailbox.backlog_stats(),
+                # Rate-limit drop counters (per spoke) + the live knob values.
+                "rate_limit_drops": dict(self.rate_limit_drops),
+                "rate_limit_drops_total": sum(self.rate_limit_drops.values()),
+                "rate_limit": {"capacity": self._rate_limit_params()[0],
+                               "fill_rate": self._rate_limit_params()[1]},
                 "mps": self.mps,
                 "throughput": self.throughput_mbps,
                 "version": version
