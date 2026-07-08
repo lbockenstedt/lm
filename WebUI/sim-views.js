@@ -3236,6 +3236,14 @@ async function csRenderVmServerVms() {
     const h = csVmSelectedHost();
     if (!h) { csSet(csEmpty('No host selected.')); return; }
     const vms = h.proxmox_vms || [];
+    // Join the missing-dongle shed deadline (proxmox.usb_state[].shed_at) onto
+    // each VM by vmid so the row's status badge can show a live "Sheds in
+    // MM:SS" countdown for a VM whose dongle was removed (teardown pending).
+    const _usbState = (h.proxmox && h.proxmox.usb_state) || h.usb_state || [];
+    const _shedByVmid = {};
+    _usbState.forEach(u => { if (u && u.shed_at && u.vmid != null) _shedByVmid[String(u.vmid)] = u.shed_at; });
+    vms.forEach(v => { v._shed_at = _shedByVmid[String(v.vmid)] || null; });
+    csStartShedTicker();
     const cats = ['Simulation Clients', 'Other', 'Containers', 'Templates'];
     const grouped = {};
     cats.forEach(c => grouped[c] = vms.filter(v => csVmCategory(v) === c));
@@ -3281,11 +3289,47 @@ window.csVmSelUpdateHeader = function () {
 // ('provisioning'/'tearing_down') + pending_checkin onto each VM (relayed via
 // the cs spoke ingest). 🔴 deleting wins over 🔵 provisioning wins over the
 // steady running/paused/stopped state.
+// Format a seconds duration as "Hh Mm" (>=1h) or "M:SS" for the shed countdown.
+function csFmtDuration(s) {
+    s = Math.max(0, Math.round(Number(s) || 0));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return h > 0 ? `${h}h ${m}m` : `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+// Single 1s ticker that updates every .cs-shed-countdown span from its absolute
+// data-shed-at (agent epoch; assumes NTP-synced clocks). Idempotent — the VM
+// list re-renders on each telemetry pulse with fresh spans; the ticker keeps
+// counting them down between pulses so the timer is live, not stepwise.
+function csStartShedTicker() {
+    if (window._csShedTicker) return;
+    window._csShedTicker = setInterval(() => {
+        const now = Date.now() / 1000;
+        document.querySelectorAll('.cs-shed-countdown').forEach(el => {
+            const at = Number(el.getAttribute('data-shed-at'));
+            const secs = at - now;
+            el.textContent = secs <= 0 ? 'now' : csFmtDuration(secs);
+        });
+    }, 1000);
+}
+
+// Badge for a VM whose dongle was removed and is counting down to teardown.
+function csShedBadge(v) {
+    if (!v || !v._shed_at) return '';
+    const secs = Number(v._shed_at) - Date.now() / 1000;
+    if (secs <= 0) return '';
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-orange-100 text-orange-700" title="Dongle removed — VM will be shed when the missing-dongle timer expires">`
+        + `<span class="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"></span>🔌 Sheds in `
+        + `<span class="cs-shed-countdown" data-shed-at="${Number(v._shed_at)}">${csFmtDuration(secs)}</span></span>`;
+}
+
 function csVmStatusBadge(v) {
     const ps = String(v.prov_status || '').toLowerCase();
     if (ps === 'tearing_down') {
         return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700"><span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>Deleting…</span>`;
     }
+    // Missing-dongle shed countdown wins over the steady status (it's imminent).
+    const shed = csShedBadge(v);
+    if (shed) return shed;
     if (ps === 'provisioning' || v.pending_checkin === true) {
         const label = (String(v.status || '').toLowerCase() === 'running') ? 'Configuring' : 'Provisioning';
         return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-sky-100 text-sky-700"><span class="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>${label}</span>`;
