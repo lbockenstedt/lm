@@ -1896,6 +1896,31 @@ function _updateMetrics(statusData) {
     if (bEl) bEl.textContent = m.backlog;
     if (tEl) tEl.textContent = `${m.throughput.toFixed(2)} MB/s`;
 
+    // Rate-limit drops tile + Backlog & Rate-Limiting detail card
+    const rdEl = document.getElementById('sys-rate-drops');
+    if (rdEl) rdEl.textContent = (m.rate_limit_drops_total ?? 0);
+    const detEl = document.getElementById('sys-backlog-detail');
+    if (detEl) {
+        const bs = m.backlog_stats || {};
+        const rl = m.rate_limit || {};
+        const drops = m.rate_limit_drops || {};
+        const esc = (s) => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+        const kv = (obj) => Object.keys(obj || {}).length
+            ? Object.entries(obj).sort((a,b)=>b[1]-a[1])
+                .map(([k,v]) => `<span class="inline-block bg-slate-100 rounded px-2 py-0.5 mr-1 mb-1">${esc(k)}: <b>${v}</b></span>`).join('')
+            : '<span class="text-slate-400 italic">none</span>';
+        detEl.innerHTML = `
+            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Backlog</span>
+                 &nbsp;total <b>${bs.total ?? 0}</b> · unacked <b>${bs.pending_ack ?? 0}</b> · queued <b>${bs.queued ?? 0}</b>
+                 ${bs.oldest_age_s ? `· oldest <b>${bs.oldest_age_s}s</b>` : ''}</div>
+            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">By type</span><br>${kv(bs.by_type)}</div>
+            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">By spoke</span><br>${kv(bs.by_spoke)}</div>
+            <div class="pt-1 border-t border-slate-100"><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Rate limit</span>
+                 &nbsp;burst <b>${rl.capacity ?? '—'}</b> · <b>${rl.fill_rate ?? '—'}</b>/s
+                 &nbsp;·&nbsp;drops total <b>${m.rate_limit_drops_total ?? 0}</b></div>
+            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Drops by spoke</span><br>${kv(drops)}</div>`;
+    }
+
     const versionEl = document.getElementById('footer-sys-version');
     if (versionEl && m.version) {
         versionEl.textContent = m.version;
@@ -1907,6 +1932,28 @@ function _updateMetrics(statusData) {
     // polling. renderSpokeIndicators() reads window.activeAlerts.
     window.activeAlerts = Array.isArray(statusData.active_alerts) ? statusData.active_alerts : [];
     window.activeAlertCount = Number(statusData.active_alert_count) || 0;
+}
+
+// Diag: drop the hub's outbound message backlog (System → Hub Status button).
+// Clears a stuck backlog (e.g. undeliverable SPOKE_UPDATE to a flapping spoke)
+// without deleting the spoke. Admin only (server enforces 403).
+async function dropHubBacklog() {
+    const btn = document.getElementById('drop-backlog-btn');
+    if (!confirm('Drop ALL queued/unacked messages in the hub backlog? '
+               + 'In-flight commands will not be retried. This is a diagnostic action.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Dropping…'; }
+    try {
+        const res = await fetch('/setup/hub-backlog/purge', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (typeof showToast === 'function') showToast(`Dropped ${data.dropped} backlog message(s).`, 'success');
+        updateStatus();  // refresh the tiles/detail
+    } catch (e) {
+        if (typeof showToast === 'function') showToast(`Drop backlog failed: ${e.message}`, 'error');
+        else alert(`Drop backlog failed: ${e.message}`);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Drop Backlog'; }
+    }
 }
 
 // Mark the hub online + build the spoke-health map (from /setup/diagnostics)
@@ -2914,10 +2961,18 @@ function _renderSettingsSection(subMenu) {
                     <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Disk</p><div id="sys-disk" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
                     <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Throughput</p><div id="sys-throughput" class="text-2xl font-bold text-slate-700 mt-1">—</div></div>
                 </div>
-                <div class="grid grid-cols-3 gap-4">
+                <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
                     <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Msg/s</p><div id="sys-mps" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
                     <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Queue Depth</p><div id="sys-queue" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
                     <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Backlog</p><div id="sys-backlog" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
+                    <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Rate-Limit Drops</p><div id="sys-rate-drops" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
+                </div>
+                <div class="${card} p-6">
+                    <div class="flex justify-between items-center mb-3">
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Message Backlog &amp; Rate Limiting ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <button onclick="dropHubBacklog()" id="drop-backlog-btn" class="text-xs px-3 py-1 rounded-md border border-red-300 text-red-600 hover:bg-red-50 transition-all">Drop Backlog</button>
+                    </div>
+                    <div id="sys-backlog-detail" class="text-xs text-slate-500 space-y-2"><p class="text-slate-400 italic">Loading…</p></div>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="${card} p-6">
