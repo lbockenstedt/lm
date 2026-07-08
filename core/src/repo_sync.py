@@ -183,6 +183,10 @@ class RepoSyncMixin:
             update_health = await self.check_update_health()
         except Exception as e:  # noqa: BLE001 — never fatal to the loop
             update_health = {"ok": False, "checks": {}, "warnings": [f"health check crashed: {e}"]}
+        for e in update_health.get("errors", []):
+            # BROKEN update/self-heal infrastructure -> ERROR so it lands in the
+            # hub error view (GET_ERROR_LOGS / bugfixer), not just a warning.
+            logger.error("[sync-error] update-health CRITICAL: %s", e)
         for w in update_health.get("warnings", []):
             logger.warning("[sync-error] update-health: %s", w)
 
@@ -195,7 +199,8 @@ class RepoSyncMixin:
                    f"{err_count} error, {skip_count} skipped"
                    + (f"; changed: {', '.join(changed)}" if changed else "")
                    + ("" if update_health.get("ok") else
-                      f"; update-health: {len(update_health.get('warnings', []))} warning(s)"))
+                      f"; update-health: {len(update_health.get('errors', []))} error(s), "
+                      f"{len(update_health.get('warnings', []))} warning(s)"))
 
         # Hub-authoritative sync log: errors → [sync-error] WARNING so the
         # cause lands in the hub log + GET_ERROR_LOGS (bugfixer).
@@ -223,11 +228,32 @@ class RepoSyncMixin:
         other heavy syncs that stagger at 90s+.
         """
         await asyncio.sleep(30)  # let spokes connect; stagger off the 90s syncs
+        _last_disabled_audit = 0.0
         while True:
             try:
                 cfg = self._repo_sync_cfg()
                 if cfg.get("enabled", True):
+                    # run_repo_sync_all runs check_update_health every cycle.
                     await self.run_repo_sync_all()
+                else:
+                    # Scheduled sync OFF - still audit the update/self-heal
+                    # infrastructure (systemd Type=exec / MainPID / Restart=,
+                    # watchdog timer, restart helper, git checkout) so drift is
+                    # LOUD in the hub log regardless of the sync toggle. Throttled
+                    # to ~5m to avoid a per-minute git ls-remote.
+                    _now = _dt.datetime.now(_dt.timezone.utc).timestamp()
+                    if (_now - _last_disabled_audit) >= 300:
+                        _last_disabled_audit = _now
+                        try:
+                            health = await self.check_update_health()
+                            for e in health.get("errors", []):
+                                logger.error("[sync-error] update-health CRITICAL "
+                                             "(sync disabled): %s", e)
+                            for w in health.get("warnings", []):
+                                logger.warning("[sync-error] update-health "
+                                               "(sync disabled): %s", w)
+                        except Exception as e:  # noqa: BLE001 - never fatal
+                            logger.warning("[sync-error] update-health audit failed: %s", e)
                 delay = self._repo_sync_interval() if cfg.get("enabled", True) else 60
                 await asyncio.sleep(delay)
             except Exception as e:

@@ -254,8 +254,16 @@ class UpdatePipelineMixin:
         stale code (no .git → fragile tarball; unresolved HEAD → button git pull
         fails; running-version ≠ on-disk → updated-but-not-restarted; missing
         restart helper → pulls but never restarts; leftover legacy leaf zombie).
-        Returns ``{ok, checks, warnings}``; never raises (best-effort)."""
+        Returns ``{ok, checks, warnings, errors}``; never raises (best-effort).
+
+        ``errors`` = the update/self-heal path is BROKEN (would serve stale code
+        or fail to restart: bad unit type, MainPID=0, no Restart=, unresolved
+        HEAD, unwritable .git, missing restart helper, stale process). The
+        caller logs these at ERROR so they surface in the hub error view.
+        ``warnings`` = advisory (behind by N commits, watchdog absent, remote
+        unreachable, legacy leaf) - logged at WARNING."""
         warnings: List[str] = []
+        errors: List[str] = []
         checks: Dict[str, Any] = {}
         try:
             hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
@@ -281,7 +289,7 @@ class UpdatePipelineMixin:
                                        "drifted (root-owned objects) — auto-repaired via lm-fix-perms.")
                     else:
                         checks["git_writable"] = False
-                        warnings.append(
+                        errors.append(
                             f"{git_objects} not writable by the hub user — git pull will "
                             f"fail ('insufficient permission for adding an object'). "
                             f"Auto-repair {'unavailable (lm-fix-perms/sudoers missing)' if not repaired else 'did not resolve it'}; "
@@ -291,7 +299,7 @@ class UpdatePipelineMixin:
                 local = await self.get_local_commit()
                 checks["local_commit"] = local
                 if local == "unknown":
-                    warnings.append(
+                    errors.append(
                         f"git HEAD unresolved in {hub_root} (dubious ownership / .git "
                         f"unreadable by the service user?) — the Update button's git pull will fail.")
                 config = self.state.get_global_config()
@@ -316,16 +324,91 @@ class UpdatePipelineMixin:
             checks["running_version"] = run_v
             checks["disk_version"] = disk_v
             if run_v and disk_v and run_v not in ("unknown",) and run_v != disk_v:
-                warnings.append(
+                errors.append(
                     f"process is STALE: running v{run_v} but on-disk is v{disk_v} — "
                     f"code updated without a restart (systemctl restart lm.service).")
 
             helper = "/usr/local/bin/lm-update-restart"
             checks["restart_helper"] = os.path.isfile(helper) and os.access(helper, os.X_OK)
             if not checks["restart_helper"]:
-                warnings.append(
+                errors.append(
                     f"{helper} missing/not executable — the Update button can pull but "
                     f"never RESTART (would leave a stale process).")
+
+            # systemd unit audit. The self-restart-on-update path is
+            # os._exit(3) + systemd Restart=. If the live unit is not Type=exec
+            # with a real MainPID and a Restart= policy, an update pulls new code
+            # but the process is never cleanly cycled - THE stale-hub failure
+            # this whole subsystem exists to prevent. Audit the RUNNING unit
+            # (not the install script) so drift from a hand-edit / old install is
+            # LOUD. Skipped where systemd is absent (dev / macOS).
+            if shutil.which("systemctl"):
+                unit = os.environ.get("LM_HUB_UNIT", "lm.service")
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "systemctl", "show", unit,
+                        "-p", "Type", "-p", "Restart", "-p", "MainPID", "-p", "ActiveState",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                    out, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+                    props: Dict[str, str] = {}
+                    for line in out.decode(errors="replace").splitlines():
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            props[k.strip()] = v.strip()
+                    checks["systemd_unit"] = props
+                    if not props:
+                        errors.append(
+                            f"{unit}: systemctl show returned nothing - the hub unit "
+                            f"is missing/misnamed; self-restart + watchdog cannot work. "
+                            f"Set LM_HUB_UNIT or re-run install_all.sh.")
+                    else:
+                        utype = props.get("Type", "")
+                        urestart = props.get("Restart", "")
+                        active = props.get("ActiveState", "")
+                        try:
+                            mainpid = int(props.get("MainPID", "0") or "0")
+                        except ValueError:
+                            mainpid = 0
+                        if utype and utype != "exec":
+                            errors.append(
+                                f"{unit} Type={utype} (expected 'exec') - the old "
+                                f"oneshot/start_all.sh mode detaches main.py (MainPID=0) "
+                                f"so an update os._exit(3) leaves a STALE process serving "
+                                f"old code; re-run install_all.sh to rebuild as Type=exec.")
+                        if urestart in ("", "no"):
+                            errors.append(
+                                f"{unit} Restart={urestart or 'no'} - the self-update "
+                                f"os._exit(3) will NOT be revived by systemd, so the hub "
+                                f"stays DOWN after every update; expected on-failure/always.")
+                        if active == "active" and mainpid == 0:
+                            errors.append(
+                                f"{unit} is active but MainPID=0 - systemd is not tracking "
+                                f"the hub process (detached mode); systemctl restart and "
+                                f"the self-update cannot cleanly cycle it (stale-hub signature).")
+                except Exception as e:  # noqa: BLE001 - audit must never raise
+                    checks["systemd_unit"] = {"error": str(e)[:120]}
+                    warnings.append(f"could not audit {unit} via systemctl: {str(e)[:120]}")
+
+                # Watchdog timer - the EXTERNAL auto-heal (root, outside
+                # lm.service cgroup) that force-restarts a wedged hub (active but
+                # :443 dead, or MainPID=0). Advisory: the primary Type=exec +
+                # Restart= self-restart still works without it.
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "systemctl", "is-active", "lm-watchdog.timer",
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                    out, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+                    wd = out.decode(errors="replace").strip() or "unknown"
+                    checks["watchdog_timer"] = wd
+                    if wd != "active":
+                        warnings.append(
+                            f"lm-watchdog.timer is '{wd}' (expected active) - the external "
+                            f"auto-heal that force-restarts a wedged hub is NOT running; "
+                            f"run scripts/install-lm-watchdog.sh (or re-run install_all.sh).")
+                except Exception as e:  # noqa: BLE001
+                    checks["watchdog_timer"] = f"error: {str(e)[:80]}"
+            else:
+                checks["systemd_unit"] = "n/a (no systemctl)"
 
             legacy = _detect_legacy_leaf()
             if legacy:
@@ -336,7 +419,8 @@ class UpdatePipelineMixin:
                     f"or: systemctl disable --now <unit> && rm the unit file).")
         except Exception as e:  # noqa: BLE001 — health check must never raise
             warnings.append(f"update health check error: {e}")
-        return {"ok": not warnings, "checks": checks, "warnings": warnings}
+        return {"ok": not warnings and not errors, "checks": checks,
+                "warnings": warnings, "errors": errors}
 
     async def _repair_update_perms(self) -> bool:
         """Best-effort self-heal for update-path permission drift (root-owned
