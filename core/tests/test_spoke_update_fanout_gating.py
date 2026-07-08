@@ -65,7 +65,7 @@ class _StubHub(UpdatePipelineMixin):
         # Connectivity gate: the marker only advances for a spoke we can deliver
         # to live. Default the spoke connected; the offline test clears it.
         self.active_connections = {"lm-opnsense-spoke-1": object()}
-        self.pushes = []  # (spoke_id, repo_url, branch)
+        self.pushes = []  # list of (spoke_id, repo_url, branch, extra_data)
 
     async def get_local_version(self):
         return "v.01"
@@ -90,7 +90,7 @@ class _StubHub(UpdatePipelineMixin):
 
     async def _push_spoke_update(self, spoke_id, repo_url, branch,
                                  msg_type="SPOKE_UPDATE", extra_data=None):
-        self.pushes.append((spoke_id, repo_url, branch))
+        self.pushes.append((spoke_id, repo_url, branch, extra_data))
         return None
 
 
@@ -179,3 +179,39 @@ async def test_stale_marker_pruned_when_spoke_unapproved():
     hub.approved_modules = {}
     await hub.perform_update()
     assert hub.state.get_global_config()["spoke_update_commits"] == {}
+
+
+@pytest.mark.asyncio
+async def test_fanout_threads_core_repo_url_and_branch_into_push():
+    """The hub must thread ``core_repo_url`` + ``core_branch`` into every pushed
+    SPOKE_UPDATE so the spoke pulls the shared /opt/lm core alongside its own
+    repo (no CLI for lm/core deploys). With ``update_sources.hub`` set, the
+    payload carries the lm repo url + the configured global branch."""
+    hub = _StubHub(remote_tip="cccc1")
+    hub.state._gc["update_sources"] = {
+        "opnsense": OPNSENSE_REPO,
+        "hub": "https://github.com/lbockenstedt/lm.git",
+    }
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    spoke_id, repo_url, branch, extra_data = hub.pushes[0]
+    assert branch == "main"
+    assert extra_data is not None
+    assert extra_data["core_repo_url"] == "https://github.com/lbockenstedt/lm.git"
+    assert extra_data["core_branch"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_fanout_core_repo_url_none_when_hub_source_absent():
+    """Air-gapped deploy with ``update_sources.hub`` blank → core_repo_url is
+    None (NOT a default public URL), so the spoke skips core gracefully. The
+    key is still present so the spoke can detect absence vs an old hub that
+    never sent it."""
+    hub = _StubHub(remote_tip="cccc1")
+    # No "hub" key in update_sources (only the spoke's own source).
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    _, _, branch, extra_data = hub.pushes[0]
+    assert extra_data is not None
+    assert extra_data["core_repo_url"] is None
+    assert extra_data["core_branch"] == "main"
