@@ -800,15 +800,33 @@ class UpdatePipelineMixin:
         # self-update above stays gated on `force` alone, so an up-to-date hub is
         # NOT needlessly re-pulled/restarted just to nudge the spokes.
         spoke_force = bool(force or force_spokes)
+        # Per-spoke re-push COOLDOWN. The marker (last_pushed[sid]) only advances
+        # when the spoke was CONNECTED at push time, so a spoke that drops
+        # mid-update (a slow git pull can stall its WS → 1011 keepalive timeout)
+        # never records the tip and gets re-pushed EVERY repo-sync cycle — a
+        # SPOKE_UPDATE storm that keeps it flapping. Suppress re-pushing the same
+        # spoke within SPOKE_UPDATE_COOLDOWN_S so a legit update has time to land
+        # + restart + reconnect on the new tip. `force_spokes` (Update button)
+        # bypasses it. Stamped on every push attempt (connected or not).
+        SPOKE_UPDATE_COOLDOWN_S = 600
+        _now = time.time()
+        pushed_ts = dict(config.get("spoke_update_pushed_ts", {}) or {})
         _approved_ids = {sid for ss in repo_spokes.values() for sid in ss}
         for _stale in [sid for sid in last_pushed if sid not in _approved_ids]:
             last_pushed.pop(_stale, None)
+            commits_changed = True
+        for _stale in [sid for sid in pushed_ts if sid not in _approved_ids]:
+            pushed_ts.pop(_stale, None)
             commits_changed = True
         for repo_url, spoke_ids in repo_spokes.items():
             tip = await self.get_remote_commit(repo_url, branch)
             for sid in spoke_ids:
                 if not spoke_force and tip != "unknown" and last_pushed.get(sid) == tip:
                     update_results.append(f"{sid}: up-to-date ({repo_url})")
+                    continue
+                if not spoke_force and (_now - float(pushed_ts.get(sid, 0) or 0)) < SPOKE_UPDATE_COOLDOWN_S:
+                    _left = int(SPOKE_UPDATE_COOLDOWN_S - (_now - float(pushed_ts.get(sid, 0) or 0)))
+                    update_results.append(f"{sid}: recently pushed - cooldown {_left}s ({repo_url})")
                     continue
                 connected = sid in getattr(self, "active_connections", {})
                 if not connected and not spoke_force:
@@ -819,15 +837,17 @@ class UpdatePipelineMixin:
                 err = await self._push_spoke_update(sid, repo_url, branch)
                 if err is None:
                     update_results.append(f"{sid}: triggered")
+                    pushed_ts[sid] = _now
+                    commits_changed = True
                     if connected and tip != "unknown":
                         last_pushed[sid] = tip
-                        commits_changed = True
                 else:
                     logger.error(f"Failed to push update for {sid}: {err}")
                     update_results.append(f"{sid}: failed")
 
         if commits_changed:
-            self.state.update_global_config({"spoke_update_commits": last_pushed})
+            self.state.update_global_config({"spoke_update_commits": last_pushed,
+                                             "spoke_update_pushed_ts": pushed_ts})
             self.state.save_state()
 
         logger.info(f"Spoke update results: {update_results}")
