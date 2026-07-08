@@ -30,6 +30,18 @@ except ImportError:
 logger = logging.getLogger("BaseControlPlane")
 
 
+def _ws_keepalive_env(name: str, default: float) -> float:
+    """Env-overridable WebSocket keepalive knob (seconds) for the spoke's
+    ``websockets.connect`` call. Mirrors the hub-side uvicorn knob in
+    api.build_server so both ends of a link use the same ping interval / pong
+    timeout. Clamped to >=5s. See control_plane.run() for why the library
+    default 20s/20s is too tight."""
+    try:
+        return max(5.0, float(os.environ.get(name, str(default))))
+    except Exception:
+        return default
+
+
 class _SpokeLogRelayHandler(logging.Handler):
     """Captures ALL log records (INFO+) into a queue for async relay to the Hub.
 
@@ -791,7 +803,26 @@ class BaseControlPlane:
         else:
             _tls_mode = "TLS unverified (self-signed hub cert)"
         logger.info("Connecting to hub %s [%s]", self.hub_url, _tls_mode)
-        async with websockets.connect(self.hub_url, compression=None, ssl=ssl_ctx) as websocket:
+        # WebSocket keepalive: the websockets library defaults
+        # (ping_interval=20s, ping_timeout=20s) tear down the connection on any
+        # event-loop stall >20s — and the hub's uvicorn default pong timeout is
+        # only 5s. A spoke that does any sync I/O on its shared loop (cs
+        # telemetry relay's dhcp subprocess + config load + persist; dns
+        # unbound-control) stalls past that, the hub closes the WS with 1011
+        # "keepalive ping timeout", and this spoke enters the 5→300s reconnect
+        # backoff — during which the hub's every-5s CS_POLL_AGENT_INBOX times
+        # out → the "Request Timeout from <spoke> after 5.0s" flood. Widen to
+        # 30s/90s (env-overridable via LM_WS_PING_INTERVAL_S /
+        # LM_WS_PING_TIMEOUT_S) so a transient stall recovers instead of
+        # cascading. The 30s app-level heartbeat below still detects a truly-dead
+        # hub via send failure, so dead-peer detection is not materially delayed.
+        async with websockets.connect(
+            self.hub_url,
+            compression=None,
+            ssl=ssl_ctx,
+            ping_interval=_ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0),
+            ping_timeout=_ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0),
+        ) as websocket:
             self._hub_ws = websocket
             # Capture the running loop so the updater thread can schedule a final
             # synchronous log flush (run_coroutine_threadsafe) before os._exit(0).

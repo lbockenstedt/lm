@@ -1043,6 +1043,16 @@ def _uvicorn_log_config():
     }
 
 
+def _ws_keepalive_env(name: str, default: float) -> float:
+    """Env-overridable WebSocket keepalive knob (seconds), shared by the hub's
+    uvicorn server and the spoke ``websockets.connect`` call so both ends of a
+    link use the same ping interval / pong timeout. Clamped to >=5s."""
+    try:
+        return max(5.0, float(os.environ.get(name, str(default))))
+    except Exception:
+        return default
+
+
 def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     """Build the awaitable uvicorn ``Server`` for the unified hub surface on a
     single port (443). ``Server.serve()`` is awaitable (vs blocking
@@ -1057,6 +1067,20 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     if tls_cert and tls_key:
         cfg_kwargs["ssl_certfile"] = tls_cert
         cfg_kwargs["ssl_keyfile"] = tls_key
+    # WebSocket keepalive: uvicorn's defaults (ping every 20s, pong timeout 5s)
+    # are too tight for spokes that do any sync I/O on their shared event loop
+    # (cs telemetry relay's dhcp subprocess + config load + persist; dns
+    # unbound-control; netbox pynetbox calls). A >5s stall makes the hub close
+    # the spoke's WS with 1011 "keepalive ping timeout", kicking the spoke into
+    # the 5→300s exponential reconnect backoff — during which every 5s
+    # CS_POLL_AGENT_INBOX times out, producing the "Request Timeout from
+    # cs-svr-XX-spoke after 5.0s" flood. Widen to 30s/90s (env-overridable via
+    # LM_WS_PING_INTERVAL_S / LM_WS_PING_TIMEOUT_S) so a transient stall
+    # recovers instead of cascading. The spoke's 30s app-level heartbeat still
+    # detects a truly-dead peer via send failure, so dead-peer detection is not
+    # materially delayed. Mirrored on the spoke side in control_plane.run().
+    cfg_kwargs["ws_ping_interval"] = _ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0)
+    cfg_kwargs["ws_ping_timeout"] = _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0)
     return uvicorn.Server(uvicorn.Config(app, **cfg_kwargs))
 
 
@@ -1069,8 +1093,13 @@ def run_api_server(hub, port=443):
     app = create_app(hub)
     cert = os.environ.get("LM_TLS_CERT", "").strip()
     key = os.environ.get("LM_TLS_KEY", "").strip()
+    # Same widened WS keepalive as build_server() (see comment there).
+    _ws_kw = {
+        "ws_ping_interval": _ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0),
+        "ws_ping_timeout": _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0),
+    }
     if cert and key:
         uvicorn.run(app, host="0.0.0.0", port=port, ssl_certfile=cert,
-                    ssl_keyfile=key, log_config=_uvicorn_log_config())
+                    ssl_keyfile=key, log_config=_uvicorn_log_config(), **_ws_kw)
     else:
-        uvicorn.run(app, host="0.0.0.0", port=port, log_config=_uvicorn_log_config())
+        uvicorn.run(app, host="0.0.0.0", port=port, log_config=_uvicorn_log_config(), **_ws_kw)
