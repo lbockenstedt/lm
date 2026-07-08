@@ -761,16 +761,26 @@ class BaseControlPlane:
                         "single update scheduler (SPOKE_UPDATE fan-out).")
         _delay = 5
         while True:
+            _sess_start = time.time()
             try:
                 await self._connect_and_serve()
                 _delay = 5  # clean return after a successful session → reset
             except (websockets.exceptions.ConnectionClosedError, OSError) as e:
-                logger.warning("Connection lost (%s). Reconnecting in %ds...", e, _delay)
-                _delay = min(_delay * 2, 300)  # cap at 5 min so a long hub outage
-                #                                    doesn't spam ~12 lines/min forever
+                _lasted = time.time() - _sess_start
+                # A session that stayed up a while then dropped (e.g. ONE
+                # keepalive-ping timeout after minutes of health) is NOT a
+                # fast-failure — reset the backoff so a lone blip reconnects in
+                # 5s instead of escalating the offline gap toward the 5-min cap
+                # (which left the spoke offline far longer than the blip
+                # warranted and stretched the request-timeout window). Only
+                # rapid repeated failures (session < 60s: a real hub outage /
+                # connect churn) grow the backoff.
+                _delay = 5 if _lasted >= 60 else min(_delay * 2, 300)
+                logger.warning("Connection lost after %.0fs (%s). Reconnecting in %ds...", _lasted, e, _delay)
             except Exception as e:
-                logger.error("Unexpected connection error (%s). Reconnecting in %ds...", e, _delay)
-                _delay = min(_delay * 2, 300)
+                _lasted = time.time() - _sess_start
+                _delay = 5 if _lasted >= 60 else min(_delay * 2, 300)
+                logger.error("Unexpected connection error after %.0fs (%s). Reconnecting in %ds...", _lasted, e, _delay)
             # If the hub URL is the auto-discovery sentinel, re-resolve on each
             # reconnect so a hub that comes up after this spoke (or moves) is
             # found without a restart.
