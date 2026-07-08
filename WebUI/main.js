@@ -8074,7 +8074,7 @@ function pxmxTh(cols) {
 // Clone action); line 2 = metadata (Type, Status, CPU, Memory, Pool). Cluster
 // and Host(node) are merged into one "Cluster / Host" column as "<cluster>/<node>".
 function pxmxVmTableHtml(vms) {
-    const cols = ['Cluster / Host', 'VMID', 'Name', 'IP Address', ''];
+    const cols = ['<input type="checkbox" onclick="pxmxBulkSelectAll(this.checked)" title="Select all"/>', 'Cluster / Host', 'VMID', 'Name', 'IP Address', ''];
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const tplPools = window._pxmxTemplatePools || [];
     const isTemplate = vm => !!(vm.pool && tplPools.includes(String(vm.pool).toLowerCase()));
@@ -8109,6 +8109,7 @@ function pxmxVmTableHtml(vms) {
         // hover and read as a single entry; both rows open the VM detail panel.
         return `<tbody class="group">
             <tr class="border-b border-slate-50 group-hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${uid}')">
+                <td class="px-4 py-2" onclick="event.stopPropagation()"><input type="checkbox" class="pxmx-vm-sel" value="${escapeHtml(vm.unique_id || '')}"/></td>
                 <td class="px-4 py-2 text-xs text-slate-500 font-mono">${clusterHost}</td>
                 <td class="px-4 py-2 font-mono text-xs font-bold">${vm.vmid}</td>
                 <td class="px-4 py-2 font-medium">${escapeHtml(vm.name || '—')}</td>
@@ -8116,12 +8117,59 @@ function pxmxVmTableHtml(vms) {
                 <td class="px-4 py-2">${cloneBtn}</td>
             </tr>
             <tr class="border-b border-slate-100 group-hover:bg-slate-50 cursor-pointer" onclick="openVmDetail('${uid}')">
-                <td colspan="5" class="px-4 pb-2 pt-0">${line2}</td>
+                <td colspan="6" class="px-4 pb-2 pt-0">${line2}</td>
             </tr>
         </tbody>`;
     }).join('');
-    return pxmxTableWrap(pxmxTh(cols) + rows);
+    return pxmxBulkBar() + pxmxTableWrap(pxmxTh(cols) + rows);
 }
+
+// Bulk VM actions — operate on the checked rows. Reuses /api/pxmx/vm-action per
+// VM (so Backup gets the same Hypervisors-config injection), confirming ONCE for
+// the batch when confirm_destructive is on.
+function pxmxBulkBar() {
+    return `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
+      <span class="text-slate-400 font-medium mr-1">Bulk (selected):</span>
+      <button onclick="pxmxBulkAction('start')" class="bg-green-100 text-green-700 px-2.5 py-1 rounded font-bold hover:bg-green-200">▶ Start</button>
+      <button onclick="pxmxBulkAction('stop')" class="bg-red-100 text-red-700 px-2.5 py-1 rounded font-bold hover:bg-red-200">■ Stop</button>
+      <button onclick="pxmxBulkAction('reboot')" class="bg-amber-100 text-amber-700 px-2.5 py-1 rounded font-bold hover:bg-amber-200">↺ Restart</button>
+      <button onclick="pxmxBulkAction('snapshot')" class="bg-slate-200 text-slate-700 px-2.5 py-1 rounded font-bold hover:bg-slate-300">📷 Snapshot</button>
+      <button onclick="pxmxBulkAction('backup')" class="bg-sky-100 text-sky-700 px-2.5 py-1 rounded font-bold hover:bg-sky-200">💾 Backup</button>
+      <span id="pxmx-bulk-status" class="text-slate-400"></span>
+    </div>`;
+}
+
+window.pxmxBulkSelectAll = function (checked) {
+    document.querySelectorAll('.pxmx-vm-sel').forEach(cb => { cb.checked = checked; });
+};
+
+window.pxmxBulkAction = async function (action) {
+    const sel = Array.from(document.querySelectorAll('.pxmx-vm-sel:checked')).map(cb => cb.value);
+    if (!sel.length) { showToast('No VMs selected', 'info'); return; }
+    if (['stop', 'reboot', 'restart', 'backup'].includes(action)) {
+        const cfg = await pxmxHvConfig();
+        if (cfg.confirm_destructive !== false &&
+            !window.confirm(`${action.toUpperCase()} ${sel.length} selected VM(s)?`)) return;
+    }
+    const statusEl = document.getElementById('pxmx-bulk-status');
+    let ok = 0, fail = 0;
+    for (const uid of sel) {
+        const vm = (window._pxmxVms || []).find(v => v.unique_id === uid);
+        if (!vm) { fail++; continue; }
+        if (statusEl) statusEl.textContent = `${action}… ${ok + fail + 1}/${sel.length}`;
+        try {
+            const r = await setupFetch('/api/pxmx/vm-action', {
+                method: 'POST',
+                body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type, action }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (r.ok && d && d.status === 'SUCCESS') ok++; else fail++;
+        } catch (e) { fail++; }
+    }
+    showToast(`Bulk ${action}: ${ok} ok${fail ? `, ${fail} failed` : ''}`, fail ? 'error' : 'success');
+    if (statusEl) statusEl.textContent = `${ok} ok${fail ? `, ${fail} failed` : ''}`;
+    setTimeout(() => loadPxmxData('Virtual Machines'), 1500);
+};
 
 // Clicking a VM row opens a details panel with Start/Stop/Restart/Snapshot
 // controls (VNC Console wired up in the VNC increment). Back returns to the
