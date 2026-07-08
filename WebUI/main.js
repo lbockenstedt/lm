@@ -1103,7 +1103,7 @@ const VIEW_SUBMENUS = {
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
-    pxmx: ['Overview', 'Virtual Machines'],
+    pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['OUs', 'Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'VM Server', 'API Server', 'Config', 'Setup', 'Spoke Management'],
@@ -8166,6 +8166,110 @@ function openVmDetail(uniqueId) {
         </div>`;
 }
 
+// Hypervisor → Settings tab: backup (storage/mode/keep) + snapshot (keep/prefix)
+// + confirm-destructive + per-host overrides. Reads GET /hypervisors-config and
+// the live per-host storage list (GET /hypervisor-storages, which fans
+// PXMX_LIST_STORAGE to each host). Saves via PUT. Governs the VM action panel.
+async function renderPxmxSettings(container) {
+    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading Hypervisor settings…</p>';
+    let cfg = {}, storages = { hosts: [] };
+    try {
+        const [cR, sR] = await Promise.all([
+            setupFetch(`/sim/api/tenant/${currentTenant}/hypervisors-config?tenant_id=${encodeURIComponent(currentTenant)}`),
+            setupFetch(`/sim/api/tenant/${currentTenant}/hypervisor-storages?tenant_id=${encodeURIComponent(currentTenant)}`),
+        ]);
+        cfg = (await cR.json()).hypervisors_config || {};
+        storages = await sR.json() || { hosts: [] };
+    } catch (e) {
+        container.innerHTML = `<div class="p-4 text-sm text-red-600">Could not load Hypervisor settings: ${escapeHtml(String(e.message || e))}</div>`;
+        return;
+    }
+    window._pxmxHvConfig = cfg; // refresh the cache the VM actions read
+    const allStorages = [...new Set((storages.hosts || []).flatMap(h => h.storages || []))].sort();
+    const optList = (arr, sel, blank) => `<option value="">${blank}</option>` +
+        arr.map(s => `<option value="${escapeHtml(s)}"${s === sel ? ' selected' : ''}>${escapeHtml(s)}</option>`).join('');
+    const modeSel = (sel, blank) => (blank ? `<option value="">${blank}</option>` : '') +
+        ['snapshot', 'suspend', 'stop'].map(m => `<option value="${m}"${m === sel ? ' selected' : ''}>${m}</option>`).join('');
+    const perHost = cfg.per_host || {};
+    const hostRows = (storages.hosts || []).map(h => {
+        const ph = perHost[h.hostname] || {};
+        return `<tr data-host="${escapeHtml(h.hostname)}" class="border-b border-slate-50">
+          <td class="px-3 py-2 text-sm font-medium text-slate-700">${escapeHtml(h.hostname)}</td>
+          <td class="px-3 py-2"><select class="ph-storage border border-slate-200 rounded px-2 py-1 text-xs bg-white">${optList(h.storages || [], ph.backup_storage, '(use global)')}</select></td>
+          <td class="px-3 py-2"><select class="ph-mode border border-slate-200 rounded px-2 py-1 text-xs bg-white">${modeSel(ph.backup_mode, '(global)')}</select></td>
+          <td class="px-3 py-2"><input type="number" min="0" class="ph-keep border border-slate-200 rounded px-2 py-1 text-xs w-20" value="${ph.backup_keep ?? ''}" placeholder="global"/></td>
+        </tr>`;
+    }).join('') || `<tr><td colspan="4" class="px-3 py-3 text-xs text-slate-400 italic">No hosts reporting storages yet (agents fan PXMX_LIST_STORAGE on connect).</td></tr>`;
+    const inp = 'border border-slate-200 rounded-md px-3 py-1.5 text-sm w-full';
+    const lbl = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
+    container.innerHTML = `
+      <div class="space-y-5 max-w-3xl">
+        <div class="hpe-card rounded-lg p-5 shadow-sm">
+          <p class="text-sm font-bold text-[#263040] mb-3">Backup (vzdump) ${helpIcon('pxmx', null, 'Hypervisor help')}</p>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div><label class="${lbl}">Default storage</label><select id="hv-backup-storage" class="${inp}">${optList(allStorages, cfg.backup_storage, '— select —')}</select></div>
+            <div><label class="${lbl}">Mode</label><select id="hv-backup-mode" class="${inp}">${modeSel(cfg.backup_mode || 'snapshot', '')}</select></div>
+            <div><label class="${lbl}">Keep last (0 = no prune)</label><input id="hv-backup-keep" type="number" min="0" value="${cfg.backup_keep ?? 3}" class="${inp}"/></div>
+          </div>
+          <p class="text-[11px] text-slate-400 mt-2">Snapshot mode = no downtime. Storage list is pulled live from each host; per-host overrides below win over the default.</p>
+        </div>
+        <div class="hpe-card rounded-lg p-5 shadow-sm">
+          <p class="text-sm font-bold text-[#263040] mb-3">Snapshot</p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div><label class="${lbl}">Keep last</label><input id="hv-snap-keep" type="number" min="0" value="${cfg.snapshot_keep ?? 5}" class="${inp}"/></div>
+            <div><label class="${lbl}">Name prefix</label><input id="hv-snap-prefix" type="text" value="${escapeHtml(cfg.snapshot_prefix || 'lm')}" class="${inp}"/></div>
+          </div>
+        </div>
+        <div class="hpe-card rounded-lg p-5 shadow-sm">
+          <p class="text-sm font-bold text-[#263040] mb-3">Per-host overrides</p>
+          <div class="overflow-x-auto"><table class="w-full text-sm" id="pxmx-perhost-rows">
+            <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr><th class="px-3 py-2 text-left font-medium">Host</th><th class="px-3 py-2 text-left font-medium">Backup storage</th><th class="px-3 py-2 text-left font-medium">Mode</th><th class="px-3 py-2 text-left font-medium">Keep</th></tr></thead>
+            <tbody>${hostRows}</tbody>
+          </table></div>
+        </div>
+        <div class="hpe-card rounded-lg p-5 shadow-sm">
+          <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded"/> Confirm before destructive VM actions (stop / restart / backup)</label>
+        </div>
+        <div class="flex items-center gap-3">
+          <button onclick="savePxmxSettings()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold">Save</button>
+          <span id="pxmx-settings-status" class="text-xs text-slate-400"></span>
+        </div>
+      </div>`;
+}
+
+async function savePxmxSettings() {
+    const val = id => (document.getElementById(id) || {}).value;
+    const perHost = {};
+    document.querySelectorAll('#pxmx-perhost-rows tr[data-host]').forEach(tr => {
+        const host = tr.getAttribute('data-host');
+        const st = (tr.querySelector('.ph-storage') || {}).value || '';
+        const md = (tr.querySelector('.ph-mode') || {}).value || '';
+        const kp = (tr.querySelector('.ph-keep') || {}).value;
+        const o = {};
+        if (st) o.backup_storage = st;
+        if (md) o.backup_mode = md;
+        if (kp !== '' && kp != null) o.backup_keep = parseInt(kp, 10);
+        if (Object.keys(o).length) perHost[host] = o;
+    });
+    const cfg = {
+        backup_storage: val('hv-backup-storage') || '',
+        backup_mode: val('hv-backup-mode') || 'snapshot',
+        backup_keep: parseInt(val('hv-backup-keep') || '0', 10) || 0,
+        snapshot_keep: parseInt(val('hv-snap-keep') || '0', 10) || 0,
+        snapshot_prefix: val('hv-snap-prefix') || 'lm',
+        confirm_destructive: (document.getElementById('hv-confirm') || {}).checked !== false,
+        per_host: perHost,
+    };
+    const st = document.getElementById('pxmx-settings-status');
+    try {
+        const r = await setupFetch(`/sim/api/tenant/${currentTenant}/hypervisors-config?tenant_id=${encodeURIComponent(currentTenant)}`, {
+            method: 'PUT', body: JSON.stringify({ hypervisors_config: cfg }),
+        });
+        if (r.ok) { window._pxmxHvConfig = cfg; showToast('Hypervisor settings saved', 'success'); if (st) st.textContent = 'Saved'; }
+        else { const d = await r.json().catch(() => ({})); showToast('Save failed: ' + (d.detail || r.status), 'error'); if (st) st.textContent = 'Save failed'; }
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); if (st) st.textContent = 'Save failed'; }
+}
+
 // Cached Setup → Hypervisors config (confirm toggle + backup/snapshot settings).
 // Fetched once per view; pass force=true to refresh after a save.
 async function pxmxHvConfig(force) {
@@ -9050,6 +9154,10 @@ async function loadPxmxData(subMenu) {
     const tableWrap = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
 
     try {
+        if (subMenu === 'Settings') {
+            await renderPxmxSettings(container);
+            return;
+        }
         if (subMenu === 'Overview' || subMenu === 'Virtual Machines') {
             const [vmR, nodesR] = await Promise.all([
                 fetch(`/api/pxmx/vms?tenant=${encodeURIComponent(currentTenant)}`),
