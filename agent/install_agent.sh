@@ -129,7 +129,11 @@ fi
 # Normalize the startup-role set: --roles (comma-list) + --role (single alias),
 # de-duplicated, order-preserved. Passed to the unit as --roles so the agent
 # spawns one RoleConnection sub-spoke per role at boot.
-mapfile -t _ROLE_LIST < <(printf '%s\n' "${STARTUP_ROLES//,/ }" $STARTUP_ROLE | awk 'NF && !seen[$0]++')
+# NOTE: ${STARTUP_ROLES//,/ } MUST be UNQUOTED so word-splitting hands printf one
+# role per arg → one per line. Quoting it collapsed all roles onto a single line,
+# so `for role in …` saw the whole string as ONE role → "Unknown role
+# 'simulation proxmox …'" and the multi-role hub agent install failed.
+mapfile -t _ROLE_LIST < <(printf '%s\n' ${STARTUP_ROLES//,/ } $STARTUP_ROLE | awk 'NF && !seen[$0]++')
 STARTUP_ROLES_CSV="$(IFS=,; printf '%s' "${_ROLE_LIST[*]}")"
 
 # System deps
