@@ -633,7 +633,15 @@ def register(app, hub, ctx):
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
         hub = app.state.hub
-        pxmx_spoke = hub.get_hypervisor_spoke()
+        # Route to the spoke that actually relays the VM's host agent (hosts are
+        # not clustered — a vncwebsocket must open on the VM's own host or it
+        # fails → "agent refused VNC_START"). Mirrors the revoke/ack-change
+        # routes: get_spoke_for_agent(agent_id) with target_agent_id in the
+        # payload so a multi-agent spoke relays to the right agent. Falls back to
+        # the global hypervisor spoke when agent_id is absent (single-host).
+        agent_id = str((body or {}).get("agent_id") or "").strip()
+        pxmx_spoke = (hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
+                      if agent_id else None) or hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
         session_id = str(uuid.uuid4())
@@ -661,6 +669,7 @@ def register(app, hub, ctx):
                 "vmid": vmid,
                 "node": node,
                 "type": str((body or {}).get("type", "qemu")),
+                "target_agent_id": agent_id,
             }, timeout=30.0)
         except Exception as e:
             hub.unregister_vnc_session(session_id)

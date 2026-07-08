@@ -29,20 +29,48 @@ def register(app, hub, ctx):
         except Exception:
             body = {}
         action = str((body or {}).get("action", "")).lower()
-        if action not in ("start", "stop", "reboot", "restart", "snapshot"):
+        if action not in ("start", "stop", "reboot", "restart", "snapshot", "backup"):
             raise HTTPException(status_code=400, detail=f"unknown action: {action}")
         hub = app.state.hub
         pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        node = str(body.get("node", "") or "")
         payload = {
             "unique_id": body.get("unique_id", ""),
             "vmid": body.get("vmid"),
-            "node": body.get("node", ""),
+            "node": node,
             "type": body.get("type", "qemu"),
             "action": action,
             "snapshot_name": body.get("snapshot_name"),
         }
+        # Backup: inject the tenant's effective vzdump config (per-host override
+        # wins over the tenant default) so the agent runs vzdump with the
+        # configured storage/mode/keep. Storage is REQUIRED — fail clearly if the
+        # Setup → Hypervisors tab hasn't set one for this host.
+        if action == "backup":
+            tenant_id = sess.get("tenant_id") or ""
+            hv = await hub.simulations_store.get_hypervisors_config(tenant_id)
+            ph = (hv.get("per_host") or {}).get(node) or {}
+            keep = ph.get("backup_keep")
+            if keep is None:
+                keep = hv.get("backup_keep")
+            payload["backup"] = {
+                "storage": ph.get("backup_storage") or hv.get("backup_storage") or "",
+                "mode": ph.get("backup_mode") or hv.get("backup_mode") or "snapshot",
+                "keep": keep or 0,
+            }
+            if not payload["backup"]["storage"]:
+                raise HTTPException(status_code=400,
+                    detail=f"No backup storage configured for host '{node or '?'}' — set one in Setup → Hypervisors")
+        # Snapshot: name it from the configured prefix when the caller didn't
+        # supply one (so snapshots read e.g. "lm-1720…" per the Setup config).
+        elif action == "snapshot" and not payload.get("snapshot_name"):
+            import time as _time
+            tenant_id = sess.get("tenant_id") or ""
+            hv = await hub.simulations_store.get_hypervisors_config(tenant_id)
+            prefix = str(hv.get("snapshot_prefix") or "lm").strip() or "lm"
+            payload["snapshot_name"] = f"{prefix}-{int(_time.time())}"
         try:
             result = await hub.request_response(pxmx_spoke, "PXMX_VM_ACTION", payload, timeout=35.0)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
