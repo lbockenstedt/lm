@@ -620,7 +620,7 @@ class UpdatePipelineMixin:
         except Exception as e:
             return e
 
-    async def perform_update(self, force=False):
+    async def perform_update(self, force=False, force_spokes=False):
         """
         Checks for updates and performs either a git pull (for git installs) or a
         tarball-based download (for non-git installs) if a new version is available.
@@ -795,6 +795,11 @@ class UpdatePipelineMixin:
             repo_spokes.setdefault(repo_url, []).append(spoke_id)
 
         commits_changed = False
+        # A manual "Update All" click forces the spoke fan-out (force_spokes) so a
+        # spoke the gate believes is already current still gets re-pushed. The hub
+        # self-update above stays gated on `force` alone, so an up-to-date hub is
+        # NOT needlessly re-pulled/restarted just to nudge the spokes.
+        spoke_force = bool(force or force_spokes)
         _approved_ids = {sid for ss in repo_spokes.values() for sid in ss}
         for _stale in [sid for sid in last_pushed if sid not in _approved_ids]:
             last_pushed.pop(_stale, None)
@@ -802,11 +807,11 @@ class UpdatePipelineMixin:
         for repo_url, spoke_ids in repo_spokes.items():
             tip = await self.get_remote_commit(repo_url, branch)
             for sid in spoke_ids:
-                if not force and tip != "unknown" and last_pushed.get(sid) == tip:
+                if not spoke_force and tip != "unknown" and last_pushed.get(sid) == tip:
                     update_results.append(f"{sid}: up-to-date ({repo_url})")
                     continue
                 connected = sid in getattr(self, "active_connections", {})
-                if not connected and not force:
+                if not connected and not spoke_force:
                     update_results.append(f"{sid}: offline - deferred ({repo_url})")
                     continue
                 logger.info(f"Triggering update for spoke {sid} from {repo_url}@{branch}"

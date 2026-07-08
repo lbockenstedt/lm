@@ -14,8 +14,11 @@ def register(app, hub, ctx):
         hub = app.state.hub
         force_param = request.query_params.get("force", "false")
         force = force_param.lower() == "true"
-        logger.info(f"API: Triggering update with force={force} (param: {force_param})")
-        success = await hub.perform_update(force=force)
+        # A manual "Update All" click sends force_spokes=true so the spoke fan-out
+        # is not gate-skipped (the hub itself only re-pulls when genuinely behind).
+        force_spokes = request.query_params.get("force_spokes", "false").lower() == "true"
+        logger.info(f"API: Triggering update force={force} force_spokes={force_spokes} (param: {force_param})")
+        success = await hub.perform_update(force=force, force_spokes=force_spokes)
         if isinstance(success, dict):
             if success.get("status") == "success":
                 return {"status": "success", "message": success["message"]}

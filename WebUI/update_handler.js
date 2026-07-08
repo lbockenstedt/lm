@@ -23,7 +23,7 @@ async function triggerUpdate(evt) {
     btn.classList.add('opacity-50', 'cursor-not-allowed');
 
     try {
-        const response = await fetch('/setup/update', { method: 'POST' });
+        const response = await fetch('/setup/update?force_spokes=true', { method: 'POST' });
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.detail || 'Update failed');
