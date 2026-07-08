@@ -76,6 +76,44 @@ def _quiet_access_paths() -> tuple:
     return paths
 
 
+class _QuietUvicornLifecycleFilter(logging.Filter):
+    """Drop per-connection uvicorn lifecycle noise so a high-volume client-WS
+    spoke (e.g. cs with many sim clients) doesn't flood the journal + the hub
+    relay buffer with a line per connect/disconnect:
+
+      - ``uvicorn.error``: ``connection open`` / ``connection closed`` — each
+        HTTP/WebSocket connection emits both, so at 10k clients this is the
+        single biggest source of INFO spam.
+      - ``uvicorn.access`` / ``uvicorn.error``: ``<addr> - "WebSocket /path"
+        [accepted]`` — one per WS handshake.
+
+    These are redundant at INFO: the client registry + CS telemetry already
+    track connected clients. Bypassed entirely at DEBUG (Enable Debug reveals
+    them) and NEVER suppresses WARNING+ (real rejections / handshake failures
+    / shutdown errors still log). Idempotent across re-inits.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Never quiet warnings/errors — only the INFO lifecycle chatter.
+        if record.levelno >= logging.WARNING:
+            return True
+        # In debug mode show every lifecycle line.
+        if logging.getLogger(record.name).getEffectiveLevel() <= logging.DEBUG:
+            return True
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001 — never block a record on a format error
+            return True
+        if msg in ("connection open", "connection closed"):
+            return False
+        # WebSocket accept line: ``<addr> - "WebSocket /path" [accepted]``.
+        # Match on the two stable substrings so it survives uvicorn format
+        # tweaks without over-matching ordinary HTTP access lines.
+        if '"WebSocket ' in msg and " [accepted]" in msg:
+            return False
+        return True
+
+
 def _int_env(name: str, default: int) -> int:
     try:
         v = int(str(os.getenv(name) or "").strip())
@@ -160,6 +198,16 @@ def configure_logging(default_level: int = logging.INFO, *,
         access_logger = logging.getLogger("uvicorn.access")
         if not any(isinstance(f, _QuietSuccessAccessFilter) for f in access_logger.filters):
             access_logger.addFilter(_QuietSuccessAccessFilter(quiet_paths))
+
+    # Suppress per-connection uvicorn lifecycle noise ("connection open" /
+    # "connection closed" / WebSocket "[accepted]") on both uvicorn.error and
+    # uvicorn.access so a high-volume client-WS spoke (cs) doesn't flood the
+    # journal + hub relay with a line per connect/disconnect. Bypassed in debug
+    # mode; WARNING+ (rejections/failures) always log. Idempotent across re-inits.
+    for _lname in ("uvicorn.error", "uvicorn.access"):
+        _lg = logging.getLogger(_lname)
+        if not any(isinstance(f, _QuietUvicornLifecycleFilter) for f in _lg.filters):
+            _lg.addFilter(_QuietUvicornLifecycleFilter())
     return level
 
 

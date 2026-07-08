@@ -131,3 +131,39 @@ def test_configure_logging_force_reconfigures_cleanly():
         assert n2 == n1  # no handler accumulation across force=True re-configs
     finally:
         _restore_root(saved_h, saved_lvl)
+
+
+def test_quiet_uvicorn_lifecycle_filter_drops_connection_lifecycle_at_info():
+    """Per-connection uvicorn lifecycle noise ('connection open'/'closed' and
+    WebSocket '[accepted]') is dropped at INFO so a high-volume client-WS spoke
+    can't flood the journal, but WARNING+ and DEBUG-mode records pass through."""
+    saved_h, saved_lvl = _root_handlers(), logging.getLogger().level
+    try:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("LOG_LEVEL", None)
+            logging_setup.configure_logging(line_buffered=False)
+        f = logging_setup._QuietUvicornLifecycleFilter()
+
+        def _rec(name, level, msg):
+            r = logging.LogRecord(name=name, level=level, pathname="", lineno=0,
+                                   msg=msg, args=None, exc_info=None)
+            return r
+
+        # INFO lifecycle chatter on both uvicorn loggers is dropped.
+        assert f.filter(_rec("uvicorn.error", logging.INFO, "connection open")) is False
+        assert f.filter(_rec("uvicorn.error", logging.INFO, "connection closed")) is False
+        assert f.filter(_rec("uvicorn.access", logging.INFO,
+                            '169.253.1.66:60530 - "WebSocket /ws/client?hostname=x" [accepted]')) is False
+        # A real rejection (WARNING) is preserved.
+        assert f.filter(_rec("uvicorn.error", logging.WARNING,
+                            "connection rejected: invalid subprotocol")) is True
+        # A non-lifecycle INFO line is preserved.
+        assert f.filter(_rec("uvicorn.error", logging.INFO,
+                            "Application startup complete")) is True
+
+        # In DEBUG mode the lifecycle lines are revealed again.
+        logging.getLogger("uvicorn.error").setLevel(logging.DEBUG)
+        logging.getLogger("uvicorn.access").setLevel(logging.DEBUG)
+        assert f.filter(_rec("uvicorn.error", logging.INFO, "connection open")) is True
+    finally:
+        _restore_root(saved_h, saved_lvl)

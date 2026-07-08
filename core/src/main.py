@@ -493,11 +493,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 super().__init__()
                 self.hub = hub
             def emit(self, record):
-                msg = self.format(record)
-                self.hub.logs.append(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
+                # Canonical format (asctime + name + level + message) so the
+                # in-memory hub log buffer is byte-identical in shape to the
+                # /var/log/lm/hub.log stderr capture — uniform in the WebUI Logs
+                # view and trivially de-duplicated against the disk file in
+                # collect_error_logs/collect_all_logs (same record, same line).
+                self.hub.logs.append(self.format(record))
 
         log_handler = HubLogHandler(self)
-        log_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+        log_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'))
         logger.addHandler(log_handler)
 
         # Route uncaught SYNC exceptions through the "Hub" logger so they land in
@@ -2637,7 +2643,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         having to comb each spoke's logs by hand.
         """
         import re
-        pat = re.compile(r"\b(error|exception|traceback|critical)\b", re.IGNORECASE)
+        # Match the LEVEL keyword, not the bare word "error" anywhere — the
+        # latter false-positives on uvicorn's ``uvicorn.error`` logger name
+        # (which carries INFO lifecycle lines like "connection open"), landing
+        # benign INFO lines in the error log. The negative lookbehind ``(?<!\.)``
+        # excludes dotted-logger-name matches (``uvicorn.error``, ``cs.error``,
+        # …) while still matching `` - ERROR - `` / ``[ERROR]`` / ``ERROR:`` /
+        # ``[sync-error]`` (hyphen is not a dot) and the ``Traceback`` /
+        # ``Exception`` continuation lines.
+        pat = re.compile(r"(?<!\.)(\berror\b|\bexception\b|\btraceback\b|\bcritical\b)",
+                         re.IGNORECASE)
         errs = []
         for log in self.logs:
             if pat.search(log):
@@ -2681,7 +2696,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return (0, "") if not m else (1, m.group(1))
 
         errs.sort(key=_ts_key)
-        return {"logs": errs}
+
+        # De-duplicate across sources. The hub's OWN records reach this list
+        # twice: once from ``self.logs`` (the HubLogHandler buffer) and once
+        # from ``/var/log/lm/hub.log`` (the root stderr capture) — same record,
+        # now byte-identical since HubLogHandler adopted the canonical format.
+        # Strip the leading ``[source] `` prefix and drop exact duplicates,
+        # keeping the first (oldest after the ascending sort) so each error
+        # appears once. Spoke/agent relayed logs (``agent_logs``) have no
+        # on-disk counterpart on the hub, so they survive untouched.
+        seen = set()
+        deduped = []
+        for line in errs:
+            key = line.split("] ", 1)[1] if line.startswith("[") else line
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(line)
+        return {"logs": deduped}
 
     async def handle_hub_request(self, spoke_id: str, req: Dict[str, Any]) -> Dict[str, Any]:
         """Dispatch a HUB_REQUEST from an approved agent and return a result dict.
