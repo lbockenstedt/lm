@@ -4983,6 +4983,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Capture the VERSION this process booted with so the update-health check
         # can detect process-vs-disk drift (code updated on disk but not restarted).
         self._startup_version = version
+        # [update-test 2026-07-09] harmless boot marker — greppable proof that an
+        # auto-pull actually restarted the process into new code. Safe to remove.
+        logger.info("[update-test] boot marker A — auto-update restart verification")
 
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
