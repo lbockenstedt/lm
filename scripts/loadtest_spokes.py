@@ -107,11 +107,18 @@ class LoadSpoke(BaseControlPlane):
     _NAMES = ("kbell", "ibennett", "xmendoza", "tstewart", "qwu", "jlee", "amorgan", "dkhan")
 
     def __init__(self, spoke_id, stats, rate, payload_bytes, clients_n=20, vms_n=3,
-                 probe_rate=2.0, **kw):
+                 probe_rate=2.0, offender=False, defiant=False, **kw):
         super().__init__(spoke_id=spoke_id, **kw)
         self.module_type = "simulation"  # cs-like → exercises the telemetry path
         self._stats = stats
         self._rate = max(0.01, float(rate))
+        # Per-spoke profile so the harness can prove OFFENDER-ONLY throttling:
+        #   offender → sends at a high rate (should get throttled).
+        #   defiant  → additionally IGNORES the slow-down signal (should get
+        #              hard-dropped / quarantined if ddos_disconnect is on).
+        # A well-behaved spoke (low rate, honors backpressure) must NOT be touched.
+        self._offender = bool(offender)
+        self._defiant = bool(defiant)
         self._probe_rate = max(0.0, float(probe_rate))
         self._probe_seq = 0               # monotonic per-spoke must-process seq
         self._pad = "x" * max(0, int(payload_bytes))
@@ -215,6 +222,12 @@ class LoadSpoke(BaseControlPlane):
             self._stats["backoff_recv"] += 1
         else:
             self._stats["resume_recv"] += 1
+        # A DEFIANT offender ignores the slow-down entirely (simulates a broken /
+        # hostile spoke) — reset the interval so its send loop keeps blasting.
+        # The hub should then hard-drop it and, with ddos_disconnect on, quarantine
+        # it — while well-behaved spokes it never signalled are untouched.
+        if self._defiant:
+            self._bp_min_interval = 0.0
 
     # ── the load: signed CS_TELEMETRY (coalesce class) + must-process PROBE ───
     def _create_spoke_tasks(self, websocket):
@@ -316,7 +329,8 @@ def _fetch_status(status_url):
         return json.loads(r.read().decode())
 
 
-async def _monitor(status_url, stop_evt, interval, stats, total):
+async def _monitor(status_url, stop_evt, interval, stats, total,
+                   our_ids=None, offender_ids=None):
     peak = {"mps": 0.0, "cpu": 0.0, "mem": 0.0, "backlog": 0, "conns": 0, "lvl": 0}
     last_sent = 0
     last_m = {}
@@ -411,6 +425,31 @@ async def _monitor(status_url, stop_evt, interval, stats, total):
         print(f"[info] telemetry received={tr} processed={tp} "
               f"({100.0 * tp / tr:.0f}% — coalescing expected under load, not loss)")
 
+    # 4. OFFENDER-ONLY: with a mixed fleet, prove the hub throttled/quarantined the
+    #    offenders and left the WELL-BEHAVED spokes untouched (no throttle, no drops).
+    if offender_ids:
+        our_ids = our_ids or set()
+        good_ids = our_ids - offender_ids
+        levels = (bp.get("spoke_levels", {}) or {})          # sid -> level (throttled now)
+        quarantined = set(bp.get("quarantined", []) or [])
+        drops = (last_m.get("rate_limit_drops", {}) or {})
+        def _hit(sid):   # throttled, quarantined, or actively dropped
+            return sid in levels or sid in quarantined or int(drops.get(sid, 0) or 0) > 0
+        off_hit = sorted(s for s in offender_ids if _hit(s))
+        good_hit = sorted(s for s in good_ids if _hit(s))
+        print(f"\n=== offender-only targeting ({len(offender_ids)} offenders / "
+              f"{len(good_ids)} well-behaved) ===")
+        print(f"[{'PASS' if off_hit else 'FAIL'}] offenders throttled/quarantined: "
+              f"{len(off_hit)}/{len(offender_ids)}"
+              + (f" (quarantined {len([s for s in off_hit if s in quarantined])})" if quarantined else ""))
+        if not good_hit:
+            print(f"[PASS] well-behaved spokes UNTOUCHED — 0/{len(good_ids)} throttled or dropped")
+        else:
+            print(f"[FAIL] {len(good_hit)}/{len(good_ids)} WELL-BEHAVED spokes were throttled/dropped "
+                  f"(should be 0): {good_hit[:8]}"
+                  + ("  ← likely PROTECT shedding everyone: lower the load or raise offender rate so "
+                     "the ladder isolates offenders before protect trips" if peak["lvl"] >= 3 else ""))
+
 
 async def main():
     ap = argparse.ArgumentParser(description="Hub load test — N synthetic spokes.")
@@ -426,6 +465,13 @@ async def main():
     ap.add_argument("--vms-per-spoke", type=int, default=3, help="synthetic proxmox VMs per spoke")
     ap.add_argument("--probe-rate", type=float, default=2.0,
                     help="must-process LOADTEST_PROBE msg/s PER spoke (seq-tracked; hub asserts zero loss). 0 disables.")
+    ap.add_argument("--offenders", type=int, default=0,
+                    help="how many spokes are OFFENDERS (high rate). The rest are well-behaved (--rate). "
+                         "Spread evenly across the fleet. Proves offender-ONLY throttling: only these should be throttled.")
+    ap.add_argument("--offender-rate", type=float, default=100.0,
+                    help="telemetry msg/s for offender spokes (should exceed the hub's per-spoke offender mark).")
+    ap.add_argument("--offender-defiant", action="store_true",
+                    help="offenders IGNORE the slow-down signal (simulate a hostile spoke) → hub should hard-drop + quarantine them.")
     ap.add_argument("--psk", default="", help="tenant onboarding PSK (auto-approves the spokes)")
     ap.add_argument("--tenant", default="", help="tenant id hint (with --psk)")
     ap.add_argument("--secret", default="", help="pre-provisioned spoke secret (else zero-touch)")
@@ -468,20 +514,39 @@ async def main():
     # all 4 spoke boxes at once produces UNIQUE spoke ids (colliding ids would
     # mutual-evict on the hub). Purge still matches on the --prefix.
     tag = (args.tag or socket.gethostname().split(".")[0] or "gen").strip()
-    spokes = [
-        LoadSpoke(
-            spoke_id=f"{args.prefix}{tag}-{i:05d}", stats=stats, rate=args.rate,
+    # Pick which indices are offenders — spread evenly across the fleet (not
+    # clustered) so throttling one doesn't just look like "first N".
+    n_off = max(0, min(int(args.offenders), args.count))
+    offender_idx = set()
+    if n_off:
+        stride = args.count / n_off
+        offender_idx = {int(k * stride) for k in range(n_off)}
+    spokes = []
+    offender_ids = set()
+    for i in range(args.count):
+        sid = f"{args.prefix}{tag}-{i:05d}"
+        is_off = i in offender_idx
+        if is_off:
+            offender_ids.add(sid)
+        spokes.append(LoadSpoke(
+            spoke_id=sid, stats=stats,
+            rate=(args.offender_rate if is_off else args.rate),
             payload_bytes=args.payload_bytes, clients_n=args.clients_per_spoke,
-            vms_n=args.vms_per_spoke, probe_rate=args.probe_rate, hub_url=args.hub,
-            secret=(args.secret or None),
+            vms_n=args.vms_per_spoke, probe_rate=args.probe_rate,
+            offender=is_off, defiant=(is_off and args.offender_defiant),
+            hub_url=args.hub, secret=(args.secret or None),
             onboarding_psk=(args.psk or None), tenant_id_hint=(args.tenant or None),
-        )
-        for i in range(args.count)
-    ]
+        ))
 
-    print(f"Load test: {args.count} spokes → {args.hub} @ {args.rate} msg/s each "
-          f"(~{args.count * args.rate:.0f} msg/s aggregate), {args.duration}s, "
-          f"ramp {args.ramp}s. Status: {status_url}")
+    if n_off:
+        print(f"Load test: {args.count} spokes → {args.hub} — {n_off} OFFENDERS @ "
+              f"{args.offender_rate} msg/s{' (DEFIANT)' if args.offender_defiant else ''} + "
+              f"{args.count - n_off} well-behaved @ {args.rate} msg/s. "
+              f"{args.duration}s, ramp {args.ramp}s. Expect: ONLY the {n_off} offenders throttled.")
+    else:
+        print(f"Load test: {args.count} spokes → {args.hub} @ {args.rate} msg/s each "
+              f"(~{args.count * args.rate:.0f} msg/s aggregate), {args.duration}s, "
+              f"ramp {args.ramp}s. Status: {status_url}")
 
     tasks = []
     per = args.ramp / max(1, args.count)
@@ -490,7 +555,8 @@ async def main():
         if per > 0:
             await asyncio.sleep(per)
 
-    mon = asyncio.create_task(_monitor(status_url, stop_evt, args.sample_interval, stats, args.count))
+    mon = asyncio.create_task(_monitor(status_url, stop_evt, args.sample_interval, stats, args.count,
+                                       our_ids={s.spoke_id for s in spokes}, offender_ids=offender_ids))
     await asyncio.sleep(args.duration)
     stop_evt.set()
     for t in tasks:

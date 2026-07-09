@@ -649,6 +649,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # pegs the loop; heartbeats/acks are small and keep flowing. Tunable via
         # global_config["protect"].shed_bytes.
         self._protect_shed_bytes = 2048
+        # Surgical-shed threshold: during protect, shed frames ONLY from spokes
+        # whose TRUE offered rate is >= this (offenders); legit low-rate spokes'
+        # telemetry flows through. Cached for the hot loop; refreshed each tick.
+        self._protect_shed_min_mps = 50.0
         # Hub-process CPU sampler (its own state, independent of the box-wide
         # psutil.cpu_percent() in get_system_metrics). ~100%/core when the loop
         # is pegged — the direct "loop saturated" signal for protect mode.
@@ -2668,8 +2672,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # is only relieved by DISCONNECTING the source — see the protect
                 # source-shed in run_mps_loop / _protect_source_shed.
                 if self._protect_mode:
+                    # SURGICAL shed: drop a large frame ONLY if this spoke is a
+                    # high-offered-rate OFFENDER. Legit low-rate spokes' telemetry
+                    # flows even during protect — the point is to shed the FLOOD,
+                    # not everyone (that's why real modules were dropping traffic).
+                    # _spoke_offered is the TRUE pre-shed per-tick count, so it
+                    # isn't corrupted by the shedding itself.
                     try:
-                        if len(message_json) > self._protect_shed_bytes:
+                        if (len(message_json) > self._protect_shed_bytes
+                                and self._spoke_offered.get(spoke_id, 0) >= self._protect_shed_min_mps):
                             self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
                             continue
                     except Exception:
@@ -2834,12 +2845,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # and-suspenders: even if reordered later, skip the limiter for a
                 # correlation-bearing frame so a reply can never be dropped.
                 if "correlation_id" not in msg_data:
-                    # PROTECT MODE: memory is at the watermark — SHED inbound
-                    # telemetry/logs (non-ack, non-heartbeat) so the in-memory
-                    # caches stop growing and the hub doesn't OOM. Heartbeats
-                    # (handled above) still flow, so liveness is preserved; data
-                    # just goes stale until memory recovers. Survive > fresh.
-                    if self._protect_mode:
+                    # PROTECT MODE: SHED inbound telemetry/logs — but SURGICALLY,
+                    # only from high-offered-rate OFFENDERS. A legit low-rate
+                    # spoke's telemetry is processed even during protect, so real
+                    # modules keep flowing while the flood is shed. Heartbeats
+                    # (handled above) always flow. Survive > fresh, but spare the
+                    # innocent.
+                    if (self._protect_mode
+                            and self._spoke_offered.get(spoke_id, 0) >= self._protect_shed_min_mps):
                         self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
                         continue
                     limiter = self.rate_limiters.get(spoke_id)
@@ -3392,8 +3405,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # Refresh the soft-watermark fraction for the hot message loop
                 # (so it reads an attribute, not a config dict, per frame).
                 try:
-                    self._rl_soft_frac = float((self.state.get_global_config()
-                        .get("backpressure", {}) or {}).get("rl_soft_fraction", 0.8))
+                    _bpc = (self.state.get_global_config().get("backpressure", {}) or {})
+                    self._rl_soft_frac = float(_bpc.get("rl_soft_fraction", 0.8))
+                    self._protect_shed_min_mps = float(_bpc.get("protect_shed_min_mps", 50.0))
                 except Exception:
                     pass
 
@@ -4147,14 +4161,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
     def _rate_limit_params(self) -> tuple:
         """(capacity, fill_rate) for the per-spoke TokenBucket, read fresh from
         ``global_config["rate_limit"]`` so the knob can be tuned for scale /
-        system resources without a code change. Defaults 10 / 5 (burst 10,
-        5 msg/s). Clamped to sane minimums so a bad config can't wedge delivery."""
+        system resources without a code change.
+
+        Defaults 400 / 200 (burst 400, 200 msg/s). This is a FLOOD guard, NOT a
+        normal-operation shaper: it must sit well ABOVE any legitimate spoke's
+        peak (a relay spoke fanning many hosted agents + a reconnect re-flush can
+        legitimately burst to tens of msg/s) so normal traffic is NEVER dropped
+        and NEVER mistaken for an offender. The old 10/5 default was far below a
+        real relay spoke's rate. Aggregate overload (many spokes each UNDER this
+        limit) is the FLEET layer's job (rung 2) + surgical protect shed, NOT
+        this per-spoke bucket. Clamped to sane minimums so a bad config can't
+        wedge delivery."""
         try:
             cfg = (self.state.get_global_config() or {}).get("rate_limit", {}) or {}
-            cap = float(cfg.get("capacity", 10))
-            rate = float(cfg.get("fill_rate", 5))
+            cap = float(cfg.get("capacity", 400))
+            rate = float(cfg.get("fill_rate", 200))
         except Exception:
-            cap, rate = 10.0, 5.0
+            cap, rate = 400.0, 200.0
         return (max(1.0, cap), max(0.1, rate))
 
     async def get_system_metrics(self) -> Dict[str, Any]:
