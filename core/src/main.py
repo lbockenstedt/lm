@@ -1030,6 +1030,41 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception as e:
             logger.warning(f"send_to_spoke_command {command_type} -> {spoke_id} failed: {e}")
 
+    def _online_grace_s(self) -> float:
+        """Grace window (s) for the DISPLAY online/offline status. A module reads
+        offline only after being out of contact THIS long — so a transient loop
+        stall or a brief reconnect never flips the tile. Default 180s; the alert
+        tiers (5 min warn / 30 min error) escalate genuine outages from there."""
+        try:
+            return float((self.state.get_global_config() or {}).get(
+                "display", {}).get("online_grace_s", 180))
+        except Exception:
+            return 180.0
+
+    def is_spoke_in_contact(self, spoke_id: str, grace_s: Optional[float] = None) -> bool:
+        """True if the spoke is connected NOW or was seen within the grace window.
+        This is the DISPLAY notion of 'online' — decoupled from instantaneous WS
+        membership so a few-second stall doesn't drop the tile. Command routing
+        still uses ``active_connections`` directly (must be live-accurate)."""
+        if spoke_id in self.active_connections:
+            return True
+        ts = self.heartbeat.last_seen.get(spoke_id)
+        if not ts:
+            return False
+        g = self._online_grace_s() if grace_s is None else grace_s
+        return (time.time() - ts) <= g
+
+    def spokes_in_contact(self, grace_s: Optional[float] = None) -> list:
+        """Ids considered 'in contact' for display: connected now OR seen within
+        the grace window. The WebUI colours online/offline tiles from this."""
+        g = self._online_grace_s() if grace_s is None else grace_s
+        now = time.time()
+        ids = set(self.active_connections.keys())
+        for sid, ts in list(self.heartbeat.last_seen.items()):
+            if ts and (now - ts) <= g:
+                ids.add(sid)
+        return sorted(ids)
+
     def _evict_spoke(self, spoke_id: str) -> None:
         """Drop ALL per-spoke in-memory state for ``spoke_id``.
 
@@ -2496,10 +2531,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # list can show a cs/simulation spoke's type even while it is
                 # offline (the in-memory spoke_module_types dict is popped on
                 # disconnect). Free-form merge — no migration needed.
+                #
+                # DEFER the disk write: update_module_metadata already marks the
+                # state dirty, and the (offloaded) 60s persistence flush writes
+                # it. A synchronous save_state() HERE did a full-state
+                # encrypt+write on the event loop on EVERY connect — under a
+                # 600-spoke reconnect storm that repeatedly stalled the loop for
+                # seconds (py-spy: save_state → _write_encrypted inside
+                # handle_connection), delaying heartbeats enough to flip modules
+                # offline. Durability to the next flush is fine: a reconnecting
+                # spoke re-registers its type anyway. Only log/event on a genuinely
+                # NEW type so a reconnect storm doesn't spam either.
+                _prev_type = self.state.system_state.get("module_metadata", {}).get(
+                    spoke_id, {}).get("module_type")
                 self.state.update_module_metadata(spoke_id, {"module_type": module_type})
-                self.state.save_state()
-                logger.info(f"Spoke {spoke_id} registered as module type: {module_type}")
-                self.record_spoke_event(spoke_id, "registered", f"module_type={module_type}")
+                if _prev_type != module_type:
+                    logger.info(f"Spoke {spoke_id} registered as module type: {module_type}")
+                    self.record_spoke_event(spoke_id, "registered", f"module_type={module_type}")
 
             # PSK self-provisioning: a spoke that presented the tenant's
             # predefined onboarding PSK (+ a tenant_id_hint) auto-approves and

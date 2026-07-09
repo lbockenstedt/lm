@@ -70,6 +70,11 @@ def register(app, hub, ctx):
         metrics = await hub.get_system_metrics()
         return {
             "active_connections": list(hub.active_connections.keys()),
+            # Display "online" set: connected now OR seen within the grace window.
+            # The WebUI colours tiles from this so a transient loop stall / brief
+            # reconnect doesn't flip a module offline — only genuine long absence
+            # does. active_connections stays the live WS truth for command routing.
+            "in_contact": hub.spokes_in_contact(),
             "spoke_module_types": dict(hub.spoke_module_types),
             "heartbeats": {sid: str(s) for sid, s in hub.heartbeat.get_all_statuses().items()},
             # Out-of-contact alerts (SpokeAlertMixin) — drives the WebUI header

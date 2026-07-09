@@ -419,6 +419,10 @@ def register(app, hub, ctx):
                 "spoke_id": sid,
                 "display_name": hub.state.get_module_name(sid),
                 "authenticated": sid in hub.active_connections,
+                # Grace-based display status: connected now OR seen within the
+                # grace window. The WebUI header dots use this so a transient
+                # stall / brief reconnect doesn't flip a module offline.
+                "in_contact": hub.is_spoke_in_contact(sid),
                 "approved": hub.approved_modules.get(sid, False),
                 "heartbeat_status": hub.heartbeat.get_status(sid),
                 "heartbeat_age_s": heartbeat_age_s,

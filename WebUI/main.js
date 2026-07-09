@@ -1904,7 +1904,11 @@ async function updateStatus() {
 
         const allSpokes = approvalsData.spokes || [];
         const approvedSpokes = allSpokes.filter(s => s.approved);
-        const connections = statusData.active_connections || [];
+        // Online/offline tiles use the grace-based "in contact" set (connected
+        // now OR seen within the grace window) so a transient hub loop-stall or a
+        // brief reconnect doesn't flip a module offline — only genuine long
+        // absence does. Falls back to active_connections on an older hub.
+        const connections = statusData.in_contact || statusData.active_connections || [];
 
         _updateMetrics(statusData);
         _applyHubHealth(diagData);
@@ -2083,7 +2087,9 @@ function _applyHubHealth(diagData) {
     window.spokeHealth = {};
     (diagData.spokes || []).forEach(s => {
         window.spokeHealth[s.spoke_id] = {
-            online: s.authenticated,
+            // Grace-based: in contact now or recently (falls back to the live WS
+            // flag on an older hub) so a transient stall doesn't drop the dot.
+            online: (s.in_contact !== undefined ? s.in_contact : s.authenticated),
             error: !!s.last_error
         };
     });
