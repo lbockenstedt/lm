@@ -166,11 +166,27 @@ class BaseControlPlane:
         self.hostname = socket.gethostname()
         self.install_uuid = self._ensure_install_uuid()
         # TLS trust for wss:// connects. Verification is OFF by default (the hub
-        # presents a self-signed cert) — encryption without authentication, which
-        # is the lab default. Set LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT=<path> to
-        # verify the hub cert against a shipped CA. See _client_ssl_ctx.
+        # presents a self-signed cert and cert deployment is still in progress) —
+        # encryption without authentication, which is the lab default for now.
+        # Flip to verify=ON once the hub cert is deployed:
+        #   - public CA (e.g. Let's Encrypt on the Azure endpoint): just set
+        #     LM_HUB_TLS_VERIFY=1 (uses the system trust store).
+        #   - self-signed hub / private CA: set LM_HUB_TLS_VERIFY=1 +
+        #     LM_HUB_CA_CERT=<path> (or LM_HUB_CA_BUNDLE=<path>) to pin the CA.
+        # See _client_ssl_ctx. Never silently downgrades: verify=ON with a missing
+        # CA path fails fast instead of falling back to unverified.
         self._tls_verify = os.environ.get("LM_HUB_TLS_VERIFY", "0").strip() in ("1", "true", "yes")
-        self._tls_ca_cert = os.environ.get("LM_HUB_CA_CERT", "").strip()
+        self._tls_ca_cert = (os.environ.get("LM_HUB_CA_CERT", "").strip()
+                             or os.environ.get("LM_HUB_CA_BUNDLE", "").strip())
+        # Surface the TLS trust config once at startup so the spoke log states
+        # plainly whether the hub cert is authenticated. The per-connect INFO line
+        # in _connect_and_serve repeats this each reconnect.
+        if self._tls_verify:
+            _cfg = f"verify=ON ca={'<system store>' if not self._tls_ca_cert else self._tls_ca_cert}"
+            logger.info("Spoke TLS config: %s (hub cert will be authenticated)", _cfg)
+        else:
+            logger.info("Spoke TLS config: verify=OFF (hub cert NOT authenticated — "
+                        "set LM_HUB_TLS_VERIFY=1 to verify once the hub cert is deployed)")
 
 
     # ------------------------------------------------------------------
@@ -832,20 +848,47 @@ class BaseControlPlane:
     def _client_ssl_ctx(self):
         """Build an SSL context for a ``wss://`` connect to the hub.
 
-        Default (lab): ``ssl._create_unverified_context()`` — traffic is
-        encrypted but the self-signed hub cert is NOT authenticated (MITM-able
-        on-path). Set ``LM_HUB_TLS_VERIFY=1`` and ``LM_HUB_CA_CERT=<path>`` to
-        verify the hub cert against a shipped CA. Returns None only on a
-        build failure (the caller then connects without TLS and fails fast,
-        surfacing the misconfiguration instead of hanging)."""
+        Default (lab, cert deployment still in progress): verify OFF —
+        ``ssl._create_unverified_context()``. Traffic is encrypted but the
+        self-signed hub cert is NOT authenticated (MITM-able on-path). This is
+        the explicit lab default for now; flip to verify=ON once the hub cert
+        is deployed.
+
+        Verify ON (``LM_HUB_TLS_VERIFY=1``):
+          - ``LM_HUB_CA_CERT`` / ``LM_HUB_CA_BUNDLE`` set + readable →
+            ``ssl.create_default_context(cafile=…)`` pins the hub CA (self-signed
+            / private-CA case).
+          - no CA path → ``ssl.create_default_context()`` trusts the system store
+            (public-CA / Let's Encrypt case).
+          - CA path set but MISSING → log ERROR + return None (fail fast). Never
+            silently downgrade an operator who asked for verification to an
+            unverified context — that's the footgun: they'd believe the hub cert
+            is authenticated when it isn't.
+
+        Returns None only on a build failure / misconfiguration (the caller then
+        connects without TLS and fails fast, surfacing the problem instead of
+        hanging or silently degrading security)."""
         try:
-            if self._tls_verify and self._tls_ca_cert:
-                ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
-                logger.info("wss: verifying hub cert against CA %s", self._tls_ca_cert)
+            if not self._tls_verify:
+                ctx = ssl._create_unverified_context()
+                logger.debug("wss: using unverified context (self-signed hub cert; "
+                             "set LM_HUB_TLS_VERIFY=1 to verify)")
                 return ctx
-            ctx = ssl._create_unverified_context()
-            logger.debug("wss: using unverified context (self-signed hub cert; "
-                         "set LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT to verify)")
+            # Verify ON: prefer a pinned CA, else the system store.
+            if self._tls_ca_cert:
+                if not os.path.isfile(self._tls_ca_cert):
+                    logger.error("wss: LM_HUB_TLS_VERIFY=1 but CA path %s does not "
+                                 "exist — refusing to silently downgrade to "
+                                 "unverified. Fix the path or unset LM_HUB_TLS_VERIFY.",
+                                 self._tls_ca_cert)
+                    return None
+                ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
+                logger.info("wss: verifying hub cert against pinned CA %s",
+                            self._tls_ca_cert)
+                return ctx
+            ctx = ssl.create_default_context()  # system trust store (public CA)
+            logger.info("wss: verifying hub cert against system trust store "
+                        "(LM_HUB_TLS_VERIFY=1, no LM_HUB_CA_CERT)")
             return ctx
         except Exception as e:
             logger.error("Could not build wss SSL context: %s — connecting without TLS", e)
@@ -948,21 +991,34 @@ class BaseControlPlane:
         # both directions sidesteps the whole class of failures at the cost of
         # a little bandwidth.
         # TLS: a wss:// hub_url gets an SSL context (verify-off by default for
-        # the self-signed hub cert; LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT verifies).
-        # ws:// stays plaintext (loopback / legacy). See _client_ssl_ctx.
+        # the self-signed hub cert; LM_HUB_TLS_VERIFY=1 verifies — pinned CA via
+        # LM_HUB_CA_CERT, else the system trust store). ws:// stays plaintext
+        # (loopback / legacy). See _client_ssl_ctx.
         ssl_ctx = self._client_ssl_ctx() if self.hub_url.lower().startswith("wss://") else None
         # Surface the connect attempt + TLS mode at INFO so it reaches the hub
-        # via the log relay (the unverified-context line in _client_ssl_ctx is
-        # DEBUG). This pairs with the "Connection lost (...)" warning below to
-        # form a troubleshooting trail: "Connecting wss://hub:443 [TLS
+        # via the log relay. This pairs with the "Connection lost (...)" warning
+        # below to form a troubleshooting trail: "Connecting wss://hub:443 [TLS
         # unverified]" then "Connection lost ([SSL: CERTIFICATE_VERIFY_FAILED])".
+        # The unverified case is elevated to WARNING for a NON-LOOPBACK hub — a
+        # remote/internet hub dialed without cert verification is the actual
+        # MITM exposure and must not be silent. Loopback/legacy ws:// stays INFO.
+        _is_loopback = ("127.0.0.1" in self.hub_url or "localhost" in self.hub_url
+                        or "ws://" in self.hub_url.lower())
         if ssl_ctx is None:
             _tls_mode = "plaintext (loopback/legacy)"
         elif self._tls_verify and self._tls_ca_cert:
             _tls_mode = f"TLS verified (CA={self._tls_ca_cert})"
+        elif self._tls_verify:
+            _tls_mode = "TLS verified (system trust store)"
         else:
             _tls_mode = "TLS unverified (self-signed hub cert)"
-        logger.info("Connecting to hub %s [%s]", self.hub_url, _tls_mode)
+        if "unverified" in _tls_mode and not _is_loopback:
+            logger.warning("Connecting to hub %s [%s] — hub cert NOT authenticated; "
+                           "an on-path MITM can read/forge the wire. Set "
+                           "LM_HUB_TLS_VERIFY=1 once the hub cert is deployed.",
+                           self.hub_url, _tls_mode)
+        else:
+            logger.info("Connecting to hub %s [%s]", self.hub_url, _tls_mode)
         # WebSocket keepalive: the websockets library defaults
         # (ping_interval=20s, ping_timeout=20s) tear down the connection on any
         # event-loop stall >20s — and the hub's uvicorn default pong timeout is
