@@ -5847,8 +5847,13 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                     name: escapeHtml(name), sid,
                     identityBanner: _identityChangeBanner(ic, ackClick),
                     metaLines: [
-                        hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${escapeHtml(hostname)}</div>` : '',
-                        `<div class="text-xs text-slate-500 pl-6">tenant: ${tenantId ? `<span class="font-mono text-slate-700">${escapeHtml(tenantId)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</div>`,
+                        // host + tenant + Online/Offline status on ONE flex-wrap
+                        // line (was three stacked divs) to save vertical space.
+                        `<div class="flex items-center gap-x-3 gap-y-0.5 flex-wrap text-xs pl-6">`
+                          + (hostname ? `<span class="font-mono text-slate-500">host: ${escapeHtml(hostname)}</span>` : '')
+                          + `<span class="text-slate-500">tenant: ${tenantId ? `<span class="font-mono text-slate-700">${escapeHtml(tenantId)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</span>`
+                          + (extras && extras.status ? `<span class="font-bold ${extras.status.tone}">${escapeHtml(extras.status.text)}</span>` : '')
+                          + `</div>`,
                         ...(extras ? extras.metaLines : []),
                     ],
                     badges: [
@@ -5989,8 +5994,14 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 name: nameWithCs, sid: aid,
                 identityBanner: _identityChangeBanner(ic, ackClick),
                 metaLines: [
-                    a.hostname ? `<div class="text-xs font-mono text-slate-500 pl-6">host: ${escapeHtml(a.hostname)}</div>` : '',
-                    `<div class="text-xs text-slate-500 pl-6">tenant: ${rowTenant ? `<span class="font-mono text-slate-700">${escapeHtml(rowTenant)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</div>`,
+                    // host + tenant + Online/Offline status on ONE flex-wrap line
+                    // (was three stacked divs) to save vertical space. rolesLine
+                    // stays its own line below it.
+                    `<div class="flex items-center gap-x-3 gap-y-0.5 flex-wrap text-xs pl-6">`
+                      + (a.hostname ? `<span class="font-mono text-slate-500">host: ${escapeHtml(a.hostname)}</span>` : '')
+                      + `<span class="text-slate-500">tenant: ${rowTenant ? `<span class="font-mono text-slate-700">${escapeHtml(rowTenant)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</span>`
+                      + (extras && extras.status ? `<span class="font-bold ${extras.status.tone}">${escapeHtml(extras.status.text)}</span>` : '')
+                      + `</div>`,
                     rolesLine,
                     ...(extras ? extras.metaLines : []),
                 ],
@@ -7279,6 +7290,10 @@ function _diagTelemetryExtras(s, fns) {
     const eSid = s.spoke_id.replace(/'/g, "\\'");
     return {
         dot,
+        // Raw {text, tone} so the caller can render the Online/Offline status
+        // INLINE on the host/tenant row (one line) instead of its own stacked
+        // div — saves vertical space on the Spokes & Agents tiles.
+        status,
         badges: [
             `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${hbBadgeTone}" title="Time since last inbound heartbeat frame (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s/never)">${hbStatus || '—'} · ${hbAge}</span>`,
             `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600 font-mono">${escapeHtml(s.version || 'unknown')}</span>`,
@@ -7287,7 +7302,7 @@ function _diagTelemetryExtras(s, fns) {
             alertBadge,
         ],
         metaLines: [
-            `<div class="text-xs ${status.tone} pl-6">${status.text}</div>`,
+            // status text moved INLINE to the caller's host/tenant row.
             s.last_error ? `<div class="text-[10px] text-red-500 font-mono pl-6 break-all">${escapeHtml(s.last_error)}</div>` : '',
         ],
         actions: [
