@@ -1610,6 +1610,15 @@ class BaseControlPlane:
 
     async def handle_system_command(self, cmd_type: str, data: Dict[str, Any]) -> Any:
         """Handles commands that affect the entire spoke system rather than a specific module."""
+        # Hub liveness probe: _install_active_connection pings an existing
+        # same-key connection to tell a half-open zombie (no reply) from a
+        # live-but-paused spoke (replies) before deciding to evict. Echo the
+        # nonce in the COMMAND_RESULT so the hub's inbound dispatch resolves the
+        # exact ping waiter. Cheap + non-mutating, so it runs even under load
+        # (a spoke too busy to reply within the hub's 2s probe window is treated
+        # as a zombie — the correct call, since it isn't making progress).
+        if cmd_type == "HUB_PING":
+            return {"status": "SUCCESS", "nonce": data.get("nonce")}
         # The hub's Agents tile / cs-bridge fan GET_AGENTS out to spokes. Answer it
         # HERE for every spoke so it's never routed to a module — a non-agent
         # module (nw/netbox/dns/dhcp/ldap/...) or a role sub-spoke would otherwise

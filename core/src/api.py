@@ -145,6 +145,17 @@ class StarletteWSAdapter:
     def __init__(self, websocket: WebSocket):
         self._ws = websocket
         self._send_lock = asyncio.Lock()
+        # App-layer liveness probe wiring (see _install_active_connection's
+        # half-open zombie check). uvicorn owns WS-layer keepalive pings and does
+        # NOT surface pong waiters to the application, so the hub probes liveness
+        # with a signed HUB_PING/HUB_PONG round-trip at the application layer.
+        # ``_probe_sender`` is armed by the hub when this connection is installed
+        # (it knows the spoke_id + signing key); ``ping()`` sends a probe and
+        # returns a future that resolves when the matching HUB_PONG arrives (or
+        # is cancelled on close). Mirrors the ``websockets``-lib ``ping()``
+        # contract the test fakes already model: ``pong_waiter = await ws.ping()``.
+        self._probe_sender = None  # async (nonce) -> None, set by hub._arm_liveness_probe
+        self._pending_pongs: Dict[str, asyncio.Future] = {}
 
     @property
     def remote_address(self):
@@ -180,11 +191,53 @@ class StarletteWSAdapter:
             await self._ws.send_text(data)
 
     async def close(self, code: int = 1000, reason: str = "") -> None:
+        # A close mid-probe cancels outstanding ping waiters so a liveness check
+        # blocked on this socket resolves to "dead" (CancelledError → the probe's
+        # except → alive=False) instead of hanging until its 2s timeout.
+        for fut in list(self._pending_pongs.values()):
+            if not fut.done():
+                fut.cancel()
+        self._pending_pongs.clear()
         try:
             async with self._send_lock:
                 await self._ws.close(code=code, reason=reason)
         except Exception:
             pass
+
+    def set_probe_sender(self, sender) -> None:
+        """Arm the app-layer liveness probe. ``sender`` is an awaitable
+        ``(nonce) -> None`` that signs + sends a HUB_PING to this spoke; set by
+        ``LabManagerHub._arm_liveness_probe`` once the connection is installed
+        and the spoke's signing key is known. Without it ``ping()`` raises
+        (treated as dead) — e.g. a pending/unauthenticated connection."""
+        self._probe_sender = sender
+
+    async def ping(self):
+        """Send a signed HUB_PING and return a pong-waiter future (the
+        ``websockets``-lib ``ping()`` contract): the caller awaits the future
+        (typically with ``asyncio.wait_for``) and it resolves when the matching
+        HUB_PONG arrives, is cancelled on close, or raises if the probe could
+        not be sent. Used by ``_install_active_connection`` to distinguish a
+        half-open zombie (no pong) from a live-but-paused spoke (pongs)."""
+        if self._probe_sender is None:
+            # No signing context (pending/unauthenticated) → not probeable;
+            # treat as dead so the caller falls through to evict/zombie handling.
+            raise ConnectionError("liveness probe unavailable (no probe sender)")
+        nonce = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        # Send BEFORE registering: a reply can't predate a successful send, and
+        # a send failure (socket already gone) should raise, not strand a future.
+        await self._probe_sender(nonce)
+        self._pending_pongs[nonce] = fut
+        return fut
+
+    def resolve_pong(self, nonce: str) -> None:
+        """Resolve the ping waiter for ``nonce`` (the hub's inbound dispatch
+        calls this when a HUB_PONG / COMMAND_RESULT carrying the ping's
+        message_id arrives). No-op if unknown/already resolved (late/dup pong)."""
+        fut = self._pending_pongs.pop(nonce, None)
+        if fut is not None and not fut.done():
+            fut.set_result(None)
 
     def __aiter__(self):
         return self

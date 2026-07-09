@@ -100,6 +100,12 @@ class _ConnHub:
     def record_spoke_event(self, spoke_id, event_type, detail=""):
         self.events.append((spoke_id, event_type, detail))
 
+    def _arm_liveness_probe(self, spoke_id, websocket):
+        # The real hub arms an app-layer HUB_PING sender on each installed
+        # connection; the unit fake's _FakeWS defines its own ping() and needs
+        # no probe wiring, so this is a no-op here.
+        return None
+
 
 def _install(hub, spoke_id, ws, key_id):
     return main.LabManagerHub._install_active_connection(hub, spoke_id, ws, key_id)

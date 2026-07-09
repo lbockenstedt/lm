@@ -587,6 +587,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # { msg_id: expire_ts }
         self._recent_request_timeouts: Dict[str, float] = {}
         self._RECENT_TIMEOUT_TTL = 60.0
+        # Outstanding app-layer liveness probes (HUB_PING message_ids awaiting a
+        # HUB_PONG). The inbound dispatch resolves the sending adapter's ping
+        # waiter when a reply carrying one of these ids arrives, BEFORE the
+        # mailbox/unknown-ack branch so a probe reply isn't mislogged as a stray
+        # ack. See StarletteWSAdapter.ping / _install_active_connection.
+        self._pending_liveness_nonces: set = set()
         # VNC console sessions (agent-terminates-WSS): session_id →
         # {queue, expires, ws_token, spoke_id, tenant_id, vmid, node, unique_id}.
         # The browser WS reads Proxmox→browser frames off ``queue`` (bytes) or
@@ -891,6 +897,47 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self.message_count += 1
         else:
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
+
+    def _arm_liveness_probe(self, spoke_id: str, websocket) -> None:
+        """Arm the app-layer liveness probe on a freshly installed connection.
+
+        ``StarletteWSAdapter.ping()`` needs a signing context (the spoke's
+        session key) to send a HUB_PING; the adapter itself is transport-only
+        and knows nothing of keys. The hub attaches this sender once the
+        connection is active so a later ``_install_active_connection`` probe of
+        this socket can ping it. Best-effort: a non-adapter websocket (the test
+        fakes define their own ``ping()``) is left untouched.
+        """
+        if hasattr(websocket, "set_probe_sender"):
+            async def _sender(nonce):
+                await self._send_liveness_ping(spoke_id, nonce)
+            try:
+                websocket.set_probe_sender(_sender)
+            except Exception:  # noqa: BLE001 — never break install over probe wiring
+                logger.debug("could not arm liveness probe for %s", spoke_id)
+
+    async def _send_liveness_ping(self, spoke_id: str, nonce: str) -> None:
+        """Send a signed HUB_PING to ``spoke_id``; the spoke's
+        ``handle_system_command`` echoes the nonce in a COMMAND_RESULT whose
+        ``correlation_id`` is this ping's ``message_id`` (= nonce), and the
+        inbound dispatch resolves the adapter's ping waiter via
+        ``resolve_pong(nonce)``. Raises if the spoke is not connected so the
+        caller's probe treats it as dead."""
+        msg = Message(
+            header=MessageHeader(
+                message_id=nonce,
+                timestamp=round(time.time(), 6),
+                sender_id="hub",
+                destination_id=spoke_id,
+            ),
+            payload=MessagePayload(type="HUB_PING", data={"nonce": nonce}),
+        )
+        self._pending_liveness_nonces.add(nonce)
+        try:
+            await self.send_to_spoke(msg)
+        except Exception:
+            self._pending_liveness_nonces.discard(nonce)
+            raise
 
     async def send_to_agent(self, spoke_id: str, agent_id: str, command_type: str, data: Dict[str, Any]):
         """
@@ -2368,6 +2415,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             )
             self.active_connections[spoke_id] = websocket
             self.active_connection_key_ids[spoke_id] = key_id
+            self._arm_liveness_probe(spoke_id, websocket)
             try:
                 await existing.close(1008, "Replaced by newer connection")
             except Exception:
@@ -2375,6 +2423,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return True
         self.active_connections[spoke_id] = websocket
         self.active_connection_key_ids[spoke_id] = key_id
+        self._arm_liveness_probe(spoke_id, websocket)
         return True
 
     async def handle_connection(self, websocket):
@@ -2773,6 +2822,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # Process Acknowledgement
                 if "correlation_id" in msg_data:
                     corr_id = msg_data["correlation_id"]
+                    # App-layer liveness probe reply (HUB_PING → COMMAND_RESULT
+                    # whose correlation_id is the ping's message_id). Resolve the
+                    # sending adapter's ping waiter BEFORE the mailbox/unknown-ack
+                    # routing so a probe reply isn't mislogged as a stray ack.
+                    # The spoke that REPLIED is the one whose socket holds the
+                    # waiter (it echoed the nonce we sent it on that socket).
+                    if corr_id in self._pending_liveness_nonces:
+                        self._pending_liveness_nonces.discard(corr_id)
+                        adapter = self.active_connections.get(spoke_id)
+                        if adapter is not None and hasattr(adapter, "resolve_pong"):
+                            adapter.resolve_pong(corr_id)
+                        self.message_count += 1
+                        continue
                     # A reply's correlation_id is the hub's original message_id.
                     # Two send paths share the id space: ``mailbox.push`` (tracked
                     # in ``mailbox.pending_ack``) and ``request_response`` (tracked
