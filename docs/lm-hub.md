@@ -29,7 +29,7 @@ It owns the state that ties the lab together — which spokes/agents exist and w
 |---|---|---|
 | `LM_TLS_CERT` / `LM_TLS_KEY` | Hub TLS cert/key (enables wss) | — |
 | `LM_TLS_PORT` | Unified listener port | 443 |
-| `LM_PXMX_AGENT_PORT` | pxmx agent-listener port advertised in mDNS | 8443 |
+| `LM_PXMX_AGENT_PORT` | pxmx spoke's own agent-listener port. **443 (standalone DEFAULT)** — the spoke serves `wss://0.0.0.0:443` so a remote agent dials `wss://<spoke>:443/ws/agent` directly. `8443` only with `--loopback` (co-located all-in-one; the hub `/ws/agent` byte-proxy dials the loopback listener). mDNS advertises the **external** dial port `443`. | 443 |
 | `LM_HUB_ADVERTISE_TLS` | Force mDNS `tls_port` TXT even with no cert (reverse-proxy) | — |
 | `LM_HUB_TLS_VERIFY` / `LM_HUB_CA_CERT` | Co-located spoke/agent cert verification (set by `--tls-verify`) | off |
 | `LM_FERNET_KEY` | Fernet at-rest key (REQUIRED, fail-closed) | — |

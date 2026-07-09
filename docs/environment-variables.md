@@ -117,7 +117,7 @@ Consolidated reference for every environment variable read across the LM system.
 | Var | Purpose | Default | Read by |
 |---|---|---|---|
 | `SPOKE_ID`, `SPOKE_SECRET`, `HUB_SECRET`, `HUB_WS` | Spoke identity | — | `.env.template` |
-| `KEA_URL` | Kea CA URL | `http://localhost:8000` | `dhcp_manager.py` |
+| `KEA_URL` | Kea CA URL | `http://localhost:8001` (deliberately not 8000, to avoid colliding with the hub) | `dhcp_manager.py` |
 
 ## dns
 

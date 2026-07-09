@@ -16,7 +16,7 @@ It is not an IPAM/NetBox discovery source — it doesn't push devices, IPs, or h
 
 ## Entrypoints
 
-`python3 -m src.main` (`LdapControlPlane`); spoke `LdapSpoke(BaseSpoke)`. systemd `lm-ldap.service` (`After=network.target slapd.service`). Installer `install_ldap.sh` (pre-seeds slapd debconf `slapd/domain string lm.local`, backend MDB, installs `slapd ldap-utils python3-pip python3-venv git curl jq libldap2-dev libsasl2-dev`, loads `base_structure.ldif` People/Groups OUs, `.env`, unit).
+`python3 -m src.main` (`LdapControlPlane`); spoke `LdapSpoke(BaseSpoke)`. systemd `lm-ldap.service` (`After=network.target slapd.service`). Installer `install_ldap.sh` (pre-seeds slapd debconf `slapd/domain string lm.local`, backend MDB, installs `slapd ldap-utils python3-pip python3-venv git curl jq libldap2-dev libsasl2-dev`, `.env`, unit). `base_structure.ldif` is a **reference template** (People/Groups OUs + an example admin user) — it is **not** auto-applied by the installer; load it manually with `ldapadd -Y EXTERNAL -H ldapi:/// -f base_structure.ldif` (adjust the `dc=…` suffix to your real base DN first).
 
 > **Primarily a role now.** LDAP runs mainly as the **`ldap`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-ldap` (module_type `directory`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/ldap.git` + deps). The dedicated `lm-ldap.service` / `install_ldap.sh` `ldap-spoke-1` path is the **legacy/standalone** alternative. Connection config (`LDAP_SERVER_URL`/admin DN/PW/base DN) comes from the hub push (WebUI), not a per-module `.env`.
 
@@ -34,11 +34,11 @@ Talks to the LDAP server via `python-ldap` (`ldap.initialize` + `simple_bind_s`)
 
 ## Key commands / handlers (`ldap_spoke.handle_command`)
 
-`GET_VERSION`, `UPDATE_CONFIG` (re-init `LdapManager`), `LIST_OUS`, `CREATE_OU`, `UPDATE_OU` (modrdn rename), `LIST_USERS`, `CREATE_USER` (`inetOrgPerson`; `secrets.token_urlsafe(16)` random password if none, returned), `UPDATE_USER` (modify cn/sn/givenName/mail + optional uid rename), `LIST_GROUPS` (`groupOfNames` or `posixGroup`), `CREATE_GROUP` (`groupOfNames` requires ≥1 member → seeded with base DN), `UPDATE_GROUP` (cn modrdn), `ADD_USER_TO_GROUP`, `REMOVE_USER_FROM_GROUP`, `SET_PASSWORD` (`passwd_s` with `modify_s` userPassword fallback), `DELETE_ENTITY`, `SEARCH_USERS` (filter on uid/cn/mail/sn/givenName/dNSHostName, escapes `\*()`, tags `source="ldap"`, type `user`/`computer`).
+`GET_VERSION`, `UPDATE_CONFIG` (re-init `LdapManager`), `INSTALL_CERT` (hub-brokered Let's Encrypt cert install — writes leaf/key/CA under `/etc/ldap/tls`, points slapd `cn=config` `olcTLSCertificateFile`/`olcTLSCertificateKeyFile`/`olcTLSCACertificateFile` at them via `ldapmodify -Y EXTERNAL -H ldapi:///`, restarts `slapd`; root only), `LIST_OUS`, `CREATE_OU`, `UPDATE_OU` (modrdn rename), `LIST_USERS`, `CREATE_USER` (`inetOrgPerson`; `secrets.token_urlsafe(16)` random password if none, returned), `UPDATE_USER` (modify cn/sn/givenName/mail + optional uid rename), `LIST_GROUPS` (`groupOfNames` or `posixGroup`), `CREATE_GROUP` (`groupOfNames` requires ≥1 member → seeded with base DN), `UPDATE_GROUP` (cn modrdn), `ADD_USER_TO_GROUP`, `REMOVE_USER_FROM_GROUP`, `SET_PASSWORD` (`passwd_s` with `modify_s` userPassword fallback), `DELETE_ENTITY`, `SEARCH_USERS` (filter on uid/cn/mail/sn/givenName/dNSHostName, escapes `\*()`, tags `source="ldap"`, type `user`/`computer`).
 
 ## Key files
 
-`src/main.py`, `src/ldap_spoke.py`, `src/ldap_manager.py` (~260 lines, whole `LdapManager`), `install_ldap.sh`, `base_structure.ldif`, `README.md`, `.env.template`, `requirements.txt`, `VERSION`.
+`src/main.py`, `src/ldap_spoke.py`, `src/ldap_manager.py` (~315 lines, whole `LdapManager`), `install_ldap.sh`, `base_structure.ldif`, `README.md`, `.env.template`, `requirements.txt`, `VERSION`.
 
 ## Notable behaviors & gotchas
 

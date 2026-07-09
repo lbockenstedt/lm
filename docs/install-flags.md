@@ -54,12 +54,12 @@ Roles persist in `.env` `LOADED_ROLES` (durable across self-update restarts); on
 ## le
 
 ### `install_le.sh`
-`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--all-prereqs` (no-op). Default `SPOKE_ID=le-<hostname>`, `HUB_URL=wss://localhost:443/ws/spoke`. **No** `--tls-verify`/`--tls-ca-cert` (not wired).
+`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--all-prereqs` (no-op). Default `SPOKE_ID=le-<hostname>`, `HUB_URL=auto` (mDNS/DNS auto-discovery — same as every other LM spoke; pass `--hub <url>` to pin). **No** `--tls-verify`/`--tls-ca-cert` (not wired).
 
 ## netbox
 
 ### `install.sh`
-`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--netbox-url`, `--netbox-token`, `--db-pass`, `--superuser`, `--superpass`, `--supermail`, `--netbox-version`, `--spoke-only` (skip full app), `--all-prereqs` (no-op), `--admin-token` (deprecated). Installs NetBox v4.2+, provisions custom fields, injects `CUSTOM_VALIDATORS`, registers the API token with the hub.
+`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`, `--netbox-url`, `--netbox-token`, `--db-pass`, `--superuser`, `--superpass`, `--supermail`, `--netbox-version`, `--spoke-only` (skip full app — wire up the LM spoke only), `--infra-only` (inverse of `--spoke-only`: install the NetBox *application* but SKIP the LM spoke unit — used by the generic agent's `netbox-server` deploy role; **mutually exclusive** with `--spoke-only`), `--all-prereqs` (no-op), `--admin-token` (deprecated). Installs NetBox v4.2+, provisions custom fields, injects `CUSTOM_VALIDATORS`, registers the API token with the hub.
 
 ## opnsense
 

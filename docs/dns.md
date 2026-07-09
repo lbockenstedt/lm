@@ -32,7 +32,7 @@ None (no installer present).
 
 ## Key commands / handlers (`dns_spoke.handle_command`)
 
-`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DNS_STATUS`, `DNS_LIST` (parses `list_local_data` lines `<name> <ttl> IN <type> <value>`), `DNS_ADD` (`local_data`), `DNS_DELETE` (`local_data_remove`), `DNS_UPDATE` (delete-then-add, non-atomic), `DNS_SYNC` (`sync_records` — only-add-missing against existing names, added/skipped counts), `DNS_STATS` (`get_stats` via `unbound-control stats_noreset` — total queries, cache hit/miss + ratio, recursion latency, uptime, per-type breakdown; relayed by `GET /api/dns/stats`), `DNS_FORWARDERS` (`list_forwarders` via `unbound-control list_forwards` — per-zone upstream servers; relayed by `GET /api/dns/forwarders`).
+`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DNS_STATUS`, `DNS_LIST` (regex-parses `local-data:`/`local-data-ptr:` directives out of the managed conf.d file — `<name>. <ttl> IN <type> <value>`; memoized on the conf file's mtime — NOT `unbound-control list_local_data`), `DNS_ADD` (append to the parsed record list + full conf rewrite + `unbound-control reload`), `DNS_DELETE` (filter out the matching record + full conf rewrite + reload), `DNS_UPDATE` (delete-then-add, non-atomic), `DNS_SYNC` (`sync_records` — only-add-missing against existing names, added/skipped counts), `DNS_STATS` (`get_stats` via `unbound-control stats_noreset` — total queries, cache hit/miss + ratio, recursion latency, uptime, per-type breakdown; relayed by `GET /api/dns/stats`), `DNS_FORWARDERS` (`list_forwarders` via `unbound-control list_forwards` — per-zone upstream servers; relayed by `GET /api/dns/forwarders`).
 
 ## NetBox auto-sync (source of truth)
 
