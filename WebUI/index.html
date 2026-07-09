@@ -354,6 +354,13 @@
                     <span class="text-xs font-bold text-[#01A982] uppercase tracking-widest">First Run Setup</span>
                 </div>
                 <div>
+                    <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Setup Token <span class="font-normal normal-case text-slate-500">(from install log — leave blank if not set)</span></label>
+                    <input id="setup-token" type="password" autocomplete="off"
+                        class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-[#01A982] focus:border-transparent"
+                        placeholder="X-Setup-Token"
+                        onkeydown="if(event.key==='Enter')document.getElementById('setup-username').focus()">
+                </div>
+                <div>
                     <label class="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Admin Username</label>
                     <input id="setup-username" type="text" autocomplete="username"
                         class="w-full bg-slate-800 border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-500 outline-none focus:ring-2 focus:ring-[#01A982] focus:border-transparent"

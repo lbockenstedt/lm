@@ -1,6 +1,6 @@
 """LDAP directory (OU/user/group) routes."""
 from api import (
-    HTTPException, Request, logger,
+    HTTPException, Request, _invalidate_user_sessions, logger,
 )
 
 
@@ -182,6 +182,13 @@ def register(app, hub, ctx):
         try:
             data = await request.json()
             result = await hub.request_response(spoke_id, "SET_PASSWORD", data)
+            # The directory password changed → any hub session minted for this
+            # directory user must be revoked so the old credential can't keep
+            # authorizing API calls until its TTL. Best-effort: the spoke already
+            # accepted the reset; a miss here only means a stale cookie lingers.
+            uid = data.get("username") or data.get("user_id") or data.get("uid")
+            if uid:
+                _invalidate_user_sessions(hub, uid)
             return result
         except Exception as e:
             logger.exception("set_ldap_user_password failed")

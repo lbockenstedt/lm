@@ -1,7 +1,7 @@
 """Setup: updates, modules, tenants, users routes."""
 from api import (
-    HTTPException, Request, _hash_password, _hub_msg, _unwrap_spoke, get_tenant_scoping,
-    logger, time,
+    HTTPException, Request, _hash_password, _hub_msg, _invalidate_user_sessions,
+    _unwrap_spoke, get_tenant_scoping, logger, time,
 )
 from access import ENFORCED_RIGHTS, resolve_effective_permissions
 
@@ -317,6 +317,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=403, detail="The protected admin account cannot be assigned to a tenant")
 
             hub.state.assign_user_to_tenant(user_id, tenant_id)
+            _invalidate_user_sessions(hub, user_id)
             return {"status": "ok", "message": f"User {user_id} assigned to tenant {tenant_id}"}
         except HTTPException:
             raise  # 400/404/403 must propagate as-is, not be re-wrapped as 500
@@ -336,6 +337,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="Missing user_id or tenant_id")
 
             hub.state.remove_user_from_tenant(user_id, tenant_id)
+            _invalidate_user_sessions(hub, user_id)
             return {"status": "ok", "message": f"User {user_id} removed from tenant {tenant_id}"}
         except HTTPException:
             raise  # 400 must propagate as-is, not be re-wrapped as 500
@@ -419,6 +421,12 @@ def register(app, hub, ctx):
                     entry["tenants"].append(tenant_id)
             users[user_id] = entry
             hub.state.save_state()
+            # Drop this user's existing sessions so the change (password, perms,
+            # tenant, group membership) takes effect immediately rather than being
+            # honored from a stale cookie until the 8h TTL / idle timeout. An
+            # admin-initiated edit is infrequent; forcing one re-login is the
+            # correct security posture (esp. a demotion).
+            _invalidate_user_sessions(hub, user_id)
 
             return {"status": "ok", "message": f"User {user_id} updated."}
         except HTTPException:
@@ -440,6 +448,9 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=404, detail="User not found")
             users[user_id]["password_hash"] = _hash_password(password)
             hub.state.save_state()
+            # Force re-login: the old credential is no longer valid, so any
+            # session minted under it must not remain usable.
+            _invalidate_user_sessions(hub, user_id)
             return {"status": "ok"}
         except HTTPException:
             raise

@@ -1,7 +1,7 @@
 """Setup misc: subnet-filter, delete-user, GitHub repos/branches, global config."""
 from api import (
-    HTTPException, Request, _FILTER_DEFAULTS, _FILTER_MODULES, _filter_config, asyncio,
-    logger,
+    HTTPException, Request, _FILTER_DEFAULTS, _FILTER_MODULES, _filter_config,
+    _invalidate_user_sessions, asyncio, logger,
 )
 
 
@@ -44,6 +44,9 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="This account is protected and cannot be deleted")
         del users[user_id]
         hub.state.save_state()
+        # Revoke any sessions the deleted user still holds so a saved cookie
+        # can't keep hitting the API as a now-nonexistent account.
+        _invalidate_user_sessions(hub, user_id)
         return {"status": "ok", "message": f"User {user_id} deleted."}
 
     @app.get("/setup/github-repos")

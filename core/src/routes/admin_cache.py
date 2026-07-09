@@ -51,17 +51,24 @@ def register(app, hub, ctx):
                 "is_admin":   bool(p.get("admin") or p.get("role") == "admin"),
                 "tenants":    u.get("tenants", []),
                 "expires_in": int(sess["expires"] - now),
-                "token_hint": token[:8] + "…",
+                # Non-secret revocation id (NOT the cookie token prefix). The old
+                # ``token_hint: token[:8]`` leaked 8 chars of the session cookie
+                # to the admin UI and matched revocation by prefix — a hostile
+                # admin (or anyone reading the listing) could narrow a session
+                # token. ``sid`` is an opaque per-session id with no relationship
+                # to the cookie, so the listing/revocation surface is safe to
+                # expose and revocation is exact, not prefix-based.
+                "sid":        sess.get("sid") or "",
             })
         if pruned:
             _save_sessions(app.state.hub)
         active.sort(key=lambda s: s["user_id"])
         return {"sessions": active, "count": len(active)}
 
-    @app.delete("/admin/sessions/{token_hint}")
-    async def admin_revoke_session(token_hint: str, request: Request):
+    @app.delete("/admin/sessions/{sid}")
+    async def admin_revoke_session(sid: str, request: Request):
         for token in list(_sessions.keys()):
-            if token.startswith(token_hint.rstrip("…")):
+            if _sessions[token].get("sid") == sid:
                 _sessions.pop(token, None)
                 _save_sessions(app.state.hub)
                 return {"status": "ok", "message": "Session revoked"}

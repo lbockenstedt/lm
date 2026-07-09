@@ -270,7 +270,7 @@ const CRUD_ROUTES = {
                               m3: 'POST', p3: '/setup/users/remove-tenant',                  api3: 'remove_user_tenant' },
     promptSetPassword:      { m: 'POST', p: '/setup/users/{userId}/set-password',            api: 'set_user_password' },
     deleteUser:             { m: 'DELETE', p: '/setup/users/{userId}',                       api: 'delete_user' },
-    revokeSession:          { m: 'DELETE', p: '/admin/sessions/{tokenHint}',                 api: 'admin_revoke_session' },
+    revokeSession:          { m: 'DELETE', p: '/admin/sessions/{sid}',                 api: 'admin_revoke_session' },
 
     // ── Firewalls / instances ──
     saveFirewall:           { m: 'POST|PUT', p: '/setup/firewalls{/{id}}',                   api: 'add_firewall/update_firewall' }, // PUT when id present
@@ -7087,7 +7087,7 @@ async function loadActiveSessions() {
                 <td class="px-4 py-3 text-slate-500 text-xs">${s.tenants.length ? s.tenants.join(', ') : '—'}</td>
                 <td class="px-4 py-3 text-slate-500 text-xs">${fmtExpiry(s.expires_in)}</td>
                 <td class="px-4 py-3 text-right">
-                    <button onclick="revokeSession('${s.token_hint}')"
+                    <button onclick="revokeSession('${s.sid}')"
                         class="text-xs text-red-400 hover:text-red-600 font-medium">Revoke</button>
                 </td>
             </tr>`).join('');
@@ -7096,10 +7096,10 @@ async function loadActiveSessions() {
     }
 }
 
-async function revokeSession(tokenHint) {
-    if (!await showConfirmToast(`Revoke session ${tokenHint}?`)) return;
+async function revokeSession(sid) {
+    if (!await showConfirmToast(`Revoke session ${sid}?`)) return;
     try {
-        const r = await setupFetch(`/admin/sessions/${encodeURIComponent(tokenHint)}`, { method: 'DELETE' });
+        const r = await setupFetch(`/admin/sessions/${encodeURIComponent(sid)}`, { method: 'DELETE' });
         const d = await r.json();
         if (r.ok) {
             showToast(d.message || 'Session revoked', 'success');
@@ -13813,6 +13813,7 @@ async function doSetup() {
     const username = (document.getElementById('setup-username')?.value || '').trim();
     const password = document.getElementById('setup-password')?.value || '';
     const password2 = document.getElementById('setup-password2')?.value || '';
+    const setupToken = document.getElementById('setup-token')?.value || '';
     const errEl = document.getElementById('setup-error');
     if (errEl) errEl.classList.add('hidden');
 
@@ -13830,9 +13831,11 @@ async function doSetup() {
     }
 
     try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (setupToken) headers['X-Setup-Token'] = setupToken;
         const r = await fetch('/auth/setup', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers,
             body: JSON.stringify({ username, password }),
             credentials: 'same-origin',
         });

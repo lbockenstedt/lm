@@ -1,8 +1,10 @@
 """Auth routes: login, me, logout, first-run setup, session prefixes."""
 from api import (
-    HTTPException, JSONResponse, Request, _SESSION_TTL, _hash_password, _save_sessions,
-    _sessions, _start_cache_for_tenant, _stop_cache_for_tenant, _verify_password,
-    get_netbox_spoke, get_tenant_scoping, logger, secrets, time,
+    HTTPException, JSONResponse, Request, _SESSION_TTL, _cookie_secure,
+    _hash_password, _login_check, _login_fail, _login_success, _record_session,
+    _save_sessions, _sessions, _start_cache_for_tenant, _stop_cache_for_tenant,
+    _verify_password, get_netbox_spoke, get_tenant_scoping, logger, os, secrets,
+    time,
 )
 from access import resolve_effective_permissions
 
@@ -20,10 +22,12 @@ def register(app, hub, ctx):
         """Authenticate a local user and set the ``lm_session`` cookie.
 
         Verifies the password against the stored hash, mints a 32-byte session
-        token (8h TTL, persisted via ``_save_sessions`` so it survives a hub
-        restart), and kicks background cache preload for each tenant the user
-        belongs to. Returns the user record (user_id, permissions, tenants) with
-        HTTP 200; 401 on bad credentials, 400 on missing fields."""
+        token (8h absolute TTL, 30m idle timeout, persisted via ``_save_sessions``
+        so it survives a hub restart), enforces failed-attempt lockout + per-IP
+        spray limiting, and kicks background cache preload for each tenant the
+        user belongs to. Returns the user record (user_id, permissions, tenants)
+        with HTTP 200; 401 on bad credentials, 429 (Retry-After) when throttled,
+        400 on missing fields."""
         hub = app.state.hub
         try:
             data = await request.json()
@@ -31,12 +35,26 @@ def register(app, hub, ctx):
             password = data.get("password", "")
             if not user_id or not password:
                 raise HTTPException(status_code=400, detail="username and password required")
+            ip = (request.client.host if request.client else "") or "unknown"
+            # Throttle BEFORE the password check so a locked-out account can't be
+            # probed even with the right credentials. ``_login_check`` covers both
+            # per-username lockout and per-IP spray windows.
+            allowed, retry_after = _login_check(user_id, ip)
+            if not allowed:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Too many login attempts. Try again later.",
+                    headers={"Retry-After": str(retry_after)},
+                )
             users = hub.state.system_state.get("users", {})
             user = users.get(user_id)
-            if not user or not user.get("password_hash"):
+            # Same 401 message for "no such user" and "wrong password" to avoid
+            # username enumeration; both increment the lockout/spray counters.
+            if not user or not user.get("password_hash") or \
+               not _verify_password(password, user["password_hash"]):
+                _login_fail(hub, user_id, ip)
                 raise HTTPException(status_code=401, detail="Invalid credentials")
-            if not _verify_password(password, user["password_hash"]):
-                raise HTTPException(status_code=401, detail="Invalid credentials")
+            _login_success(hub, user_id)
             # Always read the live record so migrations/admin changes take effect on next login.
             # Effective perms = group-derived rights unioned with per-user overrides (RBAC).
             perms   = resolve_effective_permissions(hub, user)
@@ -46,7 +64,6 @@ def register(app, hub, ctx):
             if protected:
                 tenants = []
             tenant_id = tenants[0] if tenants else None
-            token = secrets.token_urlsafe(32)
             user_data = {
                 "user_id":    user_id,
                 "auth_type":  user.get("auth_type", "local"),
@@ -55,17 +72,13 @@ def register(app, hub, ctx):
                 "tenant_id":  tenant_id,
                 "protected":  protected,
             }
-            _sessions[token] = {
-                "user_id": user_id,
-                "expires": time.time() + _SESSION_TTL,
-                "user":    user_data,
-            }
-            _save_sessions(hub)
+            token = _record_session(hub, user_data)
             resp = JSONResponse({"status": "ok", **user_data})
             resp.set_cookie(
                 key="lm_session", value=token,
                 httponly=True, samesite="lax",
                 max_age=_SESSION_TTL,
+                secure=_cookie_secure(),
             )
             # Kick off background cache preload for every tenant this user belongs to
             for tid in tenants:
@@ -132,11 +145,25 @@ def register(app, hub, ctx):
 
     @app.post("/auth/setup")
     async def first_run_setup(request: Request):
-        """Create the first admin account. Only works when no users exist."""
+        """Create the first admin account. Only works when no users exist.
+
+        When ``LM_SETUP_TOKEN`` is set (the install flag — generated by
+        ``install_all.sh`` into ``.env``), the request MUST carry a matching
+        ``X-Setup-Token`` header. This closes the first-run race where anyone who
+        could reach the hub before the operator created the first account could
+        plant the bootstrap admin. The token is consumed implicitly: once the
+        first user exists this route 403s regardless, so the token need not be
+        rotated after setup. ``--no-setup-token`` in the installer leaves the env
+        unset, restoring the old open-first-run behavior (dev/loopback only)."""
         hub = app.state.hub
         users = hub.state.system_state.get("users", {})
         if users:
             raise HTTPException(status_code=403, detail="Setup already complete — log in with an existing account")
+        setup_token = os.environ.get("LM_SETUP_TOKEN", "").strip()
+        if setup_token:
+            supplied = (request.headers.get("X-Setup-Token") or "").strip()
+            if not supplied or not secrets.compare_digest(supplied, setup_token):
+                raise HTTPException(status_code=403, detail="Setup token required")
         try:
             data = await request.json()
             username = data.get("username", "").strip()
@@ -155,33 +182,24 @@ def register(app, hub, ctx):
             }
             hub.state.system_state.setdefault("users", {})[username] = entry
             hub.state.save_state()
-            token = secrets.token_urlsafe(32)
-            _sessions[token] = {
-                "user_id": username,
-                "expires": time.time() + _SESSION_TTL,
-                "user": {
-                    "user_id": username,
-                    "auth_type": "local",
-                    "permissions": {"role": "admin", "admin": True},
-                    "tenants": [],
-                    "tenant_id": None,
-                    "protected": True,
-                },
-            }
-            _save_sessions(hub)
-            resp = JSONResponse({
-                "status": "ok",
+            user_data = {
                 "user_id": username,
                 "auth_type": "local",
                 "permissions": {"role": "admin", "admin": True},
                 "tenants": [],
                 "tenant_id": None,
                 "protected": True,
+            }
+            token = _record_session(hub, user_data)
+            resp = JSONResponse({
+                "status": "ok",
+                **user_data,
             })
             resp.set_cookie(
                 key="lm_session", value=token,
                 httponly=True, samesite="lax",
                 max_age=_SESSION_TTL,
+                secure=_cookie_secure(),
             )
             return resp
         except HTTPException:

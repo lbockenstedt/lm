@@ -270,8 +270,24 @@ _filter_config = access.filter_config
 _FILTER_MODULES = access._FILTER_MODULES
 _FILTER_DEFAULTS = access._FILTER_DEFAULTS
 
-_SESSION_TTL = 8 * 3600  # 8 hours
-_sessions: dict = {}  # token → {user_id, expires, user}
+_SESSION_TTL = 8 * 3600  # 8 hours (absolute cap)
+# Per-user live-session cap (evicts oldest on login). The idle timeout is owned
+# by access.session_user (reads LM_SESSION_IDLE_TIMEOUT_S there).
+_MAX_SESSIONS_PER_USER = int(os.environ.get("LM_MAX_SESSIONS_PER_USER", "5"))
+_sessions: dict = {}  # token → {user_id, expires, created, last_seen, sid, user}
+
+# ── Login throttling (failed-attempt lockout + per-IP spray limiter) ─────────
+# No HTTP rate-limit library is used; this is a compact in-process throttle. The
+# per-username counters (lockout state) are persisted to login_attempts.json so
+# a targeted brute-force survives a hub restart; the per-IP spray window is
+# in-memory only (resets on restart — acceptable). Tunable via env.
+_LOGIN_MAX_FAILS = int(os.environ.get("LM_LOGIN_MAX_FAILS", "5"))
+_LOGIN_BASE_LOCKOUT_S = float(os.environ.get("LM_LOGIN_BASE_LOCKOUT_S", "30"))
+_LOGIN_MAX_LOCKOUT_S = float(os.environ.get("LM_LOGIN_MAX_LOCKOUT_S", "3600"))
+_LOGIN_IP_WINDOW_S = float(os.environ.get("LM_LOGIN_IP_WINDOW_S", "300"))
+_LOGIN_IP_MAX = int(os.environ.get("LM_LOGIN_IP_MAX", "20"))
+_login_attempts: dict = {}    # {username: {count, locked_until, first_fail}}
+_login_ip_attempts: dict = {}  # {ip: [ts,...]} (in-memory, not persisted)
 
 
 def _sessions_file(hub) -> str:
@@ -279,18 +295,169 @@ def _sessions_file(hub) -> str:
     return os.path.join(hub.state.data_dir, "sessions.json")
 
 
+def _cookie_secure() -> bool:
+    """Whether the ``lm_session`` cookie should carry the ``Secure`` flag.
+
+    Explicit ``LM_COOKIE_SECURE`` env wins (1/true → on, 0/false → off — the
+    off switch for loopback-http dev). Without it, auto: Secure when a hub TLS
+    cert is configured (``LM_TLS_CERT``), off when serving plaintext. Behind a
+    TLS-terminating Azure front end that doesn't forward ``X-Forwarded-Proto``,
+    set ``LM_COOKIE_SECURE=1`` explicitly so the cookie isn't replayed over any
+    http hop."""
+    v = os.environ.get("LM_COOKIE_SECURE", "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return bool(os.environ.get("LM_TLS_CERT", "").strip())
+
+
+def _record_session(hub, user_data: dict) -> str:
+    """Mint a session token, enforce the per-user cap (evict oldest), persist.
+
+    Centralizes session creation so every login path gets the same token entropy,
+    ``sid`` (non-secret admin-revocation id), idle/created timestamps, and
+    per-user cap enforcement. Returns the new opaque token (set as the cookie)."""
+    import math as _math
+    token = secrets.token_urlsafe(32)
+    sid = secrets.token_hex(8)
+    now = time.time()
+    user_id = user_data.get("user_id")
+    # Per-user cap: evict the oldest live sessions for this user beyond the cap
+    # so one account can't accumulate unbounded tokens (session-fixation-style
+    # amplification). ``created`` (falling back to ``expires`` for old entries)
+    # is the eviction order.
+    if user_id and _MAX_SESSIONS_PER_USER > 0:
+        owned = [(t, s) for t, s in _sessions.items()
+                 if s.get("user_id") == user_id and s.get("expires", 0) > now]
+        owned.sort(key=lambda ts: ts[1].get("created", ts[1].get("expires", now)))
+        while len(owned) >= _MAX_SESSIONS_PER_USER:
+            old_t, _ = owned.pop(0)
+            _sessions.pop(old_t, None)
+    _sessions[token] = {
+        "user_id":  user_id,
+        "expires":  now + _SESSION_TTL,
+        "created":  now,
+        "last_seen": now,
+        "sid":      sid,
+        "user":     user_data,
+    }
+    _save_sessions(hub)
+    return token
+
+
+def _invalidate_user_sessions(hub, user_id) -> int:
+    """Drop every live session for ``user_id`` and persist the revocation.
+
+    Called on privilege/password/tenant/group change and on user deletion so a
+    demoted admin's existing cookie stops granting admin (the stale-session
+    window the access-control middleware would otherwise keep honoring until
+    ``/auth/me`` or the 8h TTL). Returns the count dropped."""
+    if not user_id:
+        return 0
+    drop = [t for t, s in _sessions.items() if s.get("user_id") == user_id]
+    for t in drop:
+        _sessions.pop(t, None)
+    if drop:
+        _save_sessions(hub)
+        logger.info("Invalidated %d session(s) for user %s", len(drop), user_id)
+    return len(drop)
+
+
+def _login_attempts_file(hub) -> str:
+    return os.path.join(hub.state.data_dir, "login_attempts.json")
+
+
+def _save_login_attempts(hub) -> None:
+    """Persist the per-username lockout counters (not the in-memory IP window)."""
+    try:
+        path = _login_attempts_file(hub)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_login_attempts, f)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("login_attempts persist failed: %s", exc)
+
+
+def _load_login_attempts(hub) -> None:
+    """Rehydrate persisted per-username lockout counters on startup."""
+    try:
+        path = _login_attempts_file(hub)
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return
+        with open(path) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _login_attempts.update(data)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:  # noqa: BLE001
+        logger.warning("login_attempts load failed: %s", exc)
+
+
+def _login_check(user_id: str, ip: str):
+    """Return ``(allowed, retry_after_seconds)`` for a login attempt.
+
+    Blocks (with a Retry-After) when the username is in lockout OR the source IP
+    has exceeded the spray window. ``retry_after_seconds`` is 0 when allowed."""
+    import math as _math
+    now = time.time()
+    # Per-IP spray window (credential stuffing across many usernames).
+    ip_hits = [ts for ts in _login_ip_attempts.get(ip, [])
+               if ts > now - _LOGIN_IP_WINDOW_S]
+    _login_ip_attempts[ip] = ip_hits
+    if len(ip_hits) >= _LOGIN_IP_MAX:
+        return False, max(1, int(_math.ceil((ip_hits[0] + _LOGIN_IP_WINDOW_S) - now)))
+    # Per-username lockout.
+    rec = _login_attempts.get(user_id)
+    if rec and rec.get("locked_until", 0) > now:
+        return False, max(1, int(_math.ceil(rec["locked_until"] - now)))
+    return True, 0
+
+
+def _login_fail(hub, user_id: str, ip: str) -> int:
+    """Record a failed attempt; engage/extend exponential lockout when over the
+    threshold. Returns the remaining lockout seconds (0 if not yet locked)."""
+    import math as _math
+    now = time.time()
+    # IP spray accounting.
+    _login_ip_attempts.setdefault(ip, []).append(now)
+    # Keep the per-IP list bounded (don't grow without limit between prunes).
+    _login_ip_attempts[ip] = _login_ip_attempts[ip][-(_LOGIN_IP_MAX * 4):]
+    # Username lockout with exponential backoff, capped.
+    rec = _login_attempts.get(user_id, {"count": 0, "locked_until": 0,
+                                        "first_fail": now})
+    rec["count"] = int(rec.get("count", 0)) + 1
+    if rec["count"] >= _LOGIN_MAX_FAILS:
+        growth = min(_LOGIN_BASE_LOCKOUT_S *
+                     (2 ** (rec["count"] - _LOGIN_MAX_FAILS)), _LOGIN_MAX_LOCKOUT_S)
+        rec["locked_until"] = now + growth
+    _login_attempts[user_id] = rec
+    _save_login_attempts(hub)
+    return max(0, int(_math.ceil(rec.get("locked_until", 0) - now)))
+
+
+def _login_success(hub, user_id: str) -> None:
+    """Clear a username's lockout counters on a successful login (persisted so a
+    restart doesn't re-lock an account that just succeeded)."""
+    if user_id in _login_attempts:
+        _login_attempts.pop(user_id, None)
+        _save_login_attempts(hub)
+
+
 def _save_sessions(hub) -> None:
     """Atomically persist the live session store to disk (best-effort, never raises).
 
-    Writes only the core fields {user_id, expires, user} per token, dropping the
-    runtime caches (prefixes/prefixes_at) that ``_resolve_prefixes`` adds — they
-    re-populate on demand with their own TTL. Expired tokens are pruned from the
-    written copy so the file doesn't grow with stale entries. Surviving a hub
-    restart is what keeps a triggered update from logging everyone out: the
-    ``lm_session`` cookie is already persistent for 8h, and rehydrating the same
-    token→session mapping on startup lets ``/auth/me`` recognise it. A write
-    failure logs a warning and degrades to today's in-memory-only behavior.
-    """
+    Writes the core fields {user_id, expires, created, last_seen, sid, user} per
+    token, dropping the runtime caches (prefixes/prefixes_at) that
+    ``_resolve_prefixes`` adds — they re-populate on demand with their own TTL.
+    Expired tokens are pruned from the written copy so the file doesn't grow
+    with stale entries. Surviving a hub restart is what keeps a triggered update
+    from logging everyone out: the ``lm_session`` cookie is already persistent
+    for 8h, and rehydrating the same token→session mapping on startup lets
+    ``/auth/me`` recognise it. A write failure logs a warning and degrades to
+    today's in-memory-only behavior."""
     try:
         now = time.time()
         pruned: dict = {}
@@ -298,9 +465,12 @@ def _save_sessions(hub) -> None:
             if not isinstance(sess, dict) or sess.get("expires", 0) < now:
                 continue
             pruned[token] = {
-                "user_id": sess.get("user_id"),
-                "expires": sess.get("expires"),
-                "user":    sess.get("user", {}),
+                "user_id":  sess.get("user_id"),
+                "expires":  sess.get("expires"),
+                "created":  sess.get("created", sess.get("expires", now) - _SESSION_TTL),
+                "last_seen": sess.get("last_seen", sess.get("created", now)),
+                "sid":      sess.get("sid") or secrets.token_hex(8),
+                "user":     sess.get("user", {}),
             }
         path = _sessions_file(hub)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -317,8 +487,10 @@ def _load_sessions(hub) -> None:
     """Rehydrate the in-memory session store from disk on startup (best-effort).
 
     Drops any entry whose expiry has already passed. Missing/corrupt file →
-    leaves ``_sessions`` empty (today's cold-start behavior).
-    """
+    leaves ``_sessions`` empty (today's cold-start behavior). Old entries
+    persisted before ``sid``/``last_seen``/``created`` existed get them generated
+    (sid) / defaulted (last_seen=created=now) so the idle timeout and admin
+    revocation work for rehydrated sessions too."""
     try:
         path = _sessions_file(hub)
         if not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -334,9 +506,12 @@ def _load_sessions(hub) -> None:
             if sess.get("expires", 0) < now:
                 continue
             _sessions[token] = {
-                "user_id": sess.get("user_id"),
-                "expires": sess.get("expires"),
-                "user":    sess.get("user", {}),
+                "user_id":  sess.get("user_id"),
+                "expires":  sess.get("expires"),
+                "created":  sess.get("created", now),
+                "last_seen": now,  # idle window resets on restart (absolute 8h still caps)
+                "sid":      sess.get("sid") or secrets.token_hex(8),
+                "user":     sess.get("user", {}),
             }
         if _sessions:
             logger.info("Restored %d active session(s) from disk", len(_sessions))
@@ -686,14 +861,32 @@ def create_app(hub):
     """
     app = FastAPI(title="Lab Manager Hub API")
 
-    # Enable CORS to allow WebUI to connect from different origins
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS. The WebUI is served from the SAME origin (unified :443 uvicorn), so a
+    # credentialed cross-origin policy is NOT needed by default. Default (env
+    # unset) = no credentialed cross-origin: empty origin list + credentials OFF.
+    # ``LM_CORS_ORIGINS`` (comma-separated) opts IN to specific trusted origins with
+    # credentials. ``["*"]`` + ``allow_credentials=True`` is spec-invalid (browsers
+    # reject it) and would reflect arbitrary Origin headers — never set both.
+    _cors_env = os.environ.get("LM_CORS_ORIGINS", "").strip()
+    if _cors_env:
+        _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=_cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    else:
+        # No cross-origin opt-in: still allow same-origin (no-op) and non-credentialed
+        # simple requests, but credentials are OFF and no Origin is reflected.
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=[],
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     # Attach hub instance to app state for access in routes
     app.state.hub = hub
@@ -702,6 +895,7 @@ def create_app(hub):
     # triggered update/restart stays logged in (the lm_session cookie already
     # persists for 8h; this restores the server-side token→session mapping).
     _load_sessions(hub)
+    _load_login_attempts(hub)
 
     # Anti-lockout migration: runs on every startup. Ensures the first user is
     # a fully-privileged, protected, tenant-free admin and reconciles the two
@@ -741,6 +935,14 @@ def create_app(hub):
         sess = _session_user(request)
         if not sess:
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
+        # Touch the session's last_seen so the idle-timeout window (access.py)
+        # resets on real activity. ``session_user`` already enforces the idle
+        # cap on read, so a stale session is rejected before this runs; for a
+        # live one we bump last_seen lazily (no per-request disk write — the
+        # next _save_sessions, e.g. login/logout, persists it).
+        if isinstance(sess, dict):
+            sess["last_seen"] = time.time()
 
         # /setup/* and /admin/* are admin-only
         if path.startswith("/setup/") or path.startswith("/admin/"):
@@ -867,6 +1069,23 @@ def create_app(hub):
                     "path": request.url.path,
                 },
             )
+
+    # ── Security response headers (outermost: decorates last → wraps everything) ─
+    # HSTS is emitted ONLY when cookies are served Secure (``_cookie_secure()``),
+    # i.e. when the hub is reachable over TLS — emitting HSTS over plaintext
+    # would pin an http-only client to a broken upgrade. Also stamps a couple of
+    # baseline hardening headers that are harmless on both http and https.
+    @app.middleware("http")
+    async def security_headers_middleware(request, call_next):
+        resp = await call_next(request)
+        if _cookie_secure():
+            resp.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains")
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        return resp
 
 
     # ── Auth / tenant helper closures ────────────────────────────────────────

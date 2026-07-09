@@ -22,15 +22,17 @@ EXCLUDE=()
 # (after $TLS_CERT is defined) and written into .env + the unit.
 TLS_VERIFY=false
 TLS_CA_CERT=""
+SETUP_TOKEN=true   # generate LM_SETUP_TOKEN into .env (gates first-run /auth/setup)
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
-        --reinstall)     REINSTALL=true ;;
-        --reset-secrets) RESET_SECRETS=true ;;
-        --reset-users)   RESET_USERS=true ;;
-        --exclude)       shift; IFS=',' read -ra EXCLUDE <<< "$1" ;;
-        --tls-verify)    TLS_VERIFY=true ;;
-        --tls-ca-cert)   shift; TLS_CA_CERT="$1" ;;
+        --reinstall)       REINSTALL=true ;;
+        --reset-secrets)  RESET_SECRETS=true ;;
+        --reset-users)     RESET_USERS=true ;;
+        --exclude)         shift; IFS=',' read -ra EXCLUDE <<< "$1" ;;
+        --tls-verify)      TLS_VERIFY=true ;;
+        --tls-ca-cert)     shift; TLS_CA_CERT="$1" ;;
+        --no-setup-token)  SETUP_TOKEN=false ;;  # leave first-run /auth/setup open (dev/loopback)
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
     shift
@@ -806,6 +808,37 @@ else
     log_c "✅ LM_FERNET_KEY already set — preserving existing key"
 fi
 export LM_FERNET_KEY=$(grep "^LM_FERNET_KEY=" "$HUB_ENV" | cut -d'=' -f2-)
+
+# --- Step B2b: First-run setup token (LM_SETUP_TOKEN) ---
+# Gates POST /auth/setup (bootstrap-admin creation): when set, the first-run
+# request must carry a matching X-Setup-Token header. Closes the race where
+# anyone who could reach the hub before the operator created the first account
+# could plant the bootstrap admin. The token is single-use in effect — once the
+# first user exists, /auth/setup 403s regardless — so it need not be rotated
+# after setup. Preserved across reinstall (like LM_FERNET_KEY). The installer
+# prints it once below so the operator can capture it for the first run.
+if [ "$SETUP_TOKEN" = true ]; then
+    if ! grep -q "^LM_SETUP_TOKEN=.\+" "$HUB_ENV" 2>/dev/null; then
+        SETUP_TOKEN_VAL=$("$BASE_DIR/core/venv/bin/python3" -c 'import secrets; print(secrets.token_urlsafe(32))')
+        if grep -q "^LM_SETUP_TOKEN=" "$HUB_ENV" 2>/dev/null; then
+            sed -i "s|^LM_SETUP_TOKEN=.*|LM_SETUP_TOKEN=$SETUP_TOKEN_VAL|" "$HUB_ENV"
+        else
+            echo "LM_SETUP_TOKEN=$SETUP_TOKEN_VAL" >> "$HUB_ENV"
+        fi
+        log_c "✅ Generated LM_SETUP_TOKEN (first-run /auth/setup gate)"
+        log_c "   ↳ Capture this token; the WebUI first-run setup form will need it as X-Setup-Token:"
+        log_c "     $SETUP_TOKEN_VAL"
+    else
+        log_c "✅ LM_SETUP_TOKEN already set — preserving existing token"
+    fi
+else
+    # --no-setup-token: strip any prior token so /auth/setup reverts to the open
+    # first-run behavior (only when no users exist). Idempotent.
+    if grep -q "^LM_SETUP_TOKEN=" "$HUB_ENV" 2>/dev/null; then
+        sed -i "/^LM_SETUP_TOKEN=/d" "$HUB_ENV"
+        log_c "➖ Removed LM_SETUP_TOKEN (--no-setup-token) — first-run /auth/setup is open"
+    fi
+fi
 
 # --reset-users: wipe user accounts now that the Fernet key is available and
 # the hub is still stopped, so it boots with an empty users dict.

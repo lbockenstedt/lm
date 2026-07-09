@@ -34,6 +34,7 @@ import time
 import asyncio
 import ipaddress
 import logging
+import os
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from simulations.tenant_filter import (filter_items_by_prefixes,
@@ -181,8 +182,18 @@ def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
 
 # ── Session / auth helpers ───────────────────────────────────────────────────
 
+# Idle timeout: a session with no activity for this long is treated as expired
+# even if its absolute 8h TTL hasn't elapsed. Driven by the ``last_seen`` stamp
+# the access-control middleware bumps per request. 0 disables the idle cap.
+_SESSION_IDLE_TIMEOUT_S = float(os.environ.get("LM_SESSION_IDLE_TIMEOUT_S", "1800"))
+
+
 def session_user(sessions: dict, request: "Request"):
-    """Return the session dict for the current cookie, or None."""
+    """Return the session dict for the current cookie, or None.
+
+    Enforces both the absolute TTL (``expires``) and the idle timeout
+    (``last_seen`` + ``_SESSION_IDLE_TIMEOUT_S``); an expired/idle token is
+    popped from the store so the slot frees and the next persist drops it."""
     token = request.cookies.get("lm_session")
     if not token:
         return None
@@ -190,6 +201,11 @@ def session_user(sessions: dict, request: "Request"):
     if not sess or sess["expires"] < time.time():
         sessions.pop(token, None)
         return None
+    if _SESSION_IDLE_TIMEOUT_S > 0:
+        last = sess.get("last_seen") or sess.get("created") or sess["expires"]
+        if time.time() - float(last) > _SESSION_IDLE_TIMEOUT_S:
+            sessions.pop(token, None)
+            return None
     return sess
 
 
