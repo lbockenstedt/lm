@@ -1,10 +1,13 @@
 """HMAC-SHA256 message signing and verification for Hub↔spoke traffic.
 
-Owns the canonical-JSON serialization used to produce deterministic signatures
-across Python versions and platforms, plus the ``MessageSigner`` utility that
-computes and verifies per-message HMACs over that canonical form. Verification
-logs are redacted so token-bearing frames (auth/first-secret) never leak their
-signed bytes to the logs.
+The primary wire format is the ``<sig>.<body>`` raw-bytes frame (``encode_frame``
+/ ``verify_bytes``): the body is compact JSON serialized ONCE and the HMAC is
+computed and verified over those exact bytes, so the receiver never re-serializes
+(no per-frame ``json.dumps`` / ``sort_keys`` — see docs/backpressure-throttling.md
+§7). A legacy path (``MessageSigner.sign`` / ``verify``) still HMACs a canonical
+(sorted-key) JSON envelope for callers that sign a dict rather than raw bytes.
+Verification logs are redacted so token-bearing frames (auth/first-secret) never
+leak their signed bytes to the logs.
 
 This module is intentionally stateless — it holds no secrets. The secret used
 to instantiate ``MessageSigner`` is supplied by ``key_manager.py``, which owns
@@ -26,7 +29,8 @@ def encode_frame(signer, msg: Dict[str, Any]) -> str:
     HMAC over those exact body bytes (or '' when there is no signer, for
     bootstrap heartbeats). The receiver HMACs the RECEIVED body bytes directly
     (no re-serialization, no sort_keys) — the per-frame json.dumps that dominated
-    hub ingest CPU disappears. WIP: sig-verify-raw-bytes branch."""
+    hub ingest CPU disappears. This raw-bytes frame is the deployed default across
+    the hub, cs, pxmx, and bugfixer (see docs/backpressure-throttling.md §7)."""
     body = json.dumps(msg, separators=(',', ':'))
     sig = signer.sign_bytes(body.encode()) if signer is not None else ""
     return sig + "." + body

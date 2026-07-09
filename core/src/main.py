@@ -779,7 +779,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
     }
 
     def _classify_message(self, payload_type: str, has_corr: bool) -> str:
-        """must → never dropped/coalesced (acks, replies, probes).
+        """Declarative classification policy (must / coalesce / skippable) — the
+        tested spec (test_backpressure_ladder.py) and the operator config-override
+        surface (``backpressure.classes``). NOTE: the hot receive loop in
+        ``handle_connection`` enforces this policy STRUCTURALLY inline via dedicated
+        per-type branches (correlation_id→must, CS_TELEMETRY/SPOKE_LOG→coalesce,
+        HEARTBEAT→skippable) rather than calling this per frame — so keep the two
+        in lockstep when adding or reclassifying a message type.
+
+        must → never dropped/coalesced (acks, replies, probes).
         coalesce → latest-wins, mergeable under pressure (telemetry, logs).
         skippable → a few may be dropped under pressure (heartbeats)."""
         if has_corr:
@@ -3194,6 +3202,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
                 # --- Client-Sim telemetry (combined spoke relays its full state) ---
                 # Ingest + fan-out + USB diagnostic live in _handle_cs_telemetry.
+                # CS_TELEMETRY is the "coalesce" class — this branch IS the live
+                # enforcement of _classify_message's policy; keep them in lockstep.
                 if payload.get("type") == "CS_TELEMETRY":
                     self._telemetry_received += 1
                     # Rung-3: if this spoke is under backpressure, COALESCE its
