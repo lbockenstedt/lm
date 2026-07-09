@@ -33,6 +33,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import ssl
 import sys
 import time
@@ -99,20 +100,74 @@ class LoadSpoke(BaseControlPlane):
     """A real spoke client with side-effects neutralised + a synthetic telemetry
     sender. One asyncio task per instance; hundreds run concurrently in-process."""
 
-    def __init__(self, spoke_id, stats, rate, payload_bytes, **kw):
+    _PLATFORMS = ("linux", "windows", "macos")
+    _SSIDS = ("corp-wifi", "guest-wifi", "lab-5g", "eng-2g")
+    _TIERS = ("t1", "t2", "t3")
+    _NAMES = ("kbell", "ibennett", "xmendoza", "tstewart", "qwu", "jlee", "amorgan", "dkhan")
+
+    def __init__(self, spoke_id, stats, rate, payload_bytes, clients_n=20, vms_n=3, **kw):
         super().__init__(spoke_id=spoke_id, **kw)
         self.module_type = "simulation"  # cs-like → exercises the telemetry path
         self._stats = stats
         self._rate = max(0.01, float(rate))
         self._pad = "x" * max(0, int(payload_bytes))
-        # Drop the per-instance log-relay handler the base added to the ROOT
-        # logger — with hundreds of instances that would fan every log line
-        # hundreds of ways and dominate the client's own CPU.
+        # Stable synthetic roster: client + VM identities persist across cycles
+        # like real clients (so the hub does dedup/cache/persist against a
+        # consistent set); only volatile fields vary each cycle. This drives the
+        # full CS_TELEMETRY path incl. the hub writing simulations_cache.json.
+        self._vmbase = 90000 + (abs(hash(spoke_id)) % 9000)
+        self._clients = [self._mk_client(i) for i in range(max(0, int(clients_n)))]
+        self._vms = [self._mk_vm(i) for i in range(max(0, int(vms_n)))]
         try:
             import logging
             logging.getLogger().removeHandler(self._log_relay_handler)
         except Exception:
             pass
+
+    def _mk_client(self, i):
+        vmid = self._vmbase + i
+        return {
+            "id": f"{self.spoke_id}-c{i:03d}",
+            "hostname": f"{random.choice(self._NAMES)}{i}",
+            "platform": random.choice(self._PLATFORMS),
+            "hw_type": random.choice(self._PLATFORMS),
+            "connected_ssid": random.choice(self._SSIDS),
+            "simulation_id": f"s{i % 10}",
+            "active_simulations": [f"sim-{i % 5}"],
+            "has_usb": bool(i % 3 == 0),
+            "vmid": vmid,
+            "tier": random.choice(self._TIERS),
+            "config": {"wsite": f"site-{i % 4}", "sim_phy": f"phy-{i % 3}"},
+            "overrides": {},
+        }
+
+    def _mk_vm(self, i):
+        vmid = self._vmbase + i
+        return {"vmid": vmid, "name": f"sim-{vmid}", "status": "running",
+                "ostype": "l26", "type": "qemu"}
+
+    def _build_telemetry_data(self):
+        """Realistic CS_TELEMETRY body — a full clients/VM/USB snapshot so the hub
+        runs its real ingest → fan-out → cache → persist (simulations_cache.json)
+        path, not a no-op on an empty frame. Volatile fields vary each cycle."""
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        for c in self._clients:
+            c["online"] = random.random() > 0.05
+            c["last_seen"] = now_iso
+            c["error_count"] = random.randint(0, 2)
+        usb = [{"vid": "0bda", "pid": "8812", "bus": f"{i + 1}-1"}
+               for i in range(min(4, len(self._vms)))]
+        data = {
+            "host": self.spoke_id,
+            "clients": self._clients,
+            "proxmox_vms": self._vms,
+            "usb_devices": usb,
+            "vm_count": len(self._vms),
+            "usb_count": len(usb),
+        }
+        if self._pad:
+            data["_pad"] = self._pad
+        return data
 
     # ── neutralise side-effects (no disk writes for a throwaway spoke) ────────
     def _ensure_install_uuid(self):
@@ -151,8 +206,7 @@ class LoadSpoke(BaseControlPlane):
                                "timestamp": round(time.time(), 6),
                                "sender_id": self.spoke_id, "destination_id": "hub"},
                     "payload": {"type": "CS_TELEMETRY",
-                                "data": {"host": self.spoke_id, "clients": [],
-                                         "vms": [], "usb": {}, "_pad": self._pad}},
+                                "data": self._build_telemetry_data()},
                 }
                 sig = self._sign(msg)
                 if sig is not None:
@@ -234,7 +288,9 @@ async def main():
     ap.add_argument("--rate", type=float, default=1.0, help="telemetry msg/s PER spoke")
     ap.add_argument("--duration", type=int, default=120, help="run seconds")
     ap.add_argument("--ramp", type=float, default=10.0, help="seconds to stagger all connects over")
-    ap.add_argument("--payload-bytes", type=int, default=0, help="pad each telemetry msg by N bytes")
+    ap.add_argument("--payload-bytes", type=int, default=0, help="extra pad bytes per telemetry msg")
+    ap.add_argument("--clients-per-spoke", type=int, default=20, help="synthetic clients per spoke (realistic payload)")
+    ap.add_argument("--vms-per-spoke", type=int, default=3, help="synthetic proxmox VMs per spoke")
     ap.add_argument("--psk", default="", help="tenant onboarding PSK (auto-approves the spokes)")
     ap.add_argument("--tenant", default="", help="tenant id hint (with --psk)")
     ap.add_argument("--secret", default="", help="pre-provisioned spoke secret (else zero-touch)")
@@ -273,7 +329,8 @@ async def main():
     spokes = [
         LoadSpoke(
             spoke_id=f"{args.prefix}{i:05d}", stats=stats, rate=args.rate,
-            payload_bytes=args.payload_bytes, hub_url=args.hub,
+            payload_bytes=args.payload_bytes, clients_n=args.clients_per_spoke,
+            vms_n=args.vms_per_spoke, hub_url=args.hub,
             secret=(args.secret or None),
             onboarding_psk=(args.psk or None), tenant_id_hint=(args.tenant or None),
         )
