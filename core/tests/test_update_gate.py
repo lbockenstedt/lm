@@ -10,7 +10,7 @@ ls-remote) are exercised by a host integration test (TODO).
 """
 
 import pytest
-from update_pipeline import _update_available, _ver
+from update_pipeline import _update_available, _ver, _resolve_hub_repo, _DEFAULT_HUB_REPO
 
 
 def test_ver_parses_dotted_numeric_and_falls_back():
@@ -75,3 +75,29 @@ def test_version_fallback_when_commits_equal_but_version_moved():
                           stored_commit=None, local_v="1.0.0", remote_v="1.0.1")
     assert g["ver_ahead"] is True
     assert g["update_available"] is True
+
+
+# ── _resolve_hub_repo — empty-string update_sources.hub is NOT a real URL ────
+# Regression for the silent-stale-hub bug: a present-but-empty ``hub`` value
+# made ``git ls-remote ""`` fail → ``"unknown"`` → the gate returned "checked"
+# every cycle while the hub sat un-updated. Empty must behave like absent
+# (fall back to the default), not like a URL.
+
+def test_resolve_hub_repo_absent_key_uses_default():
+    assert _resolve_hub_repo({}) == _DEFAULT_HUB_REPO
+    assert _resolve_hub_repo(None) == _DEFAULT_HUB_REPO
+
+
+def test_resolve_hub_repo_empty_string_uses_default():
+    # THE BUG: present-but-empty must not be passed to git ls-remote.
+    assert _resolve_hub_repo({"hub": ""}) == _DEFAULT_HUB_REPO
+
+
+def test_resolve_hub_repo_custom_value_preserved():
+    custom = "https://github.com/example/lm.git"
+    assert _resolve_hub_repo({"hub": custom}) == custom
+
+
+def test_resolve_hub_repo_only_hub_key_matters():
+    # Other update_sources keys don't affect the hub resolution.
+    assert _resolve_hub_repo({"pxmx": "x", "cs": "y", "hub": ""}) == _DEFAULT_HUB_REPO
