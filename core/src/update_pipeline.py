@@ -74,6 +74,27 @@ _UPDATE_SOURCE_PREFIX_MAP = {
 # _UPDATE_SOURCE_MODULE_KEY above and are unaffected.
 _IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "console"}
 
+# Canonical default for the hub's own repo. Used to fall back when
+# ``global_config["update_sources"]["hub"]`` is absent OR an empty string. An
+# empty-string value MUST behave like absent, not like a real URL: ``git
+# ls-remote "" refs/heads/main`` fails → ``get_remote_commit`` returns
+# ``"unknown"`` → ``_update_available`` reports "no update" → ``perform_update``
+# returns ``"checked"`` every cycle, SILENTLY — and ``check_update_health``'s
+# old ``if hub_repo:`` guard skipped the remote probe entirely so the box
+# reported ``ok`` with no warning. That is the exact failure mode that stranded
+# the repo_sync backstop fix on origin while the hub sat un-updated at an old
+# SHA reporting "hub=checked" with a clean health suffix. Treat empty as
+# absent everywhere (perform_update, get_remote_commit, check_update_health)
+# and WARN on the mis-config so it is LOUD, not silent.
+_DEFAULT_HUB_REPO = "https://github.com/lbockenstedt/lm"
+
+
+def _resolve_hub_repo(sources: Dict[str, Any]) -> str:
+    """Resolve the hub repo URL from ``update_sources``, treating an empty
+    string like an absent key (fall back to the default). Shared by every
+    reader so the empty-vs-absent asymmetry can never strand the hub again."""
+    return (sources or {}).get("hub") or _DEFAULT_HUB_REPO
+
 
 def _ver(v: str):
     """Parse a dotted-numeric VERSION string into a comparable tuple, or
@@ -155,7 +176,7 @@ class UpdatePipelineMixin:
         try:
             config = self.state.get_global_config()
             sources = config.get("update_sources", {})
-            repo_url = sources.get("hub", "https://github.com/lbockenstedt/lm")
+            repo_url = _resolve_hub_repo(sources)
 
             if "github.com" in repo_url:
                 parts = repo_url.rstrip("/").split("github.com/")
@@ -215,7 +236,7 @@ class UpdatePipelineMixin:
         try:
             config = self.state.get_global_config()
             sources = config.get("update_sources", {})
-            repo = hub_repo or sources.get("hub", "https://github.com/lbockenstedt/lm")
+            repo = hub_repo or _resolve_hub_repo(sources)
             ref = branch or config.get("global_branch", "main")
             proc = await asyncio.create_subprocess_exec(
                 "git", "ls-remote", repo, f"refs/heads/{ref}",
@@ -303,19 +324,33 @@ class UpdatePipelineMixin:
                         f"git HEAD unresolved in {hub_root} (dubious ownership / .git "
                         f"unreadable by the service user?) — the Update button's git pull will fail.")
                 config = self.state.get_global_config()
-                hub_repo = (config.get("update_sources", {}) or {}).get("hub")
+                sources = config.get("update_sources", {}) or {}
+                configured = sources.get("hub")
                 branch = config.get("global_branch", "main")
-                if hub_repo:
-                    remote = await self.get_remote_commit(hub_repo, branch)
-                    checks["remote_commit"] = remote
-                    if remote == "unknown":
-                        warnings.append(
-                            f"cannot reach {hub_repo}@{branch} (git ls-remote failed) — "
-                            f"update checks can't see new versions.")
-                    elif local != "unknown" and remote != local:
-                        warnings.append(
-                            f"hub code is BEHIND {branch} (local {local[:10]} vs "
-                            f"remote {remote[:10]}) — an update is pending.")
+                # Empty/missing update_sources.hub is a SILENT stale-hub bug, not
+                # a skip: the old `if hub_repo:` guard skipped this probe entirely
+                # so the box reported `ok` with no warning while perform_update's
+                # ls-remote on "" returned "unknown" → "checked" forever. Resolve
+                # to the default and probe regardless; WARN on the mis-config so
+                # it is LOUD (the fallback keeps updates working, but the operator
+                # should set the source explicitly, not accidentally inherit the
+                # default).
+                if not configured:
+                    warnings.append(
+                        "update_sources.hub is empty/missing — falling back to the "
+                        "default repo URL for update checks. Set it explicitly so the "
+                        "hub's own update source is intentional, not accidental.")
+                hub_repo = _resolve_hub_repo(sources)
+                remote = await self.get_remote_commit(hub_repo, branch)
+                checks["remote_commit"] = remote
+                if remote == "unknown":
+                    warnings.append(
+                        f"cannot reach {hub_repo}@{branch} (git ls-remote failed) — "
+                        f"update checks can't see new versions.")
+                elif local != "unknown" and remote != local:
+                    warnings.append(
+                        f"hub code is BEHIND {branch} (local {local[:10]} vs "
+                        f"remote {remote[:10]}) — an update is pending.")
 
             # Process-vs-disk drift: running version != on-disk VERSION → the code
             # was updated on disk but this process never restarted (THE stale-hub bug).
@@ -735,7 +770,7 @@ class UpdatePipelineMixin:
         # for any future deployment that bumps VERSION again.
         config = self.state.get_global_config()
         sources = config.get("update_sources", {})
-        hub_repo = sources.get("hub", "https://github.com/lbockenstedt/lm")
+        hub_repo = _resolve_hub_repo(sources)
         branch = config.get("global_branch", "main")
         stored_commit = config.get("last_update_commit")
         # Thread the lm/core source so each spoke also pulls its shared /opt/lm
