@@ -644,6 +644,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # hysteresis. Threshold configurable via global_config["protect"].
         self._protect_mode = False
         self._protect_reason = ""
+        # In protect mode, shed inbound frames LARGER than this (bytes) BEFORE
+        # the JSON parse — the parse of big telemetry frames is the CPU cost that
+        # pegs the loop; heartbeats/acks are small and keep flowing. Tunable via
+        # global_config["protect"].shed_bytes.
+        self._protect_shed_bytes = 2048
+        # Hub-process CPU sampler (its own state, independent of the box-wide
+        # psutil.cpu_percent() in get_system_metrics). ~100%/core when the loop
+        # is pegged — the direct "loop saturated" signal for protect mode.
+        try:
+            self._proc = psutil.Process()
+            self._proc.cpu_percent(interval=None)  # prime the baseline
+        except Exception:
+            self._proc = None
 
 
     async def send_to_spoke(self, message: Message, signing_secret: Optional[str] = None):
@@ -2420,6 +2433,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
             # 3. Message Loop
             async for message_json in websocket:
+                # PROTECT MODE — early shed by SIZE, BEFORE the expensive JSON
+                # parse. At a CPU-pegged loop the parse of large telemetry frames
+                # IS the bottleneck, so dropping them here (not after parsing) is
+                # what actually frees the loop. Small frames (heartbeats/acks,
+                # < shed_bytes) still parse + flow, so liveness/acks are kept.
+                if self._protect_mode:
+                    try:
+                        if len(message_json) > self._protect_shed_bytes:
+                            self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
+                            continue
+                    except Exception:
+                        pass
                 msg_data = json.loads(message_json)
 
                 # Signature Verification
@@ -3032,21 +3057,31 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     cfg = (self.state.get_global_config() or {}).get("protect", {}) or {}
                     mem_hi = float(cfg.get("mem_high_pct", 90))
                     mem_lo = float(cfg.get("mem_low_pct", 80))
-                    lag_hi = float(cfg.get("loop_lag_high_s", 1.0))
-                    lag_lo = float(cfg.get("loop_lag_low_s", 0.3))
+                    lag_hi = float(cfg.get("loop_lag_high_s", 0.75))
+                    lag_lo = float(cfg.get("loop_lag_low_s", 0.25))
+                    cpu_hi = float(cfg.get("cpu_high_pct", 90))   # hub-process %/core
+                    cpu_lo = float(cfg.get("cpu_low_pct", 70))
+                    self._protect_shed_bytes = int(cfg.get("shed_bytes", 2048))
                     memp = psutil.virtual_memory().percent
-                    _over = memp >= mem_hi or _loop_lag >= lag_hi
-                    _under = memp <= mem_lo and _loop_lag <= lag_lo
+                    cpup = self._proc.cpu_percent(interval=None) if self._proc else 0.0
+                    _over = memp >= mem_hi or _loop_lag >= lag_hi or cpup >= cpu_hi
+                    _under = memp <= mem_lo and _loop_lag <= lag_lo and cpup <= cpu_lo
+                    dwell = float(cfg.get("min_dwell_s", 5))
                     if not self._protect_mode and _over:
                         self._protect_mode = True
+                        self._protect_entered_ts = _now
                         self._protect_reason = (f"memory {memp:.0f}%" if memp >= mem_hi
+                                                else f"cpu {cpup:.0f}%/core" if cpup >= cpu_hi
                                                 else f"loop lag {_loop_lag:.1f}s")
-                        logger.error("[protect] ENTER — %s (mem %.0f%%, lag %.1fs); "
-                                     "shedding heavy reads + telemetry",
-                                     self._protect_reason, memp, _loop_lag)
-                    elif self._protect_mode and _under:
-                        logger.warning("[protect] EXIT — mem %.0f%% ≤ %.0f%%, lag %.1fs ≤ %.1fs",
-                                       memp, mem_lo, _loop_lag, lag_lo)
+                        logger.error("[protect] ENTER — %s (mem %.0f%%, cpu %.0f%%, lag %.1fs); "
+                                     "shedding heavy reads + telemetry (pre-parse)",
+                                     self._protect_reason, memp, cpup, _loop_lag)
+                    elif (self._protect_mode and _under
+                          and (_now - getattr(self, "_protect_entered_ts", 0)) >= dwell):
+                        # Min-dwell before exit so the pre-parse shed (which drops
+                        # CPU fast) doesn't flap shed↔serve every second.
+                        logger.warning("[protect] EXIT — mem %.0f%%, cpu %.0f%%, lag %.1fs",
+                                       memp, cpup, _loop_lag)
                         self._protect_mode = False
                         self._protect_reason = ""
                 except Exception as _pe:  # noqa: BLE001 — never let the guard crash the loop
