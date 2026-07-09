@@ -204,8 +204,13 @@ class KeyManager:
                 return
             # One-time migration: a plaintext keys.json was just accepted. Re-save
             # under the primary Fernet key immediately so the file stops sitting
-            # on disk in cleartext (the next _save_keys writes ciphertext).
-            if migrated_from_plaintext and self.keys:
+            # on disk in cleartext (the next _save_keys writes ciphertext). This
+            # runs even when current/history are empty (a fresh hub with no spokes
+            # yet) — the file shape was already validated above (json.load + the
+            # "current"/"history" accessors), so re-saving an empty-but-valid
+            # plaintext file as ciphertext is safe and closes the gap where a
+            # never-populated keys.json stayed plaintext forever.
+            if migrated_from_plaintext:
                 try:
                     self._save_keys()
                     logger.info("Migrated keys.json to Fernet at-rest encryption.")

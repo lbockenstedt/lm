@@ -75,11 +75,14 @@ def _isolate(monkeypatch, tmp_path):
         monkeypatch.delenv(v, raising=False)
 
 
-def _build(system_state=None, tmp_path=None):
+def _build(users=None, tmp_path=None, extra_state=None):
     import tempfile
     tmp = tmp_path or tempfile.mkdtemp()
     _ensure_loop()
-    hub = _FakeHub(tmp, system_state or {})
+    sys_state = {"users": users or {}}
+    if extra_state:
+        sys_state.update(extra_state)
+    hub = _FakeHub(tmp, sys_state)
     app = api_mod.create_app(hub)
     return TestClient(app), hub
 
