@@ -366,10 +366,15 @@ let csRefreshInFlight = false;
 // This gate coalesces that frame storm to at most one re-render per gap.
 //   -1 = auto-refresh OFF (manual Refresh / tab switch only)
 //    0 = no throttle (refresh on every debounced pulse — the legacy behavior)
-//   >0 = min seconds between telemetry-driven re-renders (default 15)
+//   >0 = min seconds between telemetry-driven re-renders
 // Persisted in localStorage (cs_auto_refresh_gap_s) so it survives reloads.
+// Default OFF (-1): telemetry-driven auto-refresh is opt-in. The cs WebSocket
+// pushes a frame every few seconds (multi-spoke + aruba), so a default-on
+// refresh re-renders the page out from under the user far too often. Users
+// who want live updates pick a gap from the Auto-refresh select; the manual
+// ↻ Refresh button always works regardless.
 const CS_AUTOREFRESH_KEY = 'cs_auto_refresh_gap_s';
-const CS_AUTOREFRESH_DEFAULT = 15;
+const CS_AUTOREFRESH_DEFAULT = -1;
 let csAutoRefreshGapS = CS_AUTOREFRESH_DEFAULT;
 let csLastAutoRefreshAt = 0;
 try {

@@ -2733,13 +2733,13 @@ function _viewTemplate(viewId) {
             // calling /sim/api/* directly with the lm_session cookie. Tenant
             // scoping reuses the hub's currentTenant global (like netbox/pxmx).
             return `<div class="space-y-3">
+  <div class="flex justify-end items-center gap-3">
+    ${typeof csAutoRefreshControl === 'function' ? csAutoRefreshControl() : ''}
+    <button onclick="loadCSData(currentSubView, currentSubChild, true)" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200">↻ Refresh</button>
+  </div>
   <div id="cs-add-toolbar" class="flex gap-2 hidden"></div>
   <div id="cs-content" class="${card}">
     <div class="py-12 text-center text-slate-400 italic">Loading…</div>
-  </div>
-  <div class="flex justify-end items-center gap-3 pt-1">
-    ${typeof csAutoRefreshControl === 'function' ? csAutoRefreshControl() : ''}
-    <button onclick="loadCSData(currentSubView, currentSubChild, true)" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200">↻ Refresh</button>
   </div>
 </div>`;
 
