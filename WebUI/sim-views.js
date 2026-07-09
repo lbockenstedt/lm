@@ -2192,11 +2192,16 @@ const CS_HUB_CONFIG_FIELDS = [
     { key: 'guest_agent_reboot_after_minutes',      label: 'GA Reboot After (min)',   type: 'number', ph: '10', min: 1 },
     { key: 'guest_agent_reclone_after_minutes',     label: 'GA Reclone After (min)',  type: 'number', ph: '30', min: 1 },
     { key: 'watchdog_reboot_enabled',               label: 'Watchdog Reboot',         type: 'onoff' },
-    { key: 'usb_vidpids',                 label: 'USB Certified VID:PIDs (JSON array of {vidpid,type,label})',  type: 'json',   ph: '[{"vidpid":"1a2b:3c4d","type":"wireless","label":"1a2b:3c4d"}]', full: true },
-    { key: 'usb_ignored_vidpids',         label: 'USB Ignored VID:PIDs (JSON array of "vid:pid")', type: 'json', ph: '["1a2b:3c4d"]', full: true },
-    { key: 't1_pci_vidpids',              label: 'T1 PCI VID:PIDs (JSON array of "vid:pid" — VM whose PCI passthrough matches → T1)', type: 'json', ph: '["1912:0015"]', full: true },
-    { key: 't3_pci_vidpids',              label: 'T3 PCI VID:PIDs (JSON array of "vid:pid" — VM whose PCI passthrough matches → T3)', type: 'json', ph: '["168c:0034"]', full: true },
-    { key: 'ignored_hostnames',           label: 'Ignored Hostnames (JSON array)', type: 'json', ph: '["sim-rpi-0000"]', full: true },
+    // ── List fields: comma- or space-delimited in the UI; the hub normalizes
+    // to a list before storing/pushing (see normalize_hub_config_lists in
+    // core/src/simulations/routes.py). No raw JSON to paste. usb_vidpids is a
+    // list of {vidpid,type,label}; only the vidpid is needed here — type/label
+    // already stored for a vidpid are preserved on save.
+    { key: 'usb_vidpids',                 label: 'USB Certified VID:PIDs',  type: 'list', obj: true, ph: '1a2b:3c4d, 5678:9abc  (comma or space separated)', full: true },
+    { key: 'usb_ignored_vidpids',         label: 'USB Ignored VID:PIDs', type: 'list', ph: '1a2b:3c4d, 5678:9abc  (comma or space separated)', full: true },
+    { key: 't1_pci_vidpids',              label: 'T1 PCI VID:PIDs (VM whose PCI passthrough matches → T1)', type: 'list', ph: '1912:0015, 168c:0034  (comma or space separated)', full: true },
+    { key: 't3_pci_vidpids',              label: 'T3 PCI VID:PIDs (VM whose PCI passthrough matches → T3)', type: 'list', ph: '168c:0034  (comma or space separated)', full: true },
+    { key: 'ignored_hostnames',           label: 'Ignored Hostnames', type: 'list', ph: 'sim-rpi-0000, sim-rpi-0001  (comma or space separated)', full: true },
 ];
 
 function _csHcOnOff(id, val, onChangeFn) {
@@ -2255,6 +2260,30 @@ function _csBranchSelect(id, currentVal, branches, onChangeFn) {
     return `<select id="${id}"${onchange} class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">${opts}</select>`;
 }
 
+// Render a stored list field (array OR JSON-array string OR legacy delimited
+// string) as a comma-separated display string for the Setup/Proxmox list inputs.
+// usb_vidpids (obj=true) is a list of {vidpid,type,label} — only vidpid is shown
+// (type/label are preserved on save by the backend). The user edits the
+// comma/space-delimited text; the hub normalizes it back to a list.
+function _csListDisplay(valRaw, isObj) {
+    let arr = valRaw;
+    if (typeof valRaw === 'string') {
+        const s = valRaw.trim();
+        if (!s) return '';
+        if (s.startsWith('[')) {
+            try { arr = JSON.parse(s); } catch (e) { arr = null; }
+        } else {
+            return s;   // already a delimited string
+        }
+    }
+    if (!Array.isArray(arr) || !arr.length) return '';
+    if (isObj) {
+        return arr.map(it => (it && typeof it === 'object') ? (it.vidpid || '') : String(it))
+                   .filter(Boolean).join(', ');
+    }
+    return arr.map(it => String(it)).join(', ');
+}
+
 async function csHubConfigCard(path) {
     const data = await csFetch(path);
     const enabled = !!(data && data.hub_config_enabled);
@@ -2275,7 +2304,11 @@ async function csHubConfigCard(path) {
         if (col.type === 'onoff') input = _csHcOnOff('cs-hc-' + col.key, valRaw, 'csSaveHubConfig');
         else if (col.type === 'branch') input = _csBranchSelect('cs-hc-' + col.key, valStr, branchMap[col.repo], 'csSaveHubConfig');
         else if (col.type === 'number') input = `<input id="cs-hc-${col.key}" type="number" value="${csEscape(valStr)}" ${col.min != null ? `min="${col.min}"` : ''} ${col.max != null ? `max="${col.max}"` : ''} placeholder="${csEscape(col.ph || '')}" onblur="csSaveHubConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
-        else input = `<input id="cs-hc-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" onblur="csSaveHubConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
+        else if (col.type === 'list') {
+            // Comma/space-delimited text; backend normalize_hub_config_lists converts to a list.
+            const disp = _csListDisplay(valRaw, !!col.obj);
+            input = `<input id="cs-hc-${col.key}" type="text" value="${csEscape(disp)}" placeholder="${csEscape(col.ph || '')}" onblur="csSaveHubConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
+        } else input = `<input id="cs-hc-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" onblur="csSaveHubConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         return `${label}${input}</label>`;
     }).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
@@ -2295,16 +2328,20 @@ window.csHcToggleEnabled = function (checked) {
 };
 
 window.csSaveHubConfig = async function () {
-    // Mirror webui-hub saveHubConfig: skip empty fields; parse JSON-array keys;
-    // scalars (incl. numbers) are sent as strings — the spoke stores them as-is
-    // and normalizes the on/off keys via _normalize_relay_enabled.
+    // Mirror webui-hub saveHubConfig: skip empty fields; list fields are sent as
+    // the raw comma/space-delimited string and the hub normalizes them to lists
+    // (normalize_hub_config_lists); scalars (incl. numbers) are sent as strings —
+    // the spoke stores them as-is and normalizes the on/off keys via
+    // _normalize_relay_enabled.
     const config = {};
     CS_HUB_CONFIG_FIELDS.forEach(col => {
         const el = csEl('cs-hc-' + col.key);
         if (!el) return;
         const v = (el.value || '').trim();
         if (!v) return;
-        if (col.type === 'json') {
+        if (col.type === 'list') {
+            config[col.key] = v;   // delimited string — backend converts to a list
+        } else if (col.type === 'json') {
             try { config[col.key] = JSON.parse(v); } catch (e) { console.error('csSaveHubConfig: JSON field parse failed, sending raw string', e); config[col.key] = v; }
         } else {
             config[col.key] = v;

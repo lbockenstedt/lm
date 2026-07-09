@@ -119,6 +119,123 @@ def _coerce_vidpid_items(raw: Any) -> list:
     return [p.strip() for p in s.split(",") if p.strip()]
 
 
+# ── Setup/Proxmox hub-config list fields ─────────────────────────────────────
+# The WebUI collects these as comma/space-delimited text (no more raw JSON),
+# but downstream — cs spoke _parse_json_list → pxmx agent — expects a list. The
+# hub is source of truth for hub_config, so a delimited string is normalized into
+# a list once, here, before store.set_hub_config + _push_config. Already-list or
+# already-JSON values pass through (backward compat with older clients and
+# pre-existing stored snapshots). usb_vidpids is a list of {vidpid,type,label};
+# type/label are preserved from the currently-stored entry when the same vidpid
+# already exists, so editing the field as a plain vidpid list does NOT discard
+# metadata a user set via another UI.
+_HUB_CONFIG_LIST_KEYS = (
+    "usb_ignored_vidpids",   # list of "vid:pid"
+    "t1_pci_vidpids",        # list of "vid:pid"
+    "t3_pci_vidpids",        # list of "vid:pid"
+    "ignored_hostnames",     # list of str
+)
+_HUB_CONFIG_VIDPID_OBJ_KEY = "usb_vidpids"  # list of {vidpid,type,label}
+
+
+def _split_delim(s: str) -> list:
+    """Split a comma/space/newline-delimited string into trimmed tokens."""
+    return [p.strip() for p in re.split(r"[,\s]+", s) if p.strip()]
+
+
+def _coerce_to_list(raw: Any) -> list:
+    """Best-effort raw → list. Accepts an already-parsed list, a JSON array
+    string, or a delimited string. Returns [] for empty/None."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return raw
+    s = str(raw).strip()
+    if not s:
+        return []
+    if s.startswith("["):
+        try:
+            parsed = json.loads(s)
+            return parsed if isinstance(parsed, list) else []
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return _split_delim(s)
+
+
+def _hub_config_list_value(key: str, raw: Any, stored_raw: Any = None) -> list:
+    """Normalize one Setup/Proxmox list field for storage/push.
+
+    vidpid string-list keys → deduped list of lowercased ``vid:pid`` (non-vidpid
+    tokens dropped). ``ignored_hostnames`` → deduped list of non-empty strings
+    (order preserved, case kept). ``usb_vidpids`` → deduped list of
+    ``{vidpid,type,label}`` dicts, reusing the stored entry's type/label when the
+    same vidpid already exists (else type ``"wireless"``, label = vidpid).
+    """
+    if key == _HUB_CONFIG_VIDPID_OBJ_KEY:
+        items = _coerce_to_list(raw)
+        prev: Dict[str, Dict[str, str]] = {}
+        for it in _coerce_to_list(stored_raw):
+            if isinstance(it, dict) and it.get("vidpid"):
+                vp = str(it["vidpid"]).strip().lower()
+                if _USB_VIDPID_RE.match(vp):
+                    prev[vp] = {"type": str(it.get("type") or "wireless"),
+                                "label": str(it.get("label") or vp)}
+        out, seen = [], set()
+        for it in items:
+            vp = str(it.get("vidpid", "") if isinstance(it, dict) else it).strip().lower()
+            if not _USB_VIDPID_RE.match(vp) or vp in seen:
+                continue
+            seen.add(vp)
+            if isinstance(it, dict):
+                # Already an object — keep its own type/label (defaults if missing).
+                out.append({"vidpid": vp,
+                            "type": str(it.get("type") or "wireless"),
+                            "label": str(it.get("label") or vp)})
+            else:
+                # Bare vidpid from a delimited string — reuse stored type/label
+                # when this vidpid already existed, else default.
+                p = prev.get(vp)
+                out.append({"vidpid": vp,
+                            "type": p["type"] if p else "wireless",
+                            "label": p["label"] if p else vp})
+        return out
+    items = _coerce_to_list(raw)
+    if key == "ignored_hostnames":
+        out, seen = [], set()
+        for it in items:
+            s = str(it).strip()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+    out, seen = [], set()
+    for it in items:
+        vp = str(it.get("vidpid", "") if isinstance(it, dict) else it).strip().lower()
+        if _USB_VIDPID_RE.match(vp) and vp not in seen:
+            seen.add(vp)
+            out.append(vp)
+    return out
+
+
+def normalize_hub_config_lists(hc: Any, stored_hc: Any = None) -> dict:
+    """Return a copy of ``hc`` with the Setup/Proxmox list fields normalized to
+    lists. The PUT /hub-config route calls this before persisting+pushing so the
+    WebUI may send comma/space-delimited strings instead of raw JSON. Fields not
+    present in ``hc`` are left untouched (the UI omits empty fields)."""
+    if not isinstance(hc, dict):
+        return hc
+    out = dict(hc)
+    stored_hc = stored_hc or {}
+    for k in _HUB_CONFIG_LIST_KEYS:
+        if k in out:
+            out[k] = _hub_config_list_value(k, out[k], stored_hc.get(k))
+    if _HUB_CONFIG_VIDPID_OBJ_KEY in out:
+        out[_HUB_CONFIG_VIDPID_OBJ_KEY] = _hub_config_list_value(
+            _HUB_CONFIG_VIDPID_OBJ_KEY, out[_HUB_CONFIG_VIDPID_OBJ_KEY],
+            stored_hc.get(_HUB_CONFIG_VIDPID_OBJ_KEY))
+    return out
+
+
 def _usb_dev_vidpid(dev: Any) -> str:
     """Lowercased ``vid:pid`` for a USB device/state entry. Entries carry either
     explicit ``vid``+``pid`` fields or a single ``vidpid`` string."""
@@ -1186,6 +1303,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         body = await request.json()
         enabled = bool(body.get("hub_config_enabled", False))
         hc = body.get("hub_config") or {}
+        # Normalize Setup/Proxmox list fields: the WebUI sends comma/space-
+        # delimited text for usb_vidpids / usb_ignored_vidpids / t1/t3_pci_vidpids
+        # / ignored_hostnames; downstream expects lists. Preserve usb_vidpids
+        # type/label from the currently-stored entry (fetch it here).
+        try:
+            stored = await store.get_hub_config(tenant_id)
+        except Exception:
+            stored = None
+        stored_hc = (stored and stored.get("hub_config")) or {}
+        hc = normalize_hub_config_lists(hc, stored_hc)
         await store.set_hub_config(tenant_id, enabled, hc)
         pushed = await _push_config(tenant_id, hc if enabled else {}) if enabled else 0
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
