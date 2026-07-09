@@ -722,7 +722,7 @@ async function csRenderSimHardware() {
         }
         return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden">
           <summary class="flex items-center justify-between px-5 py-3 cursor-pointer hover:bg-slate-50">
-            <span class="font-bold text-slate-700">${csEscape(s.spoke_name || s.spoke_id)}</span>${csOnlineBadge(s.spoke_online)}
+            <span class="font-bold text-slate-700">${csEscape(s.spoke_name || s.spoke_id)}</span>${csOnlineBadge(s.spoke_online)}${csThrottleBadge(s.spoke_id)}
           </summary>
           <div class="px-5 pb-5 border-t border-slate-100">${html}</div>
         </details>`;
@@ -761,7 +761,7 @@ async function csRenderSimClientCount() {
         }
         return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden">
           <summary class="flex items-center justify-between px-5 py-3 cursor-pointer hover:bg-slate-50">
-            <span class="font-bold text-slate-700">${csEscape(s.spoke_name || s.spoke_id)}</span>${csOnlineBadge(s.spoke_online)}
+            <span class="font-bold text-slate-700">${csEscape(s.spoke_name || s.spoke_id)}</span>${csOnlineBadge(s.spoke_online)}${csThrottleBadge(s.spoke_id)}
           </summary>
           <div class="px-5 pb-5 border-t border-slate-100">${html}</div>
         </details>`;

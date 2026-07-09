@@ -1841,6 +1841,17 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
     const backlogChip = (_bk)
         ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-amber-50 text-amber-700" title="Hub-side backlog (queued/unacked) for this ${spokeVariant ? 'spoke' : 'agent'}">${_bk} queued</span>`
         : '';
+    // Backpressure badge — the hub throttles a spoke/agent when it's over its
+    // rate (level 1, "offending") or when a fleet-wide slow-down is active
+    // (level 2, "throttled"). The badged node is being asked to coalesce its
+    // updates LOCALLY and slow down. spoke_levels is keyed by hub spoke id.
+    const _bp = _m.backpressure || {};
+    const _lvl = (_bp.spoke_levels && _bp.spoke_levels[label]) || 0;
+    const throttleChip = _lvl === 1
+        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-red-100 text-red-700 animate-pulse" title="Offending — this ${spokeVariant ? 'spoke' : 'agent'} is over its message rate; the hub asked it to slow down &amp; coalesce updates locally">⚠ Offending</span>`
+        : (_lvl >= 2
+            ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-orange-100 text-orange-700" title="Throttled — fleet-wide slow-down active; this ${spokeVariant ? 'spoke' : 'agent'} is coalescing updates locally">⏳ Throttled</span>`
+            : '');
     return `
         <div class="${container}">
             <div class="flex items-center gap-3">
@@ -1850,7 +1861,7 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
                 ${tenantChip}
             </div>
             <div class="flex items-center gap-2">
-                ${mpsChip}${backlogChip}${badge}
+                ${throttleChip}${mpsChip}${backlogChip}${badge}
             </div>
         </div>`;
 }
@@ -1949,7 +1960,27 @@ function _updateMetrics(statusData) {
             <div class="pt-1 border-t border-slate-100"><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Rate limit</span>
                  &nbsp;burst <b>${rl.capacity ?? '—'}</b> · <b>${rl.fill_rate ?? '—'}</b>/s
                  &nbsp;·&nbsp;drops total <b>${m.rate_limit_drops_total ?? 0}</b></div>
-            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Drops by spoke</span><br>${kv(drops)}</div>`;
+            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Drops by spoke</span><br>${kv(drops)}</div>
+            ${(() => {
+                // Backpressure ladder status: the graceful-degradation control
+                // loop. level 1 = offenders throttled, 2 = fleet-wide slow-down.
+                const bp = m.backpressure || {};
+                const lvl = bp.level || 0;
+                if (!lvl && !(bp.telemetry_coalesced)) return '';
+                const label = lvl >= 2 ? '<b class="text-orange-600">FLEET slow-down</b>'
+                    : lvl === 1 ? '<b class="text-red-600">throttling offenders</b>'
+                    : '<b class="text-slate-500">normal</b>';
+                const thr = (bp.spokes_throttled || []);
+                return `<div class="pt-1 border-t border-slate-100">
+                    <span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Backpressure</span>
+                    &nbsp;level <b>${lvl}</b> · ${label}
+                    ${thr.length ? `· throttled <b>${thr.length}</b>` : ''}
+                    ${bp.coalesce_pending ? `· hub-queue <b>${bp.coalesce_pending}</b>` : ''}
+                    <br><span class="text-slate-400">telemetry</span> recv <b>${bp.telemetry_received ?? 0}</b>
+                    · processed <b>${bp.telemetry_processed ?? 0}</b>
+                    · <span title="frames merged latest-wins (not dropped)">coalesced <b>${bp.telemetry_coalesced ?? 0}</b></span>
+                    ${thr.length ? `<br><span class="text-slate-400">throttled:</span> ${kv(bp.spoke_levels || {})}` : ''}</div>`;
+            })()}`;
     }
     // Populate the rate-limit knobs from live config — but skip a field while
     // it's focused so the 10s status poll doesn't clobber what's being typed.

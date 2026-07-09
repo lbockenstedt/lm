@@ -736,6 +736,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             "coalesce_min_interval_s": float(cfg.get("coalesce_min_interval_s", 2.0)),
             # Rung-3 hub drain cadence (process one latest snapshot per spoke).
             "hub_drain_interval_s": float(cfg.get("hub_drain_interval_s", 1.0)),
+            # SAFETY CAPS (learned the hard way at ~800 spokes: the ladder's own
+            # per-tick work must never compound the overload it's relieving).
+            #  • drain_budget / drain_max_s — the rung-3 drain processes at most
+            #    this many spokes, time-boxed; the rest stay superseded (that IS
+            #    coalescing — we don't owe every snapshot). Bounds drain CPU.
+            #  • max_signals_per_tick — cap LM_BACKPRESSURE sends per tick so a
+            #    fleet-wide transition spreads over several ticks instead of
+            #    signing 800 frames in one tick on the loop we're trying to free.
+            "hub_drain_budget": int(cfg.get("hub_drain_budget", 100)),
+            "hub_drain_max_s": float(cfg.get("hub_drain_max_s", 0.1)),
+            "max_signals_per_tick": int(cfg.get("max_signals_per_tick", 100)),
             # DAMPING: once throttled, HOLD a spoke for at least this long before
             # even considering release — because a throttled spoke's MEASURED
             # rate collapses (it's coalescing to coalesce_min_interval_s), so
@@ -3268,11 +3279,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         the fleet soft mark) does every spoke get the slow-down. This is the
         'throttle the loud one first, back off the whole fleet only if that
         wasn't enough' behaviour."""
+        # PROTECT TAKES PRECEDENCE. When protect mode is active the loop is
+        # already parse-bound and shedding pre-parse — that is the ONLY relief at
+        # this scale (coalescing happens AFTER json.loads, so it can't relieve a
+        # parse-bound core). Doing the ladder's O(spokes) signalling + iteration
+        # here would just compound the overload (this is what killed the hub at
+        # ~800 spokes). So stand down and let protect shed; drop any buffered
+        # coalesce work. The spoke slow-down signals we already sent still stand.
+        if self._protect_mode:
+            self._coalesce_pending = {}
+            self._load_level = max(self._load_level, 3)
+            return
+
         p = self._backpressure_params()
         live = list(getattr(self, "active_connections", {}) or {})
         # Signals are collected and fired CONCURRENTLY (gather) at the end — a
         # fleet-wide transition is hundreds of frames and must not stall the 1s
-        # tick (that's the very core we're trying to relieve).
+        # tick (that's the very core we're trying to relieve). CAPPED per tick.
         sigs = []
         if not p["enabled"]:
             for sid in [s for s, l in list(self._backoff_signaled.items()) if l]:
@@ -3332,7 +3355,37 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self._backoff_since.pop(sid, None)
         self._load_level = 2 if self._fleet_backoff else (1 if self._spoke_backoff else 0)
         if sigs:
-            await asyncio.gather(*sigs, return_exceptions=True)
+            # Cap sends per tick so a fleet-wide transition (hundreds of spokes)
+            # spreads over several ticks instead of signing every frame in one
+            # tick. Un-fired spokes just re-qualify next tick (was != desired
+            # still holds because _backoff_signaled wasn't updated for them).
+            cap = max(1, p["max_signals_per_tick"])
+            fire, defer = sigs[:cap], sigs[cap:]
+            for c in defer:
+                c.close()  # don't leave un-awaited coroutines (ResourceWarning)
+            await asyncio.gather(*fire, return_exceptions=True)
+
+        # ── WebUI-visible summary log (WARNING → HubLogHandler → Logs view) ──
+        # One line on any CHANGE of the throttled set or fleet state, naming the
+        # offending spokes — this is what the operator sees in the Logs view and
+        # drives the "throttled" badges. No change → silent (no flood).
+        prev = getattr(self, "_bp_last_summary", (frozenset(), False))
+        cur = (frozenset(new_backoff), self._fleet_backoff)
+        if cur != prev:
+            self._bp_last_summary = cur
+            if self._fleet_backoff:
+                logger.warning(
+                    "[backpressure] FLEET slow-down ACTIVE — %d spoke(s) throttled "
+                    "(aggregate over ceiling: loop-lag %.2fs, %.0f msg/s). Spokes "
+                    "are coalescing locally.", len(new_backoff), loop_lag, self.mps)
+            elif new_backoff:
+                logger.warning(
+                    "[backpressure] throttling %d offending spoke(s): %s — each is "
+                    "over %.0f msg/s; told to slow + coalesce locally.",
+                    len(new_backoff), ", ".join(sorted(new_backoff)[:10]),
+                    p["per_spoke_soft_mps"])
+            else:
+                logger.warning("[backpressure] CLEARED — all spokes back to normal cadence.")
 
     async def _signal_backoff(self, spoke_id: str, level: int, min_interval: float) -> None:
         """Send one LM_BACKPRESSURE notification to a spoke (fire-and-forget).
@@ -3347,8 +3400,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             "min_interval_s": min_interval,
             "reason": {0: "clear", 1: "offender", 2: "fleet"}.get(level, "slow"),
         })
-        logger.warning("[backpressure] %s spoke=%s level=%d min_interval=%.1fs",
-                       "SLOW" if level else "RESUME", spoke_id, level, min_interval)
+        # Per-spoke detail at DEBUG — the ladder emits a human-readable SUMMARY
+        # line at WARNING (flows to the WebUI Logs view via HubLogHandler) so a
+        # fleet-wide transition doesn't flood Logs with one line per spoke.
+        logger.debug("[backpressure] %s spoke=%s level=%d min_interval=%.1fs",
+                     "SLOW" if level else "RESUME", spoke_id, level, min_interval)
 
     async def run_coalesce_drain_loop(self):
         """Rung-3 safety net (last resort). Process at most ONE latest telemetry
@@ -3364,14 +3420,32 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             try:
                 p = self._backpressure_params()
                 await asyncio.sleep(max(0.2, p["hub_drain_interval_s"]))
-                if not self._coalesce_pending:
+                # If protect is active the loop is parse-bound; running hundreds
+                # of ingests here just compounds it. Drop the buffer (snapshots
+                # are superseded anyway) and let protect shed. This is the fix for
+                # the drain becoming a CPU sink at ~800 spokes.
+                if self._protect_mode or not self._coalesce_pending:
+                    if self._coalesce_pending:
+                        self._telemetry_coalesced += len(self._coalesce_pending)
+                        self._coalesce_pending = {}
                     continue
                 pending = self._coalesce_pending
                 self._coalesce_pending = {}
+                # BUDGET + TIME-BOX: process at most drain_budget spokes and never
+                # spend more than drain_max_s on the loop. The remainder are
+                # counted as coalesced (superseded) — bounded work regardless of
+                # how many spokes are throttled.
+                budget = max(1, p["hub_drain_budget"])
+                deadline = time.monotonic() + max(0.01, p["hub_drain_max_s"])
+                done = 0
                 for sid, (data, _ts) in pending.items():
+                    if done >= budget or time.monotonic() >= deadline:
+                        self._telemetry_coalesced += 1  # dropped/superseded
+                        continue
                     try:
                         await self._handle_cs_telemetry(sid, data)
                         self._telemetry_processed += 1
+                        done += 1
                     except Exception as e:  # noqa: BLE001
                         logger.debug("[coalesce] drain %s failed: %s", sid, e)
             except Exception as e:  # noqa: BLE001 — never let the drain die
@@ -3828,6 +3902,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     "level": self._load_level,
                     "fleet": bool(self._fleet_backoff),
                     "spokes_throttled": sorted(self._spoke_backoff),
+                    # Per-spoke level (1 = offending, 2 = fleet-throttled) so the
+                    # WebUI can badge each spoke/agent tile distinctly.
+                    "spoke_levels": {sid: lvl for sid, lvl in self._backoff_signaled.items() if lvl},
                     "coalesce_pending": len(self._coalesce_pending),
                     "telemetry_received": self._telemetry_received,
                     "telemetry_processed": self._telemetry_processed,
