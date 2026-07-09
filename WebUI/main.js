@@ -5870,11 +5870,14 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                         ...(extras ? extras.badges : []),
                     ],
                     actions: [
-                        _mgmtBtn('Edit', `openSpokeMetadataModal('${eSid}','${eName}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
+                        // Edit now hosts Reset Secret + Un-approve (moved off the
+                        // row to declutter); pass `approved` so the modal shows
+                        // Un-approve only for an already-approved spoke.
+                        _mgmtBtn('Edit', `openSpokeMetadataModal('${eSid}','${eName}',${approved})`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
                         _mgmtBtn('Tenant', `openSpokeAssignModal('${eSid}','${eTenant}')`, 'bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]'),
-                        approved
-                            ? _mgmtBtn('Un-approve', `unapproveSpoke('${eSid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')
-                            : _mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white'),
+                        // Approve stays on the row (primary action for a pending
+                        // spoke); Un-approve lives inside Edit for approved ones.
+                        ...(approved ? [] : [_mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')]),
                         ...(s._roleName ? [_mgmtBtn('Unload Role', `unloadRole('${eRoleParent}','${eRoleName}')`, 'bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200')] : []),
                         ...(extras ? extras.actions : []),
                     ],
@@ -6019,7 +6022,11 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                     ...(extras ? extras.badges : []),
                 ],
                 actions: [
-                    _mgmtBtn('Edit', `${editFn}('${eAid}','${eLabel}')`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
+                    // Spoke-kind agents route Edit → openSpokeMetadataModal, which
+                    // now hosts Reset Secret + Un-approve; pass approved (=!isPending)
+                    // so the modal shows Un-approve. pxmx Edit (openAgentConfigModal)
+                    // ignores the extra arg.
+                    _mgmtBtn('Edit', `${editFn}('${eAid}','${eLabel}'${isSpokeKind ? ',' + (!isPending) : ''})`, 'bg-[#01A982] hover:bg-[#008c6a] text-white'),
                     // Dedicated Tenant button, mirroring the Spokes table. Generic
                     // agents reuse the spoke assign modal (they bind via
                     // approve_spoke); Proxmox node agents get their own modal that
@@ -6032,7 +6039,9 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                         : '',
                     isPending
                         ? _mgmtBtn('Approve', `${approveFnName}('${eAid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
-                        : _mgmtBtn('Un-approve', `${unapproveFnName}('${eAid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200'),
+                        // Spoke-kind agents move Un-approve into Edit; pxmx agents
+                        // keep revoke on the row (its Edit is a separate config modal).
+                        : (isSpokeKind ? '' : _mgmtBtn('Un-approve', `${unapproveFnName}('${eAid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')),
                     ...(extras ? extras.actions : []),
                 ],
             }) + (extras ? extras.eventsPanel : '');
@@ -6610,7 +6619,7 @@ async function deleteAgent(agentId) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-async function openSpokeMetadataModal(spokeId, currentName) {
+async function openSpokeMetadataModal(spokeId, currentName, approved) {
     const modal = document.createElement('div');
     modal.id = 'spoke-metadata-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -6629,6 +6638,7 @@ async function openSpokeMetadataModal(spokeId, currentName) {
 
     const safeName = (currentName || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeDesc = description.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const eId = spokeId.replace(/'/g, "\\'");
 
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
@@ -6651,6 +6661,14 @@ async function openSpokeMetadataModal(spokeId, currentName) {
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">System Hostname (Optional)</label>
                     <input type="text" id="meta-hostname" placeholder="e.g. opnsense-core" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="pt-4 border-t border-slate-200 space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Spoke Actions</label>
+                    <div class="flex flex-wrap gap-2">
+                        <button onclick="resetSpokeSecret('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 transition-colors">Reset Secret</button>
+                        ${approved ? `<button onclick="unapproveSpoke('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-md bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition-colors">Un-approve</button>` : ''}
+                    </div>
+                    <p class="text-[11px] text-slate-400">Reset Secret wipes stored keys and forces re-onboarding. Un-approve revokes access until re-approved.</p>
                 </div>
                 <div class="pt-4 flex justify-end gap-3">
                     <button onclick="this.closest('#spoke-metadata-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
@@ -7250,10 +7268,10 @@ async function setRecoveryPause(spokeId, pause) {
 // (revokeAgent is already the Agents tile's Un-approve button — no duplicate).
 function _diagTelemetryExtras(s, fns) {
     fns = fns || {};
-    const resetFn = fns.resetFn || 'resetSpokeSecret';
     const deleteFn = fns.deleteFn || 'deleteSpoke';
     const allowRecoveryPause = fns.allowRecoveryPause !== false;
-    const allowReset = fns.allowReset !== false;
+    // resetFn/allowReset are no longer consumed here — Reset Secret moved into
+    // the spoke Edit modal (openSpokeMetadataModal). Callers may still pass them.
     const status = spokeStatusMessage(s);
     const evCount = (s.events || []).length;
     const rec = s.recovery || {};
@@ -7313,9 +7331,9 @@ function _diagTelemetryExtras(s, fns) {
             s.last_error ? `<div class="text-[10px] text-red-500 font-mono pl-6 break-all">${escapeHtml(s.last_error)}</div>` : '',
         ],
         actions: [
-            allowReset
-                ? _mgmtBtn('Reset Secret', `${resetFn}('${eSid}')`, 'bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300')
-                : '',
+            // Reset Secret moved into the spoke Edit modal (openSpokeMetadataModal)
+            // to declutter the row; pxmx agents never showed it (allowReset=false),
+            // so removing it here changes nothing for the Agents card.
             _mgmtBtn('Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
             allowRecoveryPause
                 ? _mgmtBtn(pauseLabel, `setRecoveryPause('${eSid}', ${!isPaused})`, isPaused ? 'text-green-600' : 'text-slate-400 hover:underline')
