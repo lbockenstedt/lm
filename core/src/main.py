@@ -678,6 +678,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._spoke_backoff = set()       # spoke_ids currently told to slow down
         self._fleet_backoff = False       # rung-2 broadcast active
         self._backoff_signaled = {}       # spoke_id -> last level we told it (dedup)
+        self._backoff_since = {}          # spoke_id -> monotonic ts throttle began (release dwell)
         # Rung-3 receiver-side coalesce: latest-wins telemetry buffer, drained at
         # a bounded cadence by run_coalesce_drain_loop. Superseded snapshots are
         # merged away (counted) instead of each running the full ingest path.
@@ -735,6 +736,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             "coalesce_min_interval_s": float(cfg.get("coalesce_min_interval_s", 2.0)),
             # Rung-3 hub drain cadence (process one latest snapshot per spoke).
             "hub_drain_interval_s": float(cfg.get("hub_drain_interval_s", 1.0)),
+            # DAMPING: once throttled, HOLD a spoke for at least this long before
+            # even considering release — because a throttled spoke's MEASURED
+            # rate collapses (it's coalescing to coalesce_min_interval_s), so
+            # evaluating release on that suppressed rate would flap it every
+            # window (throttle → rate drops → release → rate spikes → throttle).
+            # Ramp down fast, release slow. 0 disables the hold.
+            "release_dwell_s": float(cfg.get("release_dwell_s", 20.0)),
         }
 
 
@@ -3285,24 +3293,43 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         elif fleet_cool:
             self._fleet_backoff = False
 
-        # Per-spoke desired level = 2 (fleet) else 1 (offender) else 0. Offender
-        # test has its own hysteresis (stay throttled until below the clear mark).
+        # Per-spoke desired level = 2 (fleet) else 1 (offender) else 0.
+        #
+        # DAMPING (release dwell): a THROTTLED spoke's measured mps is the
+        # SUPPRESSED rate (it's coalescing to coalesce_min_interval_s), so it
+        # naturally sits below the clear mark — evaluating release on it would
+        # flap the spoke every window. So: once throttled, HOLD it for
+        # release_dwell_s before we even consider releasing, and only release
+        # then if it has genuinely gone quiet. New offenders still engage
+        # instantly (ramp down fast); we only slow the RELEASE (ramp up slow).
+        now = time.monotonic()
+        dwell = p["release_dwell_s"]
         new_backoff = set()
         for sid in live:
             mps = self.spoke_mps.get(sid, 0.0)
             was = self._backoff_signaled.get(sid, 0)
-            offender = (mps >= p["per_spoke_soft_mps"]
-                        or (was and mps >= p["per_spoke_clear_mps"]))
-            desired = 2 if self._fleet_backoff else (1 if offender else 0)
+            if self._fleet_backoff:
+                desired = 2
+            elif was:  # currently throttled → apply the release dwell
+                held = now - self._backoff_since.get(sid, now)
+                if held < dwell or mps >= p["per_spoke_clear_mps"]:
+                    desired = was          # hold (damp the flap)
+                else:
+                    desired = 0            # quiet past the dwell → release
+            else:
+                desired = 1 if mps >= p["per_spoke_soft_mps"] else 0
             if desired:
                 new_backoff.add(sid)
             if desired != was:
+                if desired and not was:
+                    self._backoff_since[sid] = now   # stamp when throttling began
                 sigs.append(self._signal_backoff(
                     sid, desired, p["coalesce_min_interval_s"] if desired else 0.0))
         self._spoke_backoff = new_backoff
         # Forget signal state for spokes that have disconnected.
         for sid in [s for s in list(self._backoff_signaled) if s not in live]:
             self._backoff_signaled.pop(sid, None)
+            self._backoff_since.pop(sid, None)
         self._load_level = 2 if self._fleet_backoff else (1 if self._spoke_backoff else 0)
         if sigs:
             await asyncio.gather(*sigs, return_exceptions=True)
