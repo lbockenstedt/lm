@@ -1444,6 +1444,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             override_cfg["sim_conf_override"] = sim_override
         if user_override:
             override_cfg["user_conf_override"] = user_override
+        # Spoke-side agent-relay timeouts (Setup → General → global_config): push
+        # to every (re)connecting cs spoke so its SPOKE_RELAY forward uses the
+        # configured long-op / fast windows (WAN + busy-agent tuning). Global
+        # for now; a per-tenant override can override these later.
+        try:
+            _gc = self.state.get_global_config() or {}
+            for _rk in ("agent_relay_timeout_long_s", "agent_relay_timeout_fast_s"):
+                if _gc.get(_rk) is not None:
+                    override_cfg[_rk] = _gc.get(_rk)
+        except Exception:  # noqa: BLE001 — best-effort
+            pass
         if override_cfg:
             try:
                 await self.request_response(spoke_id, "CS_CONFIG_UPDATE",

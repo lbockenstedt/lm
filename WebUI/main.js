@@ -3909,6 +3909,18 @@ function _renderSetupGeneralTile(content) {
             </div>
         </div>
         <div class="${card}">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agent Relay Timeouts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+            <p class="text-xs text-slate-400">How long a cs spoke waits for its hosted Proxmox agent to acknowledge a relayed command. Long ops (delete / reclone / snapshot / clone / provision) ack immediately and stream their result, but a busy (auto-prov cloning) or WAN-connected agent can be slow — raise the long-op window to avoid false "Agent response timeout" failures. Pushed to cs spokes on connect.</p>
+            <div class="flex flex-wrap items-end gap-3">
+                <div class="space-y-1"><label class="${labelCls}">Long-op timeout (s)</label>
+                    <input type="number" id="relay-timeout-long" min="1" max="600" value="60" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-1"><label class="${labelCls}">Fast timeout (s)</label>
+                    <input type="number" id="relay-timeout-fast" min="1" max="600" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <button onclick="saveRelayTimeouts()" class="${btnCls}">Save</button>
+                <span id="relay-timeout-status" class="text-xs text-slate-400"></span>
+            </div>
+        </div>
+        <div class="${card}">
             <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Appearance ${helpIcon('lm-hub', null, 'Hub help')}</h3>
             <p class="text-xs text-slate-400">Configure the header logo shown to the left of the title. Use <code>hpe-svg</code> for the built-in HPE mark, or any image URL/path.</p>
             <div class="space-y-1">
@@ -3928,6 +3940,7 @@ function _renderSetupGeneralTile(content) {
     loadCacheConfig();
     loadAppearanceForm();
     loadToastConfigForm();
+    loadRelayTimeoutsForm();
     loadRepoSyncConfig();
     if (currentView === 'settings') loadSubnetFilterToggles();
 }
@@ -13212,6 +13225,40 @@ async function loadToastConfigForm() {
     await loadToastConfig();
     const el = document.getElementById('toast-duration-input');
     if (el) el.value = window.TOAST_DURATION_MS / 1000;
+}
+
+// Agent relay timeouts (Setup → General) — global_config.agent_relay_timeout_*_s,
+// pushed to cs spokes via CS_CONFIG_UPDATE and read by their SPOKE_RELAY forward.
+async function loadRelayTimeoutsForm() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const gc = ((await r.json()) || {}).global_config || {};
+        const lo = document.getElementById('relay-timeout-long');
+        const fa = document.getElementById('relay-timeout-fast');
+        if (lo && gc.agent_relay_timeout_long_s != null) lo.value = gc.agent_relay_timeout_long_s;
+        if (fa && gc.agent_relay_timeout_fast_s != null) fa.value = gc.agent_relay_timeout_fast_s;
+    } catch (e) { console.error('loadRelayTimeoutsForm', e); }
+}
+
+async function saveRelayTimeouts() {
+    const lo = Number(document.getElementById('relay-timeout-long')?.value);
+    const fa = Number(document.getElementById('relay-timeout-fast')?.value);
+    const status = document.getElementById('relay-timeout-status');
+    if (!(lo >= 1) || !(fa >= 1)) {
+        if (status) status.textContent = 'Enter values ≥ 1s.';
+        return;
+    }
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { agent_relay_timeout_long_s: lo, agent_relay_timeout_fast_s: fa } }),
+        });
+        if (r.ok) {
+            if (status) status.textContent = 'Saved.';
+            if (typeof showToast === 'function') showToast(`Relay timeouts saved (long ${lo}s, fast ${fa}s). Applies as cs spokes reconnect.`, 'success');
+        } else if (status) { status.textContent = 'Failed to save.'; }
+    } catch (e) { if (status) status.textContent = 'Failed to save.'; console.error('saveRelayTimeouts', e); }
 }
 
 async function saveToastConfig() {
