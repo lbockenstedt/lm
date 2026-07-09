@@ -16,6 +16,7 @@ import ssl
 import sys
 import fcntl
 import contextlib
+import concurrent.futures
 from typing import Dict, Any, Optional, Type
 from .protocol import Message, MessageHeader, MessagePayload
 from ..security.signer import MessageSigner, encode_frame, split_frame
@@ -101,6 +102,12 @@ class BaseControlPlane:
     Generic Control Plane for Lab Manager Spokes.
     Handles Hub connectivity, mutual authentication, and module routing.
     """
+    # Deadline (seconds) the heartbeat thread waits for the event loop to
+    # actually push a heartbeat frame. If the loop is blocked past this, the
+    # thread logs an explicit 'event loop stalled' WARNING — the diagnostic
+    # win of moving the heartbeat off the loop. See _heartbeat_thread_target.
+    HEARTBEAT_SEND_DEADLINE_S = 5.0
+
     def __init__(self, spoke_id: str, secret: str = None, hub_secret: str = None, hub_url: str = None,
                  onboarding_psk: str = None, tenant_id_hint: str = None):
         self.spoke_id = spoke_id
@@ -1095,31 +1102,15 @@ class BaseControlPlane:
                     pass
                 return
 
-            # Heartbeat loop
-            async def heartbeat():
-                while True:
-                    try:
-                        ts = round(time.time(), 6)
-                        msg = {
-                            "header": {"message_id": str(uuid.uuid4()), "timestamp": ts,
-                                       "sender_id": self.spoke_id, "destination_id": "hub"},
-                            "payload": {"type": "HEARTBEAT", "data": {}}
-                        }
-                        await websocket.send(self._encode_frame(msg))
-                        await asyncio.sleep(30)
-                    except asyncio.CancelledError:
-                        raise
-                    except (websockets.exceptions.ConnectionClosed, OSError) as e:
-                        # Connection is gone — let the main loop notice and
-                        # reconnect. Swallowing here avoids an uncaught task
-                        # exception printing a raw traceback to stderr.
-                        logger.debug("Heartbeat send failed; letting main loop reconnect: %s", e)
-                        return
-                    except Exception as e:
-                        logger.warning("Heartbeat task error: %s", e)
-                        return
-
-            _hb_task = asyncio.create_task(heartbeat())
+            # Heartbeat — driven by a dedicated OS thread on its own clock so a
+            # stalled event loop (sync-I/O in a command handler) can't drift the
+            # cadence or hide the stall. See _heartbeat_thread_target.
+            _hb_stop = threading.Event()
+            _hb_thread = threading.Thread(
+                target=self._heartbeat_thread_target,
+                args=(websocket, asyncio.get_running_loop(), _hb_stop),
+                name=f"lm-heartbeat-{self.spoke_id}", daemon=True)
+            _hb_thread.start()
             _lr_task = asyncio.create_task(self._log_relay_task(websocket))
             # Per-module health heartbeat — emits a greppable [heartbeat] line
             # every ~60s through the log relay so BugFixer can triage a missing
@@ -1204,7 +1195,8 @@ class BaseControlPlane:
                 task.add_done_callback(cmd_tasks.discard)
             finally:
                 self._hub_ws = None
-                _hb_task.cancel()
+                _hb_stop.set()  # signal the heartbeat thread to exit
+                _hb_thread.join(timeout=2.0)  # short — it ticks on its own clock
                 _lr_task.cancel()
                 _hh_task.cancel()
                 for _t in _extra_tasks:
@@ -1212,8 +1204,72 @@ class BaseControlPlane:
                 for _t in list(cmd_tasks):
                     _t.cancel()
                 await asyncio.gather(
-                    _hb_task, _lr_task, _hh_task, *_extra_tasks,
+                    _lr_task, _hh_task, *_extra_tasks,
                     *list(cmd_tasks), return_exceptions=True)
+
+    def _heartbeat_thread_target(self, websocket, loop, stop_event) -> None:
+        """Dedicated OS thread driving the 30s spoke heartbeat, independent of
+        the asyncio event loop's scheduling.
+
+        The heartbeat used to be an ``asyncio.create_task`` sharing the event
+        loop, so any loop-blocking sync-I/O call in a command handler (the
+        historical unbound-control / Kea-CA / netbox ``_ensure_cf`` stalls)
+        starved it: ``asyncio.sleep(30)`` wouldn't tick and the hub's
+        ``last_seen`` went stale silently until the 90s WS keepalive dropped the
+        socket. This thread ticks on a real ``time.sleep`` clock (via
+        ``stop_event.wait``), so the cadence can't drift and a stall can't hide:
+        each tick schedules the send on the loop and waits up to
+        ``HEARTBEAT_SEND_DEADLINE_S`` for it to complete. If it doesn't (the loop
+        is blocked), the thread — which is NOT blocked — logs an explicit
+        'heartbeat send overdue' WARNING so the stall is observable in the spoke
+        log instead of a silent gap.
+
+        Delivery still rides the event loop (the WS socket's ``send`` is a
+        coroutine), so a hard stall still drops the WS via the hub's 90s
+        keepalive; this thread makes the stall diagnosable and the cadence
+        drift-free, and the on-the-second tick resumes with no missed beat the
+        moment the loop unblocks.
+        """
+        while not stop_event.is_set():
+            try:
+                ts = round(time.time(), 6)
+                msg = {
+                    "header": {"message_id": str(uuid.uuid4()), "timestamp": ts,
+                               "sender_id": self.spoke_id, "destination_id": "hub"},
+                    "payload": {"type": "HEARTBEAT", "data": {}}
+                }
+                frame = self._encode_frame(msg)
+            except Exception as e:  # noqa: BLE001 — encode is sync; never kill the thread
+                logger.warning("Heartbeat encode failed: %s", e)
+                if stop_event.wait(30.0):
+                    return
+                continue
+            try:
+                fut = asyncio.run_coroutine_threadsafe(websocket.send(frame), loop)
+                fut.result(timeout=self.HEARTBEAT_SEND_DEADLINE_S)
+            except concurrent.futures.TimeoutError:
+                # The event loop didn't process the send within the deadline →
+                # it's blocked on sync I/O somewhere. The send stays pending and
+                # completes (or fails) when the loop unblocks; the hub's 90s WS
+                # keepalive is the backstop. Surface the stall so it's diagnosable
+                # instead of a silent last_seen gap.
+                logger.warning(
+                    "Event loop stalled — heartbeat send did not complete in %.0fs "
+                    "(a sync-I/O call is likely blocking the loop). The WS keepalive "
+                    "may drop this connection; the send will complete when the loop "
+                    "unblocks.", self.HEARTBEAT_SEND_DEADLINE_S)
+            except (websockets.exceptions.ConnectionClosed, OSError, ConnectionError) as e:
+                logger.debug("Heartbeat send failed; letting main loop reconnect: %s", e)
+                return
+            except RuntimeError as e:
+                # Loop is closing/stopped (connection teardown) — exit cleanly.
+                logger.debug("Heartbeat thread: loop unavailable (%s)", e)
+                return
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Heartbeat thread error: %s", e)
+                return
+            if stop_event.wait(30.0):
+                return
 
     def _create_spoke_tasks(self, websocket) -> list:
         """Subclasses override to add long-lived per-connection async tasks
