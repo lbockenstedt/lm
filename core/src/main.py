@@ -1040,6 +1040,44 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # tenant_id is None: admin / global view — any connected spoke.
         return cands[0]
 
+    def get_client_sim_spokes(self, tenant_id: str = None) -> list:
+        """Return ALL approved, connected Client-Sim spokes for a tenant.
+
+        Plural counterpart to ``get_client_sim_spoke``. A tenant may have
+        SEVERAL Client-Sim spokes bound (e.g. cs-svr-02 / -03 / -04), and a
+        config push — auto-provision toggle, hub-config save, USB approval
+        merge — must reach EVERY one of them. The singular helper returns only
+        ``bound[0]``, so a toggle on a 3-spoke tenant pushed to one and the
+        WebUI toast read "Pushed to 1 spoke(s)" while 3 were connected; this
+        list is what the push fans out over so the count is honest.
+
+        Tenant isolation is identical to the singular helper: with a
+        ``tenant_id`` we return ONLY spokes bound to that tenant, or — if none
+        are bound — a single UNASSIGNED spoke the tenant implicitly claims
+        (never a spoke bound to a different tenant, whose CSSettings a push
+        would overwrite). With ``tenant_id is None`` (admin / global) every
+        connected, approved Client-Sim spoke is returned so an admin push
+        reaches the whole fleet, not just ``cands[0]``.
+        """
+        cands = self.get_all_spokes_by_type("Client-Sim") or self.get_all_spokes_by_type("simulation")
+        # Only approved spokes carry cached telemetry (unapproved frames are dropped).
+        cands = [sid for sid in cands if self.approved_modules.get(sid, False)]
+        if not cands:
+            return []
+        if tenant_id:
+            md = self.state.system_state.get("module_metadata", {})
+            bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+            if bound:
+                return bound
+            # No spoke bound to this tenant — claim ONE unassigned (never a
+            # spoke bound to another tenant — cross-tenant CSSettings leak).
+            unassigned = [sid for sid in cands if not md.get(sid, {}).get("tenant_id")]
+            if unassigned:
+                return [unassigned[0]]
+            return []
+        # tenant_id is None: admin / global view — every connected spoke.
+        return cands
+
     # Map unified-agent CS_* events to cs-spoke ingest/store commands. Keys are
     # the payload types the pxmx agent emits (see agent.send_cs_event); values are
     # the commands the cs spoke's handle_command implements.

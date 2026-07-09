@@ -13,6 +13,7 @@ section). This is the LM-side port of the legacy solutions-hpe Client-Sim UI.
 from fastapi import WebSocket, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from typing import Any, Dict
+import asyncio
 import configparser
 from datetime import datetime, timezone
 import hmac
@@ -662,50 +663,84 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             return obj
 
     async def _push_config(tenant_id: str, payload: dict) -> "_PushResult":
-        """Best-effort CS_CONFIG_UPDATE push to the tenant's Client-Sim spoke.
-        Returns a _PushResult (int-like: 0 if no spoke connected/assigned, 1 if
-        pushed — .queued is True when it was queued rather than delivered
-        live). The spoke-side CSBridge routes CS_CONFIG_UPDATE through
-        server._apply_hub_config, which handles central_api/central_config/
-        notifications/sim_conf_override/user_conf_override/
-        relay_onboarding_psk + the HUB_CONFIG_OWNED_KEYS.
+        """Best-effort CS_CONFIG_UPDATE push to ALL of the tenant's Client-Sim
+        spokes. Returns a _PushResult whose int value is the NUMBER of spokes
+        the config reached (0 if none connected/assigned; N if pushed to N
+        spokes — a tenant with 3 bound cs spokes gets 3, not 1) and ``.queued``
+        is True when ANY delivery was queued rather than live. The spoke-side
+        CSBridge routes CS_CONFIG_UPDATE through server._apply_hub_config,
+        which handles central_api/central_config/notifications/
+        sim_conf_override/user_conf_override/relay_onboarding_psk + the
+        HUB_CONFIG_OWNED_KEYS.
 
         Uses push_or_queue_to_spoke (not a bare request_response) so a spoke
         that's approved+bound but momentarily unreachable — mid self-update
         restart, brief reconnect blip — gets this queued for delivery the
         moment it reconnects instead of silently reporting "0 spokes pushed"
         for what looked like a fine, connected spoke a few seconds earlier.
-        Still counts as pushed (1) either way: a queued push WILL apply, just
-        not this instant."""
-        spoke_id = None
-        get_spoke = getattr(hub, "get_client_sim_spoke", None)
-        if callable(get_spoke):
+        A queued push still counts toward the total: it WILL apply, just not
+        this instant.
+
+        Fans out to every spoke from hub.get_client_sim_spokes (the plural
+        helper that respects tenant binding — a tenant with several bound cs
+        spokes gets the config on ALL of them, not just ``bound[0]``); falls
+        back to the singular get_client_sim_spoke on an older hub build without
+        it. Pushes CONCURRENTLY so a slow/queued spoke doesn't serialise the
+        fan-out (3 spokes = one ~5s round-trip, not three)."""
+        # Prefer the plural helper (reaches every bound cs spoke); fall back to
+        # the singular one on an older hub build without it.
+        spoke_ids: list = []
+        get_spokes = getattr(hub, "get_client_sim_spokes", None)
+        if callable(get_spokes):
             try:
-                spoke_id = get_spoke(tenant_id)
+                spoke_ids = list(get_spokes(tenant_id) or [])
             except Exception:
-                spoke_id = None
-        if not spoke_id:
+                spoke_ids = []
+        if not spoke_ids:
+            get_spoke = getattr(hub, "get_client_sim_spoke", None)
+            if callable(get_spoke):
+                try:
+                    sid = get_spoke(tenant_id)
+                except Exception:
+                    sid = None
+                if sid:
+                    spoke_ids = [sid]
+        if not spoke_ids:
             return _PushResult(0)
         push = getattr(hub, "push_or_queue_to_spoke", None)
-        if not callable(push):
-            # Fallback for a hub build without push_or_queue_to_spoke yet.
+
+        async def _one(sid: str):
+            """Push to one spoke. Returns (1, queued, msg) on delivery (live OR
+            queued — a queued push still counts, it WILL apply on reconnect),
+            (0, False, '') on transport failure."""
+            if not callable(push):
+                # Fallback for a hub build without push_or_queue_to_spoke yet.
+                try:
+                    await hub.request_response(sid, "CS_CONFIG_UPDATE", payload, timeout=5.0)
+                    return 1, False, ""
+                except Exception as exc:
+                    logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", sid, exc)
+                    return 0, False, ""
             try:
-                await hub.request_response(spoke_id, "CS_CONFIG_UPDATE", payload, timeout=5.0)
-                return _PushResult(1)
+                outcome = await push(sid, "CS_CONFIG_UPDATE", payload, timeout=5.0)
+                queued = bool(outcome.get("queued"))
+                msg = str(outcome.get("message", "") or "")
+                if queued:
+                    logger.info("CS_CONFIG_UPDATE for %s queued (spoke unreachable): %s",
+                               sid, outcome.get("message"))
+                return 1, queued, msg
             except Exception as exc:
-                logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", spoke_id, exc)
-                return _PushResult(0)
-        try:
-            outcome = await push(spoke_id, "CS_CONFIG_UPDATE", payload, timeout=5.0)
-            queued = bool(outcome.get("queued"))
-            if queued:
-                logger.info("CS_CONFIG_UPDATE for %s queued (spoke unreachable): %s",
-                           spoke_id, outcome.get("message"))
-            return _PushResult(1, queued=queued,
-                              message=outcome.get("message", "") if queued else "")
-        except Exception as exc:
-            logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", spoke_id, exc)
-            return _PushResult(0)
+                logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", sid, exc)
+                return 0, False, ""
+
+        results = await asyncio.gather(*[_one(sid) for sid in spoke_ids])
+        pushed = sum(r[0] for r in results)
+        any_queued = any(r[1] for r in results)
+        queued_msgs = [f"{sid}: {r[2]}" for sid, r in zip(spoke_ids, results)
+                       if r[1] and r[2]]
+        return _PushResult(pushed, queued=any_queued,
+                          message="; ".join(queued_msgs) if any_queued else "")
+
 
     async def _cs_forward(tenant_id: str, cmd_type: str, payload: dict,
                           timeout: float = 15.0) -> dict:
