@@ -155,6 +155,10 @@ class SimulationsStore:
                 json.dumps(self._data, indent=2, default=str))
             with open(tmp, "wb") as f:
                 f.write(encrypted)
+            try:
+                os.chmod(tmp, 0o600)  # encrypted simulations store: not world-readable
+            except OSError:
+                pass
             os.replace(tmp, self._path)
             self._needs_rekey = False
         except Exception as exc:

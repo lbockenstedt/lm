@@ -287,6 +287,11 @@ _LOGIN_BASE_LOCKOUT_S = float(os.environ.get("LM_LOGIN_BASE_LOCKOUT_S", "30"))
 _LOGIN_MAX_LOCKOUT_S = float(os.environ.get("LM_LOGIN_MAX_LOCKOUT_S", "3600"))
 _LOGIN_IP_WINDOW_S = float(os.environ.get("LM_LOGIN_IP_WINDOW_S", "300"))
 _LOGIN_IP_MAX = int(os.environ.get("LM_LOGIN_IP_MAX", "20"))
+# Cap on the number of distinct source IPs tracked in the spray window. A
+# spoofed-XFF rotation (or a large fleet behind one proxy) would otherwise grow
+# ``_login_ip_attempts`` without limit; past this cap the oldest buckets are
+# evicted. Per-username lockout remains the real defense; this is memory hygiene.
+_LOGIN_IP_TRACKED_MAX = int(os.environ.get("LM_LOGIN_IP_TRACKED_MAX", "4096"))
 _login_attempts: dict = {}    # {username: {count, locked_until, first_fail}}
 _login_ip_attempts: dict = {}  # {ip: [ts,...]} (in-memory, not persisted)
 
@@ -477,14 +482,33 @@ def _login_check(user_id: str, ip: str):
     # Per-IP spray window (credential stuffing across many usernames).
     ip_hits = [ts for ts in _login_ip_attempts.get(ip, [])
                if ts > now - _LOGIN_IP_WINDOW_S]
-    _login_ip_attempts[ip] = ip_hits
+    if ip_hits:
+        _login_ip_attempts[ip] = ip_hits
+    else:
+        # Drop an empty bucket so the dict doesn't retain a key per spoofed IP.
+        _login_ip_attempts.pop(ip, None)
     if len(ip_hits) >= _LOGIN_IP_MAX:
         return False, max(1, int(_math.ceil((ip_hits[0] + _LOGIN_IP_WINDOW_S) - now)))
+    # Bound the number of tracked IPs (memory hygiene under XFF rotation).
+    if len(_login_ip_attempts) > _LOGIN_IP_TRACKED_MAX:
+        _prune_ip_buckets(_LOGIN_IP_TRACKED_MAX)
     # Per-username lockout.
     rec = _login_attempts.get(user_id)
     if rec and rec.get("locked_until", 0) > now:
         return False, max(1, int(_math.ceil(rec["locked_until"] - now)))
     return True, 0
+
+
+def _prune_ip_buckets(max_keep: int) -> None:
+    """Evict the oldest per-IP spray buckets past ``max_keep`` (by the newest
+    timestamp in each bucket) so ``_login_ip_attempts`` can't grow unbounded
+    under a spoofed-XFF rotation or a large fleet behind one proxy."""
+    if len(_login_ip_attempts) <= max_keep:
+        return
+    scored = [(max(b) if b else 0, ip) for ip, b in _login_ip_attempts.items()]
+    scored.sort(reverse=True)
+    for _ts, ip in scored[max_keep:]:
+        _login_ip_attempts.pop(ip, None)
 
 
 def _login_fail(hub, user_id: str, ip: str) -> int:
@@ -509,11 +533,17 @@ def _login_fail(hub, user_id: str, ip: str) -> int:
     return max(0, int(_math.ceil(rec.get("locked_until", 0) - now)))
 
 
-def _login_success(hub, user_id: str) -> None:
-    """Clear a username's lockout counters on a successful login (persisted so a
-    restart doesn't re-lock an account that just succeeded)."""
+def _login_success(hub, user_id: str, ip: str = None) -> None:
+    """Clear a username's lockout counters (and its per-IP spray bucket) on a
+    successful login — persisted (the username record) so a restart doesn't
+    re-lock an account that just succeeded. The IP bucket is in-memory only."""
+    changed = False
     if user_id in _login_attempts:
         _login_attempts.pop(user_id, None)
+        changed = True
+    if ip and ip in _login_ip_attempts:
+        _login_ip_attempts.pop(ip, None)
+    if changed:
         _save_login_attempts(hub)
 
 
@@ -939,15 +969,34 @@ def create_app(hub):
     # credentials. ``["*"]`` + ``allow_credentials=True`` is spec-invalid (browsers
     # reject it) and would reflect arbitrary Origin headers — never set both.
     _cors_env = os.environ.get("LM_CORS_ORIGINS", "").strip()
-    if _cors_env:
+    if _cors_env and _cors_env != "*":
         _cors_origins = [o.strip() for o in _cors_env.split(",") if o.strip()]
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=_cors_origins,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+        # A wildcard origin with credentials is spec-invalid (browsers reject it)
+        # and, if a framework fell back to reflecting Origin, would let any site
+        # make credentialed requests. Reject "*" explicitly: log + fall back to the
+        # no-credentialed default rather than honour it.
+        if "*" in _cors_origins:
+            logger.warning(
+                "LM_CORS_ORIGINS contains '*' — wildcard with credentials is "
+                "spec-invalid and unsafe; ignoring and falling back to the "
+                "no-credentialed default. List explicit origins instead.")
+            _cors_origins = []
+        if _cors_origins:
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=_cors_origins,
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
+        else:
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=[],
+                allow_credentials=False,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
     else:
         # No cross-origin opt-in: still allow same-origin (no-op) and non-credentialed
         # simple requests, but credentials are OFF and no Origin is reflected.
@@ -1129,15 +1178,21 @@ def create_app(hub):
         try:
             return await call_next(request)
         except Exception as exc:
+            # Server-side: full traceback to the hub log (operator diagnostics).
+            # Client-side: a GENERIC detail + a short reference id (also logged
+            # with the trace) so the operator can correlate via the log without
+            # an internet-exposed hub leaking internal paths / exception
+            # fingerprints (str(exc), exc type, request path) to a caller.
+            ref = secrets.token_hex(6)
             logger.exception(
-                "Unhandled exception on %s %s", request.method, request.url.path
+                "Unhandled exception on %s %s [ref=%s]", request.method,
+                request.url.path, ref
             )
             return JSONResponse(
                 status_code=500,
                 content={
-                    "detail": str(exc),
-                    "type": type(exc).__name__,
-                    "path": request.url.path,
+                    "detail": "Internal server error",
+                    "ref": ref,
                 },
             )
 

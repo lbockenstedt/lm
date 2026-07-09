@@ -242,6 +242,17 @@ def test_cors_unlisted_origin_not_reflected(monkeypatch, tmp_path):
     assert r.headers.get("access-control-allow-origin") != "https://evil.example"
 
 
+def test_cors_wildcard_rejected(monkeypatch, tmp_path):
+    # LM_CORS_ORIGINS="*" is spec-invalid with credentials and unsafe (would
+    # reflect arbitrary Origin). It's rejected → falls back to the no-
+    # credentialed default (no Origin reflected), NOT a wildcard+creds policy.
+    monkeypatch.setenv("LM_CORS_ORIGINS", "*")
+    c, hub = _build({}, tmp_path)
+    r = c.get("/status", headers={"Origin": "https://evil.example"})
+    assert r.headers.get("access-control-allow-origin") != "https://evil.example"
+    assert r.headers.get("access-control-allow-credentials") != "true"
+
+
 # ── 4b. Trusted-proxy XFF parsing (LM_TRUSTED_PROXIES) ───────────────────────
 
 class _FakeReq:

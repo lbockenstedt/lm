@@ -117,6 +117,10 @@ class KeyManager:
             encrypted_secret = hub_encryption.encrypt(json_data)
             with open(self.hub_secret_path, "wb") as f:
                 f.write(encrypted_secret)
+            try:
+                os.chmod(self.hub_secret_path, 0o600)  # hub root secrets: not world-readable
+            except OSError:
+                pass
         except Exception as e:
             logger.error(f"Failed to save hub secrets: {e}")
 
@@ -160,6 +164,10 @@ class KeyManager:
         encrypted_data = hub_encryption.encrypt(json_data)
         with open(self.storage_path, "wb") as f:
             f.write(encrypted_data)
+        try:
+            os.chmod(self.storage_path, 0o600)  # spoke session keys: not world-readable
+        except OSError:
+            pass
 
     def load_keys(self):
         if os.path.exists(self.storage_path):

@@ -33,16 +33,16 @@ def register(app, hub, ctx):
             data = await request.json()
             user_id = data.get("username", "").strip()
             password = data.get("password", "")
-            if not user_id or not password:
-                raise HTTPException(status_code=400, detail="username and password required")
             # Real client IP for the per-IP spray limiter. Behind an Azure
             # front end the TCP peer is the proxy; _client_ip recovers the real
             # client from X-Forwarded-For ONLY when the peer is a configured
             # trusted proxy (LM_TRUSTED_PROXIES), walking right-to-left past
             # trusted hops — so XFF can't be spoofed to bypass the cap.
             ip = _client_ip(request)
-            # Throttle BEFORE the password check so a locked-out account can't be
-            # probed even with the right credentials. ``_login_check`` covers both
+            # Throttle BEFORE the field/password checks so a locked-out IP can't
+            # even probe, AND so a flood of malformed (empty-username) requests
+            # still counts against the per-IP spray window (was: the 400 fired
+            # before _login_check → unthrottled). ``_login_check`` covers both
             # per-username lockout and per-IP spray windows.
             allowed, retry_after = _login_check(user_id, ip)
             if not allowed:
@@ -51,6 +51,12 @@ def register(app, hub, ctx):
                     detail="Too many login attempts. Try again later.",
                     headers={"Retry-After": str(retry_after)},
                 )
+            if not user_id or not password:
+                # Malformed, but still abuse — count it against the IP window so
+                # an empty-field flood fills the bucket and trips the throttle
+                # above on the next request.
+                _login_fail(hub, user_id, ip)
+                raise HTTPException(status_code=400, detail="username and password required")
             users = hub.state.system_state.get("users", {})
             user = users.get(user_id)
             # Same 401 message for "no such user" and "wrong password" to avoid
@@ -59,7 +65,7 @@ def register(app, hub, ctx):
                not _verify_password(password, user["password_hash"]):
                 _login_fail(hub, user_id, ip)
                 raise HTTPException(status_code=401, detail="Invalid credentials")
-            _login_success(hub, user_id)
+            _login_success(hub, user_id, ip)
             # Always read the live record so migrations/admin changes take effect on next login.
             # Effective perms = group-derived rights unioned with per-user overrides (RBAC).
             perms   = resolve_effective_permissions(hub, user)
@@ -93,7 +99,7 @@ def register(app, hub, ctx):
             raise
         except Exception as e:
             logger.exception("local_login failed")
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail="Login request failed")
 
     @app.get("/auth/me")
     async def auth_me(request: Request):
@@ -115,6 +121,13 @@ def register(app, hub, ctx):
         # changes made after login (migrations, admin edits) are reflected immediately
         # without requiring a logout/login cycle.
         user_id = sess.get("user_id") or sess["user"].get("user_id")
+        # /auth/me is the WebUI's recurring session-validation poll and is in
+        # _PUBLIC, so access_control_middleware short-circuits BEFORE its
+        # last_seen bump. Bump here so an active user polling /auth/me isn't
+        # falsely idle-logged-out (last_seen would only advance on gated
+        # requests, which a parked-on-the-dashboard user may not make).
+        if isinstance(sess, dict):
+            sess["last_seen"] = time.time()
         live = hub.state.system_state.get("users", {}).get(user_id, {})
         # Re-derive effective (group + per-user) perms live so group membership
         # or group-permission edits take effect without a re-login.
@@ -211,7 +224,7 @@ def register(app, hub, ctx):
             raise
         except Exception as e:
             logger.exception("first_run_setup failed")
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail="Setup request failed")
 
     # _PREFIX_CACHE_TTL moved to access.py (access._PREFIX_CACHE_TTL); the
     # session-prefix cache TTL is now owned by access.resolve_prefixes.

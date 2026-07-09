@@ -44,6 +44,13 @@ class StateManager:
         try:
             if not os.path.exists(self.data_dir):
                 os.makedirs(self.data_dir, exist_ok=True)
+            # 0700 — the state dir holds Fernet-encrypted secrets (hub root
+            # secret, spoke keys, session store, system_state creds). Even
+            # encrypted, the dir must not be world-traversable/readable.
+            try:
+                os.chmod(self.data_dir, 0o700)
+            except OSError:
+                pass
             # Test writability
             test_file = os.path.join(self.data_dir, ".write_test")
             with open(test_file, "w") as f:
@@ -53,6 +60,10 @@ class StateManager:
             logger.warning(f"Cannot use {self.data_dir} (Permission denied or error: {e}). Falling back to home directory state storage.")
             self.data_dir = os.path.expanduser("~/.local/share/lm/state")
             os.makedirs(self.data_dir, exist_ok=True)
+            try:
+                os.chmod(self.data_dir, 0o700)
+            except OSError:
+                pass
 
         self.system_path = os.path.join(self.data_dir, system_path)
         self.tenants_path = os.path.join(self.data_dir, tenants_path)
@@ -190,13 +201,23 @@ class StateManager:
                 f.write(encrypted_data)
                 f.flush()
                 os.fsync(f.fileno())
+            # 0600 — encrypted state files must not be world-readable (item-11
+            # hardening goal; content is Fernet-encrypted but the mode matters).
+            try:
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
 
             # 2. Create backup of existing file if it exists
             if os.path.exists(path):
                 import shutil
                 shutil.copy2(path, bak_path)
+                try:
+                    os.chmod(bak_path, 0o600)
+                except OSError:
+                    pass
 
-            # 3. Atomic replace
+            # 3. Atomic replace (the chmod'd tmp inode becomes the final path)
             os.replace(tmp_path, path)
         except Exception as e:
             logger.error(f"Failed to atomically save state to {path}: {e}")

@@ -164,6 +164,10 @@ class Mailbox:
                 f.write(encrypted)
                 f.flush()
                 os.fsync(f.fileno())
+            try:
+                os.chmod(tmp_path, 0o600)  # encrypted mailbox state: not world-readable
+            except OSError:
+                pass
             os.replace(tmp_path, self._path)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Mailbox persist failed ({self._path}): {e}")
