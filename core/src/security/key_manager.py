@@ -267,12 +267,28 @@ class KeyManager:
         return None
 
     def get_keys_due_for_rotation(self, days: int = 30) -> List[str]:
-        """Returns a list of spoke IDs whose keys were created more than 'days' ago."""
+        """Spoke IDs due for rotation: keys created more than ``days`` ago, OR
+        whose ``expires_at`` has passed.
+
+        The second clause makes the zero-touch bootstrap's short lifetime real:
+        ``generate_first_secret`` stamps ``expires_at = now + 3600`` (1 hour) so
+        a captured bootstrap secret is only good briefly before the hub
+        proactively rotates it into a full 30-day key. Previously this field was
+        set but never read — rotation was driven solely by ``created_at`` (30
+        days), so the "first secret expires in 1 hour" comment was a lie and the
+        bootstrap secret actually lived 30 days. Now the hourly rotation loop
+        picks up an expired first secret the first tick after it expires (worst
+        case ~2h: 1h expiry + up to 1h to the next loop tick). A rotated key's
+        ``expires_at`` is ``created_at + 30d``, so the two clauses agree for
+        full keys — no double-rotation.
+        """
         now = time.time()
         threshold = days * 24 * 3600
         due = []
         for sid, key in self.keys.items():
             if (now - key.created_at) > threshold:
+                due.append(sid)
+            elif key.expires_at and now > key.expires_at:
                 due.append(sid)
         return due
 

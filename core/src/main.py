@@ -1958,6 +1958,113 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if self.spoke_module_types.get(spoke_id) == "agent":
             await self._auto_approve_pending_subspokes(spoke_id)
 
+    async def rotate_spoke_secret_now(self, spoke_id: str) -> Dict[str, Any]:
+        """On-demand, in-place session-secret rotation for one spoke (item 9b).
+
+        Rotates the key and pushes the new secret to the spoke signed with the
+        PRE-rotation secret — the same non-disruptive delivery path the 30-day
+        background loop uses (``run_key_rotation_loop``). The spoke verifies +
+        installs the new secret without re-onboarding and stays connected and
+        approved; the old secret remains valid via the history window for
+        in-flight frames until the next rotation.
+
+        This is the routine / cyclical rotation lever. For a
+        suspected-compromise rotation where the OLD secret must STOP working
+        immediately, use ``revoke_spoke`` or ``reset_spoke_secret`` (wipe +
+        re-onboard) instead — in-place rotation intentionally keeps the previous
+        secret briefly valid, which is what makes it non-disruptive.
+
+        If the spoke isn't connected, the key is still rotated; the new secret
+        takes effect on next connect (the spoke presents the old secret, which
+        is accepted via the history window, then is pushed the new key). Returns
+        ``{"status", "spoke_id", "connected", "pushed", "message"}``.
+        """
+        if spoke_id not in self.key_manager.keys:
+            return {"status": "ERROR", "spoke_id": spoke_id, "connected": False,
+                    "pushed": False, "message": "no key for this spoke — nothing to rotate"}
+        prev_secret = self.key_manager.current_session_secret(spoke_id)
+        new_key = self.key_manager.rotate_key(spoke_id)
+        connected = spoke_id in self.active_connections
+        pushed = False
+        if connected and prev_secret:
+            msg = Message(
+                header=MessageHeader(
+                    message_id=str(uuid.uuid4()), timestamp=time.time(),
+                    sender_id="hub", destination_id=spoke_id),
+                payload=MessagePayload(
+                    type="SPOKE_UPDATE_SESSION_KEY", data={"secret": new_key.secret}))
+            try:
+                await self.send_to_spoke(msg, signing_secret=prev_secret)
+                pushed = True
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"On-demand rotation: failed to push new key to {spoke_id}: {e}")
+        self.record_spoke_event(spoke_id, "secret_rotated",
+                                f"on-demand; connected={connected} pushed={pushed}")
+        logger.info(f"On-demand secret rotation for {spoke_id} "
+                    f"(connected={connected} pushed={pushed}).")
+        return {"status": "SUCCESS", "spoke_id": spoke_id, "connected": connected,
+                "pushed": pushed,
+                "message": f"secret rotated; {'new key pushed to spoke' if pushed else 'new key active on next connect'}"}
+
+    async def rotate_all_spoke_secrets_now(self) -> Dict[str, Any]:
+        """On-demand in-place rotation for every approved spoke with a key
+        (item 9b) — the operator's "rotate everything after an incident" lever.
+        Reuses ``rotate_spoke_secret_now`` per spoke (concurrent pushes), so each
+        is non-disruptive and the old secret stays briefly valid via history.
+        Returns ``{"status", "rotated": [...], "failed": [...]}``."""
+        targets = [sid for sid, ap in self.approved_modules.items() if ap
+                   and sid in self.key_manager.keys]
+
+        async def _one(sid):
+            try:
+                r = await self.rotate_spoke_secret_now(sid)
+                return sid if r.get("status") == "SUCCESS" else None
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"rotate-all: failed for {sid}: {e}")
+                return None
+
+        results = await asyncio.gather(*(_one(sid) for sid in targets)) if targets else []
+        rotated = [r for r in results if r]
+        failed = [sid for sid in targets if sid not in rotated]
+        logger.info(f"On-demand rotate-all: {len(rotated)} rotated, {len(failed)} failed.")
+        return {"status": "SUCCESS", "rotated": rotated, "failed": failed}
+
+    async def revoke_spoke(self, spoke_id: str) -> Dict[str, Any]:
+        """Immediate, non-destructive revocation of a spoke (item 9c).
+
+        The complement to on-demand rotation for the suspected-compromise case
+        where the OLD secret must STOP working right now: closes the live
+        WebSocket, drops approval (``approved=False`` — re-approval required to
+        return), and wipes the crypto material so the old secret no longer
+        verifies on reconnect (``get_valid_key`` returns None → auth-failed →
+        close 1008). Unlike ``DELETE /setup/spokes/{id}``, the registration
+        record is KEPT (the spoke remains in ``known_modules`` as a revoked /
+        pending entry) so the operator can see it was revoked and re-onboard +
+        re-approve the same id when ready. Also clears queued mail (the keyless
+        spoke can't verify signed frames). Returns ``{"status", "spoke_id",
+        "was_connected", "message"}``.
+        """
+        was_connected = spoke_id in self.active_connections
+        ws = self.active_connections.get(spoke_id)
+        if ws is not None:
+            try:
+                await ws.close(code=1008, reason="Revoked by admin")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"revoke_spoke: could not close live WS for {spoke_id}: {e}")
+        self.approved_modules[spoke_id] = False
+        self.state.register_module(spoke_id, approved=False)
+        self.state.save_state()
+        self.key_manager.delete_spoke_key(spoke_id)
+        await self.mailbox.clear_spoke(spoke_id)
+        self.record_spoke_event(spoke_id, "revoked",
+                                f"admin revoke; was_connected={was_connected}")
+        logger.warning(f"Spoke {spoke_id} revoked by admin "
+                       f"(was_connected={was_connected}); re-onboard + re-approve to return.")
+        return {"status": "SUCCESS", "spoke_id": spoke_id,
+                "was_connected": was_connected,
+                "message": f"revoked; old secret invalidated, approval dropped — "
+                           f"re-onboard + re-approve to return"}
+
     def _can_parent_auto_approve(self, spoke_id: str, parent_spoke_id: str) -> bool:
         """True if ``spoke_id`` may be auto-approved via ``parent_spoke_id``:
         the sub-spoke id is prefix-tied to the claimed parent (``{parent}-…``,

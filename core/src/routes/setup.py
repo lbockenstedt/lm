@@ -126,6 +126,51 @@ def register(app, hub, ctx):
             logger.exception("reset_spoke_secret failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/setup/spokes/{spoke_id}/rotate-secret")
+    async def rotate_spoke_secret(spoke_id: str):
+        """On-demand, in-place session-secret rotation (item 9b). Non-disruptive:
+        the spoke stays connected/approved and is pushed a new secret signed with
+        the pre-rotation secret. For suspected compromise where the OLD secret
+        must stop working immediately, use /revoke or /reset-secret instead."""
+        hub = app.state.hub
+        try:
+            result = await hub.rotate_spoke_secret_now(spoke_id)
+            if result.get("status") == "ERROR":
+                raise HTTPException(status_code=404, detail=result.get("message"))
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("rotate_spoke_secret failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/setup/spokes/rotate-all")
+    async def rotate_all_spoke_secrets():
+        """On-demand in-place rotation for every approved spoke with a key
+        (item 9b) — the "rotate everything after an incident" lever. Admin only.
+        Each spoke is rotated non-disruptively via rotate_spoke_secret_now."""
+        hub = app.state.hub
+        try:
+            return await hub.rotate_all_spoke_secrets_now()
+        except Exception as e:
+            logger.exception("rotate_all_spoke_secrets failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/setup/spokes/{spoke_id}/revoke")
+    async def revoke_spoke(spoke_id: str):
+        """Immediate, non-destructive revocation (item 9c): close the live WS,
+        drop approval (re-approval required to return), wipe the crypto material
+        so the old secret no longer verifies on reconnect — but KEEP the
+        registration record so the operator sees it was revoked and can re-onboard
+        + re-approve the same id. For a full wipe (remove the record too), use
+        DELETE /setup/spokes/{id} instead."""
+        hub = app.state.hub
+        try:
+            return await hub.revoke_spoke(spoke_id)
+        except Exception as e:
+            logger.exception("revoke_spoke failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.delete("/setup/spokes/{spoke_id}")
     async def delete_spoke(spoke_id: str):
         """Permanently remove a spoke/generic-agent registration.
