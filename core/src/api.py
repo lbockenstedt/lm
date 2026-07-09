@@ -768,6 +768,27 @@ def create_app(hub):
         return await call_next(request)
 
     # ── Error logging (outermost middleware) ────────────────────────────────
+    # Overload admission control: while the hub is in PROTECT MODE (memory
+    # watermark, see run_mps_loop), shed the heavy read/polling endpoints with
+    # 503 + Retry-After so the WebUI backs off instead of piling onto a saturated
+    # loop. Auth/control/health paths pass through untouched. This is the "shed,
+    # don't hang" guard — the ceiling stays survivable.
+    _SHED_PREFIXES = ("/status", "/setup/pending_spokes", "/setup/diagnostics",
+                      "/sim", "/aggregate")
+
+    @app.middleware("http")
+    async def overload_admission_middleware(request, call_next):
+        hub = getattr(app.state, "hub", None)
+        if (hub is not None and getattr(hub, "_protect_mode", False)
+                and request.method == "GET"
+                and any(request.url.path.startswith(p) for p in _SHED_PREFIXES)):
+            return JSONResponse(
+                status_code=503,
+                content={"detail": f"hub busy ({getattr(hub, '_protect_reason', 'overload')}) — backing off",
+                         "protect": True},
+                headers={"Retry-After": "30"})
+        return await call_next(request)
+
     # Wraps every request so that *any* unhandled exception — including ones
     # raised inside access_control_middleware (e.g. session lookup) or during
     # response serialisation, which bypass the per-route try/except — is

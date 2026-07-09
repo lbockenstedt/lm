@@ -637,6 +637,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception as e:
             logger.warning(f"[bug-report] could not create bug_dir {self.bug_dir}: {e}")
         self.is_ready = False
+        # Overload self-protection: when memory (or, later, loop-lag) crosses a
+        # watermark the hub enters PROTECT MODE — it sheds heavy read endpoints
+        # (503 + Retry-After so the WebUI backs off) and rejects NEW spoke
+        # connections, instead of paging to death or hanging. Cleared with
+        # hysteresis. Threshold configurable via global_config["protect"].
+        self._protect_mode = False
+        self._protect_reason = ""
 
 
     async def send_to_spoke(self, message: Message, signing_secret: Optional[str] = None):
@@ -2552,6 +2559,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # and-suspenders: even if reordered later, skip the limiter for a
                 # correlation-bearing frame so a reply can never be dropped.
                 if "correlation_id" not in msg_data:
+                    # PROTECT MODE: memory is at the watermark — SHED inbound
+                    # telemetry/logs (non-ack, non-heartbeat) so the in-memory
+                    # caches stop growing and the hub doesn't OOM. Heartbeats
+                    # (handled above) still flow, so liveness is preserved; data
+                    # just goes stale until memory recovers. Survive > fresh.
+                    if self._protect_mode:
+                        self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
+                        continue
                     limiter = self.rate_limiters.get(spoke_id)
                     if limiter and not limiter.consume():
                         self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
@@ -2998,9 +3013,30 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         Calculates messages per second and throughput using a 10-second moving average.
         """
         logger.info("MPS and Throughput monitoring loop started.")
+        _protect_since = 0.0
         while True:
             await asyncio.sleep(1.0)
             try:
+                # ── Overload self-protection: memory watermark with hysteresis ──
+                # Enter protect mode above the high mark, leave below the low mark
+                # (so it doesn't flap at the boundary). psutil is already a dep.
+                try:
+                    cfg = (self.state.get_global_config() or {}).get("protect", {}) or {}
+                    hi = float(cfg.get("mem_high_pct", 90))
+                    lo = float(cfg.get("mem_low_pct", 80))
+                    memp = psutil.virtual_memory().percent
+                    if not self._protect_mode and memp >= hi:
+                        self._protect_mode = True
+                        self._protect_reason = f"memory {memp:.0f}% ≥ {hi:.0f}%"
+                        logger.error("[protect] ENTER — %s; shedding heavy reads + "
+                                     "rejecting new spokes", self._protect_reason)
+                    elif self._protect_mode and memp <= lo:
+                        logger.warning("[protect] EXIT — memory %.0f%% ≤ %.0f%%", memp, lo)
+                        self._protect_mode = False
+                        self._protect_reason = ""
+                except Exception as _pe:  # noqa: BLE001 — never let the guard crash the loop
+                    logger.debug("[protect] guard sample failed: %s", _pe)
+
                 self.message_history.append(self.message_count)
 
                 if len(self.message_history) > 0:
@@ -3472,6 +3508,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # Backlog breakdown (by type / by spoke / oldest age) so a
                 # stuck backlog is diagnosable in System → Hub Status.
                 "backlog_stats": self.mailbox.backlog_stats(),
+                # Overload self-protection state (shed heavy reads + telemetry).
+                "protect": bool(self._protect_mode),
+                "protect_reason": self._protect_reason,
                 # Per-spoke inbound msg/s (for the Spokes/Agents tiles).
                 "spoke_mps": {sid: round(v, 1) for sid, v in self.spoke_mps.items()},
                 # Rate-limit drop counters (per spoke) + the live knob values.

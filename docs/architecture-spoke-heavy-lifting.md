@@ -9,9 +9,28 @@
 3. **Drill-in: hub caches detail ~N s** (default 10s) after a live fetch; offline spoke → last-known summary + "detail unavailable".
 4. **Rollout: flag-day** — the hub speaks ONLY the new summary protocol; no old-relay compat path. → the refactor lands **atomically** off a branch; `main` stays on the working relay until cutover.
 
+### Spoke-managed-systems cache + delta model (2026-07-09 refinement)
+- **Each spoke keeps an in-memory cache of the systems it manages** (its domain
+  source-of-truth): VMs/clients for cs, devices for nw, records for netbox/dns/
+  dhcp, etc.
+- **Near-real-time ingest, but the spoke RATE-LIMITS its calls to those managed
+  systems** (e.g. Proxmox `pvesh`/`qm`, device SSH/SNMP/REST, NetBox API) so
+  edge polling never hammers the managed endpoints. Poll cadence + per-target
+  rate limit are spoke-side knobs.
+- **Delta base = the last hub-ACKNOWLEDGED update.** The hub acks each applied
+  delta; the spoke diffs `last_acked_state → current_cache` and sends only that
+  delta, in real time. An un-acked delta is re-sent (at-least-once); the hub
+  applies idempotently by `seq`.
+- **Full refresh (re-baseline) is a HUB-CONFIGURABLE knob** — deployment
+  dependent. `0 = never` (rely purely on deltas + resync-on-reconnect) up to
+  e.g. hourly. Setup → General, pushed to spokes. NOT a fixed floor.
+
 ### Defaults for the remaining open questions (revisit anytime)
-- **Sync**: per-spoke monotonic `seq`; hub detects gaps; **full re-baseline** on spoke connect/reconnect, hub restart, or a detected gap; periodic full every 5 min as a floor.
-- **Summary cadence**: delta on change, coalesced; heartbeat unchanged (realtime liveness).
+- **Sync**: per-spoke monotonic `seq`; hub detects gaps → requests re-baseline;
+  full re-baseline on spoke connect/reconnect, hub restart, detected gap, **or
+  the hub's configurable full-refresh interval (default `0 = never`)**.
+- **Summary cadence**: delta-on-change from last-acked, coalesced; heartbeat
+  unchanged (realtime liveness).
 - **Consistency**: eventual for the reporting UI (summaries between deltas may be slightly stale) — acceptable; no summary-driven operation requires strong consistency.
 - **Cross-module fan-out** (global search, IPAM↔NAC sync, firewall→netbox, VM→netbox): handled per-flow — read summaries where sufficient, on-demand detail where required. Enumerated + resolved during Phase 2.
 
