@@ -1899,8 +1899,18 @@ async function updateStatus() {
         const diagOk = isAdmin() && diagRes?.ok;
 
         const statusData = await statusRes.json();
-        const approvalsData = approvalsOk ? await approvalsRes.json() : { spokes: [] };
-        const diagData = diagOk ? await diagRes.json() : { spokes: [] };
+        // /setup/pending_spokes + /setup/diagnostics are SHED (503) during a
+        // protect spike (they iterate all spokes). When that happens, REUSE the
+        // last-known-good spoke list instead of an empty one — otherwise the nav
+        // + dashboard lists rebuild EMPTY and the whole left menu vanishes for a
+        // few seconds until the next successful poll. Cache on success, fall back
+        // on shed/failure so the UI stays stable through a spike.
+        const approvalsData = approvalsOk ? await approvalsRes.json()
+            : (window.__lmLastApprovals || { spokes: [] });
+        if (approvalsOk) window.__lmLastApprovals = approvalsData;
+        const diagData = diagOk ? await diagRes.json()
+            : (window.__lmLastDiag || { spokes: [] });
+        if (diagOk) window.__lmLastDiag = diagData;
 
         const allSpokes = approvalsData.spokes || [];
         const approvedSpokes = allSpokes.filter(s => s.approved);
