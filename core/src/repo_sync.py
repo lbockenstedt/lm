@@ -234,7 +234,15 @@ class RepoSyncMixin:
                 cfg = self._repo_sync_cfg()
                 if cfg.get("enabled", True):
                     # run_repo_sync_all runs check_update_health every cycle.
-                    await self.run_repo_sync_all()
+                    # Backstop: bound the cycle to 10m so a slow/hung op (serial
+                    # provisioning pulls, a wedged spoke send in the fan-out)
+                    # can't strand updates — abandon and retry next interval
+                    # instead of stalling the loop indefinitely.
+                    try:
+                        await asyncio.wait_for(self.run_repo_sync_all(), timeout=600)
+                    except asyncio.TimeoutError:
+                        logger.warning("[sync-error] repo_sync cycle exceeded 600s "
+                                       "— abandoned; will retry next interval")
                 else:
                     # Scheduled sync OFF - still audit the update/self-heal
                     # infrastructure (systemd Type=exec / MainPID / Restart=,
