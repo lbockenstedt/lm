@@ -65,6 +65,8 @@ The cs spoke itself owns the simulation "profile" logic, the per-client override
 - **Two flags trap** — tenant `usb_auto_provision` toggle ≠ per-agent `client_simulation.enabled`; the provision loop only spawns on the latter (the "enabled but nothing provisions" root cause).
 - **store.set_hub_config REPLACES** — both `csSaveHubConfig` and `csSaveAutoProvConfig` must GET-merge-PUT or the two cards wipe each other.
 - **CS_CONFIG_UPDATE handler** is required for hub config pushes (usb_vidpids, templates, sim/user overrides) to land — without it they silently dropped to "Unknown command" and `usb_vidpids` stayed `[]`.
+- **Auto-provision config fans out to ALL bound cs spokes** — the hub's `get_client_sim_spokes` (plural) pushes the auto-provision toggle, hub-config save, and USB approval merge to *every* approved, connected cs spoke for the tenant (a tenant may bind several — cs-svr-02 / -03 / -04), concurrently — not just one (with a singular fallback for older hub builds).
+- **Setup/Proxmox list fields are comma- or space-delimited** in the WebUI (USB certified/ignored VID:PIDs, T1/T3 PCI VID:PIDs, ignored hostnames); the hub normalizes them to a list (`normalize_hub_config_lists`, split on `[,\s]+`) before storing/pushing — no raw JSON to paste.
 
 ## How it works
 

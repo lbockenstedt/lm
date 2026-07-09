@@ -18,7 +18,7 @@ Consolidated reference for every environment variable read across the LM system.
 
 | Var | Purpose | Default | Read by |
 |---|---|---|---|
-| `LM_HUB_TLS_VERIFY` | `1`/`true`/`yes` → spoke/agent verifies hub cert | off (0) | `core/src/messaging/control_plane.py`, `generic_agent/src/agent.py`, `pxmx/agent/src/agent.py`, cs/pxmx spokes |
+| `LM_HUB_TLS_VERIFY` | `1`/`true`/`yes` → spoke/agent verifies hub cert | off (0) | `core/src/messaging/control_plane.py`, `agent/src/agent_spoke.py`, `pxmx/agent/src/agent.py`, cs/pxmx spokes |
 | `LM_HUB_CA_CERT` | CA cert path for hub verification (set by `--tls-verify`) | — | same |
 
 ## Hub (lm) — security / state / runtime
@@ -43,7 +43,7 @@ Consolidated reference for every environment variable read across the LM system.
 
 | Var | Purpose | Default | Read by |
 |---|---|---|---|
-| `LM_HUB_TLS_VERIFY` / `LM_HUB_CA_CERT` | Client TLS verify | off | `generic_agent/src/agent.py` |
+| `LM_HUB_TLS_VERIFY` / `LM_HUB_CA_CERT` | Client TLS verify | off | `agent/src/agent_spoke.py` |
 | `STARTUP_ROLE` | Default `--role` | — | `agent/src/control_plane.py` |
 | `LM_ONBOARDING_PSK` / `LM_TENANT_ID_HINT` | PSK self-provisioning | — | (agent-spoke via BaseControlPlane) |
 

@@ -43,7 +43,7 @@ It owns the state that ties the lab together — which spokes/agents exist and w
 
 ## Install flags
 
-`install_all.sh`: `--reinstall`, `--reset-secrets`, `--reset-users`, `--exclude <csv>`, `--tls-verify` (optional `--tls-ca-cert <path>`; defaults CA to the hub's own `$TLS_CERT`). `install_menu.sh`: top menu `1) Hub` (spoke checklist → `install_all.sh --exclude …`) or `2) Generic agent` (→ `generic_agent/install_github.sh`). Env `LM_BRANCH` (default `main`).
+`install_all.sh`: `--reinstall`, `--reset-secrets`, `--reset-users`, `--exclude <csv>`, `--tls-verify` (optional `--tls-ca-cert <path>`; defaults CA to the hub's own `$TLS_CERT`). `install_menu.sh`: top menu `1) Hub` (spoke checklist → `install_all.sh --exclude …`) or `2) Generic agent` (→ `agent/install_agent.sh`). Env `LM_BRANCH` (default `main`).
 
 ## Key components (core/src/)
 

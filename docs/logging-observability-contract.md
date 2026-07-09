@@ -85,7 +85,8 @@ terse dialects.
 
 - **Use the shared `configure_logging()`** (`core/src/logging_setup.py`) at every
   entrypoint — never a bare `logging.basicConfig(...)`. It sets the standard
-  format `%(asctime)s - %(name)s - %(levelname)s - %(message)s`, honors the
+  format `%(asctime)s - %(name)s - %(levelname)s - %(message)s` with `datefmt`
+  `%Y-%m-%d %H:%M:%S` (no milliseconds), honors the
   `LOG_LEVEL` env var, and keeps line-buffering consistent.
 - **Default level is INFO. DEBUG is OFF by default.** Debug is a *troubleshooting*
   mode, toggled at runtime by the WebUI "Enable Debug" button (the hub broadcasts

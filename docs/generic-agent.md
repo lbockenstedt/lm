@@ -1,11 +1,12 @@
-# generic-agent (lm/generic_agent + lm/agent)
+# generic-agent (lm/agent)
 
-Two related things in the `lm` repo: (1) a **leaf agent** that calls home to a hub/spoke-gateway, and (2) an **agent-spoke** that can morph into any role on `LOAD_ROLE`. Not a separate repo — lives under `lm/`.
+The **agent-spoke** — a spoke of the hub that, on `LOAD_ROLE`, clones a sibling repo and swaps in a real spoke class. Not a separate repo — lives under `lm/agent/`.
+
+> **The legacy `generic_agent/` leaf was removed** (commit `3ddda2c` — "delete the legacy protocol-incompatible generic_agent leaf"). It could not adopt a session key or handle the current mutual-auth protocol. Everything below describes the current **agent-spoke** (`agent/src/agent_spoke.py::GenericAgent`, a `BaseSpoke` subclass); `install_menu.sh`'s "Generic agent" path now runs `agent/install_agent.sh`, not the deleted leaf.
 
 ## Role & module_type
 
-- `generic_agent/src/agent.py::GenericLeafAgent` — a leaf agent (`module_type` inherited from its gateway). Calls home, receives `SPOKE_COMMAND`.
-- `agent/src/agent_spoke.py::GenericAgent` — a spoke of the hub that, on `LOAD_ROLE`, clones a sibling repo and swaps in a real spoke class.
+- `agent/src/agent_spoke.py::GenericAgent` — a spoke of the hub that, on `LOAD_ROLE`, clones a sibling repo and swaps in a real spoke class. Its base connection registers `module_type="agent"`; each loaded role opens a separate sub-spoke connection under the role's real `module_type`.
 
 ## What it does
 
@@ -20,13 +21,11 @@ role's live status.
 
 ## Entrypoints
 
-- **GenericLeafAgent:** `generic_agent/src/agent.py`. systemd unit (built by `generic_agent/install_github.sh`), `--spoke-url` (default `auto` → discover), `--id` (default `generic-agent-1`), `--secret`.
-- **Agent-spoke:** `agent/src/control_plane.py` (argparse entrypoint), `--id` (required), `--secret`, `--hub-secret`, `--hub` (required), `--role` (default `STARTUP_ROLE` env). systemd unit built by `agent/install_agent.sh`.
+- **Agent-spoke:** `agent/src/control_plane.py` (argparse entrypoint). systemd unit `lm-agent` (built by `agent/install_agent.sh`), `--hub` (optional; omit/`auto` → auto-discover via mDNS/DNS), `--id` (default `agent-<hostname>`), `--secret`, `--hub-secret`, `--role <one>`/`--roles <csv>`, `--loopback`, `--clone`, `--tls-verify`/`--tls-ca-cert`.
 
 ## Ports
 
-- GenericLeafAgent: none served; dials `wss://127.0.0.1:443/ws/spoke` (same-box, verify-off) or `wss://<hub>:443/ws/spoke` (remote), or a SpokeGateway.
-- Agent-spoke: none served; dials the hub.
+- Agent-spoke: none served; dials the hub over `wss://127.0.0.1:443/ws/spoke` (same-box, verify-off) or `wss://<hub>:443/ws/spoke` (remote).
 
 ## Environment variables
 
@@ -34,15 +33,14 @@ role's live status.
 
 ## Install flags
 
-- `generic_agent/install_github.sh`: `--spoke-url` (optional/`auto`), `--id`, `--secret`, `--hub-secret`, `--tls-verify` (+ `--tls-ca-cert`; defaults to `/opt/lm/certs/hub.crt` if present, else requires it), `--clone` (install but don't start).
-- `agent/install_agent.sh`: `--hub` (required), `--id`, `--secret`, `--role` (one of `dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le`).
+- `agent/install_agent.sh`: `--hub` (optional; omit/`auto` → auto-discover), `--id` (default `agent-<hostname>`), `--secret`, `--hub-secret`, `--role <one>` / `--roles <csv>` (merged + de-duplicated; roles: `dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le|console`), `--loopback` (co-located with hub), `--clone` (stage + enable but leave stopped), `--tls-verify` (+ optional `--tls-ca-cert`). Roles persist in `.env` `LOADED_ROLES`. See [install-flags.md](install-flags.md) for the full canonical flag list.
 
 ## Key commands / handlers
 
-- **GenericLeafAgent:** receives `SPOKE_COMMAND` from the gateway; mutual auth (`HUB_VERIFIED` → `HUB_OK`); reconnect loop with backoff + re-discovery.
-- **Agent-spoke `_ROLE_MAP`** (rel_path, class, module_type, repo):
+- **Agent-spoke `_ROLE_MAP`** (11 hosted roles — rel_path, class, module_type, repo):
   - `dns` → `dns/src/dns_spoke.py::DNSSpoke` (`dns`, in-repo)
   - `dhcp` → `dhcp/src/dhcp_spoke.py::DHCPSpoke` (`dhcp`, in-repo)
+  - `console` → `console/src/console_spoke.py::ConsoleSpoke` (`console`, in-repo)
   - `network` → `nw/src/nw_spoke.py::NwSpoke` (`nw`, `lbockenstedt/nw.git`)
   - `netbox` → `netbox/src/netbox_spoke.py::NetboxSpoke` (`ipam`, `lbockenstedt/netbox.git`)
   - `opnsense` → `opnsense/src/opn_spoke.py::OpnSpoke` (`firewall`, `lbockenstedt/opnsense.git`)
@@ -51,18 +49,17 @@ role's live status.
   - `cppm` → `cppm/src/spoke.py::CPPMSpoke` (`nac`, `lbockenstedt/cppm.git`)
   - `proxmox` → `pxmx/src/proxmox_spoke.py::ProxmoxSpoke` (`hypervisor`, `lbockenstedt/pxmx.git`)
   - `le` → `le/src/le_spoke.py::LESpoke` (`certificates`, `lbockenstedt/le.git`)
-  - `_DEPLOY_ROLES`: `bugfixer` (curl|bash install of `lbockenstedt/bugfixer`, module_type `agent`).
+  - `_DEPLOY_ROLES` (2 — run their own installer as a background subprocess, module_type `agent`, not hosted sub-spokes): `bugfixer` (curl|bash `lbockenstedt/bugfixer` `install.sh`), `netbox-server` (curl|bash `lbockenstedt/netbox` `install.sh --infra-only` — deploys the NetBox *application*; the separate `netbox` IPAM role sub-spoke talks to it).
   - `_RoleAdapter` wraps non-BaseSpoke roles (e.g. cppm). `LOAD_ROLE`/`UNLOAD_ROLE`/`UPDATE_CONFIG` handling; `_load_role_class`/`_sync_load_role`/`_install_role` (git clone + venv pip install).
 
 ## Key files
 
-`generic_agent/src/agent.py`, `generic_agent/src/hub_discovery.py` (4th vendored copy), `generic_agent/install_github.sh`, `generic_agent/install_agent.sh`, `agent/src/agent_spoke.py`, `agent/src/control_plane.py`, `agent/install_agent.sh`.
+`agent/src/agent_spoke.py`, `agent/src/control_plane.py`, `agent/install_agent.sh`. (The legacy `generic_agent/` directory — leaf agent, its `install_github.sh`, and the 4th vendored `hub_discovery.py` copy — was removed in commit `3ddda2c`.)
 
 ## Notable behaviors & gotchas
 
-- **GenericLeafAgent was missed by the TLS rollout** — it used to take `--spoke-url` verbatim with no `ssl=`. Symptom: `Connecting to Spoke Gateway at ws://<hub>:443...` → `timed out during opening handshake` = plaintext-into-TLS-port. Fixed: vendored discovery, `--spoke-url auto` default, `_client_ssl_ctx` (verify-off default), reconnect + re-discovery, auto-upgrade of a pinned `ws://...:443` to `wss://`.
-- **Boot `--role` does NOT run `_install_role`** — `install_agent.sh` stages a boot `--role` but only pre-installs system packages; the role class loads on first `LOAD_ROLE` from the hub.
-- **9 sibling repos auto-clone on `LOAD_ROLE`** — covers every canonical hub module type except `agent`.
+- **Boot `--role` does NOT run `_install_role`** — `install_agent.sh` stages a boot `--role`/`--roles` but only pre-installs system packages; the role class loads on first `LOAD_ROLE` from the hub (staged roles auto-load at startup).
+- **8 sibling repos auto-clone on `LOAD_ROLE`** — `dns`/`dhcp`/`console` ship in-repo (staged from the `/opt/lm` clone); the other 8 roles (`network`, `netbox`, `opnsense`, `ldap`, `simulation`, `cppm`, `proxmox`, `le`) clone from their own GitHub repos. Covers every canonical hub module type except `agent`.
 
 ## How it works
 

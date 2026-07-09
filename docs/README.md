@@ -12,7 +12,7 @@ The canonical doc set lives here in `lm/docs/`. Each separate repo also carries 
 
 - [lm-hub.md](lm-hub.md) — the hub: `LabManagerHub`, FastAPI route groups, background loops, security, state, update pipeline, logging, dep guard.
 - [webui.md](webui.md) — the browser UI: panels/tabs, view router, HTTP+WS comms.
-- [generic-agent.md](generic-agent.md) — `GenericLeafAgent` leaf agent + the agent-spoke `_ROLE_MAP` role loader (10 roles + bugfixer deploy role).
+- [generic-agent.md](generic-agent.md) — the agent-spoke `_ROLE_MAP` role loader (11 hosted roles + bugfixer/netbox-server deploy roles). The legacy `GenericLeafAgent` leaf was removed.
 
 ## Spokes
 
@@ -31,7 +31,7 @@ The canonical doc set lives here in `lm/docs/`. Each separate repo also carries 
 ## Agents
 
 - [bugfixer.md](bugfixer.md) — autonomous GitHub-issue fixer bot; optional hub **agent** (not a spoke); signed `GET_LOGS`/`TRIGGER_ALL_UPDATES`.
-- (pxmx per-host agents are documented under [pxmx.md](pxmx.md); GenericLeafAgent under [generic-agent.md](generic-agent.md).)
+- (pxmx per-host agents are documented under [pxmx.md](pxmx.md); the agent-spoke under [generic-agent.md](generic-agent.md).)
 
 ## Reference
 
