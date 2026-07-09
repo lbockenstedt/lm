@@ -2958,8 +2958,13 @@ window.CS_CHILD_RENDERERS['Setup::Troubleshooting'] = csRenderSetupTroubleshooti
  * ========================================================================= */
 
 let csVmHosts = [];
-let csVmSelectedSpoke = '';       // spoke_id of the selected host (command routing)
-let csVmSelectedHostId = '';      // UNIQUE per-host key for selection — see csVmHostId
+let csVmSelectedSpoke = '';       // spoke_id of the FIRST in-scope host (single-host children)
+let csVmSelectedHostId = '';      // FIRST in-scope host id (single-host children)
+// Multi-host selection for VMS + Command Queue. Empty array = ALL hosts. The
+// searchable panel (csVmHostBanner) toggles entries here; single-host children
+// (USB / API / Console / Auto-prov) fall back to the first via csVmSelectedHost().
+let csVmSelectedHostIds = [];
+let _csHostPanelOpen = false;
 // Unique id for a host ROW/pill. Several pxmx agents relayed by ONE cs spoke
 // share the same spoke_id, so selecting by spoke_id always resolved to the
 // first host (Overview link + Host pills appeared dead / stuck on one host).
@@ -2980,32 +2985,100 @@ async function csVmLoad() {
     return csVmHosts;
 }
 
+// Hosts currently in scope: the multi-selection, or ALL hosts when empty.
+// Numeric-aware sort so pxmx-cs-svr-02/-03/-04 order naturally.
+function csVmSelectedHosts() {
+    const _hn = h => (h.spoke_name || h.spoke_hostname || h.spoke_id || '');
+    const all = csVmHosts.slice().sort((a, b) =>
+        _hn(a).localeCompare(_hn(b), undefined, { numeric: true, sensitivity: 'base' }));
+    if (!csVmSelectedHostIds.length) return all;               // empty = ALL
+    const sel = new Set(csVmSelectedHostIds);
+    const picked = all.filter(h => sel.has(csVmHostId(h)));
+    return picked.length ? picked : all;                       // stale ids → all
+}
+
+// First in-scope host — for single-host children (USB / API / Console / Auto-
+// prov) that still operate on one host. Keeps csVmSelectedHostId/Spoke in sync.
 function csVmSelectedHost() {
-    let h = csVmHosts.find(x => csVmHostId(x) === csVmSelectedHostId);
-    if (!h) h = csVmHosts.find(x => x.spoke_online) || csVmHosts[0] || null;
+    const hosts = csVmSelectedHosts();
+    let h = hosts.find(x => csVmHostId(x) === csVmSelectedHostId)
+         || hosts.find(x => x.spoke_online) || hosts[0] || null;
     if (h) { csVmSelectedHostId = csVmHostId(h); csVmSelectedSpoke = h.spoke_id; }
     return h;
 }
 
-/** Host-selector banner shown atop every drill-in child (VMs … API Server). */
+// Owning host's command-routing target (hostname) + spoke for a tagged VM.
+function csVmKey(v) { return (v._spoke || '') + '|' + (v._host || '') + '|' + v.vmid; }
+
+/** Searchable multi-select host filter shown atop every VM Server child.
+ * Replaces the old pill row (which didn't scale past ~15 hosts). Empty
+ * selection = All hosts; pick one or many. Scales via search + scroll. */
 function csVmHostBanner() {
     if (!csVmHosts.length) return '';
-    // Numeric-aware sort by display name so pxmx-cs-svr-02/-03/-04 order
-    // naturally (mirrors the fleet table sort), not in load order.
     const _hname = h => (h.spoke_name || h.spoke_hostname || h.spoke_id || '');
-    const pills = csVmHosts.slice()
-        .sort((a, b) => _hname(a).localeCompare(_hname(b), undefined, { numeric: true, sensitivity: 'base' }))
-        .map(h => {
-        const active = csVmHostId(h) === csVmSelectedHostId;
-        const cls = active ? 'bg-[#01A982] text-white border-[#01A982]'
-                           : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50';
-        return `<button onclick="csVmSelectHost('${csEscape(csVmHostId(h))}')"
-            class="px-3 py-1 rounded-full text-xs font-semibold border ${cls}">${csOnlineDot(h.spoke_online)} ${csEscape(h.spoke_name || h.spoke_id)}</button>`;
+    const sorted = csVmHosts.slice().sort((a, b) =>
+        _hname(a).localeCompare(_hname(b), undefined, { numeric: true, sensitivity: 'base' }));
+    const sel = new Set(csVmSelectedHostIds);
+    const nSel = csVmSelectedHostIds.length;
+    const summary = nSel === 0 ? `All hosts (${sorted.length})`
+                  : nSel === 1 ? (_hname(sorted.find(h => sel.has(csVmHostId(h))) || {}) || '1 host')
+                  : `${nSel} hosts selected`;
+    const rows = sorted.map(h => {
+        const id = csVmHostId(h);
+        const on = sel.has(id);
+        return `<label data-cs-host-name="${csEscape(_hname(h).toLowerCase())}"
+             class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-slate-50 ${on ? 'bg-green-50' : ''}">
+             <input type="checkbox" ${on ? 'checked' : ''} onchange="csVmHostToggle('${csEscape(id)}')"/>
+             ${csOnlineDot(h.spoke_online)}<span class="flex-1">${csEscape(_hname(h))}</span>
+             <span class="text-slate-400">${(h.proxmox_vms || []).length} VM</span></label>`;
     }).join('');
-    return `<div class="flex flex-wrap items-center gap-2 mb-4">
-      <span class="text-[10px] font-bold uppercase tracking-widest text-slate-400 mr-1">Host</span>${pills}
+    return `<div class="mb-4 relative" style="max-width:28rem">
+      <div class="flex items-center gap-2">
+        <span class="text-[10px] font-bold uppercase tracking-widest text-slate-400">Host</span>
+        <button onclick="csVmHostPanelToggle()" class="flex-1 text-left px-3 py-1.5 rounded-md border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center justify-between">
+          <span>${csEscape(summary)}</span><span class="text-slate-400">▾</span></button>
+        ${nSel ? `<button onclick="csVmHostAll()" class="text-[11px] text-slate-400 hover:text-slate-600 underline">clear</button>` : ''}
+      </div>
+      <div id="cs-host-panel" class="${_csHostPanelOpen ? '' : 'hidden'} absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-lg">
+        <div class="p-2 border-b border-slate-100">
+          <input id="cs-host-search" type="text" placeholder="Search hosts…" oninput="csVmHostSearch(this.value)"
+                 class="w-full px-2 py-1 text-xs border border-slate-200 rounded"/></div>
+        <label class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-slate-50 border-b border-slate-100 font-semibold">
+          <input type="checkbox" ${nSel === 0 ? 'checked' : ''} onchange="csVmHostAll()"/>All hosts</label>
+        <div class="max-h-64 overflow-y-auto">${rows}</div>
+      </div>
     </div>`;
 }
+
+// Host-filter interactions. A toggle re-renders the view (VM list depends on the
+// selection); we blur first so csRenderVmServerVms' csUserIsEditing() guard —
+// which blocks background telemetry re-renders — doesn't also block THIS
+// explicit re-render. _csHostPanelOpen persists so the panel stays open across it.
+window.csVmHostPanelToggle = function () {
+    _csHostPanelOpen = !_csHostPanelOpen;
+    const p = document.getElementById('cs-host-panel');
+    if (p) p.classList.toggle('hidden', !_csHostPanelOpen);
+    if (_csHostPanelOpen) { const s = document.getElementById('cs-host-search'); if (s) s.focus(); }
+};
+window.csVmHostSearch = function (term) {
+    const t = (term || '').trim().toLowerCase();
+    document.querySelectorAll('#cs-host-panel [data-cs-host-name]').forEach(el => {
+        el.classList.toggle('hidden', !!t && !el.getAttribute('data-cs-host-name').includes(t));
+    });
+};
+window.csVmHostToggle = function (id) {
+    const i = csVmSelectedHostIds.indexOf(id);
+    if (i >= 0) csVmSelectedHostIds.splice(i, 1); else csVmSelectedHostIds.push(id);
+    _csHostPanelOpen = true;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    loadCSData('VM Server', currentSubChild || 'VMs', true);
+};
+window.csVmHostAll = function () {
+    csVmSelectedHostIds = [];
+    _csHostPanelOpen = false;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    loadCSData('VM Server', currentSubChild || 'VMs', true);
+};
 
 function csOnlineDot(online) {
     return online ? '<span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block mr-1.5 align-middle"></span>'
@@ -3169,9 +3242,10 @@ async function csRefreshAutoProvStatus() {
 }
 
 window.csVmSelectHost = function (hostId, child) {
+    // Overview → VMs link / legacy single-host pick: narrow the multi-selection
+    // to just this host (empty = all; [hostId] = only it).
+    csVmSelectedHostIds = hostId ? [hostId] : [];
     csVmSelectedHostId = hostId;
-    // Derive the spoke_id of the picked host for command routing (several hosts
-    // can share one spoke_id; the picked host disambiguates which one is viewed).
     const h = csVmHosts.find(x => csVmHostId(x) === hostId);
     if (h) csVmSelectedSpoke = h.spoke_id;
     if (child) { setSubChild(child); }
@@ -3253,23 +3327,38 @@ async function csRenderVmServerVms() {
     // the pre-fetch guard does — the next telemetry pulse retries once the
     // user is done (matches csWsRefresh's own comment).
     if (csUserIsEditing()) return;
-    const h = csVmSelectedHost();
-    if (!h) { csSet(csEmpty('No host selected.')); return; }
-    const vms = h.proxmox_vms || [];
-    // Join the missing-dongle shed deadline (proxmox.usb_state[].shed_at) onto
-    // each VM by vmid so the row's status badge can show a live "Sheds in
-    // MM:SS" countdown for a VM whose dongle was removed (teardown pending).
-    const _usbState = (h.proxmox && h.proxmox.usb_state) || h.usb_state || [];
-    const _shedByVmid = {};
-    _usbState.forEach(u => { if (u && u.shed_at && u.vmid != null) _shedByVmid[String(u.vmid)] = u.shed_at; });
-    vms.forEach(v => { v._shed_at = _shedByVmid[String(v.vmid)] || null; });
+    const scope = csVmSelectedHosts();
+    if (!scope.length) { csSet(csEmpty('No hosts.')); return; }
+    const single = scope.length === 1 ? scope[0] : null;
+    csVmSelectedHost();   // keep csVmSelectedHostId/Spoke in sync for children
+    // Flatten VMs across the selected hosts, tagging each with its owning
+    // spoke/host so actions route correctly (VMIDs can collide across hosts).
+    // Join the per-host missing-dongle shed deadline (usb_state[].shed_at).
+    const vms = [];
+    scope.forEach(hh => {
+        const hn = hh.hostname || hh.spoke_hostname || hh.spoke_id;
+        const usb = (hh.proxmox && hh.proxmox.usb_state) || hh.usb_state || [];
+        const shed = {};
+        usb.forEach(u => { if (u && u.shed_at && u.vmid != null) shed[String(u.vmid)] = u.shed_at; });
+        (hh.proxmox_vms || []).forEach(v => {
+            const vv = Object.assign({}, v);
+            vv._spoke = hh.spoke_id;
+            vv._host = hn;
+            vv._hostlabel = hh.spoke_name || hn;
+            vv._shed_at = shed[String(v.vmid)] || null;
+            vv._key = csVmKey(vv);
+            vms.push(vv);
+        });
+    });
     csStartShedTicker();
     const cats = ['Simulation Clients', 'Other', 'Containers', 'Templates'];
     const grouped = {};
     cats.forEach(c => grouped[c] = vms.filter(v => csVmCategory(v) === c));
     const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-md text-xs font-bold ${i === 0 ? 'bg-[#01A982] text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
-    const rows = (grouped['Simulation Clients'] || []).map(csVmRow).join('');
-    csSet(`<div>${csVmHostBanner()}${csAutoProvPanel(h)}${tabs}
+    const rows = csVmRenderRows(grouped['Simulation Clients'] || []);
+    // Auto-prov panel is per-host — only when exactly one host is in scope.
+    const apPanel = single ? csAutoProvPanel(single) : '';
+    csSet(`<div>${csVmHostBanner()}${apPanel}${tabs}
       <div class="flex items-center gap-2 my-3 text-xs text-slate-500">
         <button onclick="csVmBulk('start_vm')" class="bg-green-100 text-green-700 px-2 py-1 rounded font-bold">Start</button>
         <button onclick="csVmBulk('stop_vm')" class="bg-amber-100 text-amber-700 px-2 py-1 rounded font-bold">Stop</button>
@@ -3280,11 +3369,12 @@ async function csRenderVmServerVms() {
       <div id="cs-vm-list">${csVmTable(rows)}</div>
     </div>`);
     window._csVmGrouped = grouped;
+    window._csVmByKey = {};
     window._csVmByVmid = {};
-    vms.forEach(v => { window._csVmByVmid[v.vmid] = v; });
+    vms.forEach(v => { window._csVmByKey[v._key] = v; window._csVmByVmid[v.vmid] = v; });
 }
 
-const CS_VM_TABLE_HEADERS = ['VMID', 'Name', 'OS', 'Status', 'Actions'];
+const CS_VM_TABLE_HEADERS = ['VMID', 'Name', 'OS', 'Status', 'Host', 'Actions'];
 
 // Friendly OS label from the agent's cached Proxmox ostype (l26 → Linux, win* →
 // Windows, etc.); falls back to the qemu/lxc type when ostype is unknown.
@@ -3476,16 +3566,19 @@ function csAutoProvPanel(h) {
 
 function csVmRow(v) {
     const vid = csEscape(v.vmid);
+    const key = csEscape(v._key != null ? v._key : csVmKey(v));
     // Disable actions on a VM that's being torn down — it's about to vanish.
     const busy = String(v.prov_status || '').toLowerCase() === 'tearing_down';
+    // Route by composite key (spoke|host|vmid) — VMIDs can collide across hosts.
     const act = (label, action, cls) => busy
         ? `<button disabled title="VM is being deleted" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">${label}</button>`
-        : `<button onclick="csVmAction(${v.vmid},'${action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${cls}">${label}</button>`;
+        : `<button onclick="csVmAction('${key}','${action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${cls}">${label}</button>`;
     return `<tr>
-      <td class="px-3 py-2 font-mono text-xs"><input type="checkbox" class="cs-vm-sel" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}</td>
+      <td class="px-3 py-2 font-mono text-xs"><input type="checkbox" class="cs-vm-sel" data-vmkey="${key}" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}</td>
       <td class="px-3 py-2 text-sm">${csEscape(v.name || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(csVmOs(v))}</td>
       <td class="px-3 py-2">${csVmStatusBadge(v)}</td>
+      <td class="px-3 py-2 text-xs text-slate-500">${csEscape(v._hostlabel || v._host || '—')}</td>
       <td class="px-3 py-2"><div class="flex flex-wrap gap-1">
         ${act('Start','start_vm','bg-green-100 text-green-700')}
         ${act('Stop','stop_vm','bg-amber-100 text-amber-700')}
@@ -3496,8 +3589,20 @@ function csVmRow(v) {
     </tr>`;
 }
 
+// Render a category's rows, capped for scale (100s of hosts × VMs). Beyond the
+// cap, prompt to narrow the Host filter rather than DOM tens of thousands of rows.
+const CS_VM_ROW_CAP = 400;
+function csVmRenderRows(list) {
+    const shown = (list || []).slice(0, CS_VM_ROW_CAP);
+    let html = shown.map(csVmRow).join('');
+    if ((list || []).length > CS_VM_ROW_CAP) {
+        html += `<tr><td colspan="6" class="px-3 py-2 text-xs text-amber-700 bg-amber-50">Showing ${CS_VM_ROW_CAP} of ${list.length} VMs — narrow the Host filter to see the rest.</td></tr>`;
+    }
+    return html;
+}
+
 window.csVmVmsTab = function (cat) {
-    const rows = (window._csVmGrouped && window._csVmGrouped[cat] || []).map(csVmRow).join('');
+    const rows = csVmRenderRows((window._csVmGrouped && window._csVmGrouped[cat]) || []);
     const list = csEl('cs-vm-list');
     if (list) list.innerHTML = csVmTable(rows);
     ['Simulation Clients','Other','Containers','Templates'].forEach(c => {
@@ -3523,55 +3628,75 @@ const CS_VM_ACTION_LABEL = {
 };
 function csVmActionLabel(a) { return CS_VM_ACTION_LABEL[a] || a; }
 
-window.csVmAction = async function (vmid, action) {
-    const v = (window._csVmByVmid && window._csVmByVmid[vmid]) || {};
+window.csVmAction = async function (key, action) {
+    // key is the composite spoke|host|vmid (routes to the VM's OWN host); tolerate
+    // a bare vmid for any legacy caller.
+    const v = (window._csVmByKey && window._csVmByKey[key])
+           || (window._csVmByVmid && window._csVmByVmid[key]) || {};
+    const vmid = v.vmid != null ? v.vmid : key;
     const args = { vmid: Number(vmid) };
     if (v.type) args.vm_type = v.type;
-    const sid = encodeURIComponent(csVmSelectedSpoke);
-    // Immediate feedback — the command is queued to the host + relayed to the
-    // agent, which can take a few seconds; don't leave the user staring.
+    const sid = encodeURIComponent(v._spoke || csVmSelectedSpoke);
+    const target = v._host || csVmTarget();
     if (typeof showToast === 'function') showToast(`${csVmActionLabel(action)} VM ${vmid}…`, 'info');
-    // Before destroying a VM, expire in-flight commands for its host so a
-    // queued start/reclone doesn't fire against a gone VM (best-effort).
-    if (action === 'delete_vm') await csExpirePendingForTarget();
+    if (action === 'delete_vm') await csExpirePendingForTarget(target);
     try {
         await csFetch(`/${csTenant()}/spokes/${sid}/proxmox-command?tenant_id=${csTenant()}`,
-            { method: 'POST', body: JSON.stringify({ action, args, target: csVmTarget() }) });
+            { method: 'POST', body: JSON.stringify({ action, args, target }) });
         csVmFlash(action + ' queued');
         setTimeout(() => loadCSData('VM Server', currentSubChild, true), 800);
     } catch (e) { console.error('csVmAction: ' + action + ' failed', e); if (typeof showToast === 'function') showToast(action + ' failed: ' + (e.message || e), 'error'); }
 };
 
 window.csVmBulk = async function (action) {
-    const ids = Array.from(document.querySelectorAll('.cs-vm-sel:checked')).map(c => c.dataset.vmid);
-    if (!ids.length) { if (typeof showToast === 'function') showToast('Select one or more VMs first.', 'info'); return; }
-    if (typeof showToast === 'function') showToast(`${csVmActionLabel(action)} ${ids.length} VM(s)…`, 'info');
-    if (action === 'delete_vm') await csExpirePendingForTarget();
-    try {
-        // Bounded concurrency (4 at a time) instead of a sequential await per
-        // VM — a 24-VM bulk action previously issued 24 back-to-back round
-        // trips; chunked Promise.all keeps the same fail-fast semantics
-        // (first error rejects the chunk) while cutting wall-clock to ~N/4.
-        const buildReq = (vmid) => {
-            const v = (window._csVmByVmid && window._csVmByVmid[vmid]) || {};
-            const args = { vmid: Number(vmid) };
+    const keys = Array.from(document.querySelectorAll('.cs-vm-sel:checked')).map(c => c.dataset.vmkey);
+    if (!keys.length) { if (typeof showToast === 'function') showToast('Select one or more VMs first.', 'info'); return; }
+    // Resolve each selected VM to its OWNING host/spoke — VMIDs collide across
+    // hosts, so a cross-host bulk must route each VM to its own host, not the
+    // one selected host (the bug where delete only hit host 04).
+    const items = keys.map(k => window._csVmByKey && window._csVmByKey[k]).filter(Boolean);
+    if (!items.length) return;
+    const byHost = {};
+    items.forEach(v => { const hl = v._hostlabel || v._host || '?'; byHost[hl] = (byHost[hl] || 0) + 1; });
+    const hostList = Object.keys(byHost);
+    // Destructive + cross-host → confirm with the per-host breakdown.
+    if (action === 'delete_vm') {
+        const bd = hostList.map(h => `${h} (${byHost[h]})`).join(', ');
+        if (!confirm(`Delete ${items.length} VM(s) across ${hostList.length} host(s)?\n\n${bd}`)) return;
+    }
+    if (typeof showToast === 'function') showToast(`${csVmActionLabel(action)} ${items.length} VM(s) across ${hostList.length} host(s)…`, 'info');
+    if (action === 'delete_vm') {
+        for (const hh of new Set(items.map(v => v._host))) { await csExpirePendingForTarget(hh); }
+    }
+    // Sequential paced enqueue — a burst floods the cs spoke's queue/WS
+    // ("connection closed mid-send"); the 250ms gap paces the ENQUEUE while the
+    // agent's own 2-slot semaphore bounds execution. Per-item errors tolerated
+    // so one failure doesn't abort the batch. Each VM routes to its own spoke.
+    let ok = 0, fail = 0;
+    for (let i = 0; i < items.length; i++) {
+        const v = items[i];
+        try {
+            const args = { vmid: Number(v.vmid) };
             if (v.type) args.vm_type = v.type;
-            return csFetch(`/${csTenant()}/spokes/${encodeURIComponent(csVmSelectedSpoke)}/proxmox-command?tenant_id=${csTenant()}`,
-                { method: 'POST', body: JSON.stringify({ action, args, target: csVmTarget() }) });
-        };
-        const CHUNK = 4;
-        for (let i = 0; i < ids.length; i += CHUNK) {
-            await Promise.all(ids.slice(i, i + CHUNK).map(buildReq));
-        }
-        csVmFlash(`${action} queued for ${ids.length} VM(s)`);
-        setTimeout(() => loadCSData('VM Server', currentSubChild, true), 1000);
-    } catch (e) { console.error('csVmBulk: ' + action + ' bulk failed', e); if (typeof showToast === 'function') showToast(action + ' bulk failed: ' + (e.message || e), 'error'); }
+            await csFetch(`/${csTenant()}/spokes/${encodeURIComponent(v._spoke)}/proxmox-command?tenant_id=${csTenant()}`,
+                { method: 'POST', body: JSON.stringify({ action, args, target: v._host }) });
+            ok++;
+        } catch (e) { console.error('csVmBulk item ' + (v && v.vmid) + ' failed', e); fail++; }
+        if (typeof showToast === 'function' && items.length > 4 && (i + 1) % 5 === 0)
+            showToast(`${csVmActionLabel(action)}… ${i + 1}/${items.length}`, 'info');
+        await new Promise(r => setTimeout(r, 250));
+    }
+    if (typeof showToast === 'function') {
+        if (fail) showToast(`${action}: ${ok} queued, ${fail} failed`, 'error');
+        else csVmFlash(`${action} queued for ${ok} VM(s)`);
+    }
+    setTimeout(() => loadCSData('VM Server', currentSubChild, true), 1000);
 };
 
 // Best-effort expiry of in-flight commands for the selected proxmox host before
 // a VM teardown. Swallowed on failure — the delete still proceeds.
-async function csExpirePendingForTarget() {
-    const host = (typeof csVmSelectedHost === 'function' && csVmSelectedHost()) || 'proxmox';
+async function csExpirePendingForTarget(target) {
+    const host = target || csVmTarget() || 'proxmox';
     try {
         await csFetch(`/${csTenant()}/proxmx/commands/pending?target=${encodeURIComponent(host)}&tenant_id=${csTenant()}`,
             { method: 'DELETE' });
@@ -3805,6 +3930,7 @@ async function csRenderVmServerVh() {
 // ── Command Queue ───────────────────────────────────────────────────────────
 async function csRenderVmServerQueue(live) {
     csSetToolbar('');
+    await csVmLoad().catch(() => {});   // populate csVmHosts for the host filter
     let cmds = [];
     try {
         // Default (live falsy) serves from the hub's cached CS_TELEMETRY
@@ -3815,7 +3941,11 @@ async function csRenderVmServerQueue(live) {
         const data = await csFetch(`/${csTenant()}/proxmx/commands?tenant_id=${csTenant()}${liveQs}`);
         cmds = (data && data.commands) || [];
     } catch (e) { console.error('csRenderVmServerQueue: command queue load failed', e); csSet(csErrorBox('Could not load command queue', e)); return; }
-    const rows = cmds.map(c => `<tr>
+    // Filter the queue to the selected host(s); empty selection = all hosts.
+    const _scope = csVmSelectedHosts();
+    const _scopeHosts = new Set(_scope.map(h => h.hostname || h.spoke_hostname || h.spoke_id));
+    const shown = csVmSelectedHostIds.length ? cmds.filter(c => _scopeHosts.has(c.target)) : cmds;
+    const rows = shown.map(c => `<tr>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(c.id ? c.id.slice(0,8) : '—')}</td>
       <td class="px-3 py-2 text-sm">${csEscape(c.action || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(c.target || '—')}</td>
@@ -3833,14 +3963,14 @@ async function csRenderVmServerQueue(live) {
             ${['start_vm','stop_vm','reboot_vm','snapshot_vm','reclone_vm','delete_vm','update_agent','unlock_template','proxmox_reclone_all'].map(a => `<option>${a}</option>`).join('')}
           </select></div>
         <div><label class="text-xs text-slate-400">Target (hostname)</label>
-          <input id="cs-cmd-target" class="border border-slate-200 rounded-md px-2 py-1 w-40" placeholder="proxmox"/></div>
+          <input id="cs-cmd-target" value="${csVmSelectedHostIds.length === 1 ? csEscape([..._scopeHosts][0] || '') : ''}" class="border border-slate-200 rounded-md px-2 py-1 w-40" placeholder="proxmox"/></div>
         <div><label class="text-xs text-slate-400">Args JSON</label>
           <input id="cs-cmd-args" class="border border-slate-200 rounded-md px-2 py-1 w-56" placeholder='{"vmid":90050}'/></div>
         <button onclick="csSendCommand()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-3 py-1.5 rounded-md text-xs font-bold">Send</button>
         <button onclick="csClearCommands()" class="bg-red-100 text-red-700 px-3 py-1.5 rounded-md text-xs font-bold">Clear Queue</button>
       </div></div>`;
-    csSet(`<div>${sendForm}
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Queue (${cmds.length})</p>
+    csSet(`<div>${csVmHostBanner()}${sendForm}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Queue (${shown.length}${csVmSelectedHostIds.length ? ' of ' + cmds.length : ''})</p>
       ${csTable(['ID', 'Action', 'Target', 'Status', 'Age', 'Message', 'Actions'], rows)}
     </div>`);
 }
