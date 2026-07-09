@@ -63,12 +63,27 @@ def register(app, hub, ctx):
         return {"status": "ok", "cleared_spokes": n}
 
     @app.get("/status")
-    async def get_status():
+    async def get_status(request: Request):
         hub = app.state.hub
         if not getattr(hub, "is_ready", False):
             raise HTTPException(status_code=503, detail="Hub is not yet ready (WebSocket server starting)")
+        # /status is public (see api.py access_control_middleware) so an anonymous
+        # caller — a health probe, or anyone reaching an internet-exposed Azure hub
+        # — gets a SECRET-FREE minimal body: readiness + a connection COUNT only.
+        # The full operational body (spoke IDs, module types, heartbeats, alerts,
+        # metrics) is returned only to an authenticated session — it reveals the
+        # fleet shape and is consumed solely by the WebUI, which always sends its
+        # cookie (credentials: 'same-origin'). ``system_state`` (users' password
+        # hashes + global_config firewall/NAC/IPAM/LDAP credentials + tenant map +
+        # spoke IPs) is NEVER returned here, authenticated or not — it was a
+        # one-shot total compromise for any unauthenticated caller.
+        sess = _session_user(request)
+        conn_count = len(hub.active_connections)
+        if not sess:
+            return {"ready": True, "active_connection_count": conn_count}
         metrics = await hub.get_system_metrics()
         return {
+            "ready": True,
             "active_connections": list(hub.active_connections.keys()),
             # Display "online" set: connected now OR seen within the grace window.
             # The WebUI colours tiles from this so a transient loop stall / brief
@@ -81,7 +96,6 @@ def register(app, hub, ctx):
             # badge (count + list) off the already-polled /status fetch.
             "active_alert_count": len(getattr(hub, "_spoke_alerts", {}) or {}),
             "active_alerts": hub.get_active_spoke_alerts(),
-            "state": hub.state.system_state,
             "metrics": metrics
         }
 

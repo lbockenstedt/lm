@@ -1101,20 +1101,54 @@ class BaseControlPlane:
                         else:
                             # All known hub_secrets failed to verify the hub's
                             # challenge — a stale hub root key (hub restart, a
-                            # restore from a different install, or a rotation).
-                            # Hard-closing here sent the spoke into an infinite
-                            # reconnect storm against a hub that was willing to
-                            # keep it pending. Fall back to zero-touch: drop the
-                            # stale secret(s), accept the hub, and let admin
-                            # approval + a fresh SPOKE_SET_HUB_SECRET re-establish
-                            # verified mutual auth on the next reconnect.
-                            logger.warning("Hub identity verification failed for all known secrets — discarding stale hub_secret(s), falling back to zero-touch (pending approval).")
-                            self.hub_secrets = []
-                            self._hub_secret_warned = True
-                            # New code booted + reached the auth exchange (pending
-                            # admin approval is NOT a code failure) → mark healthy.
-                            self._touch_healthy_marker()
-                            await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
+                            # restore from a different install, or a rotation the
+                            # spoke was offline for). How safe it is to proceed
+                            # hinges on whether TLS authenticates the hub:
+                            #
+                            #   * TLS verify ON (LM_HUB_TLS_VERIFY=1): the TLS
+                            #     layer already authenticated the hub, so a failed
+                            #     hub_proof is a benign stale rotation. Fall back
+                            #     to zero-touch (drop the stale secret, accept the
+                            #     hub, let a fresh SPOKE_SET_HUB_SECRET re-establish
+                            #     verified mutual auth). This is the original
+                            #     behaviour and is SAFE because TLS binds the peer.
+                            #
+                            #   * TLS verify OFF: the hub_proof is the ONLY
+                            #     authenticator. A failure here could be a MITM
+                            #     hub (the TLS-verify-off posture is exactly what
+                            #     lets an attacker redirect the spoke to their own
+                            #     hub). Accepting it silently = the MITM can then
+                            #     push SPOKE_UPDATE (RCE) / SPOKE_SET_HUB_SECRET /
+                            #     SPOKE_UPDATE_SESSION_KEY. So DON'T accept: keep
+                            #     the (stale) hub_secrets — wiping them is the
+                            #     MITM's prize, re-onboarding the spoke onto the
+                            #     attacker's hub — and close. The 5→300s reconnect
+                            #     backoff (core reconnect chain) keeps this a slow
+                            #     retry, not a storm. Operator re-onboards OOB
+                            #     (re-deliver the current hub_secret, or flip
+                            #     LM_HUB_TLS_VERIFY=1 once the hub cert is issued).
+                            if self._tls_verify:
+                                logger.warning("Hub identity verification failed for all known secrets — TLS verifies the hub, so treating as a stale rotation: discarding hub_secret(s), falling back to zero-touch (pending approval).")
+                                self.hub_secrets = []
+                                self._hub_secret_warned = True
+                                # New code booted + reached the auth exchange
+                                # (pending admin approval is NOT a code failure)
+                                # → mark healthy.
+                                self._touch_healthy_marker()
+                                await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
+                            else:
+                                logger.error("Hub identity verification failed for all known secrets AND TLS verify is OFF — refusing unverified hub (possible MITM). Keeping hub_secret(s); close + back off. Re-onboard OOB or set LM_HUB_TLS_VERIFY=1.")
+                                self._hub_secret_warned = True
+                                # The code booted fine — the trust failure is
+                                # operational, not a code regression, so don't let
+                                # the update watchdog roll back a good build over
+                                # it. Mark healthy, then refuse the unverified hub.
+                                self._touch_healthy_marker()
+                                try:
+                                    await websocket.close(1008, "Hub identity unverified (TLS verify off)")
+                                except Exception:
+                                    pass
+                                return
                     else:
                         if not self._hub_secret_warned:
                             logger.warning("Hub secrets not configured. Skipping Hub identity verification (Insecure).")
@@ -1977,13 +2011,40 @@ class BaseControlPlane:
 
     def _decode_frame(self, wire: str):
         """Split ``<sig>.<body>``, verify the RECEIVED body bytes directly, and
-        parse ONCE. Returns ``(msg_dict, ok)``. In bootstrap (no secret) an
-        unsigned frame is accepted so heartbeats pass; a signed frame with a bad
-        HMAC is rejected."""
+        parse ONCE. Returns ``(msg_dict, ok)`` (``ok=False`` → caller drops it).
+
+        Bootstrap (no session secret yet): unsigned frames are accepted so the
+        onboarding handshake (APPROVAL_REQUIRED / APPROVED / HUB_OK / heartbeats)
+        can proceed before the spoke adopts its key. A signed frame with a bad
+        HMAC is rejected even here.
+
+        Post-bootstrap (session secret + signer set): the hub holds the spoke's
+        session key and signs EVERY outbound frame, so an unsigned inbound frame
+        here is a MITM injection (e.g. a forged SPOKE_UPDATE pulling an attacker
+        repo_url → RCE, SPOKE_UPDATE_SESSION_KEY, or SPOKE_SET_HUB_SECRET). Drop
+        unsigned non-heartbeat frames — mirrors the hub's own policy in
+        main.py (an unsigned non-heartbeat from a spoke that has adopted its key
+        is dropped). An unsigned HEARTBEAT is still accepted so a hub that
+        momentarily omits the signature on a keepalive can't wedge the liveness
+        loop. A signed frame is verified; bad HMAC → reject."""
         sig, body = split_frame(wire)
-        if self.secret and self.signer and sig:
+        has_key = bool(self.secret and self.signer)
+        if has_key and sig:
             if not self.signer.verify_bytes(body.encode(), sig):
                 return None, False
+        if has_key and not sig:
+            # Post-bootstrap unsigned frame — parse to inspect the type, then
+            # accept ONLY a heartbeat. Anything else is an injection.
+            try:
+                preview = json.loads(body)
+            except Exception:
+                return None, False
+            if (preview.get("payload") or {}).get("type") != "HEARTBEAT":
+                logger.debug(
+                    "Unsigned non-heartbeat dropped (session key active) type=%s",
+                    (preview.get("payload") or {}).get("type"))
+                return None, False
+            return preview, True
         try:
             return json.loads(body), True
         except Exception:

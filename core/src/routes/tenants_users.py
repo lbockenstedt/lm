@@ -520,6 +520,14 @@ def register(app, hub, ctx):
                 "updated_at": time.time(),
             }
             hub.state.save_state()
+            # A group's permissions feed every member's effective permission set
+            # (union of group bundles + per-user rights). Invalidate members'
+            # sessions so a permission/demotion change takes effect immediately
+            # instead of being evadable up to the 8h session TTL (a demoted
+            # group shouldn't keep admin access by simply avoiding /auth/me).
+            for uid, u in hub.state.system_state.get("users", {}).items():
+                if group_id in (u.get("groups", []) or []):
+                    _invalidate_user_sessions(hub, uid)
             return {"status": "ok", "group_id": group_id}
         except HTTPException:
             raise
@@ -538,11 +546,18 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=403, detail="Group is protected")
             # Detach the group from every member so no user keeps a dangling id.
             users = hub.state.system_state.get("users", {})
-            for u in users.values():
+            member_ids = []
+            for uid, u in users.items():
                 if group_id in (u.get("groups", []) or []):
                     u["groups"] = [g for g in u["groups"] if g != group_id]
+                    member_ids.append(uid)
             del groups[group_id]
             hub.state.save_state()
+            # Detaching the group changes each member's effective permissions —
+            # invalidate their sessions so the loss takes effect immediately
+            # (was evadable up to the 8h session TTL).
+            for uid in member_ids:
+                _invalidate_user_sessions(hub, uid)
             return {"status": "ok"}
         except HTTPException:
             raise
