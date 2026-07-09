@@ -17,7 +17,7 @@ import fcntl
 import contextlib
 from typing import Dict, Any, Optional, Type
 from .protocol import Message, MessageHeader, MessagePayload
-from ..security.signer import MessageSigner
+from ..security.signer import MessageSigner, encode_frame, split_frame
 
 try:  # shared helper (lm/core/src); falls back if imported off a stale path
     from logging_setup import set_log_level
@@ -587,9 +587,7 @@ class BaseControlPlane:
             },
             "payload": {"type": "SPOKE_LOG", "data": {"entries": entries}},
         }
-        if self.signer:
-            msg["signature"] = self.signer.sign(msg)
-        await websocket.send(json.dumps(msg, separators=(",", ":")))
+        await websocket.send(self._encode_frame(msg))
 
     async def _log_relay_task(self, websocket) -> None:
         """Drain the log queue and send captured log entries to the Hub as SPOKE_LOG.
@@ -704,8 +702,7 @@ class BaseControlPlane:
                            "sender_id": self.spoke_id, "destination_id": "hub"},
                 "payload": {"type": payload_type, "data": data or {}},
             }
-            msg["signature"] = self._sign(msg)
-            await ws.send(json.dumps(msg, separators=(',', ':')))
+            await ws.send(self._encode_frame(msg))
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning("send_to_hub(%s) failed: %s", payload_type, e)
@@ -1088,8 +1085,7 @@ class BaseControlPlane:
                                        "sender_id": self.spoke_id, "destination_id": "hub"},
                             "payload": {"type": "HEARTBEAT", "data": {}}
                         }
-                        msg["signature"] = self._sign(msg)
-                        await websocket.send(json.dumps(msg, separators=(',', ':')))
+                        await websocket.send(self._encode_frame(msg))
                         await asyncio.sleep(30)
                     except asyncio.CancelledError:
                         raise
@@ -1131,8 +1127,8 @@ class BaseControlPlane:
             # Main Message Loop
             try:
               async for message in websocket:
-                msg = json.loads(message)
-                if not self._verify_signature(msg):
+                msg, _ok = self._decode_frame(message)
+                if not _ok:
                     continue
 
                 payload = msg.get("payload", {})
@@ -1260,10 +1256,10 @@ class BaseControlPlane:
                        "sender_id": self.spoke_id, "destination_id": "hub"},
             "payload": {"type": "COMMAND_RESULT", "data": result}
         }
-        resp["signature"] = self._sign(resp)
+        _wire = self._encode_frame(resp)
         try:
             async with send_lock:
-                await websocket.send(json.dumps(resp, separators=(',', ':')))
+                await websocket.send(_wire)
         except Exception as e:  # noqa: BLE001 — socket closed mid-handle
             logger.debug("failed to send COMMAND_RESULT for %s: %s", corr_id, e)
 
@@ -1827,3 +1823,23 @@ class BaseControlPlane:
             # In the bootstrap phase, we allow this so heartbeats can pass.
             return True
         return self.signer.verify(msg)
+
+    def _encode_frame(self, msg) -> str:
+        """Serialize + sign ``msg`` into the wire form ``<sig>.<body>`` (body
+        serialized ONCE, signed over those exact bytes). Unsigned (empty sig)
+        during bootstrap (no signer yet)."""
+        return encode_frame(self.signer, msg)
+
+    def _decode_frame(self, wire: str):
+        """Split ``<sig>.<body>``, verify the RECEIVED body bytes directly, and
+        parse ONCE. Returns ``(msg_dict, ok)``. In bootstrap (no secret) an
+        unsigned frame is accepted so heartbeats pass; a signed frame with a bad
+        HMAC is rejected."""
+        sig, body = split_frame(wire)
+        if self.secret and self.signer and sig:
+            if not self.signer.verify_bytes(body.encode(), sig):
+                return None, False
+        try:
+            return json.loads(body), True
+        except Exception:
+            return None, False

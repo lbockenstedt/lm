@@ -64,6 +64,7 @@ from messaging.protocol import Message, MessageHeader, MessagePayload, Acknowled
 from messaging.mailbox import Mailbox
 from messaging.heartbeat import HeartbeatManager
 from security.key_manager import KeyManager
+from security.signer import split_frame
 from state.manager import StateManager
 from simulations.broadcaster import SimulationsBroadcaster
 from simulations.store import SimulationsStore
@@ -866,22 +867,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
             payload_dict = asdict(message.payload)
 
-            # Sign the structured data (KeyManager now handles canonicalization)
+            # Encode to the wire form <sig>.<body> (body serialized ONCE, signed
+            # over those exact bytes) so the spoke verifies received bytes without
+            # re-serializing. signing_secret path = SPOKE_UPDATE_SESSION_KEY.
             body = {"header": header_dict, "payload": payload_dict}
             if signing_secret is not None:
-                message.signature = self.key_manager.sign_with_secret(signing_secret, body)
+                wire = self.key_manager.encode_frame_with_secret(signing_secret, body)
             else:
-                message.signature = self.key_manager.sign_message(spoke_id, body)
-
-            payload = {
-                "header": header_dict,
-                "payload": payload_dict,
-                "signature": message.signature
-            }
-            json_payload = json.dumps(payload, separators=(',', ':'))
-            self.bytes_count += len(json_payload.encode())
+                wire = self.key_manager.encode_frame(spoke_id, body)
+            self.bytes_count += len(wire.encode())
             try:
-                await ws.send(json_payload)
+                await ws.send(wire)
             except (websockets.ConnectionClosed, RuntimeError, ConnectionError) as e:
                 # The socket was closed/evicted between the active_connections
                 # lookup above and this send (the eviction path swaps sockets;
@@ -2703,15 +2699,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                             continue
                     except Exception:
                         pass
-                msg_data = json.loads(message_json)
+                # Wire form is <sig>.<body>: split, verify the RECEIVED body bytes
+                # DIRECTLY (no re-serialization — the per-frame json.dumps that
+                # dominated ingest CPU is gone), and parse the body ONCE. sig == ""
+                # means unsigned (a bootstrap heartbeat before the spoke has a key).
+                sig, body_str = split_frame(message_json)
+                try:
+                    msg_data = json.loads(body_str)
+                except Exception:
+                    logger.debug("Unparseable frame from %s — dropping", spoke_id)
+                    continue
 
-                # Signature Verification
-                signature = msg_data.get("signature")
-                data_to_verify = {k: v for k, v in msg_data.items() if k != "signature"}
-                message_bytes = json.dumps(data_to_verify, sort_keys=True, separators=(',', ':')).encode()
-
+                signature = sig or None
                 if signature:
-                    if not self.key_manager.verify_signature(spoke_id, message_bytes, signature):
+                    if not self.key_manager.verify_signature(spoke_id, body_str.encode(), sig):
                         logger.warning(f"Invalid signature from spoke {spoke_id}")
                         continue
                     # A verified signature proves the spoke installed its session
