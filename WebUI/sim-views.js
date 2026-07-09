@@ -302,6 +302,21 @@ function csOnlineBadge(online) {
         : `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold uppercase tracking-wider"><span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>Offline</span>`;
 }
 
+// Backpressure badge for a spoke tile (and, contextually, the clients it owns).
+// Reads the hub's per-spoke throttle level from the shared status metrics stash
+// (window.__lmHubMetrics, populated by main.js updateStatus). Defensive: returns
+// '' when metrics aren't present (e.g. the standalone cs spoke WebUI) or the
+// spoke isn't throttled. level 1 = offending, 2 = fleet-throttled.
+function csThrottleBadge(spokeId) {
+    try {
+        const bp = (window.__lmHubMetrics || {}).backpressure || {};
+        const lvl = (bp.spoke_levels || {})[spokeId] || 0;
+        if (lvl === 1) return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase tracking-wider animate-pulse" title="Offending — over its message rate; coalescing updates locally at the hub's request">⚠ Offending</span>`;
+        if (lvl >= 2) return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-[10px] font-bold uppercase tracking-wider" title="Throttled — fleet-wide slow-down active; coalescing updates locally">⏳ Throttled</span>`;
+    } catch (e) { /* metrics not available — no badge */ }
+    return '';
+}
+
 function csStatusBadge(status) {
     const s = String(status || 'unknown').toLowerCase();
     const map = {
@@ -3476,8 +3491,8 @@ function csShedBadge(v) {
     if (!v || !v._shed_at) return '';
     const secs = Number(v._shed_at) - Date.now() / 1000;
     if (secs <= 0) return '';
-    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-orange-100 text-orange-700" title="Dongle removed — VM will be shed when the missing-dongle timer expires">`
-        + `<span class="w-1.5 h-1.5 rounded-full bg-orange-500 animate-pulse"></span>🔌 Sheds in `
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700" title="Dongle removed — VM will be shed when the missing-dongle timer expires">`
+        + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🗑️ Sheds in `
         + `<span class="cs-shed-countdown" data-shed-at="${Number(v._shed_at)}">${csFmtDuration(secs)}</span></span>`;
 }
 
