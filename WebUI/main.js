@@ -2067,12 +2067,15 @@ const _BP_DEFAULTS = {
     fleet_cpu_soft: 55, fleet_cpu_hard: 85, fleet_cpu_clear: 40,
     coalesce_min_interval_s: 2, coalesce_max_interval_s: 15,
     release_dwell_s: 20, per_spoke_soft_mps: 50, ddos_disconnect: false,
+    fleet_min_mps: 5, protect_shed_min_mps: 50, protect_shed_top_k: 20, ddos_grace_s: 30,
 };
 const _BP_FIELDS = [
     ['bp-fleet-cpu-soft', 'fleet_cpu_soft'], ['bp-fleet-cpu-hard', 'fleet_cpu_hard'],
     ['bp-fleet-cpu-clear', 'fleet_cpu_clear'], ['bp-coalesce-min', 'coalesce_min_interval_s'],
     ['bp-coalesce-max', 'coalesce_max_interval_s'], ['bp-release-dwell', 'release_dwell_s'],
     ['bp-per-spoke-soft', 'per_spoke_soft_mps'], ['bp-ddos-disconnect', 'ddos_disconnect'],
+    ['bp-fleet-min', 'fleet_min_mps'], ['bp-protect-shed-min', 'protect_shed_min_mps'],
+    ['bp-protect-shed-topk', 'protect_shed_top_k'], ['bp-ddos-grace', 'ddos_grace_s'],
 ];
 
 async function loadBackpressureConfig() {
@@ -3219,6 +3222,10 @@ function _renderSettingsSection(subMenu) {
                         <label>Slow-down max (s)<br><input type="number" id="bp-coalesce-max" min="1" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                         <label>Release dwell (s)<br><input type="number" id="bp-release-dwell" min="0" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                         <label>Offender mark (msg/s)<br><input type="number" id="bp-per-spoke-soft" min="1" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label title="Fleet mode throttles only spokes at or above this rate — quiet spokes (real infra) are never touched">Throttle only above (msg/s)<br><input type="number" id="bp-fleet-min" min="0" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label title="Under protect, shed/disconnect only spokes at or above this rate (surgical + source shed floor)">Protect shed above (msg/s)<br><input type="number" id="bp-protect-shed-min" min="1" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label title="Max spokes disconnected per tick under protect (source-shed)">Protect shed top-K<br><input type="number" id="bp-protect-shed-topk" min="1" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label title="How long a signalled spoke may keep flooding before disconnect+quarantine (needs DDoS disconnect on)">DDoS grace (s)<br><input type="number" id="bp-ddos-grace" min="1" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                         <label class="flex items-end gap-2 pb-1"><input type="checkbox" id="bp-ddos-disconnect" class="w-4 h-4 accent-green-600"> DDoS disconnect<br>flooders</label>
                     </div>
                 </div>
