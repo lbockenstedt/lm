@@ -657,6 +657,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self._proc.cpu_percent(interval=None)  # prime the baseline
         except Exception:
             self._proc = None
+        self._proc_cpu = 0.0   # last hub-process CPU% (set each tick; ladder reads it)
 
         # ── Graceful-degradation escalation ladder (backpressure control loop) ──
         # BEFORE the blunt protect-mode shed above, a softer ladder tries to keep
@@ -754,10 +755,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # A single spoke over this msg/s is an "offender" (rung 1).
             "per_spoke_soft_mps": float(cfg.get("per_spoke_soft_mps", 50.0)),
             "per_spoke_clear_mps": float(cfg.get("per_spoke_clear_mps", 25.0)),
-            # Aggregate loop-lag (s) / mps that trips the fleet-wide rung 2.
-            "fleet_lag_soft_s": float(cfg.get("fleet_lag_soft_s", 0.30)),
-            "fleet_lag_clear_s": float(cfg.get("fleet_lag_clear_s", 0.10)),
-            "fleet_soft_mps": float(cfg.get("fleet_soft_mps", 8000.0)),
+            # Aggregate signals that trip the fleet-wide rung-2 slow-down. These
+            # sit BELOW the protect (blunt-shed) marks so the GRACEFUL slow-down
+            # engages first. Calibrated from load data: a single node at ~6000
+            # msg/s pegged the hub CPU at 100% while mps/lag were still under the
+            # old 8000/0.30 marks — so nothing throttled and the loop ground at
+            # 100%. Hub-process CPU is the earliest, truest saturation signal.
+            "fleet_cpu_soft": float(cfg.get("fleet_cpu_soft", 65.0)),   # %/core
+            "fleet_cpu_clear": float(cfg.get("fleet_cpu_clear", 45.0)),
+            "fleet_lag_soft_s": float(cfg.get("fleet_lag_soft_s", 0.15)),
+            "fleet_lag_clear_s": float(cfg.get("fleet_lag_clear_s", 0.06)),
+            "fleet_soft_mps": float(cfg.get("fleet_soft_mps", 4000.0)),
             # Min send interval (s) we ask a throttled spoke to conflate to.
             "coalesce_min_interval_s": float(cfg.get("coalesce_min_interval_s", 2.0)),
             # Rung-3 hub drain cadence (process one latest snapshot per spoke).
@@ -3286,6 +3294,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     self._protect_shed_bytes = int(cfg.get("shed_bytes", 2048))
                     memp = psutil.virtual_memory().percent
                     cpup = self._proc.cpu_percent(interval=None) if self._proc else 0.0
+                    # Stash for the ladder's fleet decision — hub-process CPU is
+                    # the signal that actually pegs first (a distributed load of
+                    # sub-offender spokes saturates the core well before mps/lag
+                    # cross their marks). The graceful fleet slow-down keys off
+                    # this at a LOWER threshold than protect.
+                    self._proc_cpu = cpup
                     _over = memp >= mem_hi or _loop_lag >= lag_hi or cpup >= cpu_hi
                     _under = memp <= mem_lo and _loop_lag <= lag_lo and cpup <= cpu_lo
                     dwell = float(cfg.get("min_dwell_s", 15))
@@ -3427,10 +3441,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 await asyncio.gather(*sigs, return_exceptions=True)
             return
 
-        # Rung 2 fleet decision (hysteresis) — loop-lag is the drain-lag proxy:
-        # when the single core can't keep up, the 1s tick returns late.
-        fleet_hot = (loop_lag >= p["fleet_lag_soft_s"]) or (self.mps >= p["fleet_soft_mps"])
-        fleet_cool = (loop_lag <= p["fleet_lag_clear_s"]) and (self.mps < p["fleet_soft_mps"] * 0.6)
+        # Rung 2 fleet decision (hysteresis). Three aggregate signals, ANY of
+        # which trips it (the point is to catch a DISTRIBUTED load of individually
+        # sub-offender spokes — none trip rung 1, but together they peg the core):
+        #   • hub-process CPU  — the earliest, truest saturation signal;
+        #   • loop-lag         — the single core can't keep up (tick returns late);
+        #   • mps              — raw processed throughput near the ceiling.
+        cpu = getattr(self, "_proc_cpu", 0.0)
+        fleet_hot = (cpu >= p["fleet_cpu_soft"]
+                     or loop_lag >= p["fleet_lag_soft_s"]
+                     or self.mps >= p["fleet_soft_mps"])
+        fleet_cool = (cpu <= p["fleet_cpu_clear"]
+                      and loop_lag <= p["fleet_lag_clear_s"]
+                      and self.mps < p["fleet_soft_mps"] * 0.6)
         if fleet_hot:
             self._fleet_backoff = True
         elif fleet_cool:
@@ -3499,8 +3522,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             if self._fleet_backoff:
                 logger.warning(
                     "[backpressure] FLEET slow-down ACTIVE — %d spoke(s) throttled "
-                    "(aggregate over ceiling: loop-lag %.2fs, %.0f msg/s). Spokes "
-                    "are coalescing locally.", len(new_backoff), loop_lag, self.mps)
+                    "(aggregate over ceiling: cpu %.0f%%, loop-lag %.2fs, %.0f msg/s). "
+                    "Spokes are coalescing locally.",
+                    len(new_backoff), getattr(self, "_proc_cpu", 0.0), loop_lag, self.mps)
             elif new_backoff:
                 logger.warning(
                     "[backpressure] throttling %d offending spoke(s): %s — over the "

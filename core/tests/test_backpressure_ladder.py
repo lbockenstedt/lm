@@ -79,6 +79,7 @@ def _make(bp_cfg=None):
     h._telemetry_received = h._telemetry_processed = h._telemetry_coalesced = 0
     h._probe_state = {}
     h._protect_mode = False
+    h._proc_cpu = 0.0
     h._bp_last_summary = (frozenset(), False)
     h._MSG_CLASS_DEFAULT = Hub._MSG_CLASS_DEFAULT
     h.signals = []          # (spoke_id, level) captured from send_to_spoke_command
@@ -145,6 +146,29 @@ def test_rung1_damping_holds_then_releases():
 
 
 # ── rung 2: fleet ───────────────────────────────────────────────────────────
+def test_rung2_fleet_on_cpu_distributed_load():
+    # 3 spokes each at 30/s — none is an offender (<50/s soft mark) and mps is
+    # low, but hub CPU is pegged: the fleet slow-down MUST still engage. This is
+    # the distributed-load case that ground the hub at 100% with nothing throttled.
+    h = _make()
+    h.active_connections = {"a": 1, "b": 1, "c": 1}
+    h.spoke_mps = {"a": 30, "b": 30, "c": 30}
+    h.mps = 90                                    # well under fleet_soft_mps
+    h._proc_cpu = 80.0                            # but the core is pegged
+    _ladder(h, loop_lag=0.0)                      # and loop-lag is low
+    assert sorted(l for _, l in h.signals) == [2, 2, 2]
+    assert h._fleet_backoff and h._load_level == 2
+    # CPU falls back below the clear mark → resume
+    h.signals.clear()
+    h._proc_cpu = 30.0
+    h.spoke_mps = {"a": 2, "b": 2, "c": 2}
+    for s in ("a", "b", "c"):
+        h._backoff_since[s] = time.monotonic() - 100
+    _ladder(h, loop_lag=0.0)
+    assert sorted(l for _, l in h.signals) == [0, 0, 0]
+    assert not h._fleet_backoff
+
+
 def test_rung2_fleet_on_loop_lag():
     h = _make()
     h.active_connections = {"a": 1, "b": 1, "c": 1}
