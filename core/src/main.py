@@ -679,6 +679,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._fleet_backoff = False       # rung-2 broadcast active
         self._backoff_signaled = {}       # spoke_id -> last level we told it (dedup)
         self._backoff_since = {}          # spoke_id -> monotonic ts throttle began (release dwell)
+        # Spokes that hit their per-spoke TokenBucket (burst+refill) THIS tick.
+        # The bucket is the earliest, per-frame offender detector — feeding it
+        # into the ladder means a bucket breach TELLS the spoke to slow down
+        # (LM_BACKPRESSURE) instead of just silently dropping its frames. Reset
+        # each tick by the ladder.
+        self._rl_breached = set()
+        # Soft watermark (default 0.8): when a spoke has consumed ≥80% of its
+        # burst bucket it is SIGNALLED to slow down (proactive). The hard limit
+        # (100%) is still a HARD DROP. Cached here and refreshed each 1s tick so
+        # the hot message loop reads an attribute, not a config dict, per frame.
+        self._rl_soft_frac = 0.8
+        # DDoS enforcement. A correct client honors the 80% signal and never hits
+        # 100%. A client that KEEPS hard-dropping after being told to slow is
+        # broken/hostile — track it and (if enabled) disconnect + quarantine so
+        # the hub stops spending json.loads+verify on its flood. Per-tick hard-
+        # drop counts + how long each has been non-compliant while signalled.
+        self._rl_harddrops = {}           # spoke_id -> hard drops THIS tick
+        self._noncompliant_since = {}     # spoke_id -> monotonic ts flood-after-signal began
+        self._quarantine = {}             # spoke_id -> monotonic ts quarantine expires
         # Rung-3 receiver-side coalesce: latest-wins telemetry buffer, drained at
         # a bounded cadence by run_coalesce_drain_loop. Superseded snapshots are
         # merged away (counted) instead of each running the full ingest path.
@@ -754,6 +773,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # window (throttle → rate drops → release → rate spikes → throttle).
             # Ramp down fast, release slow. 0 disables the hold.
             "release_dwell_s": float(cfg.get("release_dwell_s", 20.0)),
+            # Soft-watermark fraction of the burst bucket at which we SIGNAL a
+            # slow-down (0.8 = 80%). Hard drop still happens at 100%.
+            "rl_soft_fraction": float(cfg.get("rl_soft_fraction", 0.8)),
+            # DDoS enforcement — DEFAULT OFF: a legacy spoke that can't honor
+            # LM_BACKPRESSURE would keep hard-dropping and get disconnected. Turn
+            # on only once the fleet all speaks the backpressure protocol.
+            #   ddos_disconnect      — enable disconnect+quarantine escalation
+            #   ddos_grace_s         — how long a SIGNALLED spoke may keep
+            #                          hard-dropping before it's disconnected
+            #   ddos_min_harddrops   — min hard-drops/tick to count as flooding
+            #   quarantine_s         — reconnect cooldown after a disconnect
+            "ddos_disconnect": bool(cfg.get("ddos_disconnect", False)),
+            "ddos_grace_s": float(cfg.get("ddos_grace_s", 30.0)),
+            "ddos_min_harddrops": int(cfg.get("ddos_min_harddrops", 20)),
+            "quarantine_s": float(cfg.get("quarantine_s", 120.0)),
         }
 
 
@@ -2296,6 +2330,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 await websocket.close(1008, "Missing spoke_id")
                 return
 
+            # DDoS quarantine: a spoke disconnected for ignoring the slow-down
+            # signal and flooding is refused reconnect until its cooldown expires
+            # — so it can't just reconnect and immediately resume the flood. 1013
+            # = Try Again Later (the spoke's reconnect backoff honors it).
+            if self._is_quarantined(spoke_id):
+                self.record_spoke_event(spoke_id, "quarantine_reject",
+                                        "reconnect refused — still in DDoS quarantine")
+                await websocket.close(1013, "Quarantined (flooding) — retry later")
+                return
+
             # Detect a clone-and-rename (same install UUID, new id) and migrate
             # approval/tenant binding + key material to the new id BEFORE auth.
             self._reconcile_spoke_identity(spoke_id, install_uuid, spoke_hostname)
@@ -2712,13 +2756,28 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
                         continue
                     limiter = self.rate_limiters.get(spoke_id)
-                    if limiter and not limiter.consume():
-                        self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
-                        logger.warning(
-                            f"Rate limit exceeded for spoke {spoke_id} "
-                            f"(type={payload.get('type')}, total drops={self.rate_limit_drops[spoke_id]}). "
-                            f"Dropping message.")
-                        continue
+                    if limiter:
+                        ok = limiter.consume()
+                        # SOFT WATERMARK (default 80% of burst consumed): flag the
+                        # spoke so the ladder (next 1s tick) TELLS it to slow +
+                        # coalesce locally — proactively, BEFORE the hard drop.
+                        # Cheap set add (deduped); the ladder does the signalling
+                        # with its dedup/dwell/cap. A correct client backs off here
+                        # and never reaches the hard limit below.
+                        if limiter.capacity and limiter.tokens <= (1.0 - self._rl_soft_frac) * limiter.capacity:
+                            self._rl_breached.add(spoke_id)
+                        if not ok:
+                            # HARD LIMIT (100%) → DROP the frame (enforcement). A
+                            # client still hard-dropping here IGNORED the 80%
+                            # slow-down — track the hard drops so the ladder can
+                            # escalate a persistent flooder to disconnect+quarantine
+                            # (DDoS defense: stop parsing its frames entirely).
+                            self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
+                            self._rl_harddrops[spoke_id] = self._rl_harddrops.get(spoke_id, 0) + 1
+                            logger.debug(
+                                "Rate limit HARD-DROP for spoke %s (type=%s, total drops=%d).",
+                                spoke_id, payload.get('type'), self.rate_limit_drops[spoke_id])
+                            continue
 
                 # Handle other messages
                 self.message_count += 1
@@ -3237,6 +3296,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 except Exception:
                     pass
 
+                # Refresh the soft-watermark fraction for the hot message loop
+                # (so it reads an attribute, not a config dict, per frame).
+                try:
+                    self._rl_soft_frac = float((self.state.get_global_config()
+                        .get("backpressure", {}) or {}).get("rl_soft_fraction", 0.8))
+                except Exception:
+                    pass
+
                 # Per-spoke msg/s: push this tick's count into each spoke's 10s
                 # history and average. Prune history for spokes with no traffic
                 # and no live connection so the dicts don't grow unbounded.
@@ -3279,6 +3346,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         the fleet soft mark) does every spoke get the slow-down. This is the
         'throttle the loud one first, back off the whole fleet only if that
         wasn't enough' behaviour."""
+        # Snapshot + clear the per-tick bucket-breach set FIRST (so it clears
+        # every tick even when we early-return under protect). A spoke that hit
+        # its TokenBucket this tick is an instant offender — the earliest, most
+        # precise detector, ahead of the 10s-average spoke_mps.
+        breached = self._rl_breached
+        self._rl_breached = set()
+        harddrops = self._rl_harddrops
+        self._rl_harddrops = {}
+
         # PROTECT TAKES PRECEDENCE. When protect mode is active the loop is
         # already parse-bound and shedding pre-parse — that is the ONLY relief at
         # this scale (coalescing happens AFTER json.loads, so it can't relieve a
@@ -3335,12 +3411,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 desired = 2
             elif was:  # currently throttled → apply the release dwell
                 held = now - self._backoff_since.get(sid, now)
-                if held < dwell or mps >= p["per_spoke_clear_mps"]:
+                # A fresh bucket breach re-arms the dwell and holds the throttle.
+                if held < dwell or mps >= p["per_spoke_clear_mps"] or sid in breached:
                     desired = was          # hold (damp the flap)
                 else:
                     desired = 0            # quiet past the dwell → release
             else:
-                desired = 1 if mps >= p["per_spoke_soft_mps"] else 0
+                # Offender if over the mps soft mark OR it breached its burst
+                # bucket this tick (instant, per-frame trigger).
+                desired = 1 if (mps >= p["per_spoke_soft_mps"] or sid in breached) else 0
             if desired:
                 new_backoff.add(sid)
             if desired != was:
@@ -3380,12 +3459,76 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     "are coalescing locally.", len(new_backoff), loop_lag, self.mps)
             elif new_backoff:
                 logger.warning(
-                    "[backpressure] throttling %d offending spoke(s): %s — each is "
-                    "over %.0f msg/s; told to slow + coalesce locally.",
+                    "[backpressure] throttling %d offending spoke(s): %s — over the "
+                    "%.0f msg/s mark or their burst bucket; told to slow + coalesce "
+                    "locally (vs silently dropping).",
                     len(new_backoff), ", ".join(sorted(new_backoff)[:10]),
                     p["per_spoke_soft_mps"])
             else:
                 logger.warning("[backpressure] CLEARED — all spokes back to normal cadence.")
+
+        # ── DDoS enforcement: disconnect + quarantine a persistent flooder ──
+        # A spoke we've ALREADY told to slow down (level>0) that KEEPS hard-
+        # dropping frames is not honoring backpressure — broken or hostile. Once
+        # it has flooded for ddos_grace_s it's disconnected and quarantined, so
+        # the hub stops spending parse+verify on it (dropping AFTER parse doesn't
+        # stop a DDoS — only closing the socket does). DEFAULT OFF (a legacy
+        # spoke that can't honor the signal would keep hard-dropping too).
+        if p["ddos_disconnect"]:
+            min_hd = max(1, p["ddos_min_harddrops"])
+            grace = p["ddos_grace_s"]
+            offenders = []
+            for sid, hd in harddrops.items():
+                # Count spokes that are BOTH flooding (hard-drops this tick) AND
+                # under throttle this tick (new_backoff) — i.e. we've told them to
+                # slow and they're still over the hard limit. The grace clock
+                # below requires this to persist, so a compliant spoke's brief
+                # burst self-corrects and never disconnects. (Uses new_backoff, not
+                # _backoff_signaled, so a spoke released THIS tick can't slip past.)
+                if hd >= min_hd and sid in new_backoff:
+                    self._noncompliant_since.setdefault(sid, now)
+                    if (now - self._noncompliant_since[sid]) >= grace:
+                        offenders.append((sid, hd))
+                else:
+                    self._noncompliant_since.pop(sid, None)
+            # drop non-compliance clocks for anyone who stopped flooding
+            for sid in [s for s in list(self._noncompliant_since) if s not in harddrops]:
+                self._noncompliant_since.pop(sid, None)
+            for sid, hd in offenders:
+                await self._disconnect_and_quarantine(sid, hd, p["quarantine_s"])
+
+    async def _disconnect_and_quarantine(self, spoke_id: str, hard_drops: int,
+                                         quarantine_s: float) -> None:
+        """Close a persistent flooder's socket and refuse its reconnect for
+        ``quarantine_s`` (checked in handle_connection). This is the DDoS
+        backstop — dropping frames after parse still costs the hub; closing the
+        socket stops the cost. Logged at ERROR (WebUI Logs view)."""
+        self._quarantine[spoke_id] = time.monotonic() + max(0.0, quarantine_s)
+        self._noncompliant_since.pop(spoke_id, None)
+        self._backoff_signaled.pop(spoke_id, None)
+        self.record_spoke_event(spoke_id, "ddos_quarantine",
+                                f"ignored slow-down; {hard_drops} hard-drops/s → "
+                                f"disconnected + quarantined {quarantine_s:.0f}s")
+        logger.error("[backpressure] DDoS DEFENSE — spoke %s ignored the slow-down "
+                     "and kept flooding (%d hard-drops/s); DISCONNECTED + quarantined "
+                     "for %.0fs.", spoke_id, hard_drops, quarantine_s)
+        ws = self.active_connections.get(spoke_id)
+        if ws is not None:
+            try:
+                await ws.close(1013, "Flooding after slow-down — quarantined")
+            except Exception as e:  # noqa: BLE001
+                logger.debug("quarantine close of %s failed: %s", spoke_id, e)
+
+    def _is_quarantined(self, spoke_id: str) -> bool:
+        """True while ``spoke_id`` is inside its DDoS quarantine cooldown.
+        Expired entries are pruned on read so the dict stays bounded."""
+        until = self._quarantine.get(spoke_id)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            self._quarantine.pop(spoke_id, None)
+            return False
+        return True
 
     async def _signal_backoff(self, spoke_id: str, level: int, min_interval: float) -> None:
         """Send one LM_BACKPRESSURE notification to a spoke (fire-and-forget).
@@ -3905,6 +4048,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # Per-spoke level (1 = offending, 2 = fleet-throttled) so the
                     # WebUI can badge each spoke/agent tile distinctly.
                     "spoke_levels": {sid: lvl for sid, lvl in self._backoff_signaled.items() if lvl},
+                    # DDoS: spokes currently disconnected + in reconnect cooldown.
+                    "quarantined": [s for s in list(self._quarantine) if self._is_quarantined(s)],
                     "coalesce_pending": len(self._coalesce_pending),
                     "telemetry_received": self._telemetry_received,
                     "telemetry_processed": self._telemetry_processed,
