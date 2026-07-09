@@ -658,6 +658,85 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception:
             self._proc = None
 
+        # ── Graceful-degradation escalation ladder (backpressure control loop) ──
+        # BEFORE the blunt protect-mode shed above, a softer ladder tries to keep
+        # the fleet USABLE under a burst instead of dropping everything:
+        #   Rung 1  throttle the OFFENDING spoke(s) first — signal LM_BACKPRESSURE
+        #           to just the loud talkers; they coalesce/merge LOCALLY and slow
+        #           their send rate (the work moves to the spoke, per design).
+        #   Rung 2  if the aggregate is still hot after that, broadcast a fleet-
+        #           wide slow-down so every spoke coalesces + slows.
+        #   Rung 3  last resort — the hub itself coalesces inbound telemetry
+        #           (latest-per-spoke, bounded drain) so must-process frames
+        #           (acks/COMMAND_RESULT) still get serviced. Real merge work
+        #           still belongs on the spoke; this is only the safety net.
+        #   Rung 4  protect mode (existing) — OOM/CPU hard watermark, blunt shed.
+        # Levels 0..3 map to "normal / offenders-throttled / fleet-throttled /
+        # hub-coalescing". Signals are sent only on state CHANGE (hysteresis in
+        # run_backpressure_loop) so we never spam LM_BACKPRESSURE every tick.
+        self._load_level = 0
+        self._spoke_backoff = set()       # spoke_ids currently told to slow down
+        self._fleet_backoff = False       # rung-2 broadcast active
+        self._backoff_signaled = {}       # spoke_id -> last level we told it (dedup)
+        # Rung-3 receiver-side coalesce: latest-wins telemetry buffer, drained at
+        # a bounded cadence by run_coalesce_drain_loop. Superseded snapshots are
+        # merged away (counted) instead of each running the full ingest path.
+        self._coalesce_pending = {}       # spoke_id -> (data, received_ts)
+        self._telemetry_received = 0      # CS_TELEMETRY frames seen (rolling, per tick)
+        self._telemetry_processed = 0     # CS_TELEMETRY frames actually ingested
+        self._telemetry_coalesced = 0     # frames merged away (received but superseded)
+        # MUST-PROCESS accounting — the load-test PROBE (and any correlation-
+        # bearing ack) must survive every rung. Per-spoke last_seq + gap count
+        # prove zero loss even while telemetry is being coalesced/shed.
+        self._probe_state = {}            # spoke_id -> {"count":int,"last_seq":int,"gaps":int}
+
+    # Message classes for the escalation ladder. Config-overridable via
+    # global_config["backpressure"]["classes"] (type -> class) so the policy is
+    # a knob, not a hardcode. Correlation-bearing frames are ALWAYS must-process
+    # regardless of type (a reply someone is waiting on is never coalesced).
+    _MSG_CLASS_DEFAULT = {
+        "HEARTBEAT": "skippable",
+        "CS_TELEMETRY": "coalesce",
+        "SPOKE_LOG": "coalesce",
+        "COMMAND_RESULT": "must",
+        "LOADTEST_PROBE": "must",
+    }
+
+    def _classify_message(self, payload_type: str, has_corr: bool) -> str:
+        """must → never dropped/coalesced (acks, replies, probes).
+        coalesce → latest-wins, mergeable under pressure (telemetry, logs).
+        skippable → a few may be dropped under pressure (heartbeats)."""
+        if has_corr:
+            return "must"
+        try:
+            classes = (self.state.get_global_config() or {}).get(
+                "backpressure", {}).get("classes", {}) or {}
+        except Exception:
+            classes = {}
+        return classes.get(payload_type) or self._MSG_CLASS_DEFAULT.get(payload_type, "coalesce")
+
+    def _backpressure_params(self) -> dict:
+        """Live knobs for the ladder (Setup → General later). Soft marks sit
+        BELOW the protect hard watermarks so we throttle gracefully first."""
+        try:
+            cfg = (self.state.get_global_config() or {}).get("backpressure", {}) or {}
+        except Exception:
+            cfg = {}
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            # A single spoke over this msg/s is an "offender" (rung 1).
+            "per_spoke_soft_mps": float(cfg.get("per_spoke_soft_mps", 50.0)),
+            "per_spoke_clear_mps": float(cfg.get("per_spoke_clear_mps", 25.0)),
+            # Aggregate loop-lag (s) / mps that trips the fleet-wide rung 2.
+            "fleet_lag_soft_s": float(cfg.get("fleet_lag_soft_s", 0.30)),
+            "fleet_lag_clear_s": float(cfg.get("fleet_lag_clear_s", 0.10)),
+            "fleet_soft_mps": float(cfg.get("fleet_soft_mps", 8000.0)),
+            # Min send interval (s) we ask a throttled spoke to conflate to.
+            "coalesce_min_interval_s": float(cfg.get("coalesce_min_interval_s", 2.0)),
+            # Rung-3 hub drain cadence (process one latest snapshot per spoke).
+            "hub_drain_interval_s": float(cfg.get("hub_drain_interval_s", 1.0)),
+        }
+
 
     async def send_to_spoke(self, message: Message, signing_secret: Optional[str] = None):
         """
@@ -2578,6 +2657,27 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     self.message_count += 1
                     continue
 
+                # MUST-PROCESS probe (load-test verification hook). Classified
+                # 'must' but carries NO correlation_id, so handle it HERE — above
+                # the rate limiter + protect shed — to PROVE must-process frames
+                # survive every rung of the ladder while telemetry is coalesced.
+                # Cheap: a per-spoke seq/gap counter, no ingest. A gap here would
+                # be a real must-process LOSS (a bug); telemetry gaps are expected.
+                if payload.get("type") == "LOADTEST_PROBE":
+                    self.message_count += 1
+                    st = self._probe_state.setdefault(
+                        spoke_id, {"count": 0, "last_seq": -1, "gaps": 0})
+                    try:
+                        seq = int((payload.get("data") or {}).get("seq", -1))
+                    except (TypeError, ValueError):
+                        seq = -1
+                    if st["last_seq"] >= 0 and seq > st["last_seq"] + 1:
+                        st["gaps"] += seq - st["last_seq"] - 1
+                    st["count"] += 1
+                    if seq > st["last_seq"]:
+                        st["last_seq"] = seq
+                    continue
+
                 # Rate Limiting for non-heartbeat messages.
                 # ACKs / replies (correlation_id present) are handled + `continue`
                 # ABOVE this block, so they are NEVER rate-limited/dropped. Belt-
@@ -2607,7 +2707,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # --- Client-Sim telemetry (combined spoke relays its full state) ---
                 # Ingest + fan-out + USB diagnostic live in _handle_cs_telemetry.
                 if payload.get("type") == "CS_TELEMETRY":
+                    self._telemetry_received += 1
+                    # Rung-3: if this spoke is under backpressure, COALESCE its
+                    # telemetry (latest-wins) into the drain buffer instead of
+                    # running the full ingest inline. A prior un-drained snapshot
+                    # for this spoke is merged away (counted). Keeps the main loop
+                    # free for must-process frames while the spoke catches up to
+                    # the slow-down signal. Not under pressure → ingest inline.
+                    if spoke_id in self._spoke_backoff:
+                        if spoke_id in self._coalesce_pending:
+                            self._telemetry_coalesced += 1
+                        self._coalesce_pending[spoke_id] = (payload.get("data", {}), time.time())
+                        continue
                     await self._handle_cs_telemetry(spoke_id, payload.get("data", {}))
+                    self._telemetry_processed += 1
                     continue
 
                 # --- Spoke log forwarding (SPOKE_LOG) ---
@@ -3123,10 +3236,119 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         self.spoke_mps.pop(sid, None)
                 self.spoke_msg_count = {}
 
+                # ── Escalation ladder: throttle offenders first, then fleet ──
+                # Runs AFTER per-spoke mps is computed so it can name the loud
+                # talkers. Sends LM_BACKPRESSURE on state-change only.
+                try:
+                    await self._apply_backpressure_ladder(_loop_lag)
+                except Exception as _be:  # noqa: BLE001 — never crash the tick
+                    logger.debug("[backpressure] ladder skipped: %s", _be)
+
                 self.message_count = 0
                 self.bytes_count = 0
             except Exception as e:
                 logger.debug("[mps] loop iteration skipped: %s", e, exc_info=True)
+
+    async def _apply_backpressure_ladder(self, loop_lag: float) -> None:
+        """The graceful-degradation control loop (§7 of the spoke-heavy-lifting
+        plan). Decides each 1s tick which spokes to slow down and signals only
+        the DELTA (LM_BACKPRESSURE on level change), so it never spams.
+
+        Rung 1 (offender-first): a spoke over ``per_spoke_soft_mps`` is told to
+        slow + coalesce LOCALLY — the merge work lands on the spoke, not the hub.
+        Rung 2 (fleet): only if the aggregate is STILL hot (loop-lag / mps over
+        the fleet soft mark) does every spoke get the slow-down. This is the
+        'throttle the loud one first, back off the whole fleet only if that
+        wasn't enough' behaviour."""
+        p = self._backpressure_params()
+        live = list(getattr(self, "active_connections", {}) or {})
+        # Signals are collected and fired CONCURRENTLY (gather) at the end — a
+        # fleet-wide transition is hundreds of frames and must not stall the 1s
+        # tick (that's the very core we're trying to relieve).
+        sigs = []
+        if not p["enabled"]:
+            for sid in [s for s, l in list(self._backoff_signaled.items()) if l]:
+                sigs.append(self._signal_backoff(sid, 0, 0.0))
+            self._spoke_backoff = set()
+            self._fleet_backoff = False
+            self._load_level = 0
+            if sigs:
+                await asyncio.gather(*sigs, return_exceptions=True)
+            return
+
+        # Rung 2 fleet decision (hysteresis) — loop-lag is the drain-lag proxy:
+        # when the single core can't keep up, the 1s tick returns late.
+        fleet_hot = (loop_lag >= p["fleet_lag_soft_s"]) or (self.mps >= p["fleet_soft_mps"])
+        fleet_cool = (loop_lag <= p["fleet_lag_clear_s"]) and (self.mps < p["fleet_soft_mps"] * 0.6)
+        if fleet_hot:
+            self._fleet_backoff = True
+        elif fleet_cool:
+            self._fleet_backoff = False
+
+        # Per-spoke desired level = 2 (fleet) else 1 (offender) else 0. Offender
+        # test has its own hysteresis (stay throttled until below the clear mark).
+        new_backoff = set()
+        for sid in live:
+            mps = self.spoke_mps.get(sid, 0.0)
+            was = self._backoff_signaled.get(sid, 0)
+            offender = (mps >= p["per_spoke_soft_mps"]
+                        or (was and mps >= p["per_spoke_clear_mps"]))
+            desired = 2 if self._fleet_backoff else (1 if offender else 0)
+            if desired:
+                new_backoff.add(sid)
+            if desired != was:
+                sigs.append(self._signal_backoff(
+                    sid, desired, p["coalesce_min_interval_s"] if desired else 0.0))
+        self._spoke_backoff = new_backoff
+        # Forget signal state for spokes that have disconnected.
+        for sid in [s for s in list(self._backoff_signaled) if s not in live]:
+            self._backoff_signaled.pop(sid, None)
+        self._load_level = 2 if self._fleet_backoff else (1 if self._spoke_backoff else 0)
+        if sigs:
+            await asyncio.gather(*sigs, return_exceptions=True)
+
+    async def _signal_backoff(self, spoke_id: str, level: int, min_interval: float) -> None:
+        """Send one LM_BACKPRESSURE notification to a spoke (fire-and-forget).
+        level 0 = resume, 1 = offender slow-down, 2 = fleet slow-down. Records
+        the last level sent so the ladder only re-signals on change."""
+        if self._backoff_signaled.get(spoke_id, 0) == level:
+            return
+        self._backoff_signaled[spoke_id] = level
+        await self.send_to_spoke_command(spoke_id, "LM_BACKPRESSURE", {
+            "level": level,
+            "coalesce": level > 0,
+            "min_interval_s": min_interval,
+            "reason": {0: "clear", 1: "offender", 2: "fleet"}.get(level, "slow"),
+        })
+        logger.warning("[backpressure] %s spoke=%s level=%d min_interval=%.1fs",
+                       "SLOW" if level else "RESUME", spoke_id, level, min_interval)
+
+    async def run_coalesce_drain_loop(self):
+        """Rung-3 safety net (last resort). Process at most ONE latest telemetry
+        snapshot per spoke each cycle; frames that arrived and were superseded
+        before their turn were already merged away (latest-wins) in the message
+        loop. Work is bounded by spoke-count, not inbound rate — so must-process
+        frames on the main loop keep getting serviced while a burst drains.
+
+        The REAL merge work belongs on the spoke (it coalesces before sending);
+        this only catches the in-flight burst before the slow-down signal lands."""
+        logger.info("Coalesce drain loop started (rung-3 backpressure safety net).")
+        while True:
+            try:
+                p = self._backpressure_params()
+                await asyncio.sleep(max(0.2, p["hub_drain_interval_s"]))
+                if not self._coalesce_pending:
+                    continue
+                pending = self._coalesce_pending
+                self._coalesce_pending = {}
+                for sid, (data, _ts) in pending.items():
+                    try:
+                        await self._handle_cs_telemetry(sid, data)
+                        self._telemetry_processed += 1
+                    except Exception as e:  # noqa: BLE001
+                        logger.debug("[coalesce] drain %s failed: %s", sid, e)
+            except Exception as e:  # noqa: BLE001 — never let the drain die
+                logger.debug("[coalesce] drain loop iteration skipped: %s", e)
 
     async def run_tenant_sync_loop(self):
         """Periodically pull tenants from the NetBox spoke and upsert into hub state."""
@@ -3570,6 +3792,22 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "rate_limit_drops_total": sum(self.rate_limit_drops.values()),
                 "rate_limit": {"capacity": self._rate_limit_params()[0],
                                "fill_rate": self._rate_limit_params()[1]},
+                # Escalation-ladder state (cheap dicts — safe to include even in
+                # protect mode). load_level: 0 normal / 1 offenders-throttled /
+                # 2 fleet-throttled. telemetry_* prove coalescing (not dropping);
+                # probe_* prove must-process frames survive with zero gaps.
+                "load_level": self._load_level,
+                "backpressure": {
+                    "level": self._load_level,
+                    "fleet": bool(self._fleet_backoff),
+                    "spokes_throttled": sorted(self._spoke_backoff),
+                    "coalesce_pending": len(self._coalesce_pending),
+                    "telemetry_received": self._telemetry_received,
+                    "telemetry_processed": self._telemetry_processed,
+                    "telemetry_coalesced": self._telemetry_coalesced,
+                },
+                "probe_counts": {sid: st["count"] for sid, st in self._probe_state.items()},
+                "probe_gaps": {sid: st["gaps"] for sid, st in self._probe_state.items() if st["gaps"]},
                 "mps": self.mps,
                 "throughput": self.throughput_mbps,
                 "version": version
@@ -3981,6 +4219,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         persistence_task = asyncio.create_task(self.state.persistence_loop())
         repo_sync_task = asyncio.create_task(self.run_repo_sync_loop())
         mps_task = asyncio.create_task(self.run_mps_loop())
+        coalesce_drain_task = asyncio.create_task(self.run_coalesce_drain_loop())
         opnsense_poll_task = asyncio.create_task(self.run_opnsense_polling_loop())
         rotation_task = asyncio.create_task(self.run_key_rotation_loop())
         tenant_sync_task = asyncio.create_task(self.run_tenant_sync_loop())

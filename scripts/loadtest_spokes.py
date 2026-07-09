@@ -106,11 +106,14 @@ class LoadSpoke(BaseControlPlane):
     _TIERS = ("t1", "t2", "t3")
     _NAMES = ("kbell", "ibennett", "xmendoza", "tstewart", "qwu", "jlee", "amorgan", "dkhan")
 
-    def __init__(self, spoke_id, stats, rate, payload_bytes, clients_n=20, vms_n=3, **kw):
+    def __init__(self, spoke_id, stats, rate, payload_bytes, clients_n=20, vms_n=3,
+                 probe_rate=2.0, **kw):
         super().__init__(spoke_id=spoke_id, **kw)
         self.module_type = "simulation"  # cs-like → exercises the telemetry path
         self._stats = stats
         self._rate = max(0.01, float(rate))
+        self._probe_rate = max(0.0, float(probe_rate))
+        self._probe_seq = 0               # monotonic per-spoke must-process seq
         self._pad = "x" * max(0, int(payload_bytes))
         # Stable synthetic roster: client + VM identities persist across cycles
         # like real clients (so the hub does dedup/cache/persist against a
@@ -199,12 +202,29 @@ class LoadSpoke(BaseControlPlane):
             return {"status": "SUCCESS", "message": "loadtest: SPOKE_UPDATE ignored"}
         return await super().handle_system_command(cmd_type, data)
 
-    # ── the load: one signed CS_TELEMETRY every 1/rate seconds ───────────────
+    # ── honor the hub's slow-down signal by doing the merge work HERE ─────────
+    def apply_backpressure(self, level, coalesce=False, min_interval_s=0.0):
+        """Record the signal (base) + count that we received it, so the test can
+        prove the control loop CLOSED (hub signalled → spoke honored). The actual
+        conflation happens in the telemetry loop, which slows to
+        ``self._bp_min_interval`` and MERGES the snapshots it skips (latest-wins)
+        into the next send — this is the 'combine msg 1 & 2' behaviour, on the
+        spoke, so the hub is relieved of the work."""
+        super().apply_backpressure(level, coalesce=coalesce, min_interval_s=min_interval_s)
+        if level:
+            self._stats["backoff_recv"] += 1
+        else:
+            self._stats["resume_recv"] += 1
+
+    # ── the load: signed CS_TELEMETRY (coalesce class) + must-process PROBE ───
     def _create_spoke_tasks(self, websocket):
-        return [asyncio.create_task(self._telemetry_loop(websocket))]
+        tasks = [asyncio.create_task(self._telemetry_loop(websocket))]
+        if self._probe_rate > 0:
+            tasks.append(asyncio.create_task(self._probe_loop(websocket)))
+        return tasks
 
     async def _telemetry_loop(self, websocket):
-        period = 1.0 / self._rate
+        base_period = 1.0 / self._rate
         while True:
             try:
                 now = time.time()
@@ -233,6 +253,43 @@ class LoadSpoke(BaseControlPlane):
             except Exception:
                 self._stats["send_err"] += 1
                 return  # let the reconnect loop take over
+            # Under backpressure, slow to the hub-requested min interval and
+            # ACCOUNT for the snapshots we merged away (latest-wins) — this ONE
+            # send now represents `merged+1` ticks. That's the local coalescing
+            # the hub asked for, measured so the test can show it happening.
+            period = self._bp_send_interval(base_period)
+            if period > base_period:
+                merged = int(period / base_period) - 1
+                if merged > 0:
+                    self._stats["coalesced_local"] += merged
+            await asyncio.sleep(period)
+
+    async def _probe_loop(self, websocket):
+        """Emit a low-rate MUST-PROCESS frame with a monotonic per-spoke seq. The
+        hub counts these + detects gaps; the test asserts ZERO loss even while
+        telemetry is being coalesced/shed — proving the ladder keeps must-process
+        flowing. NOT throttled by backpressure (that's the whole point)."""
+        period = 1.0 / self._probe_rate
+        while True:
+            try:
+                now = time.time()
+                msg = {
+                    "header": {"message_id": str(uuid.uuid4()),
+                               "timestamp": round(now, 6),
+                               "sender_id": self.spoke_id, "destination_id": "hub"},
+                    "payload": {"type": "LOADTEST_PROBE",
+                                "data": {"seq": self._probe_seq}},
+                }
+                sig = self._sign(msg)
+                if sig is not None:
+                    msg["signature"] = sig
+                await websocket.send(json.dumps(msg, separators=(",", ":")))
+                self._probe_seq += 1
+                self._stats["probes_sent"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return  # reconnect loop takes over; seq continues where it left off
             await asyncio.sleep(period)
 
     async def run_forever(self, stop_evt):
@@ -260,11 +317,27 @@ def _fetch_status(status_url):
 
 
 async def _monitor(status_url, stop_evt, interval, stats, total):
-    peak = {"mps": 0.0, "cpu": 0.0, "mem": 0.0, "backlog": 0, "conns": 0}
+    peak = {"mps": 0.0, "cpu": 0.0, "mem": 0.0, "backlog": 0, "conns": 0, "lvl": 0}
     last_sent = 0
+    last_m = {}
+    # lvl = escalation level (0 normal / 1 offenders / 2 fleet); thr = spokes told
+    # to slow down; coal = telemetry frames the HUB merged away (rung-3 safety).
+    # Hub telemetry_*/probe counters are CUMULATIVE across runs — snapshot a
+    # baseline so the end-of-test numbers reflect only THIS run.
+    base = {"tr": 0, "tp": 0, "coal": 0, "probes": 0, "gaps": 0}
+    try:
+        _b = (await asyncio.to_thread(_fetch_status, status_url)).get("metrics", {}) or {}
+        _bp0 = _b.get("backpressure", {}) or {}
+        base["tr"] = int(_bp0.get("telemetry_received", 0) or 0)
+        base["tp"] = int(_bp0.get("telemetry_processed", 0) or 0)
+        base["coal"] = int(_bp0.get("telemetry_coalesced", 0) or 0)
+        base["probes"] = sum(int(v) for v in (_b.get("probe_counts", {}) or {}).values())
+        base["gaps"] = sum(int(v) for v in (_b.get("probe_gaps", {}) or {}).values())
+    except Exception:
+        pass
     print(f"\n{'t(s)':>5} {'conns':>6} {'client/s':>9} {'hub mps':>8} "
-          f"{'cpu%':>6} {'mem%':>6} {'backlog':>8}")
-    print("-" * 58)
+          f"{'cpu%':>6} {'mem%':>6} {'lvl':>3} {'thr':>4} {'hub-coal':>8}")
+    print("-" * 72)
     t_start = time.time()
     while not stop_evt.is_set():
         await asyncio.sleep(interval)
@@ -276,22 +349,67 @@ async def _monitor(status_url, stop_evt, interval, stats, total):
             data = await asyncio.to_thread(_fetch_status, status_url)
             m = data.get("metrics", {}) or {}
             conns = len(data.get("active_connections", []) or [])
+            last_m = m
         except Exception:
             conns = -1
         mps = float(m.get("mps", 0) or 0)
         cpu = float(m.get("cpu_util", 0) or 0)
         mem = float(m.get("mem_util", 0) or 0)
         backlog = int(m.get("backlog", 0) or 0)
+        bp = m.get("backpressure", {}) or {}
+        lvl = int(m.get("load_level", 0) or 0)
+        thr = len(bp.get("spokes_throttled", []) or [])
+        coal = int(bp.get("telemetry_coalesced", 0) or 0)
         peak["mps"] = max(peak["mps"], mps); peak["cpu"] = max(peak["cpu"], cpu)
         peak["mem"] = max(peak["mem"], mem); peak["backlog"] = max(peak["backlog"], backlog)
-        peak["conns"] = max(peak["conns"], conns)
+        peak["conns"] = max(peak["conns"], conns); peak["lvl"] = max(peak["lvl"], lvl)
         print(f"{elapsed:5.0f} {conns:6d} {client_rate:9.0f} {mps:8.0f} "
-              f"{cpu:6.1f} {mem:6.1f} {backlog:8d}")
-    print("-" * 58)
+              f"{cpu:6.1f} {mem:6.1f} {lvl:3d} {thr:4d} {coal:8d}")
+    print("-" * 72)
     print(f"PEAK: conns={peak['conns']} hub_mps={peak['mps']:.0f} "
-          f"cpu={peak['cpu']:.1f}% mem={peak['mem']:.1f}% backlog={peak['backlog']}")
-    print(f"client sent total={stats['sent']} send_err={stats['send_err']} "
-          f"conn_err={stats['conn_err']} (target {total} spokes)")
+          f"cpu={peak['cpu']:.1f}% mem={peak['mem']:.1f}% backlog={peak['backlog']} "
+          f"max_level={peak['lvl']}")
+    print(f"client sent telemetry={stats['sent']} probes={stats['probes_sent']} "
+          f"send_err={stats['send_err']} conn_err={stats['conn_err']} (target {total} spokes)")
+
+    # ── VERIFICATION: prove the ladder did the RIGHT thing, not just survive ──
+    print("\n=== backpressure verification ===")
+    bp = (last_m.get("backpressure", {}) or {})
+    probe_counts = (last_m.get("probe_counts", {}) or {})
+    probe_gaps = (last_m.get("probe_gaps", {}) or {})
+    hub_probes = sum(int(v) for v in probe_counts.values()) - base["probes"]
+    gap_total = sum(int(v) for v in probe_gaps.values()) - base["gaps"]
+
+    # 1. Throttling engaged? (hub reached rung 1/2 AND spokes received the signal)
+    engaged = (peak["lvl"] > 0) or (stats["backoff_recv"] > 0)
+    print(f"[{'PASS' if engaged else 'n/a '}] throttling triggered — "
+          f"max escalation level {peak['lvl']} "
+          f"({'offenders' if peak['lvl'] == 1 else 'fleet' if peak['lvl'] >= 2 else 'none'}); "
+          f"spokes honored slow-down {stats['backoff_recv']}x, resumed {stats['resume_recv']}x")
+
+    # 2. Spoke did the work locally? (frames merged on the spoke before sending)
+    hub_coal = int(bp.get("telemetry_coalesced", 0)) - base["coal"]
+    print(f"[{'PASS' if stats['coalesced_local'] else 'n/a '}] spoke coalesced LOCALLY — "
+          f"{stats['coalesced_local']} telemetry snapshots merged on the spokes; "
+          f"hub also merged {hub_coal} (rung-3 safety)")
+
+    # 3. Must-process survived? (zero probe gaps — the hard assertion)
+    if stats["probes_sent"] == 0:
+        print("[n/a ] must-process probe disabled (--probe-rate 0)")
+    elif gap_total == 0 and hub_probes > 0:
+        print(f"[PASS] must-process ZERO loss — hub received {hub_probes} probes, "
+              f"0 seq gaps across {len(probe_counts)} spokes (sent ~{stats['probes_sent']})")
+    else:
+        print(f"[FAIL] must-process LOSS — {gap_total} seq gaps detected "
+              f"(hub received {hub_probes}, spokes sent {stats['probes_sent']}); "
+              f"gapped spokes: {list(probe_gaps)[:5]}")
+    # Telemetry (coalesce class) is ALLOWED to gap — that's the point. Report the
+    # ratio so it's visible the hub processed fewer than it received under load.
+    tr = int(bp.get("telemetry_received", 0)) - base["tr"]
+    tp = int(bp.get("telemetry_processed", 0)) - base["tp"]
+    if tr > 0:
+        print(f"[info] telemetry received={tr} processed={tp} "
+              f"({100.0 * tp / tr:.0f}% — coalescing expected under load, not loss)")
 
 
 async def main():
@@ -306,6 +424,8 @@ async def main():
     ap.add_argument("--payload-bytes", type=int, default=0, help="extra pad bytes per telemetry msg")
     ap.add_argument("--clients-per-spoke", type=int, default=20, help="synthetic clients per spoke (realistic payload)")
     ap.add_argument("--vms-per-spoke", type=int, default=3, help="synthetic proxmox VMs per spoke")
+    ap.add_argument("--probe-rate", type=float, default=2.0,
+                    help="must-process LOADTEST_PROBE msg/s PER spoke (seq-tracked; hub asserts zero loss). 0 disables.")
     ap.add_argument("--psk", default="", help="tenant onboarding PSK (auto-approves the spokes)")
     ap.add_argument("--tenant", default="", help="tenant id hint (with --psk)")
     ap.add_argument("--secret", default="", help="pre-provisioned spoke secret (else zero-touch)")
@@ -339,7 +459,9 @@ async def main():
     status_url = args.status_url or (
         args.hub.replace("wss://", "https://").replace("ws://", "http://").rstrip("/") + "/status")
 
-    stats = {"sent": 0, "send_err": 0, "connects": 0, "conn_err": 0}
+    stats = {"sent": 0, "send_err": 0, "connects": 0, "conn_err": 0,
+             "probes_sent": 0, "coalesced_local": 0,
+             "backoff_recv": 0, "resume_recv": 0}
     stop_evt = asyncio.Event()
 
     # Fold this box's hostname (or --tag) into every id so running the harness on
@@ -350,7 +472,7 @@ async def main():
         LoadSpoke(
             spoke_id=f"{args.prefix}{tag}-{i:05d}", stats=stats, rate=args.rate,
             payload_bytes=args.payload_bytes, clients_n=args.clients_per_spoke,
-            vms_n=args.vms_per_spoke, hub_url=args.hub,
+            vms_n=args.vms_per_spoke, probe_rate=args.probe_rate, hub_url=args.hub,
             secret=(args.secret or None),
             onboarding_psk=(args.psk or None), tenant_id_hint=(args.tenant or None),
         )

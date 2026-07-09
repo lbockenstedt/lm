@@ -1152,6 +1152,23 @@ class BaseControlPlane:
                     logger.info("Spoke '%s' approved by admin. Ready for commands.", self.spoke_id)
                     continue
 
+                # Backpressure slow-down signal from the hub — a fire-and-forget
+                # NOTIFICATION (no COMMAND_RESULT ack, like APPROVED) so it never
+                # adds to the hub's in-flight/ack load while it's already busy.
+                # level 0 = resume, 1 = this spoke is the offender, 2 = fleet-wide.
+                # The spoke does the heavy lifting: coalesce/merge its outbound
+                # updates LOCALLY and slow its send cadence (apply_backpressure).
+                if cmd_type == "LM_BACKPRESSURE":
+                    try:
+                        self.apply_backpressure(
+                            int(data.get("level", 0)),
+                            coalesce=bool(data.get("coalesce", False)),
+                            min_interval_s=float(data.get("min_interval_s", 0.0)),
+                        )
+                    except Exception as e:  # noqa: BLE001 — never crash the loop
+                        logger.debug("apply_backpressure failed: %s", e)
+                    continue
+
                 # Backpressure: cap in-flight handlers so a sustained overload
                 # can't grow unbounded. Reject with a fast ERROR ack so the hub
                 # doesn't pile up timed-out requests waiting on a stalled spoke.
@@ -1188,6 +1205,33 @@ class BaseControlPlane:
         tasks. Returned tasks are cancelled and awaited when the connection
         closes. Default: no extra tasks."""
         return []
+
+    def apply_backpressure(self, level: int, coalesce: bool = False,
+                           min_interval_s: float = 0.0) -> None:
+        """Honor the hub's LM_BACKPRESSURE slow-down signal.
+
+        The design pushes the merge work to the SPOKE: on level>0 a module
+        should coalesce/merge its outbound updates locally (latest-wins, combine
+        adjacent snapshots that are ~identical) and raise its send cadence to at
+        least ``min_interval_s``. This base implementation just RECORDS the
+        signal (so any send loop can consult ``self._bp_min_interval`` /
+        ``self._bp_level``); domain modules override to do the real conflation.
+
+        level: 0 resume · 1 this spoke is the offender · 2 fleet-wide."""
+        self._bp_level = int(level)
+        self._bp_coalesce = bool(coalesce)
+        self._bp_min_interval = max(0.0, float(min_interval_s))
+        if level:
+            logger.info("backpressure ENGAGED (level=%d, min_interval=%.1fs) — "
+                        "coalescing outbound locally", level, self._bp_min_interval)
+        else:
+            logger.info("backpressure RELEASED — resuming normal cadence")
+
+    def _bp_send_interval(self, base_period: float) -> float:
+        """A send loop's effective period under backpressure: the larger of its
+        normal cadence and the hub-requested ``min_interval_s``. No-op (returns
+        ``base_period``) when not throttled."""
+        return max(base_period, getattr(self, "_bp_min_interval", 0.0))
 
     # --- Per-command concurrency (see Main Message Loop above) --------------
     # Tunable via env so an overloaded spoke can be adjusted without a code
