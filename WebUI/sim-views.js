@@ -358,6 +358,46 @@ let csWs = null, csWsReconnect = null, csWsRefreshTimer = null;
 // csSet. Explicit loadCSData calls (Save/post-action reloads) leave this false.
 let csRefreshInFlight = false;
 
+// Auto-refresh throttle knob — the minimum gap (seconds) between telemetry-
+// driven re-renders. csWsRefresh fires on EVERY telemetry/aruba frame the cs
+// WebSocket receives; with multiple cs spokes each relaying ~10-15s plus aruba
+// updates, frames arrive every few seconds, so without a throttle the page
+// re-renders far faster than the "15s" the per-spoke relay cadence implies.
+// This gate coalesces that frame storm to at most one re-render per gap.
+//   -1 = auto-refresh OFF (manual Refresh / tab switch only)
+//    0 = no throttle (refresh on every debounced pulse — the legacy behavior)
+//   >0 = min seconds between telemetry-driven re-renders (default 15)
+// Persisted in localStorage (cs_auto_refresh_gap_s) so it survives reloads.
+const CS_AUTOREFRESH_KEY = 'cs_auto_refresh_gap_s';
+const CS_AUTOREFRESH_DEFAULT = 15;
+let csAutoRefreshGapS = CS_AUTOREFRESH_DEFAULT;
+let csLastAutoRefreshAt = 0;
+try {
+    const _v = parseInt(localStorage.getItem(CS_AUTOREFRESH_KEY), 10);
+    if (!isNaN(_v)) csAutoRefreshGapS = _v;
+} catch (e) { /* localStorage unavailable — keep default */ }
+function csAutoRefreshOpts() {
+    return [['-1', 'Off'], ['5', '5s'], ['15', '15s'],
+            ['30', '30s'], ['60', '60s'], ['0', 'No throttle']];
+}
+function csSetAutoRefreshGap(v) {
+    csAutoRefreshGapS = parseInt(v, 10);
+    if (isNaN(csAutoRefreshGapS)) csAutoRefreshGapS = CS_AUTOREFRESH_DEFAULT;
+    try { localStorage.setItem(CS_AUTOREFRESH_KEY, String(csAutoRefreshGapS)); } catch (e) {}
+    // Reset so the next pulse after a change can fire promptly (e.g. switching
+    // from a long gap back to 5s shouldn't wait out the old remainder).
+    csLastAutoRefreshAt = 0;
+}
+// The <select> rendered next to the manual Refresh button (main.js cs shell).
+function csAutoRefreshControl() {
+    const opts = csAutoRefreshOpts()
+        .map(([v, lbl]) => `<option value="${v}"${Number(v) === csAutoRefreshGapS ? ' selected' : ''}>${csEscape(lbl)}</option>`)
+        .join('');
+    return `<label class="text-[10px] text-slate-400 uppercase tracking-wider mr-1">Auto-refresh</label>`
+        + `<select onchange="csSetAutoRefreshGap(this.value)" class="text-xs border border-slate-200 rounded-md px-2 py-1 bg-white text-slate-600" title="Throttle telemetry-driven page refreshes. Off = manual Refresh only.">`
+        + opts + `</select>`;
+}
+
 // Pages that telemetry must NEVER auto-refresh, even when the user is idle.
 // These are form-heavy / config pages where a silent innerHTML replace is
 // disruptive (wipes un-saved local state, re-mounts widgets, drops scroll
@@ -440,6 +480,12 @@ function csWsRefresh() {
         // Explicit renders (tab switch / Save / Refresh button) bypass this.
         const childKey = (typeof currentSubChild !== 'undefined' ? currentSubChild : '');
         if (CS_NO_REFRESH.has(currentSubView + '::' + childKey)) return;
+        // Auto-refresh throttle knob: -1 = OFF (manual Refresh only); >0 = skip
+        // this pulse if less than the configured gap has elapsed since the last
+        // telemetry-driven re-render (the next pulse retries, so a multi-spoke
+        // frame storm coalesces to ~one refresh per gap). 0 = no throttle.
+        if (csAutoRefreshGapS < 0) return;
+        if (csAutoRefreshGapS > 0 && Date.now() - csLastAutoRefreshAt < csAutoRefreshGapS * 1000) return;
         // Don't stomp an in-progress edit on ANY page (Config, Auto-
         // Provisioning, Central API Setup, or a search box on a live-data
         // page) — skip this cycle and let the next telemetry pulse (~10s
@@ -450,6 +496,7 @@ function csWsRefresh() {
         // (the pre-check above can't see that). Cleared in finally so a
         // thrown renderer still resets the gate.
         csRefreshInFlight = true;
+        csLastAutoRefreshAt = Date.now();
         loadCSData(currentSubView, currentSubChild, true).finally(
             () => { csRefreshInFlight = false; });
     }, 1500);
