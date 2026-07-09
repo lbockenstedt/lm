@@ -50,6 +50,11 @@ SPOKE_UPDATE_DELIVERY_COOLDOWN_S = 600
 BACKLOG_MAX_AGE_DEFAULT_S = 3600
 # How often retry_loop runs the expiry sweep (cheap, but no need every 1s).
 BACKLOG_EXPIRY_SWEEP_INTERVAL_S = 30
+# Grace before the "supersession" fast-expiry can fire: a message must have been
+# pending at least this long, and the spoke must have acked NEWER traffic, before
+# we treat it as passed-over. Keeps a just-queued message from being dropped in a
+# normal interleave.
+BACKLOG_SUPERSEDE_GRACE_S = 45
 
 
 def _is_spoke_update(message: Message) -> bool:
@@ -93,6 +98,12 @@ class Mailbox:
         # 24h ttl. Swept on a throttle from retry_loop.
         self.backlog_max_age_s: float = float(BACKLOG_MAX_AGE_DEFAULT_S)
         self._last_expiry_sweep = 0.0
+
+        # Per-spoke time of the last successful ack — "the spoke is alive and
+        # draining". A message still pending to a spoke whose last ack is NEWER
+        # than that message's send time was passed over → drop it fast (see
+        # _expire_stale supersession rule), instead of waiting out the age cap.
+        self._last_ack_ts: Dict[str, float] = {}
 
         self.retry_intervals = [5, 15, 60, 300, 900]  # Exponential backoff intervals in seconds
 
@@ -232,6 +243,14 @@ class Mailbox:
         """
         if ack.correlation_id in self.pending_ack:
             logger.debug(f"Message {ack.correlation_id} acknowledged with status: {ack.status}")
+            # Record per-spoke last-ack time (authoritative dest from the pending
+            # message) — proof the spoke is alive AND draining traffic. Drives
+            # the "supersession" expiry: an OLDER message still pending to a
+            # spoke that has since acked NEWER traffic was passed over and won't
+            # be acked, so it can be dropped fast (no 1h wait).
+            _dest = getattr(self.pending_ack[ack.correlation_id][0].header, "destination_id", None)
+            if _dest:
+                self._last_ack_ts[_dest] = time.time()
             del self.pending_ack[ack.correlation_id]
             await self._asave()
         else:
@@ -315,16 +334,34 @@ class Mailbox:
             self.spoke_queues[spoke_id] = deferred
             await self._asave()
 
-    def _expire_stale(self, now: float) -> int:
-        """Drop backlog messages older than min(their ttl, backlog_max_age_s)
-        from BOTH pending_ack and the per-spoke offline queues. Returns the
-        count expired. This is the proactive counterpart to queue_for_spoke's
-        lazy TTL filter (which only runs when a NEW message is queued for that
-        spoke) — without it a stale entry for an idle spoke sits until its 24h
-        ttl. Non-raising; the caller persists if the count is non-zero."""
+    def _expire_stale(self, now: float, connected: Optional[set] = None) -> int:
+        """Drop backlog messages from BOTH pending_ack and the per-spoke offline
+        queues when either:
+
+          • AGE: older than min(their ttl, backlog_max_age_s) — the absolute
+            catch-all so nothing lingers to the 24h ttl; or
+          • SUPERSEDED: the destination spoke is CONNECTED and has acked NEWER
+            traffic (``_last_ack_ts[spoke] > msg.send_time + grace``) — proof
+            the spoke is alive and draining, so this older still-pending message
+            was passed over and won't be acked. Drops in ~45s instead of 1h.
+
+        Returns the count expired. Non-raising; caller persists if non-zero."""
         cap = self.backlog_max_age_s if self.backlog_max_age_s and self.backlog_max_age_s > 0 else None
+        connected = connected or set()
+
+        def _superseded(msg: Message, stamp: float) -> bool:
+            sid = getattr(msg.header, "destination_id", None)
+            if not sid or sid not in connected:
+                return False
+            stamp = float(stamp or now)
+            if (now - stamp) < BACKLOG_SUPERSEDE_GRACE_S:
+                return False  # give a fresh message a fair chance first
+            last_ack = self._last_ack_ts.get(sid, 0.0)
+            return last_ack > (stamp + BACKLOG_SUPERSEDE_GRACE_S)
 
         def _expired(msg: Message, stamp: float) -> bool:
+            if _superseded(msg, stamp):
+                return True
             age = now - float(stamp or now)
             limit = float(getattr(msg.header, "ttl", 86400) or 86400)
             if cap is not None:
@@ -370,7 +407,7 @@ class Mailbox:
             # their age cap so a stuck message can't linger to its 24h ttl.
             if (now - self._last_expiry_sweep) >= BACKLOG_EXPIRY_SWEEP_INTERVAL_S:
                 self._last_expiry_sweep = now
-                if self._expire_stale(now):
+                if self._expire_stale(now, connected=set(send_func_map or {})):
                     changed = True
             for msg_id, (msg, last_sent, retries) in list(self.pending_ack.items()):
                 if retries >= len(self.retry_intervals):
