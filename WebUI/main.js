@@ -7146,18 +7146,37 @@ function _normalizePxmxAgent(a) {
 // line with its timestamp (copyLogs reads container._rawLogs, not innerText),
 // so the collapse is a display concern only — no data is lost.
 
-// Strip the optional leading `[source] ` prefix (spoke/agent logs are served
-// as `[lm-svcs-netbox] 2026-07-08 ... - NetboxSpoke - INFO - msg`) AND the
-// `YYYY-MM-DD HH:MM:SS - ` timestamp so two lines that differ only by emit
-// time — or only by the per-source bracket prefix — compare equal. Without
-// stripping the prefix, the timestamp landed INSIDE the key and every
-// occurrence was unique, so spoke logs never collapsed. Falls back to the
-// whole line when there's no recognizable prefix/timestamp (traceback
-// continuations, non-canonical relay lines).
+// Grouping key for collapsing repeats. The DISPLAYED row is always the
+// original line (with its real timestamp/uuid/counters); only this collapse
+// KEY is normalized, so no data is lost — expanding a ×N group shows every
+// occurrence verbatim. We normalize the per-instance parts that vary between
+// otherwise-identical lines so "same event, different timestamp/uuid/counter"
+// lines collapse into one ×N row (the operator's "combine all the common
+// ones" rule):
+//   1. leading `[source] ` prefix + leading `YYYY-MM-DD HH:MM:SS - ` timestamp
+//      (the original de-dup keys; tolerate ,ms/.ms fractional seconds some
+//      loggers append). Without stripping these the timestamp landed INSIDE
+//      the key and every occurrence was unique, so spoke logs never collapsed.
+//   2. UUIDs (8-4-4-4-12) — the per-request msg_id in `Request Timeout: [CMD]
+//      <uuid> from <spoke>`, the `Request: <uuid> -> ...` debug id, the `Late
+//      reply for <uuid>` id. Random correlation ids, never meaningful.
+//   3. durations with a time unit (5.0s / 160s / 30ms) — timeout/backoff/
+//      elapsed values that vary per occurrence (`Reconnecting in 160s`,
+//      `after 5.0s`).
+//   4. key=N counters (queue=16 / uptime_s=0 / count=5) — per-tick metrics in
+//      heartbeat/telemetry lines.
+// Identifiers that merely CONTAIN digits (cs-svr-03-spoke, lm-agent-opnsense,
+// module=firewall, spoke_id=lm-agent) are NOT touched — they are not a leading
+// [source]/timestamp, not a UUID, not a bare digit+time-unit, and not key=N
+// (the value isn't digits) — so different spokes/modules/reasons still group
+// SEPARATELY; only the noisy metrics within one spoke's stream collapse.
 function _logLineKey(log) {
     return String(log)
-        .replace(/^\[[^\]]*\]\s*/, '')                       // leading [source] prefix
-        .replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\s*-\s*/, '');  // timestamp
+        .replace(/^\[[^\]]*\]\s*/, '')                                       // leading [source] prefix
+        .replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?\s*-\s*/, '')  // timestamp (+ optional ,ms/.ms)
+        .replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, '<uuid>')  // per-request UUID (Request Timeout / Request / Late reply)
+        .replace(/\b\d+(?:\.\d+)?(?:ms|s|us)\b/g, '<T>')                      // duration (5.0s / 160s / 30ms)
+        .replace(/(\b\w+)=\d+\b/g, '$1=<N>');                                 // counter (queue=16 / uptime_s=0)
 }
 
 // One log line → a highlighted row. `count` (>1) adds a "×N" badge and wires the
