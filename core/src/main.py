@@ -593,6 +593,27 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # mailbox/unknown-ack branch so a probe reply isn't mislogged as a stray
         # ack. See StarletteWSAdapter.ping / _install_active_connection.
         self._pending_liveness_nonces: set = set()
+        # Replay / freshness protection on inbound signed frames (item 8B). The
+        # wire is HMAC-SIGNED, not encrypted, and the signature verifies over the
+        # body bytes — so a captured signed frame replays verbatim (same bytes →
+        # same HMAC → accepted). TLS-verify-ON (item 7) closes the *capture* path
+        # but not application-level replay; a delayed/replayed frame can still
+        # re-apply stale state (worst case a replayed SPOKE_UPDATE_SESSION_KEY
+        # forcing a spoke back to an old secret → desync). Defense-in-depth:
+        # (1) reject frames whose header.timestamp is older than the window (or
+        # more than a small skew in the future), and (2) dedupe exact message_id
+        # replays within a TTL-bounded seen-set. Applied AFTER signature
+        # verification, only to signed frames, so unsigned heartbeats cost
+        # nothing and an attacker can't use it as an unauth flood vector.
+        # { msg_id: expire_ts }; bounded by _prune_seen_message_ids each add.
+        self._seen_message_ids: Dict[str, float] = {}
+        self._REPLAY_WINDOW_S = float(os.environ.get("LM_REPLAY_WINDOW_S", "120"))
+        self._REPLAY_FUTURE_SKEW_S = 5.0  # accept up to Ns clock skew into the future
+        self._REPLAY_SEEN_TTL = self._REPLAY_WINDOW_S  # seen-set lives for the window
+        # Per-spoke throttle for replay/stale warnings so a replay flood doesn't
+        # spam the log: { spoke_id: last_warn_ts }.
+        self._replay_warn_last: Dict[str, float] = {}
+        self._REPLAY_WARN_INTERVAL_S = 10.0
         # VNC console sessions (agent-terminates-WSS): session_id →
         # {queue, expires, ws_token, spoke_id, tenant_id, vmid, node, unique_id}.
         # The browser WS reads Proxmox→browser frames off ``queue`` (bytes) or
@@ -1071,6 +1092,77 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         now = time.time()
         self._recent_request_timeouts = {k: v for k, v in self._recent_request_timeouts.items()
                                          if v > now}
+
+    def _prune_seen_message_ids(self) -> None:
+        """Drop expired entries from ``_seen_message_ids`` (called on each new
+        addition so the replay seen-set stays bounded — it never grows past the
+        number of distinct message_ids received within the replay window)."""
+        now = time.time()
+        self._seen_message_ids = {k: v for k, v in self._seen_message_ids.items()
+                                  if v > now}
+
+    def _replay_warn(self, spoke_id: str, reason: str) -> None:
+        """Emit a replay/stale WARNING at most once per
+        ``_REPLAY_WARN_INTERVAL_S`` per spoke so a replay flood doesn't spam."""
+        now = time.time()
+        last = self._replay_warn_last.get(spoke_id, 0.0)
+        if now - last >= self._REPLAY_WARN_INTERVAL_S:
+            self._replay_warn_last[spoke_id] = now
+            logger.warning("Dropping frame from %s: %s", spoke_id, reason)
+        else:
+            logger.debug("Dropping frame from %s: %s (throttled)", spoke_id, reason)
+
+    def _check_freshness_and_replay(self, spoke_id: str, msg_data: Dict[str, Any]) -> bool:
+        """Replay/freshness gate for an inbound SIGNED frame (item 8B).
+
+        Returns True to accept, False to drop. Two checks, both AFTER signature
+        verification (only signed frames reach here):
+
+        1. **Timestamp freshness**: ``header.timestamp`` must be within
+           ``_REPLAY_WINDOW_S`` of now (and not more than
+           ``_REPLAY_FUTURE_SKEW_S`` in the future). A frame older than the
+           window is a replay candidate; a far-future timestamp is forged/skew.
+           A signed frame with no timestamp (shouldn't happen — the protocol
+           stamps every header) is allowed through with a debug log rather than
+           dropped, so a weird-but-legitimate frame isn't bricked by v1.
+        2. **message_id dedupe**: an exact message_id seen within the window is
+           a verbatim replay → drop. New ids are recorded with a TTL.
+
+        Both are cheap (dict ops) and the seen-set is pruned each add so it's
+        bounded by the distinct-id count within the window."""
+        header = msg_data.get("header") or {}
+        ts = header.get("timestamp")
+        if ts is not None:
+            try:
+                ts_f = float(ts)
+            except (TypeError, ValueError):
+                ts_f = None
+            if ts_f is not None:
+                now = time.time()
+                age = now - ts_f
+                if age > self._REPLAY_WINDOW_S:
+                    self._replay_warn(spoke_id,
+                                      f"stale timestamp (age {age:.0f}s > "
+                                      f"{self._REPLAY_WINDOW_S:.0f}s window) — replay")
+                    return False
+                if ts_f - now > self._REPLAY_FUTURE_SKEW_S:
+                    self._replay_warn(spoke_id,
+                                      f"future timestamp (skew {ts_f - now:.0f}s) — forged/skew")
+                    return False
+            else:
+                logger.debug("Signed frame from %s has non-numeric timestamp %r — "
+                             "skipping freshness check", spoke_id, ts)
+        else:
+            logger.debug("Signed frame from %s has no timestamp — skipping "
+                         "freshness check", spoke_id)
+        msg_id = header.get("message_id")
+        if msg_id:
+            if msg_id in self._seen_message_ids:
+                self._replay_warn(spoke_id, f"duplicate message_id {msg_id} — replay")
+                return False
+            self._seen_message_ids[msg_id] = time.time() + self._REPLAY_SEEN_TTL
+            self._prune_seen_message_ids()
+        return True
 
     async def send_to_spoke_command(self, spoke_id: str, command_type: str,
                                     data: Dict[str, Any]) -> None:
@@ -2773,6 +2865,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # First signed frame clears any prior "never authenticated"
                     # diagnosis (idempotent with the connect-time discard).
                     self._unauth_warned_spokes.discard(spoke_id)
+                    # Replay/freshness gate (item 8B): drop a captured/delayed
+                    # signed frame that replays verbatim (same bytes → same HMAC)
+                    # or whose timestamp is outside the freshness window. Runs
+                    # only on signed frames, after verification, so unsigned
+                    # heartbeats cost nothing and it's not an unauth flood vector.
+                    if not self._check_freshness_and_replay(spoke_id, msg_data):
+                        continue
                 else:
                     # No signature provided. Allow ONLY heartbeats for unauthenticated spokes.
                     payload = msg_data.get("payload", {})
