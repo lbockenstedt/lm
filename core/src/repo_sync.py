@@ -99,7 +99,16 @@ class RepoSyncMixin:
             proc = await asyncio.create_subprocess_exec(
                 "git", "-C", repo_dir, "pull", "--ff-only",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            out, err = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+            except asyncio.TimeoutError:
+                # Kill the hung git so it can't linger holding a stuck network
+                # connection and pile up across cycles; recorded as error below.
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
             after = await self._git_head(repo_dir)
             ok = proc.returncode == 0
             tail = (out.decode("utf-8", "replace").strip()
@@ -144,13 +153,35 @@ class RepoSyncMixin:
         """
         now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # ── provisioning_repos/* (hub-local auxiliary service sources) ──────
+        # ── hub tree + spoke fan-out FIRST (version-gated, snapshot/rollback) ─
+        # The hub self-update is the PRIORITY, so it runs before the auxiliary
+        # provisioning_repos pulls. Previously provisioning ran first, and its
+        # ten serial ``git pull``s (each bounded 120s, but summing to ~20m when
+        # the network degrades) could stall the whole cycle before the hub
+        # update-check was ever reached — the box sat on stale code for tens of
+        # minutes and looked like "auto-update is broken / I have to pull by
+        # hand". Hub-first guarantees a newly-pushed commit is detected and
+        # applied every cycle regardless of provisioning-repo network health.
+        try:
+            hub_result = await self.perform_update(force_spokes=force_spokes)
+            if not isinstance(hub_result, dict):
+                hub_result = {"status": "checked",
+                              "message": str(hub_result)}
+        except Exception as e:  # noqa: BLE001 — best-effort
+            logger.warning("[sync-error] repo_sync perform_update failed: %s", e)
+            hub_result = {"status": "error", "message": str(e)[:300]}
+
+        # ── provisioning_repos/* pulled CONCURRENTLY (hub-local aux sources) ─
+        # Run all repo pulls at once so the phase is bounded by the SLOWEST
+        # single repo (~120s) instead of the SUM of all of them. Each
+        # _git_pull_repo is internally timeout-bounded and never raises.
         repo_results: List[Dict[str, Any]] = []
         try:
             hub_root = os.path.abspath(
                 os.path.join(os.path.dirname(__file__), "../../"))
             prov_dir = os.path.join(hub_root, "provisioning_repos")
             if os.path.isdir(prov_dir):
+                pull_coros = []
                 for entry in sorted(os.listdir(prov_dir)):
                     sub = os.path.join(prov_dir, entry)
                     if not os.path.isdir(sub):
@@ -160,19 +191,11 @@ class RepoSyncMixin:
                                              "message": "not a git repo",
                                              "changed": False})
                         continue
-                    repo_results.append(await self._git_pull_repo(sub))
+                    pull_coros.append(self._git_pull_repo(sub))
+                if pull_coros:
+                    repo_results.extend(await asyncio.gather(*pull_coros))
         except Exception as e:  # noqa: BLE001 — best-effort, never fatal
             logger.warning("[sync-error] repo_sync provisioning_repos scan failed: %s", e)
-
-        # ── hub tree + spoke fan-out (version-gated, snapshot/rollback) ─────
-        try:
-            hub_result = await self.perform_update(force_spokes=force_spokes)
-            if not isinstance(hub_result, dict):
-                hub_result = {"status": "checked",
-                              "message": str(hub_result)}
-        except Exception as e:  # noqa: BLE001 — best-effort
-            logger.warning("[sync-error] repo_sync perform_update failed: %s", e)
-            hub_result = {"status": "error", "message": str(e)[:300]}
 
         # ── Update-path self-diagnosis ─────────────────────────────────────
         # Verify the hub's OWN git/update machinery is functional so a broken
@@ -234,7 +257,14 @@ class RepoSyncMixin:
                 cfg = self._repo_sync_cfg()
                 if cfg.get("enabled", True):
                     # run_repo_sync_all runs check_update_health every cycle.
-                    await self.run_repo_sync_all()
+                    # Backstop: never let one cycle stall the loop for more than
+                    # 10m even if an inner await misbehaves — abandon and retry
+                    # next interval so a wedged network op can't strand updates.
+                    try:
+                        await asyncio.wait_for(self.run_repo_sync_all(), timeout=600)
+                    except asyncio.TimeoutError:
+                        logger.warning("[sync-error] repo_sync cycle exceeded 600s "
+                                       "— abandoned; will retry next interval")
                 else:
                     # Scheduled sync OFF - still audit the update/self-heal
                     # infrastructure (systemd Type=exec / MainPID / Restart=,
