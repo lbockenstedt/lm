@@ -455,6 +455,13 @@ class BaseControlPlane:
         return self._prepare_service_restart(reason=reason)
 
     def perform_self_update_check(self) -> bool:
+        """Git fetch + pull the spoke's own repo and, if new commits landed,
+        snapshot the prior HEAD, refresh requirements, and hand off to the
+        external health-gate watchdog (`_prepare_restart_with_watchdog`) which
+        restarts the service and rolls back the snapshot if the new code fails
+        to boot. Known-bad commits (rolled back before) are skipped. Returns
+        True only in the never-reached tail that exits the process; the normal
+        "applied an update" path exits with status 3 so systemd relaunches."""
         try:
             cwd = self._repo_root()
             self._ensure_git_pull_strategy(cwd)
@@ -526,6 +533,10 @@ class BaseControlPlane:
             return False
 
     def updater_worker(self) -> None:
+        """Background thread: wait a 120s post-startup grace (so the spoke can
+        connect, receive+persist its session key, and re-auth cleanly after the
+        restart this loop may trigger), then call `perform_self_update_check`
+        every 3600s. Stops when `_updater_stop` is set."""
         # Wait 120 s after startup before the first check.  This gives the spoke
         # time to connect, receive its session key, and persist it to .env so that
         # a restart triggered by an update will re-authenticate cleanly rather than
@@ -548,6 +559,7 @@ class BaseControlPlane:
         logger.info("Updater worker exiting.")
 
     def start_updater_worker(self) -> None:
+        """Launch the updater background thread (no-op if already running)."""
         if self._updater_thread and self._updater_thread.is_alive():
             return
         self._updater_thread = threading.Thread(target=self.updater_worker, name="updater-worker", daemon=True)
@@ -555,6 +567,7 @@ class BaseControlPlane:
         logger.info("Updater worker thread launched.")
 
     def stop_updater_worker(self) -> None:
+        """Signal the updater thread to stop and join it (5s timeout)."""
         self._updater_stop.set()
         if self._updater_thread:
             self._updater_thread.join(timeout=5.0)

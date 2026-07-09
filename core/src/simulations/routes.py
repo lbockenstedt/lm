@@ -1912,6 +1912,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/{tenant}/fleet-reclone")
     async def cs_fleet_reclone(request: Request, tenant: str,
                                tenant_id: str = Depends(get_tenant_id)):
+        """Queue a `proxmox_reclone_all` command on the tenant's cs spoke
+        (relayed to the pxmx agent by the CSBridgePoller). Body may carry
+        `concurrency` (int) to cap parallel reclones; 0/omit = spoke default."""
         try:
             body = await request.json()
         except Exception:
@@ -1939,6 +1942,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.post("/sim/api/{tenant}/toggle-auto-provision")
     async def cs_toggle_auto_provision(request: Request, tenant: str,
                                         tenant_id: str = Depends(get_tenant_id)):
+        """Toggle the tenant's `usb_auto_provision` hub-config flag (on/off),
+        persist it, and push it to ALL bound cs spokes via `_push_config`
+        (fans out to every approved connected Client-Sim spoke for the tenant,
+        not just one). Also enables `hub_config_enabled` when turned on."""
         try:
             body = await request.json()
         except Exception:

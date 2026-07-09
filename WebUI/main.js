@@ -7183,6 +7183,16 @@ function _normalizePxmxAgent(a) {
 // [source]/timestamp, not a UUID, not a bare digit+time-unit, and not key=N
 // (the value isn't digits) — so different spokes/modules/reasons still group
 // SEPARATELY; only the noisy metrics within one spoke's stream collapse.
+/**
+ * Normalize a log line into a stable grouping key so identical-repeat events
+ * (same source/level/message, differing only by timestamp/UUID/duration/counter)
+ * collapse into one ×N row in the log view. Strips: leading [source] prefix,
+ * leading timestamp (+optional ,ms/.ms), per-request UUIDs, durations
+ * (`5.0s`/`30ms`), and `key=<N>` counter values. Two lines that differ ONLY in
+ * those fields share a key and are grouped by `_renderGroupedLogs`.
+ * @param {string} log - raw single log line
+ * @returns {string} grouping key
+ */
 function _logLineKey(log) {
     return String(log)
         .replace(/^\[[^\]]*\]\s*/, '')                                       // leading [source] prefix
