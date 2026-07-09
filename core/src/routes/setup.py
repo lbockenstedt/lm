@@ -142,6 +142,59 @@ def register(app, hub, ctx):
             logger.exception("delete_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/setup/spokes/purge-prefix")
+    async def purge_spokes_prefix(request: Request):
+        """Bulk-remove every spoke/agent whose id starts with a prefix (default
+        'loadtest-'), running the same teardown as DELETE /setup/spokes/{id} for
+        each. For cleaning up synthetic load-test spokes in one shot / resetting
+        between runs. Admin only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        prefix = (request.query_params.get("prefix") or "loadtest-").strip()
+        if not prefix:
+            raise HTTPException(status_code=400, detail="prefix required")
+
+        def _mid(m):
+            if isinstance(m, str):
+                return m
+            if isinstance(m, dict):
+                return m.get("id") or m.get("spoke_id")
+            return None
+
+        targets = set()
+        for m in list(hub.state.system_state.get("known_modules", []) or []):
+            mid = _mid(m)
+            if mid and mid.startswith(prefix):
+                targets.add(mid)
+        # Catch anything connected/approved not yet mirrored into known_modules.
+        for mid in list(hub.approved_modules) + list(getattr(hub, "active_connections", {})):
+            if isinstance(mid, str) and mid.startswith(prefix):
+                targets.add(mid)
+
+        removed = 0
+        for spoke_id in sorted(targets):
+            try:
+                ws = hub.active_connections.get(spoke_id)
+                if ws is not None:
+                    try:
+                        await ws.close(code=1008, reason="load-test purge")
+                    except Exception:
+                        pass
+                hub.approved_modules.pop(spoke_id, None)
+                hub.state.remove_module(spoke_id)
+                hub.key_manager.delete_spoke_key(spoke_id)
+                await hub.mailbox.clear_spoke(spoke_id)
+                hub._evict_spoke(spoke_id)
+                removed += 1
+            except Exception as e:  # noqa: BLE001 — best-effort per spoke
+                logger.warning("purge_spokes_prefix: %s failed: %s", spoke_id, e)
+        logger.warning("[diag] purged %d spoke(s) with prefix '%s' by %s",
+                       removed, prefix,
+                       (sess.get("username") if isinstance(sess, dict) else "?"))
+        return {"status": "ok", "removed": removed, "prefix": prefix}
+
     @app.post("/setup/spokes/{spoke_id}/rotate-secret")
     async def rotate_spoke_secret(spoke_id: str):
         hub = app.state.hub

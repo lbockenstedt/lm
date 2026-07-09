@@ -3110,6 +3110,23 @@ const _SETUP_CLS = {
 // Spokes / Agents / Generic Agents cards; the summary bar above Spokes carries
 // the Hub/WebUI version + recovery counts that used to head the standalone
 // Diagnostics card (now removed).
+// Bulk-remove synthetic load-test spokes (id prefix 'loadtest-') in one click —
+// the loadtest harness registers hundreds; deleting them one by one is misery.
+window.purgeLoadtestSpokes = async function () {
+    if (!confirm("Remove ALL spokes/agents whose id starts with 'loadtest-'? "
+               + "For cleaning up synthetic load-test spokes.")) return;
+    try {
+        const res = await setupFetch('/setup/spokes/purge-prefix?prefix=loadtest-', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (typeof showToast === 'function') showToast(`Purged ${data.removed} load-test spoke(s).`, 'success');
+        loadSpokesAndAgents();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast(`Purge failed: ${e.message}`, 'error');
+        else alert(`Purge failed: ${e.message}`);
+    }
+};
+
 function _renderSetupSpokesTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
@@ -3117,7 +3134,10 @@ function _renderSetupSpokesTile(content) {
             <div class="${card}">
                 <div class="flex justify-between items-center mb-3">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="loadSpokesAndAgents()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
+                    <div class="flex items-center gap-3">
+                        <button onclick="purgeLoadtestSpokes()" class="text-xs text-red-500 hover:text-red-700" title="Remove all synthetic load-test spokes (id prefix 'loadtest-')">✕ Purge load-test</button>
+                        <button onclick="loadSpokesAndAgents()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
+                    </div>
                 </div>
                 <div id="spokes-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
