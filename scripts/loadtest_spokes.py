@@ -254,10 +254,9 @@ class LoadSpoke(BaseControlPlane):
                         "payload": {"type": "CS_TELEMETRY",
                                     "data": self._build_telemetry_data()},
                     }
-                    sig = self._sign(msg)
-                    if sig is not None:
-                        msg["signature"] = sig
-                    self._cached_frame = json.dumps(msg, separators=(",", ":"))
+                    # New wire form <sig>.<body> (base _encode_frame) — matches
+                    # the hub's verify-received-bytes path.
+                    self._cached_frame = self._encode_frame(msg)
                     self._cached_at = now
                 await websocket.send(self._cached_frame)
                 self._stats["sent"] += 1
@@ -293,10 +292,7 @@ class LoadSpoke(BaseControlPlane):
                     "payload": {"type": "LOADTEST_PROBE",
                                 "data": {"seq": self._probe_seq}},
                 }
-                sig = self._sign(msg)
-                if sig is not None:
-                    msg["signature"] = sig
-                await websocket.send(json.dumps(msg, separators=(",", ":")))
+                await websocket.send(self._encode_frame(msg))
                 self._probe_seq += 1
                 self._stats["probes_sent"] += 1
             except asyncio.CancelledError:

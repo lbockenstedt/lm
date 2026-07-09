@@ -310,6 +310,36 @@ class KeyManager:
         """
         return MessageSigner(secret).sign(message_dict)
 
+    def encode_frame(self, spoke_id: str, message_dict: Dict[str, Any]) -> str:
+        """Serialize + sign ``message_dict`` into the wire form ``<sig>.<body>``
+        using the spoke's current key. The receiver verifies the RECEIVED body
+        bytes directly (no re-serialization), so this replaces the sign()+dumps()
+        that dominated per-frame CPU."""
+        key = self.keys.get(spoke_id)
+        if not key:
+            raise ValueError(f"No key found for spoke {spoke_id}")
+        return MessageSigner(key.secret).encode_frame(message_dict)
+
+    def encode_frame_with_secret(self, secret: str, message_dict: Dict[str, Any]) -> str:
+        """``encode_frame`` with an EXPLICIT secret (SPOKE_UPDATE_SESSION_KEY
+        delivery — signed with the PREVIOUS secret the spoke still holds)."""
+        return MessageSigner(secret).encode_frame(message_dict)
+
+    def encode_frame(self, spoke_id: str, message_dict: Dict[str, Any]) -> str:
+        """Serialize + sign ``message_dict`` into the wire form ``<sig>.<body>``
+        using the spoke's current key. The receiver verifies the RECEIVED body
+        bytes directly (verify_signature), so this replaces sign()+dumps() and
+        removes the per-frame re-serialization."""
+        key = self.keys.get(spoke_id)
+        if not key:
+            raise ValueError(f"No key found for spoke {spoke_id}")
+        return MessageSigner(key.secret).encode_frame(message_dict)
+
+    def encode_frame_with_secret(self, secret: str, message_dict: Dict[str, Any]) -> str:
+        """``encode_frame`` with an EXPLICIT secret (SPOKE_UPDATE_SESSION_KEY
+        delivery — signed with the PREVIOUS secret the spoke still holds)."""
+        return MessageSigner(secret).encode_frame(message_dict)
+
     def verify_signature(self, spoke_id: str, message_bytes: bytes, signature: str) -> bool:
         """Verifies the HMAC signature of a message.
 

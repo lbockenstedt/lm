@@ -51,7 +51,10 @@ class _Ws:
         self.sent = []
 
     async def send(self, frame):
-        m = json.loads(frame)
+        # Frames are the wire form <sig>.<body>; parse the body.
+        from security.signer import split_frame
+        _sig, _body = split_frame(frame)
+        m = json.loads(_body)
         self.sent.append({
             "corr": m.get("correlation_id"),
             "data": m.get("payload", {}).get("data"),
@@ -66,6 +69,7 @@ class _ConcSpoke(cp.BaseControlPlane):
         self.spoke_id = "test-spoke"
         self.modules = {}
         self.module_type = "test"
+        self.signer = None   # unsigned frames (_encode_frame → <empty-sig>.<body>)
 
     def _sign(self, msg):  # noqa: D401
         return "sig"

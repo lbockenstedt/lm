@@ -21,6 +21,26 @@ from typing import Dict, Any
 
 logger = logging.getLogger("Signer")
 
+def encode_frame(signer, msg: Dict[str, Any]) -> str:
+    """Wire form ``<sig>.<body>``: body is compact JSON serialized ONCE; sig is
+    HMAC over those exact body bytes (or '' when there is no signer, for
+    bootstrap heartbeats). The receiver HMACs the RECEIVED body bytes directly
+    (no re-serialization, no sort_keys) — the per-frame json.dumps that dominated
+    hub ingest CPU disappears. WIP: sig-verify-raw-bytes branch."""
+    body = json.dumps(msg, separators=(',', ':'))
+    sig = signer.sign_bytes(body.encode()) if signer is not None else ""
+    return sig + "." + body
+
+
+def split_frame(wire: str):
+    """Split ``<sig>.<body>`` → (sig, body). sig may be '' (unsigned). A frame
+    with no separator is treated as an unsigned raw body (defensive)."""
+    sig, sep, body = wire.partition(".")
+    if not sep:
+        return "", wire
+    return sig, body
+
+
 class MessageSigner:
     """Utility for signing and verifying messages using HMAC-SHA256.
     Ensures deterministic serialization to prevent signature mismatches.
@@ -72,6 +92,16 @@ class MessageSigner:
                 f"Data: <redacted {len(bytes_used)}B {bytes_used[:8].hex()}>"
             )
         return result
+
+    def encode_frame(self, msg: Dict[str, Any]) -> str:
+        """Serialize + sign a frame ONCE into the wire form ``<sig>.<body>``.
+
+        This is the fast frame format: the receiver HMACs the RECEIVED body
+        bytes directly (verify_frame) instead of re-serialising the parsed dict,
+        eliminating the per-frame json.dumps that dominated hub ingest CPU. No
+        sort_keys is needed — the receiver verifies the exact bytes, not a
+        canonical re-serialization, so signing order is irrelevant."""
+        return encode_frame(self, msg)
 
     def verify_bytes(self, message_bytes: bytes, signature: str) -> bool:
         """Verifies a signature against raw bytes."""
