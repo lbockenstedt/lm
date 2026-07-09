@@ -168,11 +168,21 @@ class StateManager:
             return None
 
     def _save_file(self, path: str, data: Dict):
-        """Helper to save state file atomically with encryption and backup."""
+        """Helper to save state file atomically with encryption and backup.
+        Synchronous path (serialize + write together) for the immediate
+        save_state() callers that want durability before returning."""
+        self._write_encrypted(path, json.dumps(data, indent=2, default=str))
+
+    def _write_encrypted(self, path: str, json_data: str):
+        """Encrypt a PRE-SERIALIZED JSON string and atomically write it (+backup).
+
+        Split from _save_file so the periodic flush can serialize on the event
+        loop (atomic — json.dumps can't yield) and offload just THIS part — the
+        multi-second encrypt + fsync + backup at scale — to a worker thread.
+        Operates only on an immutable string, so it is thread-safe."""
         tmp_path = path + ".tmp"
         bak_path = path + ".bak"
         try:
-            json_data = json.dumps(data, indent=2, default=str)
             encrypted_data = hub_encryption.encrypt(json_data)
 
             # 1. Write to temporary file
@@ -330,16 +340,31 @@ class StateManager:
                 return False
             self._dirty = False
         try:
-            with self._write_lock:
-                self._save_file(self.system_path, self.system_state)
-                self._save_file(self.tenants_path, self.tenant_state)
-            logger.info("State persisted to disk (dirty-flagged flush)")
+            # Serialize ON the event loop — json.dumps holds the GIL and never
+            # awaits, so it is ATOMIC w.r.t. the single-threaded loop (no
+            # "dict changed size during iteration" from a concurrent heartbeat
+            # mutating spoke_last_seen). Then OFFLOAD the encrypt + fsync + backup
+            # — the multi-second, I/O-heavy part at scale (100s of spokes) — to a
+            # thread, so the 60s flush can no longer stall the loop and flip real
+            # modules offline until it finishes. _write_lock serializes this
+            # against a concurrent synchronous save_state().
+            sys_json = json.dumps(self.system_state, indent=2, default=str)
+            ten_json = json.dumps(self.tenant_state, indent=2, default=str)
+            await asyncio.to_thread(self._write_both_locked, sys_json, ten_json)
+            logger.info("State persisted to disk (dirty-flagged flush, offloaded)")
             return True
         except Exception as e:
             logger.error(f"Persistence loop error: {e}")
             with self._dirty_lock:
                 self._dirty = True  # retry next tick
             return False
+
+    def _write_both_locked(self, sys_json: str, ten_json: str):
+        """Encrypt + write both state files under the write lock. Runs in a
+        worker thread (via asyncio.to_thread) on pre-serialized strings."""
+        with self._write_lock:
+            self._write_encrypted(self.system_path, sys_json)
+            self._write_encrypted(self.tenants_path, ten_json)
 
     # --- System Management ---
 
