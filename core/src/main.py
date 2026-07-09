@@ -698,6 +698,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._rl_harddrops = {}           # spoke_id -> hard drops THIS tick
         self._noncompliant_since = {}     # spoke_id -> monotonic ts flood-after-signal began
         self._quarantine = {}             # spoke_id -> monotonic ts quarantine expires
+        # TRUE offered frames per spoke, counted at the TOP of the message loop
+        # BEFORE the protect pre-parse shed — so under protect (where shed frames
+        # never reach spoke_msg_count) we can still identify the loudest talkers
+        # to disconnect. _spoke_recv accumulates; run_mps_loop snapshots it into
+        # _spoke_offered each tick for the protect source-shed.
+        self._spoke_recv = {}
+        self._spoke_offered = {}
         # Rung-3 receiver-side coalesce: latest-wins telemetry buffer, drained at
         # a bounded cadence by run_coalesce_drain_loop. Superseded snapshots are
         # merged away (counted) instead of each running the full ingest path.
@@ -788,6 +795,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             "ddos_grace_s": float(cfg.get("ddos_grace_s", 30.0)),
             "ddos_min_harddrops": int(cfg.get("ddos_min_harddrops", 20)),
             "quarantine_s": float(cfg.get("quarantine_s", 120.0)),
+            # PROTECT SOURCE-SHED (default ON): under protect the loop is pegged
+            # just READING the flood; dropping-after-read can't free it. So the
+            # loudest talkers are DISCONNECTED (bounded per tick) + briefly
+            # quarantined, freeing loop time for real spokes' heartbeats (keeps
+            # modules ONLINE) and /status (keeps the WebUI usable). Targets by
+            # TRUE offered rate, so low-rate real modules are never touched.
+            #   protect_shed_source    — enable it
+            #   protect_shed_top_k     — max spokes disconnected per tick
+            #   protect_shed_min_mps   — only spokes offering ≥ this (frames/s)
+            #                            are eligible (spares real modules)
+            #   protect_quarantine_s   — short reconnect cooldown for the shed
+            "protect_shed_source": bool(cfg.get("protect_shed_source", True)),
+            "protect_shed_top_k": int(cfg.get("protect_shed_top_k", 20)),
+            "protect_shed_min_mps": float(cfg.get("protect_shed_min_mps", 50.0)),
+            "protect_quarantine_s": float(cfg.get("protect_quarantine_s", 30.0)),
         }
 
 
@@ -2575,11 +2597,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
             # 3. Message Loop
             async for message_json in websocket:
+                # TRUE offered-rate tally (before ANY shed) so the protect
+                # source-shed can find the loudest talkers to disconnect. One
+                # dict op per frame — cheap. Counts frames we then drop, unlike
+                # spoke_msg_count (which is post-shed).
+                if spoke_id:
+                    self._spoke_recv[spoke_id] = self._spoke_recv.get(spoke_id, 0) + 1
                 # PROTECT MODE — early shed by SIZE, BEFORE the expensive JSON
                 # parse. At a CPU-pegged loop the parse of large telemetry frames
                 # IS the bottleneck, so dropping them here (not after parsing) is
                 # what actually frees the loop. Small frames (heartbeats/acks,
                 # < shed_bytes) still parse + flow, so liveness/acks are kept.
+                # BUT dropping-after-read still costs the READ; a sustained flood
+                # is only relieved by DISCONNECTING the source — see the protect
+                # source-shed in run_mps_loop / _protect_source_shed.
                 if self._protect_mode:
                     try:
                         if len(message_json) > self._protect_shed_bytes:
@@ -3321,6 +3352,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         self.spoke_msg_history.pop(sid, None)
                         self.spoke_mps.pop(sid, None)
                 self.spoke_msg_count = {}
+                # Snapshot the TRUE offered-frame counts for the protect source-
+                # shed (per-tick ≈ frames/s), then reset for the next tick.
+                self._spoke_offered = self._spoke_recv
+                self._spoke_recv = {}
 
                 # ── Escalation ladder: throttle offenders first, then fleet ──
                 # Runs AFTER per-spoke mps is computed so it can name the loud
@@ -3365,6 +3400,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if self._protect_mode:
             self._coalesce_pending = {}
             self._load_level = max(self._load_level, 3)
+            # AGGRESSIVE relief: disconnect the loudest talkers so the loop stops
+            # spending 100% CPU just READING their flood — this is what frees loop
+            # time for real spokes' heartbeats (modules stay online) and /status
+            # (WebUI stays usable). Cheap + bounded (top-K), so it can't itself
+            # become the O(spokes) sink that the ladder must avoid under protect.
+            try:
+                await self._protect_source_shed(self._backpressure_params())
+            except Exception as _se:  # noqa: BLE001
+                logger.debug("[protect] source-shed skipped: %s", _se)
             return
 
         p = self._backpressure_params()
@@ -3529,6 +3573,44 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self._quarantine.pop(spoke_id, None)
             return False
         return True
+
+    async def _protect_source_shed(self, p: dict) -> None:
+        """Under protect, DISCONNECT the loudest talkers so the loop stops
+        spending 100% CPU just reading their flood. This is the aggressive lever
+        that pre-parse shedding lacks: dropping-after-read still costs the READ;
+        closing the socket stops the cost, freeing loop time for real spokes'
+        heartbeats (modules stay ONLINE) and /status (WebUI stays usable).
+
+        Cheap + bounded: top-K by TRUE offered rate (``_spoke_offered``, counted
+        before the shed) above a floor, so low-rate real modules are never
+        touched. Shed spokes get a SHORT quarantine and reconnect after it — a
+        sustained flood self-limits into a sawtooth the hub survives."""
+        if not p["protect_shed_source"]:
+            return
+        floor = p["protect_shed_min_mps"]
+        cands = [(sid, n) for sid, n in (self._spoke_offered or {}).items()
+                 if n >= floor and sid in self.active_connections
+                 and not self._is_quarantined(sid)]
+        if not cands:
+            return
+        cands.sort(key=lambda x: x[1], reverse=True)
+        topk = cands[:max(1, p["protect_shed_top_k"])]
+        q = max(0.0, p["protect_quarantine_s"])
+        now = time.monotonic()
+        for sid, n in topk:
+            self._quarantine[sid] = now + q
+            self.record_spoke_event(sid, "protect_shed",
+                                    f"protect: loudest talker (~{n}/s) disconnected to "
+                                    f"relieve the loop; quarantined {q:.0f}s")
+            ws = self.active_connections.get(sid)
+            if ws is not None:
+                try:
+                    await ws.close(1013, "Hub overloaded — shedding loudest talkers")
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("[protect] source-shed close of %s failed: %s", sid, e)
+        logger.error("[protect] SOURCE-SHED — disconnected %d loudest talker(s) "
+                     "(%s) + quarantined %.0fs to free the loop for real spokes.",
+                     len(topk), ", ".join(f"{s}:{n}/s" for s, n in topk[:5]), q)
 
     async def _signal_backoff(self, spoke_id: str, level: int, min_interval: float) -> None:
         """Send one LM_BACKPRESSURE notification to a spoke (fire-and-forget).

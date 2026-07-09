@@ -29,7 +29,8 @@ import main
 Hub = main.LabManagerHub
 
 _BOUND = ("_apply_backpressure_ladder", "_signal_backoff", "_backpressure_params",
-          "_classify_message", "_disconnect_and_quarantine", "_is_quarantined")
+          "_classify_message", "_disconnect_and_quarantine", "_is_quarantined",
+          "_protect_source_shed")
 
 _CFG = {
     "per_spoke_soft_mps": 50, "per_spoke_clear_mps": 25,
@@ -73,6 +74,8 @@ def _make(bp_cfg=None):
     h._quarantine = {}
     h._rl_soft_frac = 0.8
     h._coalesce_pending = {}
+    h._spoke_recv = {}
+    h._spoke_offered = {}
     h._telemetry_received = h._telemetry_processed = h._telemetry_coalesced = 0
     h._probe_state = {}
     h._protect_mode = False
@@ -181,11 +184,41 @@ def test_protect_stand_down_does_no_work():
     h.spoke_mps = {"a": 999, "b": 999}
     h.mps = 2000
     h._protect_mode = True
+    h._spoke_offered = {}                   # nothing offered → no source-shed
     h._coalesce_pending = {"a": ({}, 0), "b": ({}, 0)}
     _ladder(h, loop_lag=5.0)
-    assert h.signals == []                 # no signalling under protect
+    assert h.signals == []                 # no per-spoke signalling under protect
     assert h._coalesce_pending == {}       # buffer dropped (superseded)
     assert h._load_level >= 3
+
+
+def test_protect_source_shed_disconnects_loudest_spares_quiet():
+    h = _make({"protect_shed_top_k": 2, "protect_shed_min_mps": 50,
+               "protect_quarantine_s": 30})
+    h._protect_mode = True
+    loud1, loud2, loud3, quiet = _FakeWS(), _FakeWS(), _FakeWS(), _FakeWS()
+    h.active_connections = {"loud1": loud1, "loud2": loud2, "loud3": loud3, "quiet": quiet}
+    # TRUE offered rates (pre-shed). quiet is a real low-rate module.
+    h._spoke_offered = {"loud1": 300, "loud2": 250, "loud3": 120, "quiet": 4}
+    _ladder(h, loop_lag=5.0)
+    # top-K=2 loudest disconnected + quarantined; loud3 (over floor but not top-2)
+    # and quiet (under floor) untouched.
+    assert loud1.closed == (1013, "Hub overloaded — shedding loudest talkers")
+    assert loud2.closed == (1013, "Hub overloaded — shedding loudest talkers")
+    assert loud3.closed is None and quiet.closed is None
+    assert h._is_quarantined("loud1") and h._is_quarantined("loud2")
+    assert not h._is_quarantined("quiet")
+    assert ("loud1", "protect_shed") in h.events
+
+
+def test_protect_source_shed_can_be_disabled():
+    h = _make({"protect_shed_source": False})
+    h._protect_mode = True
+    loud = _FakeWS()
+    h.active_connections = {"loud": loud}
+    h._spoke_offered = {"loud": 999}
+    _ladder(h, loop_lag=5.0)
+    assert loud.closed is None
 
 
 # ── DDoS enforcement (opt-in) ───────────────────────────────────────────────
