@@ -38,8 +38,10 @@ def test_pending_ack_survives_a_fresh_mailbox_instance(tmp_path):
 
 def test_spoke_offline_queue_survives_a_fresh_mailbox_instance(tmp_path):
     mb = Mailbox(state_dir=str(tmp_path))
-    mb.queue_for_spoke("cs-svr-02-spoke", _msg("q1", dest="cs-svr-02-spoke"))
-    mb.queue_for_spoke("cs-svr-02-spoke", _msg("q2", dest="cs-svr-02-spoke"))
+    # queue_for_spoke is async (awaits _asave to persist) — must be awaited, else
+    # the coroutine never runs and nothing is queued/persisted.
+    asyncio.run(mb.queue_for_spoke("cs-svr-02-spoke", _msg("q1", dest="cs-svr-02-spoke")))
+    asyncio.run(mb.queue_for_spoke("cs-svr-02-spoke", _msg("q2", dest="cs-svr-02-spoke")))
 
     mb2 = Mailbox(state_dir=str(tmp_path))
     assert "cs-svr-02-spoke" in mb2.spoke_queues
