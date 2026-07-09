@@ -34,6 +34,7 @@ import asyncio
 import json
 import os
 import random
+import socket
 import ssl
 import sys
 import time
@@ -309,6 +310,7 @@ async def main():
     ap.add_argument("--tenant", default="", help="tenant id hint (with --psk)")
     ap.add_argument("--secret", default="", help="pre-provisioned spoke secret (else zero-touch)")
     ap.add_argument("--prefix", default="loadtest-", help="spoke id prefix (for cleanup)")
+    ap.add_argument("--tag", default="", help="uniquifier folded into each id (default: this box's hostname) — keeps ids unique when running the harness on several boxes at once")
     ap.add_argument("--status-url", default="", help="override; default derives https://HOST:PORT/status")
     ap.add_argument("--sample-interval", type=float, default=5.0)
     args = ap.parse_args()
@@ -340,9 +342,13 @@ async def main():
     stats = {"sent": 0, "send_err": 0, "connects": 0, "conn_err": 0}
     stop_evt = asyncio.Event()
 
+    # Fold this box's hostname (or --tag) into every id so running the harness on
+    # all 4 spoke boxes at once produces UNIQUE spoke ids (colliding ids would
+    # mutual-evict on the hub). Purge still matches on the --prefix.
+    tag = (args.tag or socket.gethostname().split(".")[0] or "gen").strip()
     spokes = [
         LoadSpoke(
-            spoke_id=f"{args.prefix}{i:05d}", stats=stats, rate=args.rate,
+            spoke_id=f"{args.prefix}{tag}-{i:05d}", stats=stats, rate=args.rate,
             payload_bytes=args.payload_bytes, clients_n=args.clients_per_spoke,
             vms_n=args.vms_per_spoke, hub_url=args.hub,
             secret=(args.secret or None),
