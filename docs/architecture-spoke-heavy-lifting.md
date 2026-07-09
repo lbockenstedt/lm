@@ -1,7 +1,19 @@
 # Architecture Plan — Spokes Do the Heavy Lifting, Hub is a Reporting + Control Plane
 
-> Status: **DRAFT / planning** (not yet implemented). Companion to
-> `unified-443-hub` and the scaling findings from the 2026-07 load-test exercise.
+> Status: **APPROVED — building on branch `spoke-heavy-lifting`** (dev mode).
+> Companion to `unified-443-hub` and the 2026-07 load-test/scaling exercise.
+
+### Locked decisions (2026-07-09)
+1. **State store: in-memory summaries** on the hub — O(spokes), no datastore. Detail lives on spokes.
+2. **Scope: all 10 modules** implement `build_summary` / `build_detail`.
+3. **Drill-in: hub caches detail ~N s** (default 10s) after a live fetch; offline spoke → last-known summary + "detail unavailable".
+4. **Rollout: flag-day** — the hub speaks ONLY the new summary protocol; no old-relay compat path. → the refactor lands **atomically** off a branch; `main` stays on the working relay until cutover.
+
+### Defaults for the remaining open questions (revisit anytime)
+- **Sync**: per-spoke monotonic `seq`; hub detects gaps; **full re-baseline** on spoke connect/reconnect, hub restart, or a detected gap; periodic full every 5 min as a floor.
+- **Summary cadence**: delta on change, coalesced; heartbeat unchanged (realtime liveness).
+- **Consistency**: eventual for the reporting UI (summaries between deltas may be slightly stale) — acceptable; no summary-driven operation requires strong consistency.
+- **Cross-module fan-out** (global search, IPAM↔NAC sync, firewall→netbox, VM→netbox): handled per-flow — read summaries where sufficient, on-demand detail where required. Enumerated + resolved during Phase 2.
 
 ## 1. Goal & principle
 
