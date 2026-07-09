@@ -188,10 +188,45 @@ _REDACT_COMMANDS = frozenset({"CS_STORE_PROXMOX_TOKEN", "CS_CREATE_PROXMOX_TOKEN
 # forwarded to the spoke — only the log line is redacted). Covers every secret
 # field name used across the command types above plus the latent hub_secret
 # field so a future request_response carrying {"hub_secret": ...} can't leak
-# the hub root secret at DEBUG.
+# the hub root secret at DEBUG. Kept as the canonical explicit list (and the
+# secret-hygiene test contract); the drop below ALSO applies a substring match
+# (``_SECRET_SUBSTRINGS``) so compound names the exact list misses —
+# ``client_secret``, ``userPassword``/``unicodePwd``, ``api_key``/``apikey``,
+# ``LDAP_ADMIN_PW``/``admin_pw``, ``access_token``, ``private_key``,
+# ``credential`` — are redacted too.
 _REDACT_FIELDS = ("token", "secret", "password", "api_token", "hub_secret",
                   "new_secret", "psk", "onboarding_psk", "enable_secret",
                   "enable_password", "community", "snmp_community")
+
+# Substring indicators — a field name CONTAINING any of these (case-insensitive)
+# is treated as secret-bearing and dropped from DEBUG logs. Over-redaction is
+# the safe direction (the value still reaches the spoke; only the log line is
+# masked), so the list is intentionally broad on secret-ish tokens and avoids
+# only the dangerous false-positives ("key"/"auth"/"id" alone match too many
+# benign fields, so they're excluded — "api_key"/"private_key" carry enough
+# context to be safe).
+_SECRET_SUBSTRINGS = ("token", "secret", "password", "passwd", "pw",
+                      "apikey", "api_key", "private_key", "credential", "psk",
+                      "community")
+
+
+def _is_secret_field(key: str) -> bool:
+    """True if ``key`` names a secret-bearing field (exact ``_REDACT_FIELDS``
+    match OR a ``_SECRET_SUBSTRINGS`` substring). Case-insensitive."""
+    k = (key or "").lower()
+    if not k:
+        return False
+    return k in _REDACT_FIELDS or any(s in k for s in _SECRET_SUBSTRINGS)
+
+
+def _scrub_secret_fields(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a shallow copy of ``d`` with every secret-bearing field removed.
+    Non-mutating (the caller may forward the original to the spoke)."""
+    out = dict(d or {})
+    for k in list(out.keys()):
+        if _is_secret_field(k):
+            out.pop(k, None)
+    return out
 
 
 def _redact(command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -201,8 +236,14 @@ def _redact(command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
       * ``_LOGSAFE_COMMANDS`` → returned unchanged (full debug trail).
       * ``_FULLY_REDACT_COMMANDS`` (or a PASSWORD/PUSH_CONFIG type name) →
         replaced with ``{"<redacted>": True}`` (inline-secret blob).
-      * otherwise → known secret fields (``_REDACT_FIELDS``) dropped from the
-        top level + nested ``result``; the rest kept. The value is still
+      * otherwise → secret-bearing fields (``_REDACT_FIELDS`` exact OR a
+        ``_SECRET_SUBSTRINGS`` substring, e.g. ``client_secret``/``userPassword``/
+        ``api_key``) dropped from the top level AND from the two nested shapes a
+        ``request_response`` payload can take: the legacy ``result`` key and the
+        real wire shape ``payload.data`` (a COMMAND_RESULT response is logged as
+        the full message ``{"header":…, "payload":{"type":"COMMAND_RESULT",
+        "data":{…}}}``; the secret lives at ``payload.data.<field>``, NOT at top
+        level — so the response side reaches it here). The value is still
         forwarded to the spoke — only the log line is redacted."""
     ct = (command_type or "").upper()
     if ct in _LOGSAFE_COMMANDS:
@@ -210,14 +251,29 @@ def _redact(command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
     if ct in _FULLY_REDACT_COMMANDS or any(s in ct for s in _FULLY_REDACT_SUBSTRINGS):
         return {"<redacted>": True}
     safe = dict(data or {})
-    for k in _REDACT_FIELDS:
-        safe.pop(k, None)
+    for k in list(safe.keys()):
+        if _is_secret_field(k):
+            safe.pop(k, None)
+    # Nested ``result`` (legacy / hypothetical response shape).
     res = safe.get("result")
     if isinstance(res, dict):
-        r = dict(res)
-        for k in _REDACT_FIELDS:
-            r.pop(k, None)
-        safe["result"] = r
+        safe["result"] = _scrub_secret_fields(res)
+    # Nested ``payload.data`` — the ACTUAL response wire shape logged at the
+    # request_response DEBUG line (response_cache stores the full message dict,
+    # so ``data`` here is ``{"header":…, "payload":{"type":"COMMAND_RESULT",
+    # "data":{…}}}``). The secret sits at ``payload.data.<field>``; reach it.
+    # ``data`` may be a dict (one object) or a list of dicts (a query result).
+    pl = safe.get("payload")
+    if isinstance(pl, dict):
+        pdata = pl.get("data")
+        if isinstance(pdata, dict):
+            safe["payload"] = {**pl, "data": _scrub_secret_fields(pdata)}
+        elif isinstance(pdata, list):
+            safe["payload"] = {
+                **pl,
+                "data": [_scrub_secret_fields(x) if isinstance(x, dict) else x
+                         for x in pdata],
+            }
     return safe
 
 
@@ -989,6 +1045,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # so push_or_queue_to_spoke queues the message for redelivery on
                 # reconnect instead of hanging the caller or bubbling up as a
                 # traceback storm ("InvalidState: connection is closing").
+                #
+                # Proactively evict the wedged socket: without this, a black-holed
+                # ESTAB ws lingers in active_connections (eviction normally happens
+                # only in handle_connection's finally on recv() exit) and the NEXT
+                # push re-fetches the same dead ws and blocks another 10s — a
+                # recurring per-attempt stall across retry/fan-out cycles until the
+                # keepalive finally tears the TCP connection down. Evicting here
+                # makes the next push queue for reconnect immediately. The `is ws`
+                # guard preserves the owns_slot invariant: a concurrent reconnect
+                # that already replaced the slot is NOT evicted (we drop only OUR
+                # dead ws); handle_connection's finally then sees owns_slot=False
+                # and leaves the live replacement's sibling state intact.
+                if self.active_connections.get(spoke_id) is ws:
+                    self.active_connections.pop(spoke_id, None)
+                    self.active_connection_key_ids.pop(spoke_id, None)
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
                 raise ConnectionError(
                     f"Spoke {spoke_id} connection closed/blocked mid-send: {e}") from e
             self.message_count += 1

@@ -94,6 +94,55 @@ def test_redact_drops_secret_from_nested_result():
     assert out == {"result": {}, "ok": True}
 
 
+def test_redact_drops_secret_from_response_payload_data():
+    # The REAL response shape logged at request_response: response_cache stores
+    # the full wire message, so ``data`` is {"header":…, "payload":{"type":
+    # "COMMAND_RESULT","data":{…}}, "correlation_id":…}. The secret lives at
+    # payload.data.<field>, NOT at top level — so the response side MUST reach
+    # it (the b8f05e7 request-side fix missed this). CS_CREATE_PROXMOX_TOKEN
+    # returns the minted Proxmox API token in payload.data.token.
+    msg = {"header": {"sender_id": "spoke"},
+           "payload": {"type": "COMMAND_RESULT",
+                       "data": {"token": "proxmox-secret-token", "vmid": 90025}},
+           "correlation_id": "abc"}
+    out = _redact("CS_CREATE_PROXMOX_TOKEN", msg)
+    assert out["payload"]["data"] == {"vmid": 90025}
+    assert "token" not in out["payload"]["data"]
+    # The original response forwarded to the caller is NOT mutated.
+    assert msg["payload"]["data"]["token"] == "proxmox-secret-token"
+
+
+def test_redact_drops_secret_from_response_payload_data_list():
+    # A list-valued payload.data (a query result) has each item scrubbed.
+    msg = {"payload": {"type": "COMMAND_RESULT",
+                       "data": [{"id": 1, "api_key": "k1"}, {"id": 2, "name": "n"}]}}
+    out = _redact("NETBOX_GET_DEVICES", msg)
+    assert out["payload"]["data"] == [{"id": 1}, {"id": 2, "name": "n"}]
+
+
+def test_redact_substring_catches_compound_secret_fields():
+    # _REDACT_FIELDS is exact-key; the substring match catches compound names
+    # the exact list misses: client_secret, userPassword, api_key, admin_pw,
+    # access_token, private_key, credential.
+    for ct, key in (("CPPM_PROBE", "client_secret"),
+                    ("CREATE_USER", "userPassword"),
+                    ("AGENT_COMMAND", "api_key"),
+                    ("SET_LDAP_CONFIG", "LDAP_ADMIN_PW"),
+                    ("OAUTH_EXCHANGE", "access_token"),
+                    ("SIGN_KEY", "private_key"),
+                    ("STORE_CREDS", "credential")):
+        out = _redact(ct, {key: "secret-value", "keep": 1})
+        assert key not in out, f"{ct}/{key} not redacted"
+        assert out.get("keep") == 1
+
+
+def test_redact_substring_does_not_overcorrect_benign_fields():
+    # Benign field names must survive (no bare "key"/"auth"/"id" substring).
+    out = _redact("NETBOX_GET_DEVICES",
+                  {"id": 1, "name": "r1", "site": "dc1", "data": 42})
+    assert out == {"id": 1, "name": "r1", "site": "dc1", "data": 42}
+
+
 def test_redact_fields_set_covers_hub_secret():
     for k in ("token", "secret", "password", "api_token", "hub_secret",
               "new_secret", "psk", "onboarding_psk"):

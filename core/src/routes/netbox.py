@@ -1,7 +1,8 @@
 """NetBox (IPAM) config + sites/racks/devices/prefixes/IPs routes."""
 from api import (
-    HTTPException, Request, _cache_entry, _hub_msg, _invalidate_module_all_tenants,
-    _refresh_module_all_tenants, _unwrap_netbox, get_netbox_spoke, get_tenant_scoping, logger,
+    HTTPException, Request, _cache_entry, _fetch_module, _hub_msg,
+    _invalidate_module_all_tenants, _refresh_module_all_tenants, _unwrap_netbox,
+    get_netbox_spoke, get_tenant_scoping, logger,
 )
 
 
@@ -12,6 +13,47 @@ def register(app, hub, ctx):
     _resolve_tenant = ctx._resolve_tenant
     _filter_session = ctx._filter_session
     _trigger_endpoint_sync_after_ipam_edit = ctx._trigger_endpoint_sync_after_ipam_edit
+
+    async def _verify_owns(request, module_key, obj_id, id_field="id"):
+        """Cross-tenant guard for NetBox path-ID mutation routes (DELETE/PUT).
+
+        A non-admin ipam user may only mutate objects that exist in THEIR
+        tenant's NetBox cache (or live list), so enumerating another tenant's
+        sequential integer IDs (device_id/prefix_id/ip_id) is fail-closed
+        rather than a cross-tenant destroy/modify. Admin bypasses (returns
+        None). Returns the caller's tenant_id on success; raises 401/403 on
+        failure. The cache is the fast path; a stale/empty cache (e.g. after
+        the 300s TTL) is refreshed via the canonical ``_fetch_module`` GET +
+        re-checked, so a legit delete isn't false-denied. Spoke-down → 503
+        (can't verify ownership without the live list)."""
+        sess = _session_user(request)
+        if sess and _is_admin(sess):
+            return None
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        tid = _resolve_tenant(request, None) or (sess.get("user", {}) or {}).get("tenant_id")
+        if not tid:
+            raise HTTPException(status_code=403, detail="No tenant context for this user")
+        sid = str(obj_id)
+
+        def _in(items):
+            return any(isinstance(it, dict) and str(it.get(id_field)) == sid
+                       for it in (items or []))
+
+        cached = _cache_entry(tid, module_key)
+        if cached and _in(cached.get("data")):
+            return tid
+        # Stale/empty cache → live-refresh the tenant's list and re-check.
+        try:
+            await _fetch_module(hub, tid, module_key)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("netbox ownership refresh [%s][%s] %s failed: %s",
+                           tid, module_key, sid, e)
+        cached = _cache_entry(tid, module_key)
+        if cached and _in(cached.get("data")):
+            return tid
+        raise HTTPException(status_code=403,
+                            detail="Object not found in your tenant (cross-tenant mutation denied)")
 
     @app.get("/setup/netbox-config")
     async def get_netbox_config():
@@ -315,6 +357,7 @@ def register(app, hub, ctx):
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        await _verify_owns(request, "netbox_devices", device_id)
         try:
             result = await hub.request_response(spoke_id, "NETBOX_DELETE_DEVICE", {"device_id": device_id})
             _refresh_module_all_tenants(hub, "netbox_devices")
@@ -333,6 +376,7 @@ def register(app, hub, ctx):
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        await _verify_owns(request, "netbox_devices", device_id)
         try:
             data = await request.json()
             data["device_id"] = device_id
@@ -379,6 +423,7 @@ def register(app, hub, ctx):
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        await _verify_owns(request, "netbox_prefixes", prefix_id)
         try:
             data = await request.json()
             data["prefix_id"] = prefix_id
@@ -398,6 +443,7 @@ def register(app, hub, ctx):
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        await _verify_owns(request, "netbox_prefixes", prefix_id)
         try:
             result = await hub.request_response(spoke_id, "NETBOX_DELETE_PREFIX", {"prefix_id": prefix_id})
             _refresh_module_all_tenants(hub, "netbox_prefixes")
@@ -526,6 +572,7 @@ def register(app, hub, ctx):
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        await _verify_owns(request, "netbox_ips", ip_id)
         try:
             result = await hub.request_response(spoke_id, "NETBOX_RELEASE_IP", {"ip_id": ip_id})
             _refresh_module_all_tenants(hub, "netbox_ips")
@@ -544,6 +591,7 @@ def register(app, hub, ctx):
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        await _verify_owns(request, "netbox_ips", ip_id)
         try:
             data = await request.json()
             data["ip_id"] = ip_id

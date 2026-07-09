@@ -198,4 +198,9 @@ class NwCacheMixin:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(snapshot, f, default=str)
+        # 0600 (not process-umask ~0644): the nw cache can hold fleet/device
+        # identifiers; matches the at-rest 0600 policy applied to state/secret
+        # files. Defense-in-depth — the parent data_dir is 0700 so traversal is
+        # already gated, but a relocated cache_dir would otherwise expose this.
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)

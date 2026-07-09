@@ -52,6 +52,23 @@ class _FakeHub:
         self.simulations_store = type("_Store", (), {})()
         self.simulations_cache = {}
         self.active_connections = set()
+        # NetBox cross-tenant-ownership tests need a connected ipam spoke + a
+        # benign request_response so _verify_owns / _fetch_module can run.
+        self.approved_modules = {}
+        self.spoke_module_types = {}
+        self._spokes_by_type = {"ipam": "ipam-spoke"}
+
+    def get_spoke_by_type(self, t):
+        return self._spokes_by_type.get(t)
+
+    async def request_response(self, spoke_id, cmd, data, timeout=30.0):
+        # A NETBOX_GET_* round-trip (used by _fetch_module on cache miss) returns
+        # an empty list so a not-owned object is fail-closed; any other command
+        # (delete/update) returns a SUCCESS body so the handler proceeds past
+        # the ownership gate.
+        if cmd and cmd.startswith("NETBOX_GET"):
+            return {"payload": {"data": []}}
+        return {"payload": {"data": {"status": "SUCCESS"}}}
 
 
 def _ensure_loop():
@@ -68,6 +85,7 @@ def _isolate(monkeypatch, tmp_path):
     api_mod._sessions.clear()
     api_mod._login_attempts.clear()
     api_mod._login_ip_attempts.clear()
+    api_mod._tenant_cache.clear()
     for v in ("LM_TLS_CERT", "LM_TLS_KEY", "LM_CORS_ORIGINS", "LM_SETUP_TOKEN",
               "LM_COOKIE_SECURE", "LM_MAX_SESSIONS_PER_USER",
               "LM_SESSION_IDLE_TIMEOUT_S", "LM_LOGIN_MAX_FAILS",
@@ -106,6 +124,15 @@ def _mint_session(hub, uid="admin", perms=None, last_seen=None):
     if last_seen is not None:
         api_mod._sessions[token]["last_seen"] = last_seen
     return token
+
+
+def _mint_tenant_session(hub, uid, tenant_id, rights=("ipam",)):
+    """Drop a live NON-admin session scoped to ``tenant_id`` with the given
+    module rights. Used by the cross-tenant / shared-infra write-gate tests."""
+    user_data = {"user_id": uid, "auth_type": "local",
+                 "permissions": {r: True for r in rights},
+                 "tenants": [tenant_id], "tenant_id": tenant_id, "protected": False}
+    return api_mod._record_session(hub, user_data)
 
 
 class _Req:
@@ -434,3 +461,95 @@ def test_admin_revoke_unknown_sid_404(tmp_path):
     admin_token = _mint_session(hub, "admin")
     r = c.delete("/admin/sessions/nope", cookies={"lm_session": admin_token})
     assert r.status_code == 404
+
+
+# ── 8. Shared-infrastructure writes gated to admin (firewall / DNS / DHCP) ───
+
+def test_firewall_write_requires_admin(tmp_path):
+    # /api/firewall/* has no module-right gate; writes (POST/PUT/DELETE) now
+    # require admin. A non-admin (even with ipam) is 403'd at the middleware.
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    r = c.post("/api/firewall/fw1/rules", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+    # Admin passes the gate (the handler then runs against the fake hub — not 403).
+    admin_tok = _mint_session(hub, "admin")
+    r = c.post("/api/firewall/fw1/rules", json={"rule": {}},
+               cookies={"lm_session": admin_tok})
+    assert r.status_code != 403
+
+
+def test_firewall_read_stays_authed_not_admin(tmp_path):
+    # GET is method-gated OUT of the admin requirement — a non-admin can still
+    # view (filtered) firewall data; only writes are admin-gated.
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    r = c.get("/api/firewall/fw1/rules", cookies={"lm_session": tok})
+    assert r.status_code != 403
+
+
+def test_dns_dhcp_write_requires_admin(tmp_path):
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    assert c.post("/api/dns/record", json={},
+                  cookies={"lm_session": tok}).status_code == 403
+    assert c.post("/api/dhcp/reservation", json={},
+                  cookies={"lm_session": tok}).status_code == 403
+    assert c.post("/api/dns/sync", cookies={"lm_session": tok}).status_code == 403
+    # Admin passes the gate (handler then runs — not 403).
+    admin_tok = _mint_session(hub, "admin")
+    assert c.post("/api/dns/record", json={},
+                  cookies={"lm_session": admin_tok}).status_code != 403
+
+
+# ── 9. Help assistant admin-gate (cross-tenant LLM tools) ─────────────────────
+
+def test_help_ask_requires_admin(tmp_path):
+    # /api/help/ask runs hub-wide (cross-tenant) LLM tools — admin-only. A
+    # non-admin is 403'd; /api/help/available stays authed-read.
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    r = c.post("/api/help/ask", json={"question": "list all spokes"},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+    # available is NOT admin-gated — any authed user may read it.
+    assert c.get("/api/help/available",
+                 cookies={"lm_session": tok}).status_code == 200
+    # Admin passes the gate; with no bugfixer agent connected the handler 409s.
+    admin_tok = _mint_session(hub, "admin")
+    r = c.post("/api/help/ask", json={"question": "list all spokes"},
+               cookies={"lm_session": admin_tok})
+    assert r.status_code == 409
+
+
+# ── 10. NetBox cross-tenant mutation ownership check ──────────────────────────
+
+def test_netbox_delete_not_owned_by_tenant_denied(tmp_path):
+    # Seed tenant tA's device cache with device 5 only. A non-admin ipam user
+    # scoped to tA may NOT delete device 999 (another tenant's, by ID enum) —
+    # fail-closed 403.
+    c, hub = _build({}, tmp_path)
+    api_mod._tenant_cache["tA"] = {"netbox_devices": {"data": [{"id": 5}]}}
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    r = c.delete("/api/netbox/devices/999", cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+def test_netbox_delete_owned_by_tenant_passes_gate(tmp_path):
+    # Device 5 IS in alice's tenant cache → ownership passes; the handler then
+    # proceeds (fake request_response returns SUCCESS) → 200, not the 403 gate.
+    c, hub = _build({}, tmp_path)
+    api_mod._tenant_cache["tA"] = {"netbox_devices": {"data": [{"id": 5}]}}
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    r = c.delete("/api/netbox/devices/5", cookies={"lm_session": tok})
+    assert r.status_code == 200
+
+
+def test_netbox_delete_admin_bypasses_ownership(tmp_path):
+    # Admin may delete any device regardless of cache; ownership check returns
+    # None for admin. The handler proceeds (fake SUCCESS) → 200, not 403.
+    c, hub = _build({}, tmp_path)
+    admin_tok = _mint_session(hub, "admin")
+    r = c.delete("/api/netbox/devices/999", cookies={"lm_session": admin_tok})
+    assert r.status_code == 200
