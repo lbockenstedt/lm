@@ -8,6 +8,9 @@ BASE_DIR="/opt/lm"
 SvcUser="svc_lm"
 LOG_DIR="/var/log/lm"
 INSTALL_LOG="$LOG_DIR/sync_secrets.log"
+# sync_secrets.log holds spoke-secret sync activity — 0640 (not world-readable).
+touch "$INSTALL_LOG" 2>/dev/null || true
+chmod 0640 "$INSTALL_LOG" 2>/dev/null || true
 
 # Logging Helpers
 log() {
@@ -95,7 +98,9 @@ for mod in "${!SPOKE_IDS[@]}"; do
 
     if [ -n "$SPOKE_SECRET" ] && [ "$SPOKE_SECRET" != "null" ]; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        log_c "✅ Fetched secret for $SPOKE_ID: ${SPOKE_SECRET:0:4}...${SPOKE_SECRET: -4}"
+        # Do NOT log any part of the secret (was first-4...last-4 = 8 chars to
+        # console + sync_secrets.log 0644). Confirm the fetch without the value.
+        log_c "✅ Fetched secret for $SPOKE_ID"
 
         SPOKE_PATH="$BASE_DIR/$mod"
         if [ -d "$SPOKE_PATH" ]; then
