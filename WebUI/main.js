@@ -2060,6 +2060,83 @@ async function dropHubBacklog() {
 // Save the per-spoke rate-limit knob (System → Hub Status). Shallow-merges into
 // global_config["rate_limit"] via POST /setup/config; the hub applies it to each
 // spoke on its next (re)connect (main.py _rate_limit_params). Admin only.
+// ── Backpressure Tuning panel (System → Hub Status) ─────────────────────────
+// The knobs live in global_config.backpressure; the hub reads them fresh each
+// 1s tick, so a Save applies LIVE (no deploy). Field id → config key + default.
+const _BP_DEFAULTS = {
+    fleet_cpu_soft: 55, fleet_cpu_hard: 85, fleet_cpu_clear: 40,
+    coalesce_min_interval_s: 2, coalesce_max_interval_s: 15,
+    release_dwell_s: 20, per_spoke_soft_mps: 50, ddos_disconnect: false,
+};
+const _BP_FIELDS = [
+    ['bp-fleet-cpu-soft', 'fleet_cpu_soft'], ['bp-fleet-cpu-hard', 'fleet_cpu_hard'],
+    ['bp-fleet-cpu-clear', 'fleet_cpu_clear'], ['bp-coalesce-min', 'coalesce_min_interval_s'],
+    ['bp-coalesce-max', 'coalesce_max_interval_s'], ['bp-release-dwell', 'release_dwell_s'],
+    ['bp-per-spoke-soft', 'per_spoke_soft_mps'], ['bp-ddos-disconnect', 'ddos_disconnect'],
+];
+
+async function loadBackpressureConfig() {
+    try {
+        const res = await setupFetch('/setup/config');
+        const data = await res.json();
+        const bp = (data.global_config && data.global_config.backpressure) || {};
+        window.__lmBackpressureCfg = bp;   // keep the full subtree so Save doesn't wipe unshown knobs
+        for (const [id, key] of _BP_FIELDS) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            const val = bp[key] !== undefined ? bp[key] : _BP_DEFAULTS[key];
+            if (el.type === 'checkbox') el.checked = !!val;
+            else if (document.activeElement !== el) el.value = val;   // don't clobber while typing
+        }
+    } catch (e) { /* leave inputs blank on failure */ }
+}
+
+function resetBackpressureConfig() {
+    for (const [id, key] of _BP_FIELDS) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        if (el.type === 'checkbox') el.checked = !!_BP_DEFAULTS[key];
+        else el.value = _BP_DEFAULTS[key];
+    }
+    if (typeof showToast === 'function') showToast('Defaults filled in — click Save to apply.', 'info');
+}
+
+async function saveBackpressureConfig() {
+    const btn = document.getElementById('bp-save-btn');
+    // Merge onto the last-loaded subtree so knobs NOT shown in this panel
+    // (surgical shed, source-shed, ddos grace, etc.) are preserved on save
+    // (the hub's /setup/config does a top-level replace of `backpressure`).
+    const merged = Object.assign({}, window.__lmBackpressureCfg || {});
+    for (const [id, key] of _BP_FIELDS) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        merged[key] = el.type === 'checkbox' ? el.checked : Number(el.value);
+    }
+    // Light sanity: soft below hard below the 90% protect line, clear below soft.
+    if (!(merged.fleet_cpu_clear < merged.fleet_cpu_soft && merged.fleet_cpu_soft < merged.fleet_cpu_hard)) {
+        const m = 'CPU marks must satisfy: release < engage < max (e.g. 40 < 55 < 85).';
+        if (typeof showToast === 'function') showToast(m, 'error'); else alert(m);
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const res = await fetch('/setup/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { backpressure: merged } }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        window.__lmBackpressureCfg = merged;
+        if (typeof showToast === 'function')
+            showToast('Backpressure tuning saved — applies live on the next tick.', 'success');
+    } catch (e) {
+        if (typeof showToast === 'function') showToast(`Save failed: ${e.message}`, 'error');
+        else alert(`Save failed: ${e.message}`);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
+}
+
 async function saveRateLimit() {
     const capIn = document.getElementById('rl-capacity');
     const rateIn = document.getElementById('rl-fillrate');
@@ -3125,6 +3202,26 @@ function _renderSettingsSection(subMenu) {
                         <p class="text-[10px] text-slate-400 mt-2">Applies to each spoke on its next (re)connect. Raise both for relay spokes hosting many agents / at scale.</p>
                     </div>
                 </div>
+                <div class="${card} p-6">
+                    <div class="flex justify-between items-center mb-1">
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Backpressure Tuning ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <div class="flex items-center gap-2">
+                            <button onclick="resetBackpressureConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore recommended defaults (not yet saved)">Reset Defaults</button>
+                            <button onclick="saveBackpressureConfig()" id="bp-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button>
+                        </div>
+                    </div>
+                    <p class="text-[10px] text-slate-400 mb-3">How hard the hub throttles spokes as it heats up. Applies LIVE (each 1s tick). Lower CPU marks + higher max slow-down = more aggressive (keeps CPU out of protect, telemetry gets staler while throttled).</p>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs text-slate-500">
+                        <label>Fleet slow-down at CPU %<br><input type="number" id="bp-fleet-cpu-soft" min="1" max="100" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label>Max slow-down at CPU %<br><input type="number" id="bp-fleet-cpu-hard" min="1" max="100" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label>Release below CPU %<br><input type="number" id="bp-fleet-cpu-clear" min="1" max="100" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label>Slow-down min (s)<br><input type="number" id="bp-coalesce-min" min="0.5" step="0.5" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label>Slow-down max (s)<br><input type="number" id="bp-coalesce-max" min="1" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label>Release dwell (s)<br><input type="number" id="bp-release-dwell" min="0" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label>Offender mark (msg/s)<br><input type="number" id="bp-per-spoke-soft" min="1" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label class="flex items-end gap-2 pb-1"><input type="checkbox" id="bp-ddos-disconnect" class="w-4 h-4 accent-green-600"> DDoS disconnect<br>flooders</label>
+                    </div>
+                </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="${card} p-6">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Spokes (<span id="spoke-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
@@ -3137,6 +3234,7 @@ function _renderSettingsSection(subMenu) {
                 </div>
             </div>`;
         updateStatus();
+        loadBackpressureConfig();
     } else if (subMenu === 'Active Sessions') {
         content.innerHTML = `
             <div class="${card} p-6">
