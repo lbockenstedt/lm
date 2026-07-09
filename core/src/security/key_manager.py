@@ -9,9 +9,7 @@ delegated to ``encryption.py`` (``hub_encryption``).
 
 Signing/verification primitives are delegated to ``signer.py`` (``MessageSigner``);
 this module only selects which secret to feed it. The wire envelope that carries
-the resulting signatures is defined in ``messaging/protocol.py``. A dev-mode
-fallback (``LM_DEV_MODE=1`` + ``LM_DEV_SECRET``) is supported for onboarding
-flows where no real key yet exists.
+the resulting signatures is defined in ``messaging/protocol.py``.
 """
 
 import secrets
@@ -243,26 +241,6 @@ class KeyManager:
         for key in self.history.get(spoke_id, []):
             if hmac.compare_digest(key.secret, secret):
                 return key.key_id
-
-        # Development fallback: ONLY enabled when LM_DEV_MODE=1 is explicitly set,
-        # and only with an explicitly configured LM_DEV_SECRET (no hardcoded default).
-        if os.getenv("LM_DEV_MODE") == "1":
-            dev_secret = os.getenv("LM_DEV_SECRET")
-            if dev_secret and hmac.compare_digest(secret, dev_secret):
-                # Only allow this if no real keys exist for this spoke to avoid symmetry failures
-                if not current and not self.history.get(spoke_id):
-                    # Ensure there is a key entry for this spoke so signing works
-                    self.keys[spoke_id] = ManagedKey(
-                        key_id="dev-key",
-                        secret=dev_secret,
-                        created_at=time.time(),
-                        expires_at=time.time() + 86400
-                    )
-                    return "dev-key"
-                else:
-                    logger.warning(f"Dev-mode secret rejected for spoke {spoke_id}: a real key is already configured.")
-            elif dev_secret is None:
-                logger.debug("LM_DEV_MODE=1 but LM_DEV_SECRET not set; dev fallback disabled.")
 
         return None
 

@@ -71,6 +71,35 @@ def test_rotated_key_not_due_until_30d():
     assert "s3" not in km.get_keys_due_for_rotation(days=30)
 
 
+# ── 10c: the LM_DEV_MODE auth backdoor is GONE — regression guard ─────────────
+
+def test_dev_mode_backdoor_removed_no_bypass_for_keyless_spoke(monkeypatch):
+    """The dev-mode fallback (LM_DEV_MODE=1 + LM_DEV_SECRET) used to let a spoke
+    authenticate with a shared dev secret when no real keys existed — a backdoor
+    that bypassed PSK/approval onboarding. It is removed entirely. Even with both
+    env vars set, a keyless spoke presenting the dev secret gets None (no auto-
+    key creation), so the only auth path is a real per-spoke key (current or
+    history). This test pins the removal so it can't be reintroduced."""
+    monkeypatch.setenv("LM_DEV_MODE", "1")
+    monkeypatch.setenv("LM_DEV_SECRET", "dev-backdoor-secret")
+    km = _make_km()
+    # No real key for "s1" — the old bypass would have minted a dev-key here.
+    assert km.get_valid_key("s1", "dev-backdoor-secret") is None
+    assert "s1" not in km.keys  # no auto-created dev-key
+
+
+def test_dev_mode_backdoor_removed_no_bypass_for_keyed_spoke(monkeypatch):
+    """Even with dev-mode env set, a keyed spoke must authenticate ONLY via its
+    real current/history secret — the dev secret is not accepted."""
+    monkeypatch.setenv("LM_DEV_MODE", "1")
+    monkeypatch.setenv("LM_DEV_SECRET", "dev-backdoor-secret")
+    km = _make_km()
+    real = km.generate_first_secret("s2")
+    assert km.get_valid_key("s2", real) is not None       # real secret works
+    assert km.get_valid_key("s2", "dev-backdoor-secret") is None  # dev secret rejected
+    assert km.get_valid_key("s2", "totally-wrong") is None        # wrong secret rejected
+
+
 # ── 9b/9c: a LabManagerHub subclass with stubbed deps ─────────────────────────
 
 class _FakeWS:

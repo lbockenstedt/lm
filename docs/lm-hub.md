@@ -37,7 +37,6 @@ It owns the state that ties the lab together — which spokes/agents exist and w
 | `LM_HEARTBEAT_INTERVAL_S` | Hub/spoke heartbeat | 60 (min 10) |
 | `LM_ONBOARDING_PSK` / `LM_TENANT_ID_HINT` | Spoke PSK self-provisioning | — |
 | `LM_DEP_GUARD_DISABLE` | Skip dep self-heal | 0 |
-| `LM_DEV_MODE` / `LM_DEV_SECRET` | Dev auth backdoor (lab only) | — |
 | `LOG_LEVEL` | Boot log level (DEBUG/INFO/WARNING/ERROR) | INFO |
 | `LM_CORS_ORIGINS` | Comma-separated credentialed CORS origins | — |
 

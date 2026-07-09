@@ -31,7 +31,6 @@ Consolidated reference for every environment variable read across the LM system.
 | `LM_ONBOARDING_PSK` | Pre-shared key for spoke self-provisioning | — | `control_plane.py` |
 | `LM_TENANT_ID_HINT` | Tenant hint for PSK self-provisioning | — | `control_plane.py` |
 | `LM_DEP_GUARD_DISABLE` | `1` skips dep self-heal | 0 | `core/src/dep_guard.py` |
-| `LM_DEV_MODE` / `LM_DEV_SECRET` | Dev auth backdoor (lab only) | — | `core/src/security/key_manager.py` |
 | `LOG_LEVEL` | Boot log level (DEBUG/INFO/WARNING/ERROR) | INFO | `core/src/logging_setup.py` |
 | `HUB_SECRET` | Hub-side secret for spoke mutual auth (legacy/compat) | — | `control_plane.py` |
 | `STARTUP_ROLE` | Default role for agent spoke (`--role` fallback) | — | `agent/src/control_plane.py` |
