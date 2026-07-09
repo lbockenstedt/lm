@@ -149,10 +149,12 @@ def test_clear_spoke_drops_pending_ack_and_offline_queue(tmp_path):
     b = _msg("b", dest="s2")
     mb.pending_ack["a"] = (a, 0.0, 0)
     mb.pending_ack["b"] = (b, 0.0, 0)
-    mb.queue_for_spoke("s1", _msg("q1", dest="s1"))
-    mb.queue_for_spoke("s3", _msg("q3", dest="s3"))
+    # queue_for_spoke + clear_spoke are async — must be awaited (else the
+    # coroutine never runs and nothing is queued / cleared).
+    asyncio.run(mb.queue_for_spoke("s1", _msg("q1", dest="s1")))
+    asyncio.run(mb.queue_for_spoke("s3", _msg("q3", dest="s3")))
 
-    dropped = mb.clear_spoke("s1")
+    dropped = asyncio.run(mb.clear_spoke("s1"))
 
     assert dropped == 2  # 1 pending_ack + 1 queued
     assert "a" not in mb.pending_ack  # s1's pending entry gone
@@ -163,6 +165,6 @@ def test_clear_spoke_drops_pending_ack_and_offline_queue(tmp_path):
 
 def test_clear_spoke_missing_spoke_is_noop(tmp_path):
     mb = Mailbox(state_dir=str(tmp_path))
-    assert mb.clear_spoke("never-seen") == 0
+    assert asyncio.run(mb.clear_spoke("never-seen")) == 0
     assert mb.pending_ack == {}
     assert mb.spoke_queues == {}
