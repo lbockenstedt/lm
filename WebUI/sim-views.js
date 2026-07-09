@@ -3234,12 +3234,17 @@ async function csRenderVmServer() {
         const px = h.proxmox || {};
         const vmN = csSimVmCount(h);
         const usbN = csUsbCount(h);
+        // Quarantined-dongle pill for the USB cell: surfaces dmesg-quarantined
+        // dongles at the fleet level (count + tooltip of bus-id: reason). The
+        // per-dongle live-recovery badges live on the USB detail card.
+        const qtList = (px.quarantine || []).filter(q => q && q.bus_path);
+        const qtPill = qtList.length ? `<span class="ml-1 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[9px] font-bold uppercase tracking-wider" title="${csEscape(qtList.map(q => q.bus_path + ': ' + (q.reason || '')).join('; '))}">🚫 ${qtList.length} QT</span>` : '';
         const selCls = csVmHostId(h) === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
         return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(csVmHostId(h))}','VMs')">
           <td class="px-4 py-2"><span class="font-medium text-slate-700">${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id)}</span></td>
           <td class="px-4 py-2 text-center">${csOnlineBadge(h.spoke_online)}</td>
           <td class="px-4 py-2 text-center">${vmN}</td>
-          <td class="px-4 py-2 text-center">${usbN}</td>
+          <td class="px-4 py-2 text-center">${usbN}${qtPill}</td>
           <td class="px-4 py-2 text-center text-xs">${csPctCell(px.cpu_1h_avg)}</td>
           <td class="px-4 py-2 text-center text-xs">${csPctCell(px.mem_1h_avg)}</td>
           <td class="px-4 py-2 text-center">${csProvThrottleBadge(px)}</td>
@@ -3483,6 +3488,13 @@ function csStartShedTicker() {
             const secs = at - now;
             el.textContent = secs <= 0 ? 'now' : csFmtDuration(secs);
         });
+        // Quarantine-recovery countdown — same absolute-epoch pattern as the
+        // shed countdown (data-qt-at = agent since + 1h QUARANTINE_RECOVERY_S).
+        document.querySelectorAll('.cs-qt-countdown').forEach(el => {
+            const at = Number(el.getAttribute('data-qt-at'));
+            const secs = at - now;
+            el.textContent = secs <= 0 ? 'now' : csFmtDuration(secs);
+        });
     }, 1000);
 }
 
@@ -3494,6 +3506,31 @@ function csShedBadge(v) {
     return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700" title="Dongle removed — VM will be shed when the missing-dongle timer expires">`
         + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🗑️ Sheds in `
         + `<span class="cs-shed-countdown" data-shed-at="${Number(v._shed_at)}">${csFmtDuration(secs)}</span></span>`;
+}
+
+// Number of quarantined dongles on a host (px.quarantine list, dmesg-only).
+function csQtCount(h) {
+    const q = (h && h.proxmox && h.proxmox.quarantine) || [];
+    return Array.isArray(q) ? q.length : 0;
+}
+
+// Badge for a dongle quarantined by kernel USB (dmesg) errors — the ONLY
+// quarantine path. Shows the bus-id + reason + a live countdown to the 1h
+// auto-recovery that clears it (a still-plugged dongle gets retried; if the
+// kernel errors persist it re-quarantines next pass). A failed clone NEVER
+// quarantines the dongle, so this is the sole "sidelined dongle" signal.
+function csQtBadge(q) {
+    if (!q || !q.bus_path) return '';
+    const at = Number(q.recovers_at);
+    const secs = isFinite(at) ? at - Date.now() / 1000 : NaN;
+    const reason = String(q.reason || 'quarantined');
+    const present = q.present === false ? ' (absent)' : '';
+    const title = `Quarantined — ${reason}${present}. Auto-recovers after 1h; re-quarantines if kernel USB errors persist.`;
+    const cnt = (isFinite(secs) && secs > 0)
+        ? `<span class="cs-qt-countdown" data-qt-at="${at}">${csFmtDuration(secs)}</span>`
+        : 'now';
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700" title="${csEscape(title)}">`
+        + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🚫 QT ${csEscape(q.bus_path)} · ${csEscape(reason)} · clears in ${cnt}</span>`;
 }
 
 function csVmStatusBadge(v) {
@@ -3838,6 +3875,16 @@ async function csRenderVmServerUsb() {
       <span><b class="text-sm text-slate-700">${fleetTotal}</b> total on cs server</span>
       <span><b class="text-sm text-slate-700">${unknown.length}</b> uncertified</span>
     </div>`;
+    // Quarantined dongles (dmesg kernel USB errors — the only quarantine path).
+    // One red badge per bus: bus-id + reason + live countdown to the 1h
+    // auto-recovery. Surfaced here (the dongle-management surface) so an admin
+    // sees WHY a dongle is sidelined and that it self-clears.
+    const qt = (px.quarantine || []).filter(q => q && q.bus_path);
+    const qtBox = qt.length ? `<div class="mb-4 border border-red-200 bg-red-50 rounded-lg p-3">
+      <p class="text-[11px] font-bold text-red-700 uppercase tracking-wider mb-2">Quarantined dongles (${qt.length}) — sidelined by kernel USB errors</p>
+      <div class="flex flex-wrap gap-2">${qt.map(csQtBadge).join('')}</div>
+      <p class="text-[10px] text-red-600/80 mt-2">Each auto-recovers after 1h and gets retried; re-quarantines if the kernel errors persist. A failed clone never quarantines a dongle.</p>
+    </div>` : '';
     // Type options for the per-row dropdown. A certified dongle that hasn't
     // been classified yet shows a "—" placeholder (selected) so the operator
     // must pick wired/wireless to assign it; picking it re-certifies (the
@@ -3911,9 +3958,13 @@ async function csRenderVmServerUsb() {
       <pre class="text-[10px] text-slate-600 mt-2 whitespace-pre-wrap">${csEscape(JSON.stringify(dbg, null, 2))}</pre>
       <p class="text-[10px] text-amber-700 mt-2">If <code>proxmox.usb</code>/<code>top.usb</code> show no <code>present_usb</code>/<code>usb_devices</code>, the cs spoke isn't aggregating USB into its telemetry. If they appear under <code>top.usb</code> but not <code>proxmox.usb</code>, it's a hub shape-mapping gap.</p>
     </details>` : '';
+    // Start the live countdown ticker so the QT badges' "clears in" timer ticks
+    // between telemetry pulses (idempotent — one interval for the whole page).
+    csStartShedTicker();
     csSet(`<div>${csVmHostBanner()}
       ${dbgBox}
       ${summary}
+      ${qtBox}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Certified USB (${certGroups.length} type${certGroups.length === 1 ? '' : 's'} · ${present.length} dongle${present.length === 1 ? '' : 's'})</p>
       ${csTable(['Device', 'VID:PID', 'Type', 'Approved', 'Count', 'Active VMs', 'Status'], certRows)}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-5 mb-2">Uncertified / Unknown (${unGroups.length} type${unGroups.length === 1 ? '' : 's'} · ${unknown.length} dongle${unknown.length === 1 ? '' : 's'}) — pick a type, then Certify</p>
