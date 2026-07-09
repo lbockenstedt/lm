@@ -3013,25 +3013,40 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         Calculates messages per second and throughput using a 10-second moving average.
         """
         logger.info("MPS and Throughput monitoring loop started.")
-        _protect_since = 0.0
+        _last_tick = time.time()
         while True:
             await asyncio.sleep(1.0)
+            # LOOP LAG = how much longer than the 1s sleep this cycle actually
+            # took. When the event loop is CPU-saturated by ingest (single core
+            # pegged), even this sleep returns late — so the overrun is a direct
+            # "loop is the bottleneck" signal, independent of memory.
+            _now = time.time()
+            _loop_lag = max(0.0, (_now - _last_tick) - 1.0)
+            _last_tick = _now
             try:
-                # ── Overload self-protection: memory watermark with hysteresis ──
-                # Enter protect mode above the high mark, leave below the low mark
-                # (so it doesn't flap at the boundary). psutil is already a dep.
+                # ── Overload self-protection: memory OR loop-lag, w/ hysteresis ──
+                # Enter above the high mark, leave below the low mark (no flap).
+                # Memory guards OOM; loop-lag guards the single-core saturation
+                # that hangs the UI. Shedding (reads + telemetry) relieves BOTH.
                 try:
                     cfg = (self.state.get_global_config() or {}).get("protect", {}) or {}
-                    hi = float(cfg.get("mem_high_pct", 90))
-                    lo = float(cfg.get("mem_low_pct", 80))
+                    mem_hi = float(cfg.get("mem_high_pct", 90))
+                    mem_lo = float(cfg.get("mem_low_pct", 80))
+                    lag_hi = float(cfg.get("loop_lag_high_s", 1.0))
+                    lag_lo = float(cfg.get("loop_lag_low_s", 0.3))
                     memp = psutil.virtual_memory().percent
-                    if not self._protect_mode and memp >= hi:
+                    _over = memp >= mem_hi or _loop_lag >= lag_hi
+                    _under = memp <= mem_lo and _loop_lag <= lag_lo
+                    if not self._protect_mode and _over:
                         self._protect_mode = True
-                        self._protect_reason = f"memory {memp:.0f}% ≥ {hi:.0f}%"
-                        logger.error("[protect] ENTER — %s; shedding heavy reads + "
-                                     "rejecting new spokes", self._protect_reason)
-                    elif self._protect_mode and memp <= lo:
-                        logger.warning("[protect] EXIT — memory %.0f%% ≤ %.0f%%", memp, lo)
+                        self._protect_reason = (f"memory {memp:.0f}%" if memp >= mem_hi
+                                                else f"loop lag {_loop_lag:.1f}s")
+                        logger.error("[protect] ENTER — %s (mem %.0f%%, lag %.1fs); "
+                                     "shedding heavy reads + telemetry",
+                                     self._protect_reason, memp, _loop_lag)
+                    elif self._protect_mode and _under:
+                        logger.warning("[protect] EXIT — mem %.0f%% ≤ %.0f%%, lag %.1fs ≤ %.1fs",
+                                       memp, mem_lo, _loop_lag, lag_lo)
                         self._protect_mode = False
                         self._protect_reason = ""
                 except Exception as _pe:  # noqa: BLE001 — never let the guard crash the loop
