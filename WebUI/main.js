@@ -3162,23 +3162,36 @@ window.purgeLoadtestSpokes = async function () {
 
 function _renderSetupSpokesTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    // Compact card variant for this tile only — the shared _SETUP_CLS.card uses
+    // p-6/space-y-4 which is generous for forms but wastes vertical space here
+    // where each row is already a dense mgmt card. Don't change the shared
+    // constant (it drives Tenant/User/Firewalls tiles too).
+    const saCard = 'hpe-card rounded-lg p-4 shadow-sm space-y-3';
+    // Spokes + Agents side-by-side on wide screens (xl:grid-cols-2) so the page
+    // height tracks the taller column instead of stacking both fully — halves
+    // the scrolling for fleets with many spokes and agents. Stacks on narrower
+    // viewports. items-start keeps each card top-aligned and prevents the
+    // shorter card from stretching to match the taller one's height (which
+    // would re-introduce empty space below its last row).
     content.innerHTML = `
             <div id="spokes-summary" class="flex flex-wrap items-center gap-3 text-xs"></div>
-            <div class="${card}">
-                <div class="flex justify-between items-center mb-3">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <div class="flex items-center gap-3">
-                        <button onclick="purgeLoadtestSpokes()" class="text-xs text-red-500 hover:text-red-700" title="Remove all synthetic load-test spokes (id prefix 'loadtest-')">✕ Purge load-test</button>
-                        <button onclick="loadSpokesAndAgents()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
+                <div class="${saCard}">
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <div class="flex items-center gap-3">
+                            <button onclick="purgeLoadtestSpokes()" class="text-xs text-red-500 hover:text-red-700" title="Remove all synthetic load-test spokes (id prefix 'loadtest-')">✕ Purge load-test</button>
+                            <button onclick="loadSpokesAndAgents()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
+                        </div>
                     </div>
+                    <div id="spokes-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
                 </div>
-                <div id="spokes-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
-            </div>
-            <div class="${card}">
-                <div class="flex justify-between items-center mb-3">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <div class="${saCard}">
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Agents ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    </div>
+                    <div id="agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
                 </div>
-                <div id="agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>`;
     loadSpokesAndAgents();
 }
@@ -5613,7 +5626,7 @@ function _mgmtEntryCard(o) {
     const badges  = (o.badges || []).filter(Boolean).join(' ');
     const meta    = (o.metaLines || []).filter(Boolean).join('');
     const actions = (o.actions || []).filter(Boolean).join('');
-    return `<div class="lm-mgmt-card border border-slate-200 rounded-md bg-white p-3 hover:bg-slate-50 space-y-2">
+    return `<div class="lm-mgmt-card border border-slate-200 rounded-md bg-white p-2.5 hover:bg-slate-50 space-y-1.5">
         <div class="flex items-start justify-between gap-3 flex-wrap">
             <div class="flex items-start gap-2.5 min-w-0">
                 <div class="w-2 h-2 mt-1.5 rounded-full ${o.dot} shrink-0"></div>
@@ -5652,7 +5665,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
         if (trueSpokes.length === 0) {
             spokesWrap.innerHTML = `<p class="py-8 text-center text-slate-400 italic text-xs">No spokes have connected yet.</p>`;
         } else {
-            spokesWrap.innerHTML = `<div class="space-y-2">${trueSpokes.map(s => {
+            spokesWrap.innerHTML = `<div class="space-y-1.5">${trueSpokes.map(s => {
                 const sid = s.spoke_id;
                 const name = s.display_name || sid;
                 const approved = s.approved;
@@ -5770,7 +5783,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     if (all.length === 0) {
         agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected yet. Install the generic agent on a node (it appears here to be approved, then load a role) or install the agent on a Proxmox node to begin.</p>`;
     } else {
-        agentsWrap.innerHTML = `<div class="space-y-2">${all.map(a => {
+        agentsWrap.innerHTML = `<div class="space-y-1.5">${all.map(a => {
             const aid = a.agent_id;
             const label = a.display_name || a.hostname || aid;
             const isPending = a._status === 'pending';
