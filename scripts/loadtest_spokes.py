@@ -118,6 +118,11 @@ class LoadSpoke(BaseControlPlane):
         self._vmbase = 90000 + (abs(hash(spoke_id)) % 9000)
         self._clients = [self._mk_client(i) for i in range(max(0, int(clients_n)))]
         self._vms = [self._mk_vm(i) for i in range(max(0, int(vms_n)))]
+        # Cache the fully-signed serialized frame; rebuilding + json.dumps +
+        # signing a large payload every message would bottleneck the GENERATOR
+        # (one core) and STARVE the hub instead of stressing it.
+        self._cached_frame = None
+        self._cached_at = 0.0
         try:
             import logging
             logging.getLogger().removeHandler(self._log_relay_handler)
@@ -201,17 +206,26 @@ class LoadSpoke(BaseControlPlane):
         period = 1.0 / self._rate
         while True:
             try:
-                msg = {
-                    "header": {"message_id": str(uuid.uuid4()),
-                               "timestamp": round(time.time(), 6),
-                               "sender_id": self.spoke_id, "destination_id": "hub"},
-                    "payload": {"type": "CS_TELEMETRY",
-                                "data": self._build_telemetry_data()},
-                }
-                sig = self._sign(msg)
-                if sig is not None:
-                    msg["signature"] = sig
-                await websocket.send(json.dumps(msg, separators=(",", ":")))
+                now = time.time()
+                # Reuse the cached signed frame; rebuild every 30s to pick up a
+                # session-key rotation. A repeated message_id is fine — inbound
+                # CS_TELEMETRY is a state snapshot, not ack-tracked/deduped by id,
+                # and the hub still runs its full ingest/fan-out/cache/persist per
+                # frame. This keeps the GENERATOR cheap so IT isn't the bottleneck.
+                if self._cached_frame is None or (now - self._cached_at) > 30:
+                    msg = {
+                        "header": {"message_id": str(uuid.uuid4()),
+                                   "timestamp": round(now, 6),
+                                   "sender_id": self.spoke_id, "destination_id": "hub"},
+                        "payload": {"type": "CS_TELEMETRY",
+                                    "data": self._build_telemetry_data()},
+                    }
+                    sig = self._sign(msg)
+                    if sig is not None:
+                        msg["signature"] = sig
+                    self._cached_frame = json.dumps(msg, separators=(",", ":"))
+                    self._cached_at = now
+                await websocket.send(self._cached_frame)
                 self._stats["sent"] += 1
             except asyncio.CancelledError:
                 raise
