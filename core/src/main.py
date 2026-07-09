@@ -682,7 +682,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._load_level = 0
         self._spoke_backoff = set()       # spoke_ids currently told to slow down
         self._fleet_backoff = False       # rung-2 broadcast active
+        self._fleet_interval = 0.0        # current adaptive fleet slow-down interval (s)
         self._backoff_signaled = {}       # spoke_id -> last level we told it (dedup)
+        self._backoff_interval = {}       # spoke_id -> last min_interval we told it (adaptive re-signal)
         self._backoff_since = {}          # spoke_id -> monotonic ts throttle began (release dwell)
         # Spokes that hit their per-spoke TokenBucket (burst+refill) THIS tick.
         # The bucket is the earliest, per-frame offender detector — feeding it
@@ -765,13 +767,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # msg/s pegged the hub CPU at 100% while mps/lag were still under the
             # old 8000/0.30 marks — so nothing throttled and the loop ground at
             # 100%. Hub-process CPU is the earliest, truest saturation signal.
-            "fleet_cpu_soft": float(cfg.get("fleet_cpu_soft", 65.0)),   # %/core
-            "fleet_cpu_clear": float(cfg.get("fleet_cpu_clear", 45.0)),
+            # fleet_cpu_soft = engage the graceful slow-down here (well under the
+            # 90% protect mark, so we THROTTLE spokes before we ever have to SHED).
+            "fleet_cpu_soft": float(cfg.get("fleet_cpu_soft", 55.0)),   # %/core
+            "fleet_cpu_clear": float(cfg.get("fleet_cpu_clear", 40.0)),
+            # fleet_cpu_hard = the CPU at which we ask throttled spokes for the
+            # MAXIMUM slow-down (coalesce_max_interval_s). Between soft and hard
+            # the requested interval scales UP with CPU — the hotter it gets, the
+            # slower we tell the spokes to send. Sits just under protect (90) so
+            # the adaptive throttle keeps CPU out of protect entirely.
+            "fleet_cpu_hard": float(cfg.get("fleet_cpu_hard", 85.0)),
             "fleet_lag_soft_s": float(cfg.get("fleet_lag_soft_s", 0.15)),
             "fleet_lag_clear_s": float(cfg.get("fleet_lag_clear_s", 0.06)),
             "fleet_soft_mps": float(cfg.get("fleet_soft_mps", 4000.0)),
-            # Min send interval (s) we ask a throttled spoke to conflate to.
+            # ADAPTIVE throttle band: a throttled spoke is asked to conflate to an
+            # interval scaled from _min (at fleet_cpu_soft) to _max (at
+            # fleet_cpu_hard). Raise _max to push the fleet down harder when the
+            # hub is hot (staler telemetry, but CPU stays out of protect).
             "coalesce_min_interval_s": float(cfg.get("coalesce_min_interval_s", 2.0)),
+            "coalesce_max_interval_s": float(cfg.get("coalesce_max_interval_s", 15.0)),
             # Rung-3 hub drain cadence (process one latest snapshot per spoke).
             "hub_drain_interval_s": float(cfg.get("hub_drain_interval_s", 1.0)),
             # SAFETY CAPS (learned the hard way at ~800 spokes: the ladder's own
@@ -3530,6 +3544,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # release_dwell_s before we even consider releasing, and only release
         # then if it has genuinely gone quiet. New offenders still engage
         # instantly (ramp down fast); we only slow the RELEASE (ramp up slow).
+        # ADAPTIVE slow-down interval: the hotter the CPU (soft→hard), the LARGER
+        # the interval we ask FLEET-throttled spokes to conflate to — push the
+        # fleet down HARDER as it heats up so CPU stays out of protect. Linear
+        # from coalesce_min (at fleet_cpu_soft) to coalesce_max (at fleet_cpu_hard).
+        imin, imax = p["coalesce_min_interval_s"], p["coalesce_max_interval_s"]
+        _soft, _hard = p["fleet_cpu_soft"], p["fleet_cpu_hard"]
+        if cpu <= _soft or _hard <= _soft:
+            fleet_interval = imin
+        else:
+            frac = min(1.0, (cpu - _soft) / (_hard - _soft))
+            fleet_interval = imin + frac * (imax - imin)
+        self._fleet_interval = round(fleet_interval, 1)
+
         now = time.monotonic()
         dwell = p["release_dwell_s"]
         new_backoff = set()
@@ -3551,16 +3578,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 desired = 1 if (mps >= p["per_spoke_soft_mps"] or sid in breached) else 0
             if desired:
                 new_backoff.add(sid)
-            if desired != was:
+            # Fleet spokes get the adaptive interval; offenders get the min.
+            want_interval = (fleet_interval if desired == 2
+                             else imin if desired == 1 else 0.0)
+            was_interval = self._backoff_interval.get(sid, 0.0)
+            # Re-signal on a level change OR a MATERIAL interval change (so the
+            # fleet actually slows further as CPU climbs — not just a one-shot).
+            interval_changed = bool(desired) and abs(want_interval - was_interval) >= max(1.0, 0.25 * max(was_interval, imin))
+            if desired != was or interval_changed:
                 if desired and not was:
                     self._backoff_since[sid] = now   # stamp when throttling began
-                sigs.append(self._signal_backoff(
-                    sid, desired, p["coalesce_min_interval_s"] if desired else 0.0))
+                sigs.append(self._signal_backoff(sid, desired, want_interval))
         self._spoke_backoff = new_backoff
         # Forget signal state for spokes that have disconnected.
         for sid in [s for s in list(self._backoff_signaled) if s not in live]:
             self._backoff_signaled.pop(sid, None)
             self._backoff_since.pop(sid, None)
+            self._backoff_interval.pop(sid, None)
         self._load_level = 2 if self._fleet_backoff else (1 if self._spoke_backoff else 0)
         if sigs:
             # Cap sends per tick so a fleet-wide transition (hundreds of spokes)
@@ -3700,11 +3734,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
     async def _signal_backoff(self, spoke_id: str, level: int, min_interval: float) -> None:
         """Send one LM_BACKPRESSURE notification to a spoke (fire-and-forget).
-        level 0 = resume, 1 = offender slow-down, 2 = fleet slow-down. Records
-        the last level sent so the ladder only re-signals on change."""
-        if self._backoff_signaled.get(spoke_id, 0) == level:
-            return
+        level 0 = resume, 1 = offender slow-down, 2 = fleet slow-down. The CALLER
+        decides when to (re-)signal — on a level change OR a material change in
+        the adaptive interval — so no level dedup here (that would swallow an
+        interval escalation). Records both so the caller can diff next tick."""
         self._backoff_signaled[spoke_id] = level
+        self._backoff_interval[spoke_id] = min_interval
         await self.send_to_spoke_command(spoke_id, "LM_BACKPRESSURE", {
             "level": level,
             "coalesce": level > 0,
@@ -4221,6 +4256,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "backpressure": {
                     "level": self._load_level,
                     "fleet": bool(self._fleet_backoff),
+                    # Current adaptive slow-down interval (s) the fleet is asked to
+                    # conflate to — climbs with CPU. Visible so you can see the
+                    # hub pushing the fleet down HARDER as it heats up.
+                    "fleet_interval_s": round(self._fleet_interval, 1),
                     "spokes_throttled": sorted(self._spoke_backoff),
                     # Per-spoke level (1 = offending, 2 = fleet-throttled) so the
                     # WebUI can badge each spoke/agent tile distinctly.

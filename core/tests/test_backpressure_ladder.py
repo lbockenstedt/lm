@@ -63,7 +63,7 @@ def _make(bp_cfg=None):
     h.spoke_mps = {}
     h.mps = 0.0
     h.active_connections = {}
-    h._backoff_signaled = {}
+    h._backoff_signaled = {}; h._backoff_interval = {}; h._fleet_interval = 0.0
     h._backoff_since = {}
     h._spoke_backoff = set()
     h._fleet_backoff = False
@@ -303,3 +303,23 @@ def test_quarantine_expires():
     assert "x" not in h._quarantine                # pruned on read
     h._quarantine["y"] = time.monotonic() + 60
     assert h._is_quarantined("y") is True
+
+
+def test_adaptive_fleet_interval_scales_with_cpu():
+    # As CPU climbs from fleet_cpu_soft(55) toward fleet_cpu_hard(85), the slow-
+    # down interval the fleet is asked to conflate to climbs from min(2) toward
+    # max(15) — the hub pushes the fleet down HARDER as it heats up, and re-signals.
+    h = _make()
+    h.active_connections = {"a": 1}
+    h.spoke_mps = {"a": 30}
+    h.mps = 90
+    h._proc_cpu = 55.0                       # at soft → min interval
+    _ladder(h)
+    assert h._fleet_backoff
+    assert abs(h._fleet_interval - 2.0) < 0.6, h._fleet_interval
+    # CPU spikes toward hard → interval near max → RE-SIGNAL (not a one-shot)
+    h.signals.clear()
+    h._proc_cpu = 85.0
+    _ladder(h)
+    assert h._fleet_interval >= 14.0, h._fleet_interval
+    assert h.signals == [("a", 2)], h.signals
