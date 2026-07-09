@@ -1963,6 +1963,24 @@ function _updateMetrics(statusData) {
 // Diag: drop the hub's outbound message backlog (System → Hub Status button).
 // Clears a stuck backlog (e.g. undeliverable SPOKE_UPDATE to a flapping spoke)
 // without deleting the spoke. Admin only (server enforces 403).
+// Zero the per-spoke rate-limit drop counters (in-memory running totals). They
+// otherwise only reset on a hub restart. Admin only (server enforces 403).
+async function resetRateLimitDrops() {
+    const btn = document.getElementById('reset-drops-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Resetting…'; }
+    try {
+        const res = await fetch('/setup/rate-limit-drops/reset', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        if (typeof showToast === 'function') showToast('Rate-limit drop counters reset.', 'success');
+        updateStatus();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast(`Reset failed: ${e.message}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Reset Drops'; }
+    }
+}
+
 async function dropHubBacklog() {
     const btn = document.getElementById('drop-backlog-btn');
     if (!confirm('Drop ALL queued/unacked messages in the hub backlog? '
@@ -3029,7 +3047,10 @@ function _renderSettingsSection(subMenu) {
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-3">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Message Backlog &amp; Rate Limiting ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <button onclick="dropHubBacklog()" id="drop-backlog-btn" class="text-xs px-3 py-1 rounded-md border border-red-300 text-red-600 hover:bg-red-50 transition-all">Drop Backlog</button>
+                        <div class="flex items-center gap-2">
+                            <button onclick="resetRateLimitDrops()" id="reset-drops-btn" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Zero the rate-limit drop counters">Reset Drops</button>
+                            <button onclick="dropHubBacklog()" id="drop-backlog-btn" class="text-xs px-3 py-1 rounded-md border border-red-300 text-red-600 hover:bg-red-50 transition-all">Drop Backlog</button>
+                        </div>
                     </div>
                     <div id="sys-backlog-detail" class="text-xs text-slate-500 space-y-2"><p class="text-slate-400 italic">Loading…</p></div>
                     <div class="mt-4 pt-3 border-t border-slate-100">

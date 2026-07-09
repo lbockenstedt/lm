@@ -44,6 +44,24 @@ def register(app, hub, ctx):
         return {"dropped": dropped, "type": msg_type or "all",
                 "backlog": hub.mailbox.backlog_stats()}
 
+    @app.post("/setup/rate-limit-drops/reset")
+    async def reset_rate_limit_drops(request: Request):
+        """Reset the per-spoke rate-limit drop counters (in-memory running totals
+        shown in System → Hub Status). Otherwise they only reset on a hub
+        restart. Admin only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        n = len(getattr(hub, "rate_limit_drops", {}) or {})
+        try:
+            hub.rate_limit_drops.clear()
+        except Exception:  # noqa: BLE001
+            hub.rate_limit_drops = {}
+        logger.info("[diag] rate-limit drop counters reset (%d spoke(s)) by %s", n,
+                    (sess.get("username") if isinstance(sess, dict) else "?"))
+        return {"status": "ok", "cleared_spokes": n}
+
     @app.get("/status")
     async def get_status():
         hub = app.state.hub
