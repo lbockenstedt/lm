@@ -762,6 +762,7 @@ class UpdatePipelineMixin:
         self.state.save_state()
 
         hub_updated = False
+        stale_reload = False  # git current but the running process is older than on-disk
         update_failed = False  # update was available + attempted, but did NOT apply
         if update_available:
             try:
@@ -848,6 +849,23 @@ class UpdatePipelineMixin:
                 clear_pending()
         else:
             logger.info("Hub is already up to date. Skipping Hub pull.")
+            # The on-disk code can still be NEWER than the RUNNING process — e.g.
+            # repo-sync or the dev watcher pulled /opt/lm/core without cycling the
+            # process, so git reads "up to date" while the process serves STALE
+            # code and the Update button reports success without ever reloading.
+            # Detect it (startup VERSION != on-disk VERSION) and flag a self-
+            # restart so the reload happens after the spoke fan-out below.
+            try:
+                _disk_v = await self.get_local_version()
+                _run_v = getattr(self, "_startup_version", None)
+                if _run_v and _disk_v and _run_v not in ("unknown",) and _run_v != _disk_v:
+                    logger.warning(
+                        "Hub git is current but the PROCESS is STALE (running %s, "
+                        "on-disk %s) — will self-restart to load the on-disk code.",
+                        _run_v, _disk_v)
+                    stale_reload = True
+            except Exception as _e:
+                logger.debug("stale-process check skipped: %s", _e)
 
         update_results = []
         config = self.state.get_global_config()
@@ -943,15 +961,18 @@ class UpdatePipelineMixin:
 
         logger.info(f"Spoke update results: {update_results}")
 
-        if hub_updated:
+        if hub_updated or stale_reload:
             # Restart local in-repo spokes (dns/dhcp live inside the lm repo; they
-            # are already updated by the hub git pull above and just need a restart).
-            for local_svc in ("lm-dns", "lm-dhcp"):
-                try:
-                    subprocess.Popen(["sudo", "systemctl", "restart", local_svc])
-                    logger.info(f"Restarting local spoke service {local_svc}")
-                except Exception as _e:
-                    logger.warning(f"Could not restart {local_svc}: {_e}")
+            # are already updated by the hub git pull above and just need a
+            # restart). Only on a real git update — a stale-process reload didn't
+            # change their code.
+            if hub_updated:
+                for local_svc in ("lm-dns", "lm-dhcp"):
+                    try:
+                        subprocess.Popen(["sudo", "systemctl", "restart", local_svc])
+                        logger.info(f"Restarting local spoke service {local_svc}")
+                    except Exception as _e:
+                        logger.warning(f"Could not restart {local_svc}: {_e}")
             # Restart the hub from OUTSIDE its own cgroup so the restart
             # command survives lm.service being stopped. Calling
             # `systemctl restart lm` directly from here races the stop/start
@@ -974,7 +995,11 @@ class UpdatePipelineMixin:
                 subprocess.Popen(["sudo", "-n", "/usr/local/bin/lm-update-restart"])
             except Exception as _e:
                 logger.warning(f"Could not schedule hub self-restart: {_e}")
-            return {"status": "success", "message": f"Updated Hub to {remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."}
+            if hub_updated:
+                _rmsg = f"Updated Hub to {remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."
+            else:
+                _rmsg = "Hub code on disk was newer than the running process (stale process) — restarting to load it. Spoke updates triggered."
+            return {"status": "success", "message": _rmsg}
 
         if update_failed:
             # An update WAS available and we tried to apply it, but the code did
