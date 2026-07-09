@@ -1863,7 +1863,11 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
 // (metrics → hub health → spoke count → nav rebuild → dashboard lists) and the
 // outer try/catch are preserved exactly from the pre-refactor body — note
 // _renderDashboardLists is awaited so its errors surface in this catch.
+let _statusBackoffUntil = 0;   // hub-requested polling backoff (protect mode)
 async function updateStatus() {
+    // Honor hub overload backpressure: if the hub told us to back off, skip
+    // this tick instead of hammering a saturated loop.
+    if (Date.now() < _statusBackoffUntil) return;
     try {
         const requests = [fetch('/status')];
         if (isAdmin()) {
@@ -1871,6 +1875,14 @@ async function updateStatus() {
         }
         const [statusRes, approvalsRes, diagRes] = await Promise.all(requests);
 
+        // 503 + Retry-After = hub in protect mode → back off polling.
+        if (statusRes.status === 503) {
+            const ra = parseInt(statusRes.headers.get('Retry-After') || '30', 10) || 30;
+            _statusBackoffUntil = Date.now() + ra * 1000;
+            if (typeof showToast === 'function') showToast(`Hub busy (protecting) — backing off ${ra}s`, 'info');
+            return;
+        }
+        _statusBackoffUntil = 0;
         if (!statusRes.ok) throw new Error('API Error');
         const approvalsOk = isAdmin() && approvalsRes?.ok;
         const diagOk = isAdmin() && diagRes?.ok;
