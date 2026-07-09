@@ -2806,9 +2806,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
             # Initialize the per-spoke rate limiter from config (applied on each
             # (re)connect, so a knob change propagates as spokes reconnect). The
-            # default burst=10 / 5 msg/s is low for a RELAY spoke that fans many
-            # hosted agents and re-flushes its queue on reconnect — raise
-            # global_config["rate_limit"] as the fleet/scale grows.
+            # default (burst=400 / 200 msg/s, from _rate_limit_params) is a FLOOD
+            # guard sized well ABOVE a RELAY spoke's legit peak — it fans many
+            # hosted agents and re-flushes its queue on reconnect — so normal
+            # traffic is never dropped. Raise global_config["rate_limit"] as the
+            # fleet/scale grows. Aggregate overload is the fleet layer's job, not
+            # this bucket. See docs/backpressure-throttling.md §4.
             _rl_cap, _rl_rate = self._rate_limit_params()
             self.rate_limiters[spoke_id] = TokenBucket(capacity=_rl_cap, fill_rate=_rl_rate)
             if module_type:
@@ -3763,7 +3766,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         Rung 2 (fleet): only if the aggregate is STILL hot (loop-lag / mps over
         the fleet soft mark) does every spoke get the slow-down. This is the
         'throttle the loud one first, back off the whole fleet only if that
-        wasn't enough' behaviour."""
+        wasn't enough' behaviour. See docs/backpressure-throttling.md §3
+        (escalation ladder) for the full rung-by-rung contract."""
         # Snapshot + clear the per-tick bucket-breach set FIRST (so it clears
         # every tick even when we early-return under protect). A spoke that hit
         # its TokenBucket this tick is an instant offender — the earliest, most

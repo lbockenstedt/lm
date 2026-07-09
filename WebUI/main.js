@@ -2078,6 +2078,8 @@ const _BP_FIELDS = [
     ['bp-protect-shed-topk', 'protect_shed_top_k'], ['bp-ddos-grace', 'ddos_grace_s'],
 ];
 
+// Load: GET the live backpressure subtree, fill the panel inputs (default where
+// unset), and cache the FULL subtree so Save can merge onto it (not overwrite).
 async function loadBackpressureConfig() {
     try {
         const res = await setupFetch('/setup/config');
@@ -2094,6 +2096,8 @@ async function loadBackpressureConfig() {
     } catch (e) { /* leave inputs blank on failure */ }
 }
 
+// Reset: fill inputs with the recommended defaults locally — NOT persisted
+// until the operator clicks Save (so a mis-click is recoverable by reloading).
 function resetBackpressureConfig() {
     for (const [id, key] of _BP_FIELDS) {
         const el = document.getElementById(id);
@@ -2104,6 +2108,9 @@ function resetBackpressureConfig() {
     if (typeof showToast === 'function') showToast('Defaults filled in — click Save to apply.', 'info');
 }
 
+// Save: merge panel fields onto the cached subtree and POST to /setup/config;
+// the hub picks it up on the next 1s tick (live, no deploy). See §8 of
+// docs/backpressure-throttling.md for the full knob reference.
 async function saveBackpressureConfig() {
     const btn = document.getElementById('bp-save-btn');
     // Merge onto the last-loaded subtree so knobs NOT shown in this panel

@@ -68,7 +68,12 @@ class MessageSigner:
         return sig
 
     def sign_bytes(self, message_bytes: bytes) -> str:
-        """Signs raw bytes using HMAC-SHA256."""
+        """HMAC-SHA256 over EXACT bytes → hex digest. The low-level primitive
+        under both signing paths: ``sign`` feeds it canonical-JSON bytes (legacy
+        dict-envelope path), while ``encode_frame`` feeds it the compact body
+        serialized ONCE. Signing raw bytes is what lets the receiver verify the
+        received body directly (verify_bytes) without re-serialising — the win
+        that removed the per-frame json.dumps from hub ingest."""
         return hmac.new(self.secret.encode(), message_bytes, hashlib.sha256).hexdigest()
 
     def verify(self, msg: Dict[str, Any]) -> bool:
@@ -104,7 +109,13 @@ class MessageSigner:
         return encode_frame(self, msg)
 
     def verify_bytes(self, message_bytes: bytes, signature: str) -> bool:
-        """Verifies a signature against raw bytes."""
+        """Verify ``signature`` against the EXACT received body bytes — the
+        receiver fast path for the ``<sig>.<body>`` frame. Because it HMACs the
+        bytes as received (no re-parse → re-serialize, no sort_keys), signing
+        order is irrelevant and the per-frame json.dumps that dominated hub
+        ingest CPU is gone. Constant-time compare (compare_digest); a mismatch
+        logs length + hex prefix only, never the raw (possibly token-bearing)
+        bytes. See docs/backpressure-throttling.md §7."""
         expected = self.sign_bytes(message_bytes)
         result = hmac.compare_digest(expected, signature)
         if not result:
