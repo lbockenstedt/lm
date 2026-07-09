@@ -14,7 +14,7 @@ The project is consolidated under the `/opt/lm` (on server) or local directory s
 | `pxmx/agent` | **Proxmox Agent** | Lightweight host-level service for real-time telemetry and API execution. |
 | `opnsense` | **OPNsense Spoke** | Firewall rule management and interface status reporting. |
 | `cs` | **Client Sim Spoke** | Traffic and DNS simulation engine for network testing. |
-| `cppm` | **CPPM Spoke** | ClearPass Policy Manager integration for endpoint and session auditing. Spoke source not in this repo — see [docs/modules/cppm.md](docs/modules/cppm.md). |
+| `cppm` | **CPPM Spoke** | ClearPass Policy Manager integration for endpoint and session auditing. Spoke source not in this repo — see [docs/cppm.md](docs/cppm.md). |
 
 ---
 
@@ -46,7 +46,7 @@ The project is consolidated under the `/opt/lm` (on server) or local directory s
 
 ### 🛠️ Active / Pending Tasks
 - [ ] **OPNsense Deep Dive**: Implement full rule creation/deletion via UI (currently supports query).
-- [ la-manager ] **Client Sim Controls**: Build out the UI components for triggering and managing simulation profiles.
+- [ ] **Client Sim Controls**: Build out the UI components for triggering and managing simulation profiles.
 - [ ] **CPPM Advanced Reporting**: Expand CPPM queries to include detailed session and endpoint analytics.
 - [ ] **Telemetry Dashboards**: Create visual real-time graphs for the metrics pushed by the Proxmox Agent.
 
@@ -58,7 +58,7 @@ The project is consolidated under the `/opt/lm` (on server) or local directory s
 1. **`core/src/main.py`**: To understand the current Hub logic and state (installed flat under `/opt/lm/core`, not nested `lm/core/src/...`).
 2. **`WebUI/main.js`**: To review the frontend routing and dynamic menu logic (installed flat under `/opt/lm/WebUI`).
 3. **`pxmx/src/proxmox_spoke.py`**: To see how the agent-bridge is implemented (sibling `pxmx` repo, cloned into `/opt/lm/pxmx`).
-4.	**`docs/`**: For technical specifications and user guides — start with [docs/README.md](docs/README.md) and [docs/operations.md](docs/operations.md).
+4.	**`docs/`**: For technical specifications and user guides — start with [docs/README.md](docs/README.md) and [docs/architecture-topology.md](docs/architecture-topology.md).
 
 **Key Architectural Constraints:**
 - **No CLI for Users**: All configuration must be handled via the WebUI.
@@ -71,7 +71,7 @@ The project is consolidated under the `/opt/lm` (on server) or local directory s
 ## 🛠️ Maintenance Commands
 - **Start All**: `./start_all.sh` (from root) — for dev. Production uses systemd: `sudo systemctl start lm`.
 - **Stop All**: `sudo systemctl stop lm lm-pxmx lm-cs lm-opnsense lm-netbox lm-dhcp lm-dns` (stop the hub + every `lm-*` spoke unit that is enabled on this host).
-- **Update / recover**: see [docs/operations.md](docs/operations.md) for the root helpers (`lm-self-restart`, `lm-update-restart`, `lm-spoke-recover`) and runbooks.
+- **Update / recover**: see [docs/architecture-topology.md](docs/architecture-topology.md) for the update/rollback watchdog + self-update pipeline, and [docs/lm-hub.md](docs/lm-hub.md) for the spoke-recovery watchdog. The root helpers (`lm-self-restart`, `lm-update-restart`, `lm-spoke-recover`) are installed by `install_all.sh` into `/usr/local/bin/`.
 
 > **Never** use `pkill -f python` to stop Lab Manager. It kills every `lm-*`
 > service in one shot — hub, spokes, and agents alike — which is exactly the

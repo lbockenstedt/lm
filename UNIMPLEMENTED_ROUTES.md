@@ -7,9 +7,12 @@
 > are read/health probes expected to be used by external automation). **Do not
 > remove without checking each one.** This file exists so we can revisit later.
 >
-> All paths are defined in `core/src/api.py`. Line numbers are as of commit
-> `4a2b96b` (2026-06-25) and **will drift** — treat the path string as the
-> stable identifier, the line number as a hint.
+> All paths are defined across `core/src/api.py` and the `core/src/routes/*`
+> route-group modules (the routes were refactored out of the single `api.py`
+> after this list was compiled). Line numbers below are from the original
+> 2026-06-25 dead-code scan and **have drifted** — treat the path string as the
+> stable identifier, the line number as a hint (it now points at the old `api.py`
+> location, not the current `routes/*` home).
 
 ## Why they look dead
 
@@ -110,14 +113,16 @@ were removed. The GET side loads config for module setup pages. Likely
 
 ## What WAS removed (for contrast)
 
-Genuinely dead and removed in `4a2b96b`:
+Genuinely dead and removed in the 2026-06-25 dead-code scan (commit SHA
+predates the 2026-06-28 history reset and no longer resolves):
 - `/api/cppm/device-detail` — a **duplicate** of the live unified
   `/api/device-detail` (which the WebUI actually calls). Not a stub; a
   superseded variant. Zero repo-wide references.
 
 The pre-native `/api/sim/start|stop|status|telemetry` block + the
-`get_cs_spoke(hub)` helper were removed earlier in `058d305` — those were
+`get_cs_spoke(hub)` helper were removed earlier — those were
 superseded by the native `/sim/api/*` tree + `sim-views.js`, and the
 corresponding spoke handlers (`CS_START/STOP_SIMULATION`,
 `CS_GET_STATUS/TELEMETRY/CLIENTS`) were removed from
-`cs/lm-spoke/src/cs_spoke.py` in cs commit `f0a2715`.
+`cs/lm-spoke/src/cs_spoke.py`. (The cs + lm commit SHAs predate the
+2026-06-28 history reset and no longer resolve.)

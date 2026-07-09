@@ -1,6 +1,13 @@
 # LM Hub — Code Diagnosability & Documentation Review (Post-Fix Re-Review)
 
 > **⚠ SUPERSEDED — retained as a historical audit record only.**
+> **The commit SHAs referenced below (`82c1129`, `7bc70c6`, `058d305`, etc.)
+> predate the 2026-06-28 repo history reset and no longer resolve in `git log`;
+> they are kept as historical anchors only.** The doc paths cited inside
+> (`docs/operations.md`, `docs/log_format.md`, `docs/installation.md`,
+> `docs/modules/*`) also reflect the pre-consolidation docs tree and have since
+> been merged into the flat `docs/*.md` set.
+>
 > All 28 findings below were addressed across three subsequent passes:
 > 1. The 4-tier parallel pass (commit `82c1129`, 21 files, +1599/−961) — rolled out
 >    `_refresh_module_all_tenants` to all 13 sites, added DEBUG relay-trace to ~15 routes,
