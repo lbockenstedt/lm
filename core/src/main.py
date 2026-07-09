@@ -973,17 +973,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 wire = self.key_manager.encode_frame(spoke_id, body)
             self.bytes_count += len(wire.encode())
             try:
-                await ws.send(wire)
-            except (websockets.ConnectionClosed, RuntimeError, ConnectionError) as e:
-                # The socket was closed/evicted between the active_connections
-                # lookup above and this send (the eviction path swaps sockets;
-                # a concurrent sender can catch the closing one mid-swap, or a
-                # duplicate-process flap can replace it). Surface as a clean
-                # ConnectionError so push_or_queue_to_spoke queues the message
-                # for redelivery on reconnect instead of bubbling up as a
-                # "connection_error — Need to call accept first" event.
+                # Bound the send: a half-open (black-holed ESTAB) socket makes
+                # ws.send() block on a full write buffer indefinitely, and a
+                # spoke mid-restart after SPOKE_UPDATE leaves its connection in
+                # CLOSING state. Either can hang the caller (the repo_sync fan-out
+                # stalled here when spokes reconnected). wait_for caps it.
+                await asyncio.wait_for(ws.send(wire), timeout=10.0)
+            except (websockets.ConnectionClosed, websockets.InvalidState,
+                    RuntimeError, ConnectionError, asyncio.TimeoutError) as e:
+                # The socket was closed/closing/black-holed between the
+                # active_connections lookup above and this send (eviction swap,
+                # duplicate-process flap, or a spoke mid-restart after SPOKE_UPDATE
+                # whose connection is CLOSING → websockets InvalidState, or a wedged
+                # write buffer → TimeoutError). Surface as a clean ConnectionError
+                # so push_or_queue_to_spoke queues the message for redelivery on
+                # reconnect instead of hanging the caller or bubbling up as a
+                # traceback storm ("InvalidState: connection is closing").
                 raise ConnectionError(
-                    f"Spoke {spoke_id} connection closed mid-send: {e}") from e
+                    f"Spoke {spoke_id} connection closed/blocked mid-send: {e}") from e
             self.message_count += 1
         else:
             raise ConnectionError(f"Spoke {spoke_id} is not connected")
