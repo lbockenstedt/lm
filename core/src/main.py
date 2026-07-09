@@ -2961,6 +2961,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
                 self.throughput_mbps = self.bytes_count / (1024 * 1024)
 
+                # Keep the mailbox's backlog-expiry cap in sync with the live
+                # config knob (global_config["backlog_expiry"].max_age_seconds,
+                # default 3600s; 0 disables the cap → 24h ttl). Cheap dict read.
+                try:
+                    _be = (self.state.get_global_config().get("backlog_expiry", {}) or {})
+                    self.mailbox.backlog_max_age_s = float(_be.get("max_age_seconds", 3600))
+                except Exception:
+                    pass
+
                 # Per-spoke msg/s: push this tick's count into each spoke's 10s
                 # history and average. Prune history for spokes with no traffic
                 # and no live connection so the dicts don't grow unbounded.

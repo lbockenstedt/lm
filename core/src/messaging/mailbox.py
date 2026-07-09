@@ -44,6 +44,13 @@ logger = logging.getLogger("Mailbox")
 #      stuck one cannot re-fire every reconnect.
 SPOKE_UPDATE_DELIVERY_COOLDOWN_S = 600
 
+# Default absolute backlog expiry (seconds): a queued/unacked message older than
+# this is dropped even if its own 24h ttl hasn't elapsed. Overridable live via
+# global_config["backlog_expiry"]["max_age_seconds"]; 0 disables the cap.
+BACKLOG_MAX_AGE_DEFAULT_S = 3600
+# How often retry_loop runs the expiry sweep (cheap, but no need every 1s).
+BACKLOG_EXPIRY_SWEEP_INTERVAL_S = 30
+
 
 def _is_spoke_update(message: Message) -> bool:
     try:
@@ -76,6 +83,16 @@ class Mailbox:
         # In-memory only (not persisted): a hub restart legitimately clears the
         # cooldown so a pending update flushes promptly after the restart.
         self._spoke_update_delivered: Dict[str, float] = {}
+
+        # Proactive backlog expiry: drop any queued/unacked message older than
+        # min(its own ttl, backlog_max_age_s) so a stale entry (e.g. an
+        # undeliverable SPOKE_UPDATE to a spoke that never takes it) can't sit
+        # forever. The hub refreshes backlog_max_age_s from
+        # global_config["backlog_expiry"]["max_age_seconds"] (default 1h);
+        # set to 0 to disable the absolute cap and fall back to each message's
+        # 24h ttl. Swept on a throttle from retry_loop.
+        self.backlog_max_age_s: float = float(BACKLOG_MAX_AGE_DEFAULT_S)
+        self._last_expiry_sweep = 0.0
 
         self.retry_intervals = [5, 15, 60, 300, 900]  # Exponential backoff intervals in seconds
 
@@ -298,6 +315,47 @@ class Mailbox:
             self.spoke_queues[spoke_id] = deferred
             await self._asave()
 
+    def _expire_stale(self, now: float) -> int:
+        """Drop backlog messages older than min(their ttl, backlog_max_age_s)
+        from BOTH pending_ack and the per-spoke offline queues. Returns the
+        count expired. This is the proactive counterpart to queue_for_spoke's
+        lazy TTL filter (which only runs when a NEW message is queued for that
+        spoke) — without it a stale entry for an idle spoke sits until its 24h
+        ttl. Non-raising; the caller persists if the count is non-zero."""
+        cap = self.backlog_max_age_s if self.backlog_max_age_s and self.backlog_max_age_s > 0 else None
+
+        def _expired(msg: Message, stamp: float) -> bool:
+            age = now - float(stamp or now)
+            limit = float(getattr(msg.header, "ttl", 86400) or 86400)
+            if cap is not None:
+                limit = min(limit, cap)
+            return age >= limit
+
+        dropped = 0
+        by_type: Dict[str, int] = {}
+        for mid in [m for m, (msg, first_sent, _r) in self.pending_ack.items()
+                    if _expired(msg, first_sent)]:
+            msg = self.pending_ack[mid][0]
+            by_type[getattr(msg.payload, "type", "?") or "?"] = \
+                by_type.get(getattr(msg.payload, "type", "?") or "?", 0) + 1
+            del self.pending_ack[mid]
+            dropped += 1
+        for sid in list(self.spoke_queues.keys()):
+            keep: List[Message] = []
+            for msg in self.spoke_queues[sid]:
+                if _expired(msg, getattr(msg.header, "timestamp", now)):
+                    t = getattr(msg.payload, "type", "?") or "?"
+                    by_type[t] = by_type.get(t, 0) + 1
+                    dropped += 1
+                else:
+                    keep.append(msg)
+            self.spoke_queues[sid] = keep
+        if dropped:
+            logger.warning("[backlog-expiry] dropped %d stale backlog message(s) "
+                           "(older than %ss): %s", dropped,
+                           int(cap) if cap else "ttl", by_type)
+        return dropped
+
     async def retry_loop(self, send_func_map):
         """
         Periodically checks for messages that haven't been acknowledged and retries them.
@@ -308,6 +366,12 @@ class Mailbox:
             to_retry = []
 
             changed = False
+            # Proactive stale-backlog expiry (throttled) — drop entries past
+            # their age cap so a stuck message can't linger to its 24h ttl.
+            if (now - self._last_expiry_sweep) >= BACKLOG_EXPIRY_SWEEP_INTERVAL_S:
+                self._last_expiry_sweep = now
+                if self._expire_stale(now):
+                    changed = True
             for msg_id, (msg, last_sent, retries) in list(self.pending_ack.items()):
                 if retries >= len(self.retry_intervals):
                     # Include spoke_id (destination) + message type so triage
