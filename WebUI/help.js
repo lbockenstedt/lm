@@ -49,6 +49,7 @@
         certificates: 'le',
         webui: 'webui',
         bugfixer: 'bugfixer',
+        console: 'console',
         agent: 'generic-agent',
         'generic-agent': 'generic-agent',
     };

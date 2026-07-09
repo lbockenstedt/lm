@@ -2817,7 +2817,7 @@ function _renderLogsSection(subMenu) {
     content.innerHTML = `
         <div class="${card}">
             <div class="px-4 py-3 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-sm font-bold text-slate-600">${title}</h3>
+                <h3 class="text-sm font-bold text-slate-600">${title} ${helpIcon('logging-observability-contract', null, 'Logs help')}</h3>
                 <div class="flex gap-3 items-center">
                     <button id="debug-toggle-btn" onclick="toggleDebugLogging()"
                         class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
