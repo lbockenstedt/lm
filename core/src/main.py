@@ -3066,7 +3066,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     cpup = self._proc.cpu_percent(interval=None) if self._proc else 0.0
                     _over = memp >= mem_hi or _loop_lag >= lag_hi or cpup >= cpu_hi
                     _under = memp <= mem_lo and _loop_lag <= lag_lo and cpup <= cpu_lo
-                    dwell = float(cfg.get("min_dwell_s", 5))
+                    dwell = float(cfg.get("min_dwell_s", 15))
                     if not self._protect_mode and _over:
                         self._protect_mode = True
                         self._protect_entered_ts = _now
@@ -3556,8 +3556,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "queue_size": len(self.mailbox.get_all_pending()),
                 "backlog": len(self.mailbox.get_all_pending()),
                 # Backlog breakdown (by type / by spoke / oldest age) so a
-                # stuck backlog is diagnosable in System → Hub Status.
-                "backlog_stats": self.mailbox.backlog_stats(),
+                # stuck backlog is diagnosable in System → Hub Status. Skipped in
+                # protect mode — it iterates the mailbox (O(backlog)) and /status
+                # must stay CHEAP so it's readable while the loop is saturated.
+                "backlog_stats": ({} if self._protect_mode else self.mailbox.backlog_stats()),
                 # Overload self-protection state (shed heavy reads + telemetry).
                 "protect": bool(self._protect_mode),
                 "protect_reason": self._protect_reason,

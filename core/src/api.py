@@ -773,7 +773,10 @@ def create_app(hub):
     # 503 + Retry-After so the WebUI backs off instead of piling onto a saturated
     # loop. Auth/control/health paths pass through untouched. This is the "shed,
     # don't hang" guard — the ceiling stays survivable.
-    _SHED_PREFIXES = ("/status", "/setup/pending_spokes", "/setup/diagnostics",
+    # /status is deliberately NOT shed — it must stay readable in protect mode so
+    # the operator + WebUI can SEE the state (it returns a lightweight body while
+    # protecting; see get_system_metrics). Only the heavy fleet-shaping views shed.
+    _SHED_PREFIXES = ("/setup/pending_spokes", "/setup/diagnostics",
                       "/sim", "/aggregate")
 
     @app.middleware("http")
