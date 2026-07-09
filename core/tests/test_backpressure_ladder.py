@@ -201,19 +201,37 @@ def test_bucket_breach_triggers_slowdown_under_mps_mark():
     assert h._rl_breached == set()                 # cleared each tick
 
 
-# ── protect stand-down ──────────────────────────────────────────────────────
-def test_protect_stand_down_does_no_work():
+# ── protect: throttle loudest, spare quiet ──────────────────────────────────
+def test_protect_throttles_loudest_spares_quiet():
+    # Under protect the ladder still THROTTLES the loud talkers (bounded, loudest-
+    # first) — standing down entirely left them un-signalled and CPU pegged. Quiet
+    # spokes (< fleet_min) are spared. The coalesce buffer is still dropped.
     h = _make()
-    h.active_connections = {"a": 1, "b": 1}
-    h.spoke_mps = {"a": 999, "b": 999}
+    h.active_connections = {"loud": 1, "quiet": 1}
+    h.spoke_mps = {"loud": 999, "quiet": 0.2}
     h.mps = 2000
     h._protect_mode = True
     h._spoke_offered = {}                   # nothing offered → no source-shed
-    h._coalesce_pending = {"a": ({}, 0), "b": ({}, 0)}
+    h._coalesce_pending = {"loud": ({}, 0)}
     _ladder(h, loop_lag=5.0)
-    assert h.signals == []                 # no per-spoke signalling under protect
-    assert h._coalesce_pending == {}       # buffer dropped (superseded)
+    assert h.signals == [("loud", 2)]       # loudest throttled, quiet spared
+    assert "quiet" not in h._spoke_backoff
+    assert h._coalesce_pending == {}        # buffer dropped (superseded)
     assert h._load_level >= 3
+
+
+def test_fleet_spares_quiet_spokes_and_throttles_loud():
+    # The exact bug the operator hit: quiet infra spokes must NOT be fleet-
+    # throttled while loud ones (40/s) must be. Fleet floor = 5/s.
+    h = _make()
+    h.active_connections = {"infra": 1, "loud": 1}
+    h.spoke_mps = {"infra": 0.1, "loud": 40.0}
+    h.mps = 90
+    h._proc_cpu = 70.0                      # fleet engaged
+    _ladder(h)
+    assert h._fleet_backoff
+    assert h.signals == [("loud", 2)]       # only the loud one; infra spared
+    assert "infra" not in h._spoke_backoff
 
 
 def test_protect_source_shed_disconnects_loudest_spares_quiet():

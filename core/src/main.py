@@ -780,6 +780,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             "fleet_lag_soft_s": float(cfg.get("fleet_lag_soft_s", 0.15)),
             "fleet_lag_clear_s": float(cfg.get("fleet_lag_clear_s", 0.06)),
             "fleet_soft_mps": float(cfg.get("fleet_soft_mps", 4000.0)),
+            # In fleet mode, only throttle spokes ACTUALLY contributing load (mps
+            # >= this). Quiet spokes (real infra at ~0.1/s) are NEVER throttled —
+            # the slow-down targets the loud talkers, loudest-first, not everyone.
+            "fleet_min_mps": float(cfg.get("fleet_min_mps", 5.0)),
             # ADAPTIVE throttle band: a throttled spoke is asked to conflate to an
             # interval scaled from _min (at fleet_cpu_soft) to _max (at
             # fleet_cpu_hard). Raise _max to push the fleet down harder when the
@@ -3490,13 +3494,34 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if self._protect_mode:
             self._coalesce_pending = {}
             self._load_level = max(self._load_level, 3)
-            # AGGRESSIVE relief: disconnect the loudest talkers so the loop stops
-            # spending 100% CPU just READING their flood — this is what frees loop
-            # time for real spokes' heartbeats (modules stay online) and /status
-            # (WebUI stays usable). Cheap + bounded (top-K), so it can't itself
-            # become the O(spokes) sink that the ladder must avoid under protect.
+            p = self._backpressure_params()
+            # Standing down ENTIRELY here was the bug the operator saw: under
+            # protect the loud spokes got NO slow-down, so CPU stayed pegged and
+            # only the early-throttled (now-quiet) spokes showed throttled. So
+            # still THROTTLE the loudest talkers (bounded, loudest-first, to the
+            # MAX interval) — cheap (sort + top-K signals), and it's exactly the
+            # spokes that need slowing. Then source-shed disconnects any that
+            # ignore it. Quiet spokes (< fleet_min) are never touched.
             try:
-                await self._protect_source_shed(self._backpressure_params())
+                _cap = max(1, p["max_signals_per_tick"])
+                _fmin = p["fleet_min_mps"]
+                _loud = sorted(getattr(self, "active_connections", {}) or {},
+                               key=lambda s: self.spoke_mps.get(s, 0.0), reverse=True)
+                _now = time.monotonic()
+                _sigs = []
+                for _sid in _loud[:_cap]:
+                    if self.spoke_mps.get(_sid, 0.0) < _fmin:
+                        break  # sorted desc → the rest are quieter still
+                    if self._backoff_signaled.get(_sid, 0) != 2:
+                        self._backoff_since.setdefault(_sid, _now)
+                        self._spoke_backoff.add(_sid)
+                        _sigs.append(self._signal_backoff(_sid, 2, p["coalesce_max_interval_s"]))
+                if _sigs:
+                    await asyncio.gather(*_sigs, return_exceptions=True)
+            except Exception as _te:  # noqa: BLE001
+                logger.debug("[protect] loud-throttle skipped: %s", _te)
+            try:
+                await self._protect_source_shed(p)
             except Exception as _se:  # noqa: BLE001
                 logger.debug("[protect] source-shed skipped: %s", _se)
             return
@@ -3559,23 +3584,33 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
         now = time.monotonic()
         dwell = p["release_dwell_s"]
+        fmin = p["fleet_min_mps"]
         new_backoff = set()
-        for sid in live:
+        # LOUDEST-FIRST: process spokes by measured rate descending so the per-
+        # tick signal cap throttles the LOUD talkers first (not front-of-dict /
+        # connection order — that was throttling quiet early spokes while loud
+        # late-connecting ones kept blasting).
+        for sid in sorted(live, key=lambda s: self.spoke_mps.get(s, 0.0), reverse=True):
             mps = self.spoke_mps.get(sid, 0.0)
             was = self._backoff_signaled.get(sid, 0)
-            if self._fleet_backoff:
-                desired = 2
-            elif was:  # currently throttled → apply the release dwell
+            if was:  # currently throttled → release dwell (measured rate is suppressed)
                 held = now - self._backoff_since.get(sid, now)
-                # A fresh bucket breach re-arms the dwell and holds the throttle.
                 if held < dwell or mps >= p["per_spoke_clear_mps"] or sid in breached:
                     desired = was          # hold (damp the flap)
+                elif self._fleet_backoff and mps >= fmin:
+                    desired = 2            # still contributing under fleet → keep throttled
                 else:
                     desired = 0            # quiet past the dwell → release
             else:
-                # Offender if over the mps soft mark OR it breached its burst
-                # bucket this tick (instant, per-frame trigger).
-                desired = 1 if (mps >= p["per_spoke_soft_mps"] or sid in breached) else 0
+                # Offender (rung 1) if over the mps soft mark or a bucket breach;
+                # else FLEET (rung 2) only if it's actually LOUD (>= fleet_min) —
+                # quiet spokes are spared even when the fleet is backing off.
+                if mps >= p["per_spoke_soft_mps"] or sid in breached:
+                    desired = 1
+                elif self._fleet_backoff and mps >= fmin:
+                    desired = 2
+                else:
+                    desired = 0
             if desired:
                 new_backoff.add(sid)
             # Fleet spokes get the adaptive interval; offenders get the min.
