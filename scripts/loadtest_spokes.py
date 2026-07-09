@@ -39,7 +39,7 @@ import time
 import urllib.request
 import uuid
 
-# ── locate the lm core (same dual resolution the real spokes use) ────────────
+# ── locate the lm core + spoke venv (turnkey on an existing spoke) ───────────
 # /opt/lm on the path resolves `core.src.messaging.*` (PEP-420 namespace pkgs);
 # /opt/lm/core/src resolves the bare `messaging.*` form. A real cs spoke tries
 # both, so we do too — one of them matches whichever layout this box has.
@@ -47,6 +47,41 @@ _repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 for _p in ("/opt/lm", "/opt/lm/core/src", _repo, os.path.join(_repo, "core", "src")):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
+
+
+def _add_spoke_venv():
+    """Add an existing spoke's venv site-packages so `websockets` (and the rest
+    of the client deps) import even when this is launched with the SYSTEM python
+    — so you can just `python3 scripts/loadtest_spokes.py` on a spoke box."""
+    import glob
+    try:
+        import websockets  # noqa: F401 — already importable, nothing to do
+        return
+    except Exception:
+        pass
+    for base in ("/opt/lm/cs/venv", "/opt/lm/core/venv", "/opt/lm/venv"):
+        for sp in glob.glob(os.path.join(base, "lib", "python*", "site-packages")):
+            if os.path.isdir(sp) and sp not in sys.path:
+                sys.path.insert(0, sp)
+
+
+_add_spoke_venv()
+
+
+def _load_env_file(path):
+    """Best-effort parse of a spoke .env (KEY=VALUE lines) → dict."""
+    out = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return out
 BaseControlPlane = None
 _imp_err = None
 for _mod in ("core.src.messaging.control_plane", "messaging.control_plane"):
@@ -192,7 +227,9 @@ async def _monitor(status_url, stop_evt, interval, stats, total):
 
 async def main():
     ap = argparse.ArgumentParser(description="Hub load test — N synthetic spokes.")
-    ap.add_argument("--hub", required=True, help="wss://HOST:PORT (e.g. wss://172.16.1.31:443)")
+    ap.add_argument("--hub", default="", help="wss://HOST:PORT (default: from --env-file HUB_URL)")
+    ap.add_argument("--env-file", default="/opt/lm/cs/.env",
+                    help="existing spoke .env to pull hub/PSK/tenant defaults from")
     ap.add_argument("--count", type=int, default=100, help="number of synthetic spokes")
     ap.add_argument("--rate", type=float, default=1.0, help="telemetry msg/s PER spoke")
     ap.add_argument("--duration", type=int, default=120, help="run seconds")
@@ -205,6 +242,22 @@ async def main():
     ap.add_argument("--status-url", default="", help="override; default derives https://HOST:PORT/status")
     ap.add_argument("--sample-interval", type=float, default=5.0)
     args = ap.parse_args()
+
+    # Fill hub / PSK / tenant from an existing spoke's .env when not given, so on
+    # a spoke box you can just run the script with --count/--rate.
+    _env = _load_env_file(args.env_file)
+    if not args.hub:
+        args.hub = (_env.get("HUB_URL") or _env.get("LM_HUB_URL") or "").strip()
+    if not args.psk:
+        args.psk = (_env.get("LM_ONBOARDING_PSK") or "").strip()
+    if not args.tenant:
+        args.tenant = (_env.get("LM_TENANT_ID_HINT") or "").strip()
+    if not args.hub:
+        sys.exit("No --hub given and none found in --env-file. Pass --hub wss://HOST:PORT")
+    if _env:
+        print(f"(loaded defaults from {args.env_file}: "
+              f"hub={'yes' if args.hub else 'no'}, psk={'yes' if args.psk else 'no'}, "
+              f"tenant={args.tenant or '-'})")
 
     if not args.psk:
         print("WARNING: no --psk → spokes stay PENDING (unapproved); only heartbeats\n"
