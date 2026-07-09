@@ -128,33 +128,47 @@ logger = logging.getLogger("Hub")
 # without re-deriving them from Hub WARNING spam.
 genAgentLogger = logging.getLogger("GenericAgent")
 
-# Command types whose request data / response payload may carry a Proxmox API
-# token secret (Phase F: CS_STORE_PROXMOX_TOKEN relays the agent-provisioned
-# root@pam!cs-hub token to the cs spoke for sim-tag sync). The token transits
-# the hub (unavoidable — the cs spoke must store it), so request_response must
-# NOT log the data or the raw result for these types. The redacted log line
-# preserves traceability (msg_id, spoke, type) without leaking the secret.
+# Command types whose request data / response payload may carry a secret that
+# must never appear in logs:
+#   * CS_STORE_PROXMOX_TOKEN / CS_CREATE_PROXMOX_TOKEN / CS_TOKEN_RESULT — the
+#     agent-provisioned root@pam!cs-hub Proxmox token relays through the hub to
+#     the cs spoke for sim-tag sync.
+#   * SPOKE_UPDATE_SESSION_KEY — carries a spoke's NEW session secret in its
+#     body (signed with the pre-rotation secret). The body is HMAC-signed, NOT
+#     encrypted, so the secret is cleartext on the wire; logging the data dict
+#     at DEBUG (request_response) would write the signing key to the hub log.
+#   * SPOKE_SET_HUB_SECRET — carries a new hub root secret.
+# The redacted log line preserves traceability (msg_id, spoke, type) without
+# leaking the secret.
 _REDACT_COMMANDS = frozenset({"CS_STORE_PROXMOX_TOKEN", "CS_CREATE_PROXMOX_TOKEN",
-                              "CS_TOKEN_RESULT"})
+                              "CS_TOKEN_RESULT", "SPOKE_UPDATE_SESSION_KEY",
+                              "SPOKE_SET_HUB_SECRET"})
+
+# Field keys dropped outright from a redacted payload (the value is still
+# forwarded to the spoke — only the log line is redacted). Covers every secret
+# field name used across the command types above plus the latent hub_secret
+# field so a future request_response carrying {"hub_secret": ...} can't leak
+# the hub root secret at DEBUG.
+_REDACT_FIELDS = ("token", "secret", "password", "api_token", "hub_secret",
+                  "new_secret", "psk", "onboarding_psk")
 
 
 def _redact(command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a log-safe view of ``data`` for token-bearing command types.
+    """Return a log-safe view of ``data`` for secret-bearing command types.
 
-    Drops the ``token``/``secret``/``result.token`` fields outright (the value
-    is still forwarded to the spoke — only the log line is redacted). For
-    non-redacted types returns the data unchanged so normal telemetry/commands
-    keep their full debug trail."""
+    Drops the secret fields outright (the value is still forwarded to the
+    spoke — only the log line is redacted). For non-redacted types returns the
+    data unchanged so normal telemetry/commands keep their full debug trail."""
     ct = (command_type or "").upper()
     if ct not in _REDACT_COMMANDS:
         return data
     safe = dict(data or {})
-    for k in ("token", "secret", "password", "api_token"):
+    for k in _REDACT_FIELDS:
         safe.pop(k, None)
     res = safe.get("result")
     if isinstance(res, dict):
         r = dict(res)
-        for k in ("token", "secret", "password", "api_token"):
+        for k in _REDACT_FIELDS:
             r.pop(k, None)
         safe["result"] = r
     return safe
@@ -2654,7 +2668,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # the parent. Absent on every other spoke (no behavior change).
             parent_spoke_id = (auth_data.get("parent_spoke_id") or "").strip()
 
-            logger.info(f"Auth attempt: spoke_id={spoke_id}, secret={f'{secret[:4]}...{secret[-4:]}' if secret and len(secret) > 8 else '***'}")
+            # DEBUG-only + length-only: a 64-char session key's 4+4 prefix/suffix
+            # is a 12.5% entropy reduction, and this fires on EVERY connect
+            # attempt, so the log would accumulate prefix/suffix for every spoke
+            # over time. Length is enough to distinguish a real key from a
+            # missing/short one for debugging without leaking key material.
+            logger.debug(f"Auth attempt: spoke_id={spoke_id}, "
+                         f"secret={'<%d chars>' % len(secret) if secret else '***'}")
             self.record_spoke_event(spoke_id, "auth_attempt", f"secret={'yes' if secret else 'no'} module_type={module_type}")
 
             if not spoke_id:

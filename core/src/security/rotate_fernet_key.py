@@ -28,6 +28,17 @@ SAFETY:
     the ``healthy`` marker, or any future plain state) is LEFT UNTOUCHED —
     rotation only touches files that decrypt successfully under the current key
     (primary) or the legacy machine-id key.
+  * BOTH the hub state dir (``--state-dir``) AND the KeyManager data dir
+    (``--keys-dir``, default ``/opt/lm/core/data``) are walked — the latter
+    holds ``keys.json`` (every spoke session key) and ``hub_secret.json`` (the
+    hub root secret window). Rotating only the state dir left those two
+    highest-value stores encrypted under the OLD key, so the next hub start
+    could not decrypt them.
+  * With ``--apply-env`` the OLD key is also written to
+    ``LM_FERNET_KEY_PREVIOUS`` in ``.env`` as a decrypt-only fallback safety
+    net for any blob the walk did not reach. Clear it once the hub has come up
+    clean under the new key (it keeps the old key usable for decryption,
+    which defeats a key-rotation-done-for-compromise if left indefinitely).
   * The new ``.env`` line is written (with ``--apply-env``) only AFTER every
     decryptable file has been re-encrypted, and the env file is backed up to
     ``.env.pre-rotate.bak`` first. If anything fails mid-rotation the script
@@ -119,8 +130,11 @@ def _iter_state_files(state_dir: str) -> List[str]:
     return out
 
 
-def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bool) -> Tuple[int, int, str]:
-    """Rotate the Fernet key over every decryptable file in ``state_dir``.
+def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bool,
+           keys_dir: Optional[str] = None) -> Tuple[int, int, str]:
+    """Rotate the Fernet key over every decryptable file in ``state_dir`` AND
+    ``keys_dir`` (the KeyManager data dir holding ``keys.json`` +
+    ``hub_secret.json``).
 
     Returns (rotated_count, skipped_count, new_key_str). Raises on any error
     before ``.env`` is touched.
@@ -138,7 +152,18 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
     new_key = new_key_bytes.decode()
     new_fernet = Fernet(new_key_bytes)
 
+    # Walk BOTH the hub state dir and the KeyManager data dir. keys.json +
+    # hub_secret.json are the highest-value secret stores and live OUTSIDE the
+    # state dir; walking only state_dir left them encrypted under the old key
+    # so the next hub start couldn't decrypt them (and the plaintext-fallback
+    # in load_keys would then read them as plaintext on a botched rotation).
     files = _iter_state_files(state_dir)
+    if keys_dir:
+        # De-dup in case keys_dir == state_dir (unusual, but avoid double work).
+        state_set = set(files)
+        for p in _iter_state_files(keys_dir):
+            if p not in state_set:
+                files.append(p)
     rotated, skipped = 0, 0
     plan: List[Tuple[str, str]] = []  # (path, plaintext_json) to re-encrypt
 
@@ -180,34 +205,46 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
                 f"files are recoverable from their .pre-rotate.bak)."
             )
 
-    # Update .env ONLY after all files are re-encrypted.
+    # Update .env ONLY after all files are re-encrypted. Also record the OLD
+    # key as LM_FERNET_KEY_PREVIOUS so any blob the walk did not reach stays
+    # decryptable; clear it once the hub is confirmed up under the new key.
     if apply_env:
         if not env_file:
             raise RuntimeError("--apply-env requires --env-file (or a default path).")
-        _write_env_key(env_file, new_key)
+        _write_env_key(env_file, new_key, previous_key=old_key)
 
     return rotated, skipped, new_key
 
 
-def _write_env_key(env_file: str, new_key: str) -> None:
-    """Backup env_file to .pre-rotate.bak then set LM_FERNET_KEY=<new_key>."""
+def _write_env_key(env_file: str, new_key: str, previous_key: Optional[str] = None) -> None:
+    """Backup env_file to .pre-rotate.bak, set LM_FERNET_KEY=<new_key>, and
+    (if ``previous_key`` is given) set LM_FERNET_KEY_PREVIOUS=<previous_key>
+    as a decrypt-only fallback for any blob the rotation walk did not reach."""
     if os.path.exists(env_file):
         shutil.copy2(env_file, env_file + ".pre-rotate.bak")
         with open(env_file, "r") as f:
             lines = f.readlines()
-        replaced = False
+        # Replace LM_FERNET_KEY and LM_FERNET_KEY_PREVIOUS in place; append
+        # whichever is missing. Track each independently.
+        replaced_new = replaced_prev = False
         for i, line in enumerate(lines):
-            if line.startswith("LM_FERNET_KEY="):
+            if line.startswith("LM_FERNET_KEY_PREVIOUS=") and previous_key:
+                lines[i] = f"LM_FERNET_KEY_PREVIOUS={previous_key}\n"
+                replaced_prev = True
+            elif line.startswith("LM_FERNET_KEY=") and not line.startswith("LM_FERNET_KEY_PREVIOUS="):
                 lines[i] = f"LM_FERNET_KEY={new_key}\n"
-                replaced = True
-                break
-        if not replaced:
+                replaced_new = True
+        if not replaced_new:
             lines.append(f"LM_FERNET_KEY={new_key}\n")
+        if previous_key and not replaced_prev:
+            lines.append(f"LM_FERNET_KEY_PREVIOUS={previous_key}\n")
         with open(env_file, "w") as f:
             f.writelines(lines)
     else:
         with open(env_file, "w") as f:
             f.write(f"LM_FERNET_KEY={new_key}\n")
+            if previous_key:
+                f.write(f"LM_FERNET_KEY_PREVIOUS={previous_key}\n")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -215,6 +252,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Rotate the hub LM_FERNET_KEY in place (decrypt + re-encrypt state).")
     p.add_argument("--state-dir", default="/var/lib/lm/state",
                    help="Hub state dir (default /var/lib/lm/state).")
+    p.add_argument("--keys-dir", default="/opt/lm/core/data",
+                   help="KeyManager data dir holding keys.json + hub_secret.json "
+                        "(default /opt/lm/core/data). Set to '' to skip.")
     p.add_argument("--env-file", default="/opt/lm/.env",
                    help="Hub .env to read the old key from / write the new key to (default /opt/lm/.env).")
     p.add_argument("--apply-env", action="store_true",
@@ -224,7 +264,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = p.parse_args(argv)
 
     try:
-        rotated, skipped, new_key = rotate(args.state_dir, args.env_file, args.apply_env, args.dry_run)
+        rotated, skipped, new_key = rotate(args.state_dir, args.env_file, args.apply_env,
+                                           args.dry_run, keys_dir=args.keys_dir or None)
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
@@ -233,6 +274,8 @@ def main(argv: Optional[List[str]] = None) -> int:
           f"skipped {skipped} plain/empty file(s).")
     if args.apply_env:
         print(f"New LM_FERNET_KEY written to {args.env_file} (backup at {args.env_file}.pre-rotate.bak).")
+        print("The OLD key was also recorded as LM_FERNET_KEY_PREVIOUS as a decrypt "
+              "fallback — clear it once the hub is confirmed up under the new key.")
     else:
         print("Apply the new key to your hub .env (then restart the hub):")
         print(f"  LM_FERNET_KEY={new_key}")

@@ -59,6 +59,16 @@ class KeyManager:
         self.hub_secrets = self._load_or_generate_hub_secrets()
         self.load_keys()
 
+    @staticmethod
+    def _plaintext_fallback_allowed() -> bool:
+        """Whether a plaintext-JSON fallback is permitted when a secret store
+        file fails Fernet decryption. Default ON (``1``) preserves the legacy
+        migration path for files written before at-rest encryption; set
+        ``LM_ALLOW_PLAINTEXT_FALLBACK=0`` to fail-closed so a botched rotation
+        or lost key can NOT silently flip the highest-value secret stores to a
+        plaintext read (the incident this guards against)."""
+        return os.environ.get("LM_ALLOW_PLAINTEXT_FALLBACK", "1").strip() in ("1", "true", "yes")
+
     def _load_or_generate_hub_secrets(self) -> List[str]:
         """Loads or generates the persistent secrets used by the Hub.
         Maintains a window of the last 3 secrets.
@@ -75,7 +85,22 @@ class KeyManager:
                         # Migration: if it was a single string
                         return [data] if isinstance(data, str) else [str(data)]
                     except Exception:
-                        # Fallback to plain text for migration
+                        # Fallback to plain text for migration — only if the
+                        # operator has not fail-closed it. A Fernet blob that
+                        # won't decrypt (e.g. after a botched rotation that
+                        # skipped this file) is NOT plaintext and must not be
+                        # silently treated as such.
+                        if not self._plaintext_fallback_allowed():
+                            logger.error(
+                                "hub_secret.json decryption failed and "
+                                "LM_ALLOW_PLAINTEXT_FALLBACK=0 — refusing "
+                                "plaintext fallback. Re-run rotate_fernet_key "
+                                "or set LM_FERNET_KEY_PREVIOUS to the old key.")
+                            raise
+                        logger.warning(
+                            "hub_secret.json decrypted as PLAINTEXT (pre-"
+                            "encryption migration). Set "
+                            "LM_ALLOW_PLAINTEXT_FALLBACK=0 to fail-closed.")
                         text = content.decode().strip()
                         return [text] if "," not in text else text.split(",")
             except Exception as e:
@@ -138,6 +163,7 @@ class KeyManager:
 
     def load_keys(self):
         if os.path.exists(self.storage_path):
+            migrated_from_plaintext = False
             try:
                 with open(self.storage_path, "rb") as f:
                     content = f.read()
@@ -146,9 +172,28 @@ class KeyManager:
                         decrypted = hub_encryption.decrypt(content)
                         data = json.loads(decrypted)
                     except Exception:
-                        # Fallback to plain text for migration
-                        with open(self.storage_path, "r") as f:
-                            data = json.load(f)
+                        # Fallback to plain text for migration — only if the
+                        # operator has not fail-closed it. A Fernet blob that
+                        # won't decrypt (e.g. after a botched rotation that
+                        # skipped this file) is NOT plaintext JSON; reading it
+                        # as text would raise and be swallowed by the outer
+                        # except, leaving the hub keyless — preferable to
+                        # silently exposing every session key via a plaintext
+                        # read of a mis-decrypted blob.
+                        if not self._plaintext_fallback_allowed():
+                            logger.error(
+                                "keys.json decryption failed and "
+                                "LM_ALLOW_PLAINTEXT_FALLBACK=0 — refusing "
+                                "plaintext fallback. Re-run rotate_fernet_key "
+                                "or set LM_FERNET_KEY_PREVIOUS to the old key.")
+                            raise
+                        logger.warning(
+                            "keys.json decrypted as PLAINTEXT (pre-encryption "
+                            "migration); will re-encrypt on next save. Set "
+                            "LM_ALLOW_PLAINTEXT_FALLBACK=0 to fail-closed.")
+                        with open(self.storage_path, "r") as pf:
+                            data = json.load(pf)
+                        migrated_from_plaintext = True
 
                     for sid, k in data["current"].items():
                         self.keys[sid] = ManagedKey(**k)
@@ -156,6 +201,16 @@ class KeyManager:
                         self.history[sid] = [ManagedKey(**k) for k in ks]
             except Exception as e:
                 logger.error(f"Error loading keys from {self.storage_path}: {e}")
+                return
+            # One-time migration: a plaintext keys.json was just accepted. Re-save
+            # under the primary Fernet key immediately so the file stops sitting
+            # on disk in cleartext (the next _save_keys writes ciphertext).
+            if migrated_from_plaintext and self.keys:
+                try:
+                    self._save_keys()
+                    logger.info("Migrated keys.json to Fernet at-rest encryption.")
+                except Exception as e:
+                    logger.warning(f"keys.json plaintext→Fernet re-save failed: {e}")
 
     def generate_first_secret(self, spoke_id: str) -> str:
         """
@@ -309,21 +364,6 @@ class KeyManager:
         using the spoke's current key. The receiver verifies the RECEIVED body
         bytes directly (no re-serialization), so this replaces the sign()+dumps()
         that dominated per-frame CPU."""
-        key = self.keys.get(spoke_id)
-        if not key:
-            raise ValueError(f"No key found for spoke {spoke_id}")
-        return MessageSigner(key.secret).encode_frame(message_dict)
-
-    def encode_frame_with_secret(self, secret: str, message_dict: Dict[str, Any]) -> str:
-        """``encode_frame`` with an EXPLICIT secret (SPOKE_UPDATE_SESSION_KEY
-        delivery — signed with the PREVIOUS secret the spoke still holds)."""
-        return MessageSigner(secret).encode_frame(message_dict)
-
-    def encode_frame(self, spoke_id: str, message_dict: Dict[str, Any]) -> str:
-        """Serialize + sign ``message_dict`` into the wire form ``<sig>.<body>``
-        using the spoke's current key. The receiver verifies the RECEIVED body
-        bytes directly (verify_signature), so this replaces sign()+dumps() and
-        removes the per-frame re-serialization."""
         key = self.keys.get(spoke_id)
         if not key:
             raise ValueError(f"No key found for spoke {spoke_id}")

@@ -6,6 +6,10 @@ back without a spoke round-trip, and what the hub pushes down to the spoke via
 ``CS_CONFIG_UPDATE`` on every write (see routes.py ``_push_config``).
 
 Persisted to ``simulations_store.json`` in the hub data dir with atomic saves.
+Encrypted at rest with ``hub_encryption`` (Fernet) — this file holds onboarding
+PSKs, per-tenant GitHub tokens, and Central API cluster creds, so it must not
+sit on disk in cleartext. A pre-encryption plaintext file is migrated on the
+first load (accepted once, then re-encrypted on the next save).
 """
 import asyncio
 import json
@@ -13,6 +17,8 @@ import logging
 import os
 import threading
 from typing import Any, Dict, List
+
+from security.encryption import hub_encryption
 
 logger = logging.getLogger("SimulationsStore")
 
@@ -95,13 +101,46 @@ class SimulationsStore:
         self._path = os.path.join(data_dir, "simulations_store.json")
         self._lock = threading.Lock()
         self._data: Dict[str, Dict[str, Any]] = {}
+        self._needs_rekey = False  # set when loaded via a fallback (plaintext) path
         self._load()
 
     # ── persistence ────────────────────────────────────────────────────────
     def _load(self) -> None:
+        """Load + decrypt the store. A pre-encryption plaintext file is accepted
+        once as a migration and flagged for re-encryption on the next save."""
         try:
-            with open(self._path, "r") as f:
-                self._data = json.load(f) or {}
+            with open(self._path, "rb") as f:
+                content = f.read()
+            if not content:
+                self._data = {}
+                return
+            try:
+                decrypted, used_primary = hub_encryption.decrypt_with_meta(content)
+                if not used_primary:
+                    # Decrypted via a previous-rotation or legacy key — re-encrypt
+                    # under the current primary on the next save so this file stops
+                    # depending on a fallback key (same migration as state/manager).
+                    self._needs_rekey = True
+                    logger.warning("SimulationsStore: %s decrypted with a FALLBACK "
+                                   "key; will re-encrypt under the current key on "
+                                   "next save.", self._path)
+                self._data = json.loads(decrypted) or {}
+            except Exception:
+                # One-time migration: a file written before at-rest encryption was
+                # applied to this store is plaintext JSON. Accept it this once and
+                # re-encrypt on the next save rather than crashing or losing the
+                # tenant onboarding PSKs / tokens already persisted.
+                try:
+                    with open(self._path, "r") as pf:
+                        self._data = json.load(pf) or {}
+                    self._needs_rekey = True
+                    logger.warning("SimulationsStore: %s was plaintext "
+                                   "(pre-encryption); migrating to Fernet on next "
+                                   "save.", self._path)
+                except Exception as exc:
+                    logger.warning("SimulationsStore: load failed (%s): %s — "
+                                   "starting empty", self._path, exc)
+                    self._data = {}
         except FileNotFoundError:
             self._data = {}
         except Exception as exc:  # corrupt JSON, etc. — start empty rather than crash
@@ -112,9 +151,12 @@ class SimulationsStore:
     def _save(self) -> None:
         try:
             tmp = self._path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(self._data, f, indent=2)
+            encrypted = hub_encryption.encrypt(
+                json.dumps(self._data, indent=2, default=str))
+            with open(tmp, "wb") as f:
+                f.write(encrypted)
             os.replace(tmp, self._path)
+            self._needs_rekey = False
         except Exception as exc:
             logger.warning("SimulationsStore: save failed (%s): %s", self._path, exc)
 
