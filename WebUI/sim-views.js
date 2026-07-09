@@ -116,6 +116,9 @@ function csTenant() { return encodeURIComponent(csTenantRaw()); }
  * @throws {Error} On 401 (session expired), 404 (not implemented), or any
  *                         non-ok status with the server's detail surfaced.
  */
+// Last-good cache of successful GET reads (url -> response), so a protect-shed
+// 503 serves stale data instead of blanking the Simulations view.
+const _csLastGood = {};
 async function csFetch(path, opts = {}) {
     const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
     // The backend's get_tenant_id() dependency (core/src/simulations/routes.py)
@@ -137,6 +140,15 @@ async function csFetch(path, opts = {}) {
     const res = await fetch(url, { ...opts, headers });
     if (res.status === 401) { handleSessionExpired(); throw new Error('Session expired'); }
     if (res.status === 404) throw new Error('Not implemented (404)');
+    // Hub PROTECTING (503, /sim + /aggregate are shed under protect): serve the
+    // last-good cached response for this GET so the Simulations view shows STALE
+    // data instead of blanking with a "backing off" error. Reads only — a
+    // mutation still surfaces the 503 so the operator knows it didn't apply.
+    const _method = (opts.method || 'GET').toUpperCase();
+    if (res.status === 503 && _method === 'GET' && _csLastGood[url] !== undefined) {
+        window.__csServingStale = true;
+        return _csLastGood[url];
+    }
     if (!res.ok) {
         // Surface the server's JSON error detail (e.g. FastAPI's {detail: ...})
         // so the caller can show a meaningful message instead of just "409 Error".
@@ -148,8 +160,11 @@ async function csFetch(path, opts = {}) {
         throw new Error(detail ? `${res.status} ${detail}` : `${res.status} ${res.statusText}`);
     }
     const ct = res.headers.get('content-type') || '';
-    if (ct.includes('application/json')) return res.json();
-    return res.text();
+    const _data = ct.includes('application/json') ? await res.json() : await res.text();
+    // Cache successful GET reads so a subsequent protect-shed (503) can serve the
+    // last-good instead of blanking the view. Bounded by the (small) set of sim URLs.
+    if (_method === 'GET') { _csLastGood[url] = _data; window.__csServingStale = false; }
+    return _data;
 }
 
 /* ---------------------------------------------------------------------------
