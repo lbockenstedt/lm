@@ -39,14 +39,25 @@ import time
 import urllib.request
 import uuid
 
-# ── locate the lm core (same resolution the real spokes use) ─────────────────
-for _p in ("/opt/lm/core/src", os.path.join(os.path.dirname(__file__), "..", "core", "src")):
+# ── locate the lm core (same dual resolution the real spokes use) ────────────
+# /opt/lm on the path resolves `core.src.messaging.*` (PEP-420 namespace pkgs);
+# /opt/lm/core/src resolves the bare `messaging.*` form. A real cs spoke tries
+# both, so we do too — one of them matches whichever layout this box has.
+_repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+for _p in ("/opt/lm", "/opt/lm/core/src", _repo, os.path.join(_repo, "core", "src")):
     if os.path.isdir(_p) and _p not in sys.path:
-        sys.path.insert(0, os.path.abspath(_p))
-try:
-    from messaging.control_plane import BaseControlPlane
-except Exception as e:  # pragma: no cover
-    sys.exit(f"Cannot import BaseControlPlane (run with PYTHONPATH=/opt/lm/core/src): {e}")
+        sys.path.insert(0, _p)
+BaseControlPlane = None
+_imp_err = None
+for _mod in ("core.src.messaging.control_plane", "messaging.control_plane"):
+    try:
+        BaseControlPlane = __import__(_mod, fromlist=["BaseControlPlane"]).BaseControlPlane
+        break
+    except Exception as e:  # pragma: no cover
+        _imp_err = e
+if BaseControlPlane is None:
+    sys.exit("Cannot import BaseControlPlane — run on a box with /opt/lm/core "
+             f"(e.g. PYTHONPATH=/opt/lm/core/src). Last error: {_imp_err}")
 
 
 class LoadSpoke(BaseControlPlane):
