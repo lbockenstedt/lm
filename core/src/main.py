@@ -128,21 +128,61 @@ logger = logging.getLogger("Hub")
 # without re-deriving them from Hub WARNING spam.
 genAgentLogger = logging.getLogger("GenericAgent")
 
-# Command types whose request data / response payload may carry a secret that
-# must never appear in logs:
-#   * CS_STORE_PROXMOX_TOKEN / CS_CREATE_PROXMOX_TOKEN / CS_TOKEN_RESULT — the
-#     agent-provisioned root@pam!cs-hub Proxmox token relays through the hub to
-#     the cs spoke for sim-tag sync.
-#   * SPOKE_UPDATE_SESSION_KEY — carries a spoke's NEW session secret in its
-#     body (signed with the pre-rotation secret). The body is HMAC-signed, NOT
-#     encrypted, so the secret is cleartext on the wire; logging the data dict
-#     at DEBUG (request_response) would write the signing key to the hub log.
-#   * SPOKE_SET_HUB_SECRET — carries a new hub root secret.
-# The redacted log line preserves traceability (msg_id, spoke, type) without
-# leaking the secret.
+# Secret-hygiene for DEBUG-mode ``request_response`` logging. ``_redact`` is
+# called for every request data dict AND every response payload before it's
+# written to hub.log → Azure Log Analytics, so the policy here is what stops a
+# secret from reaching the log.
+#
+# This is an ALLOW-LIST (default redact), not a deny-list: a NEW secret-bearing
+# command — SET_PASSWORD, CONSOLE_PUSH_CONFIG, or an ARBITRARY agent command
+# relayed via ``/api/agent/{spoke_id}/command`` (whose ``command`` type is
+# user-supplied and not enumerable) — is redacted by default instead of leaking
+# verbatim because it was absent from a deny-list.
+#
+#   * ``_LOGSAFE_COMMANDS``  — verifiably-secret-free types (telemetry, status,
+#     health, acks, list ops) logged VERBATIM for the debug trail.
+#   * ``_FULLY_REDACT_COMMANDS`` + the PASSWORD/PUSH_CONFIG heuristic — types
+#     whose payload carries inline secrets in arbitrary fields / a config BLOB
+#     (console configs with enable passwords/PSKs, password resets). The whole
+#     data dict is replaced with a marker; field-name stripping can't reach a
+#     secret buried in a ``config`` string.
+#   * everything else — known secret FIELDS are dropped (top-level + nested
+#     ``result``), the rest is kept. Catches SPOKE_UPDATE_SESSION_KEY /
+#     SPOKE_SET_HUB_SECRET / CS_TOKEN_RESULT (secret in a named field) and any
+#     future command whose secret sits in a ``_REDACT_FIELDS`` name.
+_LOGSAFE_COMMANDS = frozenset({
+    # Heartbeat / liveness / telemetry (no secret payloads)
+    "HEARTBEAT", "AGENT_HEARTBEAT", "AGENT_TELEMETRY", "CS_TELEMETRY",
+    "SPOKE_LOG", "AGENT_LOG", "AGENT_RELAY_UP", "AGENT_RELAY_DOWN",
+    "CS_INGEST_TELEMETRY", "CS_INGEST_LOG", "CS_INGEST_PROGRESS",
+    "CS_INGEST_WATCHDOG_EVENT", "CS_WATCHDOG_EVENT", "CS_HW_RESET_EVENT",
+    "CS_INGEST_HW_RESET", "CS_PROGRESS", "CS_LOG",
+    # Onboarding / approval / handshake (no secret payloads)
+    "APPROVAL_REQUIRED", "APPROVED", "HUB_OK", "HUB_VERIFIED", "CONNECTED",
+    "DISCONNECTED", "INSTALL_UUID",
+    # Backpressure / ack / probe / status
+    "LM_BACKPRESSURE", "COMMAND_RESULT", "ACK", "GET_SPOKE_STATUS",
+    "GET_AGENTS", "GET_STATUS", "HEALTH_CHECK", "PING", "PONG",
+    "CONSOLE_PROBE_RESULT", "CONSOLE_READY", "CONSOLE_CLOSED",
+})
+
+# Types whose ENTIRE payload is replaced with a marker (the secret is inline in
+# a config blob / arbitrary field, not a named ``_REDACT_FIELDS`` key). The
+# ``PASSWORD`` / ``PUSH_CONFIG`` substring heuristic catches the arbitrary
+# agent-command relay's user-supplied types too (e.g. NETBOX_RESET_ADMIN_PASSWORD).
+_FULLY_REDACT_COMMANDS = frozenset({
+    "SET_PASSWORD", "SET_USER_PASSWORD", "RESET_PASSWORD", "CONSOLE_PUSH_CONFIG",
+})
+_FULLY_REDACT_SUBSTRINGS = ("PASSWORD", "PUSH_CONFIG")
+
+# Known secret-bearing command types (kept for documentation + the secret-
+# hygiene test contract). Field-dropping below applies to ALL non-allow-listed
+# types regardless, so membership here is descriptive, not the gating control.
 _REDACT_COMMANDS = frozenset({"CS_STORE_PROXMOX_TOKEN", "CS_CREATE_PROXMOX_TOKEN",
                               "CS_TOKEN_RESULT", "SPOKE_UPDATE_SESSION_KEY",
-                              "SPOKE_SET_HUB_SECRET"})
+                              "SPOKE_SET_HUB_SECRET", "SET_PASSWORD",
+                              "SET_USER_PASSWORD", "RESET_PASSWORD",
+                              "CONSOLE_PUSH_CONFIG"})
 
 # Field keys dropped outright from a redacted payload (the value is still
 # forwarded to the spoke — only the log line is redacted). Covers every secret
@@ -150,18 +190,25 @@ _REDACT_COMMANDS = frozenset({"CS_STORE_PROXMOX_TOKEN", "CS_CREATE_PROXMOX_TOKEN
 # field so a future request_response carrying {"hub_secret": ...} can't leak
 # the hub root secret at DEBUG.
 _REDACT_FIELDS = ("token", "secret", "password", "api_token", "hub_secret",
-                  "new_secret", "psk", "onboarding_psk")
+                  "new_secret", "psk", "onboarding_psk", "enable_secret",
+                  "enable_password", "community", "snmp_community")
 
 
 def _redact(command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a log-safe view of ``data`` for secret-bearing command types.
+    """Return a log-safe view of ``data`` for ``request_response`` DEBUG logs.
 
-    Drops the secret fields outright (the value is still forwarded to the
-    spoke — only the log line is redacted). For non-redacted types returns the
-    data unchanged so normal telemetry/commands keep their full debug trail."""
+    Allow-list policy (default redact):
+      * ``_LOGSAFE_COMMANDS`` → returned unchanged (full debug trail).
+      * ``_FULLY_REDACT_COMMANDS`` (or a PASSWORD/PUSH_CONFIG type name) →
+        replaced with ``{"<redacted>": True}`` (inline-secret blob).
+      * otherwise → known secret fields (``_REDACT_FIELDS``) dropped from the
+        top level + nested ``result``; the rest kept. The value is still
+        forwarded to the spoke — only the log line is redacted."""
     ct = (command_type or "").upper()
-    if ct not in _REDACT_COMMANDS:
+    if ct in _LOGSAFE_COMMANDS:
         return data
+    if ct in _FULLY_REDACT_COMMANDS or any(s in ct for s in _FULLY_REDACT_SUBSTRINGS):
+        return {"<redacted>": True}
     safe = dict(data or {})
     for k in _REDACT_FIELDS:
         safe.pop(k, None)

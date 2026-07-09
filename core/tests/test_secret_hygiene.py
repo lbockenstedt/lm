@@ -58,10 +58,35 @@ def test_redact_drops_psk_and_new_secret_fields():
         assert k not in out
 
 
-def test_redact_non_redacted_type_returned_unchanged():
+def test_redact_non_allowlisted_type_drops_secret_fields():
+    # Allow-list policy (default redact): a type NOT in _LOGSAFE_COMMANDS gets
+    # its known secret fields dropped even though it isn't an enumerated secret
+    # type — so a NEW secret-bearing command can't leak by absence from a
+    # deny-list. Non-secret fields are preserved for the debug trail.
     d = {"secret": "s", "data": 1}
-    # A non-secret command type keeps its full debug trail (same object).
-    assert _redact("SOME_TELEMETRY", d) is d
+    out = _redact("SOME_TELEMETRY", d)
+    assert out == {"data": 1}
+    assert "secret" not in out
+
+
+def test_redact_allowlisted_type_returned_unchanged():
+    # A verifiably-secret-free type (telemetry/heartbeat/ack) keeps its full
+    # debug trail — same object, no copy.
+    from main import _LOGSAFE_COMMANDS
+    assert "HEARTBEAT" in _LOGSAFE_COMMANDS
+    d = {"spoke_id": "s1", "ts": 123}
+    assert _redact("HEARTBEAT", d) is d
+
+
+def test_redact_fully_redacts_password_and_console_config():
+    # Types carrying inline secrets in a config blob / arbitrary field get the
+    # whole payload replaced with a marker — field-name stripping can't reach a
+    # secret buried in a ``config`` string.
+    assert _redact("SET_PASSWORD", {"user_id": "u", "password": "x"}) == {"<redacted>": True}
+    assert _redact("CONSOLE_PUSH_CONFIG", {"config": "enable password 0 hunter2"}) == {"<redacted>": True}
+    # The arbitrary agent-command relay uses a user-supplied command type; the
+    # PASSWORD/PUSH_CONFIG substring heuristic catches it without enumeration.
+    assert _redact("NETBOX_RESET_ADMIN_PASSWORD", {"new": "pw"}) == {"<redacted>": True}
 
 
 def test_redact_drops_secret_from_nested_result():

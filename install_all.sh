@@ -51,6 +51,12 @@ INSTALL_LOG="$LOG_DIR/install.log"
 mkdir -p "$LOG_DIR"
 chown -R root:root "$LOG_DIR" # Temporary root ownership for installer
 chmod 755 "$LOG_DIR"
+# install.log is 0640 (root:root) — NEVER world-readable. It has historically
+# captured transient secrets (e.g. the first-run LM_SETUP_TOKEN value) via the
+# log helpers; even with the value now suppressed (see Step B2b), 0640 keeps
+# any future secret-bearing line off-limits to non-root local users.
+touch "$INSTALL_LOG" 2>/dev/null || true
+chmod 0640 "$INSTALL_LOG" 2>/dev/null || true
 
 # Logging Helpers
 log() {
@@ -826,8 +832,13 @@ if [ "$SETUP_TOKEN" = true ]; then
             echo "LM_SETUP_TOKEN=$SETUP_TOKEN_VAL" >> "$HUB_ENV"
         fi
         log_c "✅ Generated LM_SETUP_TOKEN (first-run /auth/setup gate)"
-        log_c "   ↳ Capture this token; the WebUI first-run setup form will need it as X-Setup-Token:"
-        log_c "     $SETUP_TOKEN_VAL"
+        # Print the token to the CONSOLE ONLY — never to install.log (0640 but
+        # still on-disk) — so the operator can capture it for the first-run
+        # WebUI form without leaving the bootstrap secret on disk for any
+        # later reader of the log.
+        echo "   ↳ Capture this token; the WebUI first-run setup form will need it as X-Setup-Token:"
+        echo "     $SETUP_TOKEN_VAL"
+        log "Generated LM_SETUP_TOKEN (value suppressed — shown on console only)"
     else
         log_c "✅ LM_SETUP_TOKEN already set — preserving existing token"
     fi
