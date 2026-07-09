@@ -93,6 +93,7 @@ import uuid
 import logging
 import hashlib
 import secrets
+import ipaddress
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 # Shared logging runtime toggle (lm/core/src/logging_setup.py). Used by the
@@ -288,6 +289,76 @@ _LOGIN_IP_WINDOW_S = float(os.environ.get("LM_LOGIN_IP_WINDOW_S", "300"))
 _LOGIN_IP_MAX = int(os.environ.get("LM_LOGIN_IP_MAX", "20"))
 _login_attempts: dict = {}    # {username: {count, locked_until, first_fail}}
 _login_ip_attempts: dict = {}  # {ip: [ts,...]} (in-memory, not persisted)
+
+
+def _load_trusted_proxies() -> tuple:
+    """Parse ``LM_TRUSTED_PROXIES`` (comma/space-separated IPs/CIDRs) into a
+    tuple of ``(networks, raw)``. Empty when unset.
+
+    Behind a TLS-terminating front end (Azure App Gateway / Front Door / nginx)
+    the TCP peer Starlette sees is the PROXY, not the client — so the per-IP
+    login-spray limiter is useless (every login shares one proxy-IP bucket →
+    20 attempts = a global self-DoS) unless the real client IP is recovered
+    from ``X-Forwarded-For``. But XFF is client-settable, so trusting it
+    blindly is spoofable (an attacker rotates a spoofed XFF to bypass the
+    per-IP cap). ``_client_ip`` trusts XFF ONLY when the immediate TCP peer
+    is in this trusted set, then walks the XFF chain right-to-left skipping
+    trusted hops to the first non-trusted address = the real client. Fail-
+    safe: with no trusted proxies configured, XFF is ignored and the peer IP
+    is used (so a misconfigured deploy self-DoSes rather than becoming
+    spoofable)."""
+    raw = os.environ.get("LM_TRUSTED_PROXIES", "").strip()
+    nets = []
+    if raw:
+        for tok in re.split(r"[,\s]+", raw):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                nets.append(ipaddress.ip_network(tok, strict=False))
+            except ValueError:
+                logger.warning("LM_TRUSTED_PROXIES: skipping unparseable entry %r", tok)
+    return tuple(nets), raw
+
+
+_TRUSTED_PROXY_NETS, _TRUSTED_PROXIES_RAW = _load_trusted_proxies()
+
+
+def _ip_in_trusted(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except (ValueError, TypeError):
+        return False
+    return any(addr in net for net in _TRUSTED_PROXY_NETS)
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort real client IP for security decisions (login throttling).
+
+    When the immediate TCP peer (``request.client.host``) is a configured
+    trusted proxy (``LM_TRUSTED_PROXIES``), parse ``X-Forwarded-For`` and
+    return the rightmost address that is NOT itself a trusted proxy — the
+    real client. When the peer is NOT a trusted proxy, return the peer IP
+    directly and IGNORE XFF (an untrusted peer's XFF is spoofable). When
+    there's no trusted-proxy config at all, return the peer (fail-safe: a
+    misconfigured Azure deploy self-DoSes the per-IP limiter rather than
+    trusting spoofable XFF)."""
+    peer = (request.client.host if request.client else "") or "unknown"
+    if not _TRUSTED_PROXY_NETS:
+        return peer
+    if not _ip_in_trusted(peer):
+        return peer
+    xff = request.headers.get("x-forwarded-for", "")
+    if not xff:
+        return peer
+    chain = [h.strip() for h in xff.split(",") if h.strip()]
+    # Walk right-to-left, skipping trusted-proxy hops; the first non-trusted
+    # address is the real client. If every hop is trusted (odd config), fall
+    # back to the leftmost (the origin the first proxy saw).
+    for hop in reversed(chain):
+        if not _ip_in_trusted(hop):
+            return hop
+    return chain[0] if chain else peer
 
 
 def _sessions_file(hub) -> str:

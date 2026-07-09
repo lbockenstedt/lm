@@ -71,7 +71,7 @@ def _isolate(monkeypatch, tmp_path):
     for v in ("LM_TLS_CERT", "LM_TLS_KEY", "LM_CORS_ORIGINS", "LM_SETUP_TOKEN",
               "LM_COOKIE_SECURE", "LM_MAX_SESSIONS_PER_USER",
               "LM_SESSION_IDLE_TIMEOUT_S", "LM_LOGIN_MAX_FAILS",
-              "LM_LOGIN_IP_MAX", "LM_LOGIN_IP_WINDOW_S"):
+              "LM_LOGIN_IP_MAX", "LM_LOGIN_IP_WINDOW_S", "LM_TRUSTED_PROXIES"):
         monkeypatch.delenv(v, raising=False)
 
 
@@ -240,6 +240,52 @@ def test_cors_unlisted_origin_not_reflected(monkeypatch, tmp_path):
     c, hub = _build({}, tmp_path)
     r = c.get("/status", headers={"Origin": "https://evil.example"})
     assert r.headers.get("access-control-allow-origin") != "https://evil.example"
+
+
+# ── 4b. Trusted-proxy XFF parsing (LM_TRUSTED_PROXIES) ───────────────────────
+
+class _FakeReq:
+    """Minimal stand-in for a Starlette Request for _client_ip unit tests."""
+    def __init__(self, peer, xff=""):
+        self.client = type("C", (), {"host": peer})()
+        self.headers = {"x-forwarded-for": xff} if xff else {}
+
+
+def test_client_ip_no_trusted_proxies_ignores_xff(monkeypatch):
+    # Fail-safe: with no trusted-proxy config, XFF is spoofable so it's IGNORED
+    # — the per-IP limiter uses the TCP peer (a misconfigured Azure deploy
+    # self-DoSes rather than trusting spoofable XFF).
+    monkeypatch.setattr(api_mod, "_TRUSTED_PROXY_NETS", ())
+    r = _FakeReq("203.0.113.9", xff="198.51.100.7")  # client-set (spoofed) XFF
+    assert api_mod._client_ip(r) == "203.0.113.9"
+
+
+def test_client_ip_trusted_peer_walks_xff_to_real_client(monkeypatch):
+    import ipaddress
+    monkeypatch.setattr(api_mod, "_TRUSTED_PROXY_NETS",
+                        (ipaddress.ip_network("10.0.0.0/8"),))
+    # Peer is the Azure proxy; XFF chain is [real-client, proxy]. Walk right-to-
+    # left past the trusted proxy hop to the real client.
+    r = _FakeReq("10.0.0.5", xff="203.0.113.9, 10.0.0.5")
+    assert api_mod._client_ip(r) == "203.0.113.9"
+
+
+def test_client_ip_untrusted_peer_ignores_xff(monkeypatch):
+    import ipaddress
+    monkeypatch.setattr(api_mod, "_TRUSTED_PROXY_NETS",
+                        (ipaddress.ip_network("10.0.0.0/8"),))
+    # Peer is NOT a trusted proxy → XFF is untrusted → return the peer.
+    r = _FakeReq("198.51.100.7", xff="203.0.113.9")
+    assert api_mod._client_ip(r) == "198.51.100.7"
+
+
+def test_client_ip_multi_hop_skips_all_trusted(monkeypatch):
+    import ipaddress
+    monkeypatch.setattr(api_mod, "_TRUSTED_PROXY_NETS",
+                        (ipaddress.ip_network("10.0.0.0/8"),))
+    # Two trusted proxy hops, then the real client at the left.
+    r = _FakeReq("10.0.0.9", xff="203.0.113.99, 10.0.0.5, 10.0.0.9")
+    assert api_mod._client_ip(r) == "203.0.113.99"
 
 
 # ── 5. Session invalidation on privilege/password/tenant change ──────────────

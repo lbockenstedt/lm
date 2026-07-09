@@ -1,10 +1,10 @@
 """Auth routes: login, me, logout, first-run setup, session prefixes."""
 from api import (
-    HTTPException, JSONResponse, Request, _SESSION_TTL, _cookie_secure,
-    _hash_password, _login_check, _login_fail, _login_success, _record_session,
-    _save_sessions, _sessions, _start_cache_for_tenant, _stop_cache_for_tenant,
-    _verify_password, get_netbox_spoke, get_tenant_scoping, logger, os, secrets,
-    time,
+    HTTPException, JSONResponse, Request, _SESSION_TTL, _client_ip,
+    _cookie_secure, _hash_password, _login_check, _login_fail, _login_success,
+    _record_session, _save_sessions, _sessions, _start_cache_for_tenant,
+    _stop_cache_for_tenant, _verify_password, get_netbox_spoke,
+    get_tenant_scoping, logger, os, secrets, time,
 )
 from access import resolve_effective_permissions
 
@@ -35,7 +35,12 @@ def register(app, hub, ctx):
             password = data.get("password", "")
             if not user_id or not password:
                 raise HTTPException(status_code=400, detail="username and password required")
-            ip = (request.client.host if request.client else "") or "unknown"
+            # Real client IP for the per-IP spray limiter. Behind an Azure
+            # front end the TCP peer is the proxy; _client_ip recovers the real
+            # client from X-Forwarded-For ONLY when the peer is a configured
+            # trusted proxy (LM_TRUSTED_PROXIES), walking right-to-left past
+            # trusted hops — so XFF can't be spoofed to bypass the cap.
+            ip = _client_ip(request)
             # Throttle BEFORE the password check so a locked-out account can't be
             # probed even with the right credentials. ``_login_check`` covers both
             # per-username lockout and per-IP spray windows.
