@@ -9,6 +9,7 @@ import hashlib
 import subprocess
 import threading
 import queue
+import random
 import os
 import socket
 import ssl
@@ -796,7 +797,26 @@ class BaseControlPlane:
             # found without a restart.
             if self.hub_url in ("", "auto", None):
                 await self._resolve_hub_url()
-            await asyncio.sleep(_delay)
+            # Apply ±20% jitter to the reconnect sleep so a mass disconnect
+            # (e.g. an Azure hub restart dropping the whole fleet inside the same
+            # minute) spreads its reconnect attempts across a window instead of
+            # stampeding the hub on identical 5s/10s/20s/... cadences. The
+            # deterministic _delay base still drives the exponential ladder and
+            # the 300s cap; only the actual sleep is jittered, so a lone blip
+            # (5s base) sleeps 4–6s and a maxed-out backoff sleeps 240–360s.
+            await asyncio.sleep(self._jittered_reconnect_delay(_delay))
+
+    @staticmethod
+    def _jittered_reconnect_delay(base):
+        """Return ``base`` with ±20% random jitter, clamped to ≥0.
+
+        Used by the reconnect loop so a fleet-wide disconnect (e.g. a hub
+        restart) spreads reconnect attempts across a window instead of every
+        spoke sleeping the identical 5s/10s/20s/... cadence. The deterministic
+        ``base`` still drives the exponential ladder and the 300s cap; only the
+        actual sleep is jittered. A 5s base → 4–6s; a 300s cap → 240–360s.
+        """
+        return max(0.0, base * random.uniform(0.8, 1.2))
 
     def _client_ssl_ctx(self):
         """Build an SSL context for a ``wss://`` connect to the hub.
