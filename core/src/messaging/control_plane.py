@@ -3,6 +3,10 @@ import json
 import uuid
 import time
 import websockets
+import websockets.exceptions  # noqa: F401 — eager-load so websockets.exceptions.* is
+                              # reachable without websockets.connect having run first
+                              # (websockets >=11 lazy-imports submodules; unit tests that
+                              # exercise the heartbeat/except paths don't call .connect).
 import logging
 import hmac
 import hashlib
