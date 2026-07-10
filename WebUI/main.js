@@ -3567,7 +3567,6 @@ function _renderSetupSpokesTile(content) {
                     <div class="flex justify-between items-center mb-2">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex items-center gap-3">
-                            <button onclick="purgeLoadtestSpokes()" class="text-xs text-red-500 hover:text-red-700" title="Remove all synthetic load-test spokes (id prefix 'loadtest-')">✕ Purge load-test</button>
                             <button onclick="loadSpokesAndAgents()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
                         </div>
                     </div>
