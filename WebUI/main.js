@@ -3063,7 +3063,7 @@ function _viewTemplate(viewId) {
         case 'dns':
             return `<div class="space-y-6">
   <div class="flex justify-end gap-2">
-    <button id="dns-add-btn" onclick="showDnsRecordModal()" class="${btn}">+ Add Record</button>
+    ${canEdit() ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="${btn}">+ Add Record</button>` : ''}
   </div>
   <div id="dns-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
@@ -3071,7 +3071,7 @@ function _viewTemplate(viewId) {
         case 'dhcp':
             return `<div class="space-y-6">
   <div class="flex justify-end gap-2">
-    <button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="${btn}">+ Add Reservation</button>
+    ${canEdit() ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="${btn}">+ Add Reservation</button>` : ''}
   </div>
   <div id="dhcp-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
@@ -8933,7 +8933,7 @@ async function loadOpnsenseManagement() {
     const writable = ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases'];
     const actions = document.getElementById('top-nav-actions');
     if (actions) {
-        if (writable.includes(subMenu)) {
+        if (writable.includes(subMenu) && canEdit()) {
             actions.innerHTML = `<button onclick="showOpnsenseAddModal('${subMenu}')" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add ${subMenu.replace(/s$/, '')}</button>`;
         } else {
             actions.innerHTML = '';
@@ -9423,6 +9423,7 @@ function pxmxVmTableHtml(vms) {
 // VM (so Backup gets the same Hypervisors-config injection), confirming ONCE for
 // the batch when confirm_destructive is on.
 function pxmxBulkBar() {
+    if (!canEdit()) return '';   // VM control is write-tier; view users see none
     return `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
       <span class="text-slate-400 font-medium mr-1">Bulk (selected):</span>
       <button onclick="pxmxBulkAction('start')" class="bg-green-100 text-green-700 px-2.5 py-1 rounded font-bold hover:bg-green-200">▶ Start</button>
@@ -9497,7 +9498,7 @@ function openVmDetail(uniqueId) {
                 · IP ${ipList.length ? escapeHtml(ipList.join(', ')) : '—'}
                 · Pool ${vm.pool ? escapeHtml(vm.pool) : '—'}</p>
         </div>
-        <div class="flex flex-wrap items-center gap-2 mb-4">
+        <div class="flex flex-wrap items-center gap-2 mb-4"${canEdit() ? '' : ' style="display:none"'}>
             <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-green-700 text-white transition-colors">▶ Start</button>
             <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors">■ Stop</button>
             <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
@@ -10668,7 +10669,9 @@ async function loadNetboxData(subMenu) {
             const findBtn = subMenu === 'Prefixes'
                 ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">New Subnet</button>`
                 : '';
-            actions.innerHTML = `${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add</button>`;
+            actions.innerHTML = canEdit()
+                ? `${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add</button>`
+                : '';
         } else {
             actions.innerHTML = '';
         }
