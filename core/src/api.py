@@ -1182,18 +1182,34 @@ def create_app(hub):
                                     content={"detail": "Console module access required"})
 
         # Shared-infrastructure WRITE paths (OPNsense firewall rules/aliases/NAT/
-        # DNS, and the shared DNS/DHCP server records/reservations/syncs) are NOT
-        # tenant-scoped — they mutate security policy or shared infra, so a
-        # non-admin must not reach them. No module-right exists for firewall/dns/
-        # dhcp (ENFORCED_RIGHTS has no fw/dns/dhcp key), so admin is the gate.
-        # Method-gated so a non-admin tenant user can still VIEW their filtered
-        # firewall rules / DNS records (the GET paths apply _filter_fw / subnet
-        # filtering and stay authed-read). Closes the "any authenticated user can
-        # rewrite shared firewall/DNS/DHCP config" gap.
+        # DNS, and the shared DNS/DHCP server records/reservations/syncs) mutate
+        # security policy or shared infra. No module-right exists for
+        # firewall/dns/dhcp (ENFORCED_RIGHTS has no fw/dns/dhcp key), so the
+        # tier is the gate. Method-gated so a non-admin tenant user can still
+        # VIEW their filtered firewall rules / DNS records (the GET paths apply
+        # _filter_fw / subnet filtering and stay authed-read). Closes the "any
+        # authenticated user can rewrite shared firewall/DNS/DHCP config" gap.
+        #
+        # Tier rules (Phase 3):
+        #   * Global Admin  — may write for any tenant (the ?tenant= scoping
+        #     below still confines a cross-tenant write to a real tenant).
+        #   * tenant Admin  — may write ONLY for an explicit ?tenant= it owns.
+        #     The write must target a concrete tenant (no ?tenant= is ambiguous
+        #     and rejected); _check_tenant_access confirms ownership. The
+        #     spoke-side push is already tenant-keyed.
+        #   * anyone else   — blocked (shared infra is admin-tier work).
         _SHARED_INFRA_WRITE_PREFIXES = ("/api/firewall/", "/api/dns/", "/api/dhcp/")
         if (request.method in ("POST", "PUT", "DELETE", "PATCH")
                 and any(path.startswith(p) for p in _SHARED_INFRA_WRITE_PREFIXES)):
-            if not _is_admin(sess):
+            if _is_admin(sess):
+                pass  # Global Admin — any tenant (the ?tenant= scoping below still applies)
+            elif _is_tenant_admin(sess):
+                explicit = request.query_params.get("tenant")
+                if not explicit or not _check_tenant_access(sess, explicit):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Tenant admin must target an explicit owned tenant (?tenant=)"})
+            else:
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "Admin access required for shared-infrastructure writes"})

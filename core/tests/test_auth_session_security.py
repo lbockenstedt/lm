@@ -135,6 +135,17 @@ def _mint_tenant_session(hub, uid, tenant_id, rights=("ipam",)):
     return api_mod._record_session(hub, user_data)
 
 
+def _mint_tenant_admin_session(hub, uid, tenants):
+    """Drop a live tenant-Admin session (role:"tenant_admin", NO admin flag)
+    scoped to ``tenants`` (a list — a tenant Admin may own several). Used by
+    the Phase-3 shared-infra write-gate tests."""
+    user_data = {"user_id": uid, "auth_type": "local",
+                 "permissions": {"role": "tenant_admin"},
+                 "tenants": list(tenants), "tenant_id": tenants[0],
+                 "protected": False}
+    return api_mod._record_session(hub, user_data)
+
+
 class _Req:
     """Minimal stand-in for Starlette Request with a cookie jar."""
     def __init__(self, cookie=None):
@@ -501,6 +512,89 @@ def test_dns_dhcp_write_requires_admin(tmp_path):
     admin_tok = _mint_session(hub, "admin")
     assert c.post("/api/dns/record", json={},
                   cookies={"lm_session": admin_tok}).status_code != 403
+
+
+# ── 8b. Shared-infrastructure writes: tenant-Admin tier (Phase 3) ─────────────
+# A tenant Admin may write firewall/DNS/DHCP ONLY for an explicit ?tenant= it
+# owns. Without ?tenant= the write is ambiguous and rejected; a ?tenant= for a
+# tenant it doesn't own is rejected; a plain (non-tier) user is still blocked.
+
+def test_firewall_write_tenant_admin_requires_explicit_tenant(tmp_path):
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    # No ?tenant= → ambiguous → 403.
+    r = c.post("/api/firewall/fw1/rules", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+    assert "explicit owned tenant" in r.json().get("detail", "")
+
+
+def test_firewall_write_tenant_admin_owned_tenant_passes(tmp_path):
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    # ?tenant=tA (owned) → middleware passes; the handler then runs (not 403).
+    r = c.post("/api/firewall/fw1/rules?tenant=tA", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code != 403
+
+
+def test_firewall_write_tenant_admin_other_tenant_403(tmp_path):
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    # ?tenant=other (not owned) → 403 (check_tenant_access fails).
+    r = c.post("/api/firewall/fw1/rules?tenant=other", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+def test_dns_write_tenant_admin_owned_tenant_passes(tmp_path):
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    r = c.post("/api/dns/record?tenant=tA", json={},
+               cookies={"lm_session": tok})
+    assert r.status_code != 403
+
+
+def test_dhcp_write_tenant_admin_requires_explicit_tenant(tmp_path):
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    # No ?tenant= → 403.
+    r = c.post("/api/dhcp/reservation", json={},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+    # ?tenant=tA (owned) → passes the gate.
+    r = c.post("/api/dhcp/reservation?tenant=tA", json={},
+               cookies={"lm_session": tok})
+    assert r.status_code != 403
+
+
+def test_firewall_write_global_admin_any_tenant(tmp_path):
+    """A Global Admin writes for any tenant — no ?tenant= required (it may
+    scope the push, but the tier gate doesn't demand it)."""
+    c, hub = _build({}, tmp_path)
+    admin_tok = _mint_session(hub, "admin")
+    # No ?tenant= → still passes (Global admin is unconstrained at the tier gate).
+    r = c.post("/api/firewall/fw1/rules", json={"rule": {}},
+               cookies={"lm_session": admin_tok})
+    assert r.status_code != 403
+    # ?tenant=anything → the end-of-middleware check_tenant_access(admin, x) is
+    # True for admins, so it passes too.
+    r = c.post("/api/firewall/fw1/rules?tenant=zzz", json={"rule": {}},
+               cookies={"lm_session": admin_tok})
+    assert r.status_code != 403
+
+
+def test_firewall_write_tenant_admin_multi_tenant_owned(tmp_path):
+    """A tenant Admin owning several tenants may write for any of them."""
+    c, hub = _build({}, tmp_path)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA", "tB"])
+    assert c.post("/api/firewall/fw1/rules?tenant=tA", json={"rule": {}},
+                  cookies={"lm_session": tok}).status_code != 403
+    assert c.post("/api/firewall/fw1/rules?tenant=tB", json={"rule": {}},
+                  cookies={"lm_session": tok}).status_code != 403
+    # But not a third tenant.
+    assert c.post("/api/firewall/fw1/rules?tenant=tC", json={"rule": {}},
+                  cookies={"lm_session": tok}).status_code == 403
 
 
 # ── 9. Help assistant admin-gate (cross-tenant LLM tools) ─────────────────────
