@@ -188,17 +188,31 @@ def register(app, hub, ctx):
             except Exception as e:
                 return [{"source": cmd, "type": "error", "name": str(e)}]
 
+        async def _empty():
+            # Placeholder for a leg a non-admin may not run (directory SEARCH_USERS
+            # is admin-only — see can_search_directory) so the gather shape stays
+            # uniform without fanning the directory spoke.
+            return []
+
         spoke_ipam       = hub.get_spoke_by_type("ipam")
         spoke_hypervisor = hub.get_hypervisor_spoke()
         spoke_nac        = hub.get_spoke_by_type("nac")
         spoke_directory  = hub.get_spoke_by_type("directory")
         spoke_firewall   = hub.get_spoke_by_type("firewall")
 
+        # SECURITY: the directory (LDAP) SEARCH_USERS leg bypasses the
+        # ``/api/ldap/*`` admin gate — a non-admin could enumerate directory
+        # users via the global search. The IPAM/NAC/Hypervisor/Firewall legs
+        # are tenant-scoped via the payload tenant slug above, but directory
+        # users are not tenant-scoped, so fan SEARCH_USERS only for admins.
+        sess = _session_user(request)
+        can_search_directory = bool(sess and _is_admin(sess))
+
         tasks = [
             _call(spoke_ipam,       "NETBOX_SEARCH"),
             _call(spoke_hypervisor, "SEARCH_VMS"),
             _call(spoke_nac,        "SEARCH_SESSIONS"),
-            _call(spoke_directory,  "SEARCH_USERS"),
+            _call(spoke_directory,  "SEARCH_USERS") if can_search_directory else _empty(),
             _call(spoke_firewall,   "SEARCH_DHCP"),
         ]
         all_results = await _asyncio.gather(*tasks)
@@ -215,7 +229,8 @@ def register(app, hub, ctx):
                 "ipam":       spoke_ipam is not None,
                 "hypervisor": spoke_hypervisor is not None,
                 "nac":        spoke_nac is not None,
-                "directory":  spoke_directory is not None,
+                # directory leg is admin-only; reflect whether it actually ran.
+                "directory":  bool(spoke_directory is not None and can_search_directory),
                 "firewall":   spoke_firewall is not None,
             },
         }

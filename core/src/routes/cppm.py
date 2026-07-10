@@ -196,7 +196,7 @@ def register(app, hub, ctx):
         return m.lower().replace(":", "").replace("-", "").replace(".", "") if m else ""
 
     @app.get("/api/device-detail")
-    async def get_device_detail(q: str = None, mac: str = None, ip: str = None, hostname: str = None):
+    async def get_device_detail(request: Request, q: str = None, mac: str = None, ip: str = None, hostname: str = None):
         """Fan-out device lookup across all modules by MAC, IP, or hostname.
 
         Queries every connected spoke type (CPPM endpoints/sessions, NetBox IPs,
@@ -205,9 +205,21 @@ def register(app, hub, ctx):
         (``showDeviceDashboard`` in ``WebUI/main.js``). NOTE: the inner OPNsense
         loop sets ``rules_data`` from a lease-IP match even when the rules call
         itself failed — the success condition is intentionally tied to finding a
-        DHCP lease, so read that block twice before changing it."""
+        DHCP lease, so read that block twice before changing it.
+
+        SECURITY: admin-only. This aggregates cross-tenant recon (NAC + NetBox +
+        OPNsense + Proxmox) AND a directory user search (LDAP SEARCH_USERS) by
+        MAC/IP/hostname, so a non-admin caller could read another tenant's
+        device record and enumerate directory users — the latter bypasses the
+        ``/api/ldap/*`` admin gate. Gate the whole route behind admin to match."""
         import asyncio as _asyncio, re as _re
         hub = app.state.hub
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403,
+                                detail="Admin only — cross-system device detail is admin-gated")
 
         mac = (mac or "").strip() or None
         ip = (ip or "").strip() or None
