@@ -3199,6 +3199,26 @@ window.csVmHostAll = function () {
     loadCSData('VM Server', currentSubChild || 'VMs', true);
 };
 
+// Dismiss the host panel on an outside click. It is a MULTI-select — ticking a
+// host (csVmHostToggle) deliberately keeps it open so you can pick several — so
+// clicking anywhere outside it is the clear way to close it (there was none:
+// no ✕, and only re-clicking the Host button or "All hosts" closed it). Bound
+// once at module load; keys off #cs-host-panel so it survives re-renders.
+if (!window._csHostPanelOutsideBound) {
+    window._csHostPanelOutsideBound = true;
+    document.addEventListener('click', function (e) {
+        if (!_csHostPanelOpen) return;
+        const panel = document.getElementById('cs-host-panel');
+        const wrap = panel && panel.closest('.relative');
+        // Clicks on the toggle button, the search box, or a host row live inside
+        // the wrapper and manage their own state; only an OUTSIDE click closes.
+        if (wrap && !wrap.contains(e.target)) {
+            _csHostPanelOpen = false;
+            panel.classList.add('hidden');
+        }
+    });
+}
+
 function csOnlineDot(online) {
     return online ? '<span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block mr-1.5 align-middle"></span>'
                   : '<span class="w-1.5 h-1.5 rounded-full bg-slate-300 inline-block mr-1.5 align-middle"></span>';
