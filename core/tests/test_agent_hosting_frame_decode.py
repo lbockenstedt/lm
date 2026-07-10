@@ -147,3 +147,67 @@ def test_unexpected_path_is_rejected():
     ws = _FakeAgentWS([])
     _run(host._agent_handler(ws, path="/ws/wrong"))
     assert ws.closed and ws.closed[0] == 1008
+
+
+# ── spoke → hub relay wire form ──────────────────────────────────────────────
+
+class _FakeHubWS:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, wire):
+        self.sent.append(wire)
+
+
+def test_relay_up_uses_sig_body_wire_the_hub_can_decode():
+    """_relay_agent_msg_up must emit ``<sig>.<body>`` (what the hub's
+    split_frame + json.loads(body) + verify_signature expects), NOT the legacy
+    dict-envelope. The dict-envelope's header ``timestamp`` is a float, so the
+    hub's split_frame split on that '.' and json.loads(body) failed → every
+    relayed agent frame (heartbeat/telemetry/CS_*/log) was dropped → hosted
+    agents stuck 'offline' despite a healthy agent↔spoke link."""
+    from core.src.security.signer import split_frame  # noqa: E402
+
+    host = _Host(SECRET)
+    host.spoke_id = "cs-svr-02-spoke"
+    host.signer = MessageSigner(SECRET)  # spoke↔hub session signer
+    host.connected_agents = {
+        "pxmx-cs-svr-02-agent": {"install_uuid": "u1", "hostname": "pxmx-cs-svr-02"}}
+    host._hub_ws = _FakeHubWS()
+
+    # _Host stubs _relay_agent_msg_up for the handler tests above; exercise the
+    # REAL inherited implementation here.
+    _run(AgentHostingControlPlane._relay_agent_msg_up(
+        host, "pxmx-cs-svr-02-agent", "AGENT_HEARTBEAT", {"x": 1}))
+
+    assert len(host._hub_ws.sent) == 1
+    wire = host._hub_ws.sent[0]
+
+    # Wire is <sig>.<body>: sig is a 64-char hex HMAC (no '.'), body is the FULL
+    # relay JSON — exactly what the hub decodes.
+    sig, body = split_frame(wire)
+    assert len(sig) == 64 and "." not in sig
+    parsed = json.loads(body)  # the hub's json.loads(body_str) must succeed
+    assert parsed["payload"]["type"] == "AGENT_RELAY_UP"
+    inner = parsed["payload"]["data"]["original_payload"]["payload"]
+    assert inner["type"] == "AGENT_HEARTBEAT" and inner["data"] == {"x": 1}
+    # The hub verifies the RECEIVED body bytes against sig — that must pass.
+    assert MessageSigner(SECRET).verify_bytes(body.encode(), sig)
+
+
+def test_legacy_dict_envelope_would_have_been_dropped_by_hub():
+    """Documents the bug: a dict-envelope with a float timestamp is mis-split by
+    the hub's split_frame (first '.' is inside the timestamp), so json.loads(body)
+    raises — the frame the hub silently dropped."""
+    from core.src.security.signer import split_frame  # noqa: E402
+    import pytest  # noqa: E402
+
+    legacy = {"header": {"message_id": "no-dots-uuid", "timestamp": 1783658368.1234},
+              "payload": {"type": "AGENT_RELAY_UP", "data": {}}}
+    legacy["signature"] = MessageSigner(SECRET).sign(legacy)
+    legacy_wire = json.dumps(legacy, separators=(",", ":"))
+
+    _sig, body = split_frame(legacy_wire)
+    assert body.startswith("1234")  # split landed inside the timestamp float
+    with pytest.raises(Exception):
+        json.loads(body)

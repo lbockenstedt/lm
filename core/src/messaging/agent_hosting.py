@@ -507,8 +507,16 @@ class AgentHostingControlPlane(BaseControlPlane):
                     },
                 },
             }
-            relay["signature"] = self.signer.sign(relay)
-            await hub_ws.send(json.dumps(relay, separators=(",", ":")))
+            # Send in the ``<sig>.<body>`` wire form the hub decodes (split_frame
+            # + verify the RECEIVED body bytes — main.py handle_connection). The
+            # legacy dict-envelope (json.dumps with the signature INSIDE the
+            # object) was mis-split by the hub's split_frame on the FIRST '.',
+            # which is the header ``timestamp`` float, so json.loads(body) failed
+            # and EVERY relayed agent frame (heartbeat/telemetry/CS_*/log) was
+            # dropped at the hub — hosted agents stuck "offline" and CS telemetry/
+            # logs absent even though the agent↔spoke link was healthy. Mirror
+            # control_plane's own spoke→hub sends, which use _encode_frame.
+            await hub_ws.send(self._encode_frame(relay))
         except Exception as _e:
             logger.warning("Failed to relay %s from '%s' to hub: %s", msg_type, agent_id, _e)
 
