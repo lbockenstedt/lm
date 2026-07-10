@@ -641,6 +641,7 @@ function handleSessionExpired() {
     document.getElementById('user-chip')?.classList.add('hidden');
     document.getElementById('user-chip')?.classList.remove('flex');
     document.getElementById('login-username')?.focus();
+    refreshOidcButton();
 }
 window.fetch = async function lmFetch(input, init) {
     const res = await _lmOrigFetch(input, init);
@@ -7694,6 +7695,8 @@ async function loadGroups() {
         window._permGroups = groups;
         window._permGroupNames = Object.fromEntries(
             Object.entries(groups).map(([gid, g]) => [gid, g.name || gid]));
+        // Tenant names for the group-table scope badges + the modal checklist.
+        await ensureTenants();
         if (!bodyEl) return;
         if (Object.keys(groups).length === 0) {
             bodyEl.innerHTML = `<tr><td colspan="5" class="px-4 py-6 text-center text-slate-400 italic">No groups yet — create one to bundle module access.</td></tr>`;
@@ -7713,9 +7716,17 @@ async function loadGroups() {
             const ldap = g.ldap_group
                 ? `<span class="font-mono text-xs text-blue-600">${g.ldap_group}</span>`
                 : '<span class="text-[10px] text-slate-300 italic">—</span>';
+            // Granted tenant scope: a group may carry a ``tenants`` list so a
+            // single Entra/LDAP group grants BOTH RBAC permissions AND tenant
+            // scope. Show the tenant names (ids fall back when names unresolved).
+            const tNames = (window._allTenantsName || {});
+            const scopeBadges = (g.tenants && g.tenants.length)
+                ? `<div class="mt-1 flex flex-wrap gap-1">${g.tenants.map(tid =>
+                    `<span class="text-[10px] bg-indigo-50 text-indigo-700 border border-indigo-100 px-1.5 py-0.5 rounded font-medium">${tNames[tid] || tid}</span>`).join('')}</div>`
+                : '';
             return `
                 <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-4 py-3"><div class="font-medium text-slate-700 text-sm">${g.name || gid}</div><div class="text-[11px] text-slate-400">${g.description || ''}</div></td>
+                    <td class="px-4 py-3"><div class="font-medium text-slate-700 text-sm">${g.name || gid}</div><div class="text-[11px] text-slate-400">${g.description || ''}</div>${scopeBadges}</td>
                     <td class="px-4 py-3"><div class="flex flex-wrap gap-1">${permBadges}</div></td>
                     <td class="px-4 py-3">${ldap}</td>
                     <td class="px-4 py-3 text-center text-slate-600">${g.member_count || 0}</td>
@@ -7731,7 +7742,28 @@ async function loadGroups() {
     }
 }
 
-function showGroupModal(groupId) {
+// Fetch + cache the tenant list (id + name) for the group-modal tenant
+// checklist and the group-table scope badges. /setup/tenants is admin-only;
+// the group editor is itself admin-only, so this is safe to call here.
+async function ensureTenants() {
+    if (window._allTenants) return window._allTenants;
+    try {
+        const res = await setupFetch('/setup/tenants');
+        if (!res.ok) return [];
+        const data = await res.json();
+        const tenants = data.tenants || [];
+        window._allTenants = tenants;
+        window._allTenantsName = Object.fromEntries(
+            tenants.map(t => [t.id, t.name || t.id]));
+        return tenants;
+    } catch (_e) {
+        window._allTenants = [];
+        window._allTenantsName = {};
+        return [];
+    }
+}
+
+async function showGroupModal(groupId) {
     const groups = window._permGroups || {};
     const g = groupId ? (groups[groupId] || {}) : {};
     const perms = g.permissions || {};
@@ -7744,6 +7776,16 @@ function showGroupModal(groupId) {
             : !!perms[key];
         return `<div><label class="text-xs text-slate-500 uppercase font-bold">${label}</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="grp-perm-${key}" ${checked ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"></div></div>`;
     }).join('');
+    // Tenant scope checklist — a group may carry a ``tenants`` list so a single
+    // Entra/LDAP group grants BOTH RBAC permissions AND tenant scope. The backend
+    // validates each id is a real tenant (drops unknowns), so we list only known
+    // tenants here; an id no longer in tenant_state is silently dropped on save.
+    await ensureTenants();
+    const tenants = window._allTenants || [];
+    const granted = new Set(g.tenants || []);
+    const tenantRows = tenants.length
+        ? tenants.map(t => `<label class="flex items-center gap-2 text-sm text-slate-600 py-1"><input type="checkbox" id="grp-tenant-${t.id}" ${granted.has(t.id) ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"> ${t.name || t.id}</label>`).join('')
+        : '<span class="text-[11px] text-slate-400 italic">No tenants defined yet.</span>';
     const modal = document.createElement('div');
     modal.id = 'group-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -7758,6 +7800,7 @@ function showGroupModal(groupId) {
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name</label><input type="text" id="grp-name" value="${g.name || ''}" placeholder="e.g. NOC Operators" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Description</label><input type="text" id="grp-desc" value="${g.description || ''}" placeholder="Optional" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">LDAP Group <span class="text-slate-400 normal-case font-normal">(optional — maps a directory group to this bundle)</span></label><input type="text" id="grp-ldap" value="${g.ldap_group || ''}" placeholder="cn=noc,ou=groups,dc=example,dc=com" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 font-mono"></div>
+                <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Tenant Scope <span class="text-slate-400 normal-case font-normal">(optional — grants tenant access to members; pairs with Entra/LDAP group login)</span></label><div class="grid grid-cols-2 gap-1 mt-2 max-h-36 overflow-y-auto pr-1">${tenantRows}</div></div>
                 <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Permissions</label><div class="grid grid-cols-2 gap-2 mt-2">${rightRows}</div></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
@@ -7780,12 +7823,18 @@ async function saveGroup() {
     Object.keys(_RBAC_RIGHT_LABELS).forEach(key => {
         if (document.getElementById('grp-perm-' + key)?.checked) permissions[key] = true;
     });
+    // Collect granted tenant scope. Sending an explicit list (even empty)
+    // replaces the stored set — matches the backend's "list = replace, empty =
+    // clear" contract. Unknown ids are dropped server-side.
+    const tenants = (window._allTenants || []).map(t => t.id).filter(tid =>
+        document.getElementById('grp-tenant-' + tid)?.checked);
     const body = {
         group_id: document.getElementById('grp-id').value || '',
         name,
         description: document.getElementById('grp-desc').value.trim(),
         ldap_group: document.getElementById('grp-ldap').value.trim(),
         permissions,
+        tenants,
     };
     try {
         const resp = await setupFetch('/setup/groups', {
@@ -14823,6 +14872,30 @@ async function _initApp() {
     }
 }
 
+// Entra ID (OIDC) SSO button — shown only when the hub reports OIDC enabled.
+// The button is a plain navigation to /auth/oidc/login, which mints PKCE+state
+// and 302s to Entra; on callback the hub sets the lm_session cookie and
+// redirects back to the app root, so DOMContentLoaded re-checks /auth/me and
+// continues into _initApp. No fetch/JSON here — it's a top-level browser
+// redirect, so the SSO cookie + cross-origin hop work as the OIDC backend expects.
+async function refreshOidcButton() {
+    const wrap = document.getElementById('login-oidc-wrap');
+    if (!wrap) return;
+    try {
+        const r = await fetch('/auth/oidc/enabled', { credentials: 'same-origin' });
+        if (!r.ok) { wrap.classList.add('hidden'); return; }
+        const body = await r.json().catch(() => ({}));
+        wrap.classList.toggle('hidden', !body.enabled);
+    } catch (_e) {
+        // Hub unreachable / older build without the endpoint → hide the button.
+        wrap.classList.add('hidden');
+    }
+}
+
+function doOidcLogin() {
+    window.location.href = '/auth/oidc/login';
+}
+
 async function doLogin() {
     const username = (document.getElementById('login-username')?.value || '').trim();
     const password = document.getElementById('login-password')?.value || '';
@@ -14864,6 +14937,7 @@ async function doLogout() {
     document.getElementById('user-chip')?.classList.add('hidden');
     document.getElementById('user-chip')?.classList.remove('flex');
     document.getElementById('login-username')?.focus();
+    refreshOidcButton();
 }
 
 async function doSetup() {
@@ -14926,10 +15000,13 @@ document.addEventListener('DOMContentLoaded', async () => {
             } else {
                 document.getElementById('login-username')?.focus();
             }
+            // Reveal the "Sign in with Microsoft" button when OIDC is configured.
+            refreshOidcButton();
         }
     } catch (e) {
         console.warn("Session check failed:", e);
         document.getElementById('login-username')?.focus();
+        refreshOidcButton();
     }
 });
 

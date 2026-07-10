@@ -338,6 +338,22 @@
                     class="w-full bg-[#01A982] hover:bg-[#008c6a] text-white font-bold py-2.5 px-4 rounded-lg text-sm transition-colors">
                     Sign In
                 </button>
+                <!-- Entra ID (OIDC) SSO — shown only when /auth/oidc/enabled reports
+                     enabled. The hub mints PKCE+state and 302s to Entra; on callback it
+                     sets the lm_session cookie and redirects back here, so the button is
+                     a plain navigation, not a fetch. -->
+                <div id="login-oidc-wrap" class="hidden">
+                    <div class="flex items-center gap-3 my-1">
+                        <div class="flex-1 h-px bg-slate-600"></div>
+                        <span class="text-[10px] text-slate-500 uppercase tracking-wider font-bold">or</span>
+                        <div class="flex-1 h-px bg-slate-600"></div>
+                    </div>
+                    <button onclick="doOidcLogin()"
+                        class="w-full bg-slate-700 hover:bg-slate-600 text-white font-bold py-2.5 px-4 rounded-lg text-sm transition-colors flex items-center justify-center gap-2">
+                        <svg width="16" height="16" viewBox="0 0 23 23" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="#f25022" d="M0 0h11v11H0z"/><path fill="#7fba00" d="M12 0h11v11H12z"/><path fill="#00a4ef" d="M0 12h11v11H0z"/><path fill="#ffb900" d="M12 12h11v11H12z"/></svg>
+                        Sign in with Microsoft
+                    </button>
+                </div>
             </div>
         </div>
 
