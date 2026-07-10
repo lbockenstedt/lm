@@ -1204,7 +1204,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                            "DNS rebinding to a private/loopback host is blocked.",
                 )
         await store.set_central_config(tenant_id, cfg)
-        pushed = await _push_config(tenant_id, {"central_config": hub_cc})
+        # Push ``cfg`` (NOT ``hub_cc``): cfg carries ``mode`` on top of the
+        # cluster creds, and the spoke's poller (_build_config) needs ``mode`` to
+        # pick classic vs new_central. Pushing hub_cc dropped mode, so the spoke
+        # defaulted to classic regardless of the operator's choice.
+        pushed = await _push_config(tenant_id, {"central_config": cfg})
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.post("/sim/api/aggregate/config-push")
