@@ -6178,6 +6178,9 @@ function _mgmtEntryCard(o) {
     const badges  = (o.badges || []).filter(Boolean).join(' ');
     const meta    = (o.metaLines || []).filter(Boolean).join('');
     const actions = (o.actions || []).filter(Boolean).join('');
+    // Corner actions (e.g. Events / Copy) sit at the FAR right of the header row,
+    // to the right of the ID + badges, pinned right via ml-auto.
+    const corner  = (o.cornerActions || []).filter(Boolean).join(' ');
     return `<div class="lm-mgmt-card border border-slate-200 rounded-md bg-white p-2.5 hover:bg-slate-50 space-y-1.5">
         <div class="flex items-start justify-between gap-3 flex-wrap">
             <div class="flex items-start gap-2.5 min-w-0">
@@ -6188,7 +6191,10 @@ function _mgmtEntryCard(o) {
                     ${o.identityBanner || ''}
                 </div>
             </div>
-            ${badges ? `<div class="flex items-center gap-1.5 flex-wrap justify-end">${badges}</div>` : ''}
+            <div class="flex items-center gap-3 flex-wrap justify-end ml-auto">
+                ${badges ? `<div class="flex items-center gap-1.5 flex-wrap justify-end">${badges}</div>` : ''}
+                ${corner ? `<div class="flex items-center gap-2 shrink-0">${corner}</div>` : ''}
+            </div>
         </div>
         ${meta}
         ${actions ? `<div class="flex items-center gap-2 flex-wrap pl-6">${actions}</div>` : ''}
@@ -6280,6 +6286,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                         ...(s._roleName ? [_mgmtBtn('Unload Role', `unloadRole('${eRoleParent}','${eRoleName}')`, 'bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200')] : []),
                         ...(extras ? extras.actions : []),
                     ],
+                    cornerActions: extras ? extras.eventsActions : [],
                 }) + (extras ? extras.eventsPanel : '');
             }).join('')}</div>`;
         }
@@ -6443,6 +6450,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                         : (isSpokeKind ? '' : _mgmtBtn('Un-approve', `${unapproveFnName}('${eAid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')),
                     ...(extras ? extras.actions : []),
                 ],
+                cornerActions: extras ? extras.eventsActions : [],
             }) + (extras ? extras.eventsPanel : '');
         }).join('')}</div>`;
         // Trickle: fill each connected generic agent's Active Role line as its
@@ -7860,6 +7868,10 @@ function _diagTelemetryExtras(s, fns) {
             allowRecoveryPause
                 ? _mgmtBtn(pauseLabel, `setRecoveryPause('${eSid}', ${!isPaused})`, isPaused ? 'text-green-600' : 'text-slate-400 hover:underline')
                 : '',
+        ],
+        // Events (+ Copy) pinned to the far right of the header row (next to the
+        // ID) via _mgmtEntryCard's cornerActions slot, not the bottom action row.
+        eventsActions: [
             `<button onclick="toggleSpokeEvents('${eSid}')" class="text-blue-500 hover:text-blue-700 font-medium text-xs">${evCount} events ▾</button>`,
             evCount ? `<button onclick="copySpokeEvents('${eSid}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Copy</button>` : '',
         ],
