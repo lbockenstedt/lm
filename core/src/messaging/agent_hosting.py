@@ -34,10 +34,10 @@ from typing import Any, Dict, List, Optional
 
 try:
     from .control_plane import BaseControlPlane
-    from ..security.signer import MessageSigner
+    from ..security.signer import MessageSigner, split_frame
 except ImportError:  # imported off a stale path (bare modules on sys.path)
     from messaging.control_plane import BaseControlPlane  # type: ignore
-    from security.signer import MessageSigner  # type: ignore
+    from security.signer import MessageSigner, split_frame  # type: ignore
 
 logger = logging.getLogger("AgentHostingControlPlane")
 
@@ -311,9 +311,12 @@ class AgentHostingControlPlane(BaseControlPlane):
                     # Keep connection alive (heartbeats only) until approved/disconnected
                     while not event.is_set():
                         try:
-                            raw = await asyncio.wait_for(websocket.recv(), timeout=10.0)
-                            msg = json.loads(raw)
-                            # Only heartbeats are processed while pending
+                            # Drain frames to keep the socket alive until approved.
+                            # A pending agent may send signed ``<sig>.<body>``
+                            # heartbeats; we don't process anything while pending,
+                            # so don't parse (a decode error must NOT break the
+                            # keepalive loop and bounce the pending agent).
+                            await asyncio.wait_for(websocket.recv(), timeout=10.0)
                         except asyncio.TimeoutError:
                             pass
                 except Exception:
@@ -352,11 +355,42 @@ class AgentHostingControlPlane(BaseControlPlane):
             await self._on_agent_registered(agent_id)
 
             # 3. Message loop
+            #
+            # The agent sends every post-auth frame in the ``<sig>.<body>`` wire
+            # form (encode_frame): a hex HMAC over the exact body bytes, a '.',
+            # then compact-JSON. A stale spoke that did a bare ``json.loads(raw)``
+            # here choked on the ``<sig>.`` prefix ("Expecting value" when the sig
+            # began with a-f / "Extra data" when it began with digits) and — since
+            # the decode error propagated out of the ``async for`` — tore the whole
+            # connection down on the FIRST frame → a tight, no-backoff reconnect
+            # flap. Decode the frame the way control_plane._decode_frame and the
+            # agent itself do, accept the legacy ``{...}`` dict-envelope for
+            # forward/back compat, and treat any undecodable/forged/unsigned frame
+            # as a per-frame drop (continue) — never a connection-fatal error.
             async for raw in websocket:
-                msg = json.loads(raw)
-
-                if "signature" not in msg or not self.agent_signer.verify(msg):
-                    logger.warning("Invalid agent message signature — dropping")
+                try:
+                    if isinstance(raw, (bytes, bytearray)):
+                        raw = raw.decode("utf-8", "replace")
+                    if raw[:1] == "{":
+                        # Legacy dict-envelope: signature INSIDE the JSON.
+                        msg = json.loads(raw)
+                        if "signature" not in msg or not self.agent_signer.verify(msg):
+                            logger.warning("Invalid agent message signature — dropping")
+                            continue
+                    else:
+                        # Current wire form ``<sig>.<body>``: HMAC over the exact
+                        # received body bytes (no re-serialization). The WS is
+                        # already authenticated by the shared agent_secret; the
+                        # per-frame HMAC is defense-in-depth, so an unsigned or
+                        # bad-HMAC frame is dropped (mirrors the old "must be
+                        # signed" posture) rather than trusted.
+                        sig, body = split_frame(raw)
+                        if not sig or not self.agent_signer.verify_bytes(body.encode(), sig):
+                            logger.warning("Invalid/unsigned agent frame — dropping")
+                            continue
+                        msg = json.loads(body)
+                except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as e:
+                    logger.warning(f"Undecodable agent frame dropped: {e}")
                     continue
 
                 payload  = msg.get("payload", {})
