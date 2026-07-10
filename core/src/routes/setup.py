@@ -2,7 +2,7 @@
 from api import (
     HTTPException, Request, _hub_msg, logger, time,
 )
-from access import tenant_is_shared as _tenant_is_shared
+from access import tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible
 
 
 def register(app, hub, ctx):
@@ -1298,7 +1298,15 @@ def register(app, hub, ctx):
         return {"metadata": metadata}
 
     @app.get("/setup/firewalls")
-    async def get_firewalls():
+    async def get_firewalls(request: Request):
         hub = app.state.hub
         firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
+        # Tenant-scope the DEVICE list: a non-admin sees firewalls in the shared
+        # tenant + their own tenant(s); a firewall bound to another tenant, or
+        # unassigned, is hidden (admin-only). Object-level rule filtering
+        # (_filter_fw) and the write gate are unchanged. Admins see all.
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            firewalls = [f for f in firewalls
+                         if _spoke_visible(sess, (f or {}).get("tenant_id", ""))]
         return {"firewalls": firewalls}

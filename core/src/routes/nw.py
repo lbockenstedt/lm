@@ -175,9 +175,15 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/setup/nw-devices")
-    async def get_nw_devices():
+    async def get_nw_devices(request: Request):
         hub = app.state.hub
         devices = hub.state.system_state.get("global_config", {}).get("nw_devices", [])
+        # Tenant-scope the device list (shared + own visible; other/unassigned
+        # admin-only). Object-level IP filtering + the write gate are unchanged.
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            devices = [d for d in devices
+                       if access.spoke_visible_to_session(sess, (d or {}).get("tenant_id", ""))]
         return {"nw_devices": devices}
 
     @app.post("/setup/nw-devices")
