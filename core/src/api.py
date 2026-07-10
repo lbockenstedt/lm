@@ -1208,6 +1208,31 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Firewall module access required"})
 
+        # /api/cppm/* + /cppm/* (Security/NAC module) require the ``nac`` right OR
+        # admin. NAC is read-only (no mutation endpoints); its admin-only
+        # diagnostic relays (probe/test-auth/refresh/health) are already returned
+        # above by _ADMIN_API_PREFIXES, so this only gates the tenant data reads
+        # (which stay subnet/tag-filtered per access.filter_session).
+        if path.startswith("/api/cppm/") or path.startswith("/cppm/"):
+            if not (_is_admin(sess) or _has_nac_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "NAC module access required"})
+
+        # /api/dns/* (DNS module) requires the ``dns`` right OR admin. Writes stay
+        # Global-Admin-only via _ADMIN_INFRA_WRITE_PREFIXES below (shared Unbound,
+        # no per-record constrained-write model yet); GET reads are subnet-filtered.
+        if path.startswith("/api/dns/"):
+            if not (_is_admin(sess) or _has_dns_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "DNS module access required"})
+
+        # /api/dhcp/* (DHCP module) requires the ``dhcp`` right OR admin. Writes
+        # stay Global-Admin-only (shared Kea); GET reads are subnet-filtered.
+        if path.startswith("/api/dhcp/"):
+            if not (_is_admin(sess) or _has_dhcp_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "DHCP module access required"})
+
         # Shared-infrastructure WRITE paths (OPNsense firewall rules/aliases/NAT/
         # DNS, and the shared DNS/DHCP server records/reservations/syncs) mutate
         # security policy or shared infra. No module-right exists for
@@ -1236,7 +1261,11 @@ def create_app(hub):
         # no edit) is blocked here; a write user is let through and write_scope
         # then permits their OWN-tenant dedicated writes but denies shared; a
         # tenant-admin is let through and write_scope permits shared (constrained).
-        _WRITE_TIER_PREFIXES = ("/api/firewall/",)
+        # /api/netbox/* writes already enforce per-object tenant ownership in the
+        # handlers (_verify_owns clamps to the caller's tenant slug + _enforce_
+        # body_tenant), so the middleware only adds the write-user floor here: a
+        # view user (ipam right, no edit) can read IPAM but not mutate it.
+        _WRITE_TIER_PREFIXES = ("/api/firewall/", "/api/netbox/")
         # ADMIN-ONLY writes: these back a SINGLE shared server (one Unbound / one
         # Kea / one certbot) with no per-object constrained-write model yet, so the
         # `?tenant=` gate can prove the caller owns the query param but NOT that the
