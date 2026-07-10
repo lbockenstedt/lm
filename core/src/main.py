@@ -84,6 +84,7 @@ from nw_cache import NwCacheMixin
 from dns_dhcp_sync import DnsDhcpSyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 from staleness_sweep import StalenessSweepMixin
+from self_backup import SelfBackupMixin
 from spoke_alert_sync import SpokeAlertMixin
 from repo_sync import RepoSyncMixin
 from hub_vnc_console import HubVncConsoleMixin
@@ -466,7 +467,7 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     return props
 
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, SpokeAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -3974,10 +3975,29 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     if os.path.isfile(status_file):
                         with open(status_file, "r") as f:
                             hb = f.read().strip()
+                    # Version-drift for the footer indicator: /opt/lm/VERSION is
+                    # the latest pulled code; the running-version sentinel is what
+                    # THIS hub is actually running (written at startup). behind =
+                    # a newer version is on disk but the hub hasn't restarted into
+                    # it yet (the watchdog will, in-window). Equal → up to date.
+                    _target_ver = _running_ver = ""
+                    try:
+                        with open("/opt/lm/VERSION") as _vf:
+                            _target_ver = _vf.read().strip()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        with open("/var/lib/lm/state/running-version") as _rf:
+                            _running_ver = _rf.read().strip()
+                    except Exception:  # noqa: BLE001
+                        pass
                     self._watchdog_status = {
                         "armed": armed,
                         "heartbeat": hb,
                         "log_mtime": (os.path.getmtime(wlog) if os.path.isfile(wlog) else 0),
+                        "target_version": _target_ver,
+                        "running_version": _running_ver,
+                        "behind": bool(_target_ver and _running_ver and _target_ver != _running_ver),
                     }
                 except Exception as e:  # noqa: BLE001
                     logger.debug("watchdog status cache failed: %s", e)
@@ -5442,6 +5462,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # runs on a never-configured hub (the loop otherwise defaults disabled).
         self.seed_staleness_sweep_defaults()
         staleness_sweep_task = asyncio.create_task(self.run_staleness_sweep_loop())
+        # Hub self-backup (SelfBackupMixin): on a schedule (backup_interval_hours)
+        # takes a rotated, optionally Fernet-encrypted tarball of hub state +
+        # the key/secret stores under <state_dir>/self-backup/, and optionally
+        # pushes it to a remote host over scp using an admin-placed key file.
+        # All config in global_config["self_backup"] (WebUI Setup → Self-Backup);
+        # disabled by default — opt-in. See run_self_backup_loop.
+        self.seed_self_backup_defaults()
+        self_backup_task = asyncio.create_task(self.run_self_backup_loop())
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable
         # [heartbeat] line into self.logs (module="hub" in collect_all_logs)

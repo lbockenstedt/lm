@@ -2094,7 +2094,16 @@ function _updateMetrics(statusData) {
 
     const versionEl = document.getElementById('footer-sys-version');
     if (versionEl && m.version) {
-        versionEl.textContent = m.version;
+        // Sentinel-driven indicator: GREEN = running the latest pulled version,
+        // YELLOW = a newer version is on disk but the hub hasn't restarted into
+        // it yet (watchdog will, in-window). Rendered as "● Version | .nnn".
+        const wd = m.watchdog || {};
+        const behind = !!wd.behind;
+        const dotTone = behind ? 'bg-amber-400' : 'bg-green-500';
+        const title = behind
+            ? `Behind — version ${wd.target_version || ''} pulled, pending restart (running ${wd.running_version || m.version})`
+            : 'Up to date (running the latest pulled version)';
+        versionEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full ${dotTone} align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
         window.__lmHubVersion = m.version;  // for File-a-Bug context
     }
 
