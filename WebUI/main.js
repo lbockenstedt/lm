@@ -2105,6 +2105,12 @@ async function loadUpdateGateConfig() {
         if (el) el.innerHTML = w.armed
             ? `<span class="text-green-600">● auto-heal watchdog armed</span>${w.heartbeat ? ' · ' + escapeHtml(String(w.heartbeat)) : ''}`
             : `<span class="text-amber-600">● watchdog not armed</span>`;
+        const pill = document.getElementById('ug-watchdog-pill');
+        if (pill) {
+            pill.className = 'text-[10px] px-2 py-0.5 rounded-full font-bold uppercase normal-case '
+                + (w.armed ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700');
+            pill.textContent = w.armed ? 'watchdog ✓' : 'watchdog off';
+        }
     } catch (e) { /* ignore */ }
 }
 
@@ -3297,7 +3303,7 @@ function _renderSettingsSection(subMenu) {
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-1">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Update / Maintenance Window ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">Update / Maintenance Window ${helpIcon('lm-hub', null, 'Hub help')}<span id="ug-watchdog-pill" class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-500 normal-case">watchdog …</span></h3>
                         <div class="flex items-center gap-2">
                             <button onclick="resetUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore defaults (02:00 window)">Reset Defaults</button>
                             <button onclick="saveUpdateGateConfig()" id="ug-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button>
