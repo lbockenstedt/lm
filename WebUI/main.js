@@ -1210,7 +1210,7 @@ const VIEW_CHILDREN = {
     cs: {
         'Dashboard': ['Checks', 'Hardware', 'Client Count'],
         'Clients':     ['All', 'T1', 'T2', 'T3'],
-        'Central':     ['Sites', 'Alerts', 'Clients'],
+        'Central':     ['Sites', 'Alerts', 'Insights', 'Clients'],
         'VM Server':   ['Overview', 'VMs', 'Console', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
         'Config':      ['API', 'Simulation'],
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications'],
