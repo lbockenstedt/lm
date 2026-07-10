@@ -845,13 +845,9 @@ mkdir -p "$BASE_DIR/core/data"
 chown -R $SvcUser:$SvcUser "$BASE_DIR"
 
 # --- Step B: WebUI Assets ---
-log_c "Setting up WebUI assets..."
-cd "$BASE_DIR/WebUI"
-if [ -f "install_ui.sh" ]; then
-    bash ./install_ui.sh
-else
-    log_c "✅ UI assets already in place (install_ui.sh not found in WebUI directory, skipping)."
-fi
+# WebUI ships in the git checkout at $BASE_DIR/WebUI and is served directly by
+# the hub — no separate asset-deploy step (the old install_ui.sh is retired).
+log_c "✅ WebUI assets in place (served from $BASE_DIR/WebUI)."
 cd "$BASE_DIR"
 
 # --- Step B2: Ensure Hub credentials (LM_FERNET_KEY) ---
