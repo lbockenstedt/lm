@@ -1319,6 +1319,20 @@ class UpdatePipelineMixin:
         # + restart + reconnect on the new tip. `force_spokes` (Update button)
         # bypasses it. Stamped on every push attempt (connected or not).
         SPOKE_UPDATE_COOLDOWN_S = 600
+        # Blind-re-push backstop. When the remote tip can't be resolved
+        # (``get_remote_commit`` → ``"unknown"``, e.g. GitHub ``ls-remote``
+        # failing from the hub), the up-to-date gate below can't fire and
+        # ``last_pushed[sid]`` is never stamped — so without this guard the hub
+        # blind-re-fires SPOKE_UPDATE every ``SPOKE_UPDATE_COOLDOWN_S`` (600s)
+        # forever. Each re-fire restarts the spoke (SPOKE_UPDATE's whole point),
+        # dumping its 20-30 pending command queue → the hub's CS_INGEST (30s) /
+        # GET_AGENTS (5s) timeouts — the update→flap→re-push storm. A spoke we've
+        # already pushed gets deferred while the tip stays unresolvable, with a
+        # long backstop so a genuinely-stale spoke still gets nudged if a real
+        # update landed that the hub can't see. A first-time push (no
+        # ``pushed_ts``) still goes through best-effort. ``force_spokes`` /
+        # Update button bypasses this (see ``spoke_force``).
+        SPOKE_UPDATE_BLIND_BACKSTOP_S = 6 * 3600
         _now = time.time()
         pushed_ts = dict(config.get("spoke_update_pushed_ts", {}) or {})
         _approved_ids = {sid for ss in repo_spokes.values() for sid in ss}
@@ -1337,6 +1351,15 @@ class UpdatePipelineMixin:
                 if not spoke_force and (_now - float(pushed_ts.get(sid, 0) or 0)) < SPOKE_UPDATE_COOLDOWN_S:
                     _left = int(SPOKE_UPDATE_COOLDOWN_S - (_now - float(pushed_ts.get(sid, 0) or 0)))
                     update_results.append(f"{sid}: recently pushed - cooldown {_left}s ({repo_url})")
+                    continue
+                # Blind-re-push storm guard: tip unresolvable + already pushed
+                # once → defer (don't restart the spoke every cooldown while the
+                # hub can't see GitHub). The long backstop still nudges a
+                # genuinely-stale spoke eventually. See SPOKE_UPDATE_BLIND_BACKSTOP_S.
+                if (not spoke_force and tip == "unknown"
+                        and pushed_ts.get(sid)
+                        and (_now - float(pushed_ts.get(sid, 0) or 0)) < SPOKE_UPDATE_BLIND_BACKSTOP_S):
+                    update_results.append(f"{sid}: remote tip unknown - deferred to avoid storm ({repo_url})")
                     continue
                 connected = sid in getattr(self, "active_connections", {})
                 if not connected and not spoke_force:

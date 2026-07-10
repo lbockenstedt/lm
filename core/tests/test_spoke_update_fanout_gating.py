@@ -11,8 +11,10 @@ nothing new.
 The fix records the remote tip SHA we last pushed to each spoke
 (``global_config["spoke_update_commits"][spoke_id]``) and skips the push when
 the tip hasn't moved since. ``force`` bypasses the gate; an unresolvable tip
-(ls-remote failure → ``"unknown"``) falls back to push-always so a transient
-network blip doesn't permanently silence a spoke.
+(ls-remote failure → ``"unknown"``) still delivers a first-time push
+best-effort, then defers further re-fires while the tip stays unknown (a long
+backstop still nudges a genuinely-stale spoke) so a persistent GitHub
+reachability failure doesn't become an update→flap→re-push storm.
 
 These tests stub the I/O surface of ``perform_update`` (version/commit
 fetchers, the mailbox push, the git-repo probe) and exercise just the fan-out
@@ -151,13 +153,31 @@ async def test_force_bypasses_gate(patched_clock):
 
 
 @pytest.mark.asyncio
-async def test_unknown_tip_falls_back_to_push_always(patched_clock):
+async def test_unknown_tip_does_not_storm_while_blind(patched_clock):
+    """Regression: when the remote tip is unresolvable (``ls-remote`` fails →
+    ``"unknown"``), the hub must NOT blind-re-fire SPOKE_UPDATE every cooldown.
+    Each re-fire restarts the spoke, dumping its pending command queue → the
+    hub's CS_INGEST/GET_AGENTS timeouts (the update→flap→re-push storm). A
+    first-time push goes through best-effort; subsequent cycles while the tip
+    stays unknown are deferred. A long backstop still nudges a genuinely-stale
+    spoke if a real update landed that the hub can't see. ``force`` bypasses."""
+    blind_backstop = 6 * 3600
     hub = _StubHub(remote_tip="unknown")
+    # First cycle: first-time push goes through (no pushed_ts yet).
     await hub.perform_update()
     assert len(hub.pushes) == 1
     assert hub.state.get_global_config().get("spoke_update_commits", {}).get(
-        "lm-opnsense-spoke-1") is None
+        "lm-opnsense-spoke-1") is None  # tip unknown → marker not stamped
+    # Cooldown window elapses but tip still unknown → deferred, NOT re-pushed.
     patched_clock.advance(_COOLDOWN_S + 1)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    # Still deferred well inside the blind backstop.
+    patched_clock.advance(blind_backstop // 2)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    # Backstop elapses while tip still unknown → nudge a possibly-stale spoke.
+    patched_clock.advance(blind_backstop)
     await hub.perform_update()
     assert len(hub.pushes) == 2
 
