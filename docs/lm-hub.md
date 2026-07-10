@@ -15,7 +15,7 @@ It owns the state that ties the lab together — which spokes/agents exist and w
 ## Entrypoints
 
 - **Hub process:** `core/src/main.py` — `LabManagerHub` → `asyncio.run(hub.start())`. systemd unit `lm.service`, `User=svc_lm`, single uvicorn server built by `core/src/api.py::build_server`/`create_app` on `0.0.0.0:LM_TLS_PORT` (443).
-- **Installers:** `install_all.sh` (hub + co-located spokes), `install_menu.sh` (interactive bootstrap), plus `install_hub.sh`/`install_ui.sh`/`install_hub_ui.sh`/`install_production.sh`/`start.sh`/`start_all.sh`/`sync_secrets.sh`/`verify_auth.sh`.
+- **Installers:** `install_all.sh` (hub + one co-located agent hosting the module roles), `install_all.sh --hub-only` (the hub **alone** — no co-located module roles; self-update, watchdog, restart-on-stale + maintenance-window gate, self-heal all baked in), `install_production.sh` (one-liner wrapper that curls `install_all.sh` from `main`; args pass through, so `install_production.sh --hub-only` works), `install_menu.sh` (interactive bootstrap), plus `start_all.sh`/`sync_secrets.sh`/`verify_auth.sh`. The WebUI ships in the checkout at `/opt/lm/WebUI` and is served directly by the hub (no separate asset-deploy step). The systemd `lm.service` unit runs the hub.
 
 ## Ports
 
