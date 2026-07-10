@@ -23,7 +23,7 @@ import logging
 import re
 from .service import SimulationsService
 from .store import SimulationsStore
-from .aruba import test_central_from_config, get_central_available_from_config
+from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
 from access import safe_external_url, host_resolves_external
 from urllib.parse import urlsplit
 
@@ -1158,7 +1158,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         site_mappings (which only scope the background Checks poller). Forwards
         CS_CENTRAL_BROWSE to the tenant's cs spoke (which holds the full Aruba
         client + caches). Returns an empty set + warning when the spoke is not
-        connected (a centralized-only tenant has no spoke to browse from yet)."""
+        connected (a centralized-only tenant has no spoke to browse from yet).
+
+        Mode-aware, matching test-central / available-checks: in **centralized**
+        processing mode the HUB holds the creds and runs browse_all itself (the
+        spoke is a telemetry relay and has no Aruba client); in **distributed**
+        mode it forwards CS_CENTRAL_BROWSE to the spoke. Without the centralized
+        branch, a centralized tenant's creds validated (Test Central) but the
+        Sites/Alerts/Clients tabs asked a credential-less spoke and got
+        'Central not configured'."""
+        modes = await store.get_processing_modes(tenant_id)
+        if modes.get("central_api") == "centralized":
+            cc = await store.get_central_config(tenant_id)
+            return await browse_all_from_config(cc or {})
         try:
             return await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=30.0)
         except HTTPException as exc:
