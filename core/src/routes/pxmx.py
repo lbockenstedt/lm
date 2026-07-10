@@ -577,8 +577,13 @@ def register(app, hub, ctx):
         return {"status": "ok", "message": msg}
 
     @app.get("/api/pxmx/nodes")
-    async def get_pxmx_nodes():
+    async def get_pxmx_nodes(request: Request):
         hub = app.state.hub
+        # Whole-cluster hypervisor node stats are infrastructure-wide (every
+        # node, all tenants' capacity) — Global-Admin-only. Was reachable by any
+        # authenticated user with no tenant filter.
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             return {"nodes": [], "spoke_connected": False}

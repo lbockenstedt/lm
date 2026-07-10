@@ -1216,21 +1216,41 @@ def create_app(hub):
         #     and rejected); _check_tenant_access confirms ownership. The
         #     spoke-side push is already tenant-keyed.
         #   * anyone else   — blocked (shared infra is admin-tier work).
-        _SHARED_INFRA_WRITE_PREFIXES = ("/api/firewall/", "/api/dns/", "/api/dhcp/")
-        if (request.method in ("POST", "PUT", "DELETE", "PATCH")
-                and any(path.startswith(p) for p in _SHARED_INFRA_WRITE_PREFIXES)):
-            if _is_admin(sess):
-                pass  # Global Admin — any tenant (the ?tenant= scoping below still applies)
-            elif _is_tenant_admin(sess):
-                explicit = request.query_params.get("tenant")
-                if not explicit or not _check_tenant_access(sess, explicit):
+        # Tenant-capable shared-infra writes: the OBJECT is per-tenant AND the
+        # handler binds the object id to the caller's tenant, so a tenant-admin
+        # may write to one it owns. Firewalls qualify — each is a distinct
+        # tenant-owned spoke and routes/firewall.py `_authz_firewall` verifies the
+        # firewall_id belongs to the caller before every read/write.
+        _TENANT_INFRA_WRITE_PREFIXES = ("/api/firewall/",)
+        # Admin-only shared-infra writes: these back a SINGLE shared server (one
+        # Unbound / one Kea / one certbot) with no per-object tenant model, so the
+        # `?tenant=` gate can prove the caller owns the query param but NOT that
+        # the record/reservation/cert being written belongs to that tenant. Until
+        # per-object subnet/tenant ownership is enforced on the bodies, they are
+        # locked to Global Admin (dev-mode: lock down now, reopen per-object
+        # later). Covers .../record, .../reservation, .../sync (dns/dhcp) and
+        # issue/renew/revoke/distribute/targets (le). GET reads stay authed/right-
+        # gated (method-gated here).
+        _ADMIN_INFRA_WRITE_PREFIXES = ("/api/dns/", "/api/dhcp/", "/api/le/")
+        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            if any(path.startswith(p) for p in _ADMIN_INFRA_WRITE_PREFIXES):
+                if not _is_admin(sess):
                     return JSONResponse(
                         status_code=403,
-                        content={"detail": "Tenant admin must target an explicit owned tenant (?tenant=)"})
-            else:
-                return JSONResponse(
-                    status_code=403,
-                    content={"detail": "Admin access required for shared-infrastructure writes"})
+                        content={"detail": "Admin access required for shared-infrastructure writes"})
+            elif any(path.startswith(p) for p in _TENANT_INFRA_WRITE_PREFIXES):
+                if _is_admin(sess):
+                    pass  # Global Admin — any tenant (the ?tenant= scoping below still applies)
+                elif _is_tenant_admin(sess):
+                    explicit = request.query_params.get("tenant")
+                    if not explicit or not _check_tenant_access(sess, explicit):
+                        return JSONResponse(
+                            status_code=403,
+                            content={"detail": "Tenant admin must target an explicit owned tenant (?tenant=)"})
+                else:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Admin access required for shared-infrastructure writes"})
 
         # Tenant scoping: block requests for a ?tenant= the user isn't authorised for
         tenant = request.query_params.get("tenant")

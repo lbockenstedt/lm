@@ -71,6 +71,14 @@ def register(app, hub, ctx):
         restart / spoke outage still seeds the Network Devices table."""
         logger.debug("relay GET /api/nw/devices tenant=%s", tenant)
         hub = app.state.hub
+        # Live nw fleet inventory is unfiltered infrastructure data (every
+        # device's name/model/spoke-binding across tenants) and there is no
+        # per-device tenant-ownership binding on the live spoke id yet — so this
+        # is Global-Admin-only in dev (reopen with per-device ownership later).
+        # Tenant-admins still manage their bound devices' CONFIG via
+        # /tenant/devices/nw-devices.
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         spoke_id = hub.get_spoke_by_type("nw")
         if not spoke_id:
             cached = hub.nw_cache_get_fleet()
@@ -112,6 +120,13 @@ def register(app, hub, ctx):
         device sub-views. The cache stores the *raw* envelope so the tenant
         subnet filter is re-applied per-reader from the same cached data."""
         hub = app.state.hub
+        # Per-device reads take a client-supplied device_id with no ownership
+        # check (the `info` endpoint is unfiltered metadata; mac/arp/interfaces
+        # only row-filter when the nw subnet toggle is on) — an IDOR across the
+        # shared fleet. Global-Admin-only in dev until per-device tenant
+        # ownership is enforced (reopen later).
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         command_map = {
             "info":       "NW_GET_DEVICE_INFO",
             "macs":       "NW_GET_MAC_TABLE",
