@@ -57,14 +57,23 @@ def register(app, hub, ctx):
         if scope != "constrained":
             return fw  # 'full' — admin or own-dedicated write-user; unrestricted
         sess = _session_user(request)
-        target = payload
-        if target is None and uuid is not None:
-            # Resolve the existing record so we can attribute a delete/edit by id.
-            target = await _fw_record_by_uuid(request, fw, endpoint, uuid)
-        if target is None or not await access.fw_rule_in_tenant_scope(hub, sess, endpoint, firewall_id, target):
-            raise HTTPException(
-                status_code=403,
-                detail="On shared infrastructure you may only modify entries within your tenant's scope")
+        # Both the NEW body (add/edit) AND the EXISTING record (edit/delete, by
+        # uuid) must be in the caller's slice. Validating only the new payload on
+        # an EDIT let a tenant-admin overwrite ANOTHER tenant's rule by uuid with a
+        # body in their own subnet — so an edit must also attribute the target it
+        # replaces. ADD → new only; DELETE → existing only; EDIT → both.
+        targets = []
+        if payload is not None:
+            targets.append(payload)
+        if uuid is not None:
+            targets.append(await _fw_record_by_uuid(request, fw, endpoint, uuid))
+        if not targets:
+            raise HTTPException(status_code=403, detail="Nothing to authorize")
+        for t in targets:
+            if t is None or not await access.fw_rule_in_tenant_scope(hub, sess, endpoint, firewall_id, t):
+                raise HTTPException(
+                    status_code=403,
+                    detail="On shared infrastructure you may only modify entries within your tenant's scope")
         return fw
 
     async def _fw_record_by_uuid(request, fw, endpoint, uuid):
@@ -129,7 +138,13 @@ def register(app, hub, ctx):
         _fw0, _rscope = _authz_firewall(request, firewall_id)
 
         async def _scoped(payload):
-            if _rscope == "full":
+            # 'full' = whole device (Global Admin, or an owner of a DEDICATED
+            # firewall). But an explicit ?tenant= is a deliberate "scope me to this
+            # tenant" request (the admin tenant switcher), so still apply the subnet
+            # filter when it is present — otherwise an admin acting-as-tenant would
+            # regress to seeing the whole device instead of that tenant's slice
+            # (filter_fw honors explicit_tenant even for admins).
+            if _rscope == "full" and not tenant:
                 return payload
             return await _filter_fw(request, payload, endpoint, firewall_id, tenant)
 

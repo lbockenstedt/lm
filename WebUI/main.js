@@ -684,7 +684,11 @@ function _applyEditVisibility() {
     if (!document.getElementById('lm-edit-vis-style')) {
         const s = document.createElement('style');
         s.id = 'lm-edit-vis-style';
-        s.textContent = ':root.lm-no-edit #viewport button[title="Edit"],:root.lm-no-edit #viewport button[title="Delete"]{display:none !important;}';
+        // Row-level write controls carry a descriptive title; hide them all from
+        // view users (the server enforces regardless). Covers Edit/Delete plus the
+        // netbox allocate/release and certificate renew/revoke row actions.
+        const _t = ['Edit', 'Delete', 'Allocate IP', 'Return to pool', 'Release', 'Renew', 'Revoke'];
+        s.textContent = _t.map(t => `:root.lm-no-edit #viewport button[title="${t}"]`).join(',') + '{display:none !important;}';
         document.head.appendChild(s);
     }
     document.documentElement.classList.toggle('lm-no-edit', !canEdit());
@@ -3080,7 +3084,7 @@ function _viewTemplate(viewId) {
         case 'dns':
             return `<div class="space-y-6">
   <div class="flex justify-end gap-2">
-    ${canEdit() ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="${btn}">+ Add Record</button>` : ''}
+    ${(isAdmin() || isTenantAdmin()) ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="${btn}">+ Add Record</button>` : ''}
   </div>
   <div id="dns-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
@@ -3088,7 +3092,7 @@ function _viewTemplate(viewId) {
         case 'dhcp':
             return `<div class="space-y-6">
   <div class="flex justify-end gap-2">
-    ${canEdit() ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="${btn}">+ Add Reservation</button>` : ''}
+    ${(isAdmin() || isTenantAdmin()) ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="${btn}">+ Add Reservation</button>` : ''}
   </div>
   <div id="dhcp-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;

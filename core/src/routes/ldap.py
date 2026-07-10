@@ -17,8 +17,18 @@ def register(app, hub, ctx):
     # filtered to the subtree on the hub side (reliable regardless of whether the
     # directory spoke honors a base filter). Writes are tenant-admin tier — the
     # middleware already required it; here we bind them to the tenant's own OU.
+    # DN-valued fields — must all sit within the caller's OU subtree. Includes
+    # move targets (new_superior/new_parent) so an in-OU entry can't be relocated
+    # OUT of the OU, and member DN fields.
     _LDAP_DN_FIELDS = ("dn", "parent_dn", "parent", "ou", "ou_dn", "base",
-                       "base_dn", "group_dn", "user_dn", "target_dn", "member_dn")
+                       "base_dn", "group_dn", "user_dn", "target_dn", "member_dn",
+                       "new_superior", "newsuperior", "new_parent", "new_parent_dn")
+    # BARE identity fields the directory spoke may key on INSTEAD of the validated
+    # dn — each must match the RDN value of an in-OU dn in the same payload, else a
+    # tenant-admin could send their own dn + a foreign username and act on a user
+    # outside their OU (e.g. reset ANY user's password).
+    _LDAP_BARE_ID_FIELDS = ("username", "uid", "user_id", "userid", "cn",
+                            "sam_account_name", "samaccountname")
 
     def _tenant_ldap_base(sess):
         tid = (sess or {}).get("user", {}).get("tenant_id") or ""
@@ -30,12 +40,18 @@ def register(app, hub, ctx):
         b = str(base or "").strip().lower()
         return bool(b) and bool(d) and (d == b or d.endswith("," + b))
 
+    def _rdn_value(dn) -> str:
+        # Leftmost RDN value, e.g. "uid=alice,ou=t,dc=x" -> "alice".
+        first = str(dn or "").strip().split(",", 1)[0]
+        return first.split("=", 1)[1].strip().lower() if "=" in first else ""
+
     def _assert_ldap_write(request, data):
-        """Global Admin → any. Otherwise (tenant-admin) EVERY DN-like field in the
-        payload must sit within the caller's tenant OU subtree; a write carrying no
-        resolvable in-OU DN is refused (fail-closed — a tenant-admin cannot touch
-        another tenant's OU, and a username-only password reset must be done by an
-        admin or carry the full dn)."""
+        """Global Admin → any. Otherwise (tenant-admin) EVERY DN-like field must sit
+        within the caller's tenant OU subtree, and every BARE identity field must
+        match the RDN of an in-OU DN in the same payload. A write carrying no
+        resolvable in-OU DN is refused (fail-closed) — a tenant-admin cannot touch
+        another tenant's OU, cannot relocate an entry out of it, and cannot smuggle
+        a foreign uid/username past an in-OU dn."""
         sess = _session_user(request)
         if _is_admin(sess):
             return
@@ -51,6 +67,12 @@ def register(app, hub, ctx):
             if not _dn_in_base(d, base):
                 raise HTTPException(status_code=403,
                     detail="You may only manage directory entries within your tenant's OU")
+        rdns = {_rdn_value(d) for d in dns if _rdn_value(d)}
+        for f in _LDAP_BARE_ID_FIELDS:
+            v = data.get(f)
+            if v and str(v).strip().lower() not in rdns:
+                raise HTTPException(status_code=403,
+                    detail="Identity fields must match a DN within your tenant's OU")
 
     def _scope_ldap_list(request, result):
         """Filter a LIST_* result to entries within the caller's tenant OU (admin
@@ -97,6 +119,8 @@ def register(app, hub, ctx):
             _assert_ldap_write(request, data)
             result = await hub.request_response(spoke_id, "CREATE_OU", data)
             return result
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("create_ldap_ou failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -141,6 +165,8 @@ def register(app, hub, ctx):
             _assert_ldap_write(request, data)
             result = await hub.request_response(spoke_id, "CREATE_USER", data)
             return result
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("create_ldap_user failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -185,6 +211,8 @@ def register(app, hub, ctx):
             _assert_ldap_write(request, data)
             result = await hub.request_response(spoke_id, "CREATE_GROUP", data)
             return result
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("create_ldap_group failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -216,6 +244,8 @@ def register(app, hub, ctx):
             _assert_ldap_write(request, data)
             result = await hub.request_response(spoke_id, "ADD_USER_TO_GROUP", data)
             return result
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("add_ldap_user_to_group failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -229,6 +259,8 @@ def register(app, hub, ctx):
             _assert_ldap_write(request, data)
             result = await hub.request_response(spoke_id, "REMOVE_USER_FROM_GROUP", data)
             return result
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("remove_ldap_user_from_group failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -242,6 +274,8 @@ def register(app, hub, ctx):
             _assert_ldap_write(request, data)
             result = await hub.request_response(spoke_id, "DELETE_ENTITY", data)
             return result
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("delete_ldap_entity failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -262,6 +296,8 @@ def register(app, hub, ctx):
             if uid:
                 _invalidate_user_sessions(hub, uid)
             return result
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception("set_ldap_user_password failed")
             raise HTTPException(status_code=500, detail=str(e))

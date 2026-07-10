@@ -1135,32 +1135,66 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
 async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload) -> bool:
     """CONSTRAINED-WRITE gate for a SHARED firewall. True iff ``payload`` (one
     rule / NAT / DNS / alias record being written) is attributable to ``sess``'s
-    tenant — i.e. it survives the SAME subnet + OPNsense-category attribution used
-    to filter reads (``filter_fw``). Unlike ``filter_fw`` this IGNORES the
-    ``firewall`` display toggle: a tenant-admin's writes to shared infra are
-    always constrained to their own slice, regardless of whether the read filter
-    is switched on. Endpoints with no IP/category spec (health/interfaces) are not
-    tenant-attributable → False (deny; only a Global Admin edits those on shared).
-    An empty prefix+category set → False (nothing to attribute by → deny, safe)."""
+    tenant by SUBNET — its source/destination (after server-side alias resolution)
+    falls within the caller's tenant prefixes. Ignores the ``firewall`` display
+    toggle (shared writes are always constrained).
+
+    SECURITY — two things this must NOT do (both were bugs):
+    * FAIL-CLOSED on empty prefixes. A tenant with no NetBox prefixes has nothing
+      to attribute by, so it may NOT write to shared infra (return False). The
+      filter primitives treat an empty prefix list as "no filter → keep
+      everything", which would be allow-all here — so we must short-circuit.
+    * DO NOT trust the payload's ``category``. On a WRITE the record is fully
+      caller-supplied, so OPNsense-category attribution (sound for admin-tagged
+      READS) is forgeable — a caller could tag a foreign-subnet rule with their
+      own tenant name and pass. We pass ``tenant_category=None`` so attribution is
+      strictly by subnet (alias_map is the firewall's own server-side map, not
+      caller data). Endpoints with no IP spec (health/interfaces) → False."""
     spec = _FW_FILTER_SPEC.get(endpoint)
     if not spec:
         return False
     mode, fields = spec
-    tid = (sess or {}).get("user", {}).get("tenant_id")
     prefixes = await resolve_prefixes(hub, sess)
-    tenant_cat = None
-    if endpoint in _FW_CATEGORY_ENDPOINTS and tid:
-        t = hub.state.get_tenant(tid) or {}
-        cats = [t.get("name"), t.get("slug"), t.get("netbox_tenant_slug"), tid]
-        tenant_cat = sorted({str(c).strip() for c in cats if c}) or None
-    if not prefixes and not tenant_cat:
+    if not prefixes:
         return False
     if mode == "fw":
         alias_map = await _fw_alias_map(hub, firewall_id) if firewall_id else None
-        out = filter_firewall_rules([payload], prefixes or [], alias_map, tenant_category=tenant_cat)
+        out = filter_firewall_rules([payload], prefixes, alias_map, tenant_category=None)
     else:
-        out = filter_items_by_prefixes([payload], prefixes or [], fields,
-                                       drop_no_ip=True, tenant_category=tenant_cat)
+        out = filter_items_by_prefixes([payload], prefixes, fields,
+                                       drop_no_ip=True, tenant_category=None)
+    return _list_len(out) > 0
+
+
+async def vm_in_tenant_scope(hub, sess, vm_record) -> bool:
+    """Toggle-INDEPENDENT VM ownership for CONTROL/console gates (start/stop/
+    snapshot/backup/create/clone/VNC). True iff the VM is attributable to the
+    caller's tenant by TENANT TAG or by SUBNET (ips ∈ the caller's prefixes).
+
+    Unlike ``filter_tenant`` this:
+      * ignores the ``hypervisor`` display toggle — control must NOT fail open when
+        an operator disables the read filter;
+      * does NOT count shared template pools as ownership (a tenant may clone FROM
+        a template but must not control it) — ``template_pools=[]``;
+      * FAIL-CLOSES: no tenant tags AND no prefixes → False. (filter_hypervisor_vms
+        short-circuits to "keep all" on empty prefixes, so the tag path is checked
+        directly and the no-prefix case denies rather than delegating to it.)
+    """
+    if is_admin(sess):
+        return True
+    tid = (sess or {}).get("user", {}).get("tenant_id")
+    if not tid:
+        return False
+    tenant_tags = _tenant_tag_set(hub, tid) or set()
+    if tenant_tags:
+        vm_tags = {str(t).strip().lower() for t in (vm_record.get("tags") or [])}
+        if vm_tags & {str(t).strip().lower() for t in tenant_tags}:
+            return True
+    prefixes = await resolve_prefixes(hub, sess)
+    if not prefixes:
+        return False
+    out = filter_hypervisor_vms([vm_record], prefixes, template_pools=[],
+                                tenant_tags=tenant_tags)
     return _list_len(out) > 0
 
 

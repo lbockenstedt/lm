@@ -44,8 +44,10 @@ def register(app, hub, ctx):
             "tags": info.get("tags") or [],
             "pool": info.get("pool") or "",
         }
-        kept = await _filter_tenant(request, [vm_record], "hypervisor", ["ips"])
-        if not kept:
+        # Toggle-independent, fail-closed ownership (subnet or tenant tag). NOT
+        # _filter_tenant — that returns the record unchanged when the hypervisor
+        # display filter is off, which would fail OPEN for control actions.
+        if not await access.vm_in_tenant_scope(hub, sess, vm_record):
             raise HTTPException(status_code=403, detail="not authorized for this VM's tenant")
 
     @app.post("/api/pxmx/vm-action")
@@ -55,8 +57,9 @@ def register(app, hub, ctx):
         Body: ``{unique_id, vmid, node, type, action, snapshot_name?}``. Routes to
         the pxmx spoke's ``PXMX_VM_ACTION`` (unguarded — the agent's cs_guard sim
         90000 floor does NOT apply, so real tenant VMs at arbitrary vmids work).
-        Admin-only: VM control is a privileged action. ``timeout=35`` covers a
-        slow ``qm stop``/``snapshot`` (spoke→agent window is 30s)."""
+        Authorized by _assert_vm_control: admin any, else a write-user/tenant-admin
+        who OWNS the VM (fail-closed). ``timeout=35`` covers a slow ``qm stop``/
+        ``snapshot`` (spoke→agent window is 30s)."""
         sess = _session_user(request)
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")

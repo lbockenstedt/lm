@@ -1235,15 +1235,15 @@ def create_app(hub):
                                     content={"detail": "DHCP module access required"})
 
         # /api/pxmx/* + /vm/* (Hypervisor module) require the ``pxmx`` right OR
-        # admin. This gates VM/hypervisor VIEWING — the VM lists + /vm/{id}/details
-        # are already tenant-filtered (tag + subnet via access.filter_tenant) and
-        # /vm/{id}/details fails closed on an unattributable VM. VM CONTROL
-        # (lifecycle start/stop/delete/snapshot, create, clone, VNC console mint,
-        # node/pool/iso/storage enumeration) keeps its in-handler _is_admin gate —
-        # Global-Admin-only — so a pxmx-right tenant user can see their VMs but
-        # cannot yet act on them; opening control to tenant users needs the per-VM
-        # ownership filter hardened first (tracked follow-up). /api/pxmx/agents/*
-        # stays Global-Admin-only via _ADMIN_API_PREFIXES (checked above).
+        # admin. VIEWING (VM lists + /vm/{id}/details) is tenant-filtered (tag +
+        # subnet via access.filter_tenant), fail-closed on an unattributable VM.
+        # VM CONTROL (vm-action lifecycle, create, clone, VNC console mint) is
+        # gated IN-HANDLER by the write-user tier (access.has_edit_access) AND
+        # per-VM ownership (access.vm_in_tenant_scope — toggle-independent,
+        # fail-closed): admin any, else a write-user/tenant-admin may act only on a
+        # VM in their tenant. node/pool/iso/storage enumeration is pxmx-right (feeds
+        # the create UI). /api/pxmx/nodes (whole-cluster stats) + /api/pxmx/agents/*
+        # stay Global-Admin-only.
         if path.startswith("/api/pxmx/") or path.startswith("/vm/"):
             if not (_is_admin(sess) or _has_pxmx_access(sess)):
                 return JSONResponse(status_code=403,

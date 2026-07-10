@@ -177,7 +177,9 @@ def register(app, hub, ctx):
                 info = {}
         vm_record = {"ips": info.get("ips") or [], "tags": info.get("tags") or [],
                      "pool": info.get("pool") or ""}
-        if not await _filter_tenant(request, [vm_record], "hypervisor", ["ips"]):
+        # Toggle-independent, fail-closed ownership (subnet or tenant tag) — NOT
+        # _filter_tenant, which fails OPEN when the hypervisor display filter is off.
+        if not await access.vm_in_tenant_scope(hub, sess, vm_record):
             raise HTTPException(status_code=403, detail="not authorized for this VM's tenant")
 
     @app.get("/vm/{vm_id}/details")
@@ -690,8 +692,9 @@ def register(app, hub, ctx):
         Body: ``{unique_id, vmid, node, type}``. Mints a one-shot ``session_id``
         + ``ws_token`` and tells the pxmx spoke→agent to open a Proxmox
         vncwebsocket locally (agent-terminates-WSS) and relay frames over the
-        existing WS legs. Admin-only (VM console is privileged). The browser
-        then connects to ``/ws/console/{session_id}?token=<ws_token>`` for the
+        existing WS legs. Authorized by _assert_vm_owned: admin any, else a
+        write-user/tenant-admin who OWNS the VM (console is control-tier). The
+        browser then connects to ``/ws/console/{session_id}?token=<ws_token>`` for the
         noVNC byte relay. Fire-and-forget VNC_START — the agent emits
         VNC_READY/VNC_ERROR up, which the browser WS picks up."""
         sess = _session_user(request)
