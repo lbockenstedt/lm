@@ -23,10 +23,31 @@ import asyncio
 
 import pytest
 
+import update_pipeline
 from update_pipeline import UpdatePipelineMixin
 
 
 OPNSENSE_REPO = "https://github.com/lbockenstedt/opnsense.git"
+
+_COOLDOWN_S = 600
+
+
+class _Clock:
+    def __init__(self, start=1_000_000.0):
+        self.t = start
+
+    def time(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+@pytest.fixture
+def patched_clock(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr(update_pipeline.time, "time", clock.time)
+    return clock
 
 
 class _State:
@@ -95,27 +116,25 @@ class _StubHub(UpdatePipelineMixin):
 
 
 @pytest.mark.asyncio
-async def test_unchanged_tip_skips_push_after_first_cycle():
+async def test_unchanged_tip_skips_push_after_first_cycle(patched_clock):
     hub = _StubHub(remote_tip="cccc1")
     await hub.perform_update()
-    # First cycle: no recorded tip → push.
     assert len(hub.pushes) == 1
     assert hub.pushes[0][0] == "lm-opnsense-spoke-1"
     assert hub.state.get_global_config()["spoke_update_commits"] == {
         "lm-opnsense-spoke-1": "cccc1"}
-
-    # Second cycle: same tip → skip (no new push, no result mutation).
+    patched_clock.advance(_COOLDOWN_S + 1)
     await hub.perform_update()
     assert len(hub.pushes) == 1
 
 
 @pytest.mark.asyncio
-async def test_moved_tip_pushes_again():
+async def test_moved_tip_pushes_again(patched_clock):
     hub = _StubHub(remote_tip="cccc1")
     await hub.perform_update()
     assert len(hub.pushes) == 1
-
     hub._remote_tip = "cccc2"  # repo moved
+    patched_clock.advance(_COOLDOWN_S + 1)
     await hub.perform_update()
     assert len(hub.pushes) == 2
     assert hub.state.get_global_config()["spoke_update_commits"] == {
@@ -123,25 +142,22 @@ async def test_moved_tip_pushes_again():
 
 
 @pytest.mark.asyncio
-async def test_force_bypasses_gate():
+async def test_force_bypasses_gate(patched_clock):
     hub = _StubHub(remote_tip="cccc1")
     await hub.perform_update()
     assert len(hub.pushes) == 1
-
-    # Same tip, but force=True → re-push anyway.
     await hub.perform_update(force=True)
     assert len(hub.pushes) == 2
 
 
 @pytest.mark.asyncio
-async def test_unknown_tip_falls_back_to_push_always():
-    """ls-remote failed (private repo / network) → can't gate → push every
-    cycle so a transient failure doesn't permanently silence the spoke."""
+async def test_unknown_tip_falls_back_to_push_always(patched_clock):
     hub = _StubHub(remote_tip="unknown")
     await hub.perform_update()
     assert len(hub.pushes) == 1
-    # No tip recorded (we never learned it) → next cycle still can't gate.
-    assert "spoke_update_commits" not in hub.state.get_global_config()
+    assert hub.state.get_global_config().get("spoke_update_commits", {}).get(
+        "lm-opnsense-spoke-1") is None
+    patched_clock.advance(_COOLDOWN_S + 1)
     await hub.perform_update()
     assert len(hub.pushes) == 2
 
