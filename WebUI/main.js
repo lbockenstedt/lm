@@ -6187,11 +6187,16 @@ function _mgmtEntryCard(o) {
     const badges  = (o.badges || []).filter(Boolean).join(' ');
     const meta    = (o.metaLines || []).filter(Boolean).join('');
     const actions = (o.actions || []).filter(Boolean).join('');
-    // Corner actions (e.g. Events / Copy) sit at the FAR right of the header row,
-    // to the right of the ID + badges, pinned right via ml-auto.
+    // Corner actions (e.g. Events / Copy) pin to the top-right of the header row,
+    // across from the name/ID.
     const corner  = (o.cornerActions || []).filter(Boolean).join(' ');
+    // Layout (deterministic — same for Spokes and Agents): name/ID top-left with
+    // Events/Copy top-right; then the badges (SPOKE/module/status/version…) on
+    // their OWN line, LEFT-aligned + indented (pl-6) under the name — not
+    // right-floated, which wrapped inconsistently by content width; then the
+    // host/tenant/status meta line; then the action buttons.
     return `<div class="lm-mgmt-card border border-slate-200 rounded-md bg-white p-2.5 hover:bg-slate-50 space-y-1.5">
-        <div class="flex items-start justify-between gap-3 flex-wrap">
+        <div class="flex items-start justify-between gap-3">
             <div class="flex items-start gap-2.5 min-w-0">
                 <div class="w-2 h-2 mt-1.5 rounded-full ${o.dot} shrink-0"></div>
                 <div class="min-w-0">
@@ -6200,11 +6205,9 @@ function _mgmtEntryCard(o) {
                     ${o.identityBanner || ''}
                 </div>
             </div>
-            <div class="flex items-center gap-3 flex-wrap justify-end ml-auto">
-                ${badges ? `<div class="flex items-center gap-1.5 flex-wrap justify-end">${badges}</div>` : ''}
-                ${corner ? `<div class="flex items-center gap-2 shrink-0">${corner}</div>` : ''}
-            </div>
+            ${corner ? `<div class="flex items-center gap-2 shrink-0">${corner}</div>` : ''}
         </div>
+        ${badges ? `<div class="flex items-center gap-1.5 flex-wrap pl-6">${badges}</div>` : ''}
         ${meta}
         ${actions ? `<div class="flex items-center gap-2 flex-wrap pl-6">${actions}</div>` : ''}
     </div>`;
