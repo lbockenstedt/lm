@@ -2531,6 +2531,15 @@ function _rebuildMainNav(allSpokes, connections) {
     const adminLogs     = logsNav     || _cachedNavs.logs     || '';
     const adminSettings = settingsNav || _cachedNavs.settings || '';
 
+    // Tenant-admins don't get Setup/Logs/System, but they DO manage the
+    // firewall/network/NAC/IPAM/directory/DNS/DHCP devices bound to their own
+    // tenant via the "My Devices" view (session-scoped /tenant/devices/*).
+    const _myDevicesNavHtml = () => `
+        <div onclick="setView('mydevices')" id="nav-mydevices" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg></div>
+            <span>My Devices</span>
+        </div>`;
+
     mainNav.innerHTML = `
         ${dashboardNav}
         ${dynamicHtml}
@@ -2538,6 +2547,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminSetup : ''}
         ${isAdmin() ? adminLogs : ''}
         ${isAdmin() ? adminSettings : ''}
+        ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
     `;
 
     // The Logs submenu is dynamic (logsSubmenu gates module tabs on
@@ -2713,6 +2723,11 @@ function renderSpokeIndicators() {
 async function setView(viewId) {
     if ((viewId === 'setup' || viewId === 'settings' || viewId === 'logs') && !isAdmin()) {
         return;  // silently block — nav items are hidden, this guards deep-links
+    }
+    // My Devices is the tenant-admin device surface — reachable only by a
+    // tenant-admin (or a Global Admin); guards deep-links for everyone else.
+    if (viewId === 'mydevices' && !(isTenantAdmin() || isAdmin())) {
+        return;
     }
     // Module-right gate for deep-links: a non-admin without the module's right
     // cannot enter the view even by URL/manual setView, mirroring the nav filter.
@@ -2938,6 +2953,22 @@ function _viewTemplate(viewId) {
   </div>
 </div>`;
 
+        case 'mydevices':
+            // Tenant-admin device management — same unified table as the admin
+            // Setup → Managed Devices tile, but the driver (loadAllDevices via
+            // _devEndpoint) talks to /tenant/devices/*, so it lists/edits only
+            // this tenant's devices and the spoke dropdown is own-tenant-only.
+            return `<div class="space-y-6">
+  <div class="${card}">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">My Devices</h3>
+      <button onclick="showAddDeviceModal()" class="${btn}">+ Add Device</button>
+    </div>
+    <p class="text-xs text-slate-400 mb-3">Firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances bound to your tenant. Click <strong>Add Device</strong>, choose the module type, and bind it to one of your tenant's spokes.</p>
+    <div id="all-devices-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+  </div>
+</div>`;
+
         case 'console':
             return `<div class="space-y-4">
   <div id="console-container" class="${card}">
@@ -3064,6 +3095,9 @@ function initView(viewId, subView) {
             break;
         case 'setup':
             _renderSetupSection(subView || 'Spokes & Agents');
+            break;
+        case 'mydevices':
+            loadAllDevices();
             break;
         case 'cppm':
             loadCPPMNACStatus();
@@ -8466,7 +8500,10 @@ async function refreshDebugButtonState() {
 
 async function loadApprovedSpokes() {
     try {
-        const response = await setupFetch('/setup/pending_spokes');
+        // Global Admins read the full roster (/setup/pending_spokes, admin-only);
+        // tenant-admins read only the spokes they may bind to via the
+        // session-scoped /tenant/devices/spokes (same row shape).
+        const response = await setupFetch(isAdmin() ? '/setup/pending_spokes' : '/tenant/devices/spokes');
         if (!response.ok) throw new Error('Failed to fetch spokes');
         const data = await response.json();
         return (data.spokes || []).filter(s => s.approved);
@@ -14168,6 +14205,17 @@ function closeInstanceModal() {
 // lets an admin add any of them through a single modal: pick the module type
 // first, then fill in that type's specifics. DEVICE_TYPES drives the schema.
 
+// Device-CRUD base path per role. A Global Admin uses the admin /setup/* CRUD;
+// a tenant-admin uses the session-scoped /tenant/devices/* mirror (same route
+// shapes, so only the base swaps). Every DEVICE_TYPES.endpoint starts '/setup'.
+// The unified device driver (loadAllDevices/saveDevice/deleteDevice) routes
+// through here so one code path serves the admin Setup tile and the tenant-admin
+// "My Devices" view.
+function _devEndpoint(t) {
+    if (isAdmin()) return t.endpoint;
+    return '/tenant/devices' + t.endpoint.slice('/setup'.length);
+}
+
 async function loadAllDevices() {
     const listEl = document.getElementById('all-devices-list');
     if (!listEl) return;
@@ -14175,7 +14223,7 @@ async function loadAllDevices() {
     const entries = Object.entries(DEVICE_TYPES);
     const results = await Promise.all(entries.map(async ([typeKey, t]) => {
         try {
-            const r = await setupFetch(t.endpoint);
+            const r = await setupFetch(_devEndpoint(t));
             if (!r.ok) return [];
             const data = await r.json();
             const items = data[t.responseKey] || [];
@@ -14313,7 +14361,8 @@ async function saveDevice() {
     // The unified modal handles the common add/edit path only.
     try {
         const method = id ? 'PUT' : 'POST';
-        const url = id ? `${t.endpoint}/${encodeURIComponent(id)}` : t.endpoint;
+        const ep = _devEndpoint(t);
+        const url = id ? `${ep}/${encodeURIComponent(id)}` : ep;
         const payload = id ? { config } : { [t.payloadKey]: config };
         const r = await setupFetch(url, {
             method,
@@ -14338,7 +14387,7 @@ async function deleteDevice(typeKey, id) {
     if (!t) return;
     if (!await showConfirmToast(`Delete this ${t.title.toLowerCase()} (${id})?`)) return;
     try {
-        const r = await setupFetch(`${t.endpoint}/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const r = await setupFetch(`${_devEndpoint(t)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
         if (!r.ok) throw new Error(await r.text().catch(() => r.status));
         loadAllDevices();
     } catch (e) {

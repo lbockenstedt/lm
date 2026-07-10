@@ -135,6 +135,52 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=403, detail=f"You can only bind a {prod['kind']} to a spoke assigned to your tenant")
         return (hub.state.get_spoke_tenant(spoke_id) or "") if spoke_id else ""
 
+    # Offline-spoke module_type fallback (mirror setup.py get_all_spokes_status /
+    # _module_type_for): live registration wins, then the persisted metadata,
+    # then a spoke_id-prefix guess so a disconnected spoke still labels.
+    _PREFIX_MODULE = {
+        "pxmx": "hypervisor", "opn": "firewall", "cppm": "nac",
+        "cs": "simulation", "netbox": "ipam", "ldap": "directory",
+        "dns": "dns", "dhcp": "dhcp", "nw": "nw",
+    }
+
+    def _module_type_for(sid):
+        mt = hub.spoke_module_types.get(sid)
+        if mt:
+            return mt
+        meta = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
+        if meta.get("module_type"):
+            return meta["module_type"]
+        for prefix, fallback in _PREFIX_MODULE.items():
+            if sid == prefix or sid.startswith(prefix + "-"):
+                return fallback
+        return None
+
+    @app.get("/tenant/devices/spokes", operation_id="tdev_bindable_spokes")
+    async def _bindable_spokes(request: Request):
+        """Approved spokes the caller may bind a device to — a tenant-admin's OWN
+        tenant spokes only (access.can_bind_spoke), a Global Admin's every
+        approved spoke. Shaped like /setup/pending_spokes (spoke_id/display_name/
+        approved/module_type/tenant_id) so the WebUI spoke dropdown
+        (loadApprovedSpokes) consumes it unchanged."""
+        sess = _session_user(request)
+        known = hub.state.system_state.get("known_modules", []) or []
+        names = hub.state.system_state.get("module_names", {}) or {}
+        out = []
+        for sid in known:
+            if not hub.approved_modules.get(sid, False):
+                continue
+            if not access.can_bind_spoke(hub, sess, sid):
+                continue
+            out.append({
+                "spoke_id": sid,
+                "display_name": names.get(sid, sid),
+                "approved": True,
+                "module_type": _module_type_for(sid),
+                "tenant_id": hub.state.get_spoke_tenant(sid) or "",
+            })
+        return {"spokes": out}
+
     def _register_product(route, prod):
         base = f"/tenant/devices/{route}"
         op = route.replace("-", "_")
