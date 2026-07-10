@@ -152,8 +152,11 @@ def register(app, hub, ctx):
     _filter_tenant = ctx._filter_tenant
 
     @app.get("/vm/{vm_id}/details")
-    async def get_vm_details(vm_id: str):
+    async def get_vm_details(request: Request, vm_id: str):
         hub = app.state.hub
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
         res_info = hub.state.system_state.get("resources", {}).get(vm_id, {})
         ip = res_info.get("metadata", {}).get("ip")
 
@@ -167,10 +170,31 @@ def register(app, hub, ctx):
         }
 
         pxmx_spoke = hub.get_hypervisor_spoke()
+        px_res: dict = {}
         if pxmx_spoke:
             px_res_raw = await hub.request_response(pxmx_spoke, "GET_VM_INFO", {"vm_id": vm_id})
             px_res = px_res_raw.get("payload", {}).get("data", {}) if isinstance(px_res_raw, dict) else {}
             details["proxmox"] = px_res if px_res.get("status") == "SUCCESS" else {"status": "ERROR", "error": px_res.get("message", "Unknown error")}
+
+        # SECURITY: a non-admin may only read a VM they could see in the
+        # tenant-filtered /api/pxmx/vms list. The resources cache tenant_id is
+        # not reliably populated (map_tenant_resource is currently never
+        # called), so ownership is decided the same way the list endpoint does:
+        # the VM record (ips/tags/pool from GET_VM_INFO, plus the cached IP)
+        # must survive the hypervisor tenant filter (subnet + tag + template-
+        # pool). Fail-closed (403) when the VM can't be attributed. Admins
+        # bypass. Prevents enumerating another tenant's VM proxmox/opnsense/
+        # cppm data by vm_id.
+        if not _is_admin(sess):
+            vm_record = {
+                "ips": (px_res.get("ips") or ([ip] if ip else [])),
+                "tags": px_res.get("tags") or [],
+                "pool": px_res.get("pool") or "",
+            }
+            kept = await _filter_tenant(request, [vm_record], "hypervisor", ["ips"])
+            if not kept:
+                raise HTTPException(status_code=403,
+                                    detail="not authorized for this VM's tenant")
 
         opn_spokes = hub.get_all_spokes_by_type("firewall")
         if opn_spokes and ip:
@@ -215,7 +239,17 @@ def register(app, hub, ctx):
         return details
 
     @app.get("/api/aggregate/opnsense")
-    async def aggregate_opnsense():
+    async def aggregate_opnsense(request: Request):
+        """Fleet-wide OPNsense health + interfaces across every firewall spoke.
+        Admin-only: it returns every firewall's interface topology (IPs/uplinks)
+        across all tenants, not a per-tenant view — a non-admin enumerating this
+        would see other tenants' infra. The per-tenant firewall view is
+        /api/firewall/{fwId}/... (already tenant-scoped)."""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin only")
         hub = app.state.hub
         opn_spokes = hub.get_all_spokes_by_type("firewall")
 
@@ -240,7 +274,17 @@ def register(app, hub, ctx):
         return {"hosts": list(results)}
 
     @app.get("/api/aggregate/proxmox")
-    async def aggregate_proxmox():
+    async def aggregate_proxmox(request: Request):
+        """Fleet-wide Proxmox VM inventory (GET_VM_INFO{vm_id:'all'} per
+        hypervisor spoke). Admin-only: it returns every VM on every hypervisor
+        across all tenants — a non-admin enumerating this would see other
+        tenants' full VM lists. The per-tenant view is /api/pxmx/vms (already
+        tenant-scoped)."""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin only")
         hub = app.state.hub
         pxmx_spokes = hub.get_all_spokes_by_type("hypervisor")
 

@@ -101,7 +101,17 @@ def register(app, hub, ctx):
 
 
     @app.get("/vm/{vm_id}/firewall")
-    async def get_vm_firewall(vm_id: str):
+    async def get_vm_firewall(request: Request, vm_id: str):
+        """A VM's OPNsense firewall rules keyed by the VM's cached IP. Admin-only:
+        the resources cache tenant_id is not reliably populated, so without an
+        ownership check a non-admin enumerating vm_id could read another tenant's
+        firewall rules. (Per-tenant VM detail uses /vm/{vm_id}/details which is
+        tenant-scoped; this endpoint is not used by the WebUI.)"""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin only")
         hub = app.state.hub
 
         # 1. Find the IP for this VM from the state manager
