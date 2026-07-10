@@ -51,6 +51,16 @@ class KeyManager:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.abspath(os.path.join(base_dir, "../../data"))
         os.makedirs(data_dir, exist_ok=True)
+        # Defense in depth: this directory holds the Fernet-encrypted secret
+        # stores (keys.json / hub_secret.json). The blobs are encrypted, but the
+        # files' existence and metadata should not be world-readable/listable.
+        # makedirs' mode is masked by the process umask, so chmod forces 0700
+        # idempotently on both fresh and pre-existing data dirs. Best-effort —
+        # a chmod failure (e.g. read-only FS) must NOT block startup.
+        try:
+            os.chmod(data_dir, 0o700)
+        except OSError as e:  # noqa: BLE001
+            logger.warning("Could not tighten %s to 0700: %s", data_dir, e)
 
         self.storage_path = os.path.join(data_dir, system_path)
         self.hub_secret_path = os.path.join(data_dir, hub_secret_path)
