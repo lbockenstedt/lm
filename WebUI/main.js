@@ -1193,7 +1193,7 @@ const VIEW_SUBMENUS = {
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['OUs', 'Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
-    cs: ['Dashboard', 'Clients', 'Central', 'VM Server', 'API Server', 'Config', 'Setup', 'Spoke Management'],
+    cs: ['Dashboard', 'Clients', 'Central', 'VM Server', 'Config', 'Setup', 'Spoke Management'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records', 'Statistics', 'Forwarders'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
@@ -1204,7 +1204,7 @@ const VIEW_SUBMENUS = {
 // a primary. Only cs (Simulations) uses this today — its primaries mirror the
 // solutions-hpe webui-hub tenant sub-nav, and the child sets mirror webui-hub's
 // own subtab lists (VM Server 11, Setup 7, Central 3, Simulations 3, Clients 3,
-// Config 2). Primaries not listed here (API Server, Spoke Management) have no
+// Config 2). Primaries not listed here (Spoke Management) have no
 // children → render directly, no secondary strip.
 const VIEW_CHILDREN = {
     cs: {

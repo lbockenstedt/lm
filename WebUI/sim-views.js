@@ -2,7 +2,7 @@
  * sim-views.js — Native Client-Sim (Simulations) views for the LM hub.
  *
  * Replaces the former <iframe src="/sim"> integration. The 7 Simulations
- * sub-nav tabs (Simulations / Clients / Central / VM Server / API Server /
+ * sub-nav tabs (Simulations / Clients / Central / VM Server /
  * Config / Setup) are rendered inline into #cs-content by loadCSData(), the
  * same way opnsense/ldap/netbox render into their #*-content containers.
  *
@@ -185,7 +185,6 @@ const SIM_ROUTES = {
     csRenderCentral:             { m: 'GET',    p: '/aggregate/central-status',                  api: 'get_central_status' },
     csRenderCentralAlerts:       { m: 'GET',    p: '/aggregate/central',                         api: 'get_central' },
     csRenderCentralClients:      { m: 'GET',    p: '/aggregate/central',                         api: 'get_central' },
-    csRenderApiServer:           { m: 'GET',    p: '/aggregate/api-server',                      api: 'get_api_server' },
     csRenderConfig:              { m: 'GET',    p: '/aggregate/proxmox',                         api: 'get_proxmox' },          // PVE info on Config tab
     csSaveConfigPush:            { m: 'POST',   p: '/aggregate/config-push',                     api: 'config_push' },
     csVmLoad:                    { m: 'GET',    p: '/aggregate/proxmox',                         api: 'get_proxmox' },
@@ -552,7 +551,6 @@ async function loadCSData(subMenu, child, force) {
                 case 'Dashboard': await csRenderSimulations(force); break;
                 case 'Clients':     await csRenderClients(force); break;
                 case 'Central':     await csRenderCentral(force); break;
-                case 'API Server':  await csRenderApiServer(force); break;
                 case 'Config':      await csRenderConfig(force); break;
                 case 'Setup':       await csRenderSetup(force); break;
                 case 'VM Server':   await csRenderVmServer(force); break;
@@ -1649,46 +1647,6 @@ async function csRenderCentralClients() {
 window.CS_CHILD_RENDERERS['Central::Sites']  = csRenderCentral;
 window.CS_CHILD_RENDERERS['Central::Alerts'] = csRenderCentralAlerts;
 window.CS_CHILD_RENDERERS['Central::Clients'] = csRenderCentralClients;
-
-/* ===========================================================================
- * 4. API Server — read-only per-spoke cards
- *    GET /sim/api/aggregate/api-server?tenant_id={T}
- * ========================================================================= */
-
-async function csRenderApiServer() {
-    csSetToolbar('');
-    let data = null;
-    try { data = await csFetch(`/aggregate/api-server?tenant_id=${csTenant()}`); }
-    catch (e) { console.error('csRenderApiServer: aggregate/api-server fetch failed', e); csSet(csEmpty('No API server data yet.',
-        'The /sim/api/aggregate/api-server endpoint is not wired in the backend yet (UI-first phase).')); return; }
-    const spokes = (data && data.spokes) || [];
-    if (spokes.length === 0) { csSet(csEmpty('No API server data yet.')); return; }
-    const cards = spokes.map(sp => {
-        const a = sp.api_server || {};
-        const h = a.health || {};
-        const services = a.services || {};
-        const svcRows = Object.keys(services).map(k => `<tr>
-          <td class="px-3 py-1.5 font-mono text-xs">${csEscape(k)}</td>
-          <td class="px-3 py-1.5">${csStatusBadge(typeof services[k] === 'string' ? services[k] : (services[k] && services[k].status) || 'unknown')}</td>
-        </tr>`).join('');
-        return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden">
-          <summary class="flex items-center justify-between px-5 py-3 cursor-pointer hover:bg-slate-50">
-            <span class="font-bold text-slate-700">${csEscape(sp.spoke_name || sp.spoke_hostname || sp.spoke_id)}</span>
-            <span class="flex items-center gap-2">${csOnlineBadge(sp.spoke_online)}<span class="text-xs text-slate-400">${csEscape(h.version || a.version || '—')}</span></span>
-          </summary>
-          <div class="px-5 pb-5 border-t border-slate-100 space-y-3">
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 pt-3">
-              ${csStat('Status', h.status || a.status || '—')}${csStat('Clients', h.clients != null ? h.clients : '—')}
-              ${csStat('Repo Synced', h.repo_synced === undefined ? '—' : (h.repo_synced ? 'Yes' : 'No'))}${csStat('Version', h.version || a.version || '—')}
-            </div>
-            ${h.repo_error ? `<p class="text-xs text-red-500">Repo error: ${csEscape(h.repo_error)}</p>` : ''}
-            <div><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Services</p>${csTable(['Service', 'Status'], svcRows)}</div>
-            <details class="text-xs"><summary class="cursor-pointer text-slate-400">Raw payload</summary>${csJsonDump(sp)}</details>
-          </div>
-        </details>`;
-    }).join('');
-    csSet(`<div class="space-y-3">${cards}</div>`);
-}
 
 /* ===========================================================================
  * 5. Config — config-push + simulation-conf editor + hub-config
@@ -4243,7 +4201,7 @@ async function csRenderVmServerDetails() {
     </div>`);
 }
 
-// ── Clients / Central / API Server (per-spoke, from the aggregate reads) ────
+// ── Clients / Central (per-spoke, from the aggregate reads) ────
 async function csRenderVmServerClients() {
     csSetToolbar('');
     try { await csVmLoad(); } catch (e) { console.error('csRenderVmServerClients: vm load failed', e); csSet(csErrorBox('Could not load', e)); return; }
