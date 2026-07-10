@@ -10,7 +10,43 @@ def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     _resolve_tenant = ctx._resolve_tenant
+    _filter_tenant = ctx._filter_tenant
     _trigger_vm_sync_after_pxmx_edit = ctx._trigger_vm_sync_after_pxmx_edit
+
+    async def _assert_vm_control(request, vmid=None, node=None, unique_id=None):
+        """Authorize a VM CONTROL action (start/stop/reboot/snapshot/backup).
+        Global Admin → any VM. Otherwise the caller must (a) be a write-user or
+        above (access.has_edit_access) AND (b) OWN the target VM — the VM's
+        ips/tags/pool (from GET_VM_INFO) must survive the hypervisor tenant filter,
+        exactly like the tenant-filtered VM list + /vm/{id}/details. FAIL-CLOSED:
+        an unattributable VM (spoke down, empty info) → 403, so a tenant user can
+        never act on a VM they couldn't see. A view user (pxmx right, no edit) is
+        rejected before the ownership probe."""
+        sess = _session_user(request)
+        if _is_admin(sess):
+            return
+        if not access.has_edit_access(sess):
+            raise HTTPException(status_code=403, detail="Edit access required to control VMs")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_hypervisor_spoke()
+        info: dict = {}
+        if pxmx_spoke:
+            ident = unique_id or (str(vmid) if vmid is not None else "")
+            try:
+                raw = await hub.request_response(
+                    pxmx_spoke, "GET_VM_INFO",
+                    {"vm_id": ident, "vmid": vmid, "node": node or ""})
+                info = raw.get("payload", {}).get("data", {}) if isinstance(raw, dict) else {}
+            except Exception:  # noqa: BLE001 — fail-closed below
+                info = {}
+        vm_record = {
+            "ips": info.get("ips") or [],
+            "tags": info.get("tags") or [],
+            "pool": info.get("pool") or "",
+        }
+        kept = await _filter_tenant(request, [vm_record], "hypervisor", ["ips"])
+        if not kept:
+            raise HTTPException(status_code=403, detail="not authorized for this VM's tenant")
 
     @app.post("/api/pxmx/vm-action")
     async def pxmx_vm_action(request: Request):
@@ -22,8 +58,8 @@ def register(app, hub, ctx):
         Admin-only: VM control is a privileged action. ``timeout=35`` covers a
         slow ``qm stop``/``snapshot`` (spoke→agent window is 30s)."""
         sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
         try:
             body = await request.json()
         except Exception:
@@ -31,6 +67,9 @@ def register(app, hub, ctx):
         action = str((body or {}).get("action", "")).lower()
         if action not in ("start", "stop", "reboot", "restart", "snapshot", "backup"):
             raise HTTPException(status_code=400, detail=f"unknown action: {action}")
+        # Admin → any VM; a write-user/tenant-admin → only a VM in their tenant.
+        await _assert_vm_control(request, vmid=body.get("vmid"),
+                                 node=body.get("node"), unique_id=body.get("unique_id"))
         hub = app.state.hub
         pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
@@ -96,8 +135,11 @@ def register(app, hub, ctx):
         Proxmox-organizational detail, not tenant-scoped. Returns
         ``{pools: [{poolid, comment, cluster}], spoke_connected}``."""
         sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        # Gated by the pxmx module right in the middleware; pools/ISOs/storages are
+        # cluster-organizational data feeding the create-VM dropdowns, shown to any
+        # pxmx-right user (not tenant-scoped).
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
         hub = app.state.hub
         pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
@@ -119,8 +161,11 @@ def register(app, hub, ctx):
         node and lists its ISO storages. Admin-only. Returns
         ``{isos: [{volid, name, storage, size}], node, spoke_connected}``."""
         sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        # Gated by the pxmx module right in the middleware; pools/ISOs/storages are
+        # cluster-organizational data feeding the create-VM dropdowns, shown to any
+        # pxmx-right user (not tenant-scoped).
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
         node = (node or "").strip()
         if not node:
             raise HTTPException(status_code=400, detail="node query param required")
@@ -145,8 +190,11 @@ def register(app, hub, ctx):
         ``images`` — boot-disk targets for create-VM-from-ISO). Admin-only.
         Returns ``{storages: [{storage, type, avail, total, shared}], node, spoke_connected}``."""
         sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        # Gated by the pxmx module right in the middleware; pools/ISOs/storages are
+        # cluster-organizational data feeding the create-VM dropdowns, shown to any
+        # pxmx-right user (not tenant-scoped).
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
         node = (node or "").strip()
         if not node:
             raise HTTPException(status_code=400, detail="node query param required")
@@ -178,8 +226,11 @@ def register(app, hub, ctx):
         bridge?, pool?, new_vmid?}``. After success the tenant's VM sync is
         re-triggered so NetBox picks up the new VM."""
         sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        # Write-user tier: create/clone tag the new VM with the acting tenant's
+        # labels (their own tenant for a non-admin), so a write-user or tenant-
+        # admin may create in their tenant; a view user is rejected. Admin any.
+        if not sess or not access.has_edit_access(sess):
+            raise HTTPException(status_code=403, detail="Edit access required to create VMs")
         try:
             body = await request.json()
         except Exception:
@@ -269,8 +320,11 @@ def register(app, hub, ctx):
         is re-triggered so NetBox picks up the new VM. Admin-only.
         """
         sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        # Write-user tier: create/clone tag the new VM with the acting tenant's
+        # labels (their own tenant for a non-admin), so a write-user or tenant-
+        # admin may create in their tenant; a view user is rejected. Admin any.
+        if not sess or not access.has_edit_access(sess):
+            raise HTTPException(status_code=403, detail="Edit access required to create VMs")
         try:
             body = await request.json()
         except Exception:
