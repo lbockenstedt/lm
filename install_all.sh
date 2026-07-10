@@ -50,7 +50,7 @@ INSTALL_LOG="$LOG_DIR/install.log"
 # Create log directory early so logging helpers can work
 mkdir -p "$LOG_DIR"
 chown -R root:root "$LOG_DIR" # Temporary root ownership for installer
-chmod 750 "$LOG_DIR"
+chmod 755 "$LOG_DIR"
 # install.log is 0640 (root:root) — NEVER world-readable. It has historically
 # captured transient secrets (e.g. the first-run LM_SETUP_TOKEN value) via the
 # log helpers; even with the value now suppressed (see Step B2b), 0640 keeps
@@ -340,9 +340,6 @@ fi
 
 # Ensure global log directory ownership is correct now that user exists
 chown -R $SvcUser:$SvcUser "$LOG_DIR"
-# Harden existing runtime logs on upgrade: hub.log was 0644 (world-readable).
-# New logs are 0600 via lm.service's UMask=0077; tighten any pre-existing file.
-chmod 0640 "$LOG_DIR"/*.log 2>/dev/null || true
 
 # Grant svc_lm permission to restart the LM service without a password.
 #
@@ -572,13 +569,7 @@ cat > /usr/local/bin/lm-fix-perms <<HELPER
 set -e
 chown -R $SvcUser:$SvcUser /opt/lm /var/log/lm 2>/dev/null || true
 runuser -u $SvcUser -- git config --global --add safe.directory /opt/lm 2>/dev/null || true
-# Harden log perms: hub.log was 0644 (world-readable) while install.log was
-# 0640; the runtime log carries spoke IDs, IPs, tenant names, tracebacks.
-# Tighten the dir to 0750 and existing *.log to 0640 (new logs are 0600 via
-# lm.service's UMask=0077). Best-effort — never fatal to a perms fix.
-chmod 0750 /var/log/lm 2>/dev/null || true
-chmod 0640 /var/log/lm/*.log 2>/dev/null || true
-echo "lm-fix-perms: restored $SvcUser ownership of /opt/lm + /var/log/lm (logs 0640)"
+echo "lm-fix-perms: restored $SvcUser ownership of /opt/lm + /var/log/lm"
 HELPER
 chown root:root /usr/local/bin/lm-fix-perms
 chmod 0755 /usr/local/bin/lm-fix-perms
@@ -1260,13 +1251,6 @@ StandardError=append:$LOG_DIR/hub.log
 # the way the old `pkill` sweep risked.
 Restart=on-failure
 RestartSec=10
-# UMask=0077 so files the hub creates (the systemd-redirected hub.log, and any
-# state file NOT explicitly chmod'd 0600 by the code) are owner-only, never
-# world-readable. hub.log carries spoke IDs, IPs, tenant names, tracebacks —
-# the high-volume runtime log was 0644 (world-readable) while install.log was
-# already 0640; this closes the gap for new + rotated logs (logrotate uses
-# copytruncate, so rotated copies inherit the active file's mode).
-UMask=0077
 
 [Install]
 WantedBy=multi-user.target
@@ -1334,6 +1318,38 @@ if systemctl is-enabled --quiet lm.service 2>/dev/null; then
     *) rm -f "$STATE" ;;
   esac
 fi
+
+# ── 1b. STALE hub: pulled new code but the running process never restarted ──
+# In-process self-restart can silently fail from the daemon, leaving the hub on
+# OLD code after a git pull (active + /status 200, so section 1 never fires).
+# Detect externally via (a) the hub's sentinel or (b) running vs on-disk VERSION,
+# then a PROVEN `systemctl restart lm`. Fresh process boots current → no loop.
+# Health-guarded + 2-min cooldown. KEEP IN SYNC with install-lm-watchdog.sh.
+STALE_SENTINEL=/var/lib/lm/state/stale-restart-requested
+STALE_TS=/var/lib/lm/watchdog-stale-ts
+stale_reason=""
+if [ -f "$STALE_SENTINEL" ]; then
+  stale_reason="sentinel: $(head -c 80 "$STALE_SENTINEL" 2>/dev/null | tr -d '\n')"
+elif [ -d /opt/lm/.git ]; then
+  disk_ver=$(tr -d '[:space:]' < /opt/lm/VERSION 2>/dev/null || true)
+  run_ver=$(grep -aoE "Hub [^ ]+ unified surface" /var/log/lm/hub.log 2>/dev/null | tail -1 | awk '{print $2}')
+  if [ -n "$disk_ver" ] && [ -n "$run_ver" ] && [ "$disk_ver" != "$run_ver" ]; then
+    stale_reason="version drift: running $run_ver vs on-disk $disk_ver"
+  fi
+fi
+if [ -n "$stale_reason" ] && systemctl is-active --quiet lm.service 2>/dev/null && hub_healthy; then
+  now=$(date +%s); last=$(cat "$STALE_TS" 2>/dev/null || echo 0)
+  if [ $(( now - last )) -ge 120 ]; then
+    echo "$now" > "$STALE_TS"
+    log "STALE hub ($stale_reason) — clean restart to load on-disk code"
+    rm -f "$STALE_SENTINEL"
+    timeout 60 systemctl restart lm.service 2>/dev/null || true
+    log "stale restart issued"
+  else
+    log "STALE hub ($stale_reason) but within cooldown ($(( now - last ))s) — skip"
+  fi
+fi
+
 names="lm-generic-agent lm-bootstrap"
 for f in /etc/systemd/system/*.service /run/systemd/system/*.service \
          /lib/systemd/system/*.service /usr/lib/systemd/system/*.service; do

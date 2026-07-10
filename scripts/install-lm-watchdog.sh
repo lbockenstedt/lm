@@ -95,6 +95,44 @@ if systemctl is-enabled --quiet lm.service 2>/dev/null; then
   esac
 fi
 
+# ── 1b. STALE hub: pulled new code but the running process never restarted ──
+# The in-process self-restart (lm-update-restart) can silently fail to fire from
+# the daemon (child not detached / cgroup teardown), leaving the hub serving OLD
+# code after a git pull. The hub is "active" and /status is 200, so section 1
+# never triggers. Detect it externally and do a PROVEN `systemctl restart lm`.
+# Two independent signals (either one triggers):
+#   (a) sentinel  — the hub drops /var/lib/lm/state/stale-restart-requested when
+#                   its update-health sees running-version != on-disk VERSION.
+#   (b) drift     — running version (last "unified surface" startup log line) vs
+#                   on-disk /opt/lm/VERSION. Fully external; bootstraps a stale
+#                   hub even before the sentinel code is loaded.
+# The fresh process boots current, so neither signal recurs → no restart loop.
+# Guarded on hub health + a 2-min cooldown so it can never hot-loop.
+STALE_SENTINEL=/var/lib/lm/state/stale-restart-requested
+STALE_TS=/var/lib/lm/watchdog-stale-ts
+stale_reason=""
+if [ -f "$STALE_SENTINEL" ]; then
+  stale_reason="sentinel: $(head -c 80 "$STALE_SENTINEL" 2>/dev/null | tr -d '\n')"
+elif [ -d /opt/lm/.git ]; then
+  disk_ver=$(tr -d '[:space:]' < /opt/lm/VERSION 2>/dev/null || true)
+  run_ver=$(grep -aoE "Hub [^ ]+ unified surface" /var/log/lm/hub.log 2>/dev/null | tail -1 | awk '{print $2}')
+  if [ -n "$disk_ver" ] && [ -n "$run_ver" ] && [ "$disk_ver" != "$run_ver" ]; then
+    stale_reason="version drift: running $run_ver vs on-disk $disk_ver"
+  fi
+fi
+if [ -n "$stale_reason" ] && systemctl is-active --quiet lm.service 2>/dev/null && hub_healthy; then
+  now=$(date +%s); last=$(cat "$STALE_TS" 2>/dev/null || echo 0)
+  if [ $(( now - last )) -ge 120 ]; then
+    echo "$now" > "$STALE_TS"
+    log "STALE hub ($stale_reason) — clean restart to load on-disk code"
+    rm -f "$STALE_SENTINEL"
+    timeout 60 systemctl restart lm.service 2>/dev/null || true
+    log "stale restart issued"
+  else
+    log "STALE hub ($stale_reason) but within cooldown ($(( now - last ))s) — skip"
+  fi
+fi
+
 # ── 2. Retire the legacy generic-agent zombie (root remediation) ────────────
 # Mirrors install_all.sh retire_legacy_leaf. The hub detects but can't remove.
 names="lm-generic-agent lm-bootstrap"

