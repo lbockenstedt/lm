@@ -6207,7 +6207,7 @@ function _mgmtEntryCard(o) {
             </div>
             ${corner ? `<div class="flex items-center gap-2 shrink-0">${corner}</div>` : ''}
         </div>
-        ${badges ? `<div class="flex items-center gap-1.5 flex-wrap pl-6">${badges}</div>` : ''}
+        ${badges ? `<div class="flex items-center gap-1.5 flex-wrap pl-4">${badges}</div>` : ''}
         ${meta}
         ${actions ? `<div class="flex items-center gap-2 flex-wrap pl-6">${actions}</div>` : ''}
     </div>`;
