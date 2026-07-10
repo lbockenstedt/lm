@@ -120,7 +120,8 @@ class RepoSyncMixin:
                     "commit_before": before, "commit_after": "",
                     "changed": False}
 
-    async def run_repo_sync_all(self, force_spokes: bool = False) -> Dict[str, Any]:
+    async def run_repo_sync_all(self, force_spokes: bool = False,
+                                force: bool = False) -> Dict[str, Any]:
         """Run one GitHub repo-sync cycle and record its status.
 
         Pulls ``provisioning_repos/*`` (hub-local) then delegates to
@@ -135,6 +136,14 @@ class RepoSyncMixin:
         calls with the default ``False`` (gated/cooldown-respecting). This is the
         single shared code path for BOTH the scheduled sync and the manual
         button — "update now" is just "run the scheduled cycle immediately".
+
+        ``force`` is also threaded to ``perform_update``: a MANUAL "Update now" /
+        "Sync now" click passes ``force=True`` so the watchdog restart sentinel
+        bypasses the maintenance-window/idle gate (operator wants it now). The
+        scheduled background loop passes the default ``False`` — a routine auto
+        hub pull stays gated to the maintenance window (only the gate's intended
+        deferral path). Note a STALE-reload (process behind disk) forces regardless,
+        via ``perform_update``'s ``stale_reload`` branch.
 
         NOTE: when ``perform_update`` pulls a hub change it schedules a hub
         self-restart (via the transient unit) and returns a "restarting"
@@ -178,7 +187,7 @@ class RepoSyncMixin:
 
         # ── hub tree + spoke fan-out (version-gated, snapshot/rollback) ─────
         try:
-            hub_result = await self.perform_update(force_spokes=force_spokes)
+            hub_result = await self.perform_update(force=force, force_spokes=force_spokes)
             if not isinstance(hub_result, dict):
                 hub_result = {"status": "checked",
                               "message": str(hub_result)}

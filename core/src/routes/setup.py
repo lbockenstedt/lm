@@ -1010,12 +1010,16 @@ def register(app, hub, ctx):
         spoke (``perform_update``). The hub self-restarts only when its own
         code changed; spokes self-pull and restart on their own version change.
         Returns the per-repo results + the hub update result.
+
+        Operator-initiated → ``force=True`` so any hub restart sentinel bypasses
+        the maintenance-window/idle gate (restart now, not deferred). A no-op
+        sync (already current, not stale) restarts nothing.
         """
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
-        result = await hub.run_repo_sync_all()
+        result = await hub.run_repo_sync_all(force=True)
         prov = result.get("provisioning_repos", []) or []
         return {"result": result,
                 "summary": {"status": (result.get("hub") or {}).get("status"),

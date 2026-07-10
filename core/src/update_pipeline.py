@@ -673,7 +673,16 @@ class UpdatePipelineMixin:
                 # old code. Drop a sentinel for the ROOT lm-watchdog, which does a
                 # PROVEN `systemctl restart lm` and clears it. New process boots
                 # current → not stale → no sentinel → no restart loop.
-                self._request_watchdog_restart(f"stale v{run_v}->v{disk_v}")
+                #
+                # FORCE: a stale process is an ERROR state (serving old/buggy
+                # code), not planned maintenance. The watchdog's maintenance-window
+                # / idle gate is for PLANNED pull-and-restart only; staleness must
+                # reload ASAP (within one ~60s watchdog cycle), day or night.
+                # Otherwise a fix that lands on disk mid-day sits UNLOADED until
+                # the 02:00 window (the recurring "I keep getting stale hubs"
+                # shape — a FIXED bug kept running for hours because the restart
+                # was gated). force=True bypasses the watchdog gate.
+                self._request_watchdog_restart(f"stale v{run_v}->v{disk_v}", force=True)
 
             helper = "/usr/local/bin/lm-update-restart"
             checks["restart_helper"] = os.path.isfile(helper) and os.access(helper, os.X_OK)
@@ -1436,14 +1445,22 @@ class UpdatePipelineMixin:
                 logger.warning(f"Could not schedule hub self-restart: {_e}")
             # Also request the restart via the RELIABLE external watchdog path —
             # the in-process helper above can silently fail to fire from the
-            # daemon. force=<manual Update button> → the watchdog restarts
-            # immediately; an auto-update / stale-reload sentinel is deferred by
-            # the watchdog while users are logged in (up to its max-defer). The
-            # fresh process clears the sentinel on boot, so a successful direct
-            # restart above does NOT cause a double-restart.
+            # daemon. force → the watchdog restarts immediately, bypassing the
+            # maintenance-window/idle gate; a non-force (routine auto-update)
+            # sentinel is deferred by the watchdog while users are logged in.
+            # The fresh process clears the sentinel on boot, so a successful
+            # direct restart above does NOT cause a double-restart.
+            #
+            # FORCE when: (a) the caller explicitly forced (manual "Update now"
+            # / "Sync now" button — operator wants it now), or (b) this is a
+            # stale-reload (process behind disk → reload ASAP, error state, NOT
+            # planned maintenance). A routine auto hub_updated stays NON-force
+            # (gated to the maintenance window — that's the only path the gate is
+            # meant to defer). See the staleness-force rationale in
+            # check_update_health above.
             self._request_watchdog_restart(
                 "update->restart" if hub_updated else "stale-reload->restart",
-                force=bool(force))
+                force=(stale_reload or bool(force)))
             if hub_updated:
                 _rmsg = f"Updated Hub to {remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."
             else:

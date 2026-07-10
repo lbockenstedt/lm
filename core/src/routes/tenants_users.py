@@ -32,12 +32,18 @@ def register(app, hub, ctx):
 
         A manual click sends ``force_spokes=true`` so the spoke fan-out bypasses
         the per-spoke re-push cooldown/gate (the hub itself still only re-pulls
-        its own tree when genuinely behind).
+        its own tree when genuinely behind). It ALSO passes ``force=True`` so any
+        resulting hub restart sentinel bypasses the maintenance-window/idle gate —
+        the button's name says "Update now", so a click that pulls new code (or
+        finds the process stale) restarts the hub immediately, not deferred to
+        the 02:00 window. A no-op click (already current, not stale) restarts
+        nothing — ``perform_update`` only restarts on ``hub_updated or
+        stale_reload``, both False when current.
         """
         hub = app.state.hub
         force_spokes = request.query_params.get("force_spokes", "false").lower() == "true"
-        logger.info(f"API: Manual update — run_repo_sync_all(force_spokes={force_spokes})")
-        result = await hub.run_repo_sync_all(force_spokes=force_spokes)
+        logger.info(f"API: Manual update — run_repo_sync_all(force_spokes={force_spokes}, force=True)")
+        result = await hub.run_repo_sync_all(force_spokes=force_spokes, force=True)
         hub_r = result.get("hub") if isinstance(result, dict) else None
         hub_r = hub_r if isinstance(hub_r, dict) else {}
         status = hub_r.get("status") or "checked"
