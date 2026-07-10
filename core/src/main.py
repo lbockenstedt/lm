@@ -1683,8 +1683,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         Security: the payload may carry a Proxmox token secret (CS_TOKEN_RESULT,
         Phase F). This method never logs ``data`` — only type/hostname/tenant —
         so secrets do not reach the hub log. Never raises: a missing/offline cs
-        spoke or a dispatch failure must not break the agent→hub relay loop.
+        spoke or a dispatch failure must not break the agent→hub relay loop —
+        this is enforced by an outer try/except because the caller fires the
+        relay as a background task (see ``_handle_agent_relay_up``) and an
+        unhandled exception there would only surface as a noisy "Task exception
+        was never retrieved" warning.
         """
+        try:
+            await self._relay_cs_event_inner(spoke_id, agent_id, cs_type, data)
+        except Exception as exc:  # noqa: BLE001 — never let a background relay task raise
+            logger.debug("CS_* relay: %s from %s raised: %s", cs_type, agent_id, exc)
+
+    async def _relay_cs_event_inner(self, spoke_id: str, agent_id: str,
+                                    cs_type: str, data: Dict[str, Any]) -> None:
+        """Guts of ``_relay_cs_event`` — see its docstring. Split so the outer
+        wrapper can guarantee never-raises for the fire-and-forget caller."""
         mapped = self._CS_INGEST_MAP.get(cs_type)
         if not mapped:
             logger.debug("CS_* relay: no mapping for %s from %s — dropping", cs_type, agent_id)
@@ -2667,7 +2680,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         _orig_type = original_msg.get("payload", {}).get("type")
         if _orig_type and _orig_type.startswith("CS_"):
             _cs_data = original_msg.get("payload", {}).get("data", {}) or {}
-            await self._relay_cs_event(spoke_id, agent_id, _orig_type, _cs_data)
+            # Fire-and-forget — do NOT ``await``. ``_relay_cs_event`` dispatches to
+            # the tenant's cs spoke via ``request_response`` (up to 30s) and a cs
+            # spoke that also hosts cs-dialed agents (LM_CS_AGENT_LISTENER=1, the
+            # install default) relays its OWN agent's CS_* events up this same
+            # spoke's receive loop. Awaiting the relay inline blocks THIS loop up
+            # to 30s waiting for the cs spoke's COMMAND_RESULT — but the very loop
+            # that must read that reply is the one blocked waiting for it → a
+            # self-deadlock that surfaces as the steady "Request Timeout:
+            # [CS_INGEST_TELEMETRY] from <cs-spoke> after 30.0s" at the agent
+            # telemetry cadence. Detaching lets the receive loop keep draining +
+            # read the reply (populating response_cache) while the relay runs in a
+            # background task. ``_relay_cs_event`` never raises, so the task is
+            # safe to detach; the relay is best-effort (telemetry ingest does not
+            # need its ack on the hot path). See spoke-update-storm memory: the
+            # SPOKE_UPDATE storm (600s bursts) was a DIFFERENT failure mode; this
+            # self-deadlock is what remains once that storm is gated.
+            asyncio.create_task(self._relay_cs_event(spoke_id, agent_id, _orig_type, _cs_data))
             return True
 
         # --- VNC console relay (agent-terminates-WSS) ---
