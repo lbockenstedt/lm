@@ -411,7 +411,7 @@ def register(app, hub, ctx):
     )
     _instance_crud(
         "ipam-instances", "ipam_instances",
-        lambda inst: {"netbox_url": inst.get("url"), "api_token": inst.get("api_token")},
+        lambda inst: {"netbox_url": inst.get("url"), "api_token": inst.get("api_token"), "netbox_verify_ssl": inst.get("verify_ssl")},
         legacy_key="netbox",
         legacy_to_instance=lambda c: {
             "id": str(uuid.uuid4()),

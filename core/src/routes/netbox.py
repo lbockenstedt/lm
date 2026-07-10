@@ -104,7 +104,7 @@ def register(app, hub, ctx):
             hub.state.save_state()
             spoke_id = get_netbox_spoke(hub)
             if spoke_id:
-                msg = _hub_msg(spoke_id, "UPDATE_CONFIG", {"netbox_url": config.get("url"), "api_token": config.get("api_token")})
+                msg = _hub_msg(spoke_id, "UPDATE_CONFIG", {"netbox_url": config.get("url"), "api_token": config.get("api_token"), "netbox_verify_ssl": config.get("verify_ssl")})
                 await hub.send_to_spoke(msg)
                 return {"status": "ok", "message": "Config saved and pushed to NetBox spoke.", "pushed": True}
             return {"status": "partial_success", "message": "Config saved; NetBox spoke not connected.", "pushed": False}

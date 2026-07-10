@@ -13409,6 +13409,7 @@ const INSTANCE_PRODUCTS = {
         fields: [
             { id: 'url', label: 'NetBox URL', placeholder: 'http://netbox.example.com' },
             { id: 'api_token', label: 'API Token', type: 'password', placeholder: 'API token' },
+            { id: 'verify_ssl', label: 'TLS Certificate', type: 'select', options: [['1', 'Verify cert (secure)'], ['0', 'Ignore cert (self-signed / internal CA)']] },
         ],
     },
     ldap: {
@@ -13547,7 +13548,11 @@ function showAddInstanceModal(productKey, editItem) {
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     const fieldHtml = p.fields.map(f => {
         const type = f.type || 'text';
-        return `                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">${f.label}</label><input type="${type}" id="inst-${f.id}" placeholder="${f.placeholder || ''}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>`;
+        const cls = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+        const inner = type === 'select'
+            ? `<select id="inst-${f.id}" class="${cls}">${(f.options || []).map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('')}</select>`
+            : `<input type="${type}" id="inst-${f.id}" placeholder="${f.placeholder || ''}" class="${cls}">`;
+        return `                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">${f.label}</label>${inner}</div>`;
     }).join('\n');
     // IPAM-only: an "Apply schema changes" button that provisions the Lab
     // Manager custom fields (Proxmox / OPNsense / ClearPass sync) on the
@@ -13596,7 +13601,12 @@ ${schemaBtnHtml}
         document.getElementById('inst-name').value = editItem.name || '';
         p.fields.forEach(f => {
             const el = document.getElementById('inst-' + f.id);
-            if (el) el.value = editItem[f.id] || '';
+            if (!el) return;
+            // For a <select>, only override the default (first option) when the
+            // instance has a stored value — an old instance with no verify_ssl
+            // then keeps the secure "Verify" default instead of going blank.
+            if (el.tagName === 'SELECT') { if (editItem[f.id]) el.value = editItem[f.id]; }
+            else el.value = editItem[f.id] || '';
         });
     }
 }
