@@ -176,6 +176,21 @@ def register(app, hub, ctx):
         ret = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         return hub, le_sid, _spoke_payload_or_raise(ret)
 
+    @app.post("/api/le/he-config")
+    async def le_set_he_login(request: Request):
+        """Store the Hurricane Electric account-login knob on the le spoke, so the
+        email/password is reused for every he-login issue/renew instead of typed
+        each time. Admin-only (shared-infra write); the spoke persists it 0600."""
+        _hub, _sid, payload = await _le_request("LE_SET_HE_LOGIN", await request.json())
+        return payload
+
+    @app.get("/api/le/he-config")
+    async def le_get_he_login():
+        """Whether the HE account-login knob is configured (never returns the
+        password) — drives the Setup knob's 'configured' state."""
+        _hub, _sid, payload = await _le_request("LE_GET_HE_LOGIN", {})
+        return payload
+
     @app.get("/api/le/certs")
     async def le_list_certs():
         """List managed certificates from the le spoke."""

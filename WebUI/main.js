@@ -3102,6 +3102,7 @@ function _viewTemplate(viewId) {
   <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
   <div class="flex justify-end gap-2">
     <button onclick="showLeIssueModal()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-3 py-1 rounded-md text-xs font-medium transition-all">＋ Issue certificate</button>
+    <button onclick="showHeLoginModal()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200" title="Store a Hurricane Electric account login, reused for every HE account-login DNS-01">🔑 HE account</button>
     <button onclick="leRenewAll()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">↻ Renew all</button>
     <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
     <button onclick="loadLEData()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200">↻ Refresh</button>
@@ -12006,7 +12007,8 @@ const LE_DNS_PROVIDERS = [
     ['digitalocean', 'DigitalOcean'],
     ['linode', 'Linode'],
     ['rfc2136', 'RFC 2136 (BIND)'],
-    ['he', 'Hurricane Electric (RFC 2136)'],
+    ['he-login', 'Hurricane Electric (account login)'],
+    ['he', 'Hurricane Electric (RFC 2136 / TSIG)'],
     ['hetzner', 'Hetzner'],
     ['inwx', 'INWX'],
     ['transip', 'TransIP'],
@@ -12184,6 +12186,22 @@ function showLeIssueModal() {
                         </div>
                     </details>
                 </div>
+                <!-- Hurricane Electric ACCOUNT LOGIN (dns.he.net web panel; no
+                     TSIG, no IP). Blank fields → use the saved HE account knob
+                     (Setup → Certificates). -->
+                <div id="le-issue-he-login" class="space-y-2 hidden">
+                    <p class="text-[11px] text-slate-400">Sets the <span class="font-mono">_acme-challenge</span> TXT via the dns.he.net web panel with your HE account — no per-record TSIG keys. Leave blank to use the saved HE account (Setup → Certificates → Hurricane Electric login).</p>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="flex flex-col">
+                            <label class="text-[11px] text-slate-500 mb-0.5">HE account email</label>
+                            <input id="le-issue-he-user" type="text" placeholder="(use saved account)" autocomplete="off" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                        </div>
+                        <div class="flex flex-col">
+                            <label class="text-[11px] text-slate-500 mb-0.5">HE account password</label>
+                            <input id="le-issue-he-pass" type="password" placeholder="(use saved account)" autocomplete="new-password" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                        </div>
+                    </div>
+                </div>
                 <!-- Non-rfc2136 providers: raw INI textarea (field shapes vary
                      per provider — sample shown as a grey placeholder). -->
                 <textarea id="le-issue-dns-creds" rows="5" placeholder="" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500 placeholder:text-slate-400 placeholder:font-mono placeholder:text-xs"></textarea>
@@ -12227,11 +12245,15 @@ function showLeIssueModal() {
 function leIssueUpdateDnsFields() {
     const p = document.getElementById('le-issue-dns-provider')?.value;
     if (!p) return;
+    const heLogin = p === 'he-login';
     const structured = LE_RFC2136_PROVIDERS.has(p);
     const setShown = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
-    setShown('le-issue-dns-structured', structured);
-    setShown('le-issue-dns-creds', !structured);
-    if (structured) {
+    setShown('le-issue-he-login', heLogin);
+    setShown('le-issue-dns-structured', structured && !heLogin);
+    setShown('le-issue-dns-creds', !structured && !heLogin);
+    if (heLogin) {
+        // nothing to prefill — creds come from the fields or the saved knob
+    } else if (structured) {
         // Pre-fill the Advanced "Server" field with the provider default when
         // it's empty (Hurricane Electric → ns1.he.net) so the user only types
         // the two secrets. Don't clobber a value they already entered.
@@ -12274,6 +12296,7 @@ async function leIssueCert() {
     // For rfc2136-family providers the creds come from the structured key-name
     // / key-secret fields (assembled into an INI below); otherwise from the
     // raw INI textarea.
+    const _heLogin = chSel === 'dns' && dnsProvider === 'he-login';
     const _rfc = chSel === 'dns' && dnsProvider && LE_RFC2136_PROVIDERS.has(dnsProvider);
     const _rfcIni = _rfc ? leIssueBuildRfc2136Ini() : null;
     const dnsCreds = _rfc ? _rfcIni.ini
@@ -12289,7 +12312,7 @@ async function leIssueCert() {
         if (_rfc) {
             if (!_rfcIni.keyName) { alert('TSIG key name is required'); return; }
             if (!_rfcIni.keySecret) { alert('TSIG key secret is required'); return; }
-        } else if (!dnsCreds.trim()) {
+        } else if (!_heLogin && !dnsCreds.trim()) {
             alert('DNS credentials INI is required for DNS-01'); return;
         }
     }
@@ -12300,7 +12323,16 @@ async function leIssueCert() {
     // the spoke receives the real certbot plugin name.
     if (challenge === 'dns') {
         body.dns_provider = LE_DNS_PROVIDER_ALIAS[dnsProvider] || dnsProvider;
-        body.dns_creds = dnsCreds;
+        if (_heLogin) {
+            // HE account login: send per-request creds if typed, else the spoke
+            // uses the saved knob. No dns_creds INI for this provider.
+            const hu = document.getElementById('le-issue-he-user')?.value?.trim() || '';
+            const hp = document.getElementById('le-issue-he-pass')?.value || '';
+            if (hu) body.he_username = hu;
+            if (hp) body.he_password = hp;
+        } else {
+            body.dns_creds = dnsCreds;
+        }
     }
     if (_leIssueTargets.length) body.targets = _leIssueTargets;
 
@@ -12333,6 +12365,54 @@ async function leIssueCert() {
         alert('Issue failed: ' + e.message);
         if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
     }
+}
+
+// Hurricane Electric account-login knob — stored once on the le spoke (0600) and
+// reused for every "Hurricane Electric (account login)" DNS-01 issue + renewal.
+async function showHeLoginModal() {
+    let cur = { configured: false, he_username: '' };
+    try {
+        const r = await _spokeFetch('/api/le/he-config', { method: 'GET' });
+        if (r.ok) cur = (r.data && r.data.data) ? r.data.data : (r.data || cur);
+    } catch (e) { /* spoke may be down; show empty form */ }
+    const modal = document.createElement('div');
+    modal.id = 'he-login-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    const status = cur.configured
+        ? `<span class="text-green-600">Currently configured${cur.he_username ? ' (' + escapeHtml(cur.he_username) + ')' : ''}.</span>`
+        : '<span class="text-slate-400">Not configured yet.</span>';
+    modal.innerHTML = `
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <h3 class="text-lg font-bold text-[#263040]">Hurricane Electric account</h3>
+          <button onclick="document.getElementById('he-login-modal').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
+        </div>
+        <div class="p-6 space-y-3">
+          <p class="text-xs text-slate-500">Stored once and reused for every <b>Hurricane Electric (account login)</b> DNS-01 issue &amp; renewal — no per-record TSIG keys or IP. ${status}</p>
+          <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Account email</label><input id="he-cfg-user" type="text" value="${escapeHtml(cur.he_username || '')}" autocomplete="off" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+          <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Account password</label><input id="he-cfg-pass" type="password" placeholder="${cur.configured ? 're-enter to change' : ''}" autocomplete="new-password" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+        </div>
+        <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+          <button onclick="document.getElementById('he-login-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+          <button onclick="saveHeLogin()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-6 py-2 rounded-md text-sm font-bold">Save</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+}
+
+async function saveHeLogin() {
+    const u = document.getElementById('he-cfg-user')?.value?.trim() || '';
+    const p = document.getElementById('he-cfg-pass')?.value || '';
+    if (!u || !p) { alert('Both account email and password are required.'); return; }
+    try {
+        const r = await _spokeFetch('/api/le/he-config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ he_username: u, he_password: p }),
+        });
+        if (!r.ok) { alert('Save failed: ' + (r.detail || '')); return; }
+        showToast('Hurricane Electric login saved', 'success');
+        document.getElementById('he-login-modal')?.remove();
+    } catch (e) { alert('Save failed: ' + e.message); }
 }
 
 async function leRenewCert(domain) {
