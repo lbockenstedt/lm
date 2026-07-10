@@ -1577,6 +1577,9 @@ async function loadTenantConfig() {
         listEl.innerHTML = tenants.map(t => {
             const accessible = canAccessTenant(t.id);
             const isActive = t.id === currentTenant;
+            // A Global Admin may edit ANY tenant; a tenant Admin may edit only
+            // its accessible (own) tenants. Plain users get no edit affordance.
+            const canEdit = isAdmin() || (isTenantAdmin() && accessible);
             const btnCls = isActive
                 ? 'bg-green-500 text-white cursor-default'
                 : accessible
@@ -1586,8 +1589,8 @@ async function loadTenantConfig() {
             const btnAction = accessible && !isActive ? `onclick="viewAsTenant('${t.id}')"` : '';
             return `
             <div class="flex items-center justify-between p-2 rounded-md transition-all ${isActive ? 'bg-green-50 border-l-4 border-green-500' : 'bg-white border border-slate-200'}">
-                <div class="flex items-center gap-2 flex-1 ${isAdmin() ? 'cursor-pointer group' : ''}" ${isAdmin() ? `onclick="editTenant('${t.id}')"` : ''}>
-                    <span class="text-xs font-medium text-slate-700 ${isAdmin() ? 'group-hover:text-green-600' : ''}">${t.name}</span>
+                <div class="flex items-center gap-2 flex-1 ${canEdit ? 'cursor-pointer group' : ''}" ${canEdit ? `onclick="editTenant('${t.id}')"` : ''}>
+                    <span class="text-xs font-medium text-slate-700 ${canEdit ? 'group-hover:text-green-600' : ''}">${t.name}</span>
                     ${t.description ? `<span class="text-[10px] text-slate-400 hidden sm:inline">${t.description}</span>` : ''}
                 </div>
                 <div class="flex items-center gap-2">
@@ -1609,8 +1612,17 @@ async function editTenant(tenantId) {
     const emptyState = document.getElementById('tenant-empty-state');
     if (!editor) return;
 
+    // A tenant Admin edits via the tenant-scoped route (GET /api/tenant/{id});
+    // a Global Admin uses the /setup/ route (full record). The tenant-scoped
+    // route enforces ownership server-side (the {id} must be in user.tenants).
+    const tadm = isTenantAdmin();
+    const url = tadm ? `/api/tenant/${encodeURIComponent(tenantId)}`
+                     : `/setup/tenants/${encodeURIComponent(tenantId)}`;
+    const fetcher = tadm ? (u, o) => fetch(u, { credentials: 'same-origin', ...(o||{}) })
+                         : setupFetch;
+
     try {
-        const response = await setupFetch(`/setup/tenants/${tenantId}`);
+        const response = await fetcher(url);
         if (!response.ok) throw new Error('Failed to fetch tenant details');
         const data = await response.json();
         const config = data.config || {};
@@ -1624,10 +1636,19 @@ async function editTenant(tenantId) {
         document.getElementById('quota-cppm').value = quotas.cppm || 0;
         document.getElementById('quota-opn').value = quotas.opn || 0;
 
-        // Tenant scoping fields
+        // Tenant scoping fields (read-only for a tenant Admin — re-scoping to
+        // another tenant's NetBox/Proxmox/LDAP would be a cross-tenant escalation).
         document.getElementById('tenant-netbox-slug').value  = config.netbox_tenant_slug || '';
         document.getElementById('tenant-proxmox-tag').value  = config.proxmox_tag        || '';
         document.getElementById('tenant-ldap-base-dn').value = config.ldap_base_dn       || '';
+        const lockScoping = tadm;
+        ['tenant-netbox-slug', 'tenant-proxmox-tag', 'tenant-ldap-base-dn', 'tenant-active'].forEach(id => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.disabled = lockScoping;
+            el.classList.toggle('bg-slate-100', lockScoping);
+            el.classList.toggle('cursor-not-allowed', lockScoping);
+        });
 
         editor.classList.remove('hidden');
         emptyState.classList.add('hidden');
@@ -1657,16 +1678,27 @@ async function saveTenantConfig() {
     };
 
     try {
-        const response = await setupFetch('/setup/tenant', {
+        // A tenant Admin saves via the tenant-scoped route (POST
+        // /api/tenant/{id}); the server drops scoping/active fields it cannot
+        // set, so editing is confined to name/description/quotas for its OWN
+        // tenant. A Global Admin saves via /setup/tenant (full record).
+        const tadm = isTenantAdmin();
+        const url = tadm ? `/api/tenant/${encodeURIComponent(tenantId)}`
+                         : '/setup/tenant';
+        const fetcher = tadm ? (u, o) => fetch(u, { credentials: 'same-origin', ...(o||{}) })
+                             : setupFetch;
+        const body = tadm ? { config } : { tenant_id: tenantId, config };
+        const response = await fetcher(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tenant_id: tenantId, config: config })
+            body: JSON.stringify(body)
         });
         if (response.ok) {
             alert('Tenant configuration saved successfully!');
             await loadTenantConfig();
         } else {
-            alert('Failed to save tenant configuration.');
+            const d = await response.json().catch(() => ({}));
+            alert('Failed to save tenant configuration: ' + (d.detail || response.statusText));
         }
     } catch (err) {
         alert('Error saving tenant: ' + err.message);
@@ -3491,9 +3523,9 @@ function _renderSetupTenantTile(content) {
                 <div class="flex justify-between items-center">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenants ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <div class="flex gap-2">
-                        <button onclick="syncTenantsFromNetBox()" class="${btnSecCls} text-xs">↓ Sync from NetBox</button>
+                        ${isAdmin() ? `<button onclick="syncTenantsFromNetBox()" class="${btnSecCls} text-xs">↓ Sync from NetBox</button>
                         <input type="text" id="new-tenant-id" placeholder="new-tenant-id" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-40">
-                        <button onclick="addTenant()" class="${btnCls}">+ Tenant</button>
+                        <button onclick="addTenant()" class="${btnCls}">+ Tenant</button>` : `<span class="text-[10px] text-slate-400 italic">edit only — create/sync/re-scope are Global-Admin</span>`}
                     </div>
                 </div>
                 <div id="tenant-list" class="space-y-2"></div>

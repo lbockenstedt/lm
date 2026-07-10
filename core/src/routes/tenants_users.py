@@ -759,6 +759,83 @@ def register(app, hub, ctx):
             logger.exception("ta_remove_tenant_user failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ── Phase 4: tenant CRUD on own tenants (tenant-scoped tenant edit) ──────
+    # `/setup/tenants*` (create / delete / sync / cross-tenant) stays
+    # Global-Admin-only via the access-control middleware's `/setup/` gate.
+    # These `/api/tenant/{tenant}` routes give a tenant Admin a scoped EDIT
+    # path for a tenant that is IN its `user.tenants` list. Creating a
+    # brand-new tenant, deleting a tenant, or editing a tenant the admin does
+    # NOT own stays Global-Admin-only — escalation prevention (a new tenant is
+    # a system-wide act; a non-owned tenant is another tenant's data).
+    #
+    # Editable allowlist for a tenant_admin (own tenant): `name`, `description`,
+    # `quotas` — the cosmetic + self-limit fields. The scoping fields
+    # (`netbox_tenant_slug`, `netbox_id`, `proxmox_tag`, `ldap_base_dn`) and
+    # `active` are deliberately NOT editable here: they re-scope the tenant to a
+    # different external-system tenant (NetBox tenant / Proxmox tag / LDAP
+    # branch), so a tenant_admin changing them could pull ANOTHER tenant's data
+    # into its own view — a cross-tenant escalation. Re-scoping + setting the
+    # system-wide active tenant stay Global-Admin-only (`/setup/tenant`).
+    # Onboarding-PSK management has its own tenant-scoped routes (Phase 1).
+    _TA_TENANT_EDITABLE = ("name", "description", "quotas")
+
+    @app.get("/api/tenant/{tenant}")
+    async def ta_get_tenant(tenant: str, request: Request):
+        """Tenant-scoped tenant details for the editor. A Global admin gets the
+        full record (mirrors `/setup/tenants/{tenant_id}`); a tenant_admin gets
+        only its editable fields plus the current scoping values read-only for
+        display. The path {tenant} must be in the caller's `user.tenants`
+        (enforced by `_ta_gate` → `_check_tenant_access`)."""
+        sess = _ta_gate(request, tenant)
+        hub = app.state.hub
+        tenant_rec = hub.state.get_tenant(tenant)
+        if tenant_rec is None:
+            raise HTTPException(status_code=404, detail=f"Tenant {tenant} not found")
+        if ctx._is_admin(sess):
+            return {"tenant_id": tenant, "config": dict(tenant_rec)}
+        # tenant_admin: editable fields + read-only scoping for display.
+        view_keys = _TA_TENANT_EDITABLE + ("netbox_tenant_slug", "proxmox_tag", "ldap_base_dn")
+        return {"tenant_id": tenant,
+                "config": {k: tenant_rec.get(k) for k in view_keys if k in tenant_rec}}
+
+    @app.post("/api/tenant/{tenant}")
+    async def ta_update_tenant(tenant: str, request: Request):
+        """Tenant-scoped tenant edit. A tenant_admin may merge ONLY the editable
+        allowlist (`name`/`description`/`quotas`) into its OWN tenant's record;
+        scoping fields + `active` are dropped (cross-tenant re-scope protection).
+        A Global admin may set any field (same semantics as `/setup/tenant`),
+        so this route is also a valid edit path for Global. The path {tenant}
+        must be in the caller's `user.tenants` (enforced by `_ta_gate`)."""
+        sess = _ta_gate(request, tenant)
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            config = data.get("config", {}) or {}
+            # This is the EDIT path: the tenant must already exist. Creating a
+            # tenant stays Global-Admin-only via /setup/tenants; do NOT silently
+            # create here (update_tenant would otherwise upsert). 404 either way.
+            if hub.state.get_tenant(tenant) is None:
+                raise HTTPException(status_code=404,
+                                    detail=f"Tenant {tenant} not found")
+            if ctx._is_admin(sess):
+                merged = dict(config)  # Global — full merge (mirrors /setup/tenant)
+            else:
+                # tenant_admin — allowlist only; scoping/active silently dropped.
+                merged = {k: v for k, v in config.items() if k in _TA_TENANT_EDITABLE}
+            if not merged:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No editable fields supplied (a tenant admin may only set name, description, quotas)")
+            hub.state.update_tenant(tenant, merged)
+            hub.state.save_state()
+            return {"status": "ok", "message": f"Tenant {tenant} updated.",
+                    "updated": merged}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("ta_update_tenant failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     # ── Permission groups (RBAC) ────────────────────────────────────────────
     # All /setup/* is admin-only via the access-control middleware, so these
     # need no extra gate. A group bundles the same right-keys a user carries;
