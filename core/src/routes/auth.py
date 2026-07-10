@@ -7,6 +7,7 @@ from api import (
     get_netbox_spoke, get_tenant_scoping, logger, os, secrets, time,
 )
 from access import resolve_effective_permissions
+from security.credential_store import resolve_password_hash
 
 
 def register(app, hub, ctx):
@@ -62,10 +63,14 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="username and password required")
             users = hub.state.system_state.get("users", {})
             user = users.get(user_id)
+            # The hash to verify is normally the stored password_hash; a record
+            # with a password_hash_ref instead resolves its hash from the
+            # credential store (break-glass admin hash in Key Vault).
+            pw_hash = resolve_password_hash(user) if user else None
             # Same 401 message for "no such user" and "wrong password" to avoid
             # username enumeration; both increment the lockout/spray counters.
-            if not user or not user.get("password_hash") or \
-               not _verify_password(password, user["password_hash"]):
+            if not user or not pw_hash or \
+               not _verify_password(password, pw_hash):
                 _login_fail(hub, lkey, ip)
                 raise HTTPException(status_code=401, detail="Invalid credentials")
             _login_success(hub, lkey, ip)
@@ -143,9 +148,10 @@ def register(app, hub, ctx):
                                     headers={"Retry-After": str(retry_after)})
             users = hub.state.system_state.get("users", {})
             user = users.get(user_id)
+            pw_hash = resolve_password_hash(user) if user else None
             if (not user_id or not password or not user
-                    or not user.get("password_hash")
-                    or not _verify_password(password, user["password_hash"])):
+                    or not pw_hash
+                    or not _verify_password(password, pw_hash)):
                 _login_fail(hub, lkey, ip)
                 raise HTTPException(status_code=401, detail="Invalid credentials")
             _login_success(hub, lkey, ip)

@@ -20,9 +20,9 @@ Design notes
   MFA / nonce / claim extraction logic is unit-testable without a network.
 
 This module is stateless except for the discovery-cache; it holds no secrets.
-The client private key is read from a path (``key_path``) — never stored in
-``global_config``. (Phase 3 will route ``key_path`` resolution through the
-credential store so the key can live in Azure Key Vault.)
+The client private key is read from ``key_path`` — never stored in
+``global_config`` — and resolved through ``security.credential_store`` so it
+may be a filesystem path OR a Key Vault reference (``kv:<secret-name>``).
 """
 from __future__ import annotations
 
@@ -229,9 +229,16 @@ def authorize_url(cfg: OidcConfig, discovery_doc: dict,
 def _load_private_key(key_path: str):
     """Load the PEM-encoded RSA/EC private key used to sign the client
     assertion. Accepts an unencrypted PEM (the key file's perms / Key Vault
-    ACL are the secret boundary, per the cert-auth model)."""
-    with open(key_path, "rb") as f:
-        pem = f.read()
+    ACL are the secret boundary, per the cert-auth model).
+
+    ``key_path`` may be a filesystem path (historical behaviour) OR a
+    ``kv:<secret-name>`` reference / bare secret name resolved through the
+    credential store (so the private key can live in Azure Key Vault). See
+    ``security.credential_store.resolve_private_key_material``."""
+    from .credential_store import resolve_private_key_material
+    pem = resolve_private_key_material(key_path)
+    if pem is None:
+        raise OidcError("could not load OIDC client private key from %r" % key_path)
     return serialization.load_pem_private_key(pem, password=None)
 
 
