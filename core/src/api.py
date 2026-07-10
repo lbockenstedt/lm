@@ -1089,7 +1089,7 @@ def create_app(hub):
         # /vm/ and /cppm/ were previously OUTSIDE this list → reachable with no
         # session (e.g. GET /vm/{id}/details leaked a VM's firewall/DHCP/NAC data
         # cross-tenant to anyone). They now require an authenticated session.
-        _GATED_PREFIXES = ("/api/", "/setup/", "/admin/", "/auth/", "/sim/api/", "/vm/", "/cppm/")
+        _GATED_PREFIXES = ("/api/", "/setup/", "/admin/", "/auth/", "/sim/api/", "/vm/", "/cppm/", "/tenant/")
         if not any(path.startswith(p) for p in _GATED_PREFIXES) or path == "/status":
             return await call_next(request)
 
@@ -1121,6 +1121,15 @@ def create_app(hub):
         if path.startswith("/setup/") or path.startswith("/admin/"):
             if not _is_admin(sess):
                 return JSONResponse(status_code=403, content={"detail": "Admin access required"})
+
+        # /tenant/* is the tenant-admin device-management surface — a
+        # session-scoped mirror of the admin-only /setup/* device CRUD. Reachable
+        # by tenant-admins (and Global Admins); every other authenticated user is
+        # rejected here. Per-record tenant ownership is enforced inside the
+        # handlers (routes/tenant_devices.py), so there is no cross-tenant IDOR.
+        if path.startswith("/tenant/"):
+            if not (_is_admin(sess) or access.is_tenant_admin(sess)):
+                return JSONResponse(status_code=403, content={"detail": "Tenant-admin access required"})
 
         # Privileged /api/* management namespaces are admin-only. Their per-route
         # siblings were already admin-gated; these were missed, so any authenticated
@@ -1469,11 +1478,12 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices,
     )
     setup.register(app, hub, ctx)
     firewall.register(app, hub, ctx)
     nw.register(app, hub, ctx)
+    tenant_devices.register(app, hub, ctx)
     cppm.register(app, hub, ctx)
     pxmx.register(app, hub, ctx)
     ws_transport.register(app, hub, ctx)
@@ -1491,6 +1501,7 @@ def create_app(hub):
     admin_cache.register(app, hub, ctx)
     help_assistant.register(app, hub, ctx)
     exec_routes.register(app, hub, ctx)
+    self_backup.register(app, hub, ctx)
 
     # ── H1: scrub internal-exception detail from 5xx for non-Global callers ──
     # Routes raise ``HTTPException(500, detail=str(e))`` in their

@@ -3906,6 +3906,253 @@ function _renderSetupNacTile(content) {
 // Backing routes: /setup/endpoint-sync/{sources,status,run} and
 // /setup/vm-sync/{sources,status,run}, plus the shared /setup/config
 // schedule read/write (core/src/api.py get_endpoint_sync_* / vm_sync_*).
+// ── Setup → Self-Backup tile ──────────────────────────────────────────
+// Scheduled hub-state backup: local rotated archive + optional SSH copy.
+// Global-Admin-only — the /setup/backup/* routes are admin-gated server-side
+// (and the /setup/ prefix is admin-gated by the middleware). Config persists
+// through the shared POST /setup/config ({config:{self_backup: merged}}).
+// IMPORTANT: /setup/config does a top-level gc.update({self_backup: {...}}),
+// which REPLACES the whole subtree — so Save sends the full merged dict
+// (form fields over the cached config) to preserve the server-managed
+// last_backup_at / last_copy_at / last_error fields. Backing routes:
+// /setup/backup/{run,test-copy,status} (core/src/routes/self_backup.py).
+function _renderSetupSelfBackupTile(content) {
+    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Scheduled Self-Backup ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <button onclick="runBackupNow()" id="sb-run-btn" class="${btnCls}">Back up now</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Periodically archives the hub state + key stores (Fernet-encrypted at rest already; the archive is an additional rotated copy) to <code>&lt;data_dir&gt;/self-backup/</code>. Archives are optionally Fernet-encrypted (<code>.tgz.enc</code>) and pruned to <em>keep_count</em>. The hub <code>.env</code> (secrets) is excluded unless explicitly included below. <strong>Global Admin only.</strong></p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-enabled" class="w-4 h-4 text-green-600 rounded">Enable scheduled backup</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Interval (hours)</label>
+                        <input type="number" id="sb-interval" min="1" value="24" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Keep (count)</label>
+                        <input type="number" id="sb-keep" min="1" value="7" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-encrypt" class="w-4 h-4 text-green-600 rounded" checked>Encrypt archive (.tgz.enc)</label>
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-include-env" class="w-4 h-4 text-green-600 rounded">Include .env (secrets)</label>
+                </div>
+                <div class="mt-4 flex items-center gap-3">
+                    <button onclick="saveSelfBackupConfig()" id="sb-save-btn" class="${btnCls}">Save Schedule</button>
+                    <span class="text-xs text-slate-400">Archives are encrypted with the hub Fernet key — restore requires the same <code>LM_FERNET_KEY</code>.</span>
+                </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">SSH Copy to Remote</h3>
+                    <button onclick="testBackupCopy()" id="sb-test-btn" class="${btnSecCls}">Test copy</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Optionally <code>scp</code> each backup to a remote host using a private key on the hub. The hub SSH client must already have the key (path only is stored here; key material is never read by the WebUI). <code>after_each_backup</code> pushes right after every backup; <code>own_schedule</code> pushes on its own interval below.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-copy-enabled" class="w-4 h-4 text-green-600 rounded">Enable SSH copy</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Copy mode</label>
+                        <select id="sb-copy-mode" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="after_each_backup">After each backup</option>
+                            <option value="own_schedule">Own schedule</option>
+                        </select>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Copy interval (hours)</label>
+                        <input type="number" id="sb-copy-interval" min="1" value="24" class="w-28 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-strict-hostkey" class="w-4 h-4 text-green-600 rounded">StrictHostKeyChecking</label>
+                </div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4">
+                    <div class="space-y-1">
+                        <label class="${labelCls}">SSH host</label>
+                        <input type="text" id="sb-ssh-host" placeholder="backup.example.com" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Port</label>
+                        <input type="number" id="sb-ssh-port" min="1" max="65535" value="22" class="w-28 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">User</label>
+                        <input type="text" id="sb-ssh-user" placeholder="backup" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Remote path</label>
+                        <input type="text" id="sb-ssh-path" placeholder="/backups/lm-hub/" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1 sm:col-span-2">
+                        <label class="${labelCls}">Private key path (on hub)</label>
+                        <input type="text" id="sb-ssh-keyfile" placeholder="/root/.ssh/lm_backup_id_ed25519" class="${inputCls}">
+                    </div>
+                </div>
+                <div class="mt-4 flex items-center gap-3">
+                    <button onclick="saveSelfBackupConfig()" id="sb-copy-save-btn" class="${btnCls}">Save Copy Config</button>
+                </div>
+            </div>
+            <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Status &amp; Archives</h3>
+                <div id="sb-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                <div class="mt-4">
+                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Local archives</div>
+                    <div id="sb-archives" class="space-y-1"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
+            </div>
+        `;
+    loadSelfBackupStatus();
+}
+
+function _sbFmtBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KiB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MiB';
+    return (n / 1073741824).toFixed(2) + ' GiB';
+}
+
+function _sbFmtTs(ts) {
+    const v = Number(ts) || 0;
+    if (!v) return '<span class="text-slate-400">never</span>';
+    try { return new Date(v * 1000).toLocaleString(); }
+    catch (e) { return '<span class="text-slate-400">—</span>'; }
+}
+
+// Populate the config form + status panel from GET /setup/backup/status.
+// Caches the full config subtree so Save can merge form fields over it
+// (preserving the server-managed last_backup_at / last_copy_at / last_error).
+async function loadSelfBackupStatus() {
+    let data;
+    try {
+        const r = await setupFetch('/setup/backup/status');
+        if (!r.ok) throw new Error(`${r.status}`);
+        data = await r.json();
+    } catch (e) {
+        const st = document.getElementById('sb-status');
+        if (st) st.innerHTML = `<p class="text-xs text-red-600">Failed to load status: ${escapeHtml(e.message)}</p>`;
+        return;
+    }
+    window.__lmSelfBackupCfg = data || {};
+    const setv = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; };
+    const setc = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+    setc('sb-enabled', data.enabled);
+    setv('sb-interval', data.backup_interval_hours ?? 24);
+    setv('sb-keep', data.keep_count ?? 7);
+    setc('sb-encrypt', data.encrypt_archive !== false);
+    setc('sb-include-env', !!data.include_env);
+    setc('sb-copy-enabled', !!data.copy_enabled);
+    setv('sb-copy-mode', data.copy_mode || 'after_each_backup');
+    setv('sb-copy-interval', data.copy_interval_hours ?? 24);
+    setc('sb-strict-hostkey', !!data.ssh_strict_hostkey);
+    setv('sb-ssh-host', data.ssh_host || '');
+    setv('sb-ssh-port', data.ssh_port || 22);
+    setv('sb-ssh-user', data.ssh_user || '');
+    setv('sb-ssh-path', data.ssh_path || '');
+    setv('sb-ssh-keyfile', data.ssh_keyfile || '');
+
+    const errLine = data.last_error
+        ? `<div class="text-xs text-red-600">⚠ last error: ${escapeHtml(String(data.last_error))}</div>`
+        : '';
+    const latest = data.latest
+        ? `Latest: <code class="text-slate-700">${escapeHtml(data.latest)}</code>`
+        : '<span class="text-slate-400">no archive yet</span>';
+    const st = document.getElementById('sb-status');
+    if (st) st.innerHTML = `
+        <div class="text-xs text-slate-600">Scheduled backup: <strong>${data.enabled ? 'enabled' : 'disabled'}</strong> · interval ${data.backup_interval_hours ?? 24}h · keep ${data.keep_count ?? 7}</div>
+        <div class="text-xs text-slate-600">Last backup: ${_sbFmtTs(data.last_backup_at)}</div>
+        <div class="text-xs text-slate-600">Last SSH copy: ${_sbFmtTs(data.last_copy_at)} ${data.copy_enabled ? '' : '<span class="text-slate-400">(copy disabled)</span>'}</div>
+        <div class="text-xs text-slate-600">${latest} · ${data.backup_count ?? 0} archive(s) · ${_sbFmtBytes(data.total_bytes)}</div>
+        ${errLine}
+    `;
+
+    const arc = document.getElementById('sb-archives');
+    if (arc) {
+        const files = Array.isArray(data.backups) ? data.backups : [];
+        if (!files.length) {
+            arc.innerHTML = '<p class="text-xs text-slate-400 italic">No archives yet — click “Back up now” to take one.</p>';
+        } else {
+            arc.innerHTML = files.map(f => {
+                const when = (() => { try { return new Date((f.mtime || 0) * 1000).toLocaleString(); } catch (e) { return '—'; } })();
+                return `<div class="flex items-center justify-between text-xs text-slate-600 py-1 border-b border-slate-100 last:border-0">
+                    <code class="break-all">${escapeHtml(f.name)}</code>
+                    <span class="text-slate-400 ml-3 whitespace-nowrap">${_sbFmtBytes(f.size)} · ${when}</span>
+                </div>`;
+            }).join('');
+        }
+    }
+}
+
+// Read the form fields, merge over the cached full config, and POST. Sending
+// the whole subtree (not just changed fields) because /setup/config replaces
+// the self_backup key at the top level — this preserves last_*_at / last_error.
+async function saveSelfBackupConfig() {
+    const btn = document.getElementById('sb-save-btn') || document.getElementById('sb-copy-save-btn');
+    const cur = window.__lmSelfBackupCfg || {};
+    const merged = Object.assign({}, cur, {
+        enabled: document.getElementById('sb-enabled')?.checked ? true : false,
+        backup_interval_hours: Math.max(1, parseInt(document.getElementById('sb-interval')?.value, 10) || 24),
+        keep_count: Math.max(1, parseInt(document.getElementById('sb-keep')?.value, 10) || 7),
+        include_env: document.getElementById('sb-include-env')?.checked ? true : false,
+        encrypt_archive: document.getElementById('sb-encrypt')?.checked ? true : false,
+        copy_enabled: document.getElementById('sb-copy-enabled')?.checked ? true : false,
+        copy_mode: document.getElementById('sb-copy-mode')?.value || 'after_each_backup',
+        copy_interval_hours: Math.max(1, parseInt(document.getElementById('sb-copy-interval')?.value, 10) || 24),
+        ssh_host: (document.getElementById('sb-ssh-host')?.value || '').trim(),
+        ssh_port: Math.min(65535, Math.max(1, parseInt(document.getElementById('sb-ssh-port')?.value, 10) || 22)),
+        ssh_user: (document.getElementById('sb-ssh-user')?.value || '').trim(),
+        ssh_path: (document.getElementById('sb-ssh-path')?.value || '').trim(),
+        ssh_keyfile: (document.getElementById('sb-ssh-keyfile')?.value || '').trim(),
+        ssh_strict_hostkey: document.getElementById('sb-strict-hostkey')?.checked ? true : false,
+    });
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const res = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { self_backup: merged } }),
+        });
+        if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || res.status); }
+        window.__lmSelfBackupCfg = merged;
+        if (typeof showToast === 'function') showToast('Self-backup config saved (applies live).', 'success');
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Save failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Schedule'; }
+    }
+}
+
+async function runBackupNow() {
+    const btn = document.getElementById('sb-run-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Backing up…'; }
+    try {
+        const r = await setupFetch('/setup/backup/run', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.status === 'error') throw new Error(d.error || d.detail || r.status);
+        const enc = d.encrypted ? ' (encrypted)' : '';
+        const copy = d.copy ? ` · copy: ${d.copy.status || 'ok'}` : '';
+        if (typeof showToast === 'function') showToast(`Backup ok: ${d.name} · ${_sbFmtBytes(d.size)}${enc}${copy}`, 'success');
+        loadSelfBackupStatus();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Backup failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Back up now'; }
+    }
+}
+
+async function testBackupCopy() {
+    const btn = document.getElementById('sb-test-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
+    try {
+        const r = await setupFetch('/setup/backup/test-copy', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.status === 'error') throw new Error(d.error || d.detail || r.status);
+        if (typeof showToast === 'function') showToast(`Copy ok: ${d.file || ''}`, 'success');
+        loadSelfBackupStatus();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Copy test failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Test copy'; }
+    }
+}
+
 function _renderSetupSyncTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
