@@ -1,12 +1,28 @@
 """DNS/LE/DHCP spoke-relay routes and shared spoke helpers."""
 from api import (
-    HTTPException, Request, _spoke_payload_or_raise, logger,
+    HTTPException, Request, _spoke_payload_or_raise, access, logger,
 )
 
 
 def register(app, hub, ctx):
     """Register net_services routes on the Hub app."""
     _filter_session = ctx._filter_session
+    _session_user = ctx._session_user
+    _is_admin = ctx._is_admin
+
+    async def _constrain_shared_write(request, record, fields, kind):
+        """Constrained-write gate for the SHARED DNS/DHCP servers. Global Admin →
+        unrestricted. Otherwise (a tenant-admin — the middleware already required
+        can_edit_shared) the record's IP must fall within the caller's tenant
+        subnets (access.record_in_tenant_scope); else 403. So a tenant-admin may
+        only add/edit/delete records addressed within their own prefixes."""
+        sess = _session_user(request)
+        if _is_admin(sess):
+            return
+        if not await access.record_in_tenant_scope(hub, sess, record, fields):
+            raise HTTPException(
+                status_code=403,
+                detail=f"On the shared DNS/DHCP server you may only modify a {kind} whose address is in your tenant's subnets")
 
     def _get_dns_spoke(hub):
         spoke_id = hub.get_spoke_by_type("dns")
@@ -64,15 +80,21 @@ def register(app, hub, ctx):
 
     @app.post("/api/dns/record")
     async def dns_add_record(request: Request):
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_ADD", await request.json(), log_name="dns_add_record")
+        body = await request.json()
+        await _constrain_shared_write(request, body, ["ip", "value"], "DNS record")
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_ADD", body, log_name="dns_add_record")
 
     @app.delete("/api/dns/record")
     async def dns_delete_record(request: Request):
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_DELETE", await request.json(), log_name="dns_delete_record")
+        body = await request.json()
+        await _constrain_shared_write(request, body, ["ip", "value"], "DNS record")
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_DELETE", body, log_name="dns_delete_record")
 
     @app.put("/api/dns/record")
     async def dns_update_record(request: Request):
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_UPDATE", await request.json(), log_name="dns_update_record")
+        body = await request.json()
+        await _constrain_shared_write(request, body, ["ip", "value"], "DNS record")
+        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_UPDATE", body, log_name="dns_update_record")
 
     @app.get("/api/dns/status")
     async def dns_status():
@@ -287,7 +309,9 @@ def register(app, hub, ctx):
 
     @app.post("/api/dhcp/reservation")
     async def dhcp_add_reservation(request: Request):
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_ADD_RES", await request.json(), log_name="dhcp_add_reservation")
+        body = await request.json()
+        await _constrain_shared_write(request, body, ["ip", "address"], "DHCP reservation")
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_ADD_RES", body, log_name="dhcp_add_reservation")
 
     @app.get("/api/dhcp/reservations")
     async def dhcp_list_reservations(request: Request):
@@ -303,11 +327,15 @@ def register(app, hub, ctx):
 
     @app.put("/api/dhcp/reservation")
     async def dhcp_update_reservation(request: Request):
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_UPDATE_RES", await request.json(), log_name="dhcp_update_reservation")
+        body = await request.json()
+        await _constrain_shared_write(request, body, ["ip", "address"], "DHCP reservation")
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_UPDATE_RES", body, log_name="dhcp_update_reservation")
 
     @app.delete("/api/dhcp/reservation")
     async def dhcp_delete_reservation(request: Request):
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_DEL_RES", await request.json(), log_name="dhcp_delete_reservation")
+        body = await request.json()
+        await _constrain_shared_write(request, body, ["ip", "address"], "DHCP reservation")
+        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_DEL_RES", body, log_name="dhcp_delete_reservation")
 
     @app.get("/api/dhcp/status")
     async def dhcp_status():

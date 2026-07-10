@@ -1281,15 +1281,27 @@ def create_app(hub):
         # body_tenant), so the middleware only adds the write-user floor here: a
         # view user (ipam right, no edit) can read IPAM but not mutate it.
         _WRITE_TIER_PREFIXES = ("/api/firewall/", "/api/netbox/")
+        # SHARED single-server CONSTRAINED writes: a tenant-admin may add/edit/
+        # delete a DNS record / DHCP reservation, but the handler
+        # (routes/net_services.py _constrain_shared_write) restricts it to a
+        # record whose IP is in the caller's tenant subnets. Checked BEFORE the
+        # admin-only prefix so record/reservation aren't swept up by /api/dns/ .
+        _SHARED_CONSTRAINED_WRITE_PREFIXES = ("/api/dns/record", "/api/dhcp/reservation")
         # ADMIN-ONLY writes: these back a SINGLE shared server (one Unbound / one
         # Kea / one certbot) with no per-object constrained-write model yet, so the
         # `?tenant=` gate can prove the caller owns the query param but NOT that the
         # record/reservation/cert belongs to that tenant. Locked to Global Admin
         # until per-object subnet ownership is enforced on the bodies (dns/dhcp/le
         # phases). GET reads stay right-gated (method-gated here).
-        _ADMIN_INFRA_WRITE_PREFIXES = ("/api/dns/", "/api/dhcp/", "/api/le/")
+        # le + dns/dhcp SYNC (fleet-wide rebuild) have no per-object tenant model → admin-only.
+        _ADMIN_INFRA_WRITE_PREFIXES = ("/api/le/", "/api/dns/", "/api/dhcp/")
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
-            if any(path.startswith(p) for p in _ADMIN_INFRA_WRITE_PREFIXES):
+            if any(path.startswith(p) for p in _SHARED_CONSTRAINED_WRITE_PREFIXES):
+                if not _can_edit_shared(sess):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Tenant-admin (or admin) required for shared DNS/DHCP writes"})
+            elif any(path.startswith(p) for p in _ADMIN_INFRA_WRITE_PREFIXES):
                 if not _is_admin(sess):
                     return JSONResponse(
                         status_code=403,

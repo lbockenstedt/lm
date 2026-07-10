@@ -1139,6 +1139,24 @@ async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload
     return _list_len(out) > 0
 
 
+async def record_in_tenant_scope(hub, sess, record, fields) -> bool:
+    """CONSTRAINED-WRITE gate for a SHARED single-server module (DNS Unbound /
+    DHCP Kea). True iff ``record``'s IP field(s) (``fields``, e.g. ["ip","value"]
+    for DNS, ["ip"] for DHCP) fall within the caller's tenant prefixes — the SAME
+    subnet attribution used to filter reads (``filter_items_by_prefixes``),
+    ignoring the display toggle so shared writes are always constrained. Empty
+    prefixes or a record with no concrete in-tenant IP → False (deny, safe): a
+    tenant-admin may only add/edit/delete records whose address is in their own
+    subnets; anything else is a Global-Admin action."""
+    if not isinstance(record, dict):
+        return False
+    prefixes = await resolve_prefixes(hub, sess)
+    if not prefixes:
+        return False
+    out = filter_items_by_prefixes([record], prefixes, fields, drop_no_ip=True)
+    return _list_len(out) > 0
+
+
 async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str,
                     explicit_tenant=None):
     """Network Devices subnet filter: field-based on the concrete-IP columns of
