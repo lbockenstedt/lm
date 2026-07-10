@@ -1575,6 +1575,7 @@ async function loadTenantConfig() {
         const response = await setupFetch('/setup/tenants');
         if (!response.ok) throw new Error('Failed to fetch tenants');
         const data = await response.json();
+        window._sharedTenantId = data.shared_tenant_id || null;  // for the shared badge / gate
         const tenants = data.tenants || [];
 
         listEl.innerHTML = tenants.map(t => {
@@ -1907,8 +1908,12 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
     // when unassigned/global). Additive — surfaces the binding already returned
     // by /setup/pending_spokes so an admin can see at a glance which tenant owns
     // a spoke without opening Setup → Spokes & Agents.
+    // A spoke whose tenant is the SHARED tenant is visible to every tenant
+    // (objects still subnet-scoped) — badge it amber so it's distinct from a
+    // private tenant binding (emerald).
+    const _isShared = tenant && window._sharedTenantId && tenant === window._sharedTenantId;
     const tenantChip = tenant
-        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-emerald-50 text-emerald-700" title="Tenant: ${escapeHtml(String(tenant))}">${escapeHtml(String(tenant))}</span>`
+        ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${_isShared ? 'bg-amber-100 text-amber-800' : 'bg-emerald-50 text-emerald-700'}" title="${_isShared ? 'Shared tenant — visible to all tenants: ' : 'Tenant: '}${escapeHtml(String(tenant))}">${_isShared ? 'shared · ' : ''}${escapeHtml(String(tenant))}</span>`
         : '';
     // Live per-spoke/agent metrics (from /status metrics, stashed by
     // _updateMetrics) shown on the SAME line as tenant + online/offline:
@@ -3578,7 +3583,9 @@ async function _populateSaTenantFilter() {
     try {
         const res = await setupFetch('/setup/tenants');
         if (!res.ok) return;
-        const tenants = (await res.json()).tenants || [];
+        const _tdata = await res.json();
+        window._sharedTenantId = _tdata.shared_tenant_id || null;  // for the shared badge / gate
+        const tenants = _tdata.tenants || [];
         sel.innerHTML =
             tenants.map(t => `<option value="${esc(t.id)}">${esc(t.name || t.id)}</option>`).join('') +
             '<option value="__unassigned__">Unassigned</option>' +
