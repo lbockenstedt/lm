@@ -566,6 +566,64 @@ def has_console_write_access(sess) -> bool:
     return has_module_access(sess, "console_write")
 
 
+# ── Shared tenant ────────────────────────────────────────────────────────────
+# Exactly ONE tenant may carry ``shared: True`` in its config. Its spokes/
+# resources are visible to EVERY tenant (like an unassigned spoke used to be),
+# but it stays a real tenant for ownership/scoping/quotas/sync — so shared infra
+# (a shared lab firewall/DNS/…) has a real tenant home without becoming private.
+# The id is cached module-level because ``check_tenant_access`` /
+# ``spoke_visible_to_session`` have no ``hub`` handle; ``refresh_shared_tenant``
+# is called at startup and after every tenant write.
+#
+# INVARIANT change: an UNASSIGNED spoke (no tenant_id) is NO LONGER global — it's
+# admin-only (a holding state until an admin assigns it). Shared infra must live
+# in the shared tenant now, not rely on "unassigned = everyone".
+_SHARED_TENANT_ID = None
+
+
+def refresh_shared_tenant(hub):
+    """Recompute + cache the single shared-tenant id from tenant state. Returns
+    the id (or None). Safe to call often; called on state load + tenant writes."""
+    global _SHARED_TENANT_ID
+    try:
+        tenants = (getattr(hub.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
+        _SHARED_TENANT_ID = next(
+            (tid for tid, cfg in tenants.items()
+             if isinstance(cfg, dict) and cfg.get("shared")), None)
+    except Exception:
+        _SHARED_TENANT_ID = None
+    return _SHARED_TENANT_ID
+
+
+def shared_tenant_id():
+    """The cached shared-tenant id (or None). Refreshed by refresh_shared_tenant."""
+    return _SHARED_TENANT_ID
+
+
+def tenant_is_shared(tenant_id) -> bool:
+    return bool(tenant_id) and tenant_id == _SHARED_TENANT_ID
+
+
+def spoke_visible_to_session(sess, tenant_id) -> bool:
+    """Authoritative spoke/resource-LIST visibility by its owning tenant_id.
+
+    Admin → all. Shared tenant → every user. The user's own tenant → yes.
+    Unassigned (no tenant_id) → admin-only (was global). Mirrors the WebUI
+    ``_spokeVisibleToTenant``. NOTE: this gates whether a spoke/firewall/device
+    APPEARS in a list — object-level records are still subnet/tag-scoped by the
+    ``filter_tenant`` / ``gate_record`` paths, and WRITES still go through the
+    shared-infra-write gate (tenant-admin, ``?tenant=`` owned), unchanged.
+    """
+    if is_admin(sess):
+        return True
+    if not tenant_id:
+        return False
+    if tenant_is_shared(tenant_id):
+        return True
+    allowed = (sess or {}).get("user", {}).get("tenants") or []
+    return bool(allowed) and tenant_id in allowed
+
+
 def check_tenant_access(sess, tenant_id: str) -> bool:
     """True if the session user may access ``tenant_id``.
 

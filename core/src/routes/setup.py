@@ -2,6 +2,7 @@
 from api import (
     HTTPException, Request, _hub_msg, logger, time,
 )
+from access import tenant_is_shared as _tenant_is_shared
 
 
 def register(app, hub, ctx):
@@ -486,6 +487,10 @@ def register(app, hub, ctx):
                 "install_uuid": meta.get("install_uuid", ""),
                 "identity_change": _identity_change_for(hub, sid, meta),
                 "tenant_id": hub.state.get_spoke_tenant(sid) or "",
+                # Whether this spoke's tenant is the shared tenant (visible to
+                # all). The WebUI _spokeVisibleToTenant reads this directly so its
+                # gate is self-contained (no client-side shared-id lookup/race).
+                "tenant_shared": _tenant_is_shared(hub.state.get_spoke_tenant(sid) or ""),
             })
 
         return {"spokes": spokes_status}

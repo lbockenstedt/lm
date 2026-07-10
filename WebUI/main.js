@@ -967,17 +967,20 @@ function canAccessTenant(tenantId) {
     return allowed.length === 0 || allowed.includes(tenantId);
 }
 
-// Tenant-scoped visibility of a spoke for the CURRENT user. Additive and
-// conservative — it NEVER narrows the admin all-tenants view (admins always
-// see every spoke). For a tenant-scoped (non-admin) user it hides only spokes
-// bound to a tenant they can't access; a spoke with NO tenant binding is
-// treated as global/unassigned and stays visible to everyone (so shared
-// infrastructure spokes never disappear). `spoke` is a /setup/pending_spokes
-// row (carries `tenant_id`). Used by _rebuildMainNav + _renderDashboardLists.
+// Tenant-scoped visibility of a spoke for the CURRENT user. NEVER narrows the
+// admin all-tenants view. For a non-admin: a spoke bound to the SHARED tenant is
+// visible to everyone (objects still subnet-scoped); a spoke bound to one of the
+// user's own tenants is visible; a spoke bound to another tenant is hidden; and
+// an UNASSIGNED spoke (no tenant_id) is admin-only (a holding state — the admin
+// must assign it; it is NO LONGER treated as global). `spoke` is a
+// /setup/pending_spokes row (carries `tenant_id` + `tenant_shared`). Mirrors the
+// server-side access.spoke_visible_to_session. Used by _rebuildMainNav +
+// _renderDashboardLists.
 function _spokeVisibleToTenant(spoke) {
     if (isAdmin()) return true;                 // admin: all-tenants view unchanged
+    if (spoke && spoke.tenant_shared) return true;  // shared tenant — visible to all
     const t = spoke && spoke.tenant_id;
-    if (!t) return true;                        // unassigned / global — visible to all
+    if (!t) return false;                       // unassigned → admin-only now
     return canAccessTenant(t);
 }
 
@@ -1630,6 +1633,8 @@ async function editTenant(tenantId) {
         document.getElementById('edit-tenant-id').textContent = tenantId;
         document.getElementById('tenant-name').value = config.name || tenantId;
         document.getElementById('tenant-active').checked = (currentTenant === tenantId);
+        const _shEl = document.getElementById('tenant-shared');
+        if (_shEl) _shEl.checked = !!config.shared;
 
         const quotas = config.quotas || {};
         document.getElementById('quota-vm').value = quotas.vm || 0;
@@ -1676,6 +1681,11 @@ async function saveTenantConfig() {
         proxmox_tag:        _v('tenant-proxmox-tag'),
         ldap_base_dn:       _v('tenant-ldap-base-dn'),
     };
+    // Shared-tenant flag is a Global-Admin decision (designates the one tenant
+    // whose spokes are visible to all). Only sent by an admin; the tenant-admin
+    // save route ignores it server-side.
+    const _shEl = document.getElementById('tenant-shared');
+    if (_shEl && isAdmin()) config.shared = _shEl.checked;
 
     try {
         // A tenant Admin saves via the tenant-scoped route (POST
@@ -3739,6 +3749,7 @@ function _renderSetupTenantTile(content) {
                     <p class="text-xs text-slate-500 font-bold uppercase">Editing: <span id="edit-tenant-id" class="font-mono text-[#01A982]"></span></p>
                     <div class="space-y-1"><label class="${labelCls}">Display Name</label><input type="text" id="tenant-name" class="${inputCls}"></div>
                     <div class="flex items-center gap-2"><input type="checkbox" id="tenant-active" class="w-4 h-4 text-green-600 rounded"><label class="text-sm text-slate-600">Set as active tenant</label></div>
+                    ${isAdmin() ? `<div class="flex items-center gap-2"><input type="checkbox" id="tenant-shared" class="w-4 h-4 text-green-600 rounded"><label class="text-sm text-slate-600"><b>Shared tenant</b> — its spokes are visible to <b>all</b> tenants (objects still subnet-scoped). Only one tenant can be shared.</label></div>` : ''}
                     <div class="grid grid-cols-3 gap-4">
                         <div class="space-y-1"><label class="${labelCls}">VM Quota</label><input type="number" id="quota-vm" value="0" min="0" class="${inputCls}"></div>
                         <div class="space-y-1"><label class="${labelCls}">CPPM Quota</label><input type="number" id="quota-cppm" value="0" min="0" class="${inputCls}"></div>

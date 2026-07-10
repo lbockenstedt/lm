@@ -4,7 +4,7 @@ from api import (
     _unwrap_spoke, get_tenant_scoping, logger, time,
 )
 from access import (
-    ENFORCED_RIGHTS, resolve_effective_permissions,
+    ENFORCED_RIGHTS, resolve_effective_permissions, refresh_shared_tenant,
     valid_display_name as _valid_display_name,
     valid_hostname as _valid_hostname,
     valid_identifier as _valid_identifier,
@@ -12,6 +12,12 @@ from access import (
 
 
 def register(app, hub, ctx):
+    # Prime the shared-tenant cache at startup so the visibility gate is correct
+    # before the first /setup/tenants load (refreshed again on every tenant write).
+    try:
+        refresh_shared_tenant(hub)
+    except Exception:
+        pass
     """Register tenants_users routes on the Hub app."""
 
     @app.post("/setup/update")
@@ -197,12 +203,17 @@ def register(app, hub, ctx):
                 "slug": cfg.get("netbox_tenant_slug") or tid,
                 "netbox_id": cfg.get("netbox_id"),
                 "description": cfg.get("description", ""),
+                # A shared tenant's spokes/resources are visible to every tenant
+                # (objects still subnet-scoped). Exactly one tenant carries it.
+                "shared": bool(cfg.get("shared")),
             }
             for tid, cfg in tenants.items()
         ]
         if "default" not in [t["id"] for t in tenant_list]:
-            tenant_list.insert(0, {"id": "default", "name": "Default", "slug": "default", "netbox_id": None, "description": ""})
-        return {"tenants": tenant_list}
+            tenant_list.insert(0, {"id": "default", "name": "Default", "slug": "default", "netbox_id": None, "description": "", "shared": False})
+        # Keep the shared-tenant cache fresh whenever the list is loaded.
+        shared_id = refresh_shared_tenant(hub)
+        return {"tenants": tenant_list, "shared_tenant_id": shared_id}
 
     @app.post("/setup/sync-tenants")
     async def sync_tenants_from_netbox():
@@ -287,12 +298,22 @@ def register(app, hub, ctx):
             tenant_id = data.get("tenant_id", "default")
             config = data.get("config", {})
 
+            # Single-shared invariant: setting shared=True on a tenant clears the
+            # flag on every OTHER tenant, so exactly one shared tenant exists.
+            if "shared" in config and config.get("shared"):
+                for other_tid, other_cfg in (hub.state.tenant_state.get("tenants", {}) or {}).items():
+                    if other_tid != tenant_id and isinstance(other_cfg, dict) and other_cfg.get("shared"):
+                        hub.state.update_tenant(other_tid, {"shared": False})
+
             hub.state.update_tenant(tenant_id, config)
 
             if config.get("active"):
                 hub.state.set_active_tenant(tenant_id)
 
             hub.state.save_state()
+            # Refresh the cached shared-tenant id so the visibility gate is
+            # correct on the very next request.
+            refresh_shared_tenant(hub)
 
             return {"status": "ok", "message": f"Tenant {tenant_id} updated."}
         except Exception as e:
