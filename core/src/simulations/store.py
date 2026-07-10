@@ -102,6 +102,13 @@ class SimulationsStore:
         self._lock = threading.Lock()
         self._data: Dict[str, Dict[str, Any]] = {}
         self._needs_rekey = False  # set when loaded via a fallback (plaintext) path
+        # Set when the on-disk file EXISTED but could not be decrypted/parsed (bad
+        # key, corrupt bytes, unreadable). Distinct from a legitimately absent/empty
+        # file. When True, _save() REFUSES to overwrite the file so a transient
+        # decrypt failure (e.g. a botched LM_FERNET_KEY rotation on deploy) can't
+        # silently re-encrypt an empty store over every tenant's PSKs + tokens —
+        # the next save after a failed load used to permanently destroy them.
+        self._load_failed = False
         self._load()
 
     # ── persistence ────────────────────────────────────────────────────────
@@ -139,9 +146,12 @@ class SimulationsStore:
                     logger.error(
                         "SimulationsStore: %s failed Fernet decrypt and "
                         "LM_ALLOW_PLAINTEXT_FALLBACK=0 — refusing plaintext "
-                        "fallback; starting empty (re-run rotate_fernet_key).",
+                        "fallback; starting empty AND refusing to overwrite the "
+                        "file (re-run rotate_fernet_key / restore LM_FERNET_KEY).",
                         self._path)
                     self._data = {}
+                    self._load_failed = True
+                    self._backup_undecryptable()
                     return
                 try:
                     with open(self._path, "r") as pf:
@@ -151,17 +161,52 @@ class SimulationsStore:
                                    "(pre-encryption); migrating to Fernet on next "
                                    "save.", self._path)
                 except Exception as exc:
-                    logger.warning("SimulationsStore: load failed (%s): %s — "
-                                   "starting empty", self._path, exc)
+                    logger.error("SimulationsStore: load failed (%s): %s — starting "
+                                 "empty AND refusing to overwrite the file",
+                                 self._path, exc)
                     self._data = {}
+                    self._load_failed = True
+                    self._backup_undecryptable()
         except FileNotFoundError:
+            self._data = {}  # fresh install — legitimately absent, safe to save
+        except Exception as exc:  # unreadable file, etc. — do NOT clobber it
+            logger.error("SimulationsStore: load failed (%s): %s — starting empty "
+                         "AND refusing to overwrite the file", self._path, exc)
             self._data = {}
-        except Exception as exc:  # corrupt JSON, etc. — start empty rather than crash
-            logger.warning("SimulationsStore: load failed (%s): %s — starting empty",
-                           self._path, exc)
-            self._data = {}
+            self._load_failed = True
+            self._backup_undecryptable()
+
+    def _backup_undecryptable(self) -> None:
+        """Best-effort: preserve the on-disk bytes that could not be decrypted/
+        parsed, so an operator can recover after fixing the key. Writes a one-time
+        ``.undecryptable`` sidecar (never overwritten on repeated failed loads, so
+        the FIRST-captured copy is kept)."""
+        bak = self._path + ".undecryptable"
+        try:
+            if os.path.exists(self._path) and not os.path.exists(bak):
+                with open(self._path, "rb") as src, open(bak, "wb") as dst:
+                    dst.write(src.read())
+                try:
+                    os.chmod(bak, 0o600)
+                except OSError:
+                    pass
+                logger.error("SimulationsStore: preserved undecryptable store at "
+                             "%s for recovery", bak)
+        except Exception as exc:  # noqa: BLE001 — backup is best-effort
+            logger.warning("SimulationsStore: could not back up undecryptable "
+                           "store (%s): %s", self._path, exc)
 
     def _save(self) -> None:
+        if self._load_failed:
+            # The on-disk store existed but could not be decrypted/parsed at load.
+            # Overwriting it now would re-encrypt the empty in-memory store on top
+            # of the real (recoverable) data — the exact silent-wipe this guard
+            # prevents. Drop the write; fix the key / restore the file and restart.
+            logger.error("SimulationsStore: NOT saving — the store failed to load "
+                         "and overwriting would destroy the existing on-disk data "
+                         "(%s). Restore LM_FERNET_KEY / the file, then restart.",
+                         self._path)
+            return
         try:
             tmp = self._path + ".tmp"
             encrypted = hub_encryption.encrypt(
