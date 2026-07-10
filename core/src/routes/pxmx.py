@@ -151,6 +151,35 @@ def register(app, hub, ctx):
     _resolve_tenant = ctx._resolve_tenant
     _filter_tenant = ctx._filter_tenant
 
+    async def _assert_vm_owned(request, unique_id="", vmid=None, node="", agent_id=""):
+        """VM-ownership gate for the VNC console. Global Admin → any VM. Otherwise
+        the caller must be a write-user or above (access.has_edit_access) AND own
+        the VM — its ips/tags (GET_VM_INFO) must survive the hypervisor tenant
+        filter, the same attribution as the VM list + /vm/{id}/details. FAIL-CLOSED
+        (403) on an unattributable VM. Mirrors _assert_vm_control in pxmx_vm.py.
+        Console is a control-tier action (full keyboard/mouse), so view users are
+        rejected even for their own VM."""
+        sess = _session_user(request)
+        if _is_admin(sess):
+            return
+        if not access.has_edit_access(sess):
+            raise HTTPException(status_code=403, detail="Edit access required for VM console")
+        hub = app.state.hub
+        spoke = (hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
+                 if agent_id else None) or hub.get_hypervisor_spoke()
+        info = {}
+        if spoke:
+            try:
+                raw = await hub.request_response(
+                    spoke, "GET_VM_INFO", {"vm_id": unique_id, "vmid": vmid, "node": node})
+                info = raw.get("payload", {}).get("data", {}) if isinstance(raw, dict) else {}
+            except Exception:  # noqa: BLE001 — fail-closed below
+                info = {}
+        vm_record = {"ips": info.get("ips") or [], "tags": info.get("tags") or [],
+                     "pool": info.get("pool") or ""}
+        if not await _filter_tenant(request, [vm_record], "hypervisor", ["ips"]):
+            raise HTTPException(status_code=403, detail="not authorized for this VM's tenant")
+
     @app.get("/vm/{vm_id}/details")
     async def get_vm_details(request: Request, vm_id: str):
         hub = app.state.hub
@@ -666,8 +695,8 @@ def register(app, hub, ctx):
         noVNC byte relay. Fire-and-forget VNC_START — the agent emits
         VNC_READY/VNC_ERROR up, which the browser WS picks up."""
         sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
         try:
             body = await request.json()
         except Exception:
@@ -681,6 +710,9 @@ def register(app, hub, ctx):
             vmid = int(vmid_s)
         except ValueError:
             raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
+        # Admin → any VM; a write-user/tenant-admin → only a VM in their tenant.
+        await _assert_vm_owned(request, unique_id=unique_id, vmid=vmid, node=node,
+                               agent_id=str((body or {}).get("agent_id") or "").strip())
         hub = app.state.hub
         # Route to the spoke that actually relays the VM's host agent (hosts are
         # not clustered — a vncwebsocket must open on the VM's own host or it
