@@ -22,6 +22,7 @@ import asyncio
 import time
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import api as api_mod
@@ -647,3 +648,110 @@ def test_netbox_delete_admin_bypasses_ownership(tmp_path):
     admin_tok = _mint_session(hub, "admin")
     r = c.delete("/api/netbox/devices/999", cookies={"lm_session": admin_tok})
     assert r.status_code == 200
+
+# ── 9. H1: 5xx internal-exception detail scrubbing ───────────────────────────
+# Routes raise HTTPException(500, detail=str(e)) in their except-Exception
+# blocks. A non-Global caller must NOT see the raw internal exception text
+# (paths, SQL/spoke error strings, stack fingerprints) — they get a generic
+# "Internal server error" + a ref id; a Global admin retains the real detail
+# for ops debugging. Authored 4xx messages pass through unscrubbed.
+
+_INTERNAL_SECRET = "internal leak: /opt/lm/.env Fernet key path (psycopg2 OperationalError)"
+
+def _build_with_error_routes(users=None, tmp_path=None):
+    """Real create_app stack + two public test routes: one that 500s with an
+    internal-looking detail, one that 400s with an authored message. Both are
+    outside the gated prefixes so any session (or none) can reach them. They
+    are inserted at the FRONT of the router so the ``/{full_path:path}``
+    catch-all (serve_ui) does not shadow them."""
+    c, hub = _build(users, tmp_path)
+    app = c.app
+
+    @app.get("/__test_500__")
+    async def _boom():
+        raise HTTPException(status_code=500, detail=_INTERNAL_SECRET)
+
+    @app.get("/__test_400__")
+    async def _bad():
+        raise HTTPException(status_code=400, detail="Missing tenant_id")
+
+    # Move the two just-added routes to the front so they match before the
+    # /{full_path:path} UI catch-all registered inside create_app.
+    routes = app.router.routes
+    for _ in range(2):
+        routes.insert(0, routes.pop())
+
+    return c, hub
+
+
+def test_5xx_detail_scrubbed_for_plain_user(tmp_path):
+    c, hub = _build_with_error_routes({}, tmp_path)
+    tok = _mint_tenant_session(hub, "op", "acme", rights=("ipam",))
+    r = c.get("/__test_500__", cookies={"lm_session": tok})
+    assert r.status_code == 500
+    body = r.json()
+    assert body["detail"] == "Internal server error"
+    assert "ref" in body and body["ref"]
+    # The raw internal text must not reach the client.
+    assert _INTERNAL_SECRET not in r.text
+    assert "Fernet" not in r.text
+
+
+def test_5xx_detail_scrubbed_for_tenant_admin(tmp_path):
+    c, hub = _build_with_error_routes({}, tmp_path)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["acme"])
+    r = c.get("/__test_500__", cookies={"lm_session": tok})
+    assert r.status_code == 500
+    assert r.json()["detail"] == "Internal server error"
+    assert _INTERNAL_SECRET not in r.text
+
+
+def test_5xx_detail_preserved_for_global_admin(tmp_path):
+    c, hub = _build_with_error_routes({}, tmp_path)
+    tok = _mint_session(hub, "root")  # Global admin
+    r = c.get("/__test_500__", cookies={"lm_session": tok})
+    assert r.status_code == 500
+    # Global admin sees the real detail (ops debugging), no ref substitution.
+    assert r.json()["detail"] == _INTERNAL_SECRET
+
+
+def test_5xx_detail_scrubbed_for_anonymous(tmp_path):
+    # An anonymous caller (no session) is non-admin → scrubbed.
+    c, hub = _build_with_error_routes({}, tmp_path)
+    r = c.get("/__test_500__")
+    assert r.status_code == 500
+    assert r.json()["detail"] == "Internal server error"
+    assert _INTERNAL_SECRET not in r.text
+
+
+def test_4xx_authored_detail_preserved_for_non_admin(tmp_path):
+    # A 400 with an authored validation message is NOT scrubbed — only 5xx is.
+    c, hub = _build_with_error_routes({}, tmp_path)
+    tok = _mint_tenant_session(hub, "op", "acme", rights=("ipam",))
+    r = c.get("/__test_400__", cookies={"lm_session": tok})
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Missing tenant_id"
+
+
+def test_4xx_authored_detail_preserved_for_anonymous(tmp_path):
+    c, hub = _build_with_error_routes({}, tmp_path)
+    r = c.get("/__test_400__")
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Missing tenant_id"
+
+
+def test_5xx_scrub_ref_unique_and_logged(tmp_path, caplog):
+    import logging
+    c, hub = _build_with_error_routes({}, tmp_path)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["acme"])
+    with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+        r1 = c.get("/__test_500__", cookies={"lm_session": tok})
+        r2 = c.get("/__test_500__", cookies={"lm_session": tok})
+    assert r1.status_code == r2.status_code == 500
+    ref1, ref2 = r1.json()["ref"], r2.json()["ref"]
+    # Each 5xx gets a fresh ref id for operator correlation.
+    assert ref1 and ref2 and ref1 != ref2
+    # The real detail is logged server-side (with the ref) but not returned.
+    log_text = caplog.text
+    assert ref1 in log_text
+    assert _INTERNAL_SECRET in log_text

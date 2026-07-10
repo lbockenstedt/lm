@@ -1482,6 +1482,51 @@ def create_app(hub):
     admin_cache.register(app, hub, ctx)
     help_assistant.register(app, hub, ctx)
 
+    # ── H1: scrub internal-exception detail from 5xx for non-Global callers ──
+    # Routes raise ``HTTPException(500, detail=str(e))`` in their
+    # except-Exception blocks (118+ sites). Without this handler a tenant_admin
+    # or plain user sees the raw internal exception text — file paths, SQL /
+    # NetBox / spoke error strings, stack fingerprints — an information-
+    # disclosure vector (H1). A Global Admin (``is_admin``) retains the real
+    # detail for ops debugging; everyone else gets a generic "Internal server
+    # error" + a short ref id that is logged WITH the real detail so the
+    # operator can correlate via the hub log. Unhandled (non-HTTPException)
+    # exceptions are already generic via ``error_logging_middleware``; this
+    # covers the RAISED-HTTPException path. Authored 4xx messages ("Missing
+    # tenant_id", "Tenant admin cannot grant Global Admin", "Not authorized for
+    # tenant '…'", …) pass through unchanged — only 5xx is scrubbed, so the
+    # tenant-admin UX/validation feedback is preserved.
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+    @app.exception_handler(_StarletteHTTPException)
+    async def scrub_internal_detail_handler(request: Request, exc):
+        if exc.status_code >= 500:
+            sess = None
+            try:
+                sess = _session_user(request)
+            except Exception:
+                sess = None
+            if not _is_admin(sess):
+                ref = secrets.token_hex(6)
+                # Server-side: log the real detail + ref for operator correlation.
+                # The ref is also returned to the (non-Global) caller so they can
+                # quote it to the operator without seeing the detail itself.
+                logger.warning(
+                    "5xx detail scrubbed [ref=%s] %s %s -> %r",
+                    ref, request.method, request.url.path, exc.detail,
+                )
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content={"detail": "Internal server error", "ref": ref},
+                )
+        # 4xx (authored validation messages) or a Global-admin 5xx: preserve
+        # the detail + headers exactly as FastAPI's default handler would.
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None) or None,
+        )
+
     # --- Static File Serving ---
     ui_path = os.path.join(os.path.dirname(__file__), "../../WebUI")
 
