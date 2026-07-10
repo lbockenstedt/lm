@@ -12029,7 +12029,7 @@ const LE_DNS_CREDS_HINT = {
     linode:     'dns_linode_api_key = ...',
     rfc2136:    'dns_rfc2136_server = ...\ndns_rfc2136_name = ...\ndns_rfc2136_secret = ...',
     he:         '# Hurricane Electric dns.he.net — TSIG dynamic update\n' +
-                'dns_rfc2136_server = ns1.he.net\n' +
+                'dns_rfc2136_server = 216.218.130.2\n' +  // ns1.he.net (certbot needs an IP)
                 'dns_rfc2136_port = 53\n' +
                 'dns_rfc2136_name = YOUR_KEY_NAME\n' +
                 'dns_rfc2136_secret = YOUR_TSIG_SECRET\n' +
@@ -12048,7 +12048,10 @@ const LE_RFC2136_PROVIDERS = new Set(['rfc2136', 'he']);
 
 // Default server pre-fill for the Advanced "Server" field, by provider. Empty
 // string = leave the placeholder visible (user fills it).
-const LE_RFC2136_DEFAULT_SERVER = { he: 'ns1.he.net', rfc2136: '' };
+// certbot-dns-rfc2136 requires the server as a literal IP (a hostname is
+// rejected). ns1.he.net = 216.218.130.2 (HE's stable anycast); default to the IP
+// so the form works even before the le spoke's hostname resolver is deployed.
+const LE_RFC2136_DEFAULT_SERVER = { he: '216.218.130.2', rfc2136: '' };
 
 // Initial-targets picker state for the issue modal. Array of {module_type, identifier}.
 let _leIssueTargets = [];
@@ -12163,7 +12166,7 @@ function showLeIssueModal() {
                         <div class="grid grid-cols-3 gap-2 mt-2">
                             <div class="flex flex-col">
                                 <label class="text-[11px] text-slate-400 mb-0.5">Server</label>
-                                <input id="le-issue-dns-server" type="text" placeholder="ns1.he.net" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
+                                <input id="le-issue-dns-server" type="text" placeholder="216.218.130.2 (IP, not a hostname)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500" />
                             </div>
                             <div class="flex flex-col">
                                 <label class="text-[11px] text-slate-400 mb-0.5">Port</label>
