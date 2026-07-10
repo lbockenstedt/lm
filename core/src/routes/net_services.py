@@ -48,10 +48,19 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/dns/records")
-    async def dns_list_records():
-        """List all DNS records from the Unbound spoke (unfiltered relay)."""
+    async def dns_list_records(request: Request):
+        """List DNS records from the Unbound spoke, subnet-filtered per the
+        caller's tenant when the ``dns`` subnet-filter module is enabled.
+
+        Unfiltered by default (DNS is largely a shared single-view Unbound, and
+        records can be non-IP CNAME/TXT that the IP-prefix filter would hide).
+        A multi-tenant deployment enables the ``dns`` subnet-filter toggle so a
+        non-admin sees only A/PTR records whose value (IP) is in their own
+        tenant's NetBox prefixes (mirrors /api/dhcp/leases). Admins always see
+        all records."""
         logger.debug("relay GET /api/dns/records")
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_LIST", log_name="dns_list_records")
+        data = await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_LIST", log_name="dns_list_records")
+        return await _filter_session(request, data, "dns", ["value", "ip"])
 
     @app.post("/api/dns/record")
     async def dns_add_record(request: Request):

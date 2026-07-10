@@ -55,9 +55,9 @@ _PREFIX_CACHE_TTL = 300  # seconds — session-prefix cache TTL (was a create_ap
 # carries tenant IP addresses (nac, firewall, netbox, dhcp, hypervisor) default
 # ON; the cs / Simulations module is scoped by tenant ID instead of subnet, so
 # it defaults OFF. Admins can toggle each module in System → General.
-_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "cs", "hypervisor", "nw")
+_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "dns", "cs", "hypervisor", "nw")
 _FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
-                            "dhcp": True, "cs": False, "hypervisor": True, "nw": True}
+                            "dhcp": True, "dns": False, "cs": False, "hypervisor": True, "nw": True}
 
 # Firewall endpoint → filter spec. "rules" uses the strict source/destination
 # check (with OPNsense alias expansion); the field-based endpoints filter on
