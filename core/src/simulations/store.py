@@ -577,6 +577,11 @@ class SimulationsStore:
                 return True
             return False
 
+    def tenant_ids(self) -> list:
+        """Every tenant id with a record in the store — used by the hub-side
+        Central poller to find centralized-mode tenants to poll."""
+        return list(self._data.keys())
+
     # ── processing modes (central_api / teams / email → centralized|distributed) ──
     async def get_processing_modes(self, tenant_id: str) -> Dict[str, str]:
         return dict(self._data.get(tenant_id, {}).get("processing_modes", {}))

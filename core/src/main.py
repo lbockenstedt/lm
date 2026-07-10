@@ -68,6 +68,7 @@ from security.signer import split_frame
 from state.manager import StateManager
 from simulations.broadcaster import SimulationsBroadcaster
 from simulations.store import SimulationsStore
+from simulations.central_hub_poller import CentralHubPoller
 from security.auth_manager import AuthManager, LDAPAuthProvider
 from api import (build_server, _save_sessions, _refresh_module_all_tenants,
                  _invalidate_tenant_module, _fetch_module)
@@ -770,6 +771,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Simulations module: tenant-scoped browser broadcast + slim cs-config store.
         self.simulations_broadcaster = SimulationsBroadcaster()
         self.simulations_store = SimulationsStore(self.state.data_dir)
+        # Hub-side Aruba Central status for CENTRALIZED processing mode, keyed by
+        # tenant_id. Populated by CentralHubPoller (the spoke has no Aruba client
+        # in centralized mode); read by SimulationsService as a synthetic "Hub
+        # (centralized)" spoke. See simulations/central_hub_poller.py.
+        self.central_hub_status: Dict[str, dict] = {}
+        self.central_hub_poller = CentralHubPoller(self)
         self.cache_dir = os.path.join(self.state.data_dir, "cache")
         # Network Devices (nw) module: in-memory fleet + per-device cache,
         # persisted to cache/nw_data.json and reloaded on startup so the
@@ -5526,6 +5533,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # restart instead of blanking until every spoke reconnects. Parity with
         # nw_cache. See run_sim_cache_flush_loop.
         sim_cache_task = asyncio.create_task(self.run_sim_cache_flush_loop())
+        # Hub-side Aruba Central poll loop for CENTRALIZED processing mode: the
+        # hub holds the creds and the cs spoke has no Aruba client, so this loop
+        # produces the central_status the Checks/Hardware/Client-Count/Central
+        # tabs render (distributed mode gets it from the spoke's CentralPoller
+        # via CS_TELEMETRY instead). See simulations/central_hub_poller.py.
+        central_hub_poll_task = asyncio.create_task(self.central_hub_poller.run_loop())
         # Certificate distribution: the hub is the transport for cert material
         # from the le (Let's Encrypt) spoke to each cert's target spokes. For
         # every managed cert with stale targets it pulls fullchain+key from le

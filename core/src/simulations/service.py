@@ -58,6 +58,45 @@ class SimulationsService:
         s = (info.get("status") if isinstance(info, dict) else info) or ""
         return str(s).lower()
 
+    # ── centralized-mode hub Central status (no spoke holds creds) ──────────
+    def _hub_central(self, tenant_id: str) -> Any:
+        """Hub-side ``central_status`` for a centralized-mode tenant, or None
+        when the tenant isn't centralized / hasn't been polled yet. Produced by
+        CentralHubPoller (see simulations/central_hub_poller.py); presence
+        implies centralized central_api mode."""
+        return (getattr(self.hub, "central_hub_status", {}) or {}).get(tenant_id)
+
+    @staticmethod
+    def _hub_meta() -> Dict[str, Any]:
+        """Synthetic spoke meta for the hub's own Central status so the per-spoke
+        views render a 'Hub (centralized)' row identical to a real spoke."""
+        return {"spoke_id": "hub", "spoke_name": "Hub (centralized)",
+                "spoke_hostname": "", "spoke_online": True}
+
+    def _central_site_rows(self, central: dict) -> List[dict]:
+        """Per-wsite ok/fail/unknown check tally + wireless client count from a
+        ``central_status`` block. Shared by the real-spoke and hub-centralized
+        paths in get_central_status_data."""
+        status_map = central.get("status") or {}
+        clients_by_site = central.get("central_clients_by_site") or {}
+        site_mappings = central.get("site_mappings") or {}
+        sites: List[dict] = []
+        for wsite, checks_map in status_map.items():
+            ok = fail = unk = 0
+            for _chk, info in (checks_map or {}).items():
+                s = self._check_status(info)
+                if s in _PASS:
+                    ok += 1
+                elif s in _FAIL:
+                    fail += 1
+                else:
+                    unk += 1
+            sites.append({"wsite": wsite,
+                          "central_site": site_mappings.get(wsite) or wsite,
+                          "check_ok": ok, "check_fail": fail, "check_unknown": unk,
+                          "wireless_clients": clients_by_site.get(wsite) or 0})
+        return sites
+
     # ── aggregate reads ────────────────────────────────────────────────────
     async def get_dashboard_data(self, tenant_id: str) -> Dict[str, Any]:
         """Roll up client count, hardware breakdown, and central-check summary for the tenant's cached spokes."""
@@ -71,6 +110,18 @@ class SimulationsService:
                 k = (c or {}).get("hw_type") or (c or {}).get("platform") or "Unknown"
                 hw[k] = hw.get(k, 0) + 1
             for _site, checks_map in ((data.get("central") or {}).get("status") or {}).items():
+                for _chk, info in (checks_map or {}).items():
+                    s = self._check_status(info)
+                    if s in _PASS:
+                        checks["pass"] += 1
+                    elif s in _FAIL:
+                        checks["fail"] += 1
+                    elif s in _WARN:
+                        checks["warning"] += 1
+        # Centralized-mode Central checks come from the hub poller, not a spoke.
+        hub_central = self._hub_central(tenant_id)
+        if hub_central is not None:
+            for _site, checks_map in (hub_central.get("status") or {}).items():
                 for _chk, info in (checks_map or {}).items():
                     s = self._check_status(info)
                     if s in _PASS:
@@ -242,6 +293,9 @@ class SimulationsService:
         for sid, data in self._spokes_for_tenant(tenant_id):
             central = data.get("central") or {}
             spokes.append({**self._meta(sid, data), "central_status": central})
+        hub_central = self._hub_central(tenant_id)
+        if hub_central is not None:
+            spokes.append({**self._hub_meta(), "central_status": hub_central})
         return {"tenant_id": tenant_id, "mode": "—", "spokes": spokes}
 
     async def get_central_status_data(self, tenant_id: str) -> Dict[str, Any]:
@@ -252,25 +306,14 @@ class SimulationsService:
             central = data.get("central") or {}
             tv = central.get("token_valid")
             token_valid = tv if tv is not None else token_valid
-            status_map = central.get("status") or {}
-            clients_by_site = central.get("central_clients_by_site") or {}
-            site_mappings = central.get("site_mappings") or {}
-            sites: List[dict] = []
-            for wsite, checks_map in status_map.items():
-                ok = fail = unk = 0
-                for _chk, info in (checks_map or {}).items():
-                    s = self._check_status(info)
-                    if s in _PASS:
-                        ok += 1
-                    elif s in _FAIL:
-                        fail += 1
-                    else:
-                        unk += 1
-                sites.append({"wsite": wsite,
-                              "central_site": site_mappings.get(wsite) or wsite,
-                              "check_ok": ok, "check_fail": fail, "check_unknown": unk,
-                              "wireless_clients": clients_by_site.get(wsite) or 0})
-            spokes.append({**self._meta(sid, data), "sites": sites})
+            spokes.append({**self._meta(sid, data),
+                           "sites": self._central_site_rows(central)})
+        hub_central = self._hub_central(tenant_id)
+        if hub_central is not None:
+            tv = hub_central.get("token_valid")
+            token_valid = tv if tv is not None else token_valid
+            spokes.append({**self._hub_meta(),
+                           "sites": self._central_site_rows(hub_central)})
         return {"tenant_id": tenant_id, "mode": "—", "token_valid": token_valid,
                 "hub_central_config": {}, "spokes": spokes}
 
