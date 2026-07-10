@@ -129,7 +129,20 @@ class SimulationsStore:
                 # One-time migration: a file written before at-rest encryption was
                 # applied to this store is plaintext JSON. Accept it this once and
                 # re-encrypt on the next save rather than crashing or losing the
-                # tenant onboarding PSKs / tokens already persisted.
+                # tenant onboarding PSKs / tokens already persisted — UNLESS the
+                # operator set LM_ALLOW_PLAINTEXT_FALLBACK=0, in which case fail
+                # closed (start empty) so a botched rotation can't silently flip
+                # the simulations store to a plaintext read. Same gate KeyManager
+                # and StateManager apply to their stores.
+                from security.encryption import plaintext_fallback_allowed
+                if not plaintext_fallback_allowed():
+                    logger.error(
+                        "SimulationsStore: %s failed Fernet decrypt and "
+                        "LM_ALLOW_PLAINTEXT_FALLBACK=0 — refusing plaintext "
+                        "fallback; starting empty (re-run rotate_fernet_key).",
+                        self._path)
+                    self._data = {}
+                    return
                 try:
                     with open(self._path, "r") as pf:
                         self._data = json.load(pf) or {}

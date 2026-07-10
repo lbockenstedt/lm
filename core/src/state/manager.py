@@ -170,6 +170,17 @@ class StateManager:
                                        "current key on next save.", path)
                     return json.loads(decrypted)
                 except Exception as e:
+                    # Fail-closed when the operator set LM_ALLOW_PLAINTEXT_FALLBACK=0:
+                    # a botched rotation / lost key must NOT silently flip a state
+                    # file to a plaintext read. KeyManager gates keys.json the same
+                    # way; the gate must hold across every encrypted store.
+                    from security.encryption import plaintext_fallback_allowed
+                    if not plaintext_fallback_allowed():
+                        logger.error(
+                            f"Decryption failed for {path} and "
+                            f"LM_ALLOW_PLAINTEXT_FALLBACK=0 — refusing plaintext "
+                            f"fallback (re-run rotate_fernet_key to re-encrypt).")
+                        return None
                     logger.warning(f"Decryption failed for {path}, trying plain text: {e}")
                     # Fallback to plain text for migration (re-read as text)
                     with open(path, "r") as pf:

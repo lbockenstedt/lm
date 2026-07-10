@@ -25,6 +25,19 @@ import logging
 
 logger = logging.getLogger("Encryption")
 
+
+def plaintext_fallback_allowed() -> bool:
+    """Whether a plaintext-JSON fallback is permitted when an at-rest state
+    file fails Fernet decryption. Default ON (``1``) preserves the legacy
+    migration path for files written before at-rest encryption; set
+    ``LM_ALLOW_PLAINTEXT_FALLBACK=0`` to fail-closed so a botched rotation or
+    lost key can NOT silently flip a state file (system.json/tenants.json/
+    sessions/simulations) to a plaintext read. Shared by KeyManager (secrets)
+    and the StateManager/SimulationsStore plaintext fallbacks so the operator's
+    fail-closed promise holds across EVERY encrypted store, not just keys."""
+    return os.environ.get("LM_ALLOW_PLAINTEXT_FALLBACK", "1").strip() in ("1", "true", "yes")
+
+
 class HubEncryption:
     """
     Handles transparent at-rest encryption for Hub JSON files
