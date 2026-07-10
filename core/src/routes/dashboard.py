@@ -23,7 +23,13 @@ def register(app, hub, ctx):
         pxmx_tag = scoping["proxmox_tag"]        or None
 
         spoke_ipam       = hub.get_spoke_by_type("ipam")
-        spoke_hypervisor = hub.get_hypervisor_spoke()
+        # Tenant-aware: only count VMs from a hypervisor BOUND to this tenant.
+        # The global get_hypervisor_spoke() returned tenant 1's pxmx spoke for
+        # every tenant, and a tagless tenant's unfiltered PXMX_LIST_VMS then
+        # returned the whole hypervisor's VM list — so all tenants showed the
+        # one bound tenant's VMs. Now a tenant with no bound hypervisor → 0 VMs.
+        # The admin's unscoped/default view still falls back to any hypervisor.
+        spoke_hypervisor = hub.get_hypervisor_spoke_for_tenant(scoping.get("tenant_id"))
         spoke_nac        = hub.get_spoke_by_type("nac")
 
         async def _req(spoke, cmd, payload=None):

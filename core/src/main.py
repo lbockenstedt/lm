@@ -1517,6 +1517,36 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         callers that only ever assumed a single global hypervisor spoke."""
         return self.get_spoke_by_type("hypervisor") or self.get_spoke_by_type("simulation")
 
+    def get_hypervisor_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
+        """Tenant-aware hypervisor spoke for per-tenant VM queries (dashboard
+        counts, sync). With a real ``tenant_id``, return ONLY a connected,
+        approved hypervisor spoke BOUND to that tenant — NEVER one bound to a
+        different tenant, which would leak another tenant's VMs into this
+        tenant's count (the dashboard all-tenants overview otherwise showed the
+        whole hypervisor's VM list under every tagless/unbound tenant).
+
+        No unassigned fallback here (unlike ``get_client_sim_spoke``): an
+        unassigned hypervisor attributed to every asking tenant would put the
+        same VMs on every tenant row — exactly the leak we're closing. If no
+        hypervisor is bound to the tenant, the tenant simply has no VMs to
+        count (``None`` → caller returns 0). Bind the spoke to the tenant to
+        see its VMs.
+
+        With ``tenant_id`` None / ``"default"`` (admin unscoped / global view),
+        fall back to ``get_hypervisor_spoke`` so the admin's default dashboard
+        still shows a global count (unchanged legacy behavior).
+        """
+        if not tenant_id or tenant_id == "default":
+            return self.get_hypervisor_spoke()
+        cands = self.get_all_spokes_by_type("hypervisor") or self.get_all_spokes_by_type("simulation")
+        cands = [sid for sid in cands if sid in self.active_connections
+                 and self.approved_modules.get(sid, False)]
+        if not cands:
+            return None
+        md = self.state.system_state.get("module_metadata", {})
+        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        return bound[0] if bound else None
+
     def get_all_spokes_by_type(self, module_type: str):
         """Return all connected spoke IDs that advertised the given module_type."""
         # Legacy fallback: same prefix map as get_spoke_by_type. See
