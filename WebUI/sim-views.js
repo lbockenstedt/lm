@@ -1595,18 +1595,61 @@ function _csCentralWarn(data) {
 
 async function csRenderCentral() {
     csSetToolbar('');
-    const data = await csCentralBrowse();
+    // Browse (full site inventory) + the monitoring config, so each row shows a
+    // Monitor toggle reflecting whether the site is already enrolled.
+    const [data, sitesCfg] = await Promise.all([
+        csCentralBrowse(),
+        csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
     const sites = (data && data.sites) || [];
     const warn = _csCentralWarn(data);
     if (!sites.length) { csSet(`${warn}${csEmpty('No Central sites returned.', 'Verify the Central API token/mode in Setup → Central API and that the account has sites.')}`); return; }
-    const rows = sites.map(st => `<tr>
-      <td class="px-3 py-2 font-medium text-slate-700">${csEscape(st.name || '—')}</td>
+    const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
+    const monitored = new Set(Object.values(sm).map(v => String(v)));  // Central-site names enrolled
+    const rows = sites.map(st => {
+        const name = st.name || '';
+        const isMon = monitored.has(String(name));
+        const btn = isMon
+            ? `<button onclick="csToggleMonitorSite(${JSON.stringify(name)}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this site's client count">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorSite(${JSON.stringify(name)}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count for change (shows on the dashboard)">Monitor</button>`;
+        return `<tr>
+      <td class="px-3 py-2 font-medium text-slate-700">${csEscape(name || '—')}</td>
       <td class="px-3 py-2 text-slate-500 font-mono text-xs">${csEscape(st.site_id || '—')}</td>
       <td class="px-3 py-2">${st.health_score != null && st.health_score !== '' ? csEscape(st.health_score) : '—'}</td>
       <td class="px-3 py-2 font-bold text-slate-700">${csEscape(st.wireless_clients != null ? st.wireless_clients : 0)}</td>
-    </tr>`).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${sites.length} site(s)</div>${csTable(['Site', 'Site ID', 'Health', 'Clients'], rows)}</div></div>`);
+      <td class="px-3 py-2">${name ? btn : ''}</td>
+    </tr>`;
+    }).join('');
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard</div>${csTable(['Site', 'Site ID', 'Health', 'Clients', 'Monitor'], rows)}</div></div>`);
 }
+
+// Enroll / un-enroll a Central site for client-count monitoring by toggling it in
+// central_sites_config.site_mappings (key=value=Central site name), preserving the
+// monitored alert/insight + hardware checks. Once enrolled the hub/spoke poller
+// tracks its client count (7-day baseline) and it appears on the dashboard.
+window.csToggleMonitorSite = async function (siteName, monitor) {
+    try {
+        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
+        const sm = (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? { ...cfg.site_mappings } : {};
+        if (monitor) {
+            sm[siteName] = siteName;
+        } else {
+            Object.keys(sm).forEach(k => { if (String(sm[k]) === String(siteName) || k === siteName) delete sm[k]; });
+        }
+        const body = {
+            site_mappings: sm,
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+        };
+        const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`);
+        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`, 'success');
+        csRenderCentral();
+    } catch (e) {
+        console.error('csToggleMonitorSite failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+};
 
 // ── Central → Alerts ─────────────────────────────────────────────────────────
 async function csRenderCentralAlerts() {
