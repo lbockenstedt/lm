@@ -3,8 +3,10 @@
 # DEPRECATED — do not use for new installs.
 #
 # OLD hub-only installer. Superseded by:
-#   install_all.sh        — full hub + all-spokes native install
-#   install_production.sh — one-liner wrapper around install_all.sh
+#   install_all.sh --hub-only   — hub ONLY (this file's job) — watchdog, self-heal,
+#                                 restart-on-stale + maintenance-window gate baked in
+#   install_all.sh              — hub + co-located module roles
+#   install_production.sh [--hub-only] — one-liner wrapper (args pass through)
 #
 # Anti-patterns vs install_all.sh: no service-user setup (assumes root), no
 # ExecStop precision (relies on the caller's lm.service unit which historically

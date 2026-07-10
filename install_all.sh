@@ -30,6 +30,11 @@ while [[ "$#" -gt 0 ]]; do
         --reset-secrets)  RESET_SECRETS=true ;;
         --reset-users)     RESET_USERS=true ;;
         --exclude)         shift; IFS=',' read -ra EXCLUDE <<< "$1" ;;
+        # Generic HUB-ONLY install: the hub + its self-update/watchdog/restart
+        # machinery ONLY — no co-located module roles (cs/pxmx/opnsense/…). Those
+        # run as remote spokes that onboard to this hub. Shortcut for
+        # --exclude cs,pxmx,opnsense,cppm,netbox,ldap,dns,dhcp,nw,le.
+        --hub-only)        EXCLUDE=(cs pxmx opnsense cppm netbox ldap dns dhcp nw le) ;;
         --tls-verify)      TLS_VERIFY=true ;;
         --tls-ca-cert)     shift; TLS_CA_CERT="$1" ;;
         --no-setup-token)  SETUP_TOKEN=false ;;  # leave first-run /auth/setup open (dev/loopback)
