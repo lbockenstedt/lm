@@ -1380,6 +1380,30 @@ def create_app(hub):
     def _has_console_write_access(sess):
         return access.has_console_write_access(sess)
 
+    def _has_firewall_access(sess):
+        return access.has_firewall_access(sess)
+
+    def _has_dns_access(sess):
+        return access.has_dns_access(sess)
+
+    def _has_dhcp_access(sess):
+        return access.has_dhcp_access(sess)
+
+    def _has_nac_access(sess):
+        return access.has_nac_access(sess)
+
+    def _has_ldap_access(sess):
+        return access.has_ldap_access(sess)
+
+    def _has_pxmx_access(sess):
+        return access.has_pxmx_access(sess)
+
+    def _has_edit_access(sess):
+        return access.has_edit_access(sess)
+
+    def _can_edit_shared(sess):
+        return access.can_edit_shared(sess)
+
     def _check_tenant_access(sess, tenant_id):
         return access.check_tenant_access(sess, tenant_id)
 

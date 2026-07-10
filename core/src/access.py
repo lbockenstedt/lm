@@ -377,7 +377,15 @@ def session_user(sessions: dict, request: "Request"):
 # Enforced right-keys — the permissions actually checked server-side. Group
 # editors and the effective-permission union operate over this set (plus the
 # admin flag). Kept here so the UI, routes, and resolver agree on one list.
-ENFORCED_RIGHTS = ("cs", "nw", "ipam", "le", "console", "console_write")
+ENFORCED_RIGHTS = ("cs", "nw", "ipam", "le", "console", "console_write",
+                   "firewall", "dns", "dhcp", "nac", "ldap", "pxmx", "edit")
+# Module ACCESS rights (menu + API visibility). Each gates one module's nav +
+# API namespace; a user needs the right (or admin/tenant-admin, which auto-pass)
+# to see/reach it. cs is included but the Simulations module keeps its own
+# tenant model. ``edit`` is NOT here — it is the cross-module write tier (see
+# has_edit_access), not a module.
+MODULE_RIGHTS = ("cs", "nw", "ipam", "le", "console",
+                 "firewall", "dns", "dhcp", "nac", "ldap", "pxmx")
 
 
 def resolve_effective_permissions(hub, user_record: dict) -> dict:
@@ -559,11 +567,120 @@ def has_console_access(sess) -> bool:
     return has_module_access(sess, "console")
 
 
+def has_firewall_access(sess) -> bool:
+    """Firewall (``firewall``) module access gate (see ``has_module_access``)."""
+    return has_module_access(sess, "firewall")
+
+
+def has_dns_access(sess) -> bool:
+    """DNS (``dns``) module access gate (see ``has_module_access``)."""
+    return has_module_access(sess, "dns")
+
+
+def has_dhcp_access(sess) -> bool:
+    """DHCP (``dhcp``) module access gate (see ``has_module_access``)."""
+    return has_module_access(sess, "dhcp")
+
+
+def has_nac_access(sess) -> bool:
+    """NAC (``nac``) module access gate (see ``has_module_access``)."""
+    return has_module_access(sess, "nac")
+
+
+def has_ldap_access(sess) -> bool:
+    """Directory/LDAP (``ldap``) module access gate (see ``has_module_access``)."""
+    return has_module_access(sess, "ldap")
+
+
+def has_pxmx_access(sess) -> bool:
+    """Proxmox/Hypervisor (``pxmx``) module access gate (see ``has_module_access``)."""
+    return has_module_access(sess, "pxmx")
+
+
+# ── Write tiers (view / write user / tenant-admin) ───────────────────────────
+# Layered on the per-module ACCESS rights above. A module-right user is a VIEW
+# user (read-only). The ``edit`` right promotes them to a WRITE USER — may edit
+# their own tenant's DEDICATED configs, but NOT shared infra. Editing SHARED
+# infra is a higher tier still (tenant-admin), and is constrained to the tenant's
+# slice. Global Admin does anything. read_scope/write_scope below fold these
+# tiers with resource tenancy into a single 'full'/'filtered'/'constrained'/
+# 'deny' decision so every module gates identically.
+
+def has_edit_access(sess) -> bool:
+    """WRITE-USER tier: may EDIT the caller's own tenant's DEDICATED module
+    configs. Global Admin and tenant Admin always; otherwise the explicit global
+    ``edit`` right (a non-admin write user). Does NOT grant editing SHARED infra
+    (see :func:`can_edit_shared`)."""
+    if is_admin(sess) or is_tenant_admin(sess):
+        return True
+    p = (sess or {}).get("user", {}).get("permissions", {})
+    return bool(p.get("edit"))
+
+
+def can_edit_shared(sess) -> bool:
+    """SHARED-infra write tier: only Global Admin and tenant Admin may CHANGE
+    shared infrastructure. A tenant admin's shared writes are still constrained
+    to their tenant's slice (see :func:`write_scope`); a plain write user (edit
+    right) may view shared but never change it."""
+    return is_admin(sess) or is_tenant_admin(sess)
+
+
 def has_console_write_access(sess) -> bool:
-    """Console config-WRITE gate — pushing/reading device configs (Phase G) is a
-    higher tier than viewing/interacting. Admins pass; otherwise the user needs
-    the explicit ``console_write`` right."""
-    return has_module_access(sess, "console_write")
+    """Console config-WRITE gate. The global ``edit`` write-user tier subsumes it;
+    the legacy per-module ``console_write`` right still grants it (backward
+    compat). Admin/tenant-admin pass via has_edit_access."""
+    if has_edit_access(sess):
+        return True
+    p = (sess or {}).get("user", {}).get("permissions", {})
+    return bool(p.get("console_write"))
+
+
+def read_scope(sess, tenant_id) -> str:
+    """How much of a module resource owned by ``tenant_id`` the session may READ:
+
+      * ``"full"``     — the whole device/instance (no tenant filter).
+      * ``"filtered"`` — only the tenant-relevant slice (subnet/alias/tag filter).
+      * ``"deny"``     — no access (caller raises 403).
+
+    Global Admin → full. A resource DEDICATED to the caller's own tenant → full
+    (it's theirs). The SHARED tenant → filtered (shared infra, scoped to the
+    viewer). Other-tenant / unassigned → deny. Mirrors spoke_visible_to_session
+    but distinguishes own-dedicated (full) from shared (filtered)."""
+    if is_admin(sess):
+        return "full"
+    if not tenant_id:
+        return "deny"
+    if tenant_is_shared(tenant_id):
+        return "filtered"
+    allowed = (sess or {}).get("user", {}).get("tenants") or []
+    if allowed and tenant_id in allowed:
+        return "full"
+    return "deny"
+
+
+def write_scope(sess, tenant_id) -> str:
+    """How the session may WRITE to a module resource owned by ``tenant_id``:
+
+      * ``"full"``        — mutate the whole device/instance.
+      * ``"constrained"`` — mutate ONLY objects in the tenant's slice (the caller
+                            must validate each write payload against the filter).
+      * ``"deny"``        — no write (caller raises 403).
+
+    Global Admin → full. DEDICATED to the caller's own tenant → full iff the
+    caller is a write user or above (has_edit_access), else deny (a view user
+    can't write). SHARED tenant → constrained iff the caller may edit shared
+    (tenant-admin), else deny (a view/write user can't change shared). Other/
+    unassigned → deny."""
+    if is_admin(sess):
+        return "full"
+    if not tenant_id:
+        return "deny"
+    if tenant_is_shared(tenant_id):
+        return "constrained" if can_edit_shared(sess) else "deny"
+    allowed = (sess or {}).get("user", {}).get("tenants") or []
+    if allowed and tenant_id in allowed:
+        return "full" if has_edit_access(sess) else "deny"
+    return "deny"
 
 
 # ── Shared tenant ────────────────────────────────────────────────────────────
