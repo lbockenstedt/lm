@@ -1374,6 +1374,21 @@ if systemctl is-enabled --quiet lm.service 2>/dev/null; then
   esac
 fi
 
+# ── 1a. PULL: keep /opt/lm current from GitHub (external, reliable puller) ───
+# The in-process repo_sync loop has proven unreliable; the watchdog fetches
+# origin/main and hard-aligns (also self-heals a conflicted checkout). Pull runs
+# any time (harmless); the RESTART stays gated by 1b. Runs as svc_lm. KEEP IN
+# SYNC with install-lm-watchdog.sh.
+if [ -d /opt/lm/.git ]; then
+  runuser -u svc_lm -- git -C /opt/lm fetch --quiet origin main 2>/dev/null || true
+  lc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
+  rc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse origin/main 2>/dev/null || true)
+  if [ -n "$lc" ] && [ -n "$rc" ] && [ "$lc" != "$rc" ]; then
+    log "pull: /opt/lm behind (local ${lc:0:7} -> remote ${rc:0:7}) — hard-align to origin/main"
+    runuser -u svc_lm -- git -C /opt/lm reset --hard origin/main 2>/dev/null || true
+  fi
+fi
+
 # ── 1b. STALE hub: pulled new code but the running process never restarted ──
 # In-process self-restart can silently fail from the daemon, leaving the hub on
 # OLD code after a git pull (active + /status 200, so section 1 never fires).

@@ -95,6 +95,23 @@ if systemctl is-enabled --quiet lm.service 2>/dev/null; then
   esac
 fi
 
+# ── 1a. PULL: keep /opt/lm current from GitHub ──────────────────────────────
+# The in-process repo_sync loop has proven unreliable (dies after a cycle), so
+# the external watchdog is the authoritative PULLER too: fetch origin/main and
+# hard-align (also self-heals a conflicted/half-rebased checkout). The pull runs
+# ANY time — harmless, the hub keeps serving old code — while the RESTART into it
+# stays gated by 1b's window/idle check. Runs as svc_lm to preserve /opt/lm
+# ownership; offline fetch failures are non-fatal.
+if [ -d /opt/lm/.git ]; then
+  runuser -u svc_lm -- git -C /opt/lm fetch --quiet origin main 2>/dev/null || true
+  lc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
+  rc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse origin/main 2>/dev/null || true)
+  if [ -n "$lc" ] && [ -n "$rc" ] && [ "$lc" != "$rc" ]; then
+    log "pull: /opt/lm behind (local ${lc:0:7} -> remote ${rc:0:7}) — hard-align to origin/main"
+    runuser -u svc_lm -- git -C /opt/lm reset --hard origin/main 2>/dev/null || true
+  fi
+fi
+
 # ── 1b. STALE hub: pulled new code but the running process never restarted ──
 # The in-process self-restart (lm-update-restart) can silently fail to fire from
 # the daemon (child not detached / cgroup teardown), leaving the hub serving OLD
