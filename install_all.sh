@@ -100,6 +100,35 @@ _status_200() {
     return 1
 }
 
+# Deeper liveness probe used by the UPDATE (new-version) health gate. /status is
+# PUBLIC (it bypasses the access-control middleware's gated path in api.py), so
+# a 200 from /status only proves uvicorn bound + the public handler ran — NOT
+# that the authenticated-route path works. A boots-but-broken commit where the
+# session/access-control middleware is dead (e.g. _session_user raises, the
+# sessions store fails to load, or an accidental change makes /api/* public)
+# still serves /status 200 while every gated route 500s (or, worse, 404s because
+# the gate was silently removed). That broken commit would pass a /status-only
+# gate, become the rollback BASELINE, and defeat self-heal — exactly the failure
+# this probe catches.
+#
+# Hit a NONEXISTENT /api/__lm_health_probe__ path with NO cookie. On healthy
+# current code the access-control middleware short-circuits /api/* with a 401
+# BEFORE routing (api.py), so a 401 proves: uvicorn bound + middleware wired +
+# the gated session-check path ran without crashing + the gate is still
+# ENFORCED (a 404 here would mean the gate was accidentally removed = auth
+# bypass). 500/000/200 are all failure. Only the unified 443 surface is probed
+# (legacy 8000 serves old rolled-back code that predates this gate and may not
+# return 401, so it is excluded — the rollback-verification step keeps
+# _status_200 alone).
+_gated_401() {
+    local url code
+    for url in "https://localhost:443/api/__lm_health_probe__" "http://localhost:443/api/__lm_health_probe__"; do
+        code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 3 "$url" 2>/dev/null || echo 000)"
+        [ "$code" = "401" ] && return 0
+    done
+    return 1
+}
+
 # ------------------------------------------------------------------
 # Update recovery helpers (manual path) — THIN WRAPPERS over the Python
 # entrypoint core/src/update_recovery.py, which is the SINGLE SOURCE OF TRUTH
@@ -428,26 +457,51 @@ poll_status() {  # $1=timeout  -> 0 if /status returns 200 within timeout
     return 1
 }
 
+# Stricter gate for the NEW version: /status 200 (public path + readiness) AND
+# _gated_401 (the access-control middleware's gated path is enforced). See
+# _gated_401 above for why /status alone is insufficient. The rollback
+# verification (step 3) keeps using plain poll_status because rolled-back code
+# may predate the gated middleware and would not return 401.
+poll_health() {  # $1=timeout  -> 0 if BOTH probes pass within timeout
+    local timeout="$1" waited=0
+    while [ "$waited" -lt "$timeout" ]; do
+        if _status_200 && _gated_401; then
+            return 0
+        fi
+        sleep 2; waited=$((waited + 2))
+    done
+    return 1
+}
+
 # Let the hub return its HTTP response before the restart actually fires.
 sleep 3
 systemctl restart lm 2>/dev/null || true
 
-# 1) Did the new version boot?
-if poll_status "$HEALTH_TIMEOUT"; then
-    python3 "$RECOVERY_PY" clearpending >/dev/null 2>&1 || true
-    python3 "$RECOVERY_PY" prune --keep "$KEEP_BACKUPS" >/dev/null 2>&1 || true
-    exit 0
-fi
-
-# 2) New version failed — roll back to the pre-swap snapshot.
-# Read the pending manifest here (a read, not a state-machine write) so the
-# "rolling back" log line and the to_v/from_v extraction stay in bash; the
-# restore cp + chown is delegated to the Python CLI below.
+# Read the pending manifest once (reads, not state-machine writes) so
+# to_v/from_v/backup_dir are available to both the boots-but-broken journal
+# line below and the rollback path. The restore cp + chown stays in Python.
 pending="$(cat "$PENDING" 2>/dev/null || true)"
 bdir="$(printf '%s' "$pending" | jq -r '.backup_dir // empty' 2>/dev/null)"
 to_v="$(printf '%s' "$pending" | jq -r '.to_version // empty' 2>/dev/null)"
 from_v="$(printf '%s' "$pending" | jq -r '.from_version // empty' 2>/dev/null)"
 
+# 1) Did the new version boot AND serve the gated path?
+if poll_health "$HEALTH_TIMEOUT"; then
+    python3 "$RECOVERY_PY" clearpending >/dev/null 2>&1 || true
+    python3 "$RECOVERY_PY" prune --keep "$KEEP_BACKUPS" >/dev/null 2>&1 || true
+    exit 0
+fi
+
+# /status came up but the gated middleware did not (or was bypassed). Log the
+# distinction to the journal so an operator can tell a true boot failure (no
+# /status at all) from a boots-but-broken commit that /status alone would have
+# let through. Either way we fall through to rollback below — the double-
+# failure marker (writefailed) is written only if rollback ALSO fails (step 4).
+if _status_200; then
+    echo "lm-update-restart: new version v${to_v} served /status 200 but the access-control gate did not return 401 within ${HEALTH_TIMEOUT}s (boots-but-broken) — rolling back" >&2
+fi
+
+# 2) New version failed — roll back to the pre-swap snapshot.
 if [ -z "$bdir" ] || [ ! -d "$bdir/src" ]; then
     # No snapshot to roll back to — leave the hub down and record for manual recovery.
     python3 "$RECOVERY_PY" writefailed --to-version "$to_v" --backup-dir "$bdir" \
