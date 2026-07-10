@@ -1151,6 +1151,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 data["mode"] = cc["mode"]
         return data
 
+    @app.get("/sim/api/aggregate/central-browse")
+    async def get_central_browse(tenant_id: str = Depends(get_tenant_id)):
+        """FULL Central inventory (all sites / alerts / insights / clients),
+        on-demand, for the Central → Sites/Alerts/Clients tabs — independent of
+        site_mappings (which only scope the background Checks poller). Forwards
+        CS_CENTRAL_BROWSE to the tenant's cs spoke (which holds the full Aruba
+        client + caches). Returns an empty set + warning when the spoke is not
+        connected (a centralized-only tenant has no spoke to browse from yet)."""
+        try:
+            return await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=30.0)
+        except HTTPException as exc:
+            return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
+                    "clients": [], "devices_by_site": {}, "clients_by_site": {},
+                    "warning": f"Central browse unavailable: {exc.detail}"}
+
     @app.get("/sim/api/aggregate/api-server")
     async def get_api_server(tenant_id: str = Depends(get_tenant_id)):
         return await service.get_api_server_data(tenant_id)

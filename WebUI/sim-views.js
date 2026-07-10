@@ -1576,86 +1576,74 @@ window.csClientFilterKey = csDebounce(window.csClientFilter, 200);
  *    POST /sim/api/aggregate/central  {mode, hub_central_config}
  * ========================================================================= */
 
-async function csRenderCentral() {
-    // Central → Sites child (default). Config form moved to Setup → Central API.
-    csSetToolbar('');
-    let data = {};
-    try { data = await csFetch(`/aggregate/central-status?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderCentral: aggregate/central-status fetch failed (may be 404/stub)', e); }
-    const spokes = (data && data.spokes) || [];
-    const mode = data.mode || '—';
-    const tokenValid = data.token_valid;
-    const banner = `<div class="flex items-center gap-3 mb-4">
-      <span class="text-xs text-slate-500">Mode: <b class="text-slate-700">${csEscape(mode)}</b></span>
-      <span class="text-xs text-slate-500">Token: ${tokenValid === undefined ? '<span class="text-slate-400">unknown</span>' : (tokenValid ? '<span class="text-green-600 font-bold">valid</span>' : '<span class="text-red-500 font-bold">invalid</span>')}</span>
-    </div>`;
-    let sitesHtml;
-    if (spokes.length === 0) {
-        sitesHtml = csEmpty('No central site data yet.', 'Configure Central API in Setup → Central API and spokes will report site status.');
-    } else {
-        sitesHtml = spokes.map(sp => {
-            const sites = sp.sites || [];
-            const rows = sites.map(st => `<tr>
-              <td class="px-3 py-2 font-mono text-xs">${csEscape(st.wsite)}</td>
-              <td class="px-3 py-2 text-slate-500">${csEscape(st.central_site || '—')}</td>
-              <td class="px-3 py-2 text-green-600">${csEscape(st.check_ok || 0)}</td>
-              <td class="px-3 py-2 text-red-500">${csEscape(st.check_fail || 0)}</td>
-              <td class="px-3 py-2 text-slate-400">${csEscape(st.check_unknown || 0)}</td>
-              <td class="px-3 py-2 font-bold text-slate-700">${csEscape(st.wireless_clients || 0)}</td>
-            </tr>`).join('');
-            return `<div class="hpe-card rounded-lg p-4 shadow-sm">
-              <div class="flex justify-between items-center mb-2"><span class="font-bold text-slate-700">${csEscape(sp.spoke_name || sp.spoke_id)}</span>${csOnlineBadge(sp.spoke_online)}</div>
-              ${csTable(['Site', 'Central Site', 'OK', 'Fail', 'Unknown', 'Clients'], rows)}
-            </div>`;
-        }).join('');
+// The Central Sites/Alerts/Clients tabs now pull the FULL Central inventory via
+// /aggregate/central-browse (hub forwards CS_CENTRAL_BROWSE → spoke browse_all),
+// independent of site_mappings. Shared fetch with a short in-memory cache so
+// switching tabs doesn't re-hit Central each time.
+let _csCentralBrowseCache = null, _csCentralBrowseAt = 0, _csCentralBrowseTenant = null;
+async function csCentralBrowse() {
+    const t = csTenant();
+    if (_csCentralBrowseCache && _csCentralBrowseTenant === t && (Date.now() - _csCentralBrowseAt) < 60000) {
+        return _csCentralBrowseCache;
     }
-    csSet(`<div class="space-y-4">${banner}${sitesHtml}</div>`);
+    let data = {};
+    try { data = await csFetch(`/aggregate/central-browse?tenant_id=${t}`) || {}; }
+    catch (e) { console.error('csCentralBrowse: /aggregate/central-browse failed', e); data = { warning: String(e && e.message || e) }; }
+    _csCentralBrowseCache = data; _csCentralBrowseAt = Date.now(); _csCentralBrowseTenant = t;
+    return data;
+}
+function _csCentralWarn(data) {
+    return data && data.warning ? `<div class="text-xs text-amber-600 mb-3">${csEscape(data.warning)}</div>` : '';
+}
+
+async function csRenderCentral() {
+    csSetToolbar('');
+    const data = await csCentralBrowse();
+    const sites = (data && data.sites) || [];
+    const warn = _csCentralWarn(data);
+    if (!sites.length) { csSet(`${warn}${csEmpty('No Central sites returned.', 'Verify the Central API token/mode in Setup → Central API and that the account has sites.')}`); return; }
+    const rows = sites.map(st => `<tr>
+      <td class="px-3 py-2 font-medium text-slate-700">${csEscape(st.name || '—')}</td>
+      <td class="px-3 py-2 text-slate-500 font-mono text-xs">${csEscape(st.site_id || '—')}</td>
+      <td class="px-3 py-2">${st.health_score != null && st.health_score !== '' ? csEscape(st.health_score) : '—'}</td>
+      <td class="px-3 py-2 font-bold text-slate-700">${csEscape(st.wireless_clients != null ? st.wireless_clients : 0)}</td>
+    </tr>`).join('');
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${sites.length} site(s)</div>${csTable(['Site', 'Site ID', 'Health', 'Clients'], rows)}</div></div>`);
 }
 
 // ── Central → Alerts ─────────────────────────────────────────────────────────
 async function csRenderCentralAlerts() {
     csSetToolbar('');
-    let data = {};
-    try { data = await csFetch(`/aggregate/central?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderCentralAlerts: aggregate/central fetch failed', e); }
-    const spokes = (data && data.spokes) || [];
-    if (!spokes.length) { csSet(csEmpty('No central alert data yet.')); return; }
-    const cards = spokes.map(sp => {
-        const c = sp.central_status || sp.central || {};
-        const alerts = c.central_alerts || c.hardware_alerts || [];
-        const rows = alerts.map(a => `<tr>
-          <td class="px-3 py-2 text-sm">${csEscape(a.site || a.name || '—')}</td>
-          <td class="px-3 py-2">${csStatusBadge(a.severity || a.level || 'warning')}</td>
-          <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(a.message || a.detail || '—')}</td>
-        </tr>`).join('');
-        return `<div class="hpe-card rounded-lg p-4 shadow-sm">
-          <div class="flex justify-between items-center mb-2"><span class="font-bold text-slate-700">${csEscape(sp.spoke_name || sp.spoke_id)}</span><span class="text-xs text-slate-400">${csEscape((alerts.length))} alert(s)</span></div>
-          ${csTable(['Site', 'Severity', 'Message'], rows)}
-        </div>`;
-    }).join('');
-    csSet(`<div class="space-y-4">${cards}</div>`);
+    const data = await csCentralBrowse();
+    const alerts = (data && data.alerts) || [];
+    const warn = _csCentralWarn(data);
+    if (!alerts.length) { csSet(`${warn}${csEmpty('No active Central alerts.')}`); return; }
+    const rows = alerts.map(a => `<tr>
+      <td class="px-3 py-2 text-sm">${csEscape(a.name || '—')}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(a.site || '—')}</td>
+      <td class="px-3 py-2">${csStatusBadge(a.severity || 'warning')}</td>
+      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(a.detail || a.description || a.category || '—')}</td>
+    </tr>`).join('');
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${alerts.length} alert(s)</div>${csTable(['Alert', 'Site', 'Severity', 'Detail'], rows)}</div></div>`);
 }
 
 // ── Central → Clients ────────────────────────────────────────────────────────
 async function csRenderCentralClients() {
     csSetToolbar('');
-    let data = {};
-    try { data = await csFetch(`/aggregate/central?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderCentralClients: aggregate/central fetch failed', e); }
-    const spokes = (data && data.spokes) || [];
-    if (!spokes.length) { csSet(csEmpty('No central client data yet.')); return; }
-    const cards = spokes.map(sp => {
-        const c = sp.central_status || sp.central || {};
-        const clients = c.central_clients || [];
-        const rows = clients.map(cl => `<tr>
-          <td class="px-3 py-2 text-sm">${csEscape(cl.name || cl.hostname || cl.mac || '—')}</td>
-          <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.ip || cl.ipaddr || '—')}</td>
-          <td class="px-3 py-2 text-slate-500">${csEscape(cl.site || '—')}</td>
-          <td class="px-3 py-2">${csStatusBadge(cl.status || 'unknown')}</td>
-        </tr>`).join('');
-        return `<div class="hpe-card rounded-lg p-4 shadow-sm">
-          <div class="flex justify-between items-center mb-2"><span class="font-bold text-slate-700">${csEscape(sp.spoke_name || sp.spoke_id)}</span><span class="text-xs text-slate-400">${csEscape(c.wireless_clients || 0)} wireless</span></div>
-          ${csTable(['Client', 'IP', 'Site', 'Status'], rows)}
-        </div>`;
-    }).join('');
-    csSet(`<div class="space-y-4">${cards}</div>`);
+    const data = await csCentralBrowse();
+    const clients = (data && data.clients) || [];
+    const warn = _csCentralWarn(data);
+    if (!clients.length) { csSet(`${warn}${csEmpty('No Central clients returned.')}`); return; }
+    const rows = clients.map(cl => `<tr>
+      <td class="px-3 py-2 text-sm">${csEscape(cl.hostname || cl.mac || '—')}</td>
+      <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.ip || '—')}</td>
+      <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.mac || '—')}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(cl.site || '—')}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(cl.ap || '—')}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(cl.ssid || '—')}</td>
+      <td class="px-3 py-2">${csStatusBadge(cl.status || 'unknown')}</td>
+    </tr>`).join('');
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${clients.length} client(s)</div>${csTable(['Client', 'IP', 'MAC', 'Site', 'AP', 'SSID', 'Status'], rows)}</div></div>`);
 }
 
 window.CS_CHILD_RENDERERS['Central::Sites']  = csRenderCentral;
@@ -2689,6 +2677,10 @@ async function csRenderSetupCentralApi() {
     try { conn = await csFetch(`/aggregate/central-status?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderSetupCentralApi: central-status fetch failed, defaulting to {}', e); conn = {}; }
     try { sites = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderSetupCentralApi: central-sites-config fetch failed, defaulting to {}', e); sites = {}; }
     conn = conn || {}; sites = sites || {};
+    // Discovered Central site names (from the browse endpoint) → a datalist so the
+    // "Central site" mapping field is a pick-list of real sites, not free text.
+    let _discoveredSites = [];
+    try { const _b = await csCentralBrowse(); _discoveredSites = ((_b && _b.sites) || []).map(s => s && s.name).filter(Boolean); } catch (e) { /* browse optional */ }
     const hc = conn.hub_central_config || {};
     const mode = conn.mode || (hc.api_version === 'new_central' ? 'central' : 'classic');
     const sm = (sites.site_mappings && typeof sites.site_mappings === 'object') ? sites.site_mappings : {};
@@ -2766,6 +2758,8 @@ async function csRenderSetupCentralApi() {
       </div>
 
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
+      <datalist id="cs-central-site-list">${_discoveredSites.map(n => `<option value="${csEscape(n)}">`).join('')}</datalist>
+      ${_discoveredSites.length ? `<p class="text-[10px] text-slate-400 mb-1">${_discoveredSites.length} Central site(s) discovered — the Central-site field is a pick-list.</p>` : '<p class="text-[10px] text-slate-400 mb-1">No Central sites discovered yet (check the connection); you can still type a site name.</p>'}
       <div id="cs-csc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-400 italic">No site mappings.</p>'}</div>
       <button onclick="csCscAddSm()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add mapping</button>
 
@@ -2788,7 +2782,7 @@ function csCscSmRow(w, c) {
     return `<div class="cs-csc-sm-row flex gap-2 items-center">
       <input data-cs-sm-w value="${csEscape(w != null ? w : '')}" placeholder="wireless site" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
       <span class="text-slate-400">→</span>
-      <input data-cs-sm-c value="${csEscape(c != null ? c : '')}" placeholder="Central site" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
+      <input data-cs-sm-c list="cs-central-site-list" value="${csEscape(c != null ? c : '')}" placeholder="Central site" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
       <button onclick="csCscRemoveRow(this)" class="text-red-500 text-xs px-2" title="Remove">✕</button>
     </div>`;
 }
