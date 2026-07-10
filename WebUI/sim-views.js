@@ -2637,13 +2637,15 @@ async function csRenderSetupCentralApi() {
     const sm = (sites.site_mappings && typeof sites.site_mappings === 'object') ? sites.site_mappings : {};
     const mc = Array.isArray(sites.monitored_checks) ? sites.monitored_checks : [];
     const hw = Array.isArray(sites.hardware_checks) ? sites.hardware_checks : [];
-    // Site-mapping dropdowns seed SYNCHRONOUSLY from the existing mappings so the
+    // Site-mapping <select>s seed SYNCHRONOUSLY from the existing mappings so the
     // form renders instantly (no blocking on the slow Central browse). The full
-    // lists (discovered Central sites + simulated wireless sites) are filled in
-    // place AFTER render by _csFillSiteDatalists — no re-render, so an open
-    // dropdown doesn't flash/close.
+    // option lists (discovered Central sites + simulated wireless sites) are
+    // refreshed in place AFTER render by _csRefreshSiteSelects — no re-render,
+    // so an open dropdown doesn't flash/close and each row keeps its selection.
     const _wirelessSites = Object.keys(sm);
     const _discoveredSites = Array.from(new Set(Object.values(sm).filter(Boolean)));
+    window._csWirelessSites = _wirelessSites.slice();
+    window._csCentralSites = _discoveredSites.slice();
     window._csCscMonitoredChecks = mc.map(c => ({ type: c.type || 'alert', id: c.id, name: c.name || c.id }));
     window._csCscCatalog = null;
 
@@ -2716,9 +2718,7 @@ async function csRenderSetupCentralApi() {
       </div>
 
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
-      <datalist id="cs-central-site-list">${_discoveredSites.map(n => `<option value="${csEscape(n)}">`).join('')}</datalist>
-      <datalist id="cs-wireless-site-list">${_wirelessSites.map(n => `<option value="${csEscape(n)}">`).join('')}</datalist>
-      ${_discoveredSites.length ? `<p class="text-[10px] text-slate-400 mb-1">${_discoveredSites.length} Central site(s) discovered — the Central-site field is a pick-list.</p>` : '<p class="text-[10px] text-slate-400 mb-1">No Central sites discovered yet (check the connection); you can still type a site name.</p>'}
+      ${_discoveredSites.length ? `<p class="text-[10px] text-slate-400 mb-1">${_discoveredSites.length} Central site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-[10px] text-slate-400 mb-1">No Central sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
       <div id="cs-csc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-400 italic">No site mappings.</p>'}</div>
       <button onclick="csCscAddSm()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add mapping</button>
 
@@ -2735,41 +2735,59 @@ async function csRenderSetupCentralApi() {
     </div>`;
 
     csSet(`<div class="max-w-4xl space-y-4">${connCard}${sitesCard}</div>`);
-    // Fill the site-mapping dropdowns AFTER the form is on screen — updates the
-    // <datalist> options in place (no re-render), so a click on either field
-    // never flashes. Fire-and-forget; the slow Central browse can't block the tab.
-    _csFillSiteDatalists();
+    // Refresh the site-mapping <select> options AFTER the form is on screen —
+    // rewrites each row's options in place (no re-render), so a dropdown stays
+    // open and each row keeps its selection. Fire-and-forget; the slow Central
+    // browse can't block the tab.
+    _csRefreshSiteSelects();
 }
 
-// Merge `values` into the <datalist id> options without disturbing the input.
-function _csSetDatalistOptions(id, values) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    const have = new Set(Array.from(el.querySelectorAll('option')).map(o => o.value));
-    (values || []).forEach(v => { if (v) have.add(v); });
-    el.innerHTML = Array.from(have).map(v => `<option value="${csEscape(v)}">`).join('');
+// Build <option> markup for a site <select>: a blank "— select —" first, then
+// every known site, with `current` always present and selected (so an existing
+// mapping to a site not in the discovered list still shows). Sorted for stable
+// display.
+function _csSiteOptions(list, current) {
+    const set = new Set((list || []).filter(Boolean));
+    if (current) set.add(current);
+    const opts = Array.from(set).sort();
+    const cur = current || '';
+    return [`<option value=""${cur === '' ? ' selected' : ''}>— select —</option>`]
+        .concat(opts.map(o => `<option value="${csEscape(o)}"${o === cur ? ' selected' : ''}>${csEscape(o)}</option>`))
+        .join('');
 }
-async function _csFillSiteDatalists() {
+
+// Refresh the site-mapping <select> options AFTER render: fetch the full
+// wireless + Central site lists, merge into the window globals, then rewrite
+// each row's <select> options in place (preserving its current selection). No
+// re-render, so an open dropdown doesn't flash/close.
+async function _csRefreshSiteSelects() {
     // Wireless sites (fast, local): connected clients' config.wsite.
     try {
         const cl = await csFetch(`/aggregate/clients?tenant_id=${csTenant()}`) || {};
         const rows = cl.clients || cl.rows || [];
-        _csSetDatalistOptions('cs-wireless-site-list',
-            rows.map(c => (c.config && c.config.wsite) || c.wsite).filter(Boolean));
+        const found = rows.map(c => (c.config && c.config.wsite) || c.wsite).filter(Boolean);
+        window._csWirelessSites = Array.from(new Set((window._csWirelessSites || []).concat(found))).sort();
     } catch (e) { /* clients optional */ }
     // Central sites (slower: forwards to the spoke's Central browse).
     try {
         const b = await csCentralBrowse();
-        _csSetDatalistOptions('cs-central-site-list',
-            ((b && b.sites) || []).map(s => s && s.name).filter(Boolean));
+        const found = ((b && b.sites) || []).map(s => s && s.name).filter(Boolean);
+        window._csCentralSites = Array.from(new Set((window._csCentralSites || []).concat(found))).sort();
     } catch (e) { /* browse optional */ }
+    document.querySelectorAll('#cs-csc-sm-rows .cs-csc-sm-row').forEach(row => {
+        const wSel = row.querySelector('[data-cs-sm-w]');
+        const cSel = row.querySelector('[data-cs-sm-c]');
+        if (wSel) { const cur = wSel.value; wSel.innerHTML = _csSiteOptions(window._csWirelessSites, cur); wSel.value = cur; }
+        if (cSel) { const cur = cSel.value; cSel.innerHTML = _csSiteOptions(window._csCentralSites, cur); cSel.value = cur; }
+    });
 }
 
 function csCscSmRow(w, c) {
+    const selCls = 'flex-1 bg-white border border-slate-300 rounded-md px-2 py-1.5 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-green-500';
     return `<div class="cs-csc-sm-row flex gap-2 items-center">
-      <input data-cs-sm-w list="cs-wireless-site-list" value="${csEscape(w != null ? w : '')}" placeholder="wireless site" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
+      <select data-cs-sm-w class="${selCls}">${_csSiteOptions(window._csWirelessSites, w)}</select>
       <span class="text-slate-400">→</span>
-      <input data-cs-sm-c list="cs-central-site-list" value="${csEscape(c != null ? c : '')}" placeholder="Central site" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
+      <select data-cs-sm-c class="${selCls}">${_csSiteOptions(window._csCentralSites, c)}</select>
       <button onclick="csCscRemoveRow(this)" class="text-red-500 text-xs px-2" title="Remove">✕</button>
     </div>`;
 }
