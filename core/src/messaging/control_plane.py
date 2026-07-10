@@ -1769,6 +1769,26 @@ class BaseControlPlane:
         # as a zombie — the correct call, since it isn't making progress).
         if cmd_type == "HUB_PING":
             return {"status": "SUCCESS", "nonce": data.get("nonce")}
+
+        # Remote Console (WebUI → troubleshooting). The hub only ever dispatches
+        # RUN_COMMAND after gating on Global-Admin + the remote_exec.enabled knob;
+        # ``allow_shell`` mirrors the WebUI "Debug (shell)" toggle. The frame is
+        # HMAC-signed by the authenticated hub, so a spoke trusts it exactly like
+        # SPOKE_UPDATE. Runs off the event loop (subprocess) so a slow command
+        # never stalls the shared spoke/role loop; the runner enforces the
+        # allowlist (when not shell), a timeout, and an output cap.
+        if cmd_type == "RUN_COMMAND":
+            try:
+                from ..command_runner import run_local_command
+            except ImportError:  # bare-module path (production: core/src on sys.path)
+                from command_runner import run_local_command  # type: ignore
+            res = await asyncio.to_thread(
+                run_local_command,
+                data.get("command", ""),
+                bool(data.get("allow_shell", False)),
+                float(data.get("timeout", 30.0) or 30.0),
+            )
+            return {"status": "SUCCESS", "result": res}
         # The hub's Agents tile / cs-bridge fan GET_AGENTS out to spokes. Answer it
         # HERE for every spoke so it's never routed to a module — a non-agent
         # module (nw/netbox/dns/dhcp/ldap/...) or a role sub-spoke would otherwise

@@ -1141,7 +1141,7 @@ def create_app(hub):
         #                        fleet). Admin-only; /api/help/available stays authed-read.
         _ADMIN_API_PREFIXES = ("/api/agent/", "/api/generic/", "/api/ldap/", "/api/pxmx/agents/",
                                "/api/cppm/probe", "/api/cppm/test-auth", "/cppm/refresh", "/cppm/health",
-                               "/api/help/ask")
+                               "/api/help/ask", "/api/exec")
         if any(path.startswith(p) for p in _ADMIN_API_PREFIXES):
             if not _is_admin(sess):
                 return JSONResponse(status_code=403, content={"detail": "Admin access required"})
@@ -1469,7 +1469,7 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes,
     )
     setup.register(app, hub, ctx)
     firewall.register(app, hub, ctx)
@@ -1490,6 +1490,7 @@ def create_app(hub):
     net_services.register(app, hub, ctx)
     admin_cache.register(app, hub, ctx)
     help_assistant.register(app, hub, ctx)
+    exec_routes.register(app, hub, ctx)
 
     # ── H1: scrub internal-exception detail from 5xx for non-Global callers ──
     # Routes raise ``HTTPException(500, detail=str(e))`` in their

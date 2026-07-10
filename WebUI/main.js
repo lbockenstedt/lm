@@ -1142,7 +1142,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions', 'API Tokens'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
-    setup: ['Spokes & Agents', 'Module Management', 'Simulations'],
+    setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['OUs', 'Users', 'Groups'],
@@ -3584,6 +3584,142 @@ function _onSaTenantFilterChange() {
     loadSpokesAndAgents();
 }
 
+// ── Setup → Remote Console ───────────────────────────────────────────────────
+// Run a diagnostic (allowlist) or — with Debug/shell mode on — arbitrary command
+// on the hub or any connected spoke/agent, from the WebUI, so troubleshooting
+// doesn't mean dropping into CLI. Global-Admin only (nav + backend gated), OFF by
+// default, audit-logged. Endpoints: /api/exec/config (GET/POST knobs),
+// /api/exec/targets (GET), /api/exec (POST run).
+function _renderSetupRemoteConsoleTile(content) {
+    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card} space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Remote Console ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <span id="rc-status" class="text-xs text-slate-400"></span>
+            </div>
+            <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
+                Runs commands on the hub or a connected spoke/agent for troubleshooting — <b>Global-Admin only, every command is audit-logged</b>. Off by default.
+                In diagnostic mode only a curated allowlist runs (systemctl, journalctl, tail, grep, ps, df, ip, git …).
+                <b>Debug (shell) mode</b> unlocks arbitrary commands — enable it only while actively troubleshooting; this hub is internet-facing.
+            </div>
+            <div class="flex flex-wrap gap-6">
+                <label class="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" id="rc-enabled" class="w-4 h-4 text-green-600 rounded" onchange="saveExecConfig()">
+                    Enable Remote Console
+                </label>
+                <label class="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" id="rc-shell" class="w-4 h-4 text-red-600 rounded" onchange="saveExecConfig()">
+                    Debug (shell) mode — allow <b>arbitrary</b> commands
+                </label>
+            </div>
+            <div id="rc-runner" class="space-y-3 pt-3 border-t border-slate-100">
+                <div class="flex flex-wrap gap-2 items-end">
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Target</label>
+                        <select id="rc-target" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 min-w-[220px]"><option value="hub">Hub (this box)</option></select>
+                    </div>
+                    <button onclick="loadExecTargets()" class="${btnSecCls} text-xs">↻ Targets</button>
+                </div>
+                <div class="space-y-1">
+                    <label class="${labelCls}">Command</label>
+                    <div class="flex gap-2">
+                        <input type="text" id="rc-command" placeholder="systemctl status lm-agent" class="${inputCls} font-mono" onkeydown="if(event.key==='Enter')runExecCommand()">
+                        <button onclick="runExecCommand()" class="${btnCls}" id="rc-run">Run</button>
+                    </div>
+                </div>
+                <pre id="rc-output" class="bg-slate-900 text-slate-100 text-xs font-mono rounded-md p-3 overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto hidden"></pre>
+            </div>
+        </div>`;
+    loadExecConfig();
+    loadExecTargets();
+}
+
+function _rcReflectEnabled(enabled) {
+    const runner = document.getElementById('rc-runner');
+    if (runner) { runner.classList.toggle('opacity-40', !enabled); runner.classList.toggle('pointer-events-none', !enabled); }
+    const status = document.getElementById('rc-status');
+    if (status) { status.textContent = enabled ? 'enabled' : 'disabled'; status.className = 'text-xs ' + (enabled ? 'text-green-600 font-bold' : 'text-slate-400'); }
+    const sh = document.getElementById('rc-shell');
+    if (sh) sh.disabled = !enabled;
+}
+
+async function loadExecConfig() {
+    try {
+        const r = await setupFetch('/api/exec/config');
+        if (!r.ok) return;
+        const d = await r.json();
+        const en = document.getElementById('rc-enabled');
+        const sh = document.getElementById('rc-shell');
+        if (en) en.checked = !!d.enabled;
+        if (sh) sh.checked = !!d.allow_shell;
+        _rcReflectEnabled(!!d.enabled);
+    } catch (_e) { /* leave defaults */ }
+}
+
+async function saveExecConfig() {
+    const enabled = !!document.getElementById('rc-enabled')?.checked;
+    let allow_shell = !!document.getElementById('rc-shell')?.checked;
+    if (allow_shell && enabled &&
+        !confirm('Enable DEBUG (shell) mode?\n\nThis lets a Global-Admin run ARBITRARY commands on the hub and any spoke/agent. This hub is internet-facing — only enable while actively troubleshooting, and turn it off after.')) {
+        const sh = document.getElementById('rc-shell'); if (sh) sh.checked = false;
+        allow_shell = false;
+    }
+    try {
+        const r = await setupFetch('/api/exec/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled, allow_shell }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { if (typeof showToast === 'function') showToast('Failed: ' + (d.detail || r.status), 'error'); return; }
+        const en = document.getElementById('rc-enabled'); if (en) en.checked = !!d.enabled;
+        const sh = document.getElementById('rc-shell'); if (sh) sh.checked = !!d.allow_shell;
+        _rcReflectEnabled(!!d.enabled);
+    } catch (e) { if (typeof showToast === 'function') showToast('Error: ' + e.message, 'error'); }
+}
+
+async function loadExecTargets() {
+    try {
+        const r = await setupFetch('/api/exec/targets');
+        if (!r.ok) return;
+        const d = await r.json();
+        const sel = document.getElementById('rc-target');
+        if (!sel) return;
+        const cur = sel.value;
+        sel.innerHTML = (d.targets || []).map(t =>
+            `<option value="${t.id}">${t.label}${t.kind === 'hub' ? '' : ' · ' + t.kind}</option>`).join('');
+        if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+    } catch (_e) { /* keep hub-only */ }
+}
+
+async function runExecCommand() {
+    const target = document.getElementById('rc-target')?.value || 'hub';
+    const command = (document.getElementById('rc-command')?.value || '').trim();
+    const out = document.getElementById('rc-output');
+    const btn = document.getElementById('rc-run');
+    if (!command) return;
+    if (out) { out.classList.remove('hidden'); out.textContent = 'Running…'; }
+    if (btn) btn.disabled = true;
+    try {
+        const r = await setupFetch('/api/exec', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target, command }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { if (out) out.textContent = '⛔ ' + (d.detail || ('HTTP ' + r.status)); return; }
+        let text = '';
+        if (d.error) text += '⛔ ' + d.error + '\n';
+        if (d.stdout) text += d.stdout;
+        if (d.stderr) text += (d.stdout ? '\n' : '') + '[stderr]\n' + d.stderr;
+        text += `\n\n— exit ${d.rc}${d.mode ? ' · ' + d.mode + ' mode' : ''}${d.truncated ? ' · output truncated' : ''} —`;
+        if (out) out.textContent = text.trim();
+    } catch (e) {
+        if (out) out.textContent = '⛔ ' + e.message;
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 // Setup → Tenant Config tile. GET /api/tenants (core/src/api.py get_tenants).
 function _renderSetupTenantTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
@@ -4408,6 +4544,7 @@ const SETUP_TILES = {
     'Tenant Config':    _renderSetupTenantTile,
     'User Access':      _renderSetupUserAccessTile,
     'Simulations':      _renderSetupSimulationsTile,
+    'Remote Console':   _renderSetupRemoteConsoleTile,
 };
 
 // _renderSetupSection — dispatches to one of the _renderSetup*Tile helpers
