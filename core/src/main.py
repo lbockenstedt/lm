@@ -671,6 +671,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # (or a reconnect that's still broken) emits a fresh ERROR rather than
         # silently suppressing it after the first one.
         self._unauth_warned_spokes: Set[str] = set()
+        # Per-spoke last-re-delivery timestamp for _maybe_redeliver_session_key
+        # (rate-limits re-pushing the current session key to a spoke that's
+        # still signing with a previous/rotated-out key — missed rotation push).
+        self._rotation_repush_at: Dict[str, float] = {}
         # NAC (CPPM) spokes that are CONNECTED but UNCONFIGURED — i.e. no
         # nac_instances entry is bound to this spoke (or the bound instance has
         # no 'host'), so push_config_to_spoke never delivered an UPDATE_CONFIG
@@ -2157,6 +2161,51 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "pushed": pushed,
                 "message": f"secret rotated; {'new key pushed to spoke' if pushed else 'new key active on next connect'}"}
 
+    async def _maybe_redeliver_session_key(self, spoke_id: str) -> None:
+        """Re-push the CURRENT session key to a spoke still signing with a
+        previous (rotated-out) key.
+
+        The spoke missed the original ``SPOKE_UPDATE_SESSION_KEY`` push (transient
+        disconnect/timing), so it authenticated via the history window but never
+        adopted the current key — hub→spoke replies are signed with the current
+        key, which the spoke can't verify, producing the ``Bytes signature
+        mismatch`` / ``GET_AGENTS`` / ``CS_INGEST_TELEMETRY`` timeout skew. The
+        redelivery is signed with the PREVIOUS secret (``history[0]``, which the
+        spoke still holds — that's why auth passed via history) so the spoke can
+        verify and install the current key without a full re-onboard.
+
+        Rate-limited to once per 60s per spoke. Idempotent: re-installing the
+        already-current secret is a no-op on the spoke side, so a frame signed
+        with an in-flight pre-rotation key (legitimately mid-adoption) triggering
+        this is harmless. If the spoke's secret is no longer in history (evicted
+        by a later rotation, or wiped), auth would have failed and the spoke
+        would self-heal via 1008 → zero-touch instead.
+        """
+        now = time.time()
+        if now - self._rotation_repush_at.get(spoke_id, 0.0) < 60:
+            return
+        if spoke_id not in self.active_connections:
+            return
+        current = self.key_manager.current_session_secret(spoke_id)
+        prev = self.key_manager.previous_session_secret(spoke_id)
+        if not current or not prev:
+            return
+        self._rotation_repush_at[spoke_id] = now
+        msg = Message(
+            header=MessageHeader(
+                message_id=str(uuid.uuid4()), timestamp=time.time(),
+                sender_id="hub", destination_id=spoke_id),
+            payload=MessagePayload(
+                type="SPOKE_UPDATE_SESSION_KEY", data={"secret": current}))
+        try:
+            await self.send_to_spoke(msg, signing_secret=prev)
+            logger.info(f"Re-delivered current session key to {spoke_id} "
+                        f"(was signing with previous key — missed rotation push).")
+            self.record_spoke_event(spoke_id, "session_key_redelivered",
+                                    "spoke on previous key — current key re-pushed")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Re-deliver session key to {spoke_id} failed: {e}")
+
     async def rotate_all_spoke_secrets_now(self) -> Dict[str, Any]:
         """On-demand in-place rotation for every approved spoke with a key
         (item 9b) — the operator's "rotate everything after an incident" lever.
@@ -3120,7 +3169,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
                 signature = sig or None
                 if signature:
-                    if not self.key_manager.verify_signature(spoke_id, body_str.encode(), sig):
+                    src = self.key_manager.verify_signature_source(spoke_id, body_str.encode(), sig)
+                    if src is None:
                         logger.warning(f"Invalid signature from spoke {spoke_id}")
                         continue
                     # A verified signature proves the spoke installed its session
@@ -3129,6 +3179,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # (legacy/incompatible agent that can't adopt a key) stays
                     # unauthenticated, so command routes can fail fast.
                     self.spoke_authenticated[spoke_id] = True
+                    # The spoke is signing with a PREVIOUS (rotated-out) key — it
+                    # authenticated via the history window but never adopted the
+                    # current key (missed the SPOKE_UPDATE_SESSION_KEY push). That
+                    # is exactly the skew that produces "Bytes signature mismatch"
+                    # on hub→spoke replies + GET_AGENTS/telemetry timeouts: the
+                    # spoke→hub direction verifies (history), hub→spoke does not
+                    # (spoke lacks the current key). Re-deliver the current key
+                    # signed with the previous secret so the spoke can adopt it
+                    # without a full re-onboard. Rate-limited per spoke.
+                    if src == "history":
+                        await self._maybe_redeliver_session_key(spoke_id)
                     # First signed frame clears any prior "never authenticated"
                     # diagnosis (idempotent with the connect-time discard).
                     self._unauth_warned_spokes.discard(spoke_id)

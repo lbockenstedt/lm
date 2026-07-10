@@ -138,6 +138,8 @@ def _fake_hub():
             self.mailbox = _FakeMailbox()
             self.events = []
             self.sent = []  # (msg, signing_secret)
+            # _maybe_redeliver_session_key rate-limit dict (instance-local).
+            self._rotation_repush_at = {}
 
         async def send_to_spoke(self, msg, signing_secret=None):
             self.sent.append((msg, signing_secret))
@@ -258,3 +260,115 @@ async def test_revoked_secret_no_longer_verifies():
     await hub.revoke_spoke("s1")
     # After revoke, the same secret is dead.
     assert hub.key_manager.get_valid_key("s1", secret) is None
+
+
+# ── 9d: generate_first_secret preserves history + missed-rotation self-heal ────
+
+def test_generate_first_secret_saves_old_key_to_history():
+    """Re-generating a first secret on an already-keyed spoke (re-approve storm /
+    zero-touch re-onboard of a keyed spoke) MUST save the existing key to history
+    — mirroring rotate_key — so a missed SPOKE_UPDATE_SESSION_KEY push can't
+    permanently lock out a spoke that was already keyed. Without this, the
+    overwrite destroys the only key the spoke still holds with no fallback."""
+    km = _make_km()
+    first = km.generate_first_secret("s1")
+    # Re-generate (e.g. re-approve storm): the old key must survive in history.
+    second = km.generate_first_secret("s1")
+    assert second != first
+    assert km.current_session_secret("s1") == second
+    # The previous key is retained in history so the spoke still holding `first`
+    # can authenticate (and the hub can redeliver the current key signed with it).
+    assert km.previous_session_secret("s1") == first
+    assert km.get_valid_key("s1", first) is not None  # old secret still accepted
+    # History window stays bounded at 1 previous (Total: Current + 1 Previous).
+    assert len(km.history["s1"]) == 1
+
+
+def test_generate_first_secret_no_history_for_brand_new_spoke():
+    """A truly new spoke (no existing key) gets no history entry — behavior
+    unchanged from before the fix."""
+    km = _make_km()
+    secret = km.generate_first_secret("s1")
+    assert km.current_session_secret("s1") == secret
+    assert km.history.get("s1", []) == []
+    assert km.previous_session_secret("s1") is None
+
+
+def test_verify_signature_source_distinguishes_current_vs_history():
+    """verify_signature_source reports which key verified a frame so the hub can
+    detect a spoke still signing with a rotated-out key (history) and redeliver
+    the current key."""
+    from security.signer import MessageSigner
+    km = _make_km()
+    first = km.generate_first_secret("s1")
+    second = km.generate_first_secret("s1")  # first → history, second → current
+    body = b'{"header":{"type":"x"},"payload":{}}'
+    sig_cur = MessageSigner(second).sign_bytes(body)
+    sig_old = MessageSigner(first).sign_bytes(body)
+    assert km.verify_signature_source("s1", body, sig_cur) == "current"
+    assert km.verify_signature_source("s1", body, sig_old) == "history"
+    assert km.verify_signature_source("s1", body, "bad-sig") is None
+    # verify_signature (bool) still works for any caller using the old API.
+    assert km.verify_signature("s1", body, sig_cur) is True
+    assert km.verify_signature("s1", body, sig_old) is True
+    assert km.verify_signature("s1", body, "bad-sig") is False
+
+
+async def test_maybe_redeliver_session_key_pushes_current_signed_with_prev():
+    """The self-heal: a connected spoke still signing with a previous (rotated-
+    out) key gets the CURRENT session key re-pushed, signed with the PREVIOUS
+    secret (which the spoke still holds), so it can adopt without re-onboarding.
+    This is the missed-rotation-push recovery path."""
+    hub = _fake_hub()
+    first = hub.key_manager.generate_first_secret("s1")
+    second = hub.key_manager.generate_first_secret("s1")  # first→history, second→current
+    hub.active_connections["s1"] = _FakeWS()
+
+    await hub._maybe_redeliver_session_key("s1")
+    assert len(hub.sent) == 1
+    msg, signing_secret = hub.sent[0]
+    # Push carries the CURRENT secret, signed with the PREVIOUS (history[0]).
+    assert msg.payload.type == "SPOKE_UPDATE_SESSION_KEY"
+    assert msg.payload.data["secret"] == second
+    assert signing_secret == first
+    assert any(ev[1] == "session_key_redelivered" for ev in hub.events)
+
+
+async def test_maybe_redeliver_skips_when_not_connected():
+    """No live WS → no push (the spoke will pick up the current key on its next
+    connect via the normal auth/history path or 1008→zero-touch)."""
+    hub = _fake_hub()
+    hub.key_manager.generate_first_secret("s1")
+    hub.key_manager.generate_first_secret("s1")
+    hub.active_connections.pop("s1", None)  # not connected
+    await hub._maybe_redeliver_session_key("s1")
+    assert hub.sent == []
+
+
+async def test_maybe_redeliver_rate_limited():
+    """Re-delivery is rate-limited to once per 60s per spoke — a second call
+    within the window is a no-op (no second push)."""
+    hub = _fake_hub()
+    hub.key_manager.generate_first_secret("s1")
+    hub.key_manager.generate_first_secret("s1")
+    hub.active_connections["s1"] = _FakeWS()
+    await hub._maybe_redeliver_session_key("s1")
+    assert len(hub.sent) == 1
+    # Immediately again — rate-limited, no new push.
+    await hub._maybe_redeliver_session_key("s1")
+    assert len(hub.sent) == 1
+    # After the 60s window elapses, a redelivery is allowed again.
+    hub._rotation_repush_at["s1"] = time.time() - 61
+    await hub._maybe_redeliver_session_key("s1")
+    assert len(hub.sent) == 2
+
+
+async def test_maybe_redeliver_no_op_when_no_history():
+    """If the spoke has no previous key in history (e.g. a fresh first-secret,
+    never rotated), there's nothing to sign a redelivery with → skip. Such a
+    spoke is on the current key already, so no redelivery is needed anyway."""
+    hub = _fake_hub()
+    hub.key_manager.generate_first_secret("s1")  # current only, no history
+    hub.active_connections["s1"] = _FakeWS()
+    await hub._maybe_redeliver_session_key("s1")
+    assert hub.sent == []

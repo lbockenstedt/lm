@@ -238,7 +238,22 @@ class KeyManager:
     def generate_first_secret(self, spoke_id: str) -> str:
         """
         Generates a 'First Secret' for a new spoke to use for onboarding.
+
+        If the spoke already holds a key (re-approve, or zero-touch re-onboard of
+        an already-keyed spoke), save the existing key to history first —
+        mirroring ``rotate_key`` — so a missed ``SPOKE_UPDATE_SESSION_KEY`` push
+        can't permanently lock out a spoke that was already keyed. Without this,
+        overwriting ``keys[spoke_id]`` destroys the only key the spoke still
+        holds with no fallback, and one dropped delivery = permanent skew.
         """
+        existing = self.keys.get(spoke_id)
+        if existing is not None:
+            if spoke_id not in self.history:
+                self.history[spoke_id] = []
+            self.history[spoke_id].insert(0, existing)
+            # Keep only 1 previous key (Total: Current + 1 Previous)
+            self.history[spoke_id] = self.history[spoke_id][:1]
+
         secret = secrets.token_urlsafe(32)
         key = ManagedKey(
             key_id=str(uuid.uuid4()),
@@ -397,8 +412,9 @@ class KeyManager:
         delivery — signed with the PREVIOUS secret the spoke still holds)."""
         return MessageSigner(secret).encode_frame(message_dict)
 
-    def verify_signature(self, spoke_id: str, message_bytes: bytes, signature: str) -> bool:
-        """Verifies the HMAC signature of a message.
+    def verify_signature_source(self, spoke_id: str, message_bytes: bytes,
+                                signature: str) -> Optional[str]:
+        """Which key verified the signature: ``"current"``, ``"history"``, or ``None``.
 
         Accepts the current key OR any key in the rotation history, mirroring
         ``get_valid_key``'s auth-time acceptance. Without the history window a
@@ -406,12 +422,34 @@ class KeyManager:
         ``rotate_key`` pushed the new secret to the spoke) would wrongly fail,
         creating an auth/verify asymmetry where a spoke authenticates via the
         history window but every subsequent frame fails verification.
+
+        Distinguishing current-vs-history lets the hub detect a spoke that
+        authenticated via the rotation window but never adopted the current key
+        (it missed the ``SPOKE_UPDATE_SESSION_KEY`` push) — the caller can then
+        re-deliver the current key signed with the previous secret so the spoke
+        can adopt it without a full re-onboard (see
+        ``main.py::_maybe_redeliver_session_key``).
         """
         key = self.keys.get(spoke_id)
         if key and MessageSigner(key.secret).verify_bytes(message_bytes, signature):
-            return True
+            return "current"
         # Rotation window: tolerate frames signed with the previous key.
         for hist in self.history.get(spoke_id, []):
             if MessageSigner(hist.secret).verify_bytes(message_bytes, signature):
-                return True
-        return False
+                return "history"
+        return None
+
+    def verify_signature(self, spoke_id: str, message_bytes: bytes, signature: str) -> bool:
+        """Verifies the HMAC signature of a message (current key OR history)."""
+        return self.verify_signature_source(spoke_id, message_bytes, signature) is not None
+
+    def previous_session_secret(self, spoke_id: str) -> Optional[str]:
+        """The most-recent prior secret the spoke may still hold, or None.
+
+        Used to sign a re-delivered ``SPOKE_UPDATE_SESSION_KEY`` so a spoke that
+        missed the rotation push can verify the redelivery with the key it still
+        has (its ``self.signer`` == this previous secret when auth passed via the
+        history window — ``get_valid_key`` only accepts the single kept entry).
+        """
+        hist = self.history.get(spoke_id, [])
+        return hist[0].secret if hist else None
