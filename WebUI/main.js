@@ -11782,10 +11782,9 @@ async function loadDNSData(subMenu) {
 }
 
 // ─── Certificate Management (le) view ──────────────────────────────────────
-// Minimal first-pass render: status bar (version / certbot present / count) +
-// a certificates table. The le spoke's handlers are structured stubs until
-// certbot/acme.sh is wired, so the table is usually empty and the status bar
-// carries the "not yet wired" message from the spoke.
+// Status bar (managed count) + a certificates table. The le spoke's handlers
+// are structured stubs until certbot/acme.sh is wired, so the table is usually
+// empty and the status bar carries the "not yet wired" message from the spoke.
 async function loadLEData(subMenu) {
     const container = document.getElementById('le-content');
     if (!container) return;
@@ -11803,11 +11802,7 @@ async function loadLEData(subMenu) {
         const bar = document.getElementById('le-status-bar');
         if (bar && s.ok && s.data) {
             const d = inner(s.data);
-            const certbot = d.certbot_present ? 'present' : 'not installed';
-            const certbotColor = d.certbot_present ? 'text-green-600' : 'text-amber-500';
             bar.innerHTML =
-                `<span><b class="text-sm text-slate-700">le</b></span>` +
-                `<span>certbot: <b class="text-sm ${certbotColor}">${certbot}</b></span>` +
                 `<span><b class="text-sm text-slate-700">${d.certs_managed ?? 0}</b> managed</span>`;
         } else if (bar) {
             bar.innerHTML = `<span class="text-amber-600">${s.detail || 'le spoke not connected'}</span>`;
