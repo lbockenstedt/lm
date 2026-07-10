@@ -68,6 +68,7 @@ class _RepoSyncHub(RepoSyncMixin):
             "status": "checked", "message": "Hub is current."}
         self._perform_exc = perform_exc
         self.perform_calls = 0
+        self.perform_kwargs = []   # (force, force_spokes) per call
 
     # No real git in unit tests → every provisioning_repos subdir is "skipped".
     def _is_git_repo(self, path):
@@ -75,6 +76,7 @@ class _RepoSyncHub(RepoSyncMixin):
 
     async def perform_update(self, force=False, force_spokes=False):
         self.perform_calls += 1
+        self.perform_kwargs.append((force, force_spokes))
         if self._perform_exc:
             raise self._perform_exc
         return self._perform_result
@@ -111,6 +113,45 @@ async def test_run_all_records_error_when_perform_update_raises(caplog):
     # [sync-error] marker so the cause lands in the hub log + GET_ERROR_LOGS.
     assert any("[sync-error]" in r.message and "git lock busy" in r.message
                for r in caplog.records)
+
+
+# ── force threading (footer "Update now" / "Sync now" must force the restart) ──
+# Regression for the "Update button doesn't actually force" bug: the footer
+# "Update now" button set force_spokes=True but NOT force=True, so the hub
+# restart sentinel was non-force → gated to the 02:00 maintenance window → the
+# button's name said "force" but a click never restarted the hub. Now the
+# button routes pass force=True, threaded through run_repo_sync_all into
+# perform_update. The background loop stays force=False (routine auto
+# hub_updated stays gated — the only path the maintenance window is meant to
+# defer). Staleness itself forces via perform_update's stale_reload branch
+# (covered by test_update_health_empty_hub.py + test_stale_restart_force.py).
+
+@pytest.mark.asyncio
+async def test_run_all_force_true_threads_to_perform_update():
+    # A manual "Update now" / "Sync now" click → force=True reaches perform_update.
+    h = _RepoSyncHub(global_config={"repo_sync": {"enabled": True, "interval_seconds": 900}})
+    await h.run_repo_sync_all(force=True)
+    assert h.perform_calls == 1
+    assert h.perform_kwargs == [(True, False)], h.perform_kwargs
+
+
+@pytest.mark.asyncio
+async def test_run_all_force_false_threads_to_perform_update():
+    # The scheduled background loop → force=False (routine auto hub_updated
+    # stays gated to the maintenance window — only the gate's intended deferral).
+    h = _RepoSyncHub(global_config={"repo_sync": {"enabled": True, "interval_seconds": 900}})
+    await h.run_repo_sync_all()
+    assert h.perform_calls == 1
+    assert h.perform_kwargs == [(False, False)], h.perform_kwargs
+
+
+@pytest.mark.asyncio
+async def test_run_all_force_and_force_spokes_thread_independently():
+    # force (hub restart gate bypass) and force_spokes (spoke fan-out cooldown
+    # bypass) are independent knobs — a manual click can set either/both.
+    h = _RepoSyncHub(global_config={"repo_sync": {"enabled": True, "interval_seconds": 900}})
+    await h.run_repo_sync_all(force_spokes=True, force=True)
+    assert h.perform_kwargs == [(True, True)], h.perform_kwargs
 
 
 # ── loop ─────────────────────────────────────────────────────────────────────

@@ -95,3 +95,52 @@ async def test_set_hub_up_to_date_no_warnings(monkeypatch):
     health = await h.check_update_health()
     assert not any("empty/missing" in w for w in health["warnings"])
     assert not any("BEHIND" in w for w in health["warnings"])
+
+
+# ── stale process → FORCE watchdog sentinel (never gated to the maint window) ──
+# Regression for the recurring "I keep getting stale hubs" shape: a fix lands on
+# disk mid-day but the running process is behind, and the stale-restart was
+# gated to the 02:00 maintenance window (non-force sentinel) → the fix sat
+# UNLOADED for hours. Staleness is an ERROR state, not planned maintenance: the
+# sentinel must be FORCE so the watchdog bypasses the gate and reloads within
+# one ~60s cycle, day or night.
+
+async def _disk_v502():
+    return "v.502"
+
+
+@pytest.mark.asyncio
+async def test_stale_process_writes_force_sentinel(monkeypatch):
+    h = _HealthHub({"update_sources": {"hub": "https://github.com/lbockenstedt/lm.git"}},
+                   local_commit="aaa", remote_commit="aaa")
+    h._startup_version = "v.483"      # running process is BEHIND on-disk v.502
+    h.get_local_version = _disk_v502  # disk version
+    captured = []
+    h._request_watchdog_restart = lambda reason, force=False: captured.append((reason, force))
+    monkeypatch.setattr(up.shutil, "which", lambda *a: None)  # no systemctl
+
+    health = await h.check_update_health()
+
+    assert any("STALE" in e for e in health["errors"]), health["errors"]
+    assert len(captured) == 1, captured
+    reason, force = captured[0]
+    assert force is True, "stale-restart sentinel must be FORCE (bypass the gate)"
+    assert "v.483" in reason and "v.502" in reason, reason
+
+
+@pytest.mark.asyncio
+async def test_fresh_process_writes_no_stale_sentinel(monkeypatch):
+    # Running version == on-disk version → not stale → NO sentinel (so the
+    # fresh process can't restart-loop). Pins the no-loop half of the fix.
+    h = _HealthHub({"update_sources": {"hub": "https://github.com/lbockenstedt/lm.git"}},
+                   local_commit="aaa", remote_commit="aaa")
+    h._startup_version = "v.502"      # matches disk → fresh
+    h.get_local_version = _disk_v502
+    captured = []
+    h._request_watchdog_restart = lambda reason, force=False: captured.append((reason, force))
+    monkeypatch.setattr(up.shutil, "which", lambda *a: None)
+
+    health = await h.check_update_health()
+
+    assert not any("STALE" in e for e in health["errors"]), health["errors"]
+    assert captured == [], captured
