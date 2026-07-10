@@ -438,6 +438,12 @@ def _invalidate_user_sessions(hub, user_id) -> int:
     if drop:
         _save_sessions(hub)
         logger.info("Invalidated %d session(s) for user %s", len(drop), user_id)
+    # Also drop the user's API tokens (bearer + refresh) so a demoted/deleted
+    # user's tokens stop working too — mirrors the session invalidation.
+    try:
+        api_tokens.invalidate_user(hub, user_id)
+    except Exception:  # noqa: BLE001
+        pass
     return len(drop)
 
 
@@ -1079,7 +1085,12 @@ def create_app(hub):
             return await call_next(request)
 
         # Unauthenticated endpoints within gated namespaces
+        # /auth/token (issue: does its own session-OR-password check) and
+        # /auth/token/refresh (uses the refresh token itself) authenticate
+        # internally, so the middleware lets them through. /auth/tokens (list)
+        # and /auth/token/revoke stay session-gated (not listed here).
         _PUBLIC = {"/auth/login", "/auth/me", "/auth/setup", "/status",
+                   "/auth/token", "/auth/token/refresh",
                    "/sim/api/init", "/sim/api/health"}
         _PUBLIC_GET = {"/setup/appearance", "/setup/toast-config"}
         if path in _PUBLIC or (request.method == "GET" and path in _PUBLIC_GET):

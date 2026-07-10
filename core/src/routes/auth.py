@@ -101,6 +101,105 @@ def register(app, hub, ctx):
             logger.exception("local_login failed")
             raise HTTPException(status_code=500, detail="Login request failed")
 
+    def _user_snapshot(hub, user_id, user):
+        """Build the same session-shaped user dict login uses, so an API token
+        carries identical effective permissions/tenants."""
+        perms = resolve_effective_permissions(hub, user)
+        tenants = [] if user.get("protected") else user.get("tenants", [])
+        return {"user_id": user_id, "auth_type": user.get("auth_type", "local"),
+                "permissions": perms, "tenants": tenants,
+                "tenant_id": tenants[0] if tenants else None,
+                "protected": user.get("protected", False)}
+
+    @app.post("/auth/token")
+    async def issue_api_token(request: Request):
+        """Mint an API token pair (Bearer access + refresh). Authenticate EITHER
+        with an active WebUI session (mint for yourself) OR username+password.
+        Returns {token_type:'Bearer', access_token, refresh_token, expires_in}.
+        The access token is 4h; use /auth/token/refresh to rotate seamlessly."""
+        import api_tokens
+        hub = app.state.hub
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        name = str(data.get("name") or "api token")[:64]
+        sess = _session_user(request)
+        if sess and not sess.get("api_token"):   # a cookie session mints for itself
+            user_id = sess.get("user_id")
+            snap = sess.get("user") or {}
+            snap.setdefault("user_id", user_id)
+        else:                                      # username + password (throttled, like login)
+            user_id = str(data.get("username") or "").strip()
+            password = str(data.get("password") or "")
+            ip = _client_ip(request)
+            allowed, retry_after = _login_check(user_id, ip)
+            if not allowed:
+                raise HTTPException(status_code=429, detail="Too many attempts",
+                                    headers={"Retry-After": str(retry_after)})
+            users = hub.state.system_state.get("users", {})
+            user = users.get(user_id)
+            if (not user_id or not password or not user
+                    or not user.get("password_hash")
+                    or not _verify_password(password, user["password_hash"])):
+                _login_fail(hub, user_id, ip)
+                raise HTTPException(status_code=401, detail="Invalid credentials")
+            _login_success(hub, user_id, ip)
+            snap = _user_snapshot(hub, user_id, user)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        access, refresh, ttl = api_tokens.issue_pair(hub, user_id, snap, name)
+        logger.info("Issued API token '%s' for user %s", name, user_id)
+        return JSONResponse({"token_type": "Bearer", "access_token": access,
+                             "refresh_token": refresh, "expires_in": ttl})
+
+    @app.post("/auth/token/refresh")
+    async def refresh_api_token(request: Request):
+        """Rotate a refresh token into a NEW access+refresh pair (seamless, no
+        re-login). A refresh token is single-use; reuse revokes the family."""
+        import api_tokens
+        hub = app.state.hub
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        rt = str(data.get("refresh_token") or "").strip()
+        if not rt:
+            raise HTTPException(status_code=400, detail="refresh_token required")
+        pair = api_tokens.refresh(hub, rt)
+        if not pair:
+            raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
+        access, refresh, ttl = pair
+        return JSONResponse({"token_type": "Bearer", "access_token": access,
+                             "refresh_token": refresh, "expires_in": ttl})
+
+    @app.get("/auth/tokens")
+    async def list_api_tokens(request: Request):
+        """List the caller's live API token families (metadata only, no secrets)."""
+        import api_tokens
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        return {"tokens": api_tokens.list_tokens(sess.get("user_id"))}
+
+    @app.post("/auth/token/revoke")
+    async def revoke_api_token(request: Request):
+        """Revoke one of the caller's API token families by id."""
+        import api_tokens
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        tid = str(data.get("id") or "").strip()
+        if not tid:
+            raise HTTPException(status_code=400, detail="token id required")
+        ok = api_tokens.revoke(hub, sess.get("user_id"), tid)
+        return {"status": "ok" if ok else "not_found"}
+
     @app.get("/auth/me")
     async def auth_me(request: Request):
         """Return the current user, or 401 ``{first_run}`` when unauthenticated.

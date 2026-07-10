@@ -479,6 +479,286 @@ def register(app, hub, ctx):
             logger.exception("set_user_password failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ── Tenant-scoped user management (Phase 2) ───────────────────────────────
+    # A tenant Admin may manage the operators of its own tenant(s) WITHOUT any
+    # system-wide power: it can create a user (force-assigned to an owned
+    # tenant), edit a user's module rights / password, set a password, and
+    # remove a user from one of its tenants. The /setup/users* routes stay
+    # Global-Admin-only (the middleware's /setup/ gate is untouched); these
+    # /api/tenant/{tenant}/users* routes are the tenant-scoped path.
+    #
+    # Safety rules (tenant_admin caller; Global admin is unconstrained):
+    #   * the path {tenant} must be in the caller's user.tenants (gate + the
+    #     middleware's ?tenant= scoping both enforce this);
+    #   * a tenant_admin may only MODIFY a user whose tenants ⊆ the admin's
+    #     tenants (so a perm/password change can't bleed into a tenant the
+    #     admin doesn't own), and who is NOT an admin-tier user (no editing a
+    #     Global admin or another tenant Admin) and NOT protected;
+    #   * a tenant_admin may NEVER grant the admin or tenant_admin role
+    #     (no privilege escalation via the tenant admin) — only module rights;
+    #   * a tenant_admin may only ASSIGN tenants it owns (intersect any body
+    #     tenants with its own);
+    #   * "delete" here is "remove from my tenant" (non-destructive across
+    #     other tenants): the user record survives, minus this tenant. A user
+    #     left with no tenants is inert (deny-by-default, 21d483e). Deleting the
+    #     user RECORD entirely stays Global-Admin-only.
+
+    def _ta_gate(request: Request, tenant: str):
+        """Auth + tier + tenant-ownership gate for the tenant-scoped user
+        routes. Returns the caller's session. A Global Admin (any tenant) or a
+        tenant Admin (own tenant only, via _check_tenant_access) passes; a
+        plain authenticated user is blocked — user management is an admin
+        operation, even at the tenant tier."""
+        sess = ctx._session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not (ctx._is_admin(sess) or ctx._is_tenant_admin(sess)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        if not ctx._check_tenant_access(sess, tenant):
+            raise HTTPException(status_code=403,
+                                detail=f"Not authorized for tenant '{tenant}'")
+        return sess
+
+    def _admin_tenants(sess) -> set:
+        return set((sess or {}).get("user", {}).get("tenants") or [])
+
+    def _is_target_admin_tier(target_user: dict) -> bool:
+        tp = (target_user or {}).get("permissions", {}) or {}
+        return bool(tp.get("admin") or tp.get("role") in ("admin", "tenant_admin"))
+
+    def _reject_role_escalation(permissions: dict):
+        """A tenant Admin may only grant module rights, never an admin tier."""
+        _p = permissions or {}
+        if _p.get("admin") or _p.get("role") == "admin":
+            raise HTTPException(status_code=400,
+                                detail="Tenant admin cannot grant Global Admin")
+        if _p.get("role") == "tenant_admin" or _p.get("tenant_admin"):
+            raise HTTPException(status_code=400,
+                                detail="Tenant admin cannot grant the tenant Admin role")
+
+    def _normalize_tenant_admin_perms(permissions: dict) -> dict:
+        """Drop the admin/tenant_admin keys a client might send and keep only
+        the recognised module rights (so a tenant_admin's grant is always a
+        plain module-right set, never a tier). Mirrors upsert_group's allowlist."""
+        _p = dict(permissions or {})
+        _p.pop("admin", None)
+        _p.pop("tenant_admin", None)
+        _p.pop("role", None)
+        # Keep only ENFORCED_RIGHTS (+ console_write) — no synthetic keys.
+        allowed = set(ENFORCED_RIGHTS)
+        return {k: bool(v) for k, v in _p.items() if k in allowed and v}
+
+    @app.get("/api/tenant/{tenant}/users")
+    async def ta_get_tenant_users(tenant: str, request: Request):
+        """List the users who are members of {tenant} (tenant ∈ their tenants).
+        A tenant Admin sees its own tenant's roster; a Global Admin may list
+        any. Password hashes are stripped; effective_permissions are resolved."""
+        sess = _ta_gate(request, tenant)
+        hub = app.state.hub
+        raw = hub.state.system_state.get("users", {})
+        out = {}
+        for uid, u in raw.items():
+            if tenant in (u.get("tenants") or []):
+                rec = {k: v for k, v in u.items() if k != "password_hash"}
+                rec["groups"] = u.get("groups", [])
+                rec["effective_permissions"] = resolve_effective_permissions(hub, u)
+                out[uid] = rec
+        return {"users": out, "tenant": tenant}
+
+    @app.post("/api/tenant/{tenant}/users")
+    async def ta_create_tenant_user(tenant: str, request: Request):
+        """Create a user force-assigned to {tenant} (an owned tenant). A tenant
+        Admin may only grant module rights (never admin/tenant_admin). The new
+        user starts with tenants=[{tenant}] — additional owned tenants can be
+        added later via the edit route. Reject if the user_id already exists
+        (the WebUI Add-User modal sends create=true semantics)."""
+        sess = _ta_gate(request, tenant)
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            user_id = data.get("user_id")
+            permissions = data.get("permissions", {})
+            password = data.get("password", "")
+            auth_type = data.get("auth_type", "local")
+
+            if not user_id:
+                raise HTTPException(status_code=400, detail="Missing user_id")
+            _reject_role_escalation(permissions)
+
+            users = hub.state.system_state.setdefault("users", {})
+            if user_id in users:
+                raise HTTPException(status_code=409, detail="User already exists")
+
+            perms = _normalize_tenant_admin_perms(permissions)
+            entry = {
+                "permissions": perms,
+                "auth_type": auth_type,
+                "tenants": [tenant],
+                "created_at": time.time(),
+                "updated_at": time.time(),
+            }
+            if password:
+                entry["password_hash"] = _hash_password(password)
+            users[user_id] = entry
+            hub.state.save_state()
+            _invalidate_user_sessions(hub, user_id)
+            logger.info("tenant admin %s created user %s in tenant %s",
+                        (sess.get("user") or {}).get("user_id", "?"), user_id, tenant)
+            return {"status": "ok", "message": f"User {user_id} created in tenant {tenant}."}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("ta_create_tenant_user failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/tenant/{tenant}/users/{user_id}")
+    async def ta_update_tenant_user(tenant: str, user_id: str, request: Request):
+        """Edit a user's module rights / password / auth_type. A tenant Admin
+        may only edit a user whose tenants ⊆ the admin's tenants and who is not
+        an admin-tier/protected user; it may only grant module rights and may
+        only assign tenants it owns. A Global Admin is unconstrained but still
+        cannot demote the protected account. Tenant membership for the path
+        tenant is never removed here — use the DELETE route for that."""
+        sess = _ta_gate(request, tenant)
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            permissions = data.get("permissions", {})
+            password = data.get("password", "")
+            auth_type = data.get("auth_type")
+            extra_tenants = data.get("tenants")  # list = replace membership (intersect w/ owned)
+
+            users = hub.state.system_state.get("users", {})
+            existing = users.get(user_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="User not found")
+            if existing.get("protected"):
+                raise HTTPException(status_code=403,
+                                    detail="The protected admin account cannot be modified")
+            is_global = ctx._is_admin(sess)
+            if not is_global:
+                # Tenant-admin constraints: no touching admin-tier users, and
+                # the target's tenant set must be a subset of the admin's own
+                # (so a change can't bleed into a tenant the admin doesn't own).
+                if _is_target_admin_tier(existing):
+                    raise HTTPException(status_code=403,
+                                        detail="Tenant admin cannot modify an admin-tier user")
+                if not set(existing.get("tenants") or []).issubset(_admin_tenants(sess)):
+                    raise HTTPException(status_code=403,
+                                        detail="User extends beyond your tenants — ask a Global admin")
+                _reject_role_escalation(permissions)
+
+            _p = dict(permissions or {})
+            if is_global:
+                # Global admin: reuse the /setup/users normalization so the two
+                # admin-flag forms stay in sync and the tenant_admin tier is
+                # normalized exactly as the Global user-management route does.
+                if _p.get("admin") or _p.get("role") == "admin":
+                    permissions = {**_p, "admin": True, "role": "admin"}
+                elif _p.get("role") == "tenant_admin" or _p.get("tenant_admin"):
+                    permissions = {**_p}
+                    permissions.pop("admin", None)
+                    permissions.pop("tenant_admin", None)
+                    permissions["role"] = "tenant_admin"
+            else:
+                permissions = _normalize_tenant_admin_perms(_p)
+
+            entry = {**existing, "permissions": permissions, "updated_at": time.time()}
+            if auth_type:
+                entry["auth_type"] = auth_type
+            if password:
+                entry["password_hash"] = _hash_password(password)
+            if extra_tenants is not None:
+                if not isinstance(extra_tenants, list):
+                    raise HTTPException(status_code=400, detail="tenants must be a list")
+                owned = _admin_tenants(sess) if not is_global else None
+                # The path tenant is always retained (edit must not drop it; use
+                # DELETE to leave the tenant). A tenant admin can only ADD owned
+                # tenants; a Global admin may set any list.
+                wanted = set(extra_tenants) | {tenant}
+                if owned is not None:
+                    wanted &= owned | {tenant}  # drop tenants the admin doesn't own
+                entry["tenants"] = sorted(wanted)
+            if entry.get("permissions", {}).get("role") == "tenant_admin" and not entry.get("tenants"):
+                raise HTTPException(status_code=400,
+                                    detail="Tenant Admin requires at least one assigned tenant")
+            users[user_id] = entry
+            hub.state.save_state()
+            _invalidate_user_sessions(hub, user_id)
+            return {"status": "ok", "message": f"User {user_id} updated."}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("ta_update_tenant_user failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/tenant/{tenant}/users/{user_id}/set-password")
+    async def ta_set_tenant_user_password(tenant: str, user_id: str, request: Request):
+        """Set/reset a user's password. The user must be a member of {tenant}
+        (an owned tenant). A tenant admin may not reset an admin-tier or
+        protected user's password (no credential takeover of admins)."""
+        sess = _ta_gate(request, tenant)
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            password = data.get("password", "")
+            if not password:
+                raise HTTPException(status_code=400, detail="Password required")
+            users = hub.state.system_state.get("users", {})
+            existing = users.get(user_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="User not found")
+            if existing.get("protected"):
+                raise HTTPException(status_code=403,
+                                    detail="The protected admin account cannot be modified")
+            if tenant not in (existing.get("tenants") or []):
+                raise HTTPException(status_code=403,
+                                    detail="User is not a member of this tenant")
+            if not ctx._is_admin(sess) and _is_target_admin_tier(existing):
+                raise HTTPException(status_code=403,
+                                    detail="Tenant admin cannot reset an admin-tier user's password")
+            existing["password_hash"] = _hash_password(password)
+            existing["updated_at"] = time.time()
+            hub.state.save_state()
+            _invalidate_user_sessions(hub, user_id)
+            return {"status": "ok"}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("ta_set_tenant_user_password failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.delete("/api/tenant/{tenant}/users/{user_id}")
+    async def ta_remove_tenant_user(tenant: str, user_id: str, request: Request):
+        """Remove a user from {tenant} (the non-destructive "delete from my
+        tenant" op): the user record survives minus this tenant. A user left
+        with no tenants is inert (deny-by-default). The protected account and
+        admin-tier users are never removable by a tenant admin. Deleting the
+        user RECORD entirely stays Global-Admin-only (/setup/users)."""
+        sess = _ta_gate(request, tenant)
+        hub = app.state.hub
+        try:
+            users = hub.state.system_state.get("users", {})
+            existing = users.get(user_id)
+            if not existing:
+                raise HTTPException(status_code=404, detail="User not found")
+            if existing.get("protected"):
+                raise HTTPException(status_code=403,
+                                    detail="The protected admin account cannot be modified")
+            if not ctx._is_admin(sess) and _is_target_admin_tier(existing):
+                raise HTTPException(status_code=403,
+                                    detail="Tenant admin cannot remove an admin-tier user from a tenant")
+            hub.state.remove_user_from_tenant(user_id, tenant)
+            _invalidate_user_sessions(hub, user_id)
+            return {"status": "ok",
+                    "message": f"User {user_id} removed from tenant {tenant}",
+                    "remaining_tenants": list((users.get(user_id) or {}).get("tenants") or [])}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("ta_remove_tenant_user failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     # ── Permission groups (RBAC) ────────────────────────────────────────────
     # All /setup/* is admin-only via the access-control middleware, so these
     # need no extra gate. A group bundles the same right-keys a user carries;
