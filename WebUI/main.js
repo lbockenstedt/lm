@@ -560,13 +560,25 @@ let currentTenant = 'default';
 let currentProduct = null;
 
 function isAdmin() {
+    // Global Admin (system-wide) — today's "admin" tier. Returns FALSE for a
+    // tenant Admin (role:"tenant_admin"), so every system-config / fleet /
+    // all-tenants gate that reads isAdmin() automatically hides for tenant
+    // Admins without any per-call change.
     const p = currentUser?.permissions || {};
     return p.admin === true || p.role === 'admin';
 }
 
+function isTenantAdmin() {
+    // Tenant-level Admin — admin WITHIN their assigned tenants only, tenant-
+    // confined server-side (check_tenant_access / filter_session). Not a Global
+    // Admin (isAdmin() is False for this tier).
+    const p = currentUser?.permissions || {};
+    return p.role === 'tenant_admin';
+}
+
 function hasConsoleWrite() {
     const p = currentUser?.permissions || {};
-    return isAdmin() || p.console_write === true;
+    return isAdmin() || isTenantAdmin() || p.console_write === true;
 }
 
 // ─── Session-expiry guard ───────────────────────────────────────────────────
@@ -618,7 +630,7 @@ const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Ce
 function canSeeModule(className) {
     const right = MODULE_RIGHT[className];
     if (!right) return true;              // no right defined → product-driven
-    if (isAdmin()) return true;
+    if (isAdmin() || isTenantAdmin()) return true;
     const p = currentUser?.permissions || {};
     return p[right] === true;
 }
@@ -6901,7 +6913,9 @@ async function loadUsers() {
             // (e.g. the first-run bootstrap admin) renders as checked.
             const adminCell = (perms.admin === true || perms.role === 'admin')
                 ? `<svg class="w-4 h-4 text-green-500 mx-auto" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg>`
-                : `<div class="w-4 h-4 rounded-full border-2 border-slate-200 mx-auto"></div>`;
+                : (perms.role === 'tenant_admin')
+                    ? `<span class="text-[10px] bg-amber-100 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded font-bold" title="Tenant-level Admin">Admin</span>`
+                    : `<div class="w-4 h-4 rounded-full border-2 border-slate-200 mx-auto"></div>`;
             const check = (key) => perms[key] ?
                 `<svg class="w-4 h-4 text-green-500 mx-auto" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg>` :
                 `<div class="w-4 h-4 rounded-full border-2 border-slate-200 mx-auto"></div>`;
@@ -6969,7 +6983,8 @@ async function deleteUser(userId) {
 // Right-key → display label for the group editor + user-assignment checklists.
 // Kept in sync with access.ENFORCED_RIGHTS on the backend.
 const _RBAC_RIGHT_LABELS = {
-    admin: 'System Admin',
+    admin: 'Global Admin',
+    tenant_admin: 'Admin (tenant)',
     cs: 'Simulations',
     nw: 'Network Devices',
     ipam: 'IPAM',
@@ -6997,11 +7012,14 @@ async function loadGroups() {
         bodyEl.innerHTML = Object.entries(groups).map(([gid, g]) => {
             const perms = g.permissions || {};
             const isAdmin = perms.admin === true || perms.role === 'admin';
+            const isTenantAdmin = perms.role === 'tenant_admin';
             const permBadges = isAdmin
-                ? `<span class="text-[10px] bg-amber-100 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded font-bold">System Admin</span>`
-                : (Object.keys(perms).filter(k => k !== 'role' && perms[k]).map(k =>
-                    `<span class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">${_RBAC_RIGHT_LABELS[k] || k}</span>`
-                  ).join(' ') || '<span class="text-[10px] text-slate-300 italic">none</span>');
+                ? `<span class="text-[10px] bg-amber-100 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded font-bold">Global Admin</span>`
+                : isTenantAdmin
+                    ? `<span class="text-[10px] bg-amber-50 text-amber-700 border border-amber-200 px-1.5 py-0.5 rounded font-bold">Admin (tenant)</span>`
+                    : (Object.keys(perms).filter(k => k !== 'role' && k !== 'tenant_admin' && perms[k]).map(k =>
+                        `<span class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">${_RBAC_RIGHT_LABELS[k] || k}</span>`
+                      ).join(' ') || '<span class="text-[10px] text-slate-300 italic">none</span>');
             const ldap = g.ldap_group
                 ? `<span class="font-mono text-xs text-blue-600">${g.ldap_group}</span>`
                 : '<span class="text-[10px] text-slate-300 italic">—</span>';
@@ -7028,8 +7046,12 @@ function showGroupModal(groupId) {
     const g = groupId ? (groups[groupId] || {}) : {};
     const perms = g.permissions || {};
     const isAdmin = perms.admin === true || perms.role === 'admin';
+    const isTenantAdminGroup = perms.role === 'tenant_admin';
     const rightRows = Object.entries(_RBAC_RIGHT_LABELS).map(([key, label]) => {
-        const checked = key === 'admin' ? isAdmin : !!perms[key];
+        // admin/tenant_admin are stored as role, not a flag — check from the role.
+        const checked = key === 'admin' ? isAdmin
+            : key === 'tenant_admin' ? isTenantAdminGroup
+            : !!perms[key];
         return `<div><label class="text-xs text-slate-500 uppercase font-bold">${label}</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="grp-perm-${key}" ${checked ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"></div></div>`;
     }).join('');
     const modal = document.createElement('div');
@@ -12565,7 +12587,8 @@ async function showAddUserModal() {
                     <input type="password" id="new-user-password" placeholder="••••••••" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">System Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">View</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Edit</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Hypervisor</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-pxmx" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
@@ -12605,6 +12628,7 @@ async function saveUser() {
 
     const permissions = {
         admin: document.getElementById('perm-admin').checked,
+        tenant_admin: document.getElementById('perm-tenant_admin').checked,
         view: document.getElementById('perm-view').checked,
         edit: document.getElementById('perm-edit').checked,
         pxmx: document.getElementById('perm-pxmx').checked,
@@ -12670,7 +12694,8 @@ async function editUser(userId) {
 
         const perms = user.permissions || {};
         const permFields = [
-            {id: 'admin', label: 'System Admin'},
+            {id: 'admin', label: 'Global Admin'},
+            {id: 'tenant_admin', label: 'Admin (tenant)'},
             {id: 'view', label: 'View'},
             {id: 'edit', label: 'Edit'},
             {id: 'pxmx', label: 'Hypervisor'},
@@ -12688,14 +12713,23 @@ async function editUser(userId) {
         const permHtml = permFields.map(p => {
             // Admin uses two equivalent forms; check the box if either is set so
             // editing a role-only admin shows it checked (and saving preserves it).
+            // The two admin tiers (Global Admin / tenant Admin) are mutually
+            // exclusive — checking one unchecks the other.
             const isChecked = p.id === 'admin'
                 ? (perms.admin === true || perms.role === 'admin')
-                : !!perms[p.id];
+                : p.id === 'tenant_admin'
+                    ? (perms.role === 'tenant_admin')
+                    : !!perms[p.id];
+            const onchange = p.id === 'admin'
+                ? `onchange="document.getElementById('edit-perm-tenant_admin').checked = false"`
+                : p.id === 'tenant_admin'
+                    ? `onchange="document.getElementById('edit-perm-admin').checked = false"`
+                    : '';
             return `
             <div class="space-y-2">
                 <label class="text-xs text-slate-500 uppercase font-bold">${p.label}</label>
                 <div class="flex items-center gap-2 py-2">
-                    <input type="checkbox" id="edit-perm-${p.id}" ${isChecked ? 'checked' : ''} class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
+                    <input type="checkbox" id="edit-perm-${p.id}" ${isChecked ? 'checked' : ''} ${onchange} class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500">
                 </div>
             </div>
         `;
@@ -12752,6 +12786,7 @@ async function saveUserEdits(userId) {
     try {
         const permissions = {
             admin: document.getElementById('edit-perm-admin').checked,
+            tenant_admin: document.getElementById('edit-perm-tenant_admin').checked,
             view: document.getElementById('edit-perm-view').checked,
             edit: document.getElementById('edit-perm-edit').checked,
             pxmx: document.getElementById('edit-perm-pxmx').checked,

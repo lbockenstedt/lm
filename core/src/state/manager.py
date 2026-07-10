@@ -726,6 +726,12 @@ class StateManager:
             ):
                 u["permissions"] = _as_admin(up)
                 changed = True
+            # Defensive: a tenant_admin record must never carry a stray ``admin``
+            # flag — that would make is_admin() True (an accidental Global
+            # escalation). The role is authoritative for the tier; strip it.
+            if up.get("role") == "tenant_admin" and up.get("admin"):
+                up.pop("admin", None)
+                changed = True
 
         if changed:
             logger.warning(

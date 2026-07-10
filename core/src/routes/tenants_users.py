@@ -392,12 +392,24 @@ def register(app, hub, ctx):
                 tenant_id = None  # ignore any tenant assignment attempt
 
             # Keep the two admin-flag forms (role + boolean) in sync on every
-            # write so the WebUI "System Admin" checkbox and _is_admin() never
-            # diverge — a role-only admin would otherwise show unchecked and an
-            # edit could drop the role, silently demoting the user.
+            # write so the WebUI role selector and _is_admin() never diverge —
+            # a role-only admin would otherwise show unchecked and an edit could
+            # drop the role, silently demoting the user.
             _p = permissions or {}
             if _p.get("admin") or _p.get("role") == "admin":
                 permissions = {**_p, "admin": True, "role": "admin"}
+            elif _p.get("role") == "tenant_admin" or _p.get("tenant_admin"):
+                # Tenant Admin tier: authoritative role, NO admin flag (so
+                # is_admin() stays False — the tier is tenant-confined, not
+                # system-wide). Clear any stray admin flag so a Global→tenant
+                # demotion takes effect rather than leaving a latent Global.
+                # Accept both the role form (role:"tenant_admin") and the flag
+                # form (tenant_admin:true) the WebUI checkbox sends — normalize
+                # to the role form for storage consistency.
+                permissions = {**_p}
+                permissions.pop("admin", None)
+                permissions.pop("tenant_admin", None)
+                permissions["role"] = "tenant_admin"
 
             entry = {
                 **existing,
@@ -419,6 +431,15 @@ def register(app, hub, ctx):
                 entry.setdefault("tenants", [])
                 if tenant_id not in entry["tenants"]:
                     entry["tenants"].append(tenant_id)
+            # A Tenant Admin is tenant-confined (check_tenant_access /
+            # filter_session deny-by-default for tenantless users since
+            # 21d483e); require ≥1 assigned tenant at config time so a
+            # misconfigured tenant admin isn't silently created with no access.
+            if entry.get("permissions", {}).get("role") == "tenant_admin" and not entry.get("tenants"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Tenant Admin requires at least one assigned tenant",
+                )
             users[user_id] = entry
             hub.state.save_state()
             # Drop this user's existing sessions so the change (password, perms,
@@ -504,13 +525,18 @@ def register(app, hub, ctx):
                         n += 1
                     group_id = f"{group_id}-{n}"
             existing = groups.get(group_id, {})
-            # Only persist recognised right-keys (+ admin) so a group can't smuggle
-            # an arbitrary/unknown flag into a user's effective permissions.
+            # Only persist recognised right-keys (+ admin/tenant_admin tiers) so
+            # a group can't smuggle an arbitrary/unknown flag into a user's
+            # effective permissions. A group may grant the Global Admin tier
+            # (``admin``) or the tenant Admin tier (``tenant_admin``); Global
+            # wins if both are set (see resolve_effective_permissions).
             raw_perms = data.get("permissions", {}) or {}
-            allowed = set(ENFORCED_RIGHTS) | {"admin"}
+            allowed = set(ENFORCED_RIGHTS) | {"admin", "tenant_admin"}
             perms = {k: True for k, v in raw_perms.items() if v and k in allowed}
             if perms.get("admin"):
                 perms["role"] = "admin"
+            elif perms.get("tenant_admin"):
+                perms["role"] = "tenant_admin"
             groups[group_id] = {
                 **existing,
                 "name": name or existing.get("name", group_id),

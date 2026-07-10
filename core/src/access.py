@@ -227,6 +227,13 @@ def resolve_effective_permissions(hub, user_record: dict) -> dict:
     source carries ``admin`` or ``role == "admin"``; when admin, both forms are
     normalised on so every downstream check (which honours either) agrees.
 
+    A second tier — tenant admin (``role == "tenant_admin"``) — is set if any
+    source carries it. Precedence: Global admin wins over tenant admin (a user
+    who is both is a Global Admin). A tenant admin is auto-granted every module
+    right (see :func:`has_module_access`) but is tenant-confined
+    (``check_tenant_access``/``filter_session``), so it carries no ``admin``
+    flag and ``is_admin`` stays False for the tier.
+
     Returns a fresh flat ``{right: True}`` dict suitable to drop straight into
     ``sess["user"]["permissions"]`` — so all existing middleware/frontend gates
     keep working unchanged. Never mutates the stored record."""
@@ -239,17 +246,24 @@ def resolve_effective_permissions(hub, user_record: dict) -> dict:
 
     eff: dict = {}
     is_adm = False
+    is_tadm = False
 
     def _absorb(perms: dict):
-        nonlocal is_adm
+        nonlocal is_adm, is_tadm
         for k, v in (perms or {}).items():
             if k == "role":
                 if v == "admin":
                     is_adm = True
+                elif v == "tenant_admin":
+                    is_tadm = True
                 continue
             if k == "admin":
                 if v:
                     is_adm = True
+                continue
+            if k == "tenant_admin":  # flag form, symmetric with the "admin" flag
+                if v:
+                    is_tadm = True
                 continue
             if v:  # only True grants; a False in one source never revokes another
                 eff[k] = True
@@ -264,6 +278,12 @@ def resolve_effective_permissions(hub, user_record: dict) -> dict:
     if is_adm:
         eff["admin"] = True
         eff["role"] = "admin"
+    elif is_tadm:
+        eff["role"] = "tenant_admin"
+        # No "admin" flag — is_admin() stays False so every system-wide gate
+        # (/setup, /admin, _ADMIN_API_PREFIXES, fleet, aggregates, user/tenant
+        # mgmt) keeps blocking the tier. Tenant confinement (check_tenant_access
+        # + filter_session, deny-by-default since 21d483e) does the scoping.
     return eff
 
 
@@ -293,22 +313,45 @@ def groups_for_ldap_membership(hub, member_of) -> list:
 
 
 def is_admin(sess) -> bool:
-    """True if this session belongs to an admin user.
+    """True if this session belongs to a **Global Admin** (system-wide) user.
 
     Handles both permission formats: {"admin": True} and {"role": "admin"}.
+    This is the system-wide tier — every /setup, /admin, _ADMIN_API_PREFIXES,
+    fleet, aggregate, and user/tenant-management gate reads it. It is NOT
+    satisfied by the tenant-admin tier (see :func:`is_tenant_admin`), which is
+    tenant-confined and carries no ``admin`` flag.
     """
     p = (sess or {}).get("user", {}).get("permissions", {})
     return bool(p.get("admin") or p.get("role") == "admin")
 
 
+def is_tenant_admin(sess) -> bool:
+    """True if this session belongs to a **tenant-level Admin**.
+
+    The tenant-admin tier (``role == "tenant_admin"``) is an admin *within* its
+    assigned tenants only: it auto-passes the module-access gates
+    (:func:`has_cs_access` / :func:`has_module_access`) and may manage its
+    tenants' onboarding PSKs, users, shared-infrastructure writes, and own
+    tenant records. It is **tenant-confined** — ``check_tenant_access`` and
+    ``filter_session`` (deny-by-default since 21d483e) scope it to
+    ``user.tenants`` — and it is **not** a Global Admin (``is_admin`` is False),
+    so every system/fleet/cross-tenant gate keeps blocking it. A tenant admin
+    with no tenants assigned is denied everything (the tenantless safety net).
+    """
+    p = (sess or {}).get("user", {}).get("permissions", {})
+    return bool(p.get("role") == "tenant_admin")
+
+
 def has_cs_access(sess) -> bool:
     """True if the session user may use the Simulations (cs) module.
 
-    Admins always pass; otherwise the user's permissions must carry an explicit
-    ``cs`` right (set in User Management). Mirrors the frontend ``canSeeModule``
-    gate in WebUI/main.js so nav-hiding and API/WebSocket access agree.
+    Global Admins and tenant Admins always pass; otherwise the user's
+    permissions must carry an explicit ``cs`` right (set in User Management).
+    A tenant Admin is then tenant-confined by ``check_tenant_access``/
+    ``filter_session``. Mirrors the frontend ``canSeeModule`` gate in
+    WebUI/main.js so nav-hiding and API/WebSocket access agree.
     """
-    if is_admin(sess):
+    if is_admin(sess) or is_tenant_admin(sess):
         return True
     p = (sess or {}).get("user", {}).get("permissions", {})
     return bool(p.get("cs"))
@@ -317,13 +360,14 @@ def has_cs_access(sess) -> bool:
 def has_module_access(sess, right: str) -> bool:
     """True if the session user may use a permission-gated module.
 
-    Admins always pass; otherwise the user's permissions must carry an explicit
-    ``right`` (set in User Management). Shared by the Network Devices (``nw``)
-    and IPAM (``ipam``) module gates — mirrors ``has_cs_access`` so nav-hiding
-    (frontend ``canSeeModule``) and API access agree. ``right`` is the
-    permissions key (``"nw"`` / ``"ipam"`` / ``"cs"`` …), not a display label.
+    Global Admins and tenant Admins always pass; otherwise the user's
+    permissions must carry an explicit ``right`` (set in User Management).
+    Shared by the Network Devices (``nw``) and IPAM (``ipam``) module gates —
+    mirrors ``has_cs_access`` so nav-hiding (frontend ``canSeeModule``) and API
+    access agree. A tenant Admin is tenant-confined downstream.
+    ``right`` is the permissions key (``"nw"`` / ``"ipam"`` / ``"cs"`` …).
     """
-    if is_admin(sess):
+    if is_admin(sess) or is_tenant_admin(sess):
         return True
     p = (sess or {}).get("user", {}).get("permissions", {})
     return bool(p.get(right))

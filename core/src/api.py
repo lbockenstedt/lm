@@ -257,6 +257,7 @@ from simulations.tenant_filter import (filter_items_by_prefixes,
                                        filter_firewall_rules, filter_record_by_prefixes)
 
 import access
+import api_tokens
 import vmid_alloc
 # Access-control / tenant-scoping / subnet-filter logic lives in the leaf
 # module ``access`` (importable + testable, free of the create_app() nested-def
@@ -1046,6 +1047,7 @@ def create_app(hub):
     # triggered update/restart stays logged in (the lm_session cookie already
     # persists for 8h; this restores the server-side token→session mapping).
     _load_sessions(hub)
+    api_tokens.load(hub)
     _load_login_attempts(hub)
 
     # Anti-lockout migration: runs on every startup. Ensures the first user is
@@ -1281,10 +1283,19 @@ def create_app(hub):
     # annotations``. Defined late, as before, so routes above resolve them at
     # call time; register_simulations_routes below receives them as callables.
     def _session_user(request):
+        # A Bearer API token (programmatic clients) takes precedence; otherwise
+        # the WebUI cookie session. Both return the same session-shaped dict so
+        # every access.* gate downstream is identical.
+        bt = api_tokens.bearer_session(request)
+        if bt is not None:
+            return bt
         return access.session_user(_sessions, request)
 
     def _is_admin(sess):
         return access.is_admin(sess)
+
+    def _is_tenant_admin(sess):
+        return access.is_tenant_admin(sess)
 
     def _has_cs_access(sess):
         return access.has_cs_access(sess)
@@ -1389,6 +1400,7 @@ def create_app(hub):
     ctx = SimpleNamespace(
         _session_user=_session_user,
         _is_admin=_is_admin,
+        _is_tenant_admin=_is_tenant_admin,
         _has_cs_access=_has_cs_access,
         _has_nw_access=_has_nw_access,
         _has_ipam_access=_has_ipam_access,
@@ -1417,7 +1429,7 @@ def create_app(hub):
     # Registered after the auth helpers above so the /sim routes can reuse them.
     register_simulations_routes(app, app.state.hub, _session_user, _resolve_tenant,
                                 _is_admin, _check_tenant_access, _sessions,
-                                _has_cs_access)
+                                _has_cs_access, _is_tenant_admin)
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (

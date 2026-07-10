@@ -467,7 +467,7 @@ def _cached_command_queue(hub_obj, sid):
 
 def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                   is_admin_fn, check_tenant_access_fn=None, sessions=None,
-                                  has_cs_access_fn=None):
+                                  has_cs_access_fn=None, is_tenant_admin_fn=None):
     """
     Registers the simulation API and WebSocket routes.
 
@@ -560,7 +560,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         user = sess.get("user", {})
         user_id = user.get("user_id") or sess.get("user_id") or "unknown"
         is_superadmin = bool(is_admin_fn(sess))
-        role = "admin" if is_superadmin else "member"
+        # A tenant Admin admins the tenants in its user.tenants list; a Global
+        # Admin admins every tenant. is_superadmin (top-level) stays Global-only
+        # so the cs superadmin dashboard remains a Global-Admin surface.
+        is_tadm = bool(is_tenant_admin_fn(sess)) if is_tenant_admin_fn else False
+        role = "admin" if (is_superadmin or is_tadm) else "member"
         tenant_roles = [
             {"tenant_id": tid, "role": role, "tenant_name": _tenant_name(tid)}
             for tid in _user_tenants(sess)
@@ -576,6 +580,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Raise 403 unless the request's session is an admin; return the admin session."""
         sess = session_user_fn(request)
         if not sess or not is_admin_fn(sess):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return sess
+
+    def _require_tenant_admin_or_admin(request: Request):
+        """Onboarding-PSK / tenant-admin operation gate.
+
+        A Global Admin (``is_admin_fn``) may manage any tenant's PSKs; a tenant
+        Admin (``is_tenant_admin_fn``) may manage PSKs only for a tenant in their
+        ``user.tenants`` (the ``Depends(get_tenant_id)`` + ``check_tenant_access``
+        tenant-scoping enforces that downstream). A plain ``cs``-righted user is
+        blocked — retrieving/generating onboarding PSKs is an admin operation
+        (it lets the holder enroll a rogue spoke into the tenant). Returns the
+        session.
+        """
+        sess = session_user_fn(request)
+        if not sess or not (is_admin_fn(sess) or (is_tenant_admin_fn and is_tenant_admin_fn(sess))):
             raise HTTPException(status_code=403, detail="Admin access required")
         return sess
 
@@ -1335,11 +1355,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "hub_config": result["hub_config"]}
 
     @app.get("/sim/api/tenant/{tenant}/onboarding-psk")
-    async def get_psks(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+    async def get_psks(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        _require_tenant_admin_or_admin(request)
         return {"psks": await store.get_psks(tenant_id)}
 
     @app.post("/sim/api/tenant/{tenant}/onboarding-psk")
-    async def gen_psk(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+    async def gen_psk(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        _require_tenant_admin_or_admin(request)
         import secrets as _secrets
         psk = _secrets.token_urlsafe(24)
         await store.add_psk(tenant_id, psk)
@@ -1348,6 +1370,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.delete("/sim/api/tenant/{tenant}/onboarding-psk")
     async def revoke_psk(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        _require_tenant_admin_or_admin(request)
         body = await request.json()
         psk = body.get("psk") if isinstance(body, dict) else None
         removed = await store.remove_psk(tenant_id, psk) if psk else False
