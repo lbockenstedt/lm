@@ -6705,7 +6705,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             // only once they have a role loaded — idle ones sit in the Generic
             // Agents tile) vs Proxmox node agents relayed through the pxmx
             // spoke. The Module badge names what each one runs.
-            const typeLabel = isSpokeKind ? 'Generic Agent' : 'Proxmox Agent';
+            const typeLabel = isSpokeKind ? 'Generic Agent' : 'PXMX AGENT';
             const moduleLabelCell = a._module || '—';
             const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
             const eAid = aid.replace(/'/g, "\\'");
