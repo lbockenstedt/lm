@@ -223,9 +223,6 @@ const SIM_ROUTES = {
     csRenderSetupSecurity:       { m: 'GET',    p: '/{tenant}/settings/security',                api: 'get_security' },
     csSaveSecurity:              { m: 'POST',   p: '/{tenant}/settings/security',                api: 'set_security' },
 
-    // ── Settings / troubleshooting ──
-    csRenderSetupTroubleshooting:{ m: 'GET',    p: '/{tenant}/troubleshooting',                  api: 'get_troubleshooting' },
-
     // ── PSK (onboarding-psk; used by the Spoke Mgmt card — Setup/General's
     //    duplicate copy was removed since Spoke Management already owns PSKs) ──
     csSpokeMgmtPskCard:          { m: 'GET',    p: '/tenant/{tenant}/onboarding-psk',            api: 'get_psks' },
@@ -2596,7 +2593,7 @@ window.csSaveNotifications = async function () {
 
 /* ===========================================================================
  * 6b. Setup sub-tabs (Wave 2) — Central API / Proxmox / GitHub / Security /
- *     Notifications / Troubleshooting. The 'General' overview child is
+ *     Notifications. The 'General' overview child is
  *     csRenderSetup above; the rest are registered below.
  * ========================================================================= */
 
@@ -3016,32 +3013,6 @@ async function csRenderSetupNotifications() {
     catch (e) { console.error('csRenderSetupNotifications: notifications load failed', e); csSet(csErrorBox('Could not load Notifications', e)); }
 }
 
-// ── Troubleshooting ──────────────────────────────────────────────────────────
-async function csRenderSetupTroubleshooting() {
-    csSetToolbar('');
-    let data = {};
-    try { data = await csFetch(`/${csTenant()}/troubleshooting?tenant_id=${csTenant()}`); }
-    catch (e) { console.error('csRenderSetupTroubleshooting: troubleshooting load failed', e); csSet(csErrorBox('Could not load troubleshooting', e)); return; }
-    const spokes = (data && data.spokes) || [];
-    const cards = spokes.map(s => {
-        const h = s.api_health || {};
-        const rs = s.reclone_state || {};
-        const rows = Object.entries(h).map(([k, v]) => `<tr><td class="px-3 py-2 font-mono text-xs text-slate-500">${csEscape(k)}</td><td class="px-3 py-2 text-sm">${csEscape(typeof v === 'object' ? JSON.stringify(v) : v)}</td></tr>`).join('');
-        return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-          <div class="flex items-center justify-between mb-2">
-            <span class="font-bold text-slate-700">${csEscape(s.spoke_name)}</span>
-            <span class="text-xs text-slate-400">reclone: ${csEscape(rs.status || 'idle')}</span>
-          </div>
-          ${csTable(['Key', 'Value'], rows)}
-          <div class="flex gap-2 mt-3">
-            <button onclick="csUpdateAll()" class="bg-slate-700 text-white px-3 py-1.5 rounded-md text-xs font-bold">Trigger Update</button>
-            <button onclick="csClearCommands()" class="bg-red-100 text-red-700 px-3 py-1.5 rounded-md text-xs font-bold">Clear Queue</button>
-          </div>
-        </div>`;
-    }).join('');
-    csSet(`<div class="space-y-4">${cards || csEmpty('No spokes reporting.')}</div>`);
-}
-
 // ── Register Setup children ────────────────────────────────────────────────
 window.CS_CHILD_RENDERERS['Setup::General']        = csRenderSetup;
 // Backward-compat alias: a client with stale localStorage may still request
@@ -3052,7 +3023,6 @@ window.CS_CHILD_RENDERERS['Setup::Proxmox']        = csRenderSetupProxmox;
 window.CS_CHILD_RENDERERS['Setup::GitHub']         = csRenderSetupGithub;
 window.CS_CHILD_RENDERERS['Setup::Security']       = csRenderSetupSecurity;
 window.CS_CHILD_RENDERERS['Setup::Notifications']  = csRenderSetupNotifications;
-window.CS_CHILD_RENDERERS['Setup::Troubleshooting'] = csRenderSetupTroubleshooting;
 
 /* ===========================================================================
  * 1. VM Server — fleet overview + per-spoke drill-in children

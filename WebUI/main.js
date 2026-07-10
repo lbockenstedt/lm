@@ -1213,7 +1213,7 @@ const VIEW_CHILDREN = {
         'Central':     ['Sites', 'Alerts', 'Clients'],
         'VM Server':   ['Overview', 'VMs', 'Console', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
         'Config':      ['API', 'Simulation'],
-        'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Troubleshooting'],
+        'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications'],
     },
 };
 
