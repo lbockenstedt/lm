@@ -127,7 +127,7 @@ fi
 # Guarded on hub health + a 2-min cooldown so it can never hot-loop.
 STALE_SENTINEL=/var/lib/lm/state/stale-restart-requested
 STALE_TS=/var/lib/lm/watchdog-stale-ts          # cooldown between restarts
-RESTART_ALLOWED=/var/lib/lm/state/restart-allowed  # hub-computed gate: 1 = ok now
+RESTART_ALLOWED=/var/lib/lm/state/restart-allowed  # hub-computed gate (no longer used to gate STALE-restart — staleness always restarts; kept for a future planned-restart path)
 is_force=0; stale_reason=""
 if [ -f "$STALE_SENTINEL" ]; then
   body=$(head -c 100 "$STALE_SENTINEL" 2>/dev/null | tr -d '\n')
@@ -146,21 +146,23 @@ elif [ -d /opt/lm/.git ]; then
 fi
 if [ -n "$stale_reason" ] && systemctl is-active --quiet lm.service 2>/dev/null && hub_healthy; then
   now=$(date +%s); last=$(cat "$STALE_TS" 2>/dev/null || echo 0)
-  # The hub computes the maintenance-window / idle gate (config in the WebUI,
-  # default 02:00) and writes 1/0 here. force (Update button) bypasses the gate.
-  # Fail-OPEN: a missing gate file → restart normally (never strand updates).
-  allowed=$(tr -dc '01' < "$RESTART_ALLOWED" 2>/dev/null | head -c1); allowed=${allowed:-1}
-  if [ "$is_force" = 1 ] || [ "$allowed" = 1 ]; then
-    if [ $(( now - last )) -ge 120 ]; then
-      echo "$now" > "$STALE_TS"
-      [ "$is_force" = 1 ] && fx=" [FORCE]" || fx=""
-      log "STALE hub ($stale_reason)$fx — clean restart to load on-disk code"
-      rm -f "$STALE_SENTINEL"
-      timeout 60 systemctl restart lm.service 2>/dev/null || true
-      log "stale restart issued"
-    fi
-  else
-    log "STALE hub ($stale_reason) — gated: waiting for maintenance window (users logged in / outside window)"
+  # Staleness is an ERROR state (the running process is serving old/buggy code),
+  # NOT planned maintenance — restart immediately, day or night. The
+  # maintenance-window / idle gate (RESTART_ALLOWED, hub-computed) is for
+  # PLANNED pull-and-restart only; it does NOT apply here. Before this change a
+  # stale hub sat UNLOADED until the 02:00 window — a fixed bug kept running for
+  # hours because the restart was gated while users were logged in. The 120s
+  # cooldown + the hub_healthy + is-active guards above prevent a hot-loop; the
+  # fresh process boots current (run_v == disk_v) so neither signal recurs.
+  # $is_force only labels the path (force sentinel from the hub's
+  # check_update_health vs the external drift backstop) — both restart now.
+  if [ $(( now - last )) -ge 120 ]; then
+    echo "$now" > "$STALE_TS"
+    [ "$is_force" = 1 ] && fx=" [FORCE]" || fx=""
+    log "STALE hub ($stale_reason)$fx — clean restart to load on-disk code"
+    rm -f "$STALE_SENTINEL"
+    timeout 60 systemctl restart lm.service 2>/dev/null || true
+    log "stale restart issued"
   fi
 fi
 

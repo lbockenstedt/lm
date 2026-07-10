@@ -1434,7 +1434,7 @@ fi
 # Health-guarded + 2-min cooldown. KEEP IN SYNC with install-lm-watchdog.sh.
 STALE_SENTINEL=/var/lib/lm/state/stale-restart-requested
 STALE_TS=/var/lib/lm/watchdog-stale-ts
-RESTART_ALLOWED=/var/lib/lm/state/restart-allowed  # hub-computed gate: 1 = ok now
+RESTART_ALLOWED=/var/lib/lm/state/restart-allowed  # hub-computed gate (no longer used to gate STALE-restart — staleness always restarts; kept for a future planned-restart path)
 is_force=0; stale_reason=""
 if [ -f "$STALE_SENTINEL" ]; then
   body=$(head -c 100 "$STALE_SENTINEL" 2>/dev/null | tr -d '\n')
@@ -1452,20 +1452,23 @@ elif [ -d /opt/lm/.git ]; then
 fi
 if [ -n "$stale_reason" ] && systemctl is-active --quiet lm.service 2>/dev/null && hub_healthy; then
   now=$(date +%s); last=$(cat "$STALE_TS" 2>/dev/null || echo 0)
-  # Hub computes the maintenance-window/idle gate (WebUI config, default 02:00)
-  # and writes 1/0 here. force (Update button) bypasses. Fail-OPEN on missing file.
-  allowed=$(tr -dc '01' < "$RESTART_ALLOWED" 2>/dev/null | head -c1); allowed=${allowed:-1}
-  if [ "$is_force" = 1 ] || [ "$allowed" = 1 ]; then
-    if [ $(( now - last )) -ge 120 ]; then
-      echo "$now" > "$STALE_TS"
-      [ "$is_force" = 1 ] && fx=" [FORCE]" || fx=""
-      log "STALE hub ($stale_reason)$fx — clean restart to load on-disk code"
-      rm -f "$STALE_SENTINEL"
-      timeout 60 systemctl restart lm.service 2>/dev/null || true
-      log "stale restart issued"
-    fi
-  else
-    log "STALE hub ($stale_reason) — gated: waiting for maintenance window"
+  # Staleness is an ERROR state (running process serving old/buggy code), NOT
+  # planned maintenance — restart immediately, day or night. The
+  # maintenance-window/idle gate (RESTART_ALLOWED, hub-computed) is for PLANNED
+  # pull-and-restart only; it does NOT apply here. Before this change a stale hub
+  # sat UNLOADED until the 02:00 window — a fixed bug kept running for hours
+  # because the restart was gated while users were logged in. The 120s cooldown
+  # + hub_healthy + is-active guards prevent a hot-loop; the fresh process boots
+  # current (run_v == disk_v) so neither signal recurs. $is_force only labels the
+  # path (force sentinel from the hub's check_update_health vs the external drift
+  # backstop) — both restart now. KEEP IN SYNC with install-lm-watchdog.sh.
+  if [ $(( now - last )) -ge 120 ]; then
+    echo "$now" > "$STALE_TS"
+    [ "$is_force" = 1 ] && fx=" [FORCE]" || fx=""
+    log "STALE hub ($stale_reason)$fx — clean restart to load on-disk code"
+    rm -f "$STALE_SENTINEL"
+    timeout 60 systemctl restart lm.service 2>/dev/null || true
+    log "stale restart issued"
   fi
 fi
 
