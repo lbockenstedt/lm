@@ -2686,6 +2686,16 @@ async function csRenderSetupCentralApi() {
     const sm = (sites.site_mappings && typeof sites.site_mappings === 'object') ? sites.site_mappings : {};
     const mc = Array.isArray(sites.monitored_checks) ? sites.monitored_checks : [];
     const hw = Array.isArray(sites.hardware_checks) ? sites.hardware_checks : [];
+    // Wireless sites (the simulated client sites) → a datalist for the mapping's
+    // left field. Sourced from connected clients' config.wsite, merged with any
+    // already-mapped sites so existing rows still offer their value.
+    let _wirelessSites = [];
+    try {
+        const _cl = await csFetch(`/aggregate/clients?tenant_id=${csTenant()}`) || {};
+        const _rows = _cl.clients || _cl.rows || [];
+        _wirelessSites = Array.from(new Set(_rows.map(c => (c.config && c.config.wsite) || c.wsite).filter(Boolean)));
+    } catch (e) { /* clients optional */ }
+    Object.keys(sm).forEach(w => { if (w && !_wirelessSites.includes(w)) _wirelessSites.push(w); });
     window._csCscMonitoredChecks = mc.map(c => ({ type: c.type || 'alert', id: c.id, name: c.name || c.id }));
     window._csCscCatalog = null;
 
@@ -2759,6 +2769,7 @@ async function csRenderSetupCentralApi() {
 
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
       <datalist id="cs-central-site-list">${_discoveredSites.map(n => `<option value="${csEscape(n)}">`).join('')}</datalist>
+      <datalist id="cs-wireless-site-list">${_wirelessSites.map(n => `<option value="${csEscape(n)}">`).join('')}</datalist>
       ${_discoveredSites.length ? `<p class="text-[10px] text-slate-400 mb-1">${_discoveredSites.length} Central site(s) discovered — the Central-site field is a pick-list.</p>` : '<p class="text-[10px] text-slate-400 mb-1">No Central sites discovered yet (check the connection); you can still type a site name.</p>'}
       <div id="cs-csc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-400 italic">No site mappings.</p>'}</div>
       <button onclick="csCscAddSm()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add mapping</button>
@@ -2780,7 +2791,7 @@ async function csRenderSetupCentralApi() {
 
 function csCscSmRow(w, c) {
     return `<div class="cs-csc-sm-row flex gap-2 items-center">
-      <input data-cs-sm-w value="${csEscape(w != null ? w : '')}" placeholder="wireless site" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
+      <input data-cs-sm-w list="cs-wireless-site-list" value="${csEscape(w != null ? w : '')}" placeholder="wireless site" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
       <span class="text-slate-400">→</span>
       <input data-cs-sm-c list="cs-central-site-list" value="${csEscape(c != null ? c : '')}" placeholder="Central site" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
       <button onclick="csCscRemoveRow(this)" class="text-red-500 text-xs px-2" title="Remove">✕</button>
