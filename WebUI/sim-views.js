@@ -2635,25 +2635,18 @@ async function csRenderSetupCentralApi() {
     try { conn = await csFetch(`/aggregate/central-status?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderSetupCentralApi: central-status fetch failed, defaulting to {}', e); conn = {}; }
     try { sites = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderSetupCentralApi: central-sites-config fetch failed, defaulting to {}', e); sites = {}; }
     conn = conn || {}; sites = sites || {};
-    // Discovered Central site names (from the browse endpoint) → a datalist so the
-    // "Central site" mapping field is a pick-list of real sites, not free text.
-    let _discoveredSites = [];
-    try { const _b = await csCentralBrowse(); _discoveredSites = ((_b && _b.sites) || []).map(s => s && s.name).filter(Boolean); } catch (e) { /* browse optional */ }
     const hc = conn.hub_central_config || {};
     const mode = conn.mode || (hc.api_version === 'new_central' ? 'central' : 'classic');
     const sm = (sites.site_mappings && typeof sites.site_mappings === 'object') ? sites.site_mappings : {};
     const mc = Array.isArray(sites.monitored_checks) ? sites.monitored_checks : [];
     const hw = Array.isArray(sites.hardware_checks) ? sites.hardware_checks : [];
-    // Wireless sites (the simulated client sites) → a datalist for the mapping's
-    // left field. Sourced from connected clients' config.wsite, merged with any
-    // already-mapped sites so existing rows still offer their value.
-    let _wirelessSites = [];
-    try {
-        const _cl = await csFetch(`/aggregate/clients?tenant_id=${csTenant()}`) || {};
-        const _rows = _cl.clients || _cl.rows || [];
-        _wirelessSites = Array.from(new Set(_rows.map(c => (c.config && c.config.wsite) || c.wsite).filter(Boolean)));
-    } catch (e) { /* clients optional */ }
-    Object.keys(sm).forEach(w => { if (w && !_wirelessSites.includes(w)) _wirelessSites.push(w); });
+    // Site-mapping dropdowns seed SYNCHRONOUSLY from the existing mappings so the
+    // form renders instantly (no blocking on the slow Central browse). The full
+    // lists (discovered Central sites + simulated wireless sites) are filled in
+    // place AFTER render by _csFillSiteDatalists — no re-render, so an open
+    // dropdown doesn't flash/close.
+    const _wirelessSites = Object.keys(sm);
+    const _discoveredSites = Array.from(new Set(Object.values(sm).filter(Boolean)));
     window._csCscMonitoredChecks = mc.map(c => ({ type: c.type || 'alert', id: c.id, name: c.name || c.id }));
     window._csCscCatalog = null;
 
@@ -2745,6 +2738,34 @@ async function csRenderSetupCentralApi() {
     </div>`;
 
     csSet(`<div class="max-w-4xl space-y-4">${connCard}${sitesCard}</div>`);
+    // Fill the site-mapping dropdowns AFTER the form is on screen — updates the
+    // <datalist> options in place (no re-render), so a click on either field
+    // never flashes. Fire-and-forget; the slow Central browse can't block the tab.
+    _csFillSiteDatalists();
+}
+
+// Merge `values` into the <datalist id> options without disturbing the input.
+function _csSetDatalistOptions(id, values) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const have = new Set(Array.from(el.querySelectorAll('option')).map(o => o.value));
+    (values || []).forEach(v => { if (v) have.add(v); });
+    el.innerHTML = Array.from(have).map(v => `<option value="${csEscape(v)}">`).join('');
+}
+async function _csFillSiteDatalists() {
+    // Wireless sites (fast, local): connected clients' config.wsite.
+    try {
+        const cl = await csFetch(`/aggregate/clients?tenant_id=${csTenant()}`) || {};
+        const rows = cl.clients || cl.rows || [];
+        _csSetDatalistOptions('cs-wireless-site-list',
+            rows.map(c => (c.config && c.config.wsite) || c.wsite).filter(Boolean));
+    } catch (e) { /* clients optional */ }
+    // Central sites (slower: forwards to the spoke's Central browse).
+    try {
+        const b = await csCentralBrowse();
+        _csSetDatalistOptions('cs-central-site-list',
+            ((b && b.sites) || []).map(s => s && s.name).filter(Boolean));
+    } catch (e) { /* browse optional */ }
 }
 
 function csCscSmRow(w, c) {
