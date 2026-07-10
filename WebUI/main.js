@@ -675,6 +675,21 @@ function canEdit() {
     return p.edit === true || p.console_write === true;
 }
 
+// Hide inline row Edit/Delete buttons in module tables from VIEW users (server
+// enforces write_scope — this is UX only). Rather than wrap each per-row button
+// pair (firewall/netbox/dns/dhcp/ldap, rendered by async loaders), toggle a root
+// class that a one-time stylesheet keys off, so every title="Edit"/"Delete"
+// button in the viewport — including ones added later by loaders — is covered.
+function _applyEditVisibility() {
+    if (!document.getElementById('lm-edit-vis-style')) {
+        const s = document.createElement('style');
+        s.id = 'lm-edit-vis-style';
+        s.textContent = ':root.lm-no-edit #viewport button[title="Edit"],:root.lm-no-edit #viewport button[title="Delete"]{display:none !important;}';
+        document.head.appendChild(s);
+    }
+    document.documentElement.classList.toggle('lm-no-edit', !canEdit());
+}
+
 function showToast(message, type = 'info') {
     const colors = { success: '#01A982', error: '#e53e3e', info: '#4a5568' };
     const toast = document.createElement('div');
@@ -2920,6 +2935,7 @@ function renderView(viewId) {
     const vp = document.getElementById('viewport');
     if (!vp) return;
     vp.innerHTML = _viewTemplate(viewId);
+    _applyEditVisibility();   // hide row Edit/Delete for view users (CSS-based)
 }
 
 function _viewTemplate(viewId) {
