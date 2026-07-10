@@ -187,8 +187,24 @@ class RepoSyncMixin:
             # BROKEN update/self-heal infrastructure -> ERROR so it lands in the
             # hub error view (GET_ERROR_LOGS / bugfixer), not just a warning.
             logger.error("[sync-error] update-health CRITICAL: %s", e)
-        for w in update_health.get("warnings", []):
+        # Dedup update-health warnings across cycles. A persistent mis-config
+        # (e.g. update_sources.hub empty) would otherwise log a WARNING every
+        # 15-min cycle (~96/day) of the SAME advisory, drowning the hub error
+        # log and teaching operators to ignore [sync-error]. Log each DISTINCT
+        # warning at WARNING only on its first occurrence or when it RE-appears
+        # after clearing (state change = signal); while it persists unchanged,
+        # emit a single condensed INFO line so the condition stays observable
+        # without flooding. Errors above are never deduped (always loud).
+        cur_warnings = set(update_health.get("warnings", []))
+        prev_warnings = getattr(self, "_prev_update_warnings", set())
+        for w in sorted(cur_warnings - prev_warnings):
             logger.warning("[sync-error] update-health: %s", w)
+        for w in sorted(prev_warnings - cur_warnings):
+            logger.info("[sync-error] update-health: CLEARED — %s", w)
+        if cur_warnings and not (cur_warnings - prev_warnings):
+            logger.info("[sync-error] update-health: %d warning(s) unchanged since last cycle",
+                        len(cur_warnings))
+        self._prev_update_warnings = cur_warnings
 
         ok_count = sum(1 for r in repo_results if r.get("status") == "ok")
         err_count = sum(1 for r in repo_results if r.get("status") == "error")

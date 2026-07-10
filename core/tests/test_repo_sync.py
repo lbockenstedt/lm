@@ -73,7 +73,7 @@ class _RepoSyncHub(RepoSyncMixin):
     def _is_git_repo(self, path):
         return False
 
-    async def perform_update(self, force=False):
+    async def perform_update(self, force=False, force_spokes=False):
         self.perform_calls += 1
         if self._perform_exc:
             raise self._perform_exc
@@ -133,3 +133,52 @@ async def test_loop_disabled_does_not_sync(monkeypatch):
 
     with pytest.raises(asyncio.CancelledError):
         await h.run_repo_sync_loop()
+
+# ── update-health warning dedup (item 18) ─────────────────────────────────────
+# A persistent mis-config (update_sources.hub empty) would otherwise log a
+# WARNING every 15-min cycle (~96/day) of the SAME advisory. The dedup logs a
+# distinct warning at WARNING only on first occurrence / re-appearance after
+# clearing; while it persists unchanged it emits one condensed INFO line.
+class _DedupHub(_RepoSyncHub):
+    """Canned check_update_health so the dedup logic is exercised in isolation."""
+    def __init__(self, warnings_seq):
+        super().__init__()
+        self._warnings_seq = warnings_seq
+        self._calls = 0
+
+    async def check_update_health(self):
+        w = self._warnings_seq[min(self._calls, len(self._warnings_seq) - 1)]
+        self._calls += 1
+        return {"ok": True, "checks": {}, "warnings": list(w), "errors": []}
+
+
+@pytest.mark.asyncio
+async def test_update_health_warning_deduped_across_cycles(caplog):
+    w = ["update_sources.hub is empty/missing — falling back to the default repo URL"]
+    h = _DedupHub(warnings_seq=[w, w, w])  # same warning 3 cycles
+    caplog.set_level(logging.INFO, logger="Hub")
+    await h.run_repo_sync_all()   # cycle 1: WARNING (first occurrence)
+    await h.run_repo_sync_all()   # cycle 2: INFO summary only (deduped)
+    await h.run_repo_sync_all()   # cycle 3: INFO summary only (deduped)
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING
+             and "update-health" in r.message and "empty/missing" in r.message]
+    infos = [r for r in caplog.records if r.levelno == logging.INFO
+             and "unchanged since last cycle" in r.message]
+    assert len(warns) == 1, "distinct warning logged once at WARNING, then deduped"
+    assert len(infos) == 2, "cycles 2+3 emit a condensed INFO summary"
+
+
+@pytest.mark.asyncio
+async def test_update_health_warning_re_logged_after_clearing(caplog):
+    # w, then cleared, then w again → WARNING, CLEARED INFO, WARNING (re-appear).
+    h = _DedupHub(warnings_seq=[["hub empty"], [], ["hub empty"]])
+    caplog.set_level(logging.INFO, logger="Hub")
+    await h.run_repo_sync_all()
+    await h.run_repo_sync_all()
+    await h.run_repo_sync_all()
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING
+             and "hub empty" in r.message]
+    cleared = [r for r in caplog.records if r.levelno == logging.INFO
+               and "CLEARED" in r.message and "hub empty" in r.message]
+    assert len(warns) == 2, "re-logged at WARNING when it re-appears after clearing"
+    assert len(cleared) == 1, "clearing is logged once at INFO"
