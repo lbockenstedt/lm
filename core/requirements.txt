@@ -31,3 +31,14 @@ psutil>=6.0,<8.0             # installed 7.2.2 in hub venv; cap <8 next major
 cryptography>=42,<50         # HMAC signing + spoke PSK onboarding; cap <50
 pyjwt>=2.8,<3                # Entra OIDC: RS256 client_assertion sign + id_token verify (uses cryptography)
 zeroconf>=0.131,<1.0         # mDNS hub broadcast (main.py) + spoke auto-discovery; optional — missing dep degrades to DNS-only
+
+# ── OPTIONAL: Azure Key Vault credential store (Entra OIDC break-glass) ─────
+# NOT installed by default. security/credential_store.py lazy-imports these and
+# degrades to the env provider when they're absent (LM_KEYVAULT_URL unset OR SDK
+# missing → env-only, no crash). Left as COMMENTED lines so dep_guard / a plain
+# `pip install -r requirements.txt` does NOT pull the heavy azure SDK onto every
+# hub. To enable Key Vault secrets, uncomment and re-run the installer, or pip
+# install them directly into the hub venv. See docs/deploy + the
+# azure-secret-hygiene memory.
+# azure-identity>=1.16,<2.0        # DefaultAzureCredential (managed identity / CLI / env chain)
+# azure-keyvault-secrets>=4.8,<5.0 # SecretClient for kv:<secret> refs (OIDC cert key, break-glass hash)
