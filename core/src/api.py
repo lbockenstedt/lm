@@ -1233,6 +1233,21 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "DHCP module access required"})
 
+        # /api/pxmx/* + /vm/* (Hypervisor module) require the ``pxmx`` right OR
+        # admin. This gates VM/hypervisor VIEWING — the VM lists + /vm/{id}/details
+        # are already tenant-filtered (tag + subnet via access.filter_tenant) and
+        # /vm/{id}/details fails closed on an unattributable VM. VM CONTROL
+        # (lifecycle start/stop/delete/snapshot, create, clone, VNC console mint,
+        # node/pool/iso/storage enumeration) keeps its in-handler _is_admin gate —
+        # Global-Admin-only — so a pxmx-right tenant user can see their VMs but
+        # cannot yet act on them; opening control to tenant users needs the per-VM
+        # ownership filter hardened first (tracked follow-up). /api/pxmx/agents/*
+        # stays Global-Admin-only via _ADMIN_API_PREFIXES (checked above).
+        if path.startswith("/api/pxmx/") or path.startswith("/vm/"):
+            if not (_is_admin(sess) or _has_pxmx_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Hypervisor module access required"})
+
         # Shared-infrastructure WRITE paths (OPNsense firewall rules/aliases/NAT/
         # DNS, and the shared DNS/DHCP server records/reservations/syncs) mutate
         # security policy or shared infra. No module-right exists for
