@@ -328,7 +328,7 @@ def register(app, hub, ctx):
         op = route_prefix.replace("-", "_")
 
         @app.get(f"/setup/{route_prefix}", operation_id=f"list_{op}")
-        async def list_instances():
+        async def list_instances(request: Request):
             """List instances for this product (NAC/IPAM/Directory); folds in any legacy single-instance config."""
             global_config = hub.state.system_state.get("global_config", {})
             instances = list(global_config.get(storage_key, []))
@@ -350,6 +350,14 @@ def register(app, hub, ctx):
                         global_config[legacy_key] = {}
                         hub.state.system_state["global_config"] = global_config
                         hub.state.save_state()
+            # Tenant-scope the LIST: a non-admin sees only instances in the shared
+            # tenant or their own tenant(s); other-tenant / unassigned instances
+            # are admin-only. Object-level filtering + the add/write gates are
+            # separate. Admins see all.
+            sess = _session_user(request)
+            if not _is_admin(sess):
+                instances = [i for i in instances
+                             if isinstance(i, dict) and access.spoke_visible_to_session(sess, i.get("tenant_id", ""))]
             return {"instances": instances}
 
         @app.post(f"/setup/{route_prefix}", operation_id=f"add_{op}")

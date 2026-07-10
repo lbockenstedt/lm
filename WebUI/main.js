@@ -967,6 +967,18 @@ function canAccessTenant(tenantId) {
     return allowed.length === 0 || allowed.includes(tenantId);
 }
 
+// Can the CURRENT user bind a NEW device/instance to `spoke`? Mirrors the
+// server-side access.can_bind_spoke: Global Admin → any spoke; tenant-admin →
+// only a spoke assigned to their OWN tenant (strictly own, NOT shared); plain
+// user → none. Used to filter the Add-device spoke dropdowns; the backend
+// enforces the same rule, so this is UX only.
+function _spokeBindable(spoke) {
+    if (isAdmin()) return true;
+    if (!isTenantAdmin()) return false;
+    const t = spoke && spoke.tenant_id;
+    return !!t && userAllowedTenants().includes(t);
+}
+
 // Tenant-scoped visibility of a spoke for the CURRENT user. NEVER narrows the
 // admin all-tenants view. For a non-admin: a spoke bound to the SHARED tenant is
 // visible to everyone (objects still subnet-scoped); a spoke bound to one of the
@@ -13378,8 +13390,9 @@ function showAddFirewallModal() {
         const selector = document.getElementById('fw-spoke');
         if (selector) {
             const fwSpokes = spokes.filter(s =>
-                s.module_type === 'firewall' ||
-                /^(opn|fw|firewall|pfsense|fortigate|juniper)/.test(s.spoke_id)
+                (s.module_type === 'firewall' ||
+                 /^(opn|fw|firewall|pfsense|fortigate|juniper)/.test(s.spoke_id))
+                && _spokeBindable(s)
             );
             selector.innerHTML = fwSpokes.length > 0
                 ? '<option value="">— select spoke —</option>' + fwSpokes.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('')
@@ -13790,7 +13803,7 @@ ${schemaBtnHtml}
     loadApprovedSpokes().then(spokes => {
         const selector = document.getElementById('inst-spoke');
         if (!selector) return;
-        const matched = spokes.filter(s => s.module_type === p.moduleType);
+        const matched = spokes.filter(s => s.module_type === p.moduleType && _spokeBindable(s));
         selector.innerHTML = matched.length > 0
             ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('')
             : `<option value="">No ${p.moduleType} spokes found</option>`;
@@ -14010,7 +14023,8 @@ function _renderDeviceModalFields(typeKey, values) {
         const selector = document.getElementById('dev-spoke');
         if (!selector) return;
         const matched = spokes.filter(s => t.moduleType ? s.module_type === t.moduleType : true)
-                              .filter(s => t.spokeFilter ? t.spokeFilter(s) : true);
+                              .filter(s => t.spokeFilter ? t.spokeFilter(s) : true)
+                              .filter(_spokeBindable);
         const current = values ? values.spoke_id : '';
         selector.innerHTML = matched.length > 0
             ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}"${s.spoke_id === current ? ' selected' : ''}>${s.spoke_id}</option>`).join('')
