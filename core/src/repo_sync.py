@@ -241,8 +241,29 @@ class RepoSyncMixin:
                     try:
                         await asyncio.wait_for(self.run_repo_sync_all(), timeout=600)
                     except asyncio.TimeoutError:
-                        logger.warning("[sync-error] repo_sync cycle exceeded 600s "
-                                       "— abandoned; will retry next interval")
+                        # ERROR (not WARNING) so it lands in the hub error view
+                        # (GET_ERROR_LOGS / bugfixer keys off [sync-error] ERROR),
+                        # and persist a timeout status so the WebUI Sync card
+                        # shows the stall (the abandoned run_repo_sync_all was
+                        # cancelled BEFORE it could set_repo_sync_status, so
+                        # without this the card kept the last green cycle while
+                        # the loop sat wedged on a hung spoke send / slow pull).
+                        logger.error("[sync-error] repo_sync cycle exceeded 600s "
+                                      "— abandoned; will retry next interval")
+                        try:
+                            _ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                            await self.simulations_store.set_repo_sync_status({
+                                "last_sync_ts": _ts,
+                                "hub": {"status": "error",
+                                        "message": "repo_sync cycle exceeded 600s — abandoned"},
+                                "provisioning_repos": [],
+                                "message": "hub=error; cycle exceeded 600s timeout — abandoned",
+                                "update_health": {"ok": False, "checks": {},
+                                                  "warnings": ["cycle timeout"],
+                                                  "errors": ["repo_sync cycle exceeded 600s"]},
+                            })
+                        except Exception as _e:  # noqa: BLE001 — store failure must not kill the loop
+                            logger.warning("[sync-error] repo_sync timeout status persist failed: %s", _e)
                 else:
                     # Scheduled sync OFF - still audit the update/self-heal
                     # infrastructure (systemd Type=exec / MainPID / Restart=,
