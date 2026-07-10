@@ -12027,12 +12027,12 @@ const LE_DNS_CREDS_HINT = {
     google:     'dns_google_domains_access_token = ...',
     digitalocean: 'dns_digitalocean_token = ...',
     linode:     'dns_linode_api_key = ...',
-    rfc2136:    'dns_rfc2136_server = ...\ndns_rfc2136_key_name = ...\ndns_rfc2136_key_secret = ...',
+    rfc2136:    'dns_rfc2136_server = ...\ndns_rfc2136_name = ...\ndns_rfc2136_secret = ...',
     he:         '# Hurricane Electric dns.he.net — TSIG dynamic update\n' +
                 'dns_rfc2136_server = ns1.he.net\n' +
                 'dns_rfc2136_port = 53\n' +
-                'dns_rfc2136_key_name = YOUR_KEY_NAME\n' +
-                'dns_rfc2136_key_secret = YOUR_TSIG_SECRET\n' +
+                'dns_rfc2136_name = YOUR_KEY_NAME\n' +
+                'dns_rfc2136_secret = YOUR_TSIG_SECRET\n' +
                 'dns_rfc2136_algorithm = hmac-sha256',
     hetzner:    'dns_hetzner_api_token = ...',
     inwx:       'dns_inwx_url = https://api.domrobot.com/xmlrpc/\ndns_inwx_username = ...\ndns_inwx_password = ...',
@@ -12252,8 +12252,11 @@ function leIssueBuildRfc2136Ini() {
     let ini = '';
     if (srv) ini += `dns_rfc2136_server = ${srv}\n`;
     ini += `dns_rfc2136_port = ${port}\n`;
-    ini += `dns_rfc2136_key_name = ${kn}\n`;
-    ini += `dns_rfc2136_key_secret = ${ks}\n`;
+    // certbot-dns-rfc2136 property names are dns_rfc2136_name / _secret (NOT
+    // _key_name / _key_secret) — the wrong keys produced "Property
+    // dns_rfc2136_name not found" and the issue failed.
+    ini += `dns_rfc2136_name = ${kn}\n`;
+    ini += `dns_rfc2136_secret = ${ks}\n`;
     ini += `dns_rfc2136_algorithm = ${algo}\n`;
     return { ini, keyName: kn, keySecret: ks };
 }
