@@ -1143,7 +1143,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions', 'API Tokens'],
+    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions', 'API Tokens', 'Self-Backup'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3326,6 +3326,15 @@ function _renderSettingsSection(subMenu) {
     // source/config/status data, so it works unchanged from the System view.
     if (subMenu === 'Sync') {
         _renderSetupSyncTile(content);
+        return;
+    }
+
+    // Self-Backup: scheduled hub-state backup (local rotated archive + optional
+    // SSH copy). Global-Admin-only (the /setup/backup/* routes are admin-gated
+    // server-side). _renderSetupSelfBackupTile renders into the passed
+    // container and self-loads its config/status.
+    if (subMenu === 'Self-Backup') {
+        _renderSetupSelfBackupTile(content);
         return;
     }
 
@@ -7798,10 +7807,15 @@ function _diagTelemetryExtras(s, fns) {
     const alertBadge = (aTier === 'error' || aTier === 'warning')
         ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${aTier === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}" title="Out of contact ${Math.round((s.alert_duration_s || 0) / 60)}m — forgiving alert tier (separate from the heartbeat light)">alert · ${aTier}</span>`
         : '';
-    // Version skew warning badge.
-    const skew = s.version_skew
-        ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase" title="Not on the current .NN numbering">skew</span>`
-        : '';
+    // Version chip color: GREEN = up to date, RED = out of date (version_skew),
+    // slate = unknown (no telemetry to compare against). Folds the old separate
+    // amber "skew" badge into the version chip itself.
+    const _ver = s.version || 'unknown';
+    const _verUnknown = !s.version || _ver === 'unknown';
+    const _verTone = _verUnknown ? 'bg-slate-100 text-slate-600'
+                   : (s.version_skew ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700');
+    const _verTitle = _verUnknown ? 'Version unknown — no telemetry to compare'
+                    : (s.version_skew ? 'Out of date — behind the current .NN version' : 'Up to date');
     // Heartbeat-aware status dot: green = healthy & beating, amber = slow-but-
     // live, red = offline/never/RED, slate = no heartbeat telemetry yet. The
     // management renderers use this in place of their approval-only dot when
@@ -7830,8 +7844,7 @@ function _diagTelemetryExtras(s, fns) {
         status,
         badges: [
             `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${hbBadgeTone}" title="Time since last inbound heartbeat frame (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s/never)">${hbStatus || '—'} · ${hbAge}</span>`,
-            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600 font-mono">${escapeHtml(s.version || 'unknown')}</span>`,
-            skew,
+            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase font-mono ${_verTone}" title="${_verTitle}">${escapeHtml(_ver)}</span>`,
             `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${badge.tone}" title="${escapeHtml(badge.title)}">${badge.text}</span>`,
             alertBadge,
         ],
