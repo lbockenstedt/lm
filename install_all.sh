@@ -43,6 +43,11 @@ while [[ "$#" -gt 0 ]]; do
     shift
 done
 
+# Non-interactive apt so an unattended run (cloud-init / Azure custom-script)
+# can't stall on a debconf/needrestart prompt.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 # ------------------------------------------------------------------
 # Path Configuration & Logging
 # ------------------------------------------------------------------
@@ -591,6 +596,14 @@ for a in "$@"; do
 done
 [ -n "$unit" ] || { echo '{"error":"no unit"}' >&2; exit 2; }
 
+# Least-privilege: this helper is sudo-granted NOPASSWD to svc_lm, so restrict it
+# to Lab Manager units. Without this, a compromised hub could restart/reset-failed
+# ANY systemd unit on the box (ssh, cron, …) — privilege escalation / DoS.
+case "$unit" in
+    lm|lm.service|lm-*) : ;;
+    *) echo '{"error":"unit not permitted — Lab Manager units only"}' >&2; exit 3 ;;
+esac
+
 show "$unit"
 case "$mode" in
     inspect)
@@ -1042,6 +1055,7 @@ if command -v sudo >/dev/null 2>&1; then
 else
     LM_TLS_PORT=8000 nohup "$BASE_DIR/core/venv/bin/python3" "$BASE_DIR/core/src/main.py" > "$LOG_DIR/hub.log" 2>&1 &
 fi
+PROBE_PID=$!   # reaped before the final `systemctl restart lm` (see reap_boot_probe)
 
 # Give the Hub API a moment to fully start and stabilize
 log_c "⏳ Waiting for Hub boot probe to initialize..."
@@ -1219,10 +1233,19 @@ elif [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ]; then
     echo "🔒 Hub TLS cert already present at $TLS_CERT — preserving."
 else
     echo "🔒 Generating self-signed hub TLS cert at $TLS_CERT…"
+    # Base SANs (loopback + the internal hostname). For an INTERNET-FACING hub,
+    # set LM_HUB_FQDN=hub.example.com (and/or LM_HUB_IP=<public ip>) so the cert
+    # covers the public name — otherwise browsers hit a name-MISMATCH error on top
+    # of the self-signed-CA warning. A real CA cert (Let's Encrypt) is still
+    # recommended for production; this just removes the name mismatch.
+    _san="IP:127.0.0.1,DNS:lm-hub,DNS:lm-hub.local"
+    _cn="lm-hub"
+    [ -n "${LM_HUB_FQDN:-}" ] && { _san="$_san,DNS:${LM_HUB_FQDN}"; _cn="${LM_HUB_FQDN}"; }
+    [ -n "${LM_HUB_IP:-}" ]   && _san="$_san,IP:${LM_HUB_IP}"
     openssl req -x509 -newkey rsa:2048 -nodes \
         -keyout "$TLS_KEY" -out "$TLS_CERT" -days 3650 \
-        -subj "/CN=lm-hub" \
-        -addext "subjectAltName=IP:127.0.0.1,DNS:lm-hub,DNS:lm-hub.local" \
+        -subj "/CN=${_cn}" \
+        -addext "subjectAltName=${_san}" \
         >/dev/null 2>&1 || echo "⚠️  openssl cert generation failed — hub stays plaintext."
 fi
 if [ -f "$TLS_KEY" ]; then
@@ -1310,6 +1333,20 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Reap the :8000 boot probe (started above for the in-install REST calls) BEFORE
+# bringing up the real :443 hub. Left running it lingers as a SECOND hub serving
+# the full API + WebUI in PLAINTEXT on 0.0.0.0:8000 and a duplicate writer to the
+# shared encrypted state file (corruption + an internet-exposable plaintext
+# surface). Kill by port (reliable — the probe was launched via sudo, so $! is
+# the sudo wrapper, not the python child) with the PID as a fallback.
+kill "${PROBE_PID:-0}" 2>/dev/null || true
+if command -v fuser >/dev/null 2>&1; then
+    fuser -k 8000/tcp 2>/dev/null || true
+elif command -v lsof >/dev/null 2>&1; then
+    lsof -t -i:8000 2>/dev/null | xargs -r kill 2>/dev/null || true
+fi
+sleep 1
 
 # Enable and start the service
 systemctl daemon-reload
