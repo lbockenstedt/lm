@@ -1416,11 +1416,29 @@ def create_app(hub):
     ui_path = os.path.join(os.path.dirname(__file__), "../../WebUI")
 
     if os.path.exists(ui_path):
+        ui_real = os.path.realpath(ui_path)
+
         @app.get("/{full_path:path}")
         async def serve_ui(full_path: str):
+            # SECURITY: the /{full_path:path} catch-all is PUBLIC (no session
+            # gate), so a containment guard is mandatory. Without it a path
+            # like 'static/../../../../etc/passwd' would let an UNAUTHENTICATED
+            # caller read arbitrary files as the hub user (.env with the
+            # Fernet key + secrets, sessions.json, state files). Reject '..'
+            # segments outright and verify the realpath stays under ui_path
+            # before serving. (Starlette decodes %2e%2e → '..' before the
+            # :path converter, so encoded traversal is caught too.)
+            if ".." in (full_path or "").split("/"):
+                raise HTTPException(status_code=404, detail="Not found")
             file_path = os.path.join(ui_path, full_path)
-            if os.path.exists(file_path) and os.path.isfile(file_path):
-                response = FileResponse(file_path)
+            try:
+                real = os.path.realpath(file_path)
+            except OSError:
+                raise HTTPException(status_code=404, detail="Not found")
+            if real != ui_real and not real.startswith(ui_real + os.sep):
+                raise HTTPException(status_code=404, detail="Not found")
+            if os.path.isfile(real):
+                response = FileResponse(real)
                 response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
                 response.headers["Pragma"] = "no-cache"
                 response.headers["Expires"] = "0"
