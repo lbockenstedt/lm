@@ -137,6 +137,31 @@ class AgentHostingControlPlane(BaseControlPlane):
     async def handle_system_command(self, cmd_type: str, data: Dict[str, Any]) -> Any:
         """Handle a Hub system command; on log-level changes also broadcast to
         all connected agents so the WebUI "Enable Debug" toggle reaches them."""
+        # Remote Console → a specific hosted node agent. Only an agent-hosting
+        # spoke has send_to_agent, so relay RUN_COMMAND down the /ws/agent channel
+        # and return the agent's runner result. The hub already gated this on
+        # Global-Admin + remote_exec.enabled and audit-logged it.
+        if cmd_type == "AGENT_RUN_COMMAND":
+            _to = float(data.get("timeout", 30.0) or 30.0)
+            resp = await self.send_to_agent(
+                "RUN_COMMAND",
+                {"command": data.get("command", ""),
+                 "allow_shell": bool(data.get("allow_shell", False)),
+                 "timeout": _to},
+                agent_id=data.get("agent_id"),
+                timeout=_to + 10.0)
+            # send_to_agent returns the agent's response data: the runner dict on
+            # success, or {"status":"ERROR","message":…} if the agent is gone/timed
+            # out. Normalize to a runner-shaped result for the hub.
+            if isinstance(resp, dict) and resp.get("status") == "ERROR":
+                res = {"ok": False, "rc": None, "stdout": "", "stderr": "",
+                       "truncated": False, "error": resp.get("message", "agent error")}
+            elif isinstance(resp, dict):
+                res = resp
+            else:
+                res = {"ok": False, "rc": None, "stdout": "", "stderr": "",
+                       "truncated": False, "error": "no result from agent"}
+            return {"status": "SUCCESS", "result": res}
         result = await super().handle_system_command(cmd_type, data)
         if cmd_type in ("SET_LOG_LEVEL", "SPOKE_SET_LOG_LEVEL"):
             if self.connected_agents:

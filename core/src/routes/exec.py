@@ -74,6 +74,17 @@ def register(app, hub, ctx):
         targets = [{"id": "hub", "label": "Hub (this box)", "kind": "hub"}]
         for sid in sorted(getattr(hub, "active_connections", {}) or {}):
             targets.append({"id": sid, "label": sid, "kind": "spoke"})
+        # Relayed node agents (pxmx agents dial a spoke's /ws/agent, not the hub).
+        # Route id "agent:<owning_spoke_id>:<agent_id>" so the run path can relay
+        # RUN_COMMAND down through the owning spoke. Only include ones whose owning
+        # spoke is currently connected (otherwise the relay can't reach them).
+        conns = getattr(hub, "active_connections", {}) or {}
+        for aid, info in sorted((getattr(hub, "agent_info", {}) or {}).items()):
+            sid = (info or {}).get("spoke_id", "")
+            if not sid or sid not in conns:
+                continue
+            host = (info or {}).get("hostname", aid) or aid
+            targets.append({"id": f"agent:{sid}:{aid}", "label": f"{host} · agent", "kind": "agent"})
         return {"targets": targets}
 
     @app.post("/api/exec")
@@ -93,23 +104,43 @@ def register(app, hub, ctx):
         # AUDIT — before running, unconditionally.
         logger.warning("[remote-exec] RUN user=%s target=%s shell=%s cmd=%r",
                        who, target, allow_shell, command[:500])
+        def _unwrap(resp):
+            # {"payload":{"data":{"status","result"}}} → the runner dict.
+            payload = (resp or {}).get("payload", {}) or {}
+            inner = payload.get("data", resp) or {}
+            r = inner.get("result") if isinstance(inner, dict) else None
+            if not isinstance(r, dict):
+                return {"ok": False, "rc": None, "stdout": "", "stderr": "",
+                        "truncated": False, "error": "no result (offline / timed out?)"}
+            return r
+
+        conns = getattr(hub, "active_connections", {}) or {}
         try:
             if target == "hub":
                 res = await asyncio.to_thread(run_local_command, command, allow_shell, 30.0)
+            elif target.startswith("agent:"):
+                # Relayed node agent — "agent:<owning_spoke>:<agent_id>". Relay
+                # RUN_COMMAND through the owning spoke's AGENT_RUN_COMMAND handler,
+                # which sends it down the /ws/agent channel to the agent.
+                _, _, rest = target.partition(":")
+                sid, _, aid = rest.partition(":")
+                if not sid or not aid:
+                    raise HTTPException(status_code=400, detail="bad agent target")
+                if sid not in conns:
+                    raise HTTPException(status_code=404, detail=f"agent's spoke '{sid}' not connected")
+                resp = await hub.request_response(
+                    sid, "AGENT_RUN_COMMAND",
+                    {"agent_id": aid, "command": command, "allow_shell": allow_shell, "timeout": 30.0},
+                    timeout=50.0)
+                res = _unwrap(resp)
             else:
-                if target not in (getattr(hub, "active_connections", {}) or {}):
+                if target not in conns:
                     raise HTTPException(status_code=404, detail=f"spoke '{target}' not connected")
                 resp = await hub.request_response(
                     target, "RUN_COMMAND",
                     {"command": command, "allow_shell": allow_shell, "timeout": 30.0},
                     timeout=40.0)
-                # Unwrap {"payload":{"data":{"status","result"}}} → the runner dict.
-                payload = (resp or {}).get("payload", {}) or {}
-                inner = payload.get("data", resp) or {}
-                res = inner.get("result") if isinstance(inner, dict) else None
-                if not isinstance(res, dict):
-                    res = {"ok": False, "rc": None, "stdout": "", "stderr": "",
-                           "truncated": False, "error": "no result from spoke (offline / timed out?)"}
+                res = _unwrap(resp)
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
