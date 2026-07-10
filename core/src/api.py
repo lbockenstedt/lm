@@ -1100,6 +1100,7 @@ def create_app(hub):
         # and /auth/token/revoke stay session-gated (not listed here).
         _PUBLIC = {"/auth/login", "/auth/me", "/auth/setup", "/status",
                    "/auth/token", "/auth/token/refresh",
+                   "/auth/oidc/login", "/auth/oidc/callback", "/auth/oidc/enabled",
                    "/sim/api/init", "/sim/api/health"}
         _PUBLIC_GET = {"/setup/appearance", "/setup/toast-config"}
         if path in _PUBLIC or (request.method == "GET" and path in _PUBLIC_GET):
@@ -1259,9 +1260,13 @@ def create_app(hub):
                 if not (_is_admin(sess) or _has_ldap_access(sess)):
                     return JSONResponse(status_code=403,
                                         content={"detail": "Directory module access required"})
-            elif not _is_admin(sess):
+            # WRITES are tenant-admin tier (directory management), OU-scoped in the
+            # handler (routes/ldap.py _assert_ldap_write binds a tenant-admin to
+            # their own ldap_base_dn subtree; reads are filtered to it). Global
+            # Admin is unconfined.
+            elif not _can_edit_shared(sess):
                 return JSONResponse(status_code=403,
-                                    content={"detail": "Admin access required for directory changes"})
+                                    content={"detail": "Tenant-admin (or admin) required for directory changes"})
 
         # Shared-infrastructure WRITE paths (OPNsense firewall rules/aliases/NAT/
         # DNS, and the shared DNS/DHCP server records/reservations/syncs) mutate
@@ -1597,7 +1602,7 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc,
     )
     setup.register(app, hub, ctx)
     firewall.register(app, hub, ctx)
@@ -1614,6 +1619,7 @@ def create_app(hub):
     netbox.register(app, hub, ctx)
     tenants_users.register(app, hub, ctx)
     auth.register(app, hub, ctx)
+    oidc.register(app, hub, ctx)
     setup_misc.register(app, hub, ctx)
     agents.register(app, hub, ctx)
     net_services.register(app, hub, ctx)

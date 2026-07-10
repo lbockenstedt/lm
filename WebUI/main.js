@@ -2994,10 +2994,11 @@ function _viewTemplate(viewId) {
 </div>`;
 
         case 'ldap':
-            // Directory writes (user/group/OU CRUD + password reset) are
-            // Global-Admin-only — an ldap-right user can view but not mutate.
+            // Directory writes are tenant-admin tier, OU-scoped to the tenant's
+            // ldap_base_dn subtree (server-enforced); a plain ldap-right user can
+            // view but not mutate.
             return `<div class="space-y-6">
-  <div class="flex justify-end mb-2">${isAdmin() ? `<button onclick="showLDAPModal(currentSubView)" class="${btn}">+ Add</button>` : ''}</div>
+  <div class="flex justify-end mb-2">${(isAdmin() || isTenantAdmin()) ? `<button onclick="showLDAPModal(currentSubView)" class="${btn}">+ Add</button>` : ''}</div>
   <div class="${card} p-0 overflow-hidden">
     <table class="w-full text-left text-sm">
       <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr id="ldap-table-head"></tr></thead>
