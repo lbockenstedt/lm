@@ -5268,10 +5268,6 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self._clear_watchdog_restart_sentinel()
         except Exception:  # noqa: BLE001
             pass
-        # [update-test 2026-07-10] boot marker C — greppable proof the hub auto-
-        # pulled AND fired its own (detached) self-restart into new code with no
-        # manual step. Safe to remove after verification.
-        logger.info("[update-test] boot marker C — auto-restart verification")
 
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
