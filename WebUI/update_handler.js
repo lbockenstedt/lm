@@ -30,7 +30,21 @@ async function triggerUpdate(evt) {
         }
         const data = await response.json();
         if (typeof showToast === 'function') {
-            showToast(data.message || 'Update triggered.', data.status === 'success' ? 'success' : 'info');
+            const running = data.running_version || window.__lmHubVersion || '';
+            const target = data.target_version || window.__lmTargetVersion || '';
+            let msg;
+            if (data.status === 'success') {
+                // Restart path — the watchdog performs the restart (queued, ~a
+                // moment), so say so and show the version we're moving to.
+                const verBit = (target && target !== running)
+                    ? ` — ${running ? running + ' → ' : ''}${target}`
+                    : (running ? ` (version ${running})` : '');
+                msg = `Update queued${verBit}. The hub will restart shortly.`;
+            } else {
+                // Spoke-only / already-current — keep the server's own message.
+                msg = data.message || (running ? `Already up to date (version ${running}).` : 'No update needed.');
+            }
+            showToast(msg, data.status === 'success' ? 'success' : 'info');
         }
 
         // Only the hub-restart path (status === 'success') actually restarts the

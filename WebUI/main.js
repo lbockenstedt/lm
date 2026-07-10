@@ -2105,6 +2105,7 @@ function _updateMetrics(statusData) {
             : 'Up to date (running the latest pulled version)';
         versionEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full ${dotTone} align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
         window.__lmHubVersion = m.version;  // for File-a-Bug context
+        window.__lmTargetVersion = wd.target_version || null;  // pulled/pending version, for the Update toast
     }
 
     // Out-of-contact alerts (SpokeAlertMixin) — surfaced on the already-polled
