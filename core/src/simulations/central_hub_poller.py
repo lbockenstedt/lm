@@ -21,7 +21,9 @@ rolling 1h client-count average / drop%% baseline) — keep the two in sync.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 from typing import Any, Dict
 
@@ -31,12 +33,165 @@ logger = logging.getLogger("CentralHubPoller")
 
 _POLL_INTERVAL_S = 300  # 5 min — matches the spoke poller + aruba.py cache TTLs
 
-# Rolling client-count baseline (identical to central_poller.py): last hour of
-# per-site counts → current + hourly_avg + drop%%; DEGRADED when the live count
-# is >=25%% below the hour's average.
-_CLIENT_WINDOW_SECS = 3600
-_CLIENT_MIN_SAMPLES = 3
-_CLIENT_DROP_PCT = 25.0
+# Client-count baseline constants — ported verbatim from the source webui-spoke
+# (server.py). The alarm baseline is a 7-DAY rolling average of hourly snapshots
+# (NOT the 1h average), so a prolonged client drop stays flagged instead of the
+# baseline sagging to match it.
+_CC_WINDOW = 3600          # seconds of raw samples kept (the "current hourly")
+_CC_MIN_SAMPLES = 3        # minimum live samples before flagging
+_CC_DROP_PCT = 25.0        # percent drop below baseline that flags DEGRADED
+_CC_7DAY_WINDOW = 7 * 86400
+_CC_SNAPSHOT_INTERVAL = 3600  # append one hourly snapshot to the 7-day history / hr
+_CC_KEYSEP = "\x1f"        # composite (tenant, wsite) key separator
+
+
+class ClientCountTracker:
+    """Per-(scope, wsite) client-count baseline + drop detection, ported
+    faithfully from the source webui-spoke (server.py ``_client_count_payload`` /
+    ``_save_client_count_baseline`` / ``hourly_baseline_saver``).
+
+    Monitoring a site means watching its client count for a sustained DROP: 1h of
+    raw samples gives the smoothed "current hourly" average, and a 7-DAY history
+    of hourly snapshots is the STABLE alarm baseline. ``drop_pct = (baseline -
+    hourly_avg) / baseline`` and the site goes DEGRADED at >=25%. Because the
+    baseline spans 7 days, a prolonged drop does NOT suppress the alarm. Both the
+    last-hour baseline and the 7-day history persist to disk so a restart keeps
+    the reference instead of showing NO_DATA for an hour. ``scope`` is the
+    tenant_id on the hub (a single fixed key on the distributed spoke)."""
+
+    def __init__(self, baseline_path: str, sevenday_path: str) -> None:
+        self._baseline_path = baseline_path
+        self._sevenday_path = sevenday_path
+        self._samples: Dict[str, list] = {}    # key -> [(ts, count), ...] (1h)
+        self._hourly: Dict[str, list] = {}      # key -> [(ts, hourly_avg), ...] (7d)
+        self._baseline: Dict[str, dict] = {}    # key -> {hourly_avg, recorded_at}
+        # Match the source: wait one full hour before the first snapshot write.
+        self._last_snapshot = time.time()
+        self._load()
+
+    @staticmethod
+    def _key(scope: str, wsite: str) -> str:
+        return f"{scope}{_CC_KEYSEP}{wsite}"
+
+    def _load(self) -> None:
+        now = time.time()
+        try:
+            with open(self._baseline_path, encoding="utf-8") as f:
+                self._baseline = json.load(f) or {}
+            # Seed synthetic samples from the saved average so the UI surfaces a
+            # reference immediately on restart (they age out as live data arrives).
+            for key, saved in self._baseline.items():
+                avg = round(saved.get("hourly_avg", 0))
+                self._samples[key] = [
+                    (now - (_CC_MIN_SAMPLES - i) * 60, avg) for i in range(_CC_MIN_SAMPLES)
+                ]
+        except Exception:  # noqa: BLE001 — absent/corrupt baseline → start empty
+            self._baseline = {}
+        try:
+            with open(self._sevenday_path, encoding="utf-8") as f:
+                raw = json.load(f) or {}
+            cutoff = now - _CC_7DAY_WINDOW
+            self._hourly = {
+                k: [(float(ts), float(v)) for ts, v in entries if float(ts) >= cutoff]
+                for k, entries in raw.items()
+            }
+        except Exception:  # noqa: BLE001
+            self._hourly = {}
+
+    def record(self, scope: str, wsite: str, current: int) -> None:
+        """Append a raw sample and trim to the 1-hour window."""
+        now = time.time()
+        key = self._key(scope, wsite)
+        samples = self._samples.setdefault(key, [])
+        samples.append((now, int(current)))
+        cutoff = now - _CC_WINDOW
+        self._samples[key] = [s for s in samples if s[0] >= cutoff]
+
+    def entry(self, scope: str, wsite: str, central_site: str) -> Dict[str, Any]:
+        """Per-site {current, hourly_avg, baseline_7day, drop_pct, status, ...} —
+        mirrors the source _client_count_payload per-site branch (7-day baseline,
+        persisted-baseline fallback before MIN_SAMPLES, NO_DATA when empty)."""
+        now = time.time()
+        key = self._key(scope, wsite)
+        samples = self._samples.get(key, [])
+        hist = self._hourly.get(key, [])
+        has_7day = len(hist) >= 2
+        baseline_7day = (sum(v for _, v in hist) / len(hist)) if has_7day else None
+        if not samples:
+            return {"site_name": central_site, "current": 0, "hourly_avg": 0,
+                    "baseline_7day": round(baseline_7day, 1) if baseline_7day is not None else None,
+                    "baseline_source": "7day" if has_7day else "none",
+                    "drop_pct": 0.0, "status": "NO_DATA", "ts": now}
+        current = samples[-1][1]
+        if len(samples) < _CC_MIN_SAMPLES:
+            saved = self._baseline.get(key)
+            if saved:
+                hourly_avg = saved["hourly_avg"]
+                baseline = baseline_7day if has_7day else hourly_avg
+                drop_pct = max(0.0, (baseline - hourly_avg) / baseline * 100.0) if baseline >= 1 else 0.0
+                status = "DEGRADED" if drop_pct >= _CC_DROP_PCT else "OK"
+                return {"site_name": central_site, "current": current, "hourly_avg": hourly_avg,
+                        "baseline_7day": round(baseline_7day, 1) if baseline_7day is not None else None,
+                        "baseline_source": "7day" if has_7day else "hourly",
+                        "drop_pct": round(drop_pct, 1), "status": status,
+                        "ts": samples[-1][0], "baseline_stale": True}
+            return {"site_name": central_site, "current": current, "hourly_avg": current,
+                    "baseline_7day": round(baseline_7day, 1) if baseline_7day is not None else None,
+                    "baseline_source": "7day" if has_7day else "none",
+                    "drop_pct": 0.0, "status": "NO_DATA", "ts": samples[-1][0]}
+        hourly_avg = sum(s[1] for s in samples) / len(samples)
+        baseline = baseline_7day if has_7day else hourly_avg
+        if baseline < 1:
+            drop_pct, status = 0.0, "OK"
+        else:
+            drop_pct = (baseline - hourly_avg) / baseline * 100.0
+            status = "DEGRADED" if drop_pct >= _CC_DROP_PCT else "OK"
+        return {"site_name": central_site, "current": current, "hourly_avg": round(hourly_avg, 1),
+                "baseline_7day": round(baseline_7day, 1) if baseline_7day is not None else None,
+                "baseline_source": "7day" if has_7day else "hourly",
+                "drop_pct": round(max(0.0, drop_pct), 1), "status": status,
+                "ts": samples[-1][0], "baseline_stale": False}
+
+    def maybe_snapshot(self) -> None:
+        """Once per hour: append each site's current hourly average to the 7-day
+        history and persist both files. Mirrors source hourly_baseline_saver +
+        _save_client_count_baseline."""
+        now = time.time()
+        if now - self._last_snapshot < _CC_SNAPSHOT_INTERVAL:
+            return
+        self._last_snapshot = now
+        cutoff = now - _CC_7DAY_WINDOW
+        snapshot: Dict[str, dict] = {}
+        for key, samples in self._samples.items():
+            if len(samples) < _CC_MIN_SAMPLES:
+                continue
+            avg = sum(s[1] for s in samples) / len(samples)
+            snapshot[key] = {"hourly_avg": round(avg, 1), "recorded_at": now}
+            hist = self._hourly.setdefault(key, [])
+            hist.append((now, avg))
+            self._hourly[key] = [(ts, v) for ts, v in hist if ts >= cutoff]
+        if snapshot:
+            self._baseline.update(snapshot)
+            self._persist(self._baseline_path, self._baseline)
+        if self._hourly:
+            self._persist(self._sevenday_path, {k: list(v) for k, v in self._hourly.items()})
+
+    def forget(self, scope: str) -> None:
+        """Drop all state for a scope (tenant left centralized mode / cleared creds)."""
+        prefix = f"{scope}{_CC_KEYSEP}"
+        for store in (self._samples, self._hourly, self._baseline):
+            for k in [k for k in store if k.startswith(prefix)]:
+                store.pop(k, None)
+
+    @staticmethod
+    def _persist(path: str, data: dict) -> None:
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001 — persistence is best-effort
+            logger.warning("ClientCountTracker: persist failed (%s): %s", path, exc)
 
 
 class CentralHubPoller:
@@ -47,34 +202,15 @@ class CentralHubPoller:
 
     def __init__(self, hub) -> None:
         self.hub = hub
-        # Rolling per-(tenant, wsite) client-count samples [(ts, count), ...].
-        self._client_samples: Dict[str, Dict[str, list]] = {}
+        ddir = getattr(getattr(hub, "state", None), "data_dir", ".") or "."
+        self._cc = ClientCountTracker(
+            os.path.join(ddir, "client_count_baseline.json"),
+            os.path.join(ddir, "client_count_7day.json"),
+        )
 
     @property
     def _store(self):
         return self.hub.simulations_store
-
-    def _client_count_entry(self, tenant_id: str, wsite: str,
-                            central_site: str, current: int) -> Dict[str, Any]:
-        """Rolling 1h window → {current, hourly_avg, drop_pct, status}. DEGRADED
-        when the live count is >=25%% below the hour's average (needs
-        _CLIENT_MIN_SAMPLES first → NO_DATA). Mirrors
-        central_poller.CentralPoller._client_count_entry, keyed per tenant."""
-        now = time.time()
-        samples = self._client_samples.setdefault(tenant_id, {}).setdefault(wsite, [])
-        samples.append((now, current))
-        cutoff = now - _CLIENT_WINDOW_SECS
-        while samples and samples[0][0] < cutoff:
-            samples.pop(0)
-        if len(samples) >= _CLIENT_MIN_SAMPLES:
-            avg = sum(s[1] for s in samples) / len(samples)
-            drop_pct = max(0.0, (avg - current) / avg * 100.0) if avg >= 1 else 0.0
-            status = "DEGRADED" if drop_pct >= _CLIENT_DROP_PCT else "OK"
-        else:
-            avg, drop_pct, status = float(current), 0.0, "NO_DATA"
-        return {"site_name": central_site, "current": current,
-                "hourly_avg": round(avg, 1), "drop_pct": round(drop_pct, 1),
-                "status": status, "ts": now}
 
     async def _centralized_tenants(self) -> list:
         """(tenant_id, central_config) for every tenant in centralized central_api
@@ -97,7 +233,7 @@ class CentralHubPoller:
         client = ArubaClient(central_config)
         if not client.is_configured():
             self.hub.central_hub_status.pop(tenant_id, None)
-            self._client_samples.pop(tenant_id, None)
+            self._cc.forget(tenant_id)
             return
         sites_cfg = await self._store.get_central_sites_config(tenant_id)
         site_mappings: Dict[str, str] = sites_cfg.get("site_mappings") or {}
@@ -135,8 +271,9 @@ class CentralHubPoller:
                 }
             status[wireless_site] = checks
             current = int(data.get("client_count", 0) or 0)
-            client_count_status[wireless_site] = self._client_count_entry(
-                tenant_id, wireless_site, central_site, current)
+            self._cc.record(tenant_id, wireless_site, current)
+            client_count_status[wireless_site] = self._cc.entry(
+                tenant_id, wireless_site, central_site)
             central_clients_by_site[wireless_site] = current
             for alert_id, devices in (data.get("hw_devices") or {}).items():
                 hw_totals[alert_id] = hw_totals.get(alert_id, 0) + sum(devices.values())
@@ -164,12 +301,15 @@ class CentralHubPoller:
         live = {tid for tid, _ in tenants}
         for stale in [t for t in list(self.hub.central_hub_status.keys()) if t not in live]:
             self.hub.central_hub_status.pop(stale, None)
-            self._client_samples.pop(stale, None)
+            self._cc.forget(stale)
         for tid, cc in tenants:
             try:
                 await self._poll_tenant(tid, cc)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Central hub poll failed for tenant %s: %s", tid, exc)
+        # Append the hourly snapshot to the 7-day baseline history (self-gated to
+        # once per hour) and persist — the alarm baseline that flags sustained drops.
+        self._cc.maybe_snapshot()
 
     async def run_loop(self) -> None:
         while True:
