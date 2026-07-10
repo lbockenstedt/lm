@@ -755,3 +755,149 @@ def test_5xx_scrub_ref_unique_and_logged(tmp_path, caplog):
     log_text = caplog.text
     assert ref1 in log_text
     assert _INTERNAL_SECRET in log_text
+
+
+# ── 10. L3: /api/agents roster is Global-Admin-only ─────────────────────────
+# The fleet roster (all connected agents + roles, tenant-agnostic) was
+# auth-only — any authenticated user could enumerate the whole fleet. Now
+# admin-gated (fleet stays Global-only per the RBAC invariant).
+
+def test_agents_roster_403_for_plain_user(tmp_path):
+    c, hub = _build({}, tmp_path)
+    hub.spoke_module_types = {"agent-1": "agent", "dns-1": "dns"}
+    hub.active_connections = {"agent-1", "dns-1"}
+    tok = _mint_tenant_session(hub, "op", "acme", rights=("ipam",))
+    r = c.get("/api/agents", cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+def test_agents_roster_403_for_tenant_admin(tmp_path):
+    c, hub = _build({}, tmp_path)
+    hub.spoke_module_types = {"agent-1": "agent"}
+    hub.active_connections = {"agent-1"}
+    tok = _mint_tenant_admin_session(hub, "tadm", ["acme"])
+    r = c.get("/api/agents", cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+def test_agents_roster_401_anonymous(tmp_path):
+    c, hub = _build({}, tmp_path)
+    hub.spoke_module_types = {"agent-1": "agent"}
+    hub.active_connections = {"agent-1"}
+    r = c.get("/api/agents")
+    assert r.status_code == 401  # /api/ is auth-gated before the admin gate
+
+
+def test_agents_roster_ok_for_global_admin(tmp_path):
+    c, hub = _build({}, tmp_path)
+    hub.spoke_module_types = {"agent-1": "agent", "dns-1": "dns"}
+    hub.active_connections = {"agent-1", "dns-1"}
+    tok = _mint_session(hub, "root")
+    r = c.get("/api/agents", cookies={"lm_session": tok})
+    assert r.status_code == 200
+    ids = {a["spoke_id"] for a in r.json()["agents"]}
+    # Only agent-typed + connected entries appear.
+    assert ids == {"agent-1"}
+
+
+# ── 11. M2: DHCP subnets + reservations are tenant-filtered ──────────────────
+# /api/dhcp/leases + /api/dns/records were already subnet-filtered, but
+# /api/dhcp/subnets and /api/dhcp/reservations were unfiltered relays → a
+# non-admin could read every tenant's subnets (CIDR) and reservations
+# (hostname/MAC/IP — tenant-identifying). Now filtered the same way (the dhcp
+# subnet-filter module is ON by default).
+
+class _DhcpHub(_FakeHub):
+    """FakeHub with a connected DHCP spoke returning a mixed-tenant set of
+    subnets + reservations so the filter can be seen dropping the off-tenant
+    ones."""
+    def __init__(self, data_dir, system_state=None):
+        super().__init__(data_dir, system_state)
+        self._spokes_by_type = {"ipam": "ipam-spoke", "dhcp": "dhcp-spoke"}
+        # acme owns 10.20.0.0/16; other-tenant owns 192.168.5.0/24.
+        self._subnets = [
+            {"id": 1, "subnet": "10.20.0.0/24", "pools": []},      # acme
+            {"id": 2, "subnet": "192.168.5.0/24", "pools": []},     # other
+        ]
+        self._reservations = [
+            {"ip": "10.20.0.10", "mac": "aa:aa:aa:aa:aa:aa", "hostname": "acme-host", "subnet": "10.20.0.0/24"},
+            {"ip": "192.168.5.10", "mac": "bb:bb:bb:bb:bb:bb", "hostname": "other-host", "subnet": "192.168.5.0/24"},
+        ]
+
+    async def request_response(self, spoke_id, cmd, data, timeout=30.0):
+        if cmd == "DHCP_LIST_SUBNETS":
+            return {"payload": {"data": {"status": "SUCCESS", "subnets": self._subnets}}}
+        if cmd == "DHCP_LIST_RES":
+            return {"payload": {"data": {"status": "SUCCESS", "reservations": self._reservations}}}
+        return await super().request_response(spoke_id, cmd, data, timeout)
+
+
+def _build_dhcp(monkeypatch, tmp_path, prefixes_for="acme", prefixes=("10.20.0.0/16",)):
+    # Bypass the NetBox prefix round-trip: hand resolve_prefixes a fixed list
+    # so the filter has tenant prefixes to match against.
+    async def _fake_fetch(hub, tenant_id):
+        if tenant_id == prefixes_for:
+            return list(prefixes)
+        return []
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", _fake_fetch)
+    hub = _DhcpHub(tmp_path, {"users": {}})
+    _ensure_loop()
+    app = api_mod.create_app(hub)
+    return TestClient(app), hub
+
+
+def test_dhcp_subnets_filtered_for_non_admin(monkeypatch, tmp_path):
+    c, hub = _build_dhcp(monkeypatch, tmp_path)
+    tok = _mint_tenant_session(hub, "op", "acme", rights=("ipam",))
+    r = c.get("/api/dhcp/subnets", cookies={"lm_session": tok})
+    assert r.status_code == 200
+    subnets = r.json()["subnets"]
+    cidrs = {s["subnet"] for s in subnets}
+    assert cidrs == {"10.20.0.0/24"}  # other-tenant 192.168.5.0/24 dropped
+
+
+def test_dhcp_reservations_filtered_for_non_admin(monkeypatch, tmp_path):
+    c, hub = _build_dhcp(monkeypatch, tmp_path)
+    tok = _mint_tenant_session(hub, "op", "acme", rights=("ipam",))
+    r = c.get("/api/dhcp/reservations", cookies={"lm_session": tok})
+    assert r.status_code == 200
+    reservations = r.json()["reservations"]
+    ips = {x["ip"] for x in reservations}
+    assert ips == {"10.20.0.10"}  # other-tenant 192.168.5.10 dropped
+    # Tenant-identifying data (hostname) for the other tenant is withheld.
+    assert "other-host" not in r.text
+
+
+def test_dhcp_subnets_unfiltered_for_global_admin(monkeypatch, tmp_path):
+    c, hub = _build_dhcp(monkeypatch, tmp_path)
+    tok = _mint_session(hub, "root")
+    r = c.get("/api/dhcp/subnets", cookies={"lm_session": tok})
+    assert r.status_code == 200
+    cidrs = {s["subnet"] for s in r.json()["subnets"]}
+    assert cidrs == {"10.20.0.0/24", "192.168.5.0/24"}  # admin sees all
+
+
+def test_dhcp_reservations_unfiltered_for_global_admin(monkeypatch, tmp_path):
+    c, hub = _build_dhcp(monkeypatch, tmp_path)
+    tok = _mint_session(hub, "root")
+    r = c.get("/api/dhcp/reservations", cookies={"lm_session": tok})
+    assert r.status_code == 200
+    ips = {x["ip"] for x in r.json()["reservations"]}
+    assert ips == {"10.20.0.10", "192.168.5.10"}
+
+
+def test_dhcp_subnets_empty_for_non_admin_with_no_prefixes(monkeypatch, tmp_path):
+    # A non-admin whose tenant has NO NetBox prefixes → resolve_prefixes []
+    # → filter_session returns data unchanged (can't filter). But a tenantless
+    # non-admin (no tenant_id) → filter_session returns []. This test covers the
+    # tenantless path: an op with no tenant_id gets nothing, not the fleet.
+    c, hub = _build_dhcp(monkeypatch, tmp_path)
+    user_data = {"user_id": "lost", "auth_type": "local",
+                 "permissions": {"ipam": True},
+                 "tenants": [], "tenant_id": None, "protected": False}
+    tok = api_mod._record_session(hub, user_data)
+    r = c.get("/api/dhcp/subnets", cookies={"lm_session": tok})
+    assert r.status_code == 200
+    # filter_session returns {} for a dict body when the caller has no tenant
+    # → the whole fleet is withheld (no 'subnets' key, not the unfiltered set).
+    assert r.json() == {}

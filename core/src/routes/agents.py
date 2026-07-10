@@ -41,8 +41,19 @@ def register(app, hub, ctx):
     # ─── Generic Agent API ────────────────────────────────────────────────────
 
     @app.get("/api/agents")
-    async def list_agents():
-        """List all connected generic agents and their active roles."""
+    async def list_agents(request: Request):
+        """List all connected generic agents and their active roles.
+
+        Fleet-wide roster (every connected agent + its loaded roles, regardless
+        of tenant) — Global-Admin-only. ``/api/agent/`` (singular, the command/
+        load-role namespace) is already admin-gated by the middleware's
+        ``_ADMIN_API_PREFIXES``; this plural roster was missed, so any
+        authenticated user (incl. a single-tenant non-admin) could enumerate the
+        whole fleet. A tenant Admin doesn't gain fleet visibility via the role
+        split (fleet stays Global-only — see the RBAC invariant)."""
+        sess = ctx._session_user(request)
+        if not ctx._is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         agents = []
         for sid, mtype in hub.spoke_module_types.items():

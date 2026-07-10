@@ -267,10 +267,16 @@ def register(app, hub, ctx):
         return spoke_id
 
     @app.get("/api/dhcp/subnets")
-    async def dhcp_list_subnets():
-        """List DHCP subnets configured on the Kea spoke (unfiltered relay)."""
+    async def dhcp_list_subnets(request: Request):
+        """List DHCP subnets configured on the Kea spoke, subnet-filtered per
+        the caller's tenant when the ``dhcp`` subnet-filter module is enabled
+        (mirrors /api/dhcp/leases). The subnet's ``subnet`` field is a CIDR; the
+        filter matches it against the tenant's NetBox prefixes by overlap, so a
+        non-admin sees only their own tenant's subnets. Admins always see all.
+        Unfiltered when the subnet-filter toggle is off (shared single-view Kea)."""
         logger.debug("relay GET /api/dhcp/subnets")
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_SUBNETS", log_name="dhcp_list_subnets")
+        data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_SUBNETS", log_name="dhcp_list_subnets")
+        return await _filter_session(request, data, "dhcp", ["subnet"])
 
     @app.get("/api/dhcp/leases")
     async def dhcp_list_leases(request: Request, subnet: str = None):
@@ -284,10 +290,16 @@ def register(app, hub, ctx):
         return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_ADD_RES", await request.json(), log_name="dhcp_add_reservation")
 
     @app.get("/api/dhcp/reservations")
-    async def dhcp_list_reservations():
-        """List DHCP reservations from the Kea spoke (unfiltered relay)."""
+    async def dhcp_list_reservations(request: Request):
+        """List DHCP reservations from the Kea spoke, subnet-filtered per the
+        caller's tenant when the ``dhcp`` subnet-filter module is enabled
+        (mirrors /api/dhcp/leases). A reservation's ``ip`` is matched against
+        the tenant's NetBox prefixes, so a non-admin sees only their own
+        tenant's reservations (hostname/MAC/client-id are tenant-identifying).
+        Admins always see all. Unfiltered when the toggle is off."""
         logger.debug("relay GET /api/dhcp/reservations")
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_RES", log_name="dhcp_list_reservations")
+        data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_RES", log_name="dhcp_list_reservations")
+        return await _filter_session(request, data, "dhcp", ["ip"])
 
     @app.put("/api/dhcp/reservation")
     async def dhcp_update_reservation(request: Request):
