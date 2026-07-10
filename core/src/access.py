@@ -459,29 +459,54 @@ def resolve_effective_permissions(hub, user_record: dict) -> dict:
     return eff
 
 
-def groups_for_ldap_membership(hub, member_of) -> list:
-    """Map a directory user's LDAP group memberships → hub group ids.
+def groups_and_tenants_for_membership(hub, member_of) -> tuple:
+    """Map a directory user's group memberships → (hub group ids, tenant ids).
 
-    ``member_of`` is the list of LDAP group DNs/cns from the directory
-    (``memberOf``). Returns the ids of every permission group whose
-    ``ldap_group`` matches one of them (case-insensitive, exact string).
+    ``member_of`` is the list of directory group identifiers from the IdP —
+    LDAP ``memberOf`` DNs/cns OR Entra ``groups`` claim object IDs. The
+    ``ldap_group`` field on each permission group is the generic directory-group
+    identifier (it holds the Entra group **object ID** for Entra-provisioned
+    users and the LDAP DN for LDAP users); matches case-insensitively, exact.
 
-    Phase-2 hook: the storage + mapping live here now, but local ``/auth/login``
-    does not consult LDAP, and ``LDAPAuthProvider.get_user_groups`` is still a
-    stub — wiring this into the login flow is the remaining phase-2 step."""
+    A group may ALSO carry a ``tenants`` list (granted tenant scope). Returns the
+    union of every matching group's id AND the union of every matching group's
+    ``tenants`` — so a single Entra group grants both RBAC permissions AND
+    tenant scope. This is the source of truth for Entra-provisioned users:
+    ``provision_or_sync_entra_user`` writes the derived tenant set onto the user
+    record, and ``/auth/me``/``check_tenant_access`` read it live.
+
+    Phase-2 hook: local ``/auth/login`` does not consult a directory; this is
+    driven by the OIDC callback (``routes/oidc.py``)."""
     member_of = [str(m).strip().lower() for m in (member_of or []) if m]
     if not member_of:
-        return []
+        return [], []
     try:
         groups_store = hub.state.system_state.get("permission_groups", {}) or {}
     except Exception:  # noqa: BLE001
-        return []
-    out = []
+        return [], []
+    group_ids: list = []
+    tenant_ids: list = []
+    seen_groups: set = set()
+    seen_tenants: set = set()
     for gid, grp in groups_store.items():
         lg = str(grp.get("ldap_group") or "").strip().lower()
-        if lg and lg in member_of:
-            out.append(gid)
-    return out
+        if lg and lg in member_of and gid not in seen_groups:
+            seen_groups.add(gid)
+            group_ids.append(gid)
+            for tid in grp.get("tenants") or []:
+                t = str(tid).strip()
+                if t and t not in seen_tenants:
+                    seen_tenants.add(t)
+                    tenant_ids.append(t)
+    return group_ids, tenant_ids
+
+
+def groups_for_ldap_membership(hub, member_of) -> list:
+    """Map a directory user's LDAP/Entra group memberships → hub group ids.
+
+    Thin wrapper over :func:`groups_and_tenants_for_membership` returning just
+    the group ids (backward compat for callers that don't need tenants)."""
+    return groups_and_tenants_for_membership(hub, member_of)[0]
 
 
 def is_admin(sess) -> bool:

@@ -950,12 +950,31 @@ def register(app, hub, ctx):
                 perms["role"] = "admin"
             elif perms.get("tenant_admin"):
                 perms["role"] = "tenant_admin"
+            # Granted tenant scope: a group may carry a ``tenants`` list so a
+            # single Entra group grants BOTH RBAC permissions AND tenant scope
+            # (the source of truth for Entra-provisioned users). Validate each
+            # id is a real tenant (drop unknowns silently — a typo'd id granting
+            # a non-existent tenant would otherwise widen scope unexpectedly).
+            raw_tenants = data.get("tenants")
+            if raw_tenants is None:
+                # Not sent → preserve existing (edit flow); only replace on an
+                # explicit send (list = replace, empty list = clear).
+                granted_tenants = existing.get("tenants", [])
+            else:
+                known_tenants = set(
+                    (hub.state.tenant_state.get("tenants", {}) or {}).keys())
+                granted_tenants = []
+                for tid in raw_tenants or []:
+                    t = str(tid).strip()
+                    if t and t in known_tenants and t not in granted_tenants:
+                        granted_tenants.append(t)
             groups[group_id] = {
                 **existing,
                 "name": name or existing.get("name", group_id),
                 "description": data.get("description", existing.get("description", "")),
                 "permissions": perms,
                 "ldap_group": (data.get("ldap_group") or existing.get("ldap_group", "")).strip(),
+                "tenants": granted_tenants,
                 "updated_at": time.time(),
             }
             hub.state.save_state()
