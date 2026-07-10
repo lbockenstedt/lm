@@ -624,6 +624,41 @@ def spoke_visible_to_session(sess, tenant_id) -> bool:
     return bool(allowed) and tenant_id in allowed
 
 
+def can_bind_spoke(hub, sess, spoke_id: str) -> bool:
+    """May this session bind a NEW device/instance to ``spoke_id``?
+
+    Global Admin → any spoke. A tenant-admin → ONLY a spoke assigned to one of
+    their OWN tenants (strictly own — NOT the shared tenant; shared infra is
+    managed by the shared-tenant / Global admin). Plain users → never (device/
+    connection config is admin-tier). This is the gate for the tenant-scoped
+    "Add Firewall / NAC / DNS / DHCP / IPAM / Network device" flows.
+    """
+    if is_admin(sess):
+        return True
+    if not is_tenant_admin(sess):
+        return False
+    try:
+        spoke_tenant = hub.state.get_spoke_tenant(spoke_id) or ""
+    except Exception:  # noqa: BLE001
+        spoke_tenant = ""
+    allowed = (sess or {}).get("user", {}).get("tenants") or []
+    return bool(spoke_tenant) and spoke_tenant in allowed
+
+
+def bindable_spoke_ids(hub, sess, module_type: str):
+    """Spoke ids of ``module_type`` this session may bind a device to. Global
+    Admin → all connected spokes of that type; tenant-admin → only those in their
+    own tenant(s); plain user → none. Backs both the WebUI spoke dropdown and the
+    server-side enforcement in the add-device handlers (same rule, no drift)."""
+    try:
+        sids = list(hub.get_all_spokes_by_type(module_type) or [])
+    except Exception:  # noqa: BLE001
+        sids = []
+    if is_admin(sess):
+        return sids
+    return [sid for sid in sids if can_bind_spoke(hub, sess, sid)]
+
+
 def check_tenant_access(sess, tenant_id: str) -> bool:
     """True if the session user may access ``tenant_id``.
 

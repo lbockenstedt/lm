@@ -8,7 +8,27 @@ def register(app, hub, ctx):
     """Register nw routes on the Hub app."""
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
+    _is_tenant_admin = ctx._is_tenant_admin
     _filter_nw = ctx._filter_nw
+
+    def _enforce_tenant_bind(request, cfg, kind):
+        """Shared add/edit gate for tenant-scoped device/instance creation. A
+        tenant-admin may bind ``cfg`` ONLY to a spoke in their own tenant (via
+        ``cfg['spoke_id']``) and the record is bound to that tenant; Global Admin
+        is unrestricted (record tenant defaults to the spoke's tenant). Plain
+        users are rejected. Mutates ``cfg['tenant_id']`` in place. Raises 403 on
+        violation."""
+        sess = _session_user(request)
+        spoke_id = cfg.get("spoke_id")
+        if not _is_admin(sess):
+            if not _is_tenant_admin(sess):
+                raise HTTPException(status_code=403, detail=f"Tenant-admin access required to add a {kind}")
+            if not spoke_id or not access.can_bind_spoke(hub, sess, spoke_id):
+                raise HTTPException(status_code=403,
+                                    detail=f"You can only bind a {kind} to a spoke assigned to your tenant")
+            cfg["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
+        elif spoke_id and not cfg.get("tenant_id"):
+            cfg["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
 
     def _get_nw_spoke(hub):
         """The connected nw spoke id, or raise 503 (single-instance resolver)."""
@@ -197,6 +217,7 @@ def register(app, hub, ctx):
             if new_dev.get("object_type") not in ("aos_switch", "cx_switch",
                                                    "ex_switch", "gateway"):
                 raise HTTPException(status_code=400, detail="Invalid object_type")
+            _enforce_tenant_bind(request, new_dev, "network device")
             if "id" not in new_dev:
                 new_dev["id"] = str(uuid.uuid4())
 
@@ -339,6 +360,7 @@ def register(app, hub, ctx):
                 new_inst = data.get("instance", {})
                 if not new_inst.get("name"):
                     raise HTTPException(status_code=400, detail="Missing instance name")
+                _enforce_tenant_bind(request, new_inst, route_prefix.split("-")[0])
                 if "id" not in new_inst:
                     new_inst["id"] = str(uuid.uuid4())
                 global_config = hub.state.system_state.get("global_config", {})

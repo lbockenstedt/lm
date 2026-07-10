@@ -1,4 +1,5 @@
 """Firewall (OPNsense) data + rule/alias/NAT/DNS CRUD routes."""
+import access
 from api import (
     HTTPException, Request, _FW_FETCH_TIMEOUTS, _FW_FETCH_TIMEOUT_DEFAULT, _FW_MODULES,
     _FW_WRITE_TIMEOUT, _cache_entry, _fetch_module, _hub_msg, _invalidate_module_all_tenants,
@@ -10,6 +11,7 @@ def register(app, hub, ctx):
     """Register firewall routes on the Hub app."""
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
+    _is_tenant_admin = ctx._is_tenant_admin
     _filter_fw = ctx._filter_fw
 
     @app.get("/api/firewall/{firewall_id}/refresh")
@@ -225,6 +227,22 @@ def register(app, hub, ctx):
             if not new_fw.get("name") or not new_fw.get("model"):
                 raise HTTPException(status_code=400, detail="Missing firewall name or model")
 
+            # Tenant-scoped add: a tenant-admin may bind a firewall ONLY to a
+            # firewall spoke assigned to their own tenant, and the device is bound
+            # to that tenant. Global Admin is unrestricted (device tenant defaults
+            # to the bound spoke's tenant). Plain users cannot add.
+            sess = _session_user(request)
+            spoke_id = new_fw.get("spoke_id")
+            if not _is_admin(sess):
+                if not _is_tenant_admin(sess):
+                    raise HTTPException(status_code=403, detail="Tenant-admin access required to add a firewall")
+                if not spoke_id or not access.can_bind_spoke(hub, sess, spoke_id):
+                    raise HTTPException(status_code=403,
+                                        detail="You can only bind a firewall to a spoke assigned to your tenant")
+                new_fw["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
+            elif spoke_id and not new_fw.get("tenant_id"):
+                new_fw["tenant_id"] = hub.state.get_spoke_tenant(spoke_id) or ""
+
             if "id" not in new_fw:
                 new_fw["id"] = str(uuid.uuid4())
 
@@ -236,6 +254,8 @@ def register(app, hub, ctx):
             hub.state.save_state()
 
             return {"status": "ok", "firewall": new_fw}
+        except HTTPException:
+            raise  # 400/403 must propagate as-is, not be re-wrapped as 500
         except Exception as e:
             logger.exception("add_firewall failed")
             raise HTTPException(status_code=500, detail=str(e))
