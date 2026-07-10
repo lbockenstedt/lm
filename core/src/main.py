@@ -5270,6 +5270,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Capture the VERSION this process booted with so the update-health check
         # can detect process-vs-disk drift (code updated on disk but not restarted).
         self._startup_version = version
+        # Publish the RUNNING version to a file the watchdog reads for its
+        # stale-detection — robust vs log-parsing the startup line, which can
+        # rotate out of hub.log (the failure that left a stale hub undetected).
+        try:
+            _rvp = os.environ.get("LM_RUNNING_VERSION_FILE",
+                                  "/var/lib/lm/state/running-version")
+            os.makedirs(os.path.dirname(_rvp), exist_ok=True)
+            with open(_rvp, "w") as _f:
+                _f.write(str(version))
+        except Exception:  # noqa: BLE001
+            pass
         # Fresh process is current → satisfy + clear any pending watchdog restart
         # sentinel so a successful restart doesn't get restarted again.
         try:

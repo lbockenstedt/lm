@@ -118,7 +118,11 @@ if [ -f "$STALE_SENTINEL" ]; then
   stale_reason="sentinel: $body"
 elif [ -d /opt/lm/.git ]; then
   disk_ver=$(tr -d '[:space:]' < /opt/lm/VERSION 2>/dev/null || true)
-  run_ver=$(grep -aoE "Hub [^ ]+ unified surface" /var/log/lm/hub.log 2>/dev/null | tail -1 | awk '{print $2}')
+  # Running version: the file the hub publishes at startup (robust). Fall back to
+  # the 'unified surface' startup line across hub.log AND the rotated hub.log.1
+  # (log-parse alone missed a stale hub whose startup line had rotated out).
+  run_ver=$(tr -d '[:space:]' < /var/lib/lm/state/running-version 2>/dev/null || true)
+  [ -z "$run_ver" ] && run_ver=$(grep -haoE "Hub [^ ]+ unified surface" /var/log/lm/hub.log /var/log/lm/hub.log.1 2>/dev/null | tail -1 | awk '{print $2}')
   if [ -n "$disk_ver" ] && [ -n "$run_ver" ] && [ "$disk_ver" != "$run_ver" ]; then
     stale_reason="version drift: running $run_ver vs on-disk $disk_ver"
   fi
