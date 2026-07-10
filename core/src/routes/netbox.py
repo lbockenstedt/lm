@@ -55,6 +55,37 @@ def register(app, hub, ctx):
         raise HTTPException(status_code=403,
                             detail="Object not found in your tenant (cross-tenant mutation denied)")
 
+    def _enforce_body_tenant(request, data):
+        """For NetBox add routes (racks/devices/prefixes/ips): clamp the body
+        ``tenant`` slug to one of the caller's OWN tenants for non-admins. A
+        non-admin passing another tenant's slug → 403; passing their own →
+        unchanged; passing none → none (unassigned create stays allowed, it
+        just can't target another tenant). Admins may target any tenant.
+        Mirrors claim-device's tenant guard so the plain add routes can't be
+        used to plant a resource in another tenant's scope by forwarding
+        body.tenant verbatim. Returns the slug to send to the spoke."""
+        requested_slug = (str(data.get("tenant") or "").strip()) or None
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if _is_admin(sess):
+            return requested_slug
+        if requested_slug is None:
+            return None  # unassigned create is allowed; just can't target another tenant
+        user = sess.get("user", {}) or {}
+        allowed_ids = user.get("tenants") or []
+        if not allowed_ids and user.get("tenant_id"):
+            allowed_ids = [user.get("tenant_id")]
+        allowed = set()
+        for tid in allowed_ids:
+            s = (get_tenant_scoping(hub, tid) or {}).get("netbox_tenant_slug")
+            if s:
+                allowed.add(s)
+        if requested_slug not in allowed:
+            raise HTTPException(status_code=403,
+                                detail="Not authorized to create into that tenant")
+        return requested_slug
+
     @app.get("/setup/netbox-config")
     async def get_netbox_config():
         hub = app.state.hub
@@ -181,6 +212,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
         try:
             data = await request.json()
+            data["tenant"] = _enforce_body_tenant(request, data)
             result = await hub.request_response(spoke_id, "NETBOX_ADD_RACK", data)
             _refresh_module_all_tenants(hub, "netbox_racks")
             return _unwrap_netbox(result)
@@ -197,9 +229,12 @@ def register(app, hub, ctx):
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        await _verify_owns(request, "netbox_racks", rack_id)
         try:
             data = await request.json()
             data["rack_id"] = rack_id
+            if "tenant" in data:
+                data["tenant"] = _enforce_body_tenant(request, data)
             result = await hub.request_response(spoke_id, "NETBOX_UPDATE_RACK", data)
             _refresh_module_all_tenants(hub, "netbox_racks")
             return _unwrap_netbox(result)
@@ -210,12 +245,13 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.delete("/api/netbox/racks/{rack_id}")
-    async def netbox_delete_rack(rack_id: int):
+    async def netbox_delete_rack(rack_id: int, request: Request):
         """Delete a NetBox rack; invalidates the racks cache on success."""
         hub = app.state.hub
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        await _verify_owns(request, "netbox_racks", rack_id)
         try:
             result = await hub.request_response(spoke_id, "NETBOX_DELETE_RACK", {"rack_id": rack_id})
             _refresh_module_all_tenants(hub, "netbox_racks")
@@ -242,6 +278,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
         try:
             data = await request.json()
+            data["tenant"] = _enforce_body_tenant(request, data)
             result = await hub.request_response(spoke_id, "NETBOX_ADD_DEVICE", data)
             _refresh_module_all_tenants(hub, "netbox_devices")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
@@ -380,6 +417,8 @@ def register(app, hub, ctx):
         try:
             data = await request.json()
             data["device_id"] = device_id
+            if "tenant" in data:
+                data["tenant"] = _enforce_body_tenant(request, data)
             result = await hub.request_response(spoke_id, "NETBOX_UPDATE_DEVICE", data)
             _refresh_module_all_tenants(hub, "netbox_devices")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
@@ -406,6 +445,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
         try:
             data = await request.json()
+            data["tenant"] = _enforce_body_tenant(request, data)
             result = await hub.request_response(spoke_id, "NETBOX_ALLOCATE_PREFIX", data, timeout=30.0)
             _refresh_module_all_tenants(hub, "netbox_prefixes")
             _refresh_module_all_tenants(hub, "netbox_ips")
@@ -427,6 +467,8 @@ def register(app, hub, ctx):
         try:
             data = await request.json()
             data["prefix_id"] = prefix_id
+            if "tenant" in data:
+                data["tenant"] = _enforce_body_tenant(request, data)
             result = await hub.request_response(spoke_id, "NETBOX_UPDATE_PREFIX", data)
             _refresh_module_all_tenants(hub, "netbox_prefixes")
             return _unwrap_netbox(result)
@@ -437,7 +479,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.delete("/api/netbox/prefixes/{prefix_id}")
-    async def netbox_delete_prefix(prefix_id: int):
+    async def netbox_delete_prefix(prefix_id: int, request: Request):
         """Delete a NetBox prefix; invalidates the prefix + IP caches on success."""
         hub = app.state.hub
         spoke_id = get_netbox_spoke(hub)
@@ -555,6 +597,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="NetBox spoke not connected")
         try:
             data = await request.json()
+            data["tenant"] = _enforce_body_tenant(request, data)
             result = await hub.request_response(spoke_id, "NETBOX_ALLOCATE_IP", data, timeout=30.0)
             _refresh_module_all_tenants(hub, "netbox_ips")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
@@ -595,6 +638,8 @@ def register(app, hub, ctx):
         try:
             data = await request.json()
             data["ip_id"] = ip_id
+            if "tenant" in data:
+                data["tenant"] = _enforce_body_tenant(request, data)
             result = await hub.request_response(spoke_id, "NETBOX_UPDATE_IP_ADDR", data)
             _refresh_module_all_tenants(hub, "netbox_ips")
             _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
