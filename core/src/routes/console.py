@@ -121,6 +121,34 @@ def register(app, hub, ctx):
         """Target console spoke: explicit spoke_id, else the first connected one."""
         return (body or {}).get("spoke_id") or hub.get_spoke_by_type("console")
 
+    async def _assert_port_tenant(request, sid, port_id):
+        """Cross-tenant guard for per-port Console actions (settings, detect-baud,
+        identify, config get/push). A non-admin may only act on a port whose
+        effective tenant (per-port override, else the agent's binding) is one of
+        their own. Mirrors console_open's check; admin bypasses. The port's
+        effective tenant is resolved by fetching CONSOLE_LIST_PORTS (best-effort:
+        a fetch failure falls back to the agent's whole-agent tenant, fail-closed
+        if neither is accessible)."""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if _is_admin(sess):
+            return
+        pid = str(port_id or "").strip()
+        override = ""
+        if pid:
+            try:
+                lr = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=15.0)
+                match = next((x for x in (_console_unwrap(lr).get("ports") or [])
+                              if str(x.get("port_id", "")) == pid), None)
+                override = (match or {}).get("tenant_id") or ""
+            except Exception:  # noqa: BLE001
+                pass
+        eff = override or (hub.state.get_spoke_tenant(sid) or "")
+        if not _check_tenant_access(sess, eff):
+            raise HTTPException(status_code=403,
+                                detail="not authorized for this console port's tenant")
+
     def _console_load_credentials(hub):
         """Decrypt the global auto-identify credential list from hub state ([] if
         unset/undecryptable)."""
@@ -204,6 +232,7 @@ def register(app, hub, ctx):
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No Console spoke connected")
+        await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         cmd = "CONSOLE_SET_ALIAS" if "alias" in body else "CONSOLE_SET_SETTINGS"
         r = await hub.request_response(sid, cmd, body or {}, timeout=15.0)
         return _console_unwrap(r)
@@ -219,6 +248,7 @@ def register(app, hub, ctx):
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No Console spoke connected")
+        await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         r = await hub.request_response(sid, "CONSOLE_DETECT_BAUD",
                                        {"port_id": (body or {}).get("port_id")}, timeout=45.0)
         return _console_unwrap(r)
@@ -235,6 +265,7 @@ def register(app, hub, ctx):
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No Console spoke connected")
+        await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         await _console_seed_credentials(hub, [sid])
         r = await hub.request_response(sid, "CONSOLE_AUTOPROBE",
                                        {"port_id": (body or {}).get("port_id")}, timeout=90.0)
@@ -377,6 +408,7 @@ def register(app, hub, ctx):
         sid = _console_spoke_or_none(hub, body)
         if not sid:
             raise HTTPException(status_code=503, detail="No Console spoke connected")
+        await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         await _console_seed_credentials(hub, [sid])
         r = await hub.request_response(sid, "CONSOLE_GET_CONFIG",
                                        {"port_id": (body or {}).get("port_id")}, timeout=90.0)
@@ -396,6 +428,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No Console spoke connected")
         if not str((body or {}).get("config", "")).strip():
             raise HTTPException(status_code=400, detail="config is required")
+        await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         await _console_seed_credentials(hub, [sid])
         r = await hub.request_response(sid, "CONSOLE_PUSH_CONFIG", {
             "port_id": body.get("port_id"), "config": body.get("config"),
