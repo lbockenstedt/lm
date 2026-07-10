@@ -3523,6 +3523,7 @@ function _renderSetupSpokesTile(content) {
             <div class="flex items-center gap-2 text-xs mb-1">
                 <label for="sa-tenant-filter" class="font-bold text-slate-500 uppercase tracking-wider">Tenant</label>
                 <select id="sa-tenant-filter" onchange="_onSaTenantFilterChange()" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-green-500">
+                    <option value="default" selected>Default</option>
                     <option value="__unassigned__">Unassigned</option>
                     <option value="__all__">All tenants</option>
                 </select>
@@ -3550,27 +3551,31 @@ function _renderSetupSpokesTile(content) {
     loadSpokesAndAgents();
 }
 
-// Tenant filter for the Spokes & Agents tile. Fetches the tenant list and fills
-// the #sa-tenant-filter dropdown, preserving the current selection across a
-// refresh (defaults to "Unassigned" — the freshly-onboarded, not-yet-bound
-// spokes/agents an admin most often needs to triage first). Best-effort: on a
-// failed fetch the two static options (Unassigned / All tenants) remain usable.
+// Tenant filter for the Spokes & Agents tile. Reads the tenant list from
+// /setup/tenants (tenant config — objects carry ``id``/``name``, NOT
+// tenant_id/tenant_name) and fills the #sa-tenant-filter dropdown: every tenant
+// first, then the two sentinels Unassigned + All tenants. The initial selection
+// is the system "default" tenant (guaranteed present — the backend injects it
+// when absent, tenants_users.py get_tenants), pre-seeded as a static <option> so
+// loadSpokesAndAgents reads the right value with no async race. A user's choice
+// is preserved across refresh; if it's gone, fall back to "default" then
+// Unassigned. Best-effort: on a failed fetch the static options remain usable.
 async function _populateSaTenantFilter() {
     const sel = document.getElementById('sa-tenant-filter');
     if (!sel) return;
     const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-    const current = sel.value || '__unassigned__';
+    const current = sel.value || 'default';
     try {
         const res = await setupFetch('/setup/tenants');
         if (!res.ok) return;
         const tenants = (await res.json()).tenants || [];
         sel.innerHTML =
+            tenants.map(t => `<option value="${esc(t.id)}">${esc(t.name || t.id)}</option>`).join('') +
             '<option value="__unassigned__">Unassigned</option>' +
-            '<option value="__all__">All tenants</option>' +
-            tenants.map(t => `<option value="${esc(t.tenant_id)}">${esc(t.tenant_name || t.tenant_id)}</option>`).join('');
-        // Keep the prior choice if it still exists, else fall back to Unassigned.
-        sel.value = [...sel.options].some(o => o.value === current) ? current : '__unassigned__';
-    } catch (_e) { /* leave the two static options in place */ }
+            '<option value="__all__">All tenants</option>';
+        const has = v => [...sel.options].some(o => o.value === v);
+        sel.value = has(current) ? current : (has('default') ? 'default' : '__unassigned__');
+    } catch (_e) { /* leave the static options in place */ }
 }
 
 // Re-render the Spokes & Agents lists for the newly-selected tenant. The filter
