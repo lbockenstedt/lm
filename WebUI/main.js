@@ -594,6 +594,17 @@ function _isPermsAdminTier(perms) {
     return p.admin === true || p.role === 'admin' || p.role === 'tenant_admin';
 }
 
+function _taTenantQuery() {
+    // Shared-infrastructure writes (firewall/DNS/DHCP) by a tenant Admin must
+    // target an explicit owned tenant — the hub middleware rejects an
+    // ambiguous (tenantless) write with 403 ("must target an explicit owned
+    // tenant"). Returns "?tenant=<currentTenant>" for a tenant Admin (whose
+    // currentTenant is one of its owned tenants via the picker), else "" (a
+    // Global Admin needs no explicit tenant). Append to write URLs.
+    if (!isTenantAdmin()) return '';
+    return `?tenant=${encodeURIComponent(currentTenant || 'default')}`;
+}
+
 function hasConsoleWrite() {
     const p = currentUser?.permissions || {};
     return isAdmin() || isTenantAdmin() || p.console_write === true;
@@ -11677,7 +11688,7 @@ async function saveDnsRecord() {
     };
     if (!payload.name || !payload.value) { alert('Name and Value are required'); return; }
     try {
-        const { ok, data: d, detail } = await _spokeFetch('/api/dns/record', {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/record' + _taTenantQuery(), {
             method: editing ? 'PUT' : 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -11690,7 +11701,7 @@ async function saveDnsRecord() {
 async function deleteDnsRecord(name, rtype) {
     if (!await showConfirmToast(`Delete DNS record ${name} (${rtype})?`)) return;
     try {
-        const { ok, data: d, detail } = await _spokeFetch('/api/dns/record', {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/record' + _taTenantQuery(), {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name, type: rtype }),
@@ -11887,7 +11898,7 @@ async function saveDhcpReservation() {
     }
     if (editing) payload.old_ip = modal.dataset.editIp;
     try {
-        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation', {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation' + _taTenantQuery(), {
             method: editing ? 'PUT' : 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -11900,7 +11911,7 @@ async function saveDhcpReservation() {
 async function deleteDhcpReservation(ip) {
     if (!await showConfirmToast(`Delete reservation for ${ip}?`)) return;
     try {
-        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation', {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation' + _taTenantQuery(), {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ip }),
@@ -12089,7 +12100,7 @@ async function deleteOpnsenseItem(fwId, subMenu, itemId) {
     else if (subMenu === 'Aliases') url = `/api/firewall/${fwId}/aliases/${encodeURIComponent(itemId)}`;
     else return;
     try {
-        const r = await fetch(url, { method: 'DELETE' });
+        const r = await fetch(url + _taTenantQuery(), { method: 'DELETE' });
         if (!r.ok) { const e = await r.json(); throw new Error(e.detail || r.statusText); }
         loadOpnsenseManagement();
     } catch (e) {
@@ -12221,7 +12232,7 @@ async function submitOpnsenseAdd(subMenu) {
             if (!body.hostname || !body.ip) { alert('Hostname and IP are required.'); return; }
         } else return;
 
-        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const r = await fetch(url + _taTenantQuery(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (!r.ok) { const e = await r.json(); throw new Error(e.detail || r.statusText); }
         document.getElementById('opn-add-modal')?.remove();
         loadOpnsenseManagement();
@@ -12348,7 +12359,7 @@ async function submitOpnsenseEdit(fwId, subMenu, itemId) {
             if (!body.hostname || !body.ip) { alert('Hostname and IP are required.'); return; }
         } else return;
 
-        const r = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const r = await fetch(url + _taTenantQuery(), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
         if (!r.ok) { const e = await r.json(); throw new Error(e.detail || r.statusText); }
         document.getElementById('opn-add-modal')?.remove();
         loadOpnsenseManagement();
