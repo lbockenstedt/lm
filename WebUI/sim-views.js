@@ -1651,92 +1651,49 @@ window.csToggleMonitorSite = async function (siteName, monitor) {
     }
 };
 
-// ── Central → Alerts / Insights (monitorable check TYPES) ────────────────────
-// These tabs list the monitorable Aruba Central check TYPES from the available-
-// checks catalog (NOT active instances), each with a Monitor toggle — the
-// source's "select an alert/insight to monitor" model (app.js renderAvailableChecks).
-// Enrolling a type adds {type,id,name} to central_sites_config.monitored_checks;
-// it is then evaluated across your monitored sites and its OK/triggered status
-// shows on the dashboard Checks tab. Populates from the catalog even when no
-// alerts are currently firing (why the old active-instance view looked blank).
-let _csCentralAvailCache = null, _csCentralAvailAt = 0, _csCentralAvailTenant = null;
-async function csCentralAvailable() {
-    const t = csTenant();
-    if (_csCentralAvailCache && _csCentralAvailTenant === t && (Date.now() - _csCentralAvailAt) < 60000) return _csCentralAvailCache;
-    let cat;
-    try { cat = await csFetch(`/${t}/central/available?tenant_id=${t}`) || {}; }
-    catch (e) { console.error('csCentralAvailable: fetch failed', e); cat = { warning: String(e && e.message || e) }; }
-    _csCentralAvailCache = cat; _csCentralAvailAt = Date.now(); _csCentralAvailTenant = t;
-    return cat;
+// ── Central → Alerts (live active alerts from Central) ───────────────────────
+// Displays the live active alerts Central returns (/network-notifications/v1/
+// alerts, status Active) — the same data the source browse view shows. Alert
+// CHECK-TYPE monitoring (the fixed new_central alert types) lives in Setup ->
+// Central API; new_central does not expose insights as monitorable checks
+// (the poller never counts them), so these are inventory views like Clients.
+async function csRenderCentralAlerts() {
+    csSetToolbar('');
+    const data = await csCentralBrowse();
+    const alerts = (data && data.alerts) || [];
+    const warn = _csCentralWarn(data);
+    if (!alerts.length) { csSet(`${warn}${csEmpty('No active Central alerts.', 'Active alerts come from Central /network-notifications/v1/alerts.')}`); return; }
+    const rows = alerts.map(a => `<tr>
+      <td class="px-3 py-2 text-sm">${csEscape(a.name || '—')}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(a.site || '—')}</td>
+      <td class="px-3 py-2">${csStatusBadge(a.severity || 'warning')}</td>
+      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(a.category || '—')}</td>
+      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(a.detail || a.description || '—')}</td>
+    </tr>`).join('');
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${alerts.length} active alert(s)</div>${csTable(['Alert', 'Site', 'Severity', 'Category', 'Detail'], rows)}</div></div>`);
 }
 
-async function csRenderCentralChecks(kind) {
+// ── Central → Insights (live AI insights from Central) ───────────────────────
+async function csRenderCentralInsights() {
     csSetToolbar('');
-    const label = kind === 'insight' ? 'Insight' : 'Alert';
-    const [cat, browse, sitesCfg] = await Promise.all([
-        csCentralAvailable(),
-        kind === 'insight' ? csCentralBrowse() : Promise.resolve(null),
-        csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
-    ]);
-    // Base catalog types (classic live-fetches them; new_central has static ALERT
-    // types but NO insight types), merged with distinct insight categories seen in
-    // live browse data — that's how Insights populate in new_central mode, and the
-    // poller counts insights by category (insight_cat_counts).
-    const byId = new Map();
-    ((cat && cat[kind === 'insight' ? 'insights' : 'alerts']) || []).forEach(it => {
-        if (it && it.id != null) byId.set(String(it.id), { id: String(it.id), name: it.name || String(it.id) });
-    });
-    if (kind === 'insight' && browse && Array.isArray(browse.insights)) {
-        browse.insights.forEach(x => {
-            const id = String((x.category || x.type || x.name) || '').trim();
-            if (id && !byId.has(id)) byId.set(id, { id, name: (x.category_name || x.category || x.name) || id });
-        });
-    }
-    const items = Array.from(byId.values());
-    const monChecks = Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [];
-    const monSet = new Set(monChecks.map(c => `${c.type}:${c.id}`));
-    const warn = cat && cat.warning ? `<div class="text-xs text-amber-600 mb-2">${csEscape(cat.warning)}</div>` : '';
-    if (!items.length) { csSet(`${warn}${csEmpty(`No ${label.toLowerCase()} types returned.`, 'Verify the Central API token/mode in Setup → Central API.')}`); return; }
-    const rows = items.map(it => {
-        const id = it.id, name = it.name || it.id;
-        const isMon = monSet.has(`${kind}:${id}`);
-        const btn = isMon
-            ? `<button onclick="csToggleMonitorCheck(${JSON.stringify(kind)}, ${JSON.stringify(id)}, ${JSON.stringify(name)}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this ${label.toLowerCase()}">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorCheck(${JSON.stringify(kind)}, ${JSON.stringify(id)}, ${JSON.stringify(name)}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this ${label.toLowerCase()} across your monitored sites (shows on the dashboard)">Monitor</button>`;
+    const data = await csCentralBrowse();
+    const insights = (data && data.insights) || [];
+    const warn = _csCentralWarn(data);
+    if (!insights.length) { csSet(`${warn}${csEmpty('No Central insights.', 'AI insights come from Central /network-notifications/v1/insights.')}`); return; }
+    const rows = insights.map(i => {
+        const impact = [];
+        if (i.device_count) impact.push(`${i.device_count} device${i.device_count !== 1 ? 's' : ''}`);
+        if (i.client_count) impact.push(`${i.client_count} client${i.client_count !== 1 ? 's' : ''}`);
         return `<tr>
-      <td class="px-3 py-2 text-sm text-slate-700">${csEscape(name)}</td>
-      <td class="px-3 py-2 font-mono text-xs text-slate-500">${csEscape(id)}</td>
-      <td class="px-3 py-2">${btn}</td>
+      <td class="px-3 py-2 text-sm">${csEscape(i.name || '—')}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(i.category || '—')}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(i.site || '—')}</td>
+      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(impact.join(', ') || '—')}</td>
+      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(i.description || '—')}</td>
     </tr>`;
     }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${items.length} ${label.toLowerCase()} type(s) — Monitor one to evaluate it across your monitored sites</div>${csTable([label, 'ID', 'Monitor'], rows)}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${insights.length} insight(s)</div>${csTable(['Insight', 'Category', 'Site', 'Impact', 'Detail'], rows)}</div></div>`);
 }
-async function csRenderCentralAlerts() { return csRenderCentralChecks('alert'); }
-async function csRenderCentralInsights() { return csRenderCentralChecks('insight'); }
-
-// Toggle an alert/insight TYPE in central_sites_config.monitored_checks (keyed
-// type:id), preserving site_mappings + hardware_checks. Mirrors the source's
-// available-checks checkbox -> monitored_checks behavior.
-window.csToggleMonitorCheck = async function (type, id, name, monitor) {
-    try {
-        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
-        const key = `${type}:${id}`;
-        let checks = (Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : []).filter(c => `${c.type}:${c.id}` !== key);
-        if (monitor) checks.push({ type, id, name });
-        const body = {
-            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
-            monitored_checks: checks,
-            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
-        };
-        const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
-        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`);
-        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`, 'success');
-        csRenderCentralChecks(type);
-    } catch (e) {
-        console.error('csToggleMonitorCheck failed', e);
-        if (typeof showToast === 'function') showToast(e.message, 'error');
-    }
-};
 
 // ── Central → Clients ────────────────────────────────────────────────────────
 async function csRenderCentralClients() {
