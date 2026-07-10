@@ -7824,15 +7824,23 @@ function _diagTelemetryExtras(s, fns) {
     const alertBadge = (aTier === 'error' || aTier === 'warning')
         ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${aTier === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}" title="Out of contact ${Math.round((s.alert_duration_s || 0) / 60)}m — forgiving alert tier (separate from the heartbeat light)">alert · ${aTier}</span>`
         : '';
-    // Version chip color: GREEN = up to date, RED = out of date (version_skew),
-    // slate = unknown (no telemetry to compare against). Folds the old separate
-    // amber "skew" badge into the version chip itself.
+    // Version chip color: GREEN = up to date, RED = out of date, slate =
+    // unknown (no telemetry to compare against). "Out of date" is EITHER of two
+    // signals, both hub-computed: version_behind (spoke's .NN is older than the
+    // latest .NN the hub knows for ITS repo — a genuine "newer build exists")
+    // OR version_skew (reported version isn't on the .NN numbering at all — a
+    // stale X.Y.Z / v-tag / pre-reset value). Folds both into the version chip.
     const _ver = s.version || 'unknown';
     const _verUnknown = !s.version || _ver === 'unknown';
+    const _behind = !!s.version_behind;
+    const _stale = !!s.version_skew;
+    const _outOfDate = _behind || _stale;
     const _verTone = _verUnknown ? 'bg-slate-100 text-slate-600'
-                   : (s.version_skew ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700');
+                   : (_outOfDate ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700');
     const _verTitle = _verUnknown ? 'Version unknown — no telemetry to compare'
-                    : (s.version_skew ? 'Out of date — behind the current .NN version' : 'Up to date');
+                    : _behind ? ('Out of date — running ' + _ver + ' / latest ' + (s.latest_version || '?'))
+                    : _stale ? 'Out of date — behind the current .NN version'
+                    : 'Up to date';
     // Heartbeat-aware status dot: green = healthy & beating, amber = slow-but-
     // live, red = offline/never/RED, slate = no heartbeat telemetry yet. The
     // management renderers use this in place of their approval-only dot when

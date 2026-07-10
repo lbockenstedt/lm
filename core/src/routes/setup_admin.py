@@ -3,6 +3,7 @@ import asyncio
 from api import (
     HTTPException, Request, logger, os, re, set_log_level, time,
 )
+from update_pipeline import _version_behind
 
 
 def register(app, hub, ctx):
@@ -415,6 +416,19 @@ def register(app, hub, ctx):
                 and not _is_nn(spoke_version)
             )
 
+            # version_behind: a GENUINE "this spoke is older than the latest
+            # build of ITS OWN repo" signal. Each repo has an INDEPENDENT .NN
+            # counter, so this compares the spoke's .NN to the latest .NN the hub
+            # can resolve LOCALLY for the repo backing this module_type (the lm
+            # repo for dns/dhcp/console/agent; a sibling checkout for the rest).
+            # latest_version is None when the hub can't determine it (unknown
+            # module_type or no local checkout) → version_behind stays False so
+            # we NEVER false-positive. This is orthogonal to version_skew, which
+            # flags a stale non-.NN reported version. Both mean "out of date".
+            module_type = hub.spoke_module_types.get(sid, "")
+            latest_version = hub.latest_version_for_module(module_type)
+            version_behind = _version_behind(spoke_version, latest_version)
+
             diagnostics.append({
                 "spoke_id": sid,
                 "display_name": hub.state.get_module_name(sid),
@@ -434,6 +448,8 @@ def register(app, hub, ctx):
                 "connection_state": ws.state if ws else "OFFLINE",
                 "version": spoke_version,
                 "version_skew": version_skew,
+                "version_behind": version_behind,
+                "latest_version": latest_version,
                 "hub_version": hub_version,
                 "last_attempt": telemetry.get("last_attempt"),
                 "last_status": telemetry.get("status", "UNKNOWN"),
@@ -460,7 +476,7 @@ def register(app, hub, ctx):
                 },
                 # Client-Sim combined spoke: module type, tenant binding, and
                 # whether the latest CS_TELEMETRY frame is cached.
-                "module_type": hub.spoke_module_types.get(sid, ""),
+                "module_type": module_type,
                 "tenant_id": hub.state.get_spoke_tenant(sid),
                 "cs_telemetry_cached": sid in hub.simulations_cache,
                 "cs_telemetry_ts": (hub.simulations_cache.get(sid, {}) or {}).get("timestamp"),

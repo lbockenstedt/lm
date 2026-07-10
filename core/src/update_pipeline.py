@@ -96,6 +96,51 @@ def _resolve_hub_repo(sources: Dict[str, Any]) -> str:
     return (sources or {}).get("hub") or _DEFAULT_HUB_REPO
 
 
+# module_type (as reported by a spoke) → the repo directory basename that ships
+# that module's code. Mirrors agent_spoke._ROLE_MAP: each role's spoke code lives
+# in the sibling repo named here. Both the canonical module_type (left column of
+# _ROLE_MAP, e.g. "firewall") and the raw repo/role alias (e.g. "opnsense") are
+# keyed so a spoke that reports either resolves. Used to find the LOCAL VERSION
+# file backing a spoke so the hub can tell "this spoke is BEHIND its repo's
+# latest .NN". module_types NOT here (and not in _IN_LM_REPO_MODULE_TYPES) resolve
+# to no repo → latest unknown → NEVER flagged behind (no false positive).
+_MODULE_REPO_DIR = {
+    "hypervisor": "pxmx", "proxmox": "pxmx", "pxmx": "pxmx",
+    "firewall": "opnsense", "opnsense": "opnsense", "opn": "opnsense",
+    "nac": "cppm", "cppm": "cppm",
+    "directory": "ldap", "ldap": "ldap",
+    "ipam": "netbox", "netbox": "netbox",
+    "simulation": "cs", "cs": "cs",
+    "nw": "nw", "network": "nw",
+    "certificates": "le", "le": "le",
+}
+
+
+def _parse_nn(v) -> Optional[int]:
+    """Parse a per-repo ``.NN`` version string into its integer ``N`` (e.g.
+    ``".486" -> 486``), or ``None`` for anything that is NOT on the ``.NN``
+    numbering (``"unknown"``, ``"v.01"``, an ``X.Y.Z`` tag, ``None``, ``""``).
+    Pure + module-level so the diagnostics handler and its test share one parser."""
+    import re as _re
+    m = _re.match(r"^\.(\d+)$", str(v if v is not None else "").strip())
+    return int(m.group(1)) if m else None
+
+
+def _version_behind(running, latest) -> bool:
+    """True iff BOTH ``running`` and ``latest`` are valid ``.NN`` versions and
+    ``running`` is strictly older (smaller ``N``) than ``latest``.
+
+    NEVER true when either side is unknown / non-``.NN`` — so a spoke is only
+    flagged "behind" when the hub genuinely knows a newer version exists for that
+    repo. Strictly-less (not ``!=``) so a spoke that is somehow AHEAD of a stale
+    local checkout is not mislabeled behind. Pure → unit-testable."""
+    r = _parse_nn(running)
+    l = _parse_nn(latest)
+    if r is None or l is None:
+        return False
+    return r < l
+
+
 def _ver(v: str):
     """Parse a dotted-numeric VERSION string into a comparable tuple, or
     ``(0, 0, 0)`` on any parse failure (non-numeric like ``"v.01"``, ``"unknown"``).
@@ -171,6 +216,80 @@ class UpdatePipelineMixin:
         except Exception as e:
             logger.error(f"Failed to read local version: {e}")
             return "unknown"
+
+    def _read_version_cached(self, path: str) -> Optional[str]:
+        """Read a ``VERSION`` file's contents, cached by (path, mtime).
+
+        The diagnostics handler resolves a latest-version per spoke and many
+        spokes share a repo, so a naive read would stat+open the same file once
+        per spoke per /setup/diagnostics call. Cache keyed on mtime: re-read only
+        when the file actually changes (a repo pull rewrites VERSION → new mtime).
+        Missing/unreadable file → ``None`` (never raises). Lazy cache dict, so no
+        Hub ``__init__`` change is needed for this mixin."""
+        cache = self.__dict__.setdefault("_version_read_cache", {})
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            cache.pop(path, None)
+            return None
+        hit = cache.get(path)
+        if hit is not None and hit[0] == mtime:
+            return hit[1]
+        try:
+            with open(path, "r") as f:
+                val = f.read().strip()
+        except OSError:
+            cache.pop(path, None)
+            return None
+        cache[path] = (mtime, val)
+        return val
+
+    def _sibling_version_candidates(self, repo: str) -> List[str]:
+        """Candidate on-disk paths for a sibling repo's ``VERSION`` file.
+
+        The hub only reliably keeps its OWN repo locally (``/opt/lm``); a given
+        deployment MAY also keep sibling checkouts (agent-morph clones, a
+        provisioning_repos entry, or a dev sibling tree). Probe the known layouts;
+        the first that holds a valid ``.NN`` wins. None found → latest unknown →
+        the spoke is never flagged behind."""
+        here = os.path.dirname(__file__)                      # core/src
+        hub_root = os.path.abspath(os.path.join(here, "../../"))  # lm/ (== /opt/lm)
+        parent = os.path.abspath(os.path.join(hub_root, ".."))    # dev sibling parent
+        return [
+            os.path.join(hub_root, repo, "VERSION"),
+            os.path.join(hub_root, "provisioning_repos", repo, "VERSION"),
+            os.path.join(parent, repo, "VERSION"),
+            os.path.join("/opt/lm", repo, "VERSION"),
+        ]
+
+    def latest_version_for_module(self, module_type: Optional[str]) -> Optional[str]:
+        """Latest known ``.NN`` version for the repo that backs ``module_type``.
+
+        - Module code that ships INSIDE the lm/hub clone (dns/dhcp/console/agent)
+          → the hub's own ``/opt/lm/VERSION`` (always local, always authoritative).
+        - A sibling-repo module (firewall→opnsense, ipam→netbox, …) → the first
+          local sibling ``VERSION`` checkout that holds a valid ``.NN`` (see
+          ``_sibling_version_candidates``).
+        - Unknown module_type, or no local checkout found → ``None``.
+
+        ``None`` means "hub can't determine latest" and the caller MUST NOT flag
+        the spoke as behind (never false-positive). Cheap (mtime-cached reads)."""
+        mt = (module_type or "").strip().lower()
+        if mt in _IN_LM_REPO_MODULE_TYPES:
+            hub_version = os.path.join(os.path.dirname(__file__), "../../VERSION")
+            v = self._read_version_cached(hub_version)
+            if v is None:
+                v = self._read_version_cached(
+                    os.path.join(os.path.dirname(__file__), "../VERSION"))
+            return v
+        repo = _MODULE_REPO_DIR.get(mt)
+        if not repo:
+            return None
+        for path in self._sibling_version_candidates(repo):
+            v = self._read_version_cached(path)
+            if _parse_nn(v) is not None:
+                return v
+        return None
 
     async def get_remote_version(self) -> str:
         try:
