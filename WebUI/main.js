@@ -3307,8 +3307,8 @@ function _renderSettingsSection(subMenu) {
                     <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs text-slate-500">
                         <label>Apply auto-updates<br>
                             <select id="ug-mode" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                                <option value="window">During a daily window</option>
-                                <option value="idle">When no users online</option>
+                                <option value="window">When idle — else the daily window</option>
+                                <option value="idle">Only when no users online</option>
                                 <option value="immediate">Immediately</option>
                             </select></label>
                         <label>Window start hour (0–23, local)<br><input type="number" id="ug-window-hour" min="0" max="23" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>

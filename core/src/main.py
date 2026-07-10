@@ -3792,12 +3792,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         g = self._update_gate_config()
         if g["mode"] == "immediate":
             return True
+        # Idle = nobody actively logged into the WebUI (best-effort → treat
+        # unknown as idle so we never strand an update).
+        try:
+            from api import _active_user_count
+            idle = _active_user_count() == 0
+        except Exception:  # noqa: BLE001
+            idle = True
         if g["mode"] == "idle":
-            try:
-                from api import _active_user_count
-                return _active_user_count() == 0
-            except Exception:  # noqa: BLE001
-                return True
+            return idle
+        # "window" (default): restart AS SOON AS nobody is logged in — so an idle
+        # hub updates promptly — OR during the maintenance window, which forces an
+        # update through even on a hub that always has someone connected.
+        if idle:
+            return True
         try:  # window: local hour within [start, start+duration) mod 24
             h = _dt.datetime.now().hour
         except Exception:  # noqa: BLE001
