@@ -50,7 +50,7 @@ INSTALL_LOG="$LOG_DIR/install.log"
 # Create log directory early so logging helpers can work
 mkdir -p "$LOG_DIR"
 chown -R root:root "$LOG_DIR" # Temporary root ownership for installer
-chmod 755 "$LOG_DIR"
+chmod 750 "$LOG_DIR"
 # install.log is 0640 (root:root) — NEVER world-readable. It has historically
 # captured transient secrets (e.g. the first-run LM_SETUP_TOKEN value) via the
 # log helpers; even with the value now suppressed (see Step B2b), 0640 keeps
@@ -340,6 +340,9 @@ fi
 
 # Ensure global log directory ownership is correct now that user exists
 chown -R $SvcUser:$SvcUser "$LOG_DIR"
+# Harden existing runtime logs on upgrade: hub.log was 0644 (world-readable).
+# New logs are 0600 via lm.service's UMask=0077; tighten any pre-existing file.
+chmod 0640 "$LOG_DIR"/*.log 2>/dev/null || true
 
 # Grant svc_lm permission to restart the LM service without a password.
 #
@@ -569,7 +572,13 @@ cat > /usr/local/bin/lm-fix-perms <<HELPER
 set -e
 chown -R $SvcUser:$SvcUser /opt/lm /var/log/lm 2>/dev/null || true
 runuser -u $SvcUser -- git config --global --add safe.directory /opt/lm 2>/dev/null || true
-echo "lm-fix-perms: restored $SvcUser ownership of /opt/lm + /var/log/lm"
+# Harden log perms: hub.log was 0644 (world-readable) while install.log was
+# 0640; the runtime log carries spoke IDs, IPs, tenant names, tracebacks.
+# Tighten the dir to 0750 and existing *.log to 0640 (new logs are 0600 via
+# lm.service's UMask=0077). Best-effort — never fatal to a perms fix.
+chmod 0750 /var/log/lm 2>/dev/null || true
+chmod 0640 /var/log/lm/*.log 2>/dev/null || true
+echo "lm-fix-perms: restored $SvcUser ownership of /opt/lm + /var/log/lm (logs 0640)"
 HELPER
 chown root:root /usr/local/bin/lm-fix-perms
 chmod 0755 /usr/local/bin/lm-fix-perms
@@ -1251,6 +1260,13 @@ StandardError=append:$LOG_DIR/hub.log
 # the way the old `pkill` sweep risked.
 Restart=on-failure
 RestartSec=10
+# UMask=0077 so files the hub creates (the systemd-redirected hub.log, and any
+# state file NOT explicitly chmod'd 0600 by the code) are owner-only, never
+# world-readable. hub.log carries spoke IDs, IPs, tenant names, tracebacks —
+# the high-volume runtime log was 0644 (world-readable) while install.log was
+# already 0640; this closes the gap for new + rotated logs (logrotate uses
+# copytruncate, so rotated copies inherit the active file's mode).
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
