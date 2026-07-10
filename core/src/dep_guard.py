@@ -52,6 +52,7 @@ _IMPORT_NAME = {
     "pillow": "PIL",
     "python-dateutil": "dateutil",
     "protobuf": "google.protobuf",
+    "pyjwt": "jwt",
 }
 
 
