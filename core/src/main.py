@@ -5287,6 +5287,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self._clear_watchdog_restart_sentinel()
         except Exception:  # noqa: BLE001
             pass
+        # [update-test 2026-07-10] boot marker D — proof the watchdog auto-pulled
+        # + restarted into new code (running-version file drift). Safe to remove.
+        logger.info("[update-test] boot marker D — watchdog auto-update verification")
 
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
