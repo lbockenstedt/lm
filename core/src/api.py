@@ -1148,7 +1148,7 @@ def create_app(hub):
         #                        hub-wide (cross-tenant) view (search_devices hardcodes
         #                        tenant "default"; get_spokes_status returns the whole
         #                        fleet). Admin-only; /api/help/available stays authed-read.
-        _ADMIN_API_PREFIXES = ("/api/agent/", "/api/generic/", "/api/ldap/", "/api/pxmx/agents/",
+        _ADMIN_API_PREFIXES = ("/api/agent/", "/api/generic/", "/api/pxmx/agents/",
                                "/api/cppm/probe", "/api/cppm/test-auth", "/cppm/refresh", "/cppm/health",
                                "/api/help/ask", "/api/exec")
         if any(path.startswith(p) for p in _ADMIN_API_PREFIXES):
@@ -1247,6 +1247,21 @@ def create_app(hub):
             if not (_is_admin(sess) or _has_pxmx_access(sess)):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Hypervisor module access required"})
+
+        # /api/ldap/* (Directory module). The directory is a SHARED identity store
+        # with no tenant partition, so WRITES (user/group/OU CRUD + password
+        # reset) stay Global-Admin-only; READS require the ``ldap`` right OR admin
+        # so a directory viewer can browse without mutate rights. Reopen writes to
+        # tenant scope only once a directory-tenancy model (e.g. per-tenant OU)
+        # exists. (Was entirely Global-Admin-only via _ADMIN_API_PREFIXES.)
+        if path.startswith("/api/ldap/"):
+            if request.method == "GET":
+                if not (_is_admin(sess) or _has_ldap_access(sess)):
+                    return JSONResponse(status_code=403,
+                                        content={"detail": "Directory module access required"})
+            elif not _is_admin(sess):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Admin access required for directory changes"})
 
         # Shared-infrastructure WRITE paths (OPNsense firewall rules/aliases/NAT/
         # DNS, and the shared DNS/DHCP server records/reservations/syncs) mutate

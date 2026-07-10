@@ -655,7 +655,7 @@ window.fetch = async function lmFetch(input, init) {
 // granted its explicit right. Today only the Simulations (cs) module is gated
 // this way; other modules remain product-driven (visible when their spoke is
 // connected). Add a key here to gate another module the same way.
-const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'Security/NAC': 'nac', 'DNS': 'dns', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx' };
+const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'Security/NAC': 'nac', 'DNS': 'dns', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx', 'Directory': 'ldap' };
 function canSeeModule(className) {
     const right = MODULE_RIGHT[className];
     if (!right) return true;              // no right defined → product-driven
@@ -2740,6 +2740,12 @@ async function setView(viewId) {
     if (viewId === 'mydevices' && !(isTenantAdmin() || isAdmin())) {
         return;
     }
+    // Directory (LDAP) has no MODULE_CLASSES entry (standalone view), so gate its
+    // deep-link explicitly on the `ldap` right (server enforces reads=ldap-right,
+    // writes=admin).
+    if (viewId === 'ldap' && !canSeeModule('Directory')) {
+        return;
+    }
     // Module-right gate for deep-links: a non-admin without the module's right
     // cannot enter the view even by URL/manual setView, mirroring the nav filter.
     // Covers both the class name (e.g. 'Simulations') and any product in a
@@ -2988,8 +2994,10 @@ function _viewTemplate(viewId) {
 </div>`;
 
         case 'ldap':
+            // Directory writes (user/group/OU CRUD + password reset) are
+            // Global-Admin-only — an ldap-right user can view but not mutate.
             return `<div class="space-y-6">
-  <div class="flex justify-end mb-2"><button onclick="showLDAPModal(currentSubView)" class="${btn}">+ Add</button></div>
+  <div class="flex justify-end mb-2">${isAdmin() ? `<button onclick="showLDAPModal(currentSubView)" class="${btn}">+ Add</button>` : ''}</div>
   <div class="${card} p-0 overflow-hidden">
     <table class="w-full text-left text-sm">
       <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr id="ldap-table-head"></tr></thead>
