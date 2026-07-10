@@ -816,10 +816,11 @@ async function csRenderSimClientCount() {
                   <td class="px-3 py-2">${csStatusBadge(c.status)}</td>
                   <td class="px-3 py-2 font-bold text-slate-700">${csEscape(c.current || 0)}</td>
                   <td class="px-3 py-2 text-slate-500">${csEscape(c.hourly_avg != null ? c.hourly_avg : '—')}</td>
+                  <td class="px-3 py-2 text-slate-500">${csEscape(c.baseline_7day != null ? c.baseline_7day : '—')}${c.baseline_source && c.baseline_source !== '7day' ? ` <span class="text-[10px] text-slate-400">(${csEscape(c.baseline_source)})</span>` : ''}</td>
                   <td class="px-3 py-2 ${c.drop_pct > 0 ? 'text-amber-600' : 'text-slate-500'}">${csEscape(c.drop_pct != null ? c.drop_pct + '%' : '—')}</td>
                 </tr>`;
             }).join('');
-            html = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Drop %'], rows);
+            html = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Baseline (7d)', 'Drop %'], rows);
         }
         return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden">
           <summary class="flex items-center justify-between px-5 py-3 cursor-pointer hover:bg-slate-50">
@@ -1045,10 +1046,11 @@ function csSimSpokeCard(s) {
               <td class="px-3 py-2">${csStatusBadge(c.status)}</td>
               <td class="px-3 py-2 font-bold text-slate-700">${csEscape(c.current || 0)}</td>
               <td class="px-3 py-2 text-slate-500">${csEscape(c.hourly_avg != null ? c.hourly_avg : '—')}</td>
+              <td class="px-3 py-2 text-slate-500">${csEscape(c.baseline_7day != null ? c.baseline_7day : '—')}${c.baseline_source && c.baseline_source !== '7day' ? ` <span class="text-[10px] text-slate-400">(${csEscape(c.baseline_source)})</span>` : ''}</td>
               <td class="px-3 py-2 ${c.drop_pct > 0 ? 'text-amber-600' : 'text-slate-500'}">${csEscape(c.drop_pct != null ? c.drop_pct + '%' : '—')}</td>
             </tr>`;
         }).join('');
-        ccHtml = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Drop %'], rows);
+        ccHtml = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Baseline (7d)', 'Drop %'], rows);
     }
 
     return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden" open>
