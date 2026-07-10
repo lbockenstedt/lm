@@ -35,6 +35,7 @@ import asyncio
 import ipaddress
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from simulations.tenant_filter import (filter_items_by_prefixes,
@@ -156,6 +157,169 @@ def filter_config(hub) -> dict:
     stored = hub.state.system_state.get("subnet_filter_modules", {}) or {}
     return {m: bool(stored.get(m, _FILTER_DEFAULTS.get(m, False)))
             for m in _FILTER_MODULES}
+
+
+# ── Identifier / hostname validation (defense-in-depth) ─────────────────────
+# These gate user-supplied identifiers before they're stored, logged, or — for
+# ``valid_hostname`` — sent to a spoke that runs ``hostname <value>`` in a shell
+# (SPOKE_SET_HOSTNAME). A hostname or spoke id carrying shell metacharacters
+# would be a remote command-injection vector on the spoke; a weird identifier
+# (spaces, control chars, path segments) pollutes logs/state. Strict allow-lists
+# keep the hub's identifier surface machine-shaped.
+
+# A system identifier: spoke_id / agent_id / module_id / role. Alnum-first, then
+# alnum + . _ -. 1–64 chars (matches the spoke ids the installers mint, e.g.
+# "agent-1", "dns-spoke-1", "cs-svr-02").
+_IDENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def valid_identifier(s) -> bool:
+    """True if ``s`` is a safe system identifier (spoke/agent/module/role id):
+    alphanumeric start, then alphanumeric + ``.`` ``_`` ``-``, 1–64 chars."""
+    return bool(s) and isinstance(s, str) and bool(_IDENT_RE.fullmatch(s))
+
+
+def valid_hostname(s) -> bool:
+    """True if ``s`` is a safe RFC-1123-style hostname (the value sent to a
+    spoke's SPOKE_SET_HOSTNAME, which the spoke applies via a shell ``hostname``
+    call — so this MUST reject shell metacharacters). Each label ≤63 chars,
+    alphanumeric start/end with internal ``-`` only; total ≤253 chars; dots
+    separate labels. No leading/trailing dot or dash, no underscores, no
+    spaces, no shell metacharacters."""
+    if not s or not isinstance(s, str) or len(s) > 253:
+        return False
+    if s.startswith(("-", ".")) or s.endswith(("-", ".")):
+        return False
+    labels = s.split(".")
+    for label in labels:
+        if not label or len(label) > 63:
+            return False
+        if not (label[0].isalnum() and label[-1].isalnum()):
+            return False
+        if not all(c.isalnum() or c == "-" for c in label):
+            return False
+    return True
+
+
+# A human display name (module/spoke display name). Freeform-ish but NO control
+# chars and NO shell metacharacters — it's stored in hub state and rendered in
+# the WebUI (the WebUI escapes it on render), so the risk is storage/log
+# pollution, not direct injection. Allow printable text up to 128 chars.
+_BAD_DISPLAY_CHARS = set(chr(i) for i in range(0x20)) | {
+    "\x7f", ";", "|", "&", "$", "`", "'", '"', "<", ">", "\\", }
+
+
+def valid_display_name(s) -> bool:
+    """True if ``s`` is an acceptable display name: non-empty, ≤128 chars, no
+    control chars and no shell metacharacters. Most printable text passes
+    (spaces, punctuation like ``(`` ``,`` ``:`` are fine)."""
+    if not s or not isinstance(s, str) or len(s) > 128:
+        return False
+    return not any(c in _BAD_DISPLAY_CHARS for c in s)
+
+
+# ── SSRF: outbound-URL safety ─────────────────────────────────────────────────
+# The hub makes a small number of hub-side outbound HTTP calls to user-supplied
+# destinations (notably the Aruba Central ``cluster_url`` set via the
+# /sim/api/aggregate/central write path — reachable by any cs-righted tenant
+# user, NOT just admins). In ``classic`` mode the hub POSTs the Aruba
+# ``client_id``/``client_secret`` to ``{cluster_url}/oauth2/token``, so a
+# malicious cluster_url is both SSRF (point the hub at an internal host) and
+# credential exfiltration (the creds leave to the attacker). These helpers
+# confine such destinations to public HTTPS endpoints.
+
+from urllib.parse import urlsplit  # noqa: E402
+
+# Hostnames that are always internal regardless of resolution.
+_INTERNAL_HOSTNAMES = {"localhost", "metadata.google.internal", "metadata"}
+# Cloud metadata service hosts (per-cloud) — a request to these from the hub
+# leaks the instance identity token / IAM creds. Always block.
+_METADATA_HOST_SUFFIXES = (".internal", ".local")
+
+
+def is_internal_ip(ip_str: str) -> bool:
+    """True if ``ip_str`` parses as a loopback / private / link-local / reserved
+    / unspecified / multicast IP — i.e. an address the hub must NOT be pointed
+    at over a user-supplied URL (it would be SSRF to internal services)."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_unspecified or ip.is_multicast
+    )
+
+
+def _looks_internal_hostname(host: str) -> bool:
+    host = (host or "").lower()
+    if host in _INTERNAL_HOSTNAMES:
+        return True
+    if host.endswith(_METADATA_HOST_SUFFIXES):
+        return True
+    return False
+
+
+def safe_external_url(s, *, require_https: bool = True) -> bool:
+    """True if ``s`` is an http(s) URL whose host is NOT an internal IP literal
+    or an internal-looking hostname. Pure string check (no DNS) so it is cheap
+    to run on every save and importable into tests.
+
+    ``require_https`` (default) confines hub-side outbound calls to TLS. The
+    Aruba Central token exchange carries ``client_id``/``client_secret``, so
+    plaintext is never acceptable for that path. Pass ``require_https=False``
+    only for paths that genuinely allow plain http.
+
+    This is the FIRST gate (rejects obvious internal destinations at save time).
+    Pair with ``host_resolves_external`` for a DNS-resolution pass that blocks
+    DNS-rebinding to an internal IP at the moment of save.
+    """
+    if not s or not isinstance(s, str):
+        return False
+    try:
+        parts = urlsplit(s.strip())
+    except Exception:
+        return False
+    scheme = (parts.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return False
+    if require_https and scheme != "https":
+        return False
+    host = parts.hostname  # lowercased, port stripped, brackets removed
+    if not host:
+        return False
+    if _looks_internal_hostname(host):
+        return False
+    # IP literal host (v4 or v6)? Reject if it's an internal range.
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if is_internal_ip(host):
+            return False
+    return True
+
+
+def host_resolves_external(host: str) -> bool:
+    """DNS-resolve ``host`` and return True only if EVERY resolved address is
+    external (non-internal). A hostname that resolves to even one internal IP
+    is rejected — this blocks DNS-rebinding where an attacker's DNS returns a
+    public IP at save time and an internal IP (169.254.169.254, 127.0.0.1, …)
+    by the time the hub makes the request. No-resolve / NXDOMAIN → True (the
+    outbound call will fail anyway; the string check already gated the obvious
+    cases; we don't want to add a hard DNS dependency to the save path)."""
+    if not host:
+        return True
+    import socket
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return True  # unresolvable — let the outbound call fail naturally
+    addrs = {i[4][0] for i in infos}
+    if not addrs:
+        return True
+    return not any(is_internal_ip(a) for a in addrs)
 
 
 # ── Spoke / tenant scoping ────────────────────────────────────────────────────

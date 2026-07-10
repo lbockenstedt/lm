@@ -195,6 +195,30 @@ def test_login_does_not_leak_username_existence(tmp_path):
     assert r1.json()["detail"] == r2.json()["detail"] == "Invalid credentials"
 
 
+def test_login_lockout_case_fold_shares_one_counter(monkeypatch, tmp_path):
+    """Case-variant brute force ("admin", "Admin", "ADMIN", …) must NOT get a
+    fresh ``_LOGIN_MAX_FAILS`` budget per variant — the lockout key is
+    case-folded so all variants share one counter and trip the throttle after
+    the same N failures the single-variant case would. Without the fold, an
+    attacker gets N tries × (case permutations) before lockout."""
+    monkeypatch.setenv("LM_LOGIN_MAX_FAILS", "5")
+    users = {"admin": _admin_user()}
+    c, hub = _build(users, tmp_path)
+    variants = ["admin", "Admin", "ADMIN", "aDmIn", "AdMin"]
+    for v in variants:
+        r = c.post("/auth/login", json={"username": v, "password": "wrong"})
+        assert r.status_code == 401, f"{v!r} should be 401, got {r.status_code}"
+    # 5 failures across 5 case variants → all fold to "admin", so the 6th
+    # (any variant) is locked out. If each variant had its own counter, every
+    # one would still be under the limit and this would be 401.
+    r = c.post("/auth/login", json={"username": "aDmIn", "password": "wrong"})
+    assert r.status_code == 429
+    # And the folded key is the one in the lockout store (not any variant).
+    assert "admin" in api_mod._login_attempts
+    assert "Admin" not in api_mod._login_attempts
+    assert "ADMIN" not in api_mod._login_attempts
+
+
 # ── 2. First-run setup token (install flag) ──────────────────────────────────
 
 def test_setup_requires_token_when_env_set(monkeypatch, tmp_path):

@@ -24,6 +24,8 @@ import re
 from .service import SimulationsService
 from .store import SimulationsStore
 from .aruba import test_central_from_config, get_central_available_from_config
+from access import safe_external_url, host_resolves_external
+from urllib.parse import urlsplit
 
 logger = logging.getLogger("SimRoutes")
 
@@ -1162,6 +1164,30 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg = dict(hub_cc)
         if mode:
             cfg["mode"] = mode
+        # SSRF guard: ``cluster_url`` is the host the hub POSTs the Aruba
+        # ``client_id``/``client_secret`` to (classic mode) and GETs monitoring
+        # data from. This route is reachable by any cs-righted tenant user (NOT
+        # just admins), so without a guard a tenant user can point the hub's
+        # outbound HTTP at an internal host / cloud-metadata endpoint and have
+        # the hub exfiltrate the stored Central creds there. Confine it to a
+        # public HTTPS host, and DNS-resolve it to block rebinding to an
+        # internal IP after the save. ``new_central`` mode uses a fixed HPE
+        # token URL and ignores cluster_url, so only validate when present.
+        cluster_url = (cfg.get("cluster_url") or "").strip()
+        if cluster_url:
+            if not safe_external_url(cluster_url, require_https=True):
+                raise HTTPException(
+                    status_code=400,
+                    detail="cluster_url must be a public https:// URL "
+                           "(internal hosts, IP literals, and plain http are blocked).",
+                )
+            host = urlsplit(cluster_url).hostname
+            if host and not await asyncio.to_thread(host_resolves_external, host):
+                raise HTTPException(
+                    status_code=400,
+                    detail="cluster_url resolves to an internal address — "
+                           "DNS rebinding to a private/loopback host is blocked.",
+                )
         await store.set_central_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"central_config": hub_cc})
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}

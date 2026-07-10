@@ -510,6 +510,15 @@ def _load_login_attempts(hub) -> None:
         logger.warning("login_attempts load failed: %s", exc)
 
 
+def _lockout_key(user_id: str) -> str:
+    """Case-folded lockout key for a username. Pass this (not the raw username)
+    to ``_login_check`` / ``_login_fail`` / ``_login_success`` so case-variant
+    brute force ("admin", "Admin", "ADMIN", …) shares ONE counter and trips the
+    throttle after N total tries instead of N tries × (case permutations).
+    The raw username is still used for the case-sensitive user-store lookup."""
+    return (user_id or "").casefold()
+
+
 def _login_check(user_id: str, ip: str):
     """Return ``(allowed, retry_after_seconds)`` for a login attempt.
 

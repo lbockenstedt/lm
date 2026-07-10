@@ -28,6 +28,8 @@ from typing import Any, Dict
 
 import httpx
 
+from access import safe_external_url
+
 logger = logging.getLogger(__name__)
 
 _NEW_CENTRAL_TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
@@ -73,7 +75,16 @@ class ArubaClient:
 
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = dict(config or {})
-        self.cluster_url = (self.config.get("cluster_url") or "").rstrip("/")
+        # SSRF belt-and-suspenders: the save path (/sim/api/aggregate/central)
+        # already confines cluster_url to a public https URL with a DNS-rebind
+        # check, but a value stored BEFORE that guard existed (or written by a
+        # spoke/restore) could still be internal. Neutralize it here so neither
+        # the classic token exchange (POST client_id/client_secret to
+        # {cluster_url}/oauth2/token) nor the monitoring GETs ever reach an
+        # internal host. new_central mode uses a fixed HPE token URL and never
+        # touches cluster_url, so clearing it is safe for that mode too.
+        raw_cluster_url = (self.config.get("cluster_url") or "").strip().rstrip("/")
+        self.cluster_url = raw_cluster_url if safe_external_url(raw_cluster_url) else ""
         # stored central_config carries api_version (new_central|classic) set
         # by the Setup UI (csSaveCentralConn); fall back to classic.
         self.api_version = (self.config.get("api_version")

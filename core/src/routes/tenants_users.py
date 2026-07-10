@@ -3,7 +3,12 @@ from api import (
     HTTPException, Request, _hash_password, _hub_msg, _invalidate_user_sessions,
     _unwrap_spoke, get_tenant_scoping, logger, time,
 )
-from access import ENFORCED_RIGHTS, resolve_effective_permissions
+from access import (
+    ENFORCED_RIGHTS, resolve_effective_permissions,
+    valid_display_name as _valid_display_name,
+    valid_hostname as _valid_hostname,
+    valid_identifier as _valid_identifier,
+)
 
 
 def register(app, hub, ctx):
@@ -141,6 +146,18 @@ def register(app, hub, ctx):
 
             if not spoke_id or not new_name:
                 raise HTTPException(status_code=400, detail="Missing spoke_id or display_name")
+            # Validate identifiers/hostnames BEFORE they're stored or sent to a
+            # spoke. new_hostname is relayed to the spoke's SPOKE_SET_HOSTNAME,
+            # which applies it via a shell ``hostname`` call — a value carrying
+            # shell metacharacters would be remote command injection on the
+            # spoke. display_name is stored/rendered (no shell), so it gets the
+            # softer valid_display_name check (no control/shell chars).
+            if not _valid_identifier(spoke_id):
+                raise HTTPException(status_code=400, detail="Invalid spoke_id")
+            if not _valid_display_name(new_name):
+                raise HTTPException(status_code=400, detail="Invalid display_name")
+            if new_hostname and not _valid_hostname(new_hostname):
+                raise HTTPException(status_code=400, detail="Invalid hostname")
 
             known_modules = hub.state.system_state.get("known_modules", [])
             if spoke_id not in known_modules:

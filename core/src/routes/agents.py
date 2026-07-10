@@ -2,6 +2,7 @@
 from api import (
     HTTPException, Request, logger,
 )
+from access import valid_display_name, valid_identifier
 
 
 def register(app, hub, ctx):
@@ -20,6 +21,20 @@ def register(app, hub, ctx):
 
             if not agent_id or not module_id:
                 raise HTTPException(status_code=400, detail="Missing agent_id or module_id")
+            # Validate identifiers BEFORE they're relayed to the agent. module_id
+            # is mapped to a role and sent in a LOAD_ROLE payload to the agent; an
+            # arbitrary string would be forwarded verbatim, so confine it to the
+            # identifier grammar (and the known role set below). agent_id /
+            # custom_spoke_id are used as spoke lookups/keys; display_name is
+            # stored/rendered (no shell), so it gets the softer display check.
+            if not valid_identifier(agent_id):
+                raise HTTPException(status_code=400, detail="Invalid agent_id")
+            if not valid_identifier(module_id):
+                raise HTTPException(status_code=400, detail="Invalid module_id")
+            if custom_spoke_id and not valid_identifier(custom_spoke_id):
+                raise HTTPException(status_code=400, detail="Invalid spoke_id")
+            if display_name and not valid_display_name(display_name):
+                raise HTTPException(status_code=400, detail="Invalid display_name")
 
             if agent_id not in hub.active_connections:
                 raise HTTPException(status_code=503, detail=f"Generic agent {agent_id} not connected")
@@ -34,6 +49,8 @@ def register(app, hub, ctx):
             }.get(module_id, module_id)
             result = await hub.request_response(agent_id, "LOAD_ROLE", {"role": role})
             return result
+        except HTTPException:
+            raise  # 4xx/503 must propagate as-is, not be re-wrapped as 500
         except Exception as e:
             logger.error(f"Provisioning failed: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))

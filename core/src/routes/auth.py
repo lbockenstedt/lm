@@ -1,10 +1,10 @@
 """Auth routes: login, me, logout, first-run setup, session prefixes."""
 from api import (
     HTTPException, JSONResponse, Request, _SESSION_TTL, _client_ip,
-    _cookie_secure, _hash_password, _login_check, _login_fail, _login_success,
-    _record_session, _save_sessions, _sessions, _start_cache_for_tenant,
-    _stop_cache_for_tenant, _verify_password, get_netbox_spoke,
-    get_tenant_scoping, logger, os, secrets, time,
+    _cookie_secure, _hash_password, _lockout_key, _login_check, _login_fail,
+    _login_success, _record_session, _save_sessions, _sessions,
+    _start_cache_for_tenant, _stop_cache_for_tenant, _verify_password,
+    get_netbox_spoke, get_tenant_scoping, logger, os, secrets, time,
 )
 from access import resolve_effective_permissions
 
@@ -39,12 +39,15 @@ def register(app, hub, ctx):
             # trusted proxy (LM_TRUSTED_PROXIES), walking right-to-left past
             # trusted hops — so XFF can't be spoofed to bypass the cap.
             ip = _client_ip(request)
+            # Lockout key is case-folded so case-variant brute force ("admin",
+            # "Admin", "ADMIN", …) can't get _LOGIN_MAX_FAILS tries PER variant.
+            lkey = _lockout_key(user_id)
             # Throttle BEFORE the field/password checks so a locked-out IP can't
             # even probe, AND so a flood of malformed (empty-username) requests
             # still counts against the per-IP spray window (was: the 400 fired
             # before _login_check → unthrottled). ``_login_check`` covers both
             # per-username lockout and per-IP spray windows.
-            allowed, retry_after = _login_check(user_id, ip)
+            allowed, retry_after = _login_check(lkey, ip)
             if not allowed:
                 raise HTTPException(
                     status_code=429,
@@ -55,7 +58,7 @@ def register(app, hub, ctx):
                 # Malformed, but still abuse — count it against the IP window so
                 # an empty-field flood fills the bucket and trips the throttle
                 # above on the next request.
-                _login_fail(hub, user_id, ip)
+                _login_fail(hub, lkey, ip)
                 raise HTTPException(status_code=400, detail="username and password required")
             users = hub.state.system_state.get("users", {})
             user = users.get(user_id)
@@ -63,9 +66,9 @@ def register(app, hub, ctx):
             # username enumeration; both increment the lockout/spray counters.
             if not user or not user.get("password_hash") or \
                not _verify_password(password, user["password_hash"]):
-                _login_fail(hub, user_id, ip)
+                _login_fail(hub, lkey, ip)
                 raise HTTPException(status_code=401, detail="Invalid credentials")
-            _login_success(hub, user_id, ip)
+            _login_success(hub, lkey, ip)
             # Always read the live record so migrations/admin changes take effect on next login.
             # Effective perms = group-derived rights unioned with per-user overrides (RBAC).
             perms   = resolve_effective_permissions(hub, user)
@@ -133,7 +136,8 @@ def register(app, hub, ctx):
             user_id = str(data.get("username") or "").strip()
             password = str(data.get("password") or "")
             ip = _client_ip(request)
-            allowed, retry_after = _login_check(user_id, ip)
+            lkey = _lockout_key(user_id)  # case-folded: case variants share one lockout
+            allowed, retry_after = _login_check(lkey, ip)
             if not allowed:
                 raise HTTPException(status_code=429, detail="Too many attempts",
                                     headers={"Retry-After": str(retry_after)})
@@ -142,9 +146,9 @@ def register(app, hub, ctx):
             if (not user_id or not password or not user
                     or not user.get("password_hash")
                     or not _verify_password(password, user["password_hash"])):
-                _login_fail(hub, user_id, ip)
+                _login_fail(hub, lkey, ip)
                 raise HTTPException(status_code=401, detail="Invalid credentials")
-            _login_success(hub, user_id, ip)
+            _login_success(hub, lkey, ip)
             snap = _user_snapshot(hub, user_id, user)
         if not user_id:
             raise HTTPException(status_code=401, detail="Not authenticated")
