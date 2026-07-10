@@ -1027,7 +1027,21 @@ class UpdatePipelineMixin:
             except Exception as _e:
                 logger.warning(f"Pre-restart session flush failed: {_e}")
             try:
-                subprocess.Popen(["sudo", "-n", "/usr/local/bin/lm-update-restart"])
+                # DETACH the restart helper into its own session with std streams
+                # sent to /dev/null. Launched un-detached from inside the asyncio
+                # hub daemon, the child sudo lives in the hub's process group and
+                # is killed before it can `systemd-run` the restart — which is why
+                # the hub logged "Scheduling self-restart…" every cycle but never
+                # actually restarted (no sudo in the journal, process stayed STALE).
+                # start_new_session=True lets it survive to escape the cgroup and
+                # fire the restart, exactly like a manual invocation from a tty.
+                subprocess.Popen(
+                    ["sudo", "-n", "/usr/local/bin/lm-update-restart"],
+                    start_new_session=True, close_fds=True,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                logger.info("Self-restart helper (lm-update-restart) launched (detached).")
             except Exception as _e:
                 logger.warning(f"Could not schedule hub self-restart: {_e}")
             if hub_updated:
