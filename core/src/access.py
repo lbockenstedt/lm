@@ -1107,6 +1107,38 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     return out
 
 
+async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload) -> bool:
+    """CONSTRAINED-WRITE gate for a SHARED firewall. True iff ``payload`` (one
+    rule / NAT / DNS / alias record being written) is attributable to ``sess``'s
+    tenant — i.e. it survives the SAME subnet + OPNsense-category attribution used
+    to filter reads (``filter_fw``). Unlike ``filter_fw`` this IGNORES the
+    ``firewall`` display toggle: a tenant-admin's writes to shared infra are
+    always constrained to their own slice, regardless of whether the read filter
+    is switched on. Endpoints with no IP/category spec (health/interfaces) are not
+    tenant-attributable → False (deny; only a Global Admin edits those on shared).
+    An empty prefix+category set → False (nothing to attribute by → deny, safe)."""
+    spec = _FW_FILTER_SPEC.get(endpoint)
+    if not spec:
+        return False
+    mode, fields = spec
+    tid = (sess or {}).get("user", {}).get("tenant_id")
+    prefixes = await resolve_prefixes(hub, sess)
+    tenant_cat = None
+    if endpoint in _FW_CATEGORY_ENDPOINTS and tid:
+        t = hub.state.get_tenant(tid) or {}
+        cats = [t.get("name"), t.get("slug"), t.get("netbox_tenant_slug"), tid]
+        tenant_cat = sorted({str(c).strip() for c in cats if c}) or None
+    if not prefixes and not tenant_cat:
+        return False
+    if mode == "fw":
+        alias_map = await _fw_alias_map(hub, firewall_id) if firewall_id else None
+        out = filter_firewall_rules([payload], prefixes or [], alias_map, tenant_category=tenant_cat)
+    else:
+        out = filter_items_by_prefixes([payload], prefixes or [], fields,
+                                       drop_no_ip=True, tenant_category=tenant_cat)
+    return _list_len(out) > 0
+
+
 async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str,
                     explicit_tenant=None):
     """Network Devices subnet filter: field-based on the concrete-IP columns of

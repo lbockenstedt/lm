@@ -655,13 +655,24 @@ window.fetch = async function lmFetch(input, init) {
 // granted its explicit right. Today only the Simulations (cs) module is gated
 // this way; other modules remain product-driven (visible when their spoke is
 // connected). Add a key here to gate another module the same way.
-const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console' };
+const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall' };
 function canSeeModule(className) {
     const right = MODULE_RIGHT[className];
     if (!right) return true;              // no right defined → product-driven
     if (isAdmin() || isTenantAdmin()) return true;
     const p = currentUser?.permissions || {};
     return p[right] === true;
+}
+
+// Write-user tier: may EDIT their own tenant's DEDICATED module configs. Global
+// Admin and tenant-admin always; otherwise the global `edit` right (legacy
+// `console_write` also grants it, backward compat). Gates edit controls in the
+// module views (the server enforces the same via access.write_scope, so this is
+// UX — a view user still can't write even if a button leaks through).
+function canEdit() {
+    if (isAdmin() || isTenantAdmin()) return true;
+    const p = currentUser?.permissions || {};
+    return p.edit === true || p.console_write === true;
 }
 
 function showToast(message, type = 'info') {
@@ -7627,12 +7638,19 @@ async function deleteUser(userId) {
 const _RBAC_RIGHT_LABELS = {
     admin: 'Global Admin',
     tenant_admin: 'Admin (tenant)',
-    cs: 'Simulations',
+    edit: 'Edit (write user)',
+    firewall: 'Firewall',
     nw: 'Network Devices',
     ipam: 'IPAM',
+    nac: 'Security / NAC',
+    dns: 'DNS',
+    dhcp: 'DHCP',
+    ldap: 'Directory / LDAP',
+    pxmx: 'Hypervisors',
     le: 'Certificates',
     console: 'Console',
     console_write: 'Console Write',
+    cs: 'Simulations',
 };
 
 async function loadGroups() {

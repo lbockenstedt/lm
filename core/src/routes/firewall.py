@@ -14,21 +14,24 @@ def register(app, hub, ctx):
     _is_tenant_admin = ctx._is_tenant_admin
     _filter_fw = ctx._filter_fw
 
-    def _authz_firewall(request, firewall_id):
-        """Authorize a firewall op by the firewall's OWNING tenant, and return the
-        firewall dict. Global Admin → any firewall. Otherwise the firewall must be
-        visible to the session (its own or the shared tenant — via
-        ``access.spoke_visible_to_session``); an other-tenant or unassigned
-        firewall is refused. Raises 404 when the id is unknown, 403 when the
-        caller may not touch it.
+    def _authz_firewall(request, firewall_id, write=False):
+        """Authorize + classify a firewall op by the firewall's OWNING tenant.
+        Returns ``(fw, scope)``. Raises 404 (unknown id) / 403 (no access).
 
-        This is the tenant boundary for the ENTIRE ``/api/firewall/*`` surface —
-        reads (data/refresh) AND writes (rules/aliases/NAT/DNS). Object-level
-        subnet filtering (``_filter_fw``) still narrows read payloads on top of
-        this; the gate here stops a tenant from reading or mutating a firewall it
-        doesn't own by supplying its id (there was previously no such check on
-        the write handlers — any authenticated user could push rules/NAT/DNS to
-        any firewall by id). 404-before-403 is intentional parity with the CRUD
+        The tenant boundary for the ENTIRE ``/api/firewall/*`` surface — reads
+        (data/refresh) AND writes (rules/aliases/NAT/DNS). ``scope`` folds the
+        caller's tier with the firewall's tenancy (see access.read_scope /
+        write_scope):
+
+          * read  → ``"full"`` (Global Admin, or the firewall is DEDICATED to the
+            caller's own tenant → whole device) or ``"filtered"`` (the SHARED
+            firewall → only the caller's tenant slice; ``_filter_fw`` narrows it).
+          * write → ``"full"`` (admin, or own-dedicated by a write-user+ → mutate
+            anything) or ``"constrained"`` (SHARED, tenant-admin → only rules
+            attributable to the caller's tenant; the write handler validates each
+            payload via access.fw_rule_in_tenant_scope).
+
+        ``"deny"`` → 403. 404-before-403 is intentional parity with the CRUD
         handlers; ids are server-issued UUIDs, so no meaningful existence leak."""
         hub = app.state.hub
         firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
@@ -36,11 +39,58 @@ def register(app, hub, ctx):
         if not fw:
             raise HTTPException(status_code=404, detail="Firewall not found")
         sess = _session_user(request)
-        if _is_admin(sess):
-            return fw
-        if not access.spoke_visible_to_session(sess, fw.get("tenant_id", "")):
+        tid = fw.get("tenant_id", "")
+        scope = access.write_scope(sess, tid) if write else access.read_scope(sess, tid)
+        if scope == "deny":
             raise HTTPException(status_code=403, detail="You do not have access to this firewall")
+        return fw, scope
+
+    async def _authz_fw_write(request, firewall_id, endpoint, payload=None, uuid=None):
+        """Write-authorize a firewall mutation and, on a SHARED firewall
+        (scope=='constrained'), enforce that the target is within the caller's
+        tenant slice. ADD/EDIT validate the submitted ``payload``; DELETE (only a
+        ``uuid``) fetches the current records for ``endpoint`` and checks the
+        matching record's attribution. 403 if the op falls outside the slice.
+        Returns the fw dict."""
+        hub = app.state.hub
+        fw, scope = _authz_firewall(request, firewall_id, write=True)
+        if scope != "constrained":
+            return fw  # 'full' — admin or own-dedicated write-user; unrestricted
+        sess = _session_user(request)
+        target = payload
+        if target is None and uuid is not None:
+            # Resolve the existing record so we can attribute a delete/edit by id.
+            target = await _fw_record_by_uuid(request, fw, endpoint, uuid)
+        if target is None or not await access.fw_rule_in_tenant_scope(hub, sess, endpoint, firewall_id, target):
+            raise HTTPException(
+                status_code=403,
+                detail="On shared infrastructure you may only modify entries within your tenant's scope")
         return fw
+
+    async def _fw_record_by_uuid(request, fw, endpoint, uuid):
+        """Fetch the current records for ``endpoint`` from the firewall's spoke and
+        return the one whose uuid matches (or None). Used to attribute a
+        constrained delete/edit on a shared firewall."""
+        hub = app.state.hub
+        spoke_id = fw.get("spoke_id")
+        if not spoke_id or spoke_id not in hub.active_connections:
+            return None
+        cmd = {"rules": "OPNSENSE_GET_ALL_RULES", "nat": "OPNSENSE_GET_NAT_POLICIES",
+               "dns": "OPNSENSE_GET_DNS_RECORDS", "aliases": "OPNSENSE_GET_ALIASES"}.get(endpoint)
+        if not cmd:
+            return None
+        try:
+            result = await hub.request_response(spoke_id, cmd, {}, timeout=_FW_WRITE_TIMEOUT)
+        except Exception:  # noqa: BLE001
+            return None
+        rows = result.get("payload", result) if isinstance(result, dict) else result
+        if isinstance(rows, dict):
+            rows = rows.get("data", rows)
+        items = rows if isinstance(rows, list) else (rows.get(endpoint) if isinstance(rows, dict) else None)
+        for r in (items or []):
+            if isinstance(r, dict) and (r.get("uuid") == uuid or r.get("id") == uuid):
+                return r
+        return None
 
     @app.get("/api/firewall/{firewall_id}/refresh")
     async def refresh_firewall_cache(firewall_id: str, request: Request):
@@ -73,9 +123,15 @@ def register(app, hub, ctx):
         hub = app.state.hub
         logger.debug("relay %s %s firewall=%s endpoint=%s tenant=%s", request.method, request.url.path, firewall_id, endpoint, tenant)
 
-        # Tenant boundary: refuse a firewall the caller doesn't own (admin any;
-        # else own/shared tenant). Runs before any cache serve or spoke fetch.
-        _authz_firewall(request, firewall_id)
+        # Tenant boundary + read scope: refuse a firewall the caller doesn't own
+        # (admin any; else own/shared tenant). scope 'full' = whole device (admin
+        # or own-dedicated); 'filtered' = shared, narrowed to the caller's slice.
+        _fw0, _rscope = _authz_firewall(request, firewall_id)
+
+        async def _scoped(payload):
+            if _rscope == "full":
+                return payload
+            return await _filter_fw(request, payload, endpoint, firewall_id, tenant)
 
         # Serve from tenant cache for non-admin users (if module is cached)
         sess = _session_user(request)
@@ -84,7 +140,7 @@ def register(app, hub, ctx):
             if tenant_id and endpoint in _FW_MODULES:
                 cached = _cache_entry(tenant_id, f"{endpoint}:{firewall_id}")
                 if cached:
-                    return await _filter_fw(request, cached["data"], endpoint, firewall_id, tenant)
+                    return await _scoped(cached["data"])
 
         firewalls = hub.state.system_state.get("global_config", {}).get("firewalls", [])
         fw = next((f for f in firewalls if f["id"] == firewall_id), None)
@@ -123,7 +179,7 @@ def register(app, hub, ctx):
                 if tenant_id:
                     cached = _cache_entry(tenant_id, f"{endpoint}:{firewall_id}")
                     if cached:
-                        return await _filter_fw(request, cached["data"], endpoint, firewall_id, tenant)
+                        return await _scoped(cached["data"])
             raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
 
         try:
@@ -147,7 +203,7 @@ def register(app, hub, ctx):
                     data = result
             else:
                 data = result
-            return await _filter_fw(request, data, endpoint, firewall_id, tenant)
+            return await _scoped(data)
         except HTTPException:
             raise
         except Exception as e:
@@ -186,81 +242,83 @@ def register(app, hub, ctx):
     @app.post("/api/firewall/{firewall_id}/rules")
     async def add_firewall_rule(firewall_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
         data = await request.json()
-        return await _fw_write(hub, firewall_id, "OPNSENSE_ADD_RULE", {"rule": data.get("rule", data)}, "rules")
+        rule = data.get("rule", data)
+        await _authz_fw_write(request, firewall_id, "rules", payload=rule)
+        return await _fw_write(hub, firewall_id, "OPNSENSE_ADD_RULE", {"rule": rule}, "rules")
 
     @app.delete("/api/firewall/{firewall_id}/rules/{rule_id}")
     async def delete_firewall_rule(firewall_id: str, rule_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
+        await _authz_fw_write(request, firewall_id, "rules", uuid=rule_id)
         return await _fw_write(hub, firewall_id, "OPNSENSE_DEL_RULE", {"rule_id": rule_id}, "rules")
 
     @app.put("/api/firewall/{firewall_id}/rules/{rule_id}")
     async def edit_firewall_rule(firewall_id: str, rule_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
         data = await request.json()
-        return await _fw_write(hub, firewall_id, "OPNSENSE_EDIT_RULE", {"uuid": rule_id, "rule": data.get("rule", data)}, "rules")
+        rule = data.get("rule", data)
+        await _authz_fw_write(request, firewall_id, "rules", payload=rule, uuid=rule_id)
+        return await _fw_write(hub, firewall_id, "OPNSENSE_EDIT_RULE", {"uuid": rule_id, "rule": rule}, "rules")
 
     @app.post("/api/firewall/{firewall_id}/aliases")
     async def add_firewall_alias(firewall_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
         data = await request.json()
+        await _authz_fw_write(request, firewall_id, "aliases", payload=data)
         return await _fw_spoke_cmd(hub, firewall_id, "OPNSENSE_ADD_ALIAS", data)
 
     @app.delete("/api/firewall/{firewall_id}/aliases/{alias_id}")
     async def delete_firewall_alias(firewall_id: str, alias_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
+        await _authz_fw_write(request, firewall_id, "aliases", uuid=alias_id)
         return await _fw_spoke_cmd(hub, firewall_id, "OPNSENSE_DEL_ALIAS", {"uuid": alias_id})
 
     @app.put("/api/firewall/{firewall_id}/aliases/{alias_id}")
     async def edit_firewall_alias(firewall_id: str, alias_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
         data = await request.json()
+        await _authz_fw_write(request, firewall_id, "aliases", payload=data, uuid=alias_id)
         return await _fw_spoke_cmd(hub, firewall_id, "OPNSENSE_EDIT_ALIAS", {"uuid": alias_id, **data})
 
     @app.post("/api/firewall/{firewall_id}/nat")
     async def add_nat_rule(firewall_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
         data = await request.json()
+        await _authz_fw_write(request, firewall_id, "nat", payload=data)
         return await _fw_write(hub, firewall_id, "OPNSENSE_ADD_NAT_RULE", data, "nat")
 
     @app.delete("/api/firewall/{firewall_id}/nat/{rule_id}")
     async def delete_nat_rule(firewall_id: str, rule_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
+        await _authz_fw_write(request, firewall_id, "nat", uuid=rule_id)
         return await _fw_write(hub, firewall_id, "OPNSENSE_DEL_NAT_RULE", {"nat_type": "d_nat", "uuid": rule_id}, "nat")
 
     @app.put("/api/firewall/{firewall_id}/nat/{rule_id}")
     async def edit_nat_rule(firewall_id: str, rule_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
         data = await request.json()
+        await _authz_fw_write(request, firewall_id, "nat", payload=data, uuid=rule_id)
         return await _fw_write(hub, firewall_id, "OPNSENSE_EDIT_NAT_RULE", {"uuid": rule_id, **data}, "nat")
 
     @app.post("/api/firewall/{firewall_id}/dns")
     async def add_dns_record(firewall_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
         data = await request.json()
+        await _authz_fw_write(request, firewall_id, "dns", payload=data)
         return await _fw_write(hub, firewall_id, "OPNSENSE_ADD_DNS_RECORD", data, "dns")
 
     @app.delete("/api/firewall/{firewall_id}/dns/{record_id}")
     async def delete_dns_record(firewall_id: str, record_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
+        await _authz_fw_write(request, firewall_id, "dns", uuid=record_id)
         return await _fw_write(hub, firewall_id, "OPNSENSE_DEL_DNS_RECORD", {"uuid": record_id}, "dns")
 
     @app.put("/api/firewall/{firewall_id}/dns/{record_id}")
     async def edit_dns_record(firewall_id: str, record_id: str, request: Request):
         hub = app.state.hub
-        _authz_firewall(request, firewall_id)
         data = await request.json()
+        await _authz_fw_write(request, firewall_id, "dns", payload=data, uuid=record_id)
         return await _fw_write(hub, firewall_id, "OPNSENSE_EDIT_DNS_RECORD", {"uuid": record_id, **data}, "dns")
 
     @app.post("/setup/firewalls")
