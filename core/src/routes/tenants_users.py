@@ -54,7 +54,19 @@ def register(app, hub, ctx):
         if status == "error":
             logger.error("manual update: hub sub-result error: %s", message)
             raise HTTPException(status_code=500, detail=message)
-        return {"status": status, "message": message}
+        # Exact-to-the-click version context for the WebUI toast: running = the
+        # startup sentinel (what this hub is running NOW), target = /opt/lm/VERSION
+        # (the tip just pulled by run_repo_sync_all — what it'll restart into).
+        # Same sources as the footer version indicator + the watchdog. Best-effort.
+        def _read_ver(path):
+            try:
+                with open(path) as _f:
+                    return _f.read().strip()
+            except Exception:  # noqa: BLE001
+                return ""
+        return {"status": status, "message": message,
+                "running_version": _read_ver("/var/lib/lm/state/running-version"),
+                "target_version": _read_ver("/opt/lm/VERSION")}
 
     @app.post("/setup/update/spokes")
     async def trigger_spoke_updates(request: Request):
