@@ -604,6 +604,42 @@ class UpdatePipelineMixin:
             if tmp_dir and os.path.isdir(tmp_dir):
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    async def _git_checkout_is_conflicted(self, root: str) -> bool:
+        """True if the checkout has unmerged files or an in-progress rebase/merge
+        — a wedged pull-only deploy checkout that blocks every future pull."""
+        try:
+            gd = os.path.join(root, ".git")
+            if (os.path.isdir(os.path.join(gd, "rebase-merge"))
+                    or os.path.isdir(os.path.join(gd, "rebase-apply"))
+                    or os.path.isfile(os.path.join(gd, "MERGE_HEAD"))):
+                return True
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", root, "diff", "--name-only", "--diff-filter=U",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+            return proc.returncode == 0 and bool(out.decode().strip())
+        except Exception as e:  # noqa: BLE001
+            logger.debug("conflict check failed: %s", e)
+            return False
+
+    async def _git_reset_hard_to_remote(self, root: str, branch: str) -> bool:
+        """Abandon any half-rebase/merge + local changes and hard-align the
+        pull-only deploy checkout to origin/<branch>. Returns True on success."""
+        cmd = (f"cd {root} && "
+               f"(git rebase --abort 2>/dev/null; git merge --abort 2>/dev/null; true) && "
+               f"git fetch origin {branch} && git reset --hard origin/{branch}")
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            _out, err = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+            if proc.returncode == 0:
+                return True
+            logger.warning("reset --hard recovery failed (rc=%d): %s",
+                           proc.returncode, err.decode().strip()[:300])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("reset --hard recovery errored: %s", e)
+        return False
+
     async def _git_update(self, hub_root: str, hub_repo: str, branch: str) -> bool:
         """
         Performs a git-based update. Returns True only if the update actually
@@ -630,6 +666,25 @@ class UpdatePipelineMixin:
 
             if process.returncode != 0:
                 logger.error(f"Hub git pull failed (rc={process.returncode}): {err_msg}")
+                # SELF-HEAL: a pull-only deploy checkout can wedge in a conflicted
+                # / half-rebased state (unmerged files — classically the CI VERSION
+                # bump colliding with a racing pull), which then blocks EVERY future
+                # pull. /opt/lm carries no intentional local commits, so recover by
+                # abandoning local state and hard-aligning to the remote tip — the
+                # same recovery a human runs (rebase --abort + reset --hard).
+                el = err_msg.lower()
+                if ("unmerged" in el or "conflict" in el or "unresolved" in el
+                        or "would be overwritten" in el
+                        or await self._git_checkout_is_conflicted(hub_root)):
+                    logger.warning("Hub checkout is conflicted — self-healing via "
+                                   "reset --hard origin/%s", branch)
+                    if await self._git_reset_hard_to_remote(hub_root, branch):
+                        nlc = await self.get_local_commit()
+                        rc2 = await self.get_remote_commit(hub_repo, branch)
+                        if nlc != "unknown" and nlc == rc2:
+                            logger.info("Hub self-healed to %s via reset --hard.", nlc[:10])
+                            return True
+                        logger.warning("Hub reset --hard ran but HEAD still != remote.")
                 return False
 
             # CRITICAL: verify the pull actually advanced HEAD to the remote tip.
