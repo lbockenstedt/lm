@@ -574,12 +574,19 @@ class AgentHostingControlPlane(BaseControlPlane):
             },
             "payload": {"type": cmd_type, "data": data},
         }
-        msg["signature"] = self.agent_signer.sign(msg)
+        # Wire form <sig>.<body> (encode_frame): the agent decodes with
+        # split_frame + verify_bytes over the body bytes. This was previously a
+        # raw ``json.dumps(msg)`` with an in-payload ``signature`` (the old signing
+        # scheme) — but the agent's receive loop split_frame's on the FIRST '.',
+        # which in raw JSON is the ``time.time()`` timestamp's decimal point, so
+        # json.loads saw a truncated body ("Extra data: line 1 column 8 (char 7)")
+        # and the agent flapped after every auth. Frame it like the hub↔spoke legs.
+        wire = self.agent_signer.encode_frame(msg)
 
         fut = asyncio.get_running_loop().create_future()
         self.pending_responses[corr_id] = fut
         try:
-            await ws.send(json.dumps(msg, separators=(',', ':')))
+            await ws.send(wire)
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self.pending_responses.pop(corr_id, None)
@@ -606,9 +613,11 @@ class AgentHostingControlPlane(BaseControlPlane):
             },
             "payload": {"type": cmd_type, "data": data},
         }
-        msg["signature"] = self.agent_signer.sign(msg)
+        # Frame form <sig>.<body> (encode_frame) — same fix as send_to_agent; a
+        # raw json.dumps here made the agent's split_frame choke on the timestamp
+        # float. Used for the high-volume VNC down-frames + control.
         try:
-            await rec["ws"].send(json.dumps(msg, separators=(',', ':')))
+            await rec["ws"].send(self.agent_signer.encode_frame(msg))
             return True
         except Exception as e:
             logger.warning(f"send_raw_to_agent {cmd_type} -> {agent_id} failed: {e}")
