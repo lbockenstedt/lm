@@ -3520,6 +3520,14 @@ function _renderSetupSpokesTile(content) {
     // would re-introduce empty space below its last row).
     content.innerHTML = `
             <div id="spokes-summary" class="flex flex-wrap items-center gap-3 text-xs"></div>
+            <div class="flex items-center gap-2 text-xs mb-1">
+                <label for="sa-tenant-filter" class="font-bold text-slate-500 uppercase tracking-wider">Tenant</label>
+                <select id="sa-tenant-filter" onchange="_onSaTenantFilterChange()" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-green-500">
+                    <option value="__unassigned__">Unassigned</option>
+                    <option value="__all__">All tenants</option>
+                </select>
+                <span class="text-[10px] text-slate-400 italic">show spokes &amp; agents for this tenant (Unassigned = not yet bound to one)</span>
+            </div>
             <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
                 <div class="${saCard}">
                     <div class="flex justify-between items-center mb-2">
@@ -3538,6 +3546,36 @@ function _renderSetupSpokesTile(content) {
                     <div id="agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
                 </div>
             </div>`;
+    _populateSaTenantFilter();
+    loadSpokesAndAgents();
+}
+
+// Tenant filter for the Spokes & Agents tile. Fetches the tenant list and fills
+// the #sa-tenant-filter dropdown, preserving the current selection across a
+// refresh (defaults to "Unassigned" — the freshly-onboarded, not-yet-bound
+// spokes/agents an admin most often needs to triage first). Best-effort: on a
+// failed fetch the two static options (Unassigned / All tenants) remain usable.
+async function _populateSaTenantFilter() {
+    const sel = document.getElementById('sa-tenant-filter');
+    if (!sel) return;
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const current = sel.value || '__unassigned__';
+    try {
+        const res = await setupFetch('/setup/tenants');
+        if (!res.ok) return;
+        const tenants = (await res.json()).tenants || [];
+        sel.innerHTML =
+            '<option value="__unassigned__">Unassigned</option>' +
+            '<option value="__all__">All tenants</option>' +
+            tenants.map(t => `<option value="${esc(t.tenant_id)}">${esc(t.tenant_name || t.tenant_id)}</option>`).join('');
+        // Keep the prior choice if it still exists, else fall back to Unassigned.
+        sel.value = [...sel.options].some(o => o.value === current) ? current : '__unassigned__';
+    } catch (_e) { /* leave the two static options in place */ }
+}
+
+// Re-render the Spokes & Agents lists for the newly-selected tenant. The filter
+// is read inside loadSpokesAndAgents(), so a plain reload applies it.
+function _onSaTenantFilterChange() {
     loadSpokesAndAgents();
 }
 
@@ -6416,13 +6454,34 @@ async function loadSpokesAndAgents() {
     trueSpokes.sort((a, b) =>
         (a.display_name || a.spoke_id || '').localeCompare(
             (b.display_name || b.spoke_id || ''), undefined, { sensitivity: 'base' }));
-    _renderSpokesTable(spokesWrap, trueSpokes, diagBy);
+
+    // Tenant filter (Setup → Spokes & Agents dropdown). Applied LAST — after the
+    // role-annotation pass above has run against the full set — so a role
+    // sub-spoke's parent lookup is never broken by a filtered-out peer. Spokes
+    // and generic agents carry tenant_id directly; a pxmx node agent carries its
+    // owning spoke_id, so its tenant is that spoke's tenant_id. "__unassigned__"
+    // (the default) matches anything with no tenant binding — the freshly
+    // onboarded spokes/agents an admin triages first; "__all__" disables the
+    // filter.
+    const _saFilter = document.getElementById('sa-tenant-filter')?.value || '__unassigned__';
+    const _spokeTenantById = new Map(spokes.map(s => [s.spoke_id, (s.tenant_id || '').trim()]));
+    const _saMatch = (tid) => {
+        tid = (tid || '').trim();
+        if (_saFilter === '__all__') return true;
+        if (_saFilter === '__unassigned__') return !tid;
+        return tid === _saFilter;
+    };
+    const trueSpokesF    = trueSpokes.filter(s => _saMatch(s.tenant_id));
+    const genericAgentsF = genericAgents.filter(s => _saMatch(s.tenant_id));
+    const pxmxAgentsF    = pxmxAgents.filter(a => _saMatch(_spokeTenantById.get(a.spoke_id) ?? a.tenant_id));
+
+    _renderSpokesTable(spokesWrap, trueSpokesF, diagBy);
     // An agent is an agent — idle (no role yet) and active (role-loaded) generic
     // agents both render in the single Agents table alongside the Proxmox node
     // agents. (The former separate "Generic Agents" tile was removed — splitting
     // by idle/active gave no useful signal and just hid freshly-onboarded agents
     // in a second card.) Load Role + Approve affordances live in _renderAgentsTable.
-    await _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy);
+    await _renderAgentsTable(agentsWrap, genericAgentsF, pxmxAgentsF, diagBy);
 }
 
 // _renderSpokesSummary(diagData) — the spoke-update recovery-count bar that sat
