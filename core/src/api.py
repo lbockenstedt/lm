@@ -440,6 +440,37 @@ def _invalidate_user_sessions(hub, user_id) -> int:
     return len(drop)
 
 
+def _active_user_count(window_s: int = 300) -> int:
+    """Distinct users with a live (non-expired), recently-seen session — i.e.
+    someone actively using the WebUI right now (the WebUI polls /status every
+    ~10s, refreshing last_seen). Used to defer a disruptive restart/update to a
+    quiet window (see the watchdog idle-guard). Recency-based so a walked-away
+    session ages out of the count on its own."""
+    now = time.time()
+    users = set()
+    for s in _sessions.values():
+        try:
+            if float(s.get("expires", 0)) > now and (now - float(s.get("last_seen", 0))) <= window_s:
+                users.add(s.get("user_id"))
+        except (TypeError, ValueError):
+            continue
+    return len(users)
+
+
+def write_active_users_file(hub) -> None:
+    """Write the current active-user count to a file the ROOT lm-watchdog reads
+    before a (non-force) restart, so it can hold off while users are logged in.
+    Best-effort; never raises. Path mirrors update_pipeline's sentinel dir."""
+    try:
+        path = os.environ.get("LM_ACTIVE_USERS_FILE",
+                              "/var/lib/lm/state/active-users")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(f"{_active_user_count()}\n")
+    except Exception as e:  # noqa: BLE001 — best-effort signalling
+        logger.debug("active-users file write failed: %s", e)
+
+
 def _login_attempts_file(hub) -> str:
     return os.path.join(hub.state.data_dir, "login_attempts.json")
 

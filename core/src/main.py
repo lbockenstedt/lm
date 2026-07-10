@@ -3773,6 +3773,119 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             except Exception as e:  # noqa: BLE001
                 logger.debug("sim cache flush loop error: %s", e)
 
+    def _update_gate_config(self) -> dict:
+        """The WebUI-editable maintenance-window / idle gate for AUTO restarts
+        (global_config.update_gate). Defaults to a 02:00 local-time window."""
+        try:
+            cfg = (self.state.system_state.get("global_config", {}) or {}).get("update_gate", {}) or {}
+        except Exception:  # noqa: BLE001
+            cfg = {}
+        return {
+            "mode": str(cfg.get("mode", "window")).lower(),      # window | idle | immediate
+            "window_hour": int(cfg.get("window_hour", 2)),        # 0-23 local
+            "window_duration_h": int(cfg.get("window_duration_h", 2)),
+        }
+
+    def _gate_allows_restart_now(self) -> bool:
+        """Whether an AUTO-update restart may fire right now per update_gate.
+        The footer Update button bypasses this (force sentinel). Fail-open."""
+        g = self._update_gate_config()
+        if g["mode"] == "immediate":
+            return True
+        if g["mode"] == "idle":
+            try:
+                from api import _active_user_count
+                return _active_user_count() == 0
+            except Exception:  # noqa: BLE001
+                return True
+        try:  # window: local hour within [start, start+duration) mod 24
+            h = _dt.datetime.now().hour
+        except Exception:  # noqa: BLE001
+            return True
+        start = g["window_hour"] % 24
+        dur = max(1, min(24, g["window_duration_h"]))
+        return any((start + i) % 24 == h for i in range(dur))
+
+    async def run_watchdog_bridge_loop(self):
+        """Bridge the ROOT lm-watchdog to the hub, every ~20s:
+          1. Write the active-user count to a file the watchdog reads before a
+             (non-force) restart, so it holds off while users are logged in.
+          2. Relay NEW watchdog.log lines into the hub log ([watchdog] …) so its
+             events land in the centralized hub log + WebUI Logs view.
+          3. Cache the watchdog heartbeat/status (last run + last action) so the
+             WebUI can show that auto-heal is alive (via /status → get_system_metrics).
+        Purely observational + best-effort; never fatal to the hub.
+        """
+        from api import write_active_users_file  # lazy: avoid module-level dep
+        wlog = "/var/log/lm/watchdog.log"
+        status_file = "/var/lib/lm/watchdog-status"
+        self._watchdog_status = getattr(self, "_watchdog_status", {}) or {}
+        self._watchdog_log_pos = getattr(self, "_watchdog_log_pos", None)
+        await asyncio.sleep(20)  # stagger past boot
+        while True:
+            try:
+                # 1. active-user count + restart-gate flag for the watchdog.
+                # The gate flag (1/0) encodes the maintenance-window/idle policy
+                # so the watchdog only auto-restarts when allowed (Update button
+                # force-sentinel bypasses it). Fail-open: written every cycle.
+                try:
+                    write_active_users_file(self)
+                    _allowed = "1" if self._gate_allows_restart_now() else "0"
+                    _gp = os.environ.get("LM_RESTART_ALLOWED_FILE",
+                                         "/var/lib/lm/state/restart-allowed")
+                    os.makedirs(os.path.dirname(_gp), exist_ok=True)
+                    with open(_gp, "w") as _f:
+                        _f.write(_allowed + "\n")
+                except Exception:  # noqa: BLE001
+                    pass
+                # 2. relay new watchdog.log lines into the hub log
+                try:
+                    if os.path.isfile(wlog):
+                        size = os.path.getsize(wlog)
+                        # First pass (pos None) or rotation (file shrank) → start at
+                        # end / start so we don't replay the whole history into the hub log.
+                        if self._watchdog_log_pos is None or self._watchdog_log_pos > size:
+                            self._watchdog_log_pos = size
+                        elif size > self._watchdog_log_pos:
+                            with open(wlog, "r") as f:
+                                f.seek(self._watchdog_log_pos)
+                                new = f.read()
+                                self._watchdog_log_pos = f.tell()
+                            for line in new.splitlines():
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                low = line.lower()
+                                if "restart" in low or "force" in low or "stale" in low or "kill" in low or "purged" in low:
+                                    logger.warning("[watchdog] %s", line)
+                                else:
+                                    logger.info("[watchdog] %s", line)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("watchdog log relay failed: %s", e)
+                # 3. cache watchdog heartbeat/status for the WebUI
+                try:
+                    armed = False
+                    if shutil.which("systemctl"):
+                        proc = await asyncio.create_subprocess_exec(
+                            "systemctl", "is-active", "lm-watchdog.timer",
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                        out, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+                        armed = out.decode().strip() == "active"
+                    hb = ""
+                    if os.path.isfile(status_file):
+                        with open(status_file, "r") as f:
+                            hb = f.read().strip()
+                    self._watchdog_status = {
+                        "armed": armed,
+                        "heartbeat": hb,
+                        "log_mtime": (os.path.getmtime(wlog) if os.path.isfile(wlog) else 0),
+                    }
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("watchdog status cache failed: %s", e)
+            except Exception as e:  # noqa: BLE001 — never fatal
+                logger.debug("watchdog bridge loop cycle failed: %s", e)
+            await asyncio.sleep(20)
+
     async def run_mps_loop(self):
         """
         Calculates messages per second and throughput using a 10-second moving average.
@@ -4742,7 +4855,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "probe_gaps": {sid: st["gaps"] for sid, st in self._probe_state.items() if st["gaps"]},
                 "mps": self.mps,
                 "throughput": self.throughput_mbps,
-                "version": version
+                "version": version,
+                # Auto-heal watchdog status (armed / last heartbeat) so the WebUI
+                # can show it's alive — populated by run_watchdog_bridge_loop.
+                "watchdog": getattr(self, "_watchdog_status", {}) or {},
             }
         except Exception as e:
             logger.error(f"Error collecting system metrics: {e}")
@@ -5146,6 +5262,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Capture the VERSION this process booted with so the update-health check
         # can detect process-vs-disk drift (code updated on disk but not restarted).
         self._startup_version = version
+        # Fresh process is current → satisfy + clear any pending watchdog restart
+        # sentinel so a successful restart doesn't get restarted again.
+        try:
+            self._clear_watchdog_restart_sentinel()
+        except Exception:  # noqa: BLE001
+            pass
         # [update-test 2026-07-10] boot marker C — greppable proof the hub auto-
         # pulled AND fired its own (detached) self-restart into new code with no
         # manual step. Safe to remove after verification.
@@ -5154,6 +5276,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         retry_task = asyncio.create_task(self.run_retry_loop())
         persistence_task = asyncio.create_task(self.state.persistence_loop())
         repo_sync_task = asyncio.create_task(self.run_repo_sync_loop())
+        watchdog_bridge_task = asyncio.create_task(self.run_watchdog_bridge_loop())
         mps_task = asyncio.create_task(self.run_mps_loop())
         coalesce_drain_task = asyncio.create_task(self.run_coalesce_drain_loop())
         opnsense_poll_task = asyncio.create_task(self.run_opnsense_polling_loop())

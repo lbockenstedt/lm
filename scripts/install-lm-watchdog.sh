@@ -109,10 +109,13 @@ fi
 # The fresh process boots current, so neither signal recurs → no restart loop.
 # Guarded on hub health + a 2-min cooldown so it can never hot-loop.
 STALE_SENTINEL=/var/lib/lm/state/stale-restart-requested
-STALE_TS=/var/lib/lm/watchdog-stale-ts
-stale_reason=""
+STALE_TS=/var/lib/lm/watchdog-stale-ts          # cooldown between restarts
+RESTART_ALLOWED=/var/lib/lm/state/restart-allowed  # hub-computed gate: 1 = ok now
+is_force=0; stale_reason=""
 if [ -f "$STALE_SENTINEL" ]; then
-  stale_reason="sentinel: $(head -c 80 "$STALE_SENTINEL" 2>/dev/null | tr -d '\n')"
+  body=$(head -c 100 "$STALE_SENTINEL" 2>/dev/null | tr -d '\n')
+  case "$body" in "force "*) is_force=1 ;; esac      # footer Update button = force
+  stale_reason="sentinel: $body"
 elif [ -d /opt/lm/.git ]; then
   disk_ver=$(tr -d '[:space:]' < /opt/lm/VERSION 2>/dev/null || true)
   run_ver=$(grep -aoE "Hub [^ ]+ unified surface" /var/log/lm/hub.log 2>/dev/null | tail -1 | awk '{print $2}')
@@ -122,16 +125,26 @@ elif [ -d /opt/lm/.git ]; then
 fi
 if [ -n "$stale_reason" ] && systemctl is-active --quiet lm.service 2>/dev/null && hub_healthy; then
   now=$(date +%s); last=$(cat "$STALE_TS" 2>/dev/null || echo 0)
-  if [ $(( now - last )) -ge 120 ]; then
-    echo "$now" > "$STALE_TS"
-    log "STALE hub ($stale_reason) — clean restart to load on-disk code"
-    rm -f "$STALE_SENTINEL"
-    timeout 60 systemctl restart lm.service 2>/dev/null || true
-    log "stale restart issued"
+  # The hub computes the maintenance-window / idle gate (config in the WebUI,
+  # default 02:00) and writes 1/0 here. force (Update button) bypasses the gate.
+  # Fail-OPEN: a missing gate file → restart normally (never strand updates).
+  allowed=$(tr -dc '01' < "$RESTART_ALLOWED" 2>/dev/null | head -c1); allowed=${allowed:-1}
+  if [ "$is_force" = 1 ] || [ "$allowed" = 1 ]; then
+    if [ $(( now - last )) -ge 120 ]; then
+      echo "$now" > "$STALE_TS"
+      [ "$is_force" = 1 ] && fx=" [FORCE]" || fx=""
+      log "STALE hub ($stale_reason)$fx — clean restart to load on-disk code"
+      rm -f "$STALE_SENTINEL"
+      timeout 60 systemctl restart lm.service 2>/dev/null || true
+      log "stale restart issued"
+    fi
   else
-    log "STALE hub ($stale_reason) but within cooldown ($(( now - last ))s) — skip"
+    log "STALE hub ($stale_reason) — gated: waiting for maintenance window (users logged in / outside window)"
   fi
 fi
+
+# ── heartbeat: prove the watchdog is alive to the hub → WebUI ────────────────
+printf '%s armed\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > /var/lib/lm/watchdog-status 2>/dev/null || true
 
 # ── 2. Retire the legacy generic-agent zombie (root remediation) ────────────
 # Mirrors install_all.sh retire_legacy_leaf. The hub detects but can't remove.

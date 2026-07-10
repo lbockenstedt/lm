@@ -256,20 +256,39 @@ class UpdatePipelineMixin:
 
     _STALE_RESTART_SENTINEL = "/var/lib/lm/state/stale-restart-requested"
 
-    def _request_watchdog_restart(self, reason: str) -> None:
+    def _request_watchdog_restart(self, reason: str, force: bool = False) -> None:
         """Signal the external lm-watchdog to cleanly restart the hub by dropping
-        a sentinel file it polls. Used when the in-process self-restart can't be
-        trusted to fire (stale-process recovery). The watchdog restarts + clears
+        a sentinel file it polls — the RELIABLE restart path (the in-process
+        self-restart can't be trusted to fire). The watchdog restarts + clears
         it; the fresh process boots current so the sentinel is not re-written.
+
+        ``force`` marks a user-initiated restart (the footer Update button): the
+        watchdog restarts IMMEDIATELY, bypassing the logged-in-users idle guard.
+        A non-force (auto-update / stale-recovery) sentinel is deferred by the
+        watchdog while users are actively logged in (up to its max-defer).
         Best-effort; never raises. Overridable via LM_STALE_RESTART_SENTINEL."""
         try:
             path = os.environ.get("LM_STALE_RESTART_SENTINEL",
                                   self._STALE_RESTART_SENTINEL)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:
-                f.write(f"{reason}\n")
+                f.write(f"{'force ' if force else ''}{reason}\n")
         except Exception as e:  # noqa: BLE001 — signalling is best-effort
             logger.debug("watchdog-restart sentinel write failed: %s", e)
+
+    def _clear_watchdog_restart_sentinel(self) -> None:
+        """Remove the watchdog restart sentinel — called at hub startup. The
+        fresh process is by definition current, so any pending restart request
+        is satisfied; clearing it prevents a double-restart when the direct
+        self-restart worked (a genuinely-still-stale process is re-detected by
+        check_update_health, which re-drops it). Best-effort."""
+        try:
+            path = os.environ.get("LM_STALE_RESTART_SENTINEL",
+                                  self._STALE_RESTART_SENTINEL)
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("watchdog sentinel clear failed: %s", e)
 
     def _is_git_repo(self, path: str) -> bool:
         """Check if the given path is a git repository (contains a .git directory or is git rev-parse valid)."""
@@ -1122,6 +1141,16 @@ class UpdatePipelineMixin:
                 logger.info("Self-restart helper (lm-update-restart) launched (detached).")
             except Exception as _e:
                 logger.warning(f"Could not schedule hub self-restart: {_e}")
+            # Also request the restart via the RELIABLE external watchdog path —
+            # the in-process helper above can silently fail to fire from the
+            # daemon. force=<manual Update button> → the watchdog restarts
+            # immediately; an auto-update / stale-reload sentinel is deferred by
+            # the watchdog while users are logged in (up to its max-defer). The
+            # fresh process clears the sentinel on boot, so a successful direct
+            # restart above does NOT cause a double-restart.
+            self._request_watchdog_restart(
+                "update->restart" if hub_updated else "stale-reload->restart",
+                force=bool(force))
             if hub_updated:
                 _rmsg = f"Updated Hub to {remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."
             else:

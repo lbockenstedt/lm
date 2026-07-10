@@ -2080,6 +2080,65 @@ const _BP_FIELDS = [
 
 // Load: GET the live backpressure subtree, fill the panel inputs (default where
 // unset), and cache the FULL subtree so Save can merge onto it (not overwrite).
+// Update / maintenance-window gate (global_config.update_gate). Default: apply
+// auto-update restarts during a daily 02:00 window so they never interrupt
+// logged-in users; the footer Update button bypasses it (force). Also renders
+// the auto-heal watchdog's live status so the operator can see it's armed.
+const _UG_DEFAULTS = { mode: 'window', window_hour: 2, window_duration_h: 2 };
+
+async function loadUpdateGateConfig() {
+    try {
+        const res = await setupFetch('/setup/config');
+        const data = await res.json();
+        const g = (data.global_config && data.global_config.update_gate) || {};
+        window.__lmUpdateGateCfg = g;
+        const setv = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; };
+        setv('ug-mode', g.mode || _UG_DEFAULTS.mode);
+        setv('ug-window-hour', g.window_hour !== undefined ? g.window_hour : _UG_DEFAULTS.window_hour);
+        setv('ug-window-duration', g.window_duration_h !== undefined ? g.window_duration_h : _UG_DEFAULTS.window_duration_h);
+    } catch (e) { /* leave inputs as-is on failure */ }
+    // Live watchdog status from /status → metrics.watchdog (bridge loop).
+    try {
+        const s = await (await fetch('/status', { credentials: 'same-origin' })).json();
+        const w = (s.metrics && s.metrics.watchdog) || {};
+        const el = document.getElementById('ug-watchdog-status');
+        if (el) el.innerHTML = w.armed
+            ? `<span class="text-green-600">● auto-heal watchdog armed</span>${w.heartbeat ? ' · ' + escapeHtml(String(w.heartbeat)) : ''}`
+            : `<span class="text-amber-600">● watchdog not armed</span>`;
+    } catch (e) { /* ignore */ }
+}
+
+function resetUpdateGateConfig() {
+    const setv = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    setv('ug-mode', _UG_DEFAULTS.mode);
+    setv('ug-window-hour', _UG_DEFAULTS.window_hour);
+    setv('ug-window-duration', _UG_DEFAULTS.window_duration_h);
+    if (typeof showToast === 'function') showToast('Defaults filled (02:00 window) — click Save to apply.', 'info');
+}
+
+async function saveUpdateGateConfig() {
+    const btn = document.getElementById('ug-save-btn');
+    const merged = Object.assign({}, window.__lmUpdateGateCfg || {}, {
+        mode: document.getElementById('ug-mode').value,
+        window_hour: Number(document.getElementById('ug-window-hour').value),
+        window_duration_h: Number(document.getElementById('ug-window-duration').value),
+    });
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const res = await fetch('/setup/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: { update_gate: merged } }),
+        });
+        if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || res.status); }
+        if (typeof showToast === 'function') showToast('Update window saved (applies live).', 'success');
+        window.__lmUpdateGateCfg = merged;
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Save failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
+}
+
 async function loadBackpressureConfig() {
     try {
         const res = await setupFetch('/setup/config');
@@ -3236,6 +3295,26 @@ function _renderSettingsSection(subMenu) {
                         <label class="flex items-end gap-2 pb-1"><input type="checkbox" id="bp-ddos-disconnect" class="w-4 h-4 accent-green-600"> DDoS disconnect<br>flooders</label>
                     </div>
                 </div>
+                <div class="${card} p-6">
+                    <div class="flex justify-between items-center mb-1">
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Update / Maintenance Window ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <div class="flex items-center gap-2">
+                            <button onclick="resetUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore defaults (02:00 window)">Reset Defaults</button>
+                            <button onclick="saveUpdateGateConfig()" id="ug-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button>
+                        </div>
+                    </div>
+                    <p class="text-[10px] text-slate-400 mb-3">When AUTO-updates <b>apply</b>. The hub pulls new code anytime; the restart into it is held for this window so it never interrupts logged-in users. The footer <b>Update</b> button bypasses this and restarts immediately. <span id="ug-watchdog-status" class="font-mono ml-1"></span></p>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs text-slate-500">
+                        <label>Apply auto-updates<br>
+                            <select id="ug-mode" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="window">During a daily window</option>
+                                <option value="idle">When no users online</option>
+                                <option value="immediate">Immediately</option>
+                            </select></label>
+                        <label>Window start hour (0–23, local)<br><input type="number" id="ug-window-hour" min="0" max="23" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                        <label>Window length (hours)<br><input type="number" id="ug-window-duration" min="1" max="24" step="1" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                    </div>
+                </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="${card} p-6">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Spokes (<span id="spoke-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
@@ -3249,6 +3328,7 @@ function _renderSettingsSection(subMenu) {
             </div>`;
         updateStatus();
         loadBackpressureConfig();
+        loadUpdateGateConfig();
     } else if (subMenu === 'Active Sessions') {
         content.innerHTML = `
             <div class="${card} p-6">
