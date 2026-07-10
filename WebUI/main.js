@@ -576,6 +576,24 @@ function isTenantAdmin() {
     return p.role === 'tenant_admin';
 }
 
+function _taUsersBase() {
+    // Tenant-scoped user-management base URL (Phase 2). A tenant Admin manages
+    // the users of its CURRENT tenant (the active tenant in the header picker),
+    // via /api/tenant/{tenant}/users*. Returns null for a Global Admin, who keeps
+    // using the system-wide /setup/users* routes. Switching the header tenant
+    // picker re-scopes the Users page (loadUsers re-fetches on showSection).
+    if (!isTenantAdmin()) return null;
+    return `/api/tenant/${encodeURIComponent(currentTenant || 'default')}/users`;
+}
+
+function _isPermsAdminTier(perms) {
+    // True if the (effective) permissions describe an admin-tier user (Global
+    // Admin or tenant Admin). A tenant Admin viewing the Users list may not
+    // edit/remove these (the backend 403s; hide the buttons to match).
+    const p = perms || {};
+    return p.admin === true || p.role === 'admin' || p.role === 'tenant_admin';
+}
+
 function hasConsoleWrite() {
     const p = currentUser?.permissions || {};
     return isAdmin() || isTenantAdmin() || p.console_write === true;
@@ -1111,7 +1129,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions'],
+    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions', 'API Tokens'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -6891,10 +6909,14 @@ async function loadUsers() {
     if (!bodyEl) return;
 
     try {
-        const response = await setupFetch('/setup/users');
+        // Tenant Admins manage their CURRENT tenant's users via the tenant-
+        // scoped route; Global Admins see the whole fleet via /setup/users.
+        const base = _taUsersBase();
+        const response = await setupFetch(base ? base : '/setup/users');
         if (!response.ok) throw new Error('Failed to fetch users');
         const data = await response.json();
         const users = data.users || {};
+        const viewerIsTadm = !!isTenantAdmin();
 
         if (Object.keys(users).length === 0) {
             bodyEl.innerHTML = `<tr class="text-center py-8 text-slate-400 italic"><td colspan="17">No users configured.</td></tr>`;
@@ -6931,10 +6953,16 @@ async function loadUsers() {
 
             const isProtected = !!user.protected;
             const lockIcon = `<svg class="w-3 h-3 inline-block text-slate-400 ml-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/></svg>`;
+            // A tenant Admin may not edit/remove protected OR admin-tier users
+            // (the backend 403s; hide the buttons so the UI matches). Global
+            // Admins see the full action set for non-protected users.
+            const lockedForTadm = viewerIsTadm && (isProtected || _isPermsAdminTier(perms));
             const actions = isProtected
                 ? `<span class="text-slate-300 text-xs italic select-none">Protected${lockIcon}</span>`
-                : `<button onclick="editUser('${userId}')" class="text-blue-400 hover:text-blue-600 text-xs font-bold mr-3">Edit</button>
-                   <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold">Delete</button>`;
+                : lockedForTadm
+                    ? `<span class="text-slate-300 text-xs italic select-none">Admin${lockIcon}</span>`
+                    : `<button onclick="editUser('${userId}')" class="text-blue-400 hover:text-blue-600 text-xs font-bold mr-3">Edit</button>
+                       <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold">Delete</button>`;
 
             return `
                 <tr class="hover:bg-slate-50 transition-colors">
@@ -6965,14 +6993,18 @@ async function loadUsers() {
 }
 
 async function deleteUser(userId) {
-    if (!await showConfirmToast(`Are you sure you want to delete user ${userId}?`)) return;
+    const base = _taUsersBase();
+    const verb = base ? `remove user ${userId} from tenant ${currentTenant}` : `delete user ${userId}`;
+    if (!await showConfirmToast(`Are you sure you want to ${verb}?`)) return;
     try {
-        const response = await setupFetch(`/setup/users/${userId}`, { method: 'DELETE' });
+        const url = base ? `${base}/${encodeURIComponent(userId)}` : `/setup/users/${encodeURIComponent(userId)}`;
+        const response = await setupFetch(url, { method: 'DELETE' });
         if (response.ok) {
-            alert('User deleted');
+            alert(base ? 'User removed from tenant' : 'User deleted');
             await loadUsers();
         } else {
-            alert('Failed to delete user');
+            const d = await response.json().catch(() => ({}));
+            alert(d.detail || 'Failed to delete user');
         }
     } catch (err) {
         alert('Error deleting user: ' + err.message);
@@ -12563,6 +12595,7 @@ async function changeUserPassword(userDn) {
 }
 
 async function showAddUserModal() {
+    const tadm = isTenantAdmin();
     const modal = document.createElement('div');
     modal.id = 'add-user-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -12587,8 +12620,8 @@ async function showAddUserModal() {
                     <input type="password" id="new-user-password" placeholder="••••••••" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>
+                    ${tadm ? '' : `<div><label class="text-xs text-slate-500 uppercase font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>`}
                     <div><label class="text-xs text-slate-500 uppercase font-bold">View</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Edit</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-edit" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Hypervisor</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-pxmx" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
@@ -12602,10 +12635,10 @@ async function showAddUserModal() {
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Console</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Console Write</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console_write" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                 </div>
-                <div class="space-y-2 border-t border-slate-200 pt-3">
+                ${tadm ? `<div class="space-y-2 border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Tenant</label><div class="text-sm text-slate-600">User is created in <span class="font-mono font-bold text-green-700">${escapeHtml(currentTenant || 'default')}</span> (your tenant). Module rights only — admin roles are Global-Admin-only.</div></div>` : `<div class="space-y-2 border-t border-slate-200 pt-3">
                     <label class="text-xs text-slate-500 uppercase font-bold">Permission Groups <span class="text-slate-400 normal-case font-normal">(bundle access; unioned with the flags above)</span></label>
                     <div id="new-user-groups" class="flex flex-wrap gap-2 text-sm text-slate-400 italic">Loading groups…</div>
-                </div>
+                </div>`}
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeAddUserModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
@@ -12614,7 +12647,9 @@ async function showAddUserModal() {
         </div>
     `;
     document.body.appendChild(modal);
-    _populateUserGroupChecklist('new-user-groups', []);
+    if (document.getElementById('new-user-groups')) {
+        _populateUserGroupChecklist('new-user-groups', []);
+    }
 }
 
 function closeAddUserModal() {
@@ -12626,9 +12661,13 @@ async function saveUser() {
     const userId = document.getElementById('new-user-id').value.trim();
     if (!userId) { alert('Please enter a User ID'); return; }
 
+    const tadm = isTenantAdmin();
+    // A tenant Admin may only grant module rights — never an admin tier. The
+    // role checkboxes are hidden in the modal for tenant_admin, but force the
+    // keys false regardless so a crafted client value can't escalate.
     const permissions = {
-        admin: document.getElementById('perm-admin').checked,
-        tenant_admin: document.getElementById('perm-tenant_admin').checked,
+        admin: tadm ? false : document.getElementById('perm-admin')?.checked,
+        tenant_admin: tadm ? false : document.getElementById('perm-tenant_admin')?.checked,
         view: document.getElementById('perm-view').checked,
         edit: document.getElementById('perm-edit').checked,
         pxmx: document.getElementById('perm-pxmx').checked,
@@ -12644,13 +12683,16 @@ async function saveUser() {
     };
     const auth_type = document.getElementById('new-user-auth-type')?.value || 'local';
     const password = document.getElementById('new-user-password')?.value || '';
-    const groups = _collectCheckedGroups('new-user-groups');
+    const groups = tadm ? undefined : _collectCheckedGroups('new-user-groups');
+    const base = _taUsersBase();
 
     try {
-        const response = await setupFetch('/setup/users', {
+        const response = await setupFetch(base ? base : '/setup/users', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_id: userId, permissions, auth_type, password, groups, create: true })
+            body: JSON.stringify(base
+                ? { user_id: userId, permissions, auth_type, password }
+                : { user_id: userId, permissions, auth_type, password, groups, create: true })
         });
         if (response.ok) {
             alert('User created successfully');
@@ -12667,16 +12709,22 @@ async function saveUser() {
 
 async function editUser(userId) {
     try {
-        const [userResp, tenantResp, groupResp] = await Promise.all([
-            setupFetch('/setup/users'),
-            setupFetch('/setup/tenants'),
-            setupFetch('/setup/groups')
-        ]);
-        if (!userResp.ok || !tenantResp.ok) throw new Error('Failed to load user or tenant data');
+        const tadm = isTenantAdmin();
+        const base = _taUsersBase();
+        // Tenant Admins use the tenant-scoped user list + their own allowed
+        // tenants (the /setup/tenants + /setup/groups routes are Global-only).
+        const fetches = tadm
+            ? [setupFetch(base)]
+            : [setupFetch('/setup/users'), setupFetch('/setup/tenants'), setupFetch('/setup/groups')];
+        const results = await Promise.all(fetches);
+        const userResp = results[0];
+        const tenantResp = tadm ? null : results[1];
+        const groupResp = tadm ? null : results[2];
+        if (!userResp.ok) throw new Error('Failed to load user data');
 
         const userData = await userResp.json();
-        const tenantData = await tenantResp.json();
-        const groupData = groupResp.ok ? await groupResp.json() : { groups: {} };
+        const tenantData = tenantResp ? await tenantResp.json() : { tenants: (userAllowedTenants() || []).map(id => ({ id, name: id })) };
+        const groupData = groupResp && groupResp.ok ? await groupResp.json() : { groups: {} };
 
         const users = userData.users || {};
         const user = users[userId];
@@ -12692,10 +12740,11 @@ async function editUser(userId) {
         modal.id = 'edit-user-modal';
         modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
 
-        const perms = user.permissions || {};
+        const perms = user.effective_permissions || user.permissions || {};
+        // Tenant Admins may only edit module rights — hide the Global Admin /
+        // tenant Admin tier checkboxes (the backend rejects them anyway).
         const permFields = [
-            {id: 'admin', label: 'Global Admin'},
-            {id: 'tenant_admin', label: 'Admin (tenant)'},
+            ...(tadm ? [] : [{id: 'admin', label: 'Global Admin'}, {id: 'tenant_admin', label: 'Admin (tenant)'}]),
             {id: 'view', label: 'View'},
             {id: 'edit', label: 'Edit'},
             {id: 'pxmx', label: 'Hypervisor'},
@@ -12758,7 +12807,7 @@ async function editUser(userId) {
                 <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-8">
                     <div class="space-y-6"><div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Permissions</h4><div class="grid grid-cols-2 gap-4">${permHtml}</div></div></div>
                     <div class="space-y-6">
-                        <div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Permission Groups</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${groupHtml || '<div class="text-xs text-slate-400 italic p-2">No groups defined.</div>'}</div></div>
+                        ${tadm ? '' : `<div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Permission Groups</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${groupHtml || '<div class="text-xs text-slate-400 italic p-2">No groups defined.</div>'}</div></div>`}
                         <div><h4 class="text-xs font-bold text-slate-400 uppercase mb-4">Tenant Associations</h4><div class="border border-slate-200 rounded-lg overflow-hidden bg-slate-50 max-h-40 overflow-y-auto p-2 space-y-1">${tenantHtml || '<div class="text-xs text-slate-400 italic p-2">No tenants available.</div>'}</div></div>
                     </div>
                 </div>
@@ -12784,9 +12833,14 @@ function closeEditUserModal() {
 
 async function saveUserEdits(userId) {
     try {
+        const tadm = isTenantAdmin();
+        const base = _taUsersBase();
+        // The admin-tier checkboxes are absent for a tenant Admin; use optional
+        // chaining so the read is false (and force false regardless — a tenant
+        // admin must never grant an admin tier; the backend rejects it too).
         const permissions = {
-            admin: document.getElementById('edit-perm-admin').checked,
-            tenant_admin: document.getElementById('edit-perm-tenant_admin').checked,
+            admin: tadm ? false : document.getElementById('edit-perm-admin')?.checked,
+            tenant_admin: tadm ? false : document.getElementById('edit-perm-tenant_admin')?.checked,
             view: document.getElementById('edit-perm-view').checked,
             edit: document.getElementById('edit-perm-edit').checked,
             pxmx: document.getElementById('edit-perm-pxmx').checked,
@@ -12803,6 +12857,26 @@ async function saveUserEdits(userId) {
 
         const tenantCheckboxes = document.querySelectorAll('input[id^="edit-tenant-"]');
         const selectedTenants = Array.from(tenantCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
+
+        if (tadm) {
+            // One tenant-scoped POST: permissions + tenant membership (the route
+            // intersects the requested tenants with the admin's owned tenants and
+            // always retains the path tenant). No groups, no separate
+            // assign/remove-tenant calls.
+            const resp = await setupFetch(`${base}/${encodeURIComponent(userId)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ permissions, tenants: selectedTenants })
+            });
+            if (!resp.ok) {
+                const d = await resp.json().catch(() => ({}));
+                throw new Error(d.detail || 'Failed to update user');
+            }
+            alert('User updated successfully');
+            closeEditUserModal();
+            await loadUsers();
+            return;
+        }
 
         const groupCheckboxes = document.querySelectorAll('input[id^="edit-grp-"]');
         const selectedGroups = Array.from(groupCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
@@ -12842,7 +12916,11 @@ async function promptSetPassword(userId) {
     const pw = prompt(`Set password for ${userId}:`);
     if (!pw) return;
     try {
-        const resp = await setupFetch(`/setup/users/${userId}/set-password`, {
+        const base = _taUsersBase();
+        const url = base
+            ? `${base}/${encodeURIComponent(userId)}/set-password`
+            : `/setup/users/${encodeURIComponent(userId)}/set-password`;
+        const resp = await setupFetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password: pw }),
