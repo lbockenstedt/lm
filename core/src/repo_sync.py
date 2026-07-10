@@ -164,6 +164,18 @@ class RepoSyncMixin:
         except Exception as e:  # noqa: BLE001 — best-effort, never fatal
             logger.warning("[sync-error] repo_sync provisioning_repos scan failed: %s", e)
 
+        # ── Sibling-repo latest-version cache refresh ──────────────────────
+        # Primary refresh of the per-repo latest-.NN used by the diagnostics
+        # "behind latest" chip for spokes whose repo isn't checked out locally
+        # (opnsense/netbox/cs/pxmx/…). Rides THIS cycle so it runs on the same
+        # schedule as replication and is gated by the same repo_sync.enabled
+        # toggle (checked inside). Off-loop, concurrent, best-effort — never
+        # blocks /setup/diagnostics and never raises.
+        try:
+            await self._refresh_all_module_versions()
+        except Exception as e:  # noqa: BLE001 — best-effort, never fatal
+            logger.debug("repo_sync module-version refresh failed: %s", e)
+
         # ── hub tree + spoke fan-out (version-gated, snapshot/rollback) ─────
         try:
             hub_result = await self.perform_update(force_spokes=force_spokes)

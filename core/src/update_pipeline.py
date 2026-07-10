@@ -141,6 +141,58 @@ def _version_behind(running, latest) -> bool:
     return r < l
 
 
+# ── GitHub-backed "latest .NN" for sibling repos ────────────────────────────
+# A normal hub keeps only its OWN repo locally (/opt/lm); sibling spokes
+# (opnsense/netbox/cs/pxmx/…) have no local VERSION checkout, so their latest
+# .NN can't be resolved from disk and they were NEVER flagged behind. These repos
+# autobump a `.NN` VERSION on every push (see .github/workflows/version-bump.yml)
+# and the CI bot COMMITS the VERSION file to the default branch — it does NOT tag
+# — so the latest .NN is read from the raw VERSION file on the default branch, not
+# from `git ls-remote --tags`. Fetched over HTTPS (stdlib urllib, no deps) with a
+# short timeout, HOURLY-cached (lazy stale-while-revalidate), and refreshed OFF
+# the event loop. On any failure the last-good value (or None) is kept — the
+# never-false-positive rule holds.
+_GITHUB_OWNER = "lbockenstedt"
+# Hourly is plenty — these .NN counters move on human-paced pushes, and the chip
+# only needs to be roughly current. Serving a value up to an hour stale never
+# false-positives (a stale-but-real latest is still <= the true latest).
+_VERSION_CHECK_TTL_S = 3600
+# Short, so an air-gapped / offline hub never stalls the background refresh long.
+# The diagnostics request itself NEVER waits on this — it reads the cache only.
+_VERSION_FETCH_TIMEOUT_S = 8.0
+
+
+def _github_version_url(repo: str, owner: str = _GITHUB_OWNER, branch: str = "main") -> str:
+    """Raw-content URL for a repo's ``VERSION`` file on its default branch. The
+    version-bump bot commits ``VERSION`` (no tag), so this raw file IS the latest
+    ``.NN``. ``repo`` is a bare repo name from ``_MODULE_REPO_DIR`` (or ``lm``)."""
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/VERSION"
+
+
+def _fetch_github_version(repo: str, owner: str = _GITHUB_OWNER,
+                          branch: str = "main",
+                          timeout: float = _VERSION_FETCH_TIMEOUT_S) -> Optional[str]:
+    """Fetch a repo's raw ``VERSION`` over HTTPS and return its stripped contents
+    (e.g. ``".486"``), or ``None`` on any failure (network down, non-200, bad
+    content). Pure stdlib ``urllib`` (no extra deps). Blocking — callers run it via
+    ``asyncio.to_thread``; NEVER on the event loop. Reads only a small prefix (a
+    VERSION file is a few bytes). Failures are DEBUG-logged and non-fatal so an
+    offline hub never errors or false-positives — it just serves the last good
+    value (or None)."""
+    import urllib.request
+    url = _github_version_url(repo, owner, branch)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "lm-hub-version-check"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if getattr(resp, "status", 200) not in (200, None):
+                return None
+            raw = resp.read(64).decode("utf-8", "replace").strip()
+            return raw or None
+    except Exception as e:  # noqa: BLE001 — offline is normal; never fatal
+        logger.debug("github version fetch failed for %s: %s", repo, e)
+        return None
+
+
 def _ver(v: str):
     """Parse a dotted-numeric VERSION string into a comparable tuple, or
     ``(0, 0, 0)`` on any parse failure (non-numeric like ``"v.01"``, ``"unknown"``).
@@ -289,7 +341,106 @@ class UpdatePipelineMixin:
             v = self._read_version_cached(path)
             if _parse_nn(v) is not None:
                 return v
-        return None
+        # No local authoritative VERSION for this sibling repo → fall back to the
+        # hourly GitHub-cached latest .NN (served synchronously; refreshed in the
+        # background). None when unresolvable → caller never flags behind.
+        gh = self._github_latest_cached(repo)
+        return gh if _parse_nn(gh) is not None else None
+
+    # ── GitHub latest-version cache (repo_sync-driven + stale-while-revalidate) ─
+    def _github_check_enabled(self) -> bool:
+        """Whether to fetch the latest ``.NN`` from GitHub. Tied to the EXISTING
+        hub "sync all repos" replication toggle
+        (``global_config["repo_sync"]["enabled"]``, default True) — no separate
+        env flag: when GitHub replication is OFF (e.g. an air-gapped hub), the
+        per-repo latest-version check is OFF too, and sibling latest then resolves
+        only from local checkouts (unresolved siblings are simply never flagged
+        behind). Defaults True; never raises (a stub/early hub with no state → ON)."""
+        try:
+            return bool(self.state.get_global_config()
+                        .get("repo_sync", {}).get("enabled", True))
+        except Exception:  # noqa: BLE001 — no state yet / stub → default enabled
+            return True
+
+    def _github_latest_cached(self, repo: str) -> Optional[str]:
+        """Latest ``.NN`` for a sibling ``repo`` from the HOURLY GitHub cache.
+
+        Synchronous + fast — reads the in-memory cache ONLY, NEVER a live network
+        call, so ``/setup/diagnostics`` stays fast. When the cached entry is stale
+        (or absent) a background refresh is scheduled and the last-good value is
+        returned in the meantime (stale-while-revalidate). First-ever call returns
+        ``None`` (nothing cached yet) and warms the cache for the next call — so a
+        spoke is never false-positived on a cold cache. Returns ``None`` when the
+        check is disabled or nothing good has been fetched yet."""
+        if not self._github_check_enabled():
+            return None
+        cache = self.__dict__.setdefault("_github_version_cache", {})
+        entry = cache.get(repo)  # (fetched_ts, value_or_None) | None
+        fresh = entry is not None and (time.time() - entry[0]) < _VERSION_CHECK_TTL_S
+        if not fresh:
+            self._schedule_github_version_refresh(repo)
+        return entry[1] if entry is not None else None
+
+    def _schedule_github_version_refresh(self, repo: str) -> None:
+        """Fire-and-forget a background refresh of ``repo``'s latest .NN, if a
+        running event loop is available (it is, inside the async diagnostics
+        handler). De-duplicated by ``_refresh_github_version`` so overlapping
+        diagnostics calls don't launch parallel fetches. Best-effort: no running
+        loop (e.g. a unit test with no loop) → silently skip; the cache simply
+        stays as-is and the caller returns the last-good value (or None)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._refresh_github_version(repo))
+
+    async def _refresh_github_version(self, repo: str) -> None:
+        """Refresh ``repo``'s latest .NN in the GitHub cache. Runs the blocking
+        HTTPS fetch OFF the event loop (``asyncio.to_thread``). De-duplicated via
+        an in-flight set so concurrent diagnostics calls fetch each repo at most
+        once at a time. On a good ``.NN`` the cache is updated; on failure the
+        LAST-GOOD value is kept (its TTL reset so we don't hammer an offline
+        remote every request) — NEVER dropped and NEVER turned into a
+        false-positive. Never raises."""
+        if not self._github_check_enabled():
+            return
+        inflight = self.__dict__.setdefault("_github_version_inflight", set())
+        if repo in inflight:
+            return
+        inflight.add(repo)
+        try:
+            text = await asyncio.to_thread(_fetch_github_version, repo)
+            cache = self.__dict__.setdefault("_github_version_cache", {})
+            now = time.time()
+            if _parse_nn(text) is not None:
+                cache[repo] = (now, text)
+            else:
+                # Fetch failed / non-.NN: keep the last-good value if we have one
+                # (reset its TTL so we retry ~hourly, not every request); otherwise
+                # remember the miss as None so the cold cache doesn't spin.
+                prev = cache.get(repo)
+                cache[repo] = (now, prev[1] if prev is not None else None)
+        except Exception as e:  # noqa: BLE001 — background refresh is best-effort
+            logger.debug("github version refresh errored for %s: %s", repo, e)
+        finally:
+            inflight.discard(repo)
+
+    async def _refresh_all_module_versions(self) -> None:
+        """Refresh the GitHub latest-``.NN`` cache for EVERY sibling repo. This is
+        the PRIMARY refresh path — the repo-sync cycle (``run_repo_sync_all``,
+        which already does GitHub network work on the configured interval, default
+        15m) calls it, so the cache stays warm on the same schedule as replication
+        and is OFF whenever replication is off. The lazy stale-while-revalidate in
+        ``_github_latest_cached`` (hourly TTL) is only a fallback. Refreshes run
+        concurrently (each is a ~8s off-loop fetch) and are individually
+        best-effort; never raises."""
+        if not self._github_check_enabled():
+            return
+        repos = sorted(set(_MODULE_REPO_DIR.values()))
+        await asyncio.gather(
+            *(self._refresh_github_version(r) for r in repos),
+            return_exceptions=True,
+        )
 
     async def get_remote_version(self) -> str:
         try:
