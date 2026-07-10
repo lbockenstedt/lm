@@ -3433,6 +3433,32 @@ function _renderSettingsSection(subMenu) {
                 </div>
             </div>`;
         loadActiveSessions();
+    } else if (subMenu === 'API Tokens') {
+        content.innerHTML = `
+            <div class="${card} p-6 space-y-5">
+                <div class="flex justify-between items-center">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">API Tokens ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <button onclick="loadApiTokens()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
+                </div>
+                <p class="text-[11px] text-slate-400 leading-relaxed">Bearer tokens for programmatic API access — they carry <b>your</b> permissions. Send <code>Authorization: Bearer &lt;access&gt;</code>. The access token expires in <b>4 hours</b>; POST the refresh token to <code>/auth/token/refresh</code> to rotate to a fresh pair with no re-login. Tokens are shown <b>once</b> — store them securely.</p>
+                <div class="flex items-end gap-2">
+                    <label class="text-xs text-slate-500 flex-1">Token name<br>
+                        <input type="text" id="apitok-name" placeholder="e.g. ci-pipeline" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
+                    <button onclick="createApiToken()" id="apitok-create-btn" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold">Create token</button>
+                </div>
+                <div id="apitok-new" class="hidden"></div>
+                <div class="overflow-hidden rounded-md border border-slate-200">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                            <tr><th class="px-4 py-3">Name</th><th class="px-4 py-3">Created</th><th class="px-4 py-3">Expires</th><th class="px-4 py-3"></th></tr>
+                        </thead>
+                        <tbody id="apitok-table-body" class="divide-y divide-slate-200">
+                            <tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>`;
+        loadApiTokens();
     } else {
         content.innerHTML = `
             <div class="${card} p-6 space-y-4">
@@ -7241,6 +7267,80 @@ function _collectCheckedGroups(containerId) {
     if (!el) return [];
     return Array.from(el.querySelectorAll('input[data-grp]'))
         .filter(cb => cb.checked).map(cb => cb.getAttribute('data-grp'));
+}
+
+// ── API Tokens (Settings → API Tokens) ──────────────────────────────────────
+// Self-service Bearer/refresh token management for the logged-in user. Backend:
+// POST /auth/token (issue), GET /auth/tokens (list), POST /auth/token/revoke.
+async function loadApiTokens() {
+    const body = document.getElementById('apitok-table-body');
+    if (!body) return;
+    try {
+        const res = await fetch('/auth/tokens', { credentials: 'same-origin' });
+        const data = await res.json();
+        const toks = data.tokens || [];
+        if (!toks.length) {
+            body.innerHTML = '<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">No API tokens.</td></tr>';
+            return;
+        }
+        const fmt = (s) => s ? new Date(s * 1000).toLocaleString() : '—';
+        body.innerHTML = toks.map(t => `
+            <tr>
+                <td class="px-4 py-3 font-medium text-slate-700">${escapeHtml(t.name || '(unnamed)')}</td>
+                <td class="px-4 py-3 text-slate-500">${fmt(t.created)}</td>
+                <td class="px-4 py-3 text-slate-500">${fmt(t.expires)}</td>
+                <td class="px-4 py-3 text-right"><button onclick="revokeApiToken('${escJsAttr(String(t.id))}')" class="text-xs text-red-600 hover:text-red-700 font-medium">Revoke</button></td>
+            </tr>`).join('');
+    } catch (e) {
+        body.innerHTML = '<tr><td colspan="4" class="px-4 py-6 text-center text-red-400 italic">Failed to load.</td></tr>';
+    }
+}
+
+async function createApiToken() {
+    const btn = document.getElementById('apitok-create-btn');
+    const name = (document.getElementById('apitok-name') || {}).value || '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+    try {
+        const res = await fetch('/auth/token', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || res.status);
+        const box = document.getElementById('apitok-new');
+        if (box) {
+            box.className = 'rounded-md border border-green-300 bg-green-50 p-4 space-y-2 text-xs';
+            box.innerHTML = `
+                <p class="font-bold text-green-800">Token created — copy these now; they won't be shown again.</p>
+                <div><span class="text-slate-500">Access token (Bearer, 4h):</span><code class="block break-all bg-white border border-slate-200 rounded px-2 py-1 mt-1">${escapeHtml(data.access_token)}</code></div>
+                <div><span class="text-slate-500">Refresh token (rotate via POST /auth/token/refresh):</span><code class="block break-all bg-white border border-slate-200 rounded px-2 py-1 mt-1">${escapeHtml(data.refresh_token)}</code></div>`;
+        }
+        const nm = document.getElementById('apitok-name'); if (nm) nm.value = '';
+        loadApiTokens();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Create failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Create token'; }
+    }
+}
+
+async function revokeApiToken(id) {
+    if (!await (typeof showConfirmToast === 'function'
+            ? showConfirmToast('Revoke this API token? Any client using it stops working immediately.')
+            : Promise.resolve(confirm('Revoke this API token?')))) return;
+    try {
+        const res = await fetch('/auth/token/revoke', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id }),
+        });
+        if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || res.status); }
+        if (typeof showToast === 'function') showToast('Token revoked.', 'success');
+        loadApiTokens();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Revoke failed: ' + e.message, 'error');
+    }
 }
 
 async function loadActiveSessions() {
