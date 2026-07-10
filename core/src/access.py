@@ -361,15 +361,21 @@ def has_console_write_access(sess) -> bool:
 def check_tenant_access(sess, tenant_id: str) -> bool:
     """True if the session user may access ``tenant_id``.
 
-    Admins and users with no tenant restrictions can access everything.
-    Otherwise the requested tenant must be in the user's tenants list.
+    Admins access everything. A non-admin must have the tenant in their
+    ``user.tenants`` list — deny by default. An empty/missing ``tenants``
+    list means the user has NO tenant assignment (login derives
+    ``tenant_id = tenants[0]``), not "sees all tenants": the previous
+    ``not allowed or tenant_id in allowed`` let an unconfigured non-admin
+    (e.g. one created without a tenant_id) pass the ``?tenant=`` gate for
+    ANY tenant. This now matches the deny-by-default posture of
+    :func:`effective_tenant`.
     """
     if not sess:
         return False
     if is_admin(sess):
         return True
-    allowed = sess.get("user", {}).get("tenants", [])
-    return not allowed or tenant_id in allowed
+    allowed = sess.get("user", {}).get("tenants") or []
+    return bool(allowed) and tenant_id in allowed
 
 
 def resolve_tenant(sessions: dict, request: "Request", explicit: str = None) -> str | None:
@@ -549,12 +555,20 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
     No-op for admins, for disabled modules, or when the tenant has no prefixes
     (can't filter). Otherwise drops items whose concrete IPs all fall outside the
     tenant's prefixes (see simulations/tenant_filter.py).
+
+    A non-admin with NO tenant assignment (``user.tenant_id`` absent — login
+    derives it from ``tenants[0]``) is denied: returning the unfiltered
+    fleet-wide set would be a cross-tenant bypass (the tenantless-bypass the
+    ``?tenant=`` gate now also closes in :func:`check_tenant_access`). Such a
+    user is unconfigured; admins still see everything.
     """
     sess = session_user(sessions, request)
     if not sess or is_admin(sess):
         return data
     if not filter_enabled(hub, module):
         return data
+    if not sess.get("user", {}).get("tenant_id"):
+        return [] if isinstance(data, list) else ({} if isinstance(data, dict) else data)
     prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
         return data
