@@ -1186,7 +1186,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'Active Sessions', 'API Tokens', 'Self-Backup'],
+    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3526,34 +3526,32 @@ function _renderSettingsSection(subMenu) {
                         <div id="agent-list" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                     </div>
                 </div>
+                <div class="${card} p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Active Sessions ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <button onclick="loadActiveSessions()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
+                    </div>
+                    <div class="overflow-hidden rounded-md border border-slate-200">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
+                                <tr>
+                                    <th class="px-4 py-3">User</th>
+                                    <th class="px-4 py-3">Role</th>
+                                    <th class="px-4 py-3">Tenants</th>
+                                    <th class="px-4 py-3">Expires In</th>
+                                    <th class="px-4 py-3"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="sessions-table-body" class="divide-y divide-slate-200">
+                                <tr><td colspan="5" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading…</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
             </div>`;
         updateStatus();
         loadBackpressureConfig();
         loadUpdateGateConfig();
-    } else if (subMenu === 'Active Sessions') {
-        content.innerHTML = `
-            <div class="${card} p-6">
-                <div class="flex justify-between items-center mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Active Sessions ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="loadActiveSessions()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
-                </div>
-                <div class="overflow-hidden rounded-md border border-slate-200">
-                    <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs">
-                            <tr>
-                                <th class="px-4 py-3">User</th>
-                                <th class="px-4 py-3">Role</th>
-                                <th class="px-4 py-3">Tenants</th>
-                                <th class="px-4 py-3">Expires In</th>
-                                <th class="px-4 py-3"></th>
-                            </tr>
-                        </thead>
-                        <tbody id="sessions-table-body" class="divide-y divide-slate-200">
-                            <tr><td colspan="5" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading…</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-            </div>`;
         loadActiveSessions();
     } else if (subMenu === 'API Tokens') {
         content.innerHTML = `
