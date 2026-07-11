@@ -3167,8 +3167,8 @@ function _viewTemplate(viewId) {
   <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
   <div class="flex items-center gap-2">
     <button onclick="showLeIssueModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">＋ Issue certificate</button>
-    <button onclick="leRenewAll()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">↻ Renew all</button>
-    <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
+    <button onclick="leRenewAll()" class="bg-green-600 hover:bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">↻ Renew all</button>
+    <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
     <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
   </div>
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
@@ -3545,7 +3545,7 @@ function _renderSettingsSection(subMenu) {
                                 <input type="number" id="rl-capacity" min="1" step="1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                             <label class="text-xs text-slate-500">Refill (msg/s)<br>
                                 <input type="number" id="rl-fillrate" min="0.1" step="0.1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
-                            <button onclick="saveRateLimit()" id="rl-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button>
+                            <button onclick="saveRateLimit()" id="rl-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
                         </div>
                         <p class="text-[10px] text-slate-400 mt-2">Applies to each spoke on its next (re)connect. Raise both for relay spokes hosting many agents / at scale.</p>
                     </div>
@@ -3555,7 +3555,7 @@ function _renderSettingsSection(subMenu) {
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Backpressure Tuning ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex items-center gap-2">
                             <button onclick="resetBackpressureConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore recommended defaults (not yet saved)">Reset Defaults</button>
-                            <button onclick="saveBackpressureConfig()" id="bp-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button>
+                            <button onclick="saveBackpressureConfig()" id="bp-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
                         </div>
                     </div>
                     <p class="text-[10px] text-slate-400 mb-3">How hard the hub throttles spokes as it heats up. Applies LIVE (each 1s tick). Lower CPU marks + higher max slow-down = more aggressive (keeps CPU out of protect, telemetry gets staler while throttled).</p>
@@ -3579,7 +3579,7 @@ function _renderSettingsSection(subMenu) {
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">Update / Maintenance Window ${helpIcon('lm-hub', null, 'Hub help')}<span id="ug-watchdog-pill" class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-500 normal-case">watchdog …</span></h3>
                         <div class="flex items-center gap-2">
                             <button onclick="resetUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore defaults (02:00 window)">Reset Defaults</button>
-                            <button onclick="saveUpdateGateConfig()" id="ug-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-green-600 text-white hover:bg-green-700 transition-all">Save</button>
+                            <button onclick="saveUpdateGateConfig()" id="ug-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
                         </div>
                     </div>
                     <p class="text-[10px] text-slate-400 mb-3">When AUTO-updates <b>apply</b>. The hub pulls new code anytime; the restart into it is held for this window so it never interrupts logged-in users. The footer <b>Update</b> button bypasses this and restarts immediately. <span id="ug-watchdog-status" class="font-mono ml-1"></span></p>
@@ -8797,7 +8797,7 @@ function updateDebugButtonUI(enabled) {
     if (!btn || !text) return;
 
     if (enabled) {
-        btn.className = 'text-[10px] bg-green-600 text-white border border-green-700 px-2 py-1 rounded hover:bg-green-700 transition-colors font-bold flex items-center gap-1';
+        btn.className = 'text-[10px] bg-[#01A982]/10 text-[#01A982] border border-[#01A982] px-2 py-1 rounded hover:bg-[#01A982]/20 transition-colors font-bold flex items-center gap-1';
         text.textContent = 'Debug Logging: ON';
     } else {
         btn.className = 'text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1';
@@ -9792,7 +9792,7 @@ function openVmDetail(uniqueId) {
                 · Pool ${vm.pool ? escapeHtml(vm.pool) : '—'}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2 mb-4"${canEdit() ? '' : ' style="display:none"'}>
-            <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-green-700 text-white transition-colors">▶ Start</button>
+            <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors">▶ Start</button>
             <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors">■ Stop</button>
             <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
             <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors">📷 Snapshot</button>
@@ -12225,7 +12225,7 @@ function showLeTargetsModal(domain) {
                 <input id="le-tgt-id" type="text" placeholder="e.g. edge-1" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
             </div>
             <button onclick="addLeTarget('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
-            <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-md text-sm font-bold">Distribute now</button>
+            <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Distribute now</button>
             <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
         </div>
     </div>`;
