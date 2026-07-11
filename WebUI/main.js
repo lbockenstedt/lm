@@ -12125,12 +12125,40 @@ function leIssueToggleChallenge() {
     const ch = sel.value;                       // http | http-webroot | dns | tls-alpn
     const set = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
     set('le-issue-webroot-row', ch === 'http-webroot');
+    set('le-issue-dns-cred-row', ch === 'dns');
     set('le-issue-dns-provider-row', ch === 'dns');
     set('le-issue-dns-creds-row', ch === 'dns');
     // Populate the DNS fields for the (default) provider as soon as the DNS-01
     // row appears, so the right input shape is visible without a provider
-    // re-select.
-    if (ch === 'dns') leIssueUpdateDnsFields();
+    // re-select. Also load the tenant's saved credentials into the picker.
+    if (ch === 'dns') { leIssueUpdateDnsFields(); leIssuePopulateCreds(); }
+}
+
+// Load the tenant's saved DNS credentials into the issue-form picker.
+async function leIssuePopulateCreds() {
+    const sel = document.getElementById('le-issue-dns-credential');
+    if (!sel || sel.dataset.loaded) return;
+    try {
+        const r = await _spokeFetch('/api/le/dns-credentials', { method: 'GET' });
+        const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
+        const creds = d.credentials || [];
+        sel.innerHTML = '<option value="">— enter manually below —</option>' +
+            creds.map(c => {
+                const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
+                return `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} — ${escapeHtml(label)}</option>`;
+            }).join('');
+        sel.dataset.loaded = '1';
+    } catch (e) { /* leave manual entry available */ }
+}
+
+// When a saved credential is picked, it supplies the provider + secrets, so hide
+// the manual provider/creds inputs; "— enter manually —" shows them again.
+function leIssueToggleSavedCred() {
+    const useSaved = !!document.getElementById('le-issue-dns-credential')?.value;
+    const set = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
+    set('le-issue-dns-provider-row', !useSaved);
+    set('le-issue-dns-creds-row', !useSaved);
+    if (!useSaved) leIssueUpdateDnsFields();
 }
 
 function leIssueAddTarget() {
@@ -12203,6 +12231,13 @@ function showLeIssueModal() {
             <div id="le-issue-webroot-row" class="flex flex-col hidden">
                 <label class="text-xs text-slate-500 mb-1">Webroot path</label>
                 <input id="le-issue-webroot" type="text" placeholder="/var/www/html" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+            </div>
+            <div id="le-issue-dns-cred-row" class="flex flex-col hidden">
+                <label class="text-xs text-slate-500 mb-1">Saved DNS credential</label>
+                <select id="le-issue-dns-credential" onchange="leIssueToggleSavedCred()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <option value="">— enter manually below —</option>
+                </select>
+                <p class="text-[11px] text-slate-400 mt-1">Pick one of your tenant's saved credentials (manage via 🔑 DNS Credentials), or enter one manually below.</p>
             </div>
             <div id="le-issue-dns-provider-row" class="flex flex-col hidden">
                 <label class="text-xs text-slate-500 mb-1">DNS provider</label>
@@ -12353,6 +12388,9 @@ async function leIssueCert() {
     const chSel = document.getElementById('le-issue-challenge')?.value || 'http';
     const challenge = chSel === 'http-webroot' ? 'http' : chSel;
     const webroot = chSel === 'http-webroot' ? (document.getElementById('le-issue-webroot')?.value?.trim() || '') : '';
+    // A saved (named) DNS credential wins — it supplies the provider + secrets
+    // server-side, so the manual provider/creds inputs are skipped entirely.
+    const savedCred = chSel === 'dns' ? (document.getElementById('le-issue-dns-credential')?.value || '') : '';
     const dnsProvider = chSel === 'dns' ? (document.getElementById('le-issue-dns-provider')?.value || '') : '';
     // For rfc2136-family providers the creds come from the structured key-name
     // / key-secret fields (assembled into an INI below); otherwise from the
@@ -12368,8 +12406,8 @@ async function leIssueCert() {
     if (!domain) { alert('Domain is required'); return; }
     if (!email) { alert('ACME account email is required'); return; }
     if (chSel === 'http-webroot' && !webroot) { alert('Webroot path is required for HTTP-01 webroot'); return; }
-    if (challenge === 'dns') {
-        if (!dnsProvider) { alert('Pick a DNS provider for DNS-01'); return; }
+    if (challenge === 'dns' && !savedCred) {
+        if (!dnsProvider) { alert('Pick a saved DNS credential or a DNS provider for DNS-01'); return; }
         if (_rfc) {
             if (!_rfcIni.keyName) { alert('TSIG key name is required'); return; }
             if (!_rfcIni.keySecret) { alert('TSIG key secret is required'); return; }
@@ -12382,7 +12420,10 @@ async function leIssueCert() {
     if (chSel === 'http-webroot') body.webroot = webroot;
     // Resolve frontend provider aliases (e.g. Hurricane Electric → rfc2136) so
     // the spoke receives the real certbot plugin name.
-    if (challenge === 'dns') {
+    if (challenge === 'dns' && savedCred) {
+        // Named tenant credential: the spoke resolves provider + secrets from it.
+        body.dns_credential = savedCred;
+    } else if (challenge === 'dns') {
         body.dns_provider = LE_DNS_PROVIDER_ALIAS[dnsProvider] || dnsProvider;
         if (_heLogin) {
             // HE account login: send per-request creds if typed, else the spoke
