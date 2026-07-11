@@ -4116,14 +4116,22 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     if os.path.isfile(status_file):
                         with open(status_file, "r") as f:
                             hb = f.read().strip()
-                    # Version-drift for the footer indicator: /opt/lm/VERSION is
-                    # the latest pulled code; the running-version sentinel is what
-                    # THIS hub is actually running (written at startup). behind =
-                    # a newer version is on disk but the hub hasn't restarted into
-                    # it yet (the watchdog will, in-window). Equal → up to date.
+                    # Version-drift for the footer indicator: the hub's VERSION
+                    # file is the latest pulled code; the running-version sentinel
+                    # is what THIS hub is actually running (written at startup).
+                    # behind = a newer version is on disk but the hub hasn't
+                    # restarted into it yet (the watchdog will, in-window). Equal →
+                    # up to date. Read VERSION via the SAME path resolution as
+                    # get_local_version / the startup write (the checkout this
+                    # process runs from), NOT a hardcoded /opt/lm/VERSION — a dev
+                    # box running from a different tree would otherwise read the
+                    # wrong file and `behind` would never (or always) flip.
                     _target_ver = _running_ver = ""
                     try:
-                        with open("/opt/lm/VERSION") as _vf:
+                        _vp = os.path.join(os.path.dirname(__file__), "../../VERSION")
+                        if not os.path.exists(_vp):
+                            _vp = os.path.join(os.path.dirname(__file__), "../VERSION")
+                        with open(_vp) as _vf:
                             _target_ver = _vf.read().strip()
                     except Exception:  # noqa: BLE001
                         pass
@@ -4132,13 +4140,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                             _running_ver = _rf.read().strip()
                     except Exception:  # noqa: BLE001
                         pass
+                    _behind = bool(_target_ver and _running_ver
+                                   and _target_ver != _running_ver)
+                    # update_available = a newer version is on the REMOTE but not
+                    # yet pulled (set by check_update_health each repo_sync cycle).
+                    # The dot is yellow on EITHER signal: behind (pulled, pending
+                    # restart) OR update_available (remote ahead, not yet pulled).
+                    _update_avail = bool(getattr(self, "_update_available", False))
                     self._watchdog_status = {
                         "armed": armed,
                         "heartbeat": hb,
                         "log_mtime": (os.path.getmtime(wlog) if os.path.isfile(wlog) else 0),
                         "target_version": _target_ver,
                         "running_version": _running_ver,
-                        "behind": bool(_target_ver and _running_ver and _target_ver != _running_ver),
+                        "behind": _behind,
+                        "update_available": _update_avail,
                     }
                 except Exception as e:  # noqa: BLE001
                     logger.debug("watchdog status cache failed: %s", e)

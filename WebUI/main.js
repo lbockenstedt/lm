@@ -2137,15 +2137,21 @@ function _updateMetrics(statusData) {
 
     const versionEl = document.getElementById('footer-sys-version');
     if (versionEl && m.version) {
-        // Sentinel-driven indicator: GREEN = running the latest pulled version,
-        // YELLOW = a newer version is on disk but the hub hasn't restarted into
-        // it yet (watchdog will, in-window). Rendered as "● Version | .nnn".
+        // Sentinel-driven indicator: GREEN = running the latest version (disk
+        // AND remote match the running process); YELLOW = a newer version is
+        // available — either already pulled to disk but the hub hasn't restarted
+        // into it yet (wd.behind, watchdog will in-window), OR detected on the
+        // remote but not yet pulled (wd.update_available, e.g. repo_sync off /
+        // between cycles). Rendered as "● Version | .nnn".
         const wd = m.watchdog || {};
         const behind = !!wd.behind;
-        const dotTone = behind ? 'bg-amber-400' : 'bg-green-500';
+        const updateAvail = !!wd.update_available;
+        const dotTone = (behind || updateAvail) ? 'bg-amber-400' : 'bg-green-500';
         const title = behind
             ? `Behind — version ${wd.target_version || ''} pulled, pending restart (running ${wd.running_version || m.version})`
-            : 'Up to date (running the latest pulled version)';
+            : updateAvail
+                ? `Update available — a newer version is on the remote (running ${m.version}); click Update to pull`
+                : 'Up to date (running the latest pulled version)';
         versionEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full ${dotTone} align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
         window.__lmHubVersion = m.version;  // for File-a-Bug context
         window.__lmTargetVersion = wd.target_version || null;  // pulled/pending version, for the Update toast

@@ -657,6 +657,20 @@ class UpdatePipelineMixin:
                     warnings.append(
                         f"hub code is BEHIND {branch} (local {local[:10]} vs "
                         f"remote {remote[:10]}) — an update is pending.")
+                # Cache the "update available" flag for the footer version dot.
+                # run_watchdog_bridge_loop surfaces it in /status so the WebUI
+                # turns yellow when a newer remote exists, even BEFORE the pull
+                # lands on disk — the disk-vs-running `behind` flag only covers
+                # the pulled-not-restarted state, so without this the dot stays
+                # green while the sentinel has already found a new version (e.g.
+                # repo_sync disabled: the audit detects remote-ahead but no pull
+                # runs → disk == running → behind=False → green). False when
+                # remote is unreachable (never false-yellow on a network blip) or
+                # local is unresolved. Refreshed every repo_sync cycle (15m, or
+                # 5m audit when sync is off); cleared on a successful pull below.
+                self._update_available = bool(
+                    local not in ("unknown", "") and remote not in ("unknown", "")
+                    and local != remote)
 
             # Process-vs-disk drift: running version != on-disk VERSION → the code
             # was updated on disk but this process never restarted (THE stale-hub bug).
@@ -1254,6 +1268,11 @@ class UpdatePipelineMixin:
                         if applied != "unknown":
                             self.state.update_global_config({"last_update_commit": applied})
                             self.state.save_state()
+                        # Local now equals remote → no update is pending. Clear
+                        # the footer-dot flag so a post-restart dot isn't stale-
+                        # yellow for up to a cycle (the next check_update_health
+                        # would also clear it, but the pull knows it NOW).
+                        self._update_available = False
                     else:
                         # Pull failed — local code is unchanged, so there is
                         # nothing to roll back to. Drop the pending manifest.
