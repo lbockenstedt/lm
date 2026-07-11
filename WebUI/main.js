@@ -13868,6 +13868,14 @@ async function changeUserPassword(userDn) {
 
 async function showAddUserModal() {
     const tadm = isTenantAdmin();
+    // Tenant picklist for the Assigned Tenants multi-select (Global admins only —
+    // a Tenant Admin creates users in their OWN tenant, no picker). Required when
+    // "Admin (tenant)" is checked; the backend rejects a tenant_admin with none.
+    if (!tadm) { try { await ensureTenants(); } catch (e) {} }
+    const _tenants = tadm ? [] : (window._allTenants || []);
+    const _tenantRows = _tenants.length
+        ? _tenants.map(t => `<label class="flex items-center gap-2 text-sm text-slate-600 py-1"><input type="checkbox" value="${escapeHtml(t.id)}" class="new-user-tenant w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"> ${escapeHtml(t.name || t.id)}</label>`).join('')
+        : '<span class="text-[11px] text-slate-400 italic">No tenants defined yet.</span>';
     const modal = document.createElement('div');
     modal.id = 'add-user-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -13908,6 +13916,10 @@ async function showAddUserModal() {
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Console Write</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-console_write" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                 </div>
                 ${tadm ? `<div class="space-y-2 border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Tenant</label><div class="text-sm text-slate-600">User is created in <span class="font-mono font-bold text-green-700">${escapeHtml(currentTenant || 'default')}</span> (your tenant). Module rights only — admin roles are Global-Admin-only.</div></div>` : `<div class="space-y-2 border-t border-slate-200 pt-3">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Assigned Tenants <span class="text-slate-400 normal-case font-normal">(required for Tenant Admin; also confines a regular user)</span></label>
+                    <div id="new-user-tenants" class="grid grid-cols-3 gap-x-4 gap-y-1 mt-1 max-h-36 overflow-y-auto pr-1">${_tenantRows}</div>
+                </div>
+                <div class="space-y-2 border-t border-slate-200 pt-3">
                     <label class="text-xs text-slate-500 uppercase font-bold">Permission Groups <span class="text-slate-400 normal-case font-normal">(bundle access; unioned with the flags above)</span></label>
                     <div id="new-user-groups" class="flex flex-wrap gap-2 text-sm text-slate-400 italic">Loading groups…</div>
                 </div>`}
@@ -13956,6 +13968,14 @@ async function saveUser() {
     const auth_type = document.getElementById('new-user-auth-type')?.value || 'local';
     const password = document.getElementById('new-user-password')?.value || '';
     const groups = tadm ? undefined : _collectCheckedGroups('new-user-groups');
+    // Assigned tenants (Global-admin path). A Tenant Admin MUST have ≥1 — guard
+    // client-side for a clear message before the backend 400s.
+    const tenants = tadm ? undefined : Array.from(
+        document.querySelectorAll('#new-user-tenants input.new-user-tenant:checked')).map(el => el.value);
+    if (!tadm && permissions.tenant_admin && (!tenants || tenants.length === 0)) {
+        alert('Tenant Admin requires at least one assigned tenant — select one under "Assigned Tenants".');
+        return;
+    }
     const base = _taUsersBase();
 
     try {
@@ -13964,7 +13984,7 @@ async function saveUser() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(base
                 ? { user_id: userId, permissions, auth_type, password }
-                : { user_id: userId, permissions, auth_type, password, groups, create: true })
+                : { user_id: userId, permissions, auth_type, password, groups, tenants, create: true })
         });
         if (response.ok) {
             alert('User created successfully');

@@ -483,10 +483,25 @@ def register(app, hub, ctx):
                 entry["groups"] = [g for g in groups if g in valid]
             if password:
                 entry["password_hash"] = _hash_password(password)
-            if tenant_id:
-                entry.setdefault("tenants", [])
-                if tenant_id not in entry["tenants"]:
-                    entry["tenants"].append(tenant_id)
+            # Assigned tenants. Accept a `tenants` LIST (the Add/Edit User modal's
+            # multi-select) — authoritative so an edit can also REMOVE tenants —
+            # and/or a single legacy `tenant_id` (unioned in). Ignored for
+            # protected accounts (anti-lockout; tenant_id was cleared above). This
+            # is the Global-admin path, so no ownership filtering — that is the
+            # tenant-scoped /tenant/... route's job.
+            tenants_list = data.get("tenants")
+            if tenants_list is not None and not isinstance(tenants_list, list):
+                raise HTTPException(status_code=400, detail="tenants must be a list")
+            if not existing.get("protected"):
+                if tenants_list is not None:
+                    wanted = {t for t in tenants_list if t}
+                    if tenant_id:
+                        wanted.add(tenant_id)
+                    entry["tenants"] = sorted(wanted)
+                elif tenant_id:
+                    entry.setdefault("tenants", [])
+                    if tenant_id not in entry["tenants"]:
+                        entry["tenants"].append(tenant_id)
             # A Tenant Admin is tenant-confined (check_tenant_access /
             # filter_session deny-by-default for tenantless users since
             # 21d483e); require ≥1 assigned tenant at config time so a
