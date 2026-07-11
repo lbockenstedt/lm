@@ -1227,7 +1227,9 @@ function csRenderClientsFaceted() {
         bodyEl.innerHTML = `<div class="text-center text-slate-400 text-sm py-10 border border-dashed border-slate-200 rounded-lg">${total.toLocaleString()} client(s). Pick a <span class="font-semibold text-slate-600">Simulation</span>, <span class="font-semibold text-slate-600">Tier</span>, or <span class="font-semibold text-slate-600">Site</span> above — or search by name / IP / MAC — to list clients.</div>`;
         return;
     }
-    const matches = csClientCache.filter(c => csClientPass(c));
+    const matches = csClientCache.filter(c => csClientPass(c))
+        .sort((a, b) => String(a.hostname || a.id || '')
+            .localeCompare(String(b.hostname || b.id || ''), undefined, { numeric: true, sensitivity: 'base' }));
     // Paginate.
     const pageSize = csClientPageSize;
     const totalPages = Math.max(1, Math.ceil(matches.length / pageSize));
@@ -1414,7 +1416,7 @@ function csRenderClientRows(rows, targetId) {
         return line1 + line2;
     }).join('');
     body.innerHTML = csTable(
-        ['Hostname', 'Site', 'SID', 'PHY', 'OS', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
+        ['Name', 'Site', 'SID', 'PHY', 'OS', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
         rowHtml,
         // Column widths (10 cols — Status column dropped; status is now a dot by
         // the hostname). Tunable: adjust these and the header order as needed.
@@ -1680,9 +1682,10 @@ window.csDemoClear = async function (btn) {
 // PERSISTED registry overrides (sticky across reconnects/reboots). The panel
 // is an expandable row beneath each client; opening it fetches the host's
 // current overrides and seeds the toggles.
-const CS_CONTROL_FLAGS = ['kill_switch', 'dns_fail', 'iperf', 'download',
-    'www_traffic', 'ping_test', 'ssidpw_fail', 'auth_fail', 'dhcp_fail',
-    'port_flap', 'assoc_fail'];
+// Alphabetical so the sim knobs + the Simulation facet dropdown list in order.
+const CS_CONTROL_FLAGS = ['assoc_fail', 'auth_fail', 'dhcp_fail', 'dns_fail',
+    'download', 'iperf', 'kill_switch', 'ping_test', 'port_flap',
+    'ssidpw_fail', 'www_traffic'];
 const CS_CONTROL_COLS = 11;  // Clients-table column count (panel colspan)
 
 function csCtlId(host, flag) {
