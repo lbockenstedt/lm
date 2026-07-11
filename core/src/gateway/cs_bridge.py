@@ -384,15 +384,29 @@ class CSBridgePoller:
         merged["client_simulation"] = cs_cfg
 
         try:
-            await hub.request_response(host_spoke, "SET_AGENT_CONFIG",
-                                       {"agent_id": agent_id, "config": merged},
-                                       timeout=5.0)
-            self._last_usb_cfg[agent_id] = sig
-            self._last_actual_push[agent_id] = now
+            # Drain-aware: when the host spoke is mid self-update (draining —
+            # about to os._exit + relaunch), a raw request_response would hang
+            # to its 5s timeout when the spoke drops its WS mid-reply (the
+            # "Request Timeout: [SET_AGENT_CONFIG] ... after 5.0s" flood on
+            # Update) and the late ack then lands as "unknown message ID"
+            # (the _recent_request_timeouts TTL expires across the spoke's
+            # restart). _drain_aware_config_push queues straight to the durable
+            # mailbox when draining (tracked in pending_ack → ack recognized,
+            # no timeout, no warning), and otherwise does a normal
+            # live-attempt + queue-on-unreachable push. Same path CS_CONFIG_UPDATE
+            # already uses. Mirrors the push_or_queue_to_spoke semantics.
+            outcome = await hub._drain_aware_config_push(
+                host_spoke, "SET_AGENT_CONFIG",
+                {"agent_id": agent_id, "config": merged}, timeout=5.0)
+            if not outcome.get("queued"):
+                self._last_usb_cfg[agent_id] = sig
+                self._last_actual_push[agent_id] = now
             _nvid = len(cfg.get("vidpids") or []) if isinstance(cfg, dict) else 0
+            _qnote = " (queued — spoke draining/unreachable, applies on reconnect)" \
+                if outcome.get("queued") else ""
             logger.info("[cs-bridge] %s: PUSHED usb_config from %s (%d dongle vidpid(s), "
-                        "auto_provision=%s) — host should flip AUTO-PROV on within ~60s",
-                        agent_id, cs_spoke, _nvid, cfg.get("auto_provision"))
+                        "auto_provision=%s) — host should flip AUTO-PROV on within ~60s%s",
+                        agent_id, cs_spoke, _nvid, cfg.get("auto_provision"), _qnote)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[cs-bridge] %s: usb_config PUSH FAILED to spoke %s: %s",
                            agent_id, host_spoke, exc)
