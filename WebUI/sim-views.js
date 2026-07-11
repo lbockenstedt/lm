@@ -1605,21 +1605,29 @@ async function csRenderCentral() {
     if (!sites.length) { csSet(`${warn}${csEmpty('No Central sites returned.', 'Verify the Central API token/mode in Setup → Central API and that the account has sites.')}`); return; }
     const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
     const monitored = new Set(Object.values(sm).map(v => String(v)));  // Central-site names enrolled
+    // Per-site alert/insight counts from the browse data. Insights tagged
+    // "All Sites" (global) count toward every site.
+    const alertsBySite = {}, insightsBySite = {}; let globalInsights = 0;
+    ((data && data.alerts) || []).forEach(a => { const s = a.site || '—'; alertsBySite[s] = (alertsBySite[s] || 0) + 1; });
+    ((data && data.insights) || []).forEach(i => { const s = i.site || '—'; if (s === 'All Sites') globalInsights++; else insightsBySite[s] = (insightsBySite[s] || 0) + 1; });
     const rows = sites.map(st => {
         const name = st.name || '';
         const isMon = monitored.has(String(name));
+        const nAlerts = alertsBySite[name] || 0;
+        const nInsights = (insightsBySite[name] || 0) + globalInsights;
         const btn = isMon
             ? `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(name))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this site's client count">✓ Monitored</button>`
             : `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(name))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count for change (shows on the dashboard)">Monitor</button>`;
         return `<tr>
       <td class="px-3 py-2 font-medium text-slate-700">${csEscape(name || '—')}</td>
-      <td class="px-3 py-2 text-slate-500 font-mono text-xs">${csEscape(st.site_id || '—')}</td>
       <td class="px-3 py-2">${st.health_score != null && st.health_score !== '' ? csEscape(st.health_score) : '—'}</td>
       <td class="px-3 py-2 font-bold text-slate-700">${csEscape(st.wireless_clients != null ? st.wireless_clients : 0)}</td>
+      <td class="px-3 py-2 ${nAlerts ? 'text-amber-600 font-bold' : 'text-slate-400'}">${nAlerts}</td>
+      <td class="px-3 py-2 ${nInsights ? 'text-slate-600' : 'text-slate-400'}">${nInsights}</td>
       <td class="px-3 py-2">${name ? btn : ''}</td>
     </tr>`;
     }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard</div>${csTable(['Site', 'Site ID', 'Health', 'Clients', 'Monitor'], rows)}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard</div>${csTable(['Site', 'Health', 'Clients', 'Alerts', 'Insights', 'Monitor'], rows)}</div></div>`);
 }
 
 // Enroll / un-enroll a Central site for client-count monitoring by toggling it in
@@ -1774,10 +1782,75 @@ async function csRenderCentralClients() {
     csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${clients.length} client(s)</div>${csTable(['Client', 'IP', 'MAC', 'Site', 'AP', 'SSID', 'Status', 'Monitor'], rows)}</div></div>`);
 }
 
+// ── Central → Hardware (device-down check types) ─────────────────────────────
+// Lists the monitorable hardware checks (AP/Switch/Gateway Down) from the
+// available-checks catalog with a Monitor toggle -> central_sites_config
+// .hardware_checks (SEPARATE from monitored_checks). The poller consumes
+// hardware_checks to produce the dashboard Hardware alerts.
+let _csCentralAvailCache = null, _csCentralAvailAt = 0, _csCentralAvailTenant = null;
+async function csCentralAvailable() {
+    const t = csTenant();
+    if (_csCentralAvailCache && _csCentralAvailTenant === t && (Date.now() - _csCentralAvailAt) < 60000) return _csCentralAvailCache;
+    let cat;
+    try { cat = await csFetch(`/${t}/central/available?tenant_id=${t}`) || {}; }
+    catch (e) { console.error('csCentralAvailable: fetch failed', e); cat = { warning: String(e && e.message || e) }; }
+    _csCentralAvailCache = cat; _csCentralAvailAt = Date.now(); _csCentralAvailTenant = t;
+    return cat;
+}
+
+async function csRenderCentralHardware() {
+    csSetToolbar('');
+    const [cat, sitesCfg] = await Promise.all([
+        csCentralAvailable(),
+        csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const items = (cat && cat.hardware) || [];
+    const warn = cat && cat.warning ? `<div class="text-xs text-amber-600 mb-2">${csEscape(cat.warning)}</div>` : '';
+    if (!items.length) { csSet(`${warn}${csEmpty('No hardware check types returned.', 'Verify the Central API token/mode in Setup → Central API.')}`); return; }
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.hardware_checks) ? sitesCfg.hardware_checks : []).map(c => String(c.id)));
+    const rows = items.map(it => {
+        const id = it.id, name = it.name || it.id, dt = it.device_type || '';
+        const isMon = monSet.has(String(id));
+        const btn = isMon
+            ? `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this hardware check">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this hardware check (device down) on the dashboard">Monitor</button>`;
+        return `<tr>
+      <td class="px-3 py-2 text-sm text-slate-700">${csEscape(name)}</td>
+      <td class="px-3 py-2 font-mono text-xs text-slate-500">${csEscape(id)}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(dt || '—')}</td>
+      <td class="px-3 py-2">${btn}</td>
+    </tr>`;
+    }).join('');
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${items.length} hardware check(s) — Monitor one to track device-down across your monitored sites</div>${csTable(['Hardware check', 'ID', 'Device type', 'Monitor'], rows)}</div></div>`);
+}
+
+// Toggle a hardware check in central_sites_config.hardware_checks (keyed by id),
+// preserving site_mappings + monitored_checks.
+window.csToggleMonitorHardware = async function (id, name, deviceType, monitor) {
+    try {
+        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
+        let hw = (Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : []).filter(c => String(c.id) !== String(id));
+        if (monitor) hw.push({ id, name, device_type: deviceType });
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: hw,
+        };
+        const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`);
+        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`, 'success');
+        csRenderCentralHardware();
+    } catch (e) {
+        console.error('csToggleMonitorHardware failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+};
+
 window.CS_CHILD_RENDERERS['Central::Sites']    = csRenderCentral;
 window.CS_CHILD_RENDERERS['Central::Alerts']   = csRenderCentralAlerts;
 window.CS_CHILD_RENDERERS['Central::Insights'] = csRenderCentralInsights;
 window.CS_CHILD_RENDERERS['Central::Clients']  = csRenderCentralClients;
+window.CS_CHILD_RENDERERS['Central::Hardware'] = csRenderCentralHardware;
 
 /* ===========================================================================
  * 5. Config — config-push + simulation-conf editor + hub-config
