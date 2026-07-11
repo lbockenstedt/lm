@@ -1205,15 +1205,16 @@ const VIEW_SUBMENUS = {
 // a primary. Only cs (Simulations) uses this today — its primaries mirror the
 // solutions-hpe webui-hub tenant sub-nav, and the child sets mirror webui-hub's
 // own subtab lists (VM Server 11, Setup 7, Central 3, Simulations 3, Clients 3,
-// Config 2). Primaries not listed here (Spoke Management) have no
-// children → render directly, no secondary strip.
+// Config 0). Primaries not listed here (Spoke Management) have no
+// children → render directly, no secondary strip. Config has NO sub-tabs — the
+// former "Simulation" tab is now the Config root (the "API" tab was dropped);
+// loadCSData's `case 'Config'` renders csRenderConfigSimulation directly.
 const VIEW_CHILDREN = {
     cs: {
         'Dashboard': ['Checks', 'Hardware', 'Client Count'],
         'Clients':     ['All', 'T1', 'T2', 'T3'],
         'Central':     ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware'],
         'VM Server':   ['Overview', 'VMs', 'Console', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
-        'Config':      ['API', 'Simulation'],
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications'],
     },
 };
@@ -3101,15 +3102,18 @@ function _viewTemplate(viewId) {
             // content is rendered inline into #cs-content by sim-views.js,
             // calling /sim/api/* directly with the lm_session cookie. Tenant
             // scoping reuses the hub's currentTenant global (like netbox/pxmx).
+            // The ↻ Refresh button is a floating bottom-right FAB (consistent
+            // "all refresh buttons at the bottom right"); the auto-refresh
+            // throttle select stays in the top-right toolbar.
             return `<div class="space-y-3">
   <div class="flex justify-end items-center gap-3">
     ${typeof csAutoRefreshControl === 'function' ? csAutoRefreshControl() : ''}
-    <button onclick="loadCSData(currentSubView, currentSubChild, true)" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200">↻ Refresh</button>
   </div>
   <div id="cs-add-toolbar" class="flex gap-2 hidden"></div>
   <div id="cs-content" class="${card}">
     <div class="py-12 text-center text-slate-400 italic">Loading…</div>
   </div>
+  <button onclick="loadCSData(currentSubView, currentSubChild, true)" title="Refresh" class="fixed bottom-4 right-4 z-40 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-md text-xs font-medium transition-all border border-slate-200 shadow-sm">↻ Refresh</button>
 </div>`;
 
         case 'netbox':
@@ -7928,7 +7932,10 @@ async function showGroupModal(groupId) {
         const checked = key === 'admin' ? isAdmin
             : key === 'tenant_admin' ? isTenantAdminGroup
             : !!perms[key];
-        return `<div><label class="text-xs text-slate-500 uppercase font-bold">${label}</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="grp-perm-${key}" ${checked ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500"></div></div>`;
+        // Compact inline cell (checkbox + label on one line) so the grid packs
+        // into 4 columns without the stacked label-above-checkbox making the
+        // modal tall — matches the Tenant Scope row style below.
+        return `<label class="flex items-center gap-2 text-xs text-slate-600 py-1"><input type="checkbox" id="grp-perm-${key}" ${checked ? 'checked' : ''} class="w-4 h-4 text-indigo-600 border-slate-300 rounded focus:ring-indigo-500">${label}</label>`;
     }).join('');
     // Tenant scope checklist — a group may carry a ``tenants`` list so a single
     // Entra/LDAP group grants BOTH RBAC permissions AND tenant scope. The backend

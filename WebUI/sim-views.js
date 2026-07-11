@@ -433,8 +433,8 @@ function csAutoRefreshControl() {
 // reload, the Refresh button) always render.
 const CS_NO_REFRESH = new Set([
     'Setup::Proxmox',   // Proxmox hypervisor config — manual Refresh only
-    'Config::API',      // Config → API
-    'Config::Simulation', // Config → Simulation (form-heavy)
+    'Config',           // Config (form-heavy) — manual Refresh only. No sub-tabs;
+                        // the former "Simulation" tab is now the Config root.
     'VM Server::Command Queue', // loads serve from the cached CS_TELEMETRY
                                 // command_queue (instant); kept manual-refresh so
                                 // a busy spoke's live=1 re-fetch after a mutation
@@ -504,7 +504,11 @@ function csWsRefresh() {
         // Page-level denylist: never auto-refresh these even when idle.
         // Explicit renders (tab switch / Save / Refresh button) bypass this.
         const childKey = (typeof currentSubChild !== 'undefined' ? currentSubChild : '');
-        if (CS_NO_REFRESH.has(currentSubView + '::' + childKey)) return;
+        // Match `primary::child` (a specific sub-tab) OR a bare `primary` (a
+        // childless primary like Config — currentSubChild may also hold a stale
+        // value from a prior primary, so the bare form is the reliable match).
+        if (CS_NO_REFRESH.has(currentSubView + '::' + childKey) ||
+            CS_NO_REFRESH.has(currentSubView)) return;
         // Auto-refresh throttle knob: -1 = OFF (manual Refresh only); >0 = skip
         // this pulse if less than the configured gap has elapsed since the last
         // telemetry-driven re-render (the next pulse retries, so a multi-spoke
@@ -557,7 +561,7 @@ async function loadCSData(subMenu, child, force) {
                 case 'Dashboard': await csRenderSimulations(force); break;
                 case 'Clients':     await csRenderClients(force); break;
                 case 'Central':     await csRenderCentral(force); break;
-                case 'Config':      await csRenderConfig(force); break;
+                case 'Config':      await csRenderConfigSimulation(force); break;
                 case 'Setup':       await csRenderSetup(force); break;
                 case 'VM Server':   await csRenderVmServer(force); break;
                 case 'Spoke Management': await csRenderSpokeManagement(force); break;
@@ -2216,7 +2220,7 @@ async function csRenderConfigSimulation() {
       </div>
       <p class="text-xs text-slate-400 mb-3">Edit the labeled fields. Saved as the hub-managed <code>sim_conf_override</code> INI and pushed to the spoke (merged on top of the repo's simulation.conf). Clearing a field reverts it to the repo default.</p>
       <div id="cs-ini-sections">${simBody}</div>
-      <div class="flex items-center gap-3 mt-4">
+      <div class="flex justify-end items-center gap-3 mt-4">
         <button onclick="csSaveSimConfStructured()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
         <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Refresh</button>
       </div>
@@ -2367,10 +2371,12 @@ function csRenderUserOverridesCard(uo, uoErr) {
       <p class="text-xs text-slate-400 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the bucket profile for that user).</p>
       <div class="flex items-center gap-3 mb-3">
         <button onclick="csUOAdd()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
-        <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-md text-sm font-bold">Refresh</button>
         <button onclick="csUOSave()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
       </div>
       <div id="cs-uo-cards">${csUORenderCards()}</div>
+      <div class="flex justify-end mt-3">
+        <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-md text-sm font-bold">Refresh</button>
+      </div>
     </div>`;
 }
 
@@ -2484,8 +2490,10 @@ function csFmtFetched(iso) {
     } catch (e) { return iso; }
 }
 
-window.CS_CHILD_RENDERERS['Config::API'] = csRenderConfig;
-window.CS_CHILD_RENDERERS['Config::Simulation'] = csRenderConfigSimulation;
+// Config has no sub-tabs now (the former "Simulation" tab is the Config root,
+// rendered by `case 'Config'` → csRenderConfigSimulation; the "API" tab was
+// dropped). csRenderConfig (the old API-tab content) is retained but no longer
+// registered as a child renderer.
 
 /* Shared hub-config card used by Config → Simulation + Setup → Proxmox.
  * Mirrors webui-hub's HUB_CONFIG_FIELDS panel (app.js:16485 + templates/index.html:954):
