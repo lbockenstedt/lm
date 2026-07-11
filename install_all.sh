@@ -991,6 +991,7 @@ DEFAULTS = {
     "netbox": "https://github.com/lbockenstedt/netbox.git",
     "ldap": "https://github.com/lbockenstedt/ldap.git",
     "nw": "https://github.com/lbockenstedt/nw.git",
+    "le": "https://github.com/lbockenstedt/le.git",
 }
 
 state_paths = [

@@ -1351,6 +1351,7 @@ async function scanGitHubRepos() {
             'update-source-netbox': ['netbox'],
             'update-source-ldap':   ['ldap'],
             'update-source-nw':     ['nw'],
+            'update-source-le':     ['le', 'certificates'],
         };
 
         const repoByName = Object.fromEntries(repos.map(r => [r.name.toLowerCase(), r]));
@@ -1408,7 +1409,7 @@ async function populateBranchSelect(selectId, repo, currentVal) {
 }
 
 async function saveUpdateSources() {
-    const sources = {
+    const formSources = {
         hub: document.getElementById('update-source-hub').value,
         pxmx: document.getElementById('update-source-pxmx').value,
         opnsense: document.getElementById('update-source-opn').value,
@@ -1417,8 +1418,26 @@ async function saveUpdateSources() {
         netbox: document.getElementById('update-source-netbox').value,
         ldap: document.getElementById('update-source-ldap').value,
         nw: document.getElementById('update-source-nw').value,
+        le: document.getElementById('update-source-le').value,
     };
     const globalBranch = document.getElementById('global-branch').value;
+
+    // MERGE over the existing update_sources so keys NOT exposed in this form
+    // (legacy "opn", "agent", "qa", …) are preserved. POST /setup/config does
+    // gc.update(config) — a TOP-LEVEL merge — so the entire update_sources dict
+    // is replaced by whatever we send. Sending only the form keys would silently
+    // wipe e.g. update_sources.le the installer seeded (the bug that left the le
+    // spoke un-updatable → "Unknown command: LE_SET_DNS_CRED"). Overlay the form
+    // on the fetched existing sources so nothing is dropped on save.
+    let existingSources = {};
+    try {
+        const r = await setupFetch('/setup/config');
+        if (r.ok) {
+            const data = await r.json();
+            existingSources = (data && data.global_config && data.global_config.update_sources) || {};
+        }
+    } catch (e) { /* fetch failed — fall back to form-only below */ }
+    const sources = Object.assign({}, existingSources, formSources);
 
     try {
         const response = await setupFetch('/setup/config', {
@@ -1471,7 +1490,8 @@ async function loadSetupConfig() {
             'cppm': 'update-source-cppm',
             'netbox': 'update-source-netbox',
             'ldap': 'update-source-ldap',
-            'nw': 'update-source-nw'
+            'nw': 'update-source-nw',
+            'le': 'update-source-le'
         };
         for (const [key, id] of Object.entries(sourceFields)) {
             const el = document.getElementById(id);
@@ -4867,6 +4887,7 @@ function _renderSetupGeneralTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">NetBox Repo</label><input type="text" id="update-source-netbox" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">LDAP Repo</label><input type="text" id="update-source-ldap" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Network Devices Repo</label><input type="text" id="update-source-nw" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Certificates (LE) Repo</label><input type="text" id="update-source-le" class="${inputCls}"></div>
             </div>
             <div class="flex items-center gap-4 pt-2">
                 <span id="last-update-ts" class="text-xs text-slate-400"></span>
