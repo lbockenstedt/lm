@@ -506,6 +506,12 @@ class ArubaClient:
             # aren't reliably site-scoped, so an active alert counts for EVERY
             # monitored site; key name||category = the WebUI monitored-check id.
             for al in await self._new_central_alerts():
+                al_site = str(al.get("site") or "").strip()
+                # Count an alert for THIS site when it is pinned here (name match)
+                # or has no site ("-" = global -> every site). Enables per-site
+                # alert monitoring; the monitored check id is name||category.
+                if al_site and al_site not in ("-", "—") and al_site.lower() != site.lower():
+                    continue
                 nm = str(al.get("name") or al.get("category") or "").strip()
                 if nm:
                     alert_type_counts[nm] = alert_type_counts.get(nm, 0) + 1
@@ -938,6 +944,20 @@ class ArubaClient:
                     logger.info("new_central alerts sample keys [%s]: %s",
                                 self._config_hash, sorted(raw_alerts[0].keys()))
 
+                # Resolve a site for each alert. The payload may carry a site by
+                # NAME (siteName/site/groupName) or only a siteId — build an
+                # id->name map from the cached sites-health so alerts key to the
+                # right site instead of falling to the global "-" bucket.
+                site_id_to_name: dict[str, str] = {}
+                try:
+                    for s in await self._nc_sites_health():
+                        _sid = str(s.get("id") or s.get("siteId") or s.get("site_id") or "").strip()
+                        _nm = str(s.get("name") or s.get("siteName") or s.get("site_name") or "").strip()
+                        if _sid and _nm:
+                            site_id_to_name[_sid] = _nm
+                except Exception:  # noqa: BLE001
+                    pass
+
                 # Group by (name, site). Keep only non-cleared alerts (the demo's
                 # expected errors that should be PRESENT).
                 groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -946,7 +966,11 @@ class ArubaClient:
                     if status in ("cleared", "closed", "resolved") or item.get("clearedReason"):
                         continue
                     name = str(item.get("name") or item.get("summary") or "Alert").strip()
-                    site = str(item.get("siteName") or item.get("site") or "—").strip() or "—"
+                    site = (str(item.get("siteName") or item.get("site_name")
+                                or item.get("site") or item.get("groupName") or "").strip()
+                            or site_id_to_name.get(str(item.get("siteId")
+                                or item.get("site_id") or "").strip(), "")
+                            or "—")
                     key = (name.lower(), site.lower())
                     if key not in groups:
                         groups[key] = {
