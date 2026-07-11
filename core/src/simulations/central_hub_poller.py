@@ -262,8 +262,13 @@ class CentralHubPoller:
                     continue
                 counts = alert_counts if (chk.get("type") or "alert") == "alert" else insight_counts
                 n = int(counts.get(cid, 0) or 0)
-                checks[cid] = {"status": "ok" if n == 0 else "error",
-                               "message": f"{n} active" if n else "No active alerts"}
+                # INVERTED semantics: this is a demo/simulation platform that is
+                # SUPPOSED to be generating these alerts/insights. A monitored check
+                # is HEALTHY (ok) when its error IS present, and FAILING (error) when
+                # the expected error is NOT detected — the sim stopped producing it.
+                # Monitor-for-absence: notify when the expected error goes missing.
+                checks[cid] = {"status": "ok" if n > 0 else "error",
+                               "message": f"{n} active (as expected)" if n else "Expected error NOT detected"}
             if not checks and data.get("site_health") is not None:
                 checks["site_health"] = {
                     "status": "ok" if (data.get("site_health") or 0) >= 80 else "warning",
