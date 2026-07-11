@@ -1103,6 +1103,126 @@ function csSimSpokeCard(s) {
 let csClientCache = [];
 let csClientTier = 'all'; // 'all' | 't1' | 't2'
 
+// ── Faceted Clients drill-down (scales to thousands) ─────────────────────────
+// Instead of one flat table of every client, the Clients tab summarizes by
+// Simulation, then drills Simulation → Tier → Site → the client list, with a
+// name/IP/MAC search that works at any level. Each facet is a chip row whose
+// counts reflect the OTHER active facets (standard faceted counting).
+let csFacet = { sim: null, tier: null, site: null };
+const CS_CLIENT_RENDER_CAP = 300;  // cap rendered rows so a huge match set can't freeze the DOM
+
+// Active simulation flags for a client — a per-client override WINS, else its
+// active_simulations / effective config. Mirrors csClientSimBar's isOn.
+function csClientActiveSims(c) {
+    const active = new Set((Array.isArray(c.active_simulations) ? c.active_simulations : [])
+        .map(s => String(s).toLowerCase()));
+    const cfg = c.effective_config || c.config || {};
+    const ov = c.overrides || {};
+    return CS_CONTROL_FLAGS.filter(f => {
+        if (Object.prototype.hasOwnProperty.call(ov, f))
+            return ['on', 'true', '1'].includes(String(ov[f]).toLowerCase());
+        return active.has(f) ||
+            ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
+    });
+}
+function csClientSite(c) { return (c.config && c.config.wsite) || c.wsite || '—'; }
+function csClientSearchHay(c) {
+    return [c.hostname, c.id, c.connected_ssid, c.simulation_id, c.platform,
+            c.ip, c.mac, c.address, c.config && c.config.address, c.config && c.config.ip]
+        .filter(Boolean).join(' ').toLowerCase();
+}
+// Passes the active facets? `skip` omits one dimension (used for facet counts so
+// a facet's own selection doesn't collapse its counts to the chosen value).
+function csClientPass(c, skip) {
+    const st = csEl('cs-client-status') && csEl('cs-client-status').value;
+    const q = ((csEl('cs-client-search') && csEl('cs-client-search').value) || '').trim().toLowerCase();
+    if (skip !== 'status') {
+        if (st === 'online' && !c.online) return false;
+        if (st === 'offline' && c.online) return false;
+    }
+    if (skip !== 'search' && q && !csClientSearchHay(c).includes(q)) return false;
+    if (skip !== 'sim' && csFacet.sim && csClientActiveSims(c).indexOf(csFacet.sim) === -1) return false;
+    if (skip !== 'tier' && csFacet.tier && csClassifyClient(c) !== csFacet.tier) return false;
+    if (skip !== 'site' && csFacet.site && csClientSite(c) !== csFacet.site) return false;
+    return true;
+}
+window.csFacetSet = function (dim, val) {
+    csFacet[dim] = (csFacet[dim] === val) ? null : val;  // re-click a chip to deselect
+    if (dim === 'tier') csClientTier = csFacet.tier || 'all';
+    // Deselecting Simulation clears the narrower facets so counts stay coherent.
+    if (dim === 'sim' && !csFacet.sim) { csFacet.tier = null; csFacet.site = null; csClientTier = 'all'; }
+    csRenderClientsFaceted();
+};
+window.csFacetReset = function () {
+    csFacet = { sim: null, tier: null, site: null };
+    csClientTier = 'all';
+    if (csEl('cs-client-search')) csEl('cs-client-search').value = '';
+    if (csEl('cs-client-status')) csEl('cs-client-status').value = '';
+    csRenderClientsFaceted();
+};
+
+// Render the facet chip bar + either the summary hint (no facet/search) or the
+// filtered, capped client list. Cheap: O(clients × facets), no DOM until drill.
+function csRenderClientsFaceted() {
+    const facetsEl = csEl('cs-facets');
+    const bodyEl = csEl('cs-client-body') || csEl('cs-content');
+    if (!facetsEl || !bodyEl) return;
+    const q = ((csEl('cs-client-search') && csEl('cs-client-search').value) || '').trim();
+
+    const simCounts = {};
+    CS_CONTROL_FLAGS.forEach(f => { simCounts[f] = 0; });
+    const tierCounts = { t1: 0, t2: 0, t3: 0 };
+    const siteCounts = {};
+    csClientCache.forEach(c => {
+        if (csClientPass(c, 'sim')) csClientActiveSims(c).forEach(f => { if (f in simCounts) simCounts[f]++; });
+        if (csClientPass(c, 'tier')) { const t = csClassifyClient(c); if (t in tierCounts) tierCounts[t]++; }
+        if (csClientPass(c, 'site')) { const s = csClientSite(c); siteCounts[s] = (siteCounts[s] || 0) + 1; }
+    });
+
+    const chip = (label, count, active, onclick) =>
+        `<button onclick="${onclick}" class="px-2.5 py-1 rounded-full text-xs font-semibold border transition-colors ${active ? 'bg-green-600 text-white border-green-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${csEscape(label)}${count != null ? ` <span class="opacity-70">${count}</span>` : ''}</button>`;
+    const rowCls = 'flex items-start gap-2';
+    const lblCls = 'text-[11px] font-bold text-slate-400 uppercase tracking-wider w-20 pt-1.5 shrink-0';
+
+    // csEscape(JSON.stringify(x)) — JSON quotes the string; csEscape turns the
+    // double quotes into &quot; so they don't break the double-quoted onclick=""
+    // (site names can be arbitrary). The 'sim'/'tier'/'site' literals are single-
+    // quoted and safe as-is.
+    const simChips = CS_CONTROL_FLAGS.filter(f => simCounts[f] > 0 || csFacet.sim === f)
+        .map(f => chip(f, simCounts[f], csFacet.sim === f, `csFacetSet('sim',${csEscape(JSON.stringify(f))})`)).join(' ');
+    const tierChips = ['t1', 't2', 't3'].map(t =>
+        chip(t.toUpperCase(), tierCounts[t], csFacet.tier === t, `csFacetSet('tier',${csEscape(JSON.stringify(t))})`)).join(' ');
+    const siteChips = Object.keys(siteCounts).sort().map(s =>
+        chip(s, siteCounts[s], csFacet.site === s, `csFacetSet('site',${csEscape(JSON.stringify(s))})`)).join(' ');
+
+    // Show the Tier/Site refinement rows whenever any facet/search is set (so a
+    // T1/T2/T3 sub-nav pick is reflected); list clients only once a Simulation is
+    // chosen OR a search is active — Simulation is the entry point, so a tier
+    // pre-selected from the sub-nav still shows the summary, not thousands of rows.
+    const showRefine = !!(csFacet.sim || csFacet.tier || csFacet.site || q);
+    const showList = !!(csFacet.sim || q);
+    facetsEl.innerHTML = `
+      <div class="space-y-2 mb-3">
+        <div class="${rowCls}"><span class="${lblCls}">Simulation</span><div class="flex flex-wrap gap-1.5">${simChips || '<span class="text-xs text-slate-400 italic pt-1">No active simulations.</span>'}</div></div>
+        ${showRefine ? `<div class="${rowCls}"><span class="${lblCls}">Tier</span><div class="flex flex-wrap gap-1.5">${tierChips}</div></div>
+        <div class="${rowCls}"><span class="${lblCls}">Site</span><div class="flex flex-wrap gap-1.5">${siteChips || '<span class="text-xs text-slate-400 italic pt-1">—</span>'}</div></div>
+        <button onclick="csFacetReset()" class="text-xs text-slate-400 hover:text-slate-600 underline">Clear filters</button>` : ''}
+      </div>`;
+
+    if (!showList) {
+        const total = csClientCache.length;
+        bodyEl.innerHTML = `<div class="text-center text-slate-400 text-sm py-10 border border-dashed border-slate-200 rounded-lg">${total.toLocaleString()} client(s). Pick a <span class="font-semibold text-slate-600">Simulation</span> above (then Tier, then Site) — or search by name / IP / MAC — to list clients.</div>`;
+        return;
+    }
+    const matches = csClientCache.filter(c => csClientPass(c));
+    const shown = matches.slice(0, CS_CLIENT_RENDER_CAP);
+    const note = matches.length > CS_CLIENT_RENDER_CAP
+        ? `<div class="text-xs text-amber-600 mb-2">Showing first ${CS_CLIENT_RENDER_CAP} of ${matches.length.toLocaleString()} — refine Tier / Site or search to narrow.</div>`
+        : `<div class="text-xs text-slate-400 mb-2">${matches.length.toLocaleString()} client(s)</div>`;
+    bodyEl.innerHTML = note + '<div id="cs-client-rows"></div>';
+    csRenderClientRows(shown, 'cs-client-rows');
+}
+
 // T1 = no USB passthrough; T2 = USB dongle passthrough (reclone bus / has_usb).
 // Mirrors webui-hub classifyClient (app.js:2275). Falls back to t1 when no signal.
 function csClassifyClient(c) {
@@ -1120,10 +1240,14 @@ function csClassifyClient(c) {
 
 async function csRenderClients(tier) {
     // tier may come in as a boolean `force` arg from the legacy primary-switch
-    // fallback; only accept real tier strings.
-    if (tier === 't1' || tier === 't2' || tier === 't3' || tier === 'all') csClientTier = tier;
-    csSetToolbar(`<input id="cs-client-search" oninput="csClientFilterKey()" placeholder="Search clients…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
-      <select id="cs-client-status" onchange="csClientFilter()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
+    // fallback; only accept real tier strings. The Clients::T1/T2/T3 sub-nav tabs
+    // pre-seed the Tier facet (drill still goes Simulation → Tier → Site).
+    if (tier === 't1' || tier === 't2' || tier === 't3' || tier === 'all') {
+        csClientTier = tier;
+        csFacet.tier = (tier === 'all') ? null : tier;
+    }
+    csSetToolbar(`<input id="cs-client-search" oninput="csClientFilterKey()" placeholder="Search name / IP / MAC…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
+      <select id="cs-client-status" onchange="csRenderClientsFaceted()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
       </select>`);
     // Initial load: fan out the clients fetch and the demo card together.
@@ -1136,18 +1260,12 @@ async function csRenderClients(tier) {
         csFetch(`/aggregate/clients?tenant_id=${csTenant()}`),
         csDemoCard(),
     ]);
-    const rows = csNormalizeClients(data);
-    csClientCache = rows;
-    const all = rows.length;
-    const t1 = rows.filter(c => csClassifyClient(c) === 't1').length;
-    const t2 = rows.filter(c => csClassifyClient(c) === 't2').length;
-    const t3 = rows.filter(c => csClassifyClient(c) === 't3').length;
-    const online = rows.filter(c => c.online).length;
-    const pills = csSummaryRow([[all, 'Clients'], [t1, 'T1'], [t2, 'T2'], [t3, 'T3'], [online, 'Online']]);
-    // Kill switch moved to the All/T1/T2 child strip (renderSecondaryNav →
-    // csKillSwitchMountChip), pinned far right — no longer a content banner here.
-    csSet(`<div class="space-y-4">${demoCard}${pills}<div id="cs-client-body"></div></div>`);
-    csClientFilter();
+    csClientCache = csNormalizeClients(data);
+    // Faceted drill-down: the demo card, then the Simulation/Tier/Site facet bar,
+    // then the (drill-gated, capped) client list. Kill switch stays in the
+    // secondary-nav chip (renderSecondaryNav → csKillSwitchMountChip).
+    csSet(`<div class="space-y-4">${demoCard}<div id="cs-facets"></div><div id="cs-client-body"></div></div>`);
+    csRenderClientsFaceted();
 }
 
 // "Purge Clients" — ports the original solutions-hpe cs-webui button
@@ -1197,8 +1315,8 @@ function csNormalizeClients(data) {
 // override on click. Columns: Hostname, Site, Sim-ID, PHY, OS, Status, Tier,
 // SSID, Last Seen, Errors, Demo.
 const CS_CLIENT_COLS = 11;
-function csRenderClientRows(rows) {
-    const body = csEl('cs-client-body') || csEl('cs-content');
+function csRenderClientRows(rows, targetId) {
+    const body = (targetId && csEl(targetId)) || csEl('cs-client-body') || csEl('cs-content');
     if (!rows || rows.length === 0) {
         body.innerHTML = csEmpty('No clients reported.',
             'Connected client simulators will appear here once spokes check in.');
@@ -1654,24 +1772,15 @@ window.csCtlSaveUO = async function (btn) {
     } catch (e) { console.error('csCtlSaveUO: save failed', e); csCtlMsg(host, e.message || 'failed', false); }
 };
 
-window.csClientFilter = function () {
-    const q = (csEl('cs-client-search') && csEl('cs-client-search').value || '').toLowerCase();
-    const st = csEl('cs-client-status') && csEl('cs-client-status').value;
-    const filtered = csClientCache.filter(c => {
-        if (csClientTier !== 'all' && csClassifyClient(c) !== csClientTier) return false;
-        if (st === 'online' && !c.online) return false;
-        if (st === 'offline' && c.online) return false;
-        if (!q) return true;
-        const hay = [c.spoke_name, c.spoke_id, c.hostname, c.id, c.connected_ssid, c.simulation_id, c.platform]
-            .filter(Boolean).join(' ').toLowerCase();
-        return hay.includes(q);
-    });
-    csRenderClientRows(filtered);
-};
+// Back-compat alias — the faceted renderer is the single filter path now
+// (search + status + Simulation/Tier/Site facets). Any external caller still
+// invoking csClientFilter() gets a faceted re-render.
+window.csClientFilter = function () { csRenderClientsFaceted(); };
 
-// Keystroke-debounced entry point for the free-text search input (the status
-// <select> stays on the immediate onchange= above). See csDebounce.
-window.csClientFilterKey = csDebounce(window.csClientFilter, 200);
+// Keystroke-debounced entry point for the search input (the status <select>
+// re-renders immediately via its onchange=). Search matches name / IP / MAC /
+// SSID / Sim-ID and works at any drill level. See csDebounce.
+window.csClientFilterKey = csDebounce(function () { csRenderClientsFaceted(); }, 200);
 
 /* ===========================================================================
  * 3. Central — sites / alerts / clients + save form

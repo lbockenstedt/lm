@@ -146,6 +146,11 @@ class SimulationsService:
                     **meta,
                     "hostname": c.get("hostname") or c.get("id") or "",
                     "id": c.get("id") or c.get("hostname") or "",
+                    # IP / MAC surfaced for the Clients search (name / IP / MAC).
+                    # Passthrough from the telemetry client (empty when the sim
+                    # client doesn't report them).
+                    "ip": c.get("ip") or c.get("ip_address") or (c.get("config") or {}).get("address") or "",
+                    "mac": c.get("mac") or c.get("mac_address") or "",
                     "platform": c.get("platform") or c.get("hw_type") or "—",
                     "hw_type": c.get("hw_type") or c.get("platform") or "",
                     "online": bool(c.get("online", meta["spoke_online"])),
