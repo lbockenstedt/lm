@@ -69,6 +69,29 @@ class _SpokeLogRelayHandler(logging.Handler):
     name/level already in the canonical record.
     """
 
+    # Multi-role log scoping (optional; None on standalone spokes). A shared
+    # "generic" agent process hosts N role sub-spokes, each a BaseControlPlane
+    # that installs THIS handler on the ROOT logger. Without scoping, every
+    # handler captures the WHOLE process's stream and relays it under its own
+    # spoke_id — so the hub's ``agent_logs[{base}-cppm]`` and
+    # ``agent_logs[{base}-opnsense]`` both hold the full mixed stream (CPPM logs
+    # appear under OPNSense and vice versa). Scoping each handler to its role's
+    # logger-name prefixes routes each line to exactly one bucket:
+    #   include_prefixes — if set, relay ONLY records whose logger name matches
+    #     one of these prefixes (a role sub-spoke relays only its own role's
+    #     loggers). Matching is stem-style: ``name == p or name.startswith(p)``
+    #     so ``"CPPM"`` catches ``CPPMSpoke``/``CPPMClient``/``CPPMQueries``/…
+    #   exclude_prefixes — if set, DROP records matching any prefix (the base
+    #     agent relays everything EXCEPT the roles' loggers, so its bucket holds
+    #     agent/process/non-role lines + shared-infra loggers like
+    #     ``HubDiscovery``/``DepGuard``/``UpdateRecovery`` that live in BOTH
+    #     lm/core and a role repo and so can't be attributed by name).
+    #   Both None (default) => relay everything — the STANDALONE spoke behavior
+    #   (one process, one spoke, all its logs under one spoke_id), preserved
+    #   unchanged for non-agent spokes.
+    _include_prefixes: Optional[set] = None
+    _exclude_prefixes: Optional[set] = None
+
     def __init__(self, log_queue: queue.Queue):
         super().__init__(level=logging.DEBUG)
         self._queue = log_queue
@@ -78,8 +101,27 @@ class _SpokeLogRelayHandler(logging.Handler):
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'))
 
+    def set_include_prefixes(self, prefixes) -> None:
+        """Relay only records whose logger name matches one of ``prefixes``."""
+        self._include_prefixes = set(prefixes) if prefixes else None
+
+    def set_exclude_prefixes(self, prefixes) -> None:
+        """Drop records whose logger name matches one of ``prefixes``."""
+        self._exclude_prefixes = set(prefixes) if prefixes else None
+
+    def _in_scope(self, name: str) -> bool:
+        inc = self._include_prefixes
+        if inc is not None:
+            return any(name == p or name.startswith(p) for p in inc)
+        exc = self._exclude_prefixes
+        if exc is not None:
+            return not any(name == p or name.startswith(p) for p in exc)
+        return True
+
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            if not self._in_scope(record.name):
+                return
             entry = self.format(record)
             try:
                 self._queue.put_nowait(entry)

@@ -47,6 +47,44 @@ _ROLE_MAP = {
     "console":    ("console/src/console_spoke.py",  "ConsoleSpoke", "console",   None),
 }
 
+# Logger-name prefixes each role emits under. Used by the multi-role agent's
+# log-relay scoping (see _SpokeLogRelayHandler in core/src/messaging/
+# control_plane.py) so a shared/generic agent hosting several role sub-spokes
+# relays each role's lines ONLY under that role's spoke_id — without this, every
+# role sub-spoke + the base agent each relay the whole root stream under their
+# own id, so CPPM logs land in the OPNSense bucket and vice versa.
+#
+# A record is relayed by a role's RoleConnection iff its logger name matches
+# one of that role's prefixes (stem-style: ``name == p or name.startswith(p)``).
+# The base agent's handler EXCLUDES the union of all these prefixes, so its
+# bucket holds agent/process/non-role lines instead of duplicating every role.
+#
+# Roles whose modules share a clean stem (CPPM*, Opn*, Ldap*, Netbox*, Nw*,
+# DHCP*+Kea, DNS*+Unbound, LE*+le.) need just that stem; roles with ad-hoc
+# helper-module names list each stem. Shared logger names that live in BOTH
+# lm/core AND a role repo — HubDiscovery, DepGuard, UpdateRecovery (core +
+# pxmx) — are intentionally NOT listed: they're one global logger used by both
+# shared infra and the role, so they can't be attributed by name and fall
+# through to the base agent bucket (correct: they're process-infra logs).
+# Third-party libs (httpx, httpcore, …) are likewise unlisted → base bucket.
+# Adding a new top-level logger to a role repo: if it doesn't share one of the
+# stems below, add it here or its lines fall to the base agent bucket (a
+# discoverable mis-route, never cross-contamination between sibling roles).
+_ROLE_LOG_PREFIXES: Dict[str, tuple] = {
+    "dns":        ("DNS", "Unbound"),
+    "dhcp":       ("DHCP", "Kea"),
+    "network":    ("Nw",),
+    "netbox":     ("Netbox",),
+    "opnsense":   ("Opn",),
+    "ldap":       ("Ldap",),
+    "simulation": ("CS", "CentralPoller", "ClientRegistry", "client_sim_dashboard",
+                   "ProxmoxDeploy", "SimulationEngine", "TokenStore", "LocalStore"),
+    "cppm":       ("CPPM",),
+    "proxmox":    ("Proxmox", "Pxmx"),
+    "le":         ("LE", "le."),
+    "console":    ("Console",),
+}
+
 # Deploy roles: instead of morphing the agent into a service, these run an
 # install script that deploys an external service as its own systemd unit.
 # The deployed service connects to the Hub independently (under its own

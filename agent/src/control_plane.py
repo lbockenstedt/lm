@@ -34,7 +34,7 @@ except ImportError:
     from messaging.agent_hosting import AgentHostingControlPlane
 
 import agent_spoke
-from agent_spoke import GenericAgent, _ROLE_MAP
+from agent_spoke import GenericAgent, _ROLE_MAP, _ROLE_LOG_PREFIXES
 
 try:
     from logging_setup import configure_logging
@@ -148,6 +148,16 @@ class RoleConnection(AgentHostingControlPlane):
         # The role instance handles this connection's commands; registered under
         # the role name so BaseControlPlane's first-module fallback routes to it.
         self.register_module(role_name, role_instance)
+        # Multi-role log scoping: relay ONLY this role's loggers so the hub's
+        # per-role agent_logs[spoke_id] bucket (keyed by this sub-spoke's
+        # {base}-{role} id) holds just this role's lines — not every sibling's.
+        # Without this, all N role sub-spokes + the base agent each relay the
+        # full root stream under their own spoke_id, so CPPM logs appear under
+        # OPNSense and vice versa. _ROLE_LOG_PREFIXES carries each role's
+        # logger-name stems; names shared with lm/core (HubDiscovery/DepGuard/
+        # UpdateRecovery) are NOT listed and fall through to the base bucket.
+        self._log_relay_handler.set_include_prefixes(
+            _ROLE_LOG_PREFIXES.get(role_name, ()))
         # Back-reference so the role can push UNSOLICITED signed frames to the hub
         # via send_to_hub — e.g. the console role's live serial output
         # (CONSOLE_DATA_UP) from its reader thread, or LE_CERT_RENEWED. Mirrors how
@@ -430,6 +440,16 @@ class AgentControlPlane(BaseControlPlane):
     def __init__(self, spoke_id, secret, hub_secret="", hub_url="",
                  startup_roles: List[str] = None, startup_role: str = ""):
         super().__init__(spoke_id, secret, hub_secret, hub_url)
+        # Base agent = process-wide catch-all: relay everything EXCEPT the
+        # roles' loggers (each role's own RoleConnection relays those under
+        # {base}-{role}). Without the exclude, the base bucket would duplicate
+        # every role's lines. The union covers ALL roles whether loaded or not;
+        # an unloaded role's stem never emits, so excluding it is a no-op.
+        # Shared-infra loggers (HubDiscovery/DepGuard/UpdateRecovery) and
+        # third-party libs aren't in any role's list → they land here, which is
+        # correct (process-infra, not a sibling role's operational log).
+        self._log_relay_handler.set_exclude_prefixes(
+            {p for stems in _ROLE_LOG_PREFIXES.values() for p in stems})
         # --role (single, backward-compat) is an alias for --roles (comma-list).
         cli_roles = list(startup_roles or [])
         if startup_role and startup_role not in cli_roles:
