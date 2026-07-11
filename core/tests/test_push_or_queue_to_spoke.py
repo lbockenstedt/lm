@@ -29,6 +29,13 @@ class _FakeHub:
         self._result = request_response_result
         self._exc = request_response_exc
         self.calls = []
+        # Drain bookkeeping: the timeout fallback calls mark_draining so the hub
+        # stops poking a spoke that didn't reply. Record calls so the test can
+        # assert the fallback fires.
+        self.drained = []
+
+    def mark_draining(self, spoke_id, window=None):
+        self.drained.append((spoke_id, window))
 
     async def request_response(self, spoke_id, command_type, data, timeout=5.0):
         self.calls.append((spoke_id, command_type, data, timeout))
@@ -81,6 +88,9 @@ def test_timeout_shaped_reply_falls_back_to_mailbox_queue():
 
     assert outcome["queued"] is True
     assert len(hub.mailbox.pushed) == 1
+    # The timeout fallback also marks the spoke draining so the next push skips
+    # the 5s live wait and queues directly (a missed drain signal).
+    assert hub.drained == [("cs-svr-02-spoke", 90.0)]
 
 
 def test_genuine_spoke_refusal_is_not_queued():

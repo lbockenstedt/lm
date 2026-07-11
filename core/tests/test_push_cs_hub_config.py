@@ -51,10 +51,32 @@ class _Hub:
         self.state = state
         self.simulations_store = store
         self.sent = []  # list of (cmd, data)
+        # Drain state (hub never drains in these tests).
+        self._draining_spokes = {}
+        self.DRAIN_WINDOW_S = 180.0
+
+    def mark_draining(self, spoke_id, window=None):
+        if spoke_id:
+            self._draining_spokes[spoke_id] = 0
+
+    def is_draining(self, spoke_id):
+        return False
+
+    def clear_draining(self, spoke_id):
+        self._draining_spokes.pop(spoke_id, None)
 
     async def request_response(self, spoke_id, cmd, data, timeout=5.0):
         self.sent.append((cmd, data))
         return {"status": "SUCCESS"}
+
+    async def push_or_queue_to_spoke(self, spoke_id, cmd, data, timeout=5.0):
+        # Record the push (the non-draining path routes through here now) and
+        # return a non-queued success so push_cs_hub_config treats it as live.
+        self.sent.append((cmd, data))
+        return {"status": "ok", "queued": False, "result": {"status": "SUCCESS"}}
+
+    async def _drain_aware_config_push(self, spoke_id, cmd, data, timeout=5.0):
+        return await self.push_or_queue_to_spoke(spoke_id, cmd, data, timeout=timeout)
 
 
 def _vidpid(vp, type_="wireless", label=None):
