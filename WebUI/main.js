@@ -7924,10 +7924,15 @@ async function loadGroups() {
 // checklist and the group-table scope badges. /setup/tenants is admin-only;
 // the group editor is itself admin-only, so this is safe to call here.
 async function ensureTenants() {
-    if (window._allTenants) return window._allTenants;
+    // Cache HIT only on a populated list. An empty array is truthy, so caching
+    // [] (a transient fetch failure, or a fresh install with no tenants yet)
+    // would short-circuit every later call to return [] — the "No tenants
+    // defined yet" bug in the Add-User modal even after tenants appear. Re-fetch
+    // whenever the cache is empty/missing so the list self-heals.
+    if (window._allTenants && window._allTenants.length) return window._allTenants;
     try {
         const res = await setupFetch('/setup/tenants');
-        if (!res.ok) return [];
+        if (!res.ok) return window._allTenants || [];
         const data = await res.json();
         const tenants = data.tenants || [];
         window._allTenants = tenants;
@@ -7935,9 +7940,9 @@ async function ensureTenants() {
             tenants.map(t => [t.id, t.name || t.id]));
         return tenants;
     } catch (_e) {
-        window._allTenants = [];
-        window._allTenantsName = {};
-        return [];
+        // Don't poison the cache on a transient failure — leave whatever's
+        // cached (possibly empty) so the next call retries.
+        return window._allTenants || [];
     }
 }
 
@@ -13918,7 +13923,7 @@ async function showAddUserModal() {
                     <label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-400 normal-case font-normal">(leave blank to set later)</span></label>
                     <input type="password" id="new-user-password" placeholder="••••••••" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
-                <div class="grid grid-cols-4 gap-3">
+                <div class="grid grid-cols-6 gap-3">
                     ${tadm ? '' : `<div><label class="text-xs text-slate-500 uppercase font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>`}
                     <div><label class="text-xs text-slate-500 uppercase font-bold">View</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
