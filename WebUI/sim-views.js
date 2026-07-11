@@ -333,6 +333,7 @@ function csStatusBadge(status) {
     const map = {
         pass: 'bg-green-100 text-green-700', ok: 'bg-green-100 text-green-700', functional: 'bg-green-100 text-green-700',
         fail: 'bg-red-100 text-red-700', failed: 'bg-red-100 text-red-700',
+        error: 'bg-red-100 text-red-700', critical: 'bg-red-100 text-red-700', down: 'bg-red-100 text-red-700',
         warning: 'bg-amber-100 text-amber-700', degraded: 'bg-amber-100 text-amber-700',
         no_data: 'bg-slate-100 text-slate-500', unknown: 'bg-slate-100 text-slate-500'
     };
