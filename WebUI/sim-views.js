@@ -2549,7 +2549,7 @@ function csConfigSourceCard(source, cfg) {
     const repo = cfg.repo_url || '';
     const branch = cfg.repo_branch || 'main';
     const btn = (val, label, active) =>
-        `<button onclick="csSetConfigSource('${val}')" class="px-3 py-1.5 rounded-md text-sm font-bold border transition-colors ${active ? 'bg-green-600 text-white border-green-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${label}</button>`;
+        `<button onclick="csSetConfigSource('${val}')" class="px-3 py-1.5 rounded-md text-sm font-bold border transition-colors ${active ? 'bg-[#01A982]/10 text-[#01A982] border-[#01A982]' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${label}</button>`;
     let status;
     if (isHub) {
         status = '<span class="text-emerald-700">Hub-owned — the GitHub sync is ignored; your edits are authoritative and are never reverted by a repo pull.</span>';
