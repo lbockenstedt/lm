@@ -1004,6 +1004,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 discovered[vp] = {"vidpid": vp, "name": name or "",
                                   "seen_on": [], "is_global": vp in g_cert,
                                   "is_global_ignored": vp in g_ign,
+                                  "locally_certified": [],
                                   "locally_ignored": locally_ignored}
             else:
                 if not e["name"] and name:
@@ -1023,6 +1024,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 entry = {"tenant_name": tname, "spoke_name": "(tenant certified)"}
                 if entry not in discovered[vp]["seen_on"]:
                     discovered[vp]["seen_on"].append(entry)
+                # Record the tenant (with id) that locally certified this device so
+                # the superadmin can un-approve it per-tenant from the discovered row.
+                if not any(c.get("tenant_id") == tid for c in discovered[vp]["locally_certified"]):
+                    discovered[vp]["locally_certified"].append({"tenant_id": tid, "tenant_name": tname})
             for vp in _normalize_usb_ignored(cfg.get("usb_ignored_vidpids")):
                 if vp in g_ign:
                     continue

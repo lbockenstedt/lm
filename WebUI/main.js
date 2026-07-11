@@ -2137,24 +2137,32 @@ function _updateMetrics(statusData) {
 
     const versionEl = document.getElementById('footer-sys-version');
     if (versionEl && m.version) {
-        // Sentinel-driven indicator: GREEN = running the latest version (disk
-        // AND remote match the running process); YELLOW = a newer version is
-        // available — either already pulled to disk but the hub hasn't restarted
-        // into it yet (wd.behind, watchdog will in-window), OR detected on the
-        // remote but not yet pulled (wd.update_available, e.g. repo_sync off /
-        // between cycles). Rendered as "● Version | .nnn".
+        // m.version is the RUNNING version (what this process booted with), NOT
+        // the on-disk VERSION file — so it only advances after a real restart,
+        // not the moment a `git pull` rewrites VERSION. The dot is the
+        // disk-vs-running + remote-vs-local drift signal:
+        //   GREEN  = running the latest (disk == running, remote == local)
+        //   YELLOW (behind)        = a newer VERSION is on disk but the hub
+        //                           hasn't restarted into it yet (disk != running)
+        //   YELLOW (update_avail)  = a newer version is on the remote, not pulled
+        // Rendered as "● Version | <running .nnn>".
         const wd = m.watchdog || {};
         const behind = !!wd.behind;
         const updateAvail = !!wd.update_available;
         const dotTone = (behind || updateAvail) ? 'bg-amber-400' : 'bg-green-500';
+        // wd.running_version mirrors m.version (both the running process's boot
+        // version); target_version is the on-disk VERSION. Surface the explicit
+        // running/target pair in the tooltip so the drift is obvious.
+        const running = wd.running_version || m.version;
+        const target = wd.target_version || '';
         const title = behind
-            ? `Behind — version ${wd.target_version || ''} pulled, pending restart (running ${wd.running_version || m.version})`
+            ? `Behind — disk has ${target} but running ${running}; restart pending (watchdog will in-window)`
             : updateAvail
-                ? `Update available — a newer version is on the remote (running ${m.version}); click Update to pull`
-                : 'Up to date (running the latest pulled version)';
+                ? `Update available — a newer version is on the remote (running ${running}); click Update to pull`
+                : `Up to date (running ${running})`;
         versionEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full ${dotTone} align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
-        window.__lmHubVersion = m.version;  // for File-a-Bug context
-        window.__lmTargetVersion = wd.target_version || null;  // pulled/pending version, for the Update toast
+        window.__lmHubVersion = m.version;  // for File-a-Bug context (running version)
+        window.__lmTargetVersion = target || null;  // on-disk VERSION, for the Update toast
     }
 
     // Out-of-contact alerts (SpokeAlertMixin) — surfaced on the already-polled
@@ -4693,10 +4701,10 @@ function _renderSetupSimulationsTile(content) {
             <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Global USB Approvals ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide USB dongle approvals — applies to every tenant (merged with each tenant's own list).</p>
-                <div class="grid grid-cols-2 gap-6">
+                <div class="space-y-6">
                     <div>
                         <p class="${labelCls} mb-1">Certified globally</p>
-                        <div id="global-usb-certified" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                        <div id="global-usb-certified" class="space-y-2 mb-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                         <div class="flex gap-1">
                             <input id="gusbc-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
                             <input id="gusbc-label" placeholder="label" class="flex-1 text-xs ${inputCls} px-2 py-1">
@@ -6163,12 +6171,24 @@ async function loadUsbOverview() {
     const g = data.global || {};
     const certWrap = document.getElementById('global-usb-certified');
     const ignWrap = document.getElementById('global-usb-ignored');
+    // Rendered as full-width bordered rows to match the Discovered-devices list
+    // below, each with an Un-approve / Un-ignore action.
     certWrap.innerHTML = (g.certified || []).length
-        ? (g.certified || []).map(d => _usbChip(d.vidpid, `${d.vidpid} <span class="text-slate-400">${d.label || ''}</span>`, `removeGlobalUsbCert('${d.vidpid}')`)).join('')
-        : '<span class="text-xs text-slate-400 italic">None</span>';
+        ? (g.certified || []).map(d => `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
+            <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(d.vidpid)}</span>
+            <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(d.label || '—')}</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-green-100 text-green-700">Certified globally</span>
+            <button onclick="removeGlobalUsbCert('${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-approve</button>
+          </div>`).join('')
+        : '<p class="text-xs text-slate-400 italic">None certified.</p>';
     ignWrap.innerHTML = (g.ignored || []).length
-        ? (g.ignored || []).map(vp => _usbChip(vp, vp, `removeGlobalUsbIgnore('${vp}')`)).join('')
-        : '<span class="text-xs text-slate-400 italic">None</span>';
+        ? (g.ignored || []).map(vp => `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
+            <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(vp)}</span>
+            <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">—</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-200 text-slate-600">Ignored globally</span>
+            <button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-ignore</button>
+          </div>`).join('')
+        : '<p class="text-xs text-slate-400 italic">None ignored.</p>';
 
     const list = document.getElementById('tenant-usb-list');
     const tenants = data.tenants || [];
@@ -6231,18 +6251,23 @@ async function loadDiscoveredUsb() {
         // pxmx agent uses as each provisioned VM's sim_phy. Defaults to
         // wireless (the agent's own default); hidden once already global.
         const approveBtn = d.is_global
-            ? ''
+            ? `<button onclick="removeGlobalUsbCert('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-approve globally</button>`
             : `<select id="gusbt-${esc(vp)}" title="Dongle type" class="text-xs bg-white border border-slate-300 rounded-md px-2 py-1 outline-none focus:ring-2 focus:ring-green-500 text-slate-800"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
                <button onclick="approveGlobalUsb('${vp}')" class="bg-green-100 text-green-700 px-2 py-1 rounded text-xs font-bold">Approve globally</button>`;
         const ignoreBtn = d.is_global_ignored
-            ? ''
+            ? `<button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-ignore globally</button>`
             : `<button onclick="ignoreGlobalUsb('${vp}')" class="bg-slate-200 text-slate-600 px-2 py-1 rounded text-xs font-bold">Ignore globally</button>`;
+        // Per-tenant LOCAL un-approve — one button per tenant that certified this
+        // device locally (drops it from that tenant's usb_vidpids).
+        const localBtns = (d.locally_certified || []).map(c =>
+            `<button onclick="tenantUsbRemove('${esc(c.tenant_id)}','${vp}')" title="Un-approve locally for ${esc(c.tenant_name)}" class="bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 px-2 py-1 rounded text-[11px] font-bold">Un-approve @${esc(c.tenant_name)}</button>`
+        ).join('');
         return `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${esc(vp)}</span>
             <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${esc(d.name || '—')}</span>
             <span class="text-[11px] text-slate-400 flex-1 min-w-[10rem]">${seen}</span>
             ${badge}
-            <span class="flex gap-1">${approveBtn}${ignoreBtn}</span>
+            <span class="flex flex-wrap gap-1">${approveBtn}${ignoreBtn}${localBtns}</span>
         </div>`;
     }).join('');
 }
@@ -6395,6 +6420,7 @@ async function _tenantUsbPost(tid, vid, pid, action, inp, type) {
         if (inp) inp.value = '';
         if (typeof showToast === 'function') showToast(`${action} queued for ${vid}:${pid}`, 'success');
         loadUsbOverview();
+        loadDiscoveredUsb();  // keep the discovered list's local-cert badges/buttons in sync
     } catch (e) { if (typeof showToast === 'function') showToast('Failed: ' + e.message, 'error'); }
 }
 
