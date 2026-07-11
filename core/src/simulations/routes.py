@@ -1314,6 +1314,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             elif isinstance(cdata.get("proxmox"), dict) and \
                     cdata["proxmox"].get("vm_count") is not None:
                 vm_count = cdata["proxmox"].get("vm_count")
+            if vm_count is None:
+                # No Proxmox HOST inventory relayed (e.g. no pxmx agent reporting
+                # VMs), but a Client-Sim spoke's sim clients each run in a VM — so
+                # fall back to the registered sim-client count instead of blanking
+                # the column when clients clearly exist.
+                clients = cdata.get("clients")
+                if isinstance(clients, list):
+                    vm_count = len(clients)
             out.append({
                 "spoke_id": sid,
                 "display_name": m.get("display_name") or sid,
