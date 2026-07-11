@@ -1314,10 +1314,10 @@ function csClientsLegend() {
         <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-green-500"></span> Online</span>
         <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span> Offline &lt; 30 min</span>
         <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> Offline &gt; 30 min</span>
-        <span class="flex items-center gap-1.5">${sw('bg-slate-500/15 text-slate-700 border border-slate-500')} SID default ON</span>
+        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/10 text-[#263040] border border-[#263040]')} SID default ON</span>
         <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} SID default OFF</span>
-        <span class="flex items-center gap-1.5">${sw('bg-white text-slate-700 border-2 border-slate-500')} Override ON</span>
-        <span class="flex items-center gap-1.5">${sw('bg-slate-500/5 text-slate-500/70 border border-slate-400')} Override OFF</span>
+        <span class="flex items-center gap-1.5">${sw('bg-white text-[#263040] border-2 border-[#263040]')} Override ON</span>
+        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/5 text-[#263040]/60 border border-[#263040]/40')} Override OFF</span>
         <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
         <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
         <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">0.75 hrs</span> Last Seen over 30 min ago</span>
@@ -1439,16 +1439,16 @@ function csSimBtnClass(on, isOverride) {
     // faint). The override object is pruned server-side when it matches the
     // bucket default (see ClientRegistry.set_overrides), so an override button
     // only appears for a REAL deviation from the bucket.
-    // Grey (slate) with a light fill + solid border — same treatment as the
-    // left-menu active items. Filled light-grey = default ON; slate border =
-    // override (bold=on / faint=off); plain light-slate = default OFF.
+    // HPE-navy (#263040, the header/banner color) with a light fill + solid navy
+    // border — same treatment as the left-menu active items. Filled light-navy =
+    // default ON; navy border = override (bold=on / faint=off); slate = default OFF.
     if (isOverride) {
         return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
-            (on ? 'bg-white text-slate-700 border-2 border-slate-500 hover:bg-slate-50'
-                : 'bg-slate-500/5 text-slate-500/70 border-slate-400 hover:bg-slate-500/10');
+            (on ? 'bg-white text-[#263040] border-2 border-[#263040] hover:bg-[#263040]/5'
+                : 'bg-[#263040]/5 text-[#263040]/60 border-[#263040]/40 hover:bg-[#263040]/10');
     }
     return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
-        (on ? 'bg-slate-500/15 text-slate-700 border-slate-500'
+        (on ? 'bg-[#263040]/10 text-[#263040] border-[#263040]'
             : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-100');
 }
 
@@ -4146,7 +4146,7 @@ async function csRenderVmServerVms() {
     const cats = ['Simulation Clients', 'Other', 'Containers', 'Templates'];
     const grouped = {};
     cats.forEach(c => grouped[c] = vms.filter(v => csVmCategory(v) === c));
-    const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-md text-xs font-bold ${i === 0 ? 'bg-[#01A982] text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
+    const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-md text-xs font-bold ${i === 0 ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
     const rows = csVmRenderRows(grouped['Simulation Clients'] || []);
     // Auto-prov panel is per-host — only when exactly one host is in scope.
     const apPanel = single ? csAutoProvPanel(single) : '';
@@ -4431,7 +4431,7 @@ window.csVmVmsTab = function (cat) {
     if (list) list.innerHTML = csVmTable(rows);
     ['Simulation Clients','Other','Containers','Templates'].forEach(c => {
         const b = csEl('cs-vmtab-' + c);
-        if (b) b.className = 'px-3 py-1.5 rounded-md text-xs font-bold ' + (c === cat ? 'bg-[#01A982] text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200');
+        if (b) b.className = 'px-3 py-1.5 rounded-md text-xs font-bold ' + (c === cat ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50');
     });
 };
 
