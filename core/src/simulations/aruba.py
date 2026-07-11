@@ -501,6 +501,15 @@ class ArubaClient:
                 if cat:
                     insight_cat_counts[cat] = insight_cat_counts.get(cat, 0) + 1
 
+            # Count network-notifications alerts by name so MONITORED alert checks
+            # (Central -> Alerts Monitor button) evaluate on the dashboard. Alerts
+            # aren't reliably site-scoped, so an active alert counts for EVERY
+            # monitored site; key name||category = the WebUI monitored-check id.
+            for al in await self._new_central_alerts():
+                nm = str(al.get("name") or al.get("category") or "").strip()
+                if nm:
+                    alert_type_counts[nm] = alert_type_counts.get(nm, 0) + 1
+
             return {
                 "site_health": site_health,
                 "wireless_clients": wireless_clients,
@@ -907,7 +916,12 @@ class ArubaClient:
                 raw_alerts: list[dict[str, Any]] = []
                 next_page: Any = 1
                 pages = 0
-                while next_page is not None and pages < 10:
+                seen: set = set()
+                # Bounded: <=5 pages, stop on an empty page or a non-advancing
+                # "next" — so slow/looping alert pagination can NEVER stall
+                # browse_all (which awaits alerts + insights + sites in parallel).
+                while next_page is not None and pages < 5 and next_page not in seen:
+                    seen.add(next_page)
                     payload = await self._get(http, "/network-notifications/v1/alerts",
                                               params={"limit": 100, "next": next_page})
                     if isinstance(payload, dict) and isinstance(payload.get("msg"), dict):
@@ -916,6 +930,8 @@ class ArubaClient:
                     raw_alerts.extend(items)
                     pages += 1
                     next_page = (payload or {}).get("next")
+                    if not items:
+                        break
 
                 # Diagnostic: log the first alert's field names once (values NOT logged).
                 if raw_alerts:
