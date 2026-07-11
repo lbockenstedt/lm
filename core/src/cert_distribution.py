@@ -31,7 +31,7 @@ logger = logging.getLogger("CertDistribution")
 # installs the cert on ITSELF (writes LM_TLS_CERT/LM_TLS_KEY + schedules
 # lm-self-restart) via the ``install_on_hub`` callable threaded in by the
 # HubCertDistributionMixin._distribute_one_cert wrapper.
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub"}
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage"}
 
 
 def _unwrap(result: Any) -> Dict[str, Any]:

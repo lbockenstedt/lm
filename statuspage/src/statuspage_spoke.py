@@ -58,8 +58,10 @@ class StatusPageSpoke(BaseSpoke):
       UPDATE_CONFIG       — web port / public hostname / TLS cert paths, tenant
                             display name. Restarts the web server if the bind or
                             cert material changed.
-      STATUS_SET_CERT     — TLS fullchain+key material (le-role delivery); wired
-                            into the uvicorn TLS config and the server restarted.
+      INSTALL_CERT        — TLS fullchain+key material from the le cert-
+                            distribution pipeline (statuspage is a CERT_CAPABLE
+                            target); wired into the uvicorn TLS config + re-bind.
+                            STATUS_SET_CERT is an equivalent direct alias.
     """
 
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
@@ -142,7 +144,11 @@ class StatusPageSpoke(BaseSpoke):
             return self._apply_snapshot(data)
         if cmd == "UPDATE_CONFIG":
             return self._apply_config(data)
-        if cmd == "STATUS_SET_CERT":
+        # INSTALL_CERT is what the le cert-distribution pipeline pushes to every
+        # cert-capable target (statuspage is registered in CERT_CAPABLE_MODULES);
+        # STATUS_SET_CERT is an equivalent direct alias. Both carry
+        # {fullchain, privkey} which _apply_cert wires into the uvicorn TLS bind.
+        if cmd in ("INSTALL_CERT", "STATUS_SET_CERT"):
             return self._apply_cert(data)
         return {"status": "ERROR", "message": f"unknown command {command_type}"}
 
