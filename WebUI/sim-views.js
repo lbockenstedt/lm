@@ -1307,7 +1307,7 @@ async function csRenderClients(tier) {
 // csSimBtnClass / the row renderer so the samples match the live UI exactly.
 function csClientsLegend() {
     const sw = cls => `<span class="${cls} px-2 py-0.5 rounded-md text-[11px] font-bold">sim</span>`;
-    const tier = (cls, t) => `<span class="text-[10px] font-bold px-2 py-0.5 rounded ${cls}">${t}</span>`;
+    const tier = (cls, t) => `<span class="font-bold text-slate-600">${t}</span>`;
     return `<div class="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
       <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2">
@@ -1402,7 +1402,7 @@ function csRenderClientRows(rows, targetId) {
           <td class="px-4 py-2 font-mono text-xs text-slate-500">${csEscape(c.simulation_id || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.sim_phy || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.platform || c.hw_type || '—')}</td>
-          <td class="px-4 py-2"><span class="text-[10px] font-bold px-2 py-0.5 rounded ${t === 't2' ? 'bg-purple-100 text-purple-700' : t === 't3' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}">${t.toUpperCase()}</span></td>
+          <td class="px-4 py-2 text-xs font-semibold text-slate-600">${t.toUpperCase()}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.connected_ssid || '—')}</td>
           <td class="px-4 py-2 ${_ls.mins != null && _ls.mins > 30 ? 'text-red-600 font-bold' : 'text-slate-500'}" title="${csEscape(csLastSeen(c.last_seen))}">${csEscape(_ls.text)}</td>
           <td class="px-4 py-2 ${c.error_count > 0 ? 'text-amber-600 font-bold' : 'text-slate-400'}">${csEscape(c.error_count || 0)}</td>
