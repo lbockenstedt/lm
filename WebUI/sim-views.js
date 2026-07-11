@@ -1229,7 +1229,7 @@ function csRenderClientRows(rows) {
         return line1 + line2;
     }).join('');
     body.innerHTML = csTable(
-        ['Hostname', 'Site', 'Sim-ID', 'PHY', 'OS', 'Status', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
+        ['Hostname', 'Site', 'SID', 'PHY', 'OS', 'Status', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
         rowHtml,
         // First-pass column widths — wide table (11 cols). Tunable: adjust
         // these and the header order as needed.
