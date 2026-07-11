@@ -699,6 +699,22 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # { msg_id: expire_ts }
         self._recent_request_timeouts: Dict[str, float] = {}
         self._RECENT_TIMEOUT_TTL = 60.0
+        # Spokes currently DRAINING (mid self-update — git pull then os._exit +
+        # systemd relaunch). While draining the hub does NOT fire request/reply
+        # commands (CS_CONFIG_UPDATE, ...) at the spoke: the spoke is about to
+        # exit, so a request_response would just hang to its 5s timeout when the
+        # WS drops mid-reply (the "Request Timeout: [CS_CONFIG_UPDATE] ... after
+        # 5.0s" flood on Update). Instead config pushes are queued to the durable
+        # mailbox (flush_mailbox delivers them on the next STABLE reconnect).
+        # Marked three ways: (1) hub marks drain the instant it pushes SPOKE_UPDATE
+        # (Update button — update_pipeline fan-out), (2) the spoke reports
+        # ``draining: true`` in CS_TELEMETRY (refreshes/extends the window), and
+        # (3) push_or_queue_to_spoke marks drain on a live-attempt timeout
+        # (fallback for a missed signal). Cleared when the spoke reports
+        # ``draining: false`` after its restart, or by the window expiring.
+        # { spoke_id: drain_until_ts }
+        self._draining_spokes: Dict[str, float] = {}
+        self.DRAIN_WINDOW_S = 180.0
         # Outstanding app-layer liveness probes (HUB_PING message_ids awaiting a
         # HUB_PONG). The inbound dispatch resolves the sending adapter's ping
         # waiter when a reply carrying one of these ids arrives, BEFORE the
@@ -1218,6 +1234,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # rejection forever, so only the timeout shape falls through.
             if (isinstance(result, dict) and result.get("status") == "ERROR"
                     and result.get("message") == "Timed out waiting for spoke response"):
+                # A timeout means "no reply" — the spoke is likely mid self-update
+                # (its loop free but about to os._exit, or already restarting) and
+                # missed the drain signal (e.g. a non-cs spoke with no CS_TELEMETRY
+                # path, or a spoke that exited before its first draining frame).
+                # Mark it draining for a short window so subsequent pushes skip the
+                # 5s live wait and queue directly instead of timing out again.
+                self.mark_draining(spoke_id, window=90.0)
                 raise TimeoutError("no reply — spoke may be reconnecting")
             return {"status": "ok", "queued": False, "result": result}
         except Exception as exc:
@@ -1244,6 +1267,74 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         now = time.time()
         self._recent_request_timeouts = {k: v for k, v in self._recent_request_timeouts.items()
                                          if v > now}
+
+    # ── spoke drain state (mid self-update) ─────────────────────────────────
+    def mark_draining(self, spoke_id: str, window: float = None) -> None:
+        """Mark a spoke as DRAINING (mid self-update) for ``window`` seconds
+        (default DRAIN_WINDOW_S). While draining the hub queues config pushes to
+        the durable mailbox instead of firing a 5s request_response that would
+        time out when the spoke exits mid-reply. Idempotent + refreshes the
+        window on each call (a spoke reporting ``draining: true`` every 10s
+        keeps the window extended across a long git pull)."""
+        if not spoke_id:
+            return
+        if window is None:
+            window = self.DRAIN_WINDOW_S
+        self._draining_spokes[spoke_id] = time.time() + window
+
+    def is_draining(self, spoke_id: str) -> bool:
+        """True if the spoke is within its drain window (mid self-update)."""
+        if not spoke_id:
+            return False
+        until = self._draining_spokes.get(spoke_id)
+        if until is None:
+            return False
+        if time.time() > until:
+            # Window expired — the spoke never reported ``draining: false`` (e.g.
+            # the update failed and it restarted on the old code, or it's gone).
+            # Drop the entry so the hub resumes normal live pushes.
+            self._draining_spokes.pop(spoke_id, None)
+            return False
+        return True
+
+    def clear_draining(self, spoke_id: str) -> None:
+        """Clear drain state (the spoke reported ``draining: false`` after its
+        restart — it's back for good)."""
+        if spoke_id and spoke_id in self._draining_spokes:
+            self._draining_spokes.pop(spoke_id, None)
+
+    async def _drain_aware_config_push(self, spoke_id: str, command_type: str,
+                                       data: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
+        """Config-push (CS_CONFIG_UPDATE) that respects spoke drain state.
+
+        While the spoke is DRAINING (mid self-update — about to os._exit +
+        relaunch), skip the 5s live ``request_response``: the spoke is about to
+        drop its WS, so the request would just time out when it exits mid-reply
+        (the "Request Timeout: [CS_CONFIG_UPDATE] ... after 5.0s" flood on
+        Update). Queue straight to the durable mailbox instead — its immediate
+        send still reaches an alive-but-draining spoke (whose loop is free: the
+        update runs in asyncio.to_thread, so CS_CONFIG_UPDATE processes
+        normally and writes config to disk before the restart), and if the
+        spoke already exited the send fails + the message stays in pending_ack
+        for flush_mailbox to deliver on the next STABLE reconnect. Either way
+        the config lands once the spoke is back for good; no 5s hang, no ERROR
+        log, no reconnect-flap storm.
+
+        When NOT draining, a normal push_or_queue_to_spoke (live attempt with a
+        queue-on-unreachable fallback)."""
+        if self.is_draining(spoke_id):
+            msg = Message(
+                header=MessageHeader(
+                    message_id=str(uuid.uuid4()), timestamp=time.time(),
+                    sender_id="hub", destination_id=spoke_id,
+                ),
+                payload=MessagePayload(type=command_type, data=data),
+            )
+            await self.mailbox.push(msg, self.send_to_spoke)
+            logger.info("%s draining — %s queued (skipped live request_response)",
+                        spoke_id, command_type)
+            return {"status": "ok", "queued": True, "draining": True}
+        return await self.push_or_queue_to_spoke(spoke_id, command_type, data, timeout=timeout)
 
     def _prune_seen_message_ids(self) -> None:
         """Drop expired entries from ``_seen_message_ids`` (called on each new
@@ -2026,10 +2117,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             pass
         if override_cfg:
             try:
-                await self.request_response(spoke_id, "CS_CONFIG_UPDATE",
-                                             override_cfg, timeout=5.0)
-                logger.info("Re-pushed CS sim/user overrides to %s (tenant %s)",
-                            spoke_id, tenant_id)
+                outcome = await self._drain_aware_config_push(
+                    spoke_id, "CS_CONFIG_UPDATE", override_cfg, timeout=5.0)
+                if outcome.get("queued"):
+                    logger.info("CS override re-push to %s %s (tenant %s)",
+                                spoke_id,
+                                "draining — queued" if outcome.get("draining")
+                                else "queued (spoke unreachable)", tenant_id)
+                else:
+                    logger.info("Re-pushed CS sim/user overrides to %s (tenant %s)",
+                                spoke_id, tenant_id)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("CS override re-push to %s failed: %s",
                                spoke_id, exc)
@@ -2075,9 +2172,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if not cfg:
             return
         try:
-            await self.request_response(spoke_id, "CS_CONFIG_UPDATE", cfg, timeout=5.0)
-            logger.info("Re-pushed CS hub config to %s (tenant %s)",
-                        spoke_id, tenant_id)
+            outcome = await self._drain_aware_config_push(
+                spoke_id, "CS_CONFIG_UPDATE", cfg, timeout=5.0)
+            if outcome.get("queued"):
+                logger.info("CS hub config re-push to %s %s (tenant %s)",
+                            spoke_id,
+                            "draining — queued" if outcome.get("draining")
+                            else "queued (spoke unreachable)", tenant_id)
+            else:
+                logger.info("Re-pushed CS hub config to %s (tenant %s)",
+                            spoke_id, tenant_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("CS_CONFIG_UPDATE re-push to %s failed: %s",
                            spoke_id, exc)
@@ -2505,6 +2609,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return
         self.simulations_cache[spoke_id] = cs_data
         self._sim_cache_dirty = True  # warm-load snapshot flushed by run_sim_cache_flush_loop
+        # Spoke-reported drain state (mid self-update). ``draining: true`` keeps
+        # the hub from firing request/reply commands at a spoke that's about to
+        # os._exit+relaunch (config pushes queue to the mailbox instead). A
+        # spoke that just restarted reports ``draining: false`` on its first
+        # tick → clear drain so the hub resumes normal live pushes.
+        try:
+            if cs_data.get("draining"):
+                self.mark_draining(spoke_id)
+            else:
+                self.clear_draining(spoke_id)
+        except Exception:  # noqa: BLE001 — drain bookkeeping must never break ingest
+            pass
         # Fan out to browsers subscribed on /sim/ws (tenant-scoped).
         try:
             await self.simulations_broadcaster.broadcast(
