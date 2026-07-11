@@ -716,7 +716,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # can't tell a late request/response reply from a genuinely stray ack.
         # { msg_id: expire_ts }
         self._recent_request_timeouts: Dict[str, float] = {}
-        self._RECENT_TIMEOUT_TTL = 60.0
+        # Aligned with DRAIN_WINDOW_S (a spoke mid self-update can take up to
+        # ~180s to git-pull, os._exit, relaunch, then flush its late FAILED
+        # replies). A request that times out EARLY in that window gets its late
+        # reply back MORE than 60s later; a 60s TTL let those fall through to
+        # "unknown message ID" (WARNING). At 180s the late reply is recognized
+        # + logged DEBUG ("late reply") instead. Entries are keyed by the
+        # original msg_id, so a genuinely stray/spoofed ack with an unrelated
+        # id still WARNs — no security-signal loss.
+        self._RECENT_TIMEOUT_TTL = 180.0
         # Fire-and-forget broadcast command message_ids (SET_LOG_LEVEL,
         # CLEAR_LOGS, …) sent via the LOW-LEVEL send_to_spoke — NOT through
         # mailbox.push, so they're never in mailbox.pending_ack. The spoke still
