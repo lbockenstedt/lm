@@ -984,6 +984,24 @@ function csLastSeen(v) {
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+// Relative "minutes ago" for the Clients Last Seen column + the age in minutes
+// so the cell can turn red past 30 min. Falls back to the raw value when
+// unparseable. Same timestamp parsing as csLastSeen (epoch s/ms or ISO string).
+function csLastSeenAgo(v) {
+    if (v == null || v === '' || v === '—') return { text: '—', mins: null };
+    let ms = NaN;
+    if (typeof v === 'number') ms = v;
+    else { const s = String(v).trim(); ms = /^[\d.]+$/.test(s) ? Number(s) : Date.parse(s); }
+    if (isNaN(ms)) return { text: String(v), mins: null };
+    if (ms < 1e11) ms *= 1000;
+    const mins = Math.max(0, Math.floor((Date.now() - ms) / 60000));
+    let text;
+    if (mins < 1) text = 'just now';
+    else if (mins < 60) text = `${mins} min${mins === 1 ? '' : 's'} ago`;
+    else { const h = Math.floor(mins / 60), m = mins % 60; text = `${h}h${m ? ' ' + m + 'm' : ''} ago`; }
+    return { text, mins };
+}
+
 // Compact inline stat row — "<b>N</b> Label <b>N</b> Label …" — the overview
 // header style used by VM Server, Spoke Management, Clients, and the Simulations
 // sub-views. `items` is a list of [value, label] pairs.
@@ -1179,6 +1197,7 @@ function csRenderClientRows(rows) {
         const host = c.hostname || c.id || '';
         const cfg = c.config || {};
         const _demoOn = window._csDemoActive && window._csDemoActive[host];
+        const _ls = csLastSeenAgo(c.last_seen);
         const line1 = `<tr class="border-t border-slate-100 ${_demoOn ? 'bg-amber-50' : ''}">
           <td class="px-4 py-2 font-mono text-xs">${csEscape(host || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.wsite || '—')}</td>
@@ -1188,7 +1207,7 @@ function csRenderClientRows(rows) {
           <td class="px-4 py-2">${csOnlineBadge(c.online)}</td>
           <td class="px-4 py-2"><span class="text-[10px] font-bold px-2 py-0.5 rounded ${t === 't2' ? 'bg-purple-100 text-purple-700' : t === 't3' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}">${t.toUpperCase()}</span></td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.connected_ssid || '—')}</td>
-          <td class="px-4 py-2 text-slate-500">${csEscape(csLastSeen(c.last_seen))}</td>
+          <td class="px-4 py-2 ${_ls.mins != null && _ls.mins > 30 ? 'text-red-600 font-bold' : 'text-slate-500'}" title="${csEscape(csLastSeen(c.last_seen))}">${csEscape(_ls.text)}</td>
           <td class="px-4 py-2 ${c.error_count > 0 ? 'text-amber-600 font-bold' : 'text-slate-400'}">${csEscape(c.error_count || 0)}</td>
           ${host ? csDemoCell(host) : '<td class="px-4 py-2 text-slate-300">—</td>'}
         </tr>`;
