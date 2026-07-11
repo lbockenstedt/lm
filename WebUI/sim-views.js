@@ -1626,7 +1626,7 @@ async function csRenderCentral() {
 // central_sites_config.site_mappings (key=value=Central site name), preserving the
 // monitored alert/insight + hardware checks. Once enrolled the hub/spoke poller
 // tracks its client count (7-day baseline) and it appears on the dashboard.
-window.csToggleMonitorSite = async function (siteName, monitor) {
+window.csToggleMonitorSite = async function (siteName, monitor, rerender) {
     try {
         const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
         const sm = (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? { ...cfg.site_mappings } : {};
@@ -1643,7 +1643,7 @@ window.csToggleMonitorSite = async function (siteName, monitor) {
         const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`);
         else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`, 'success');
-        csRenderCentral();
+        (rerender === 'clients' ? csRenderCentralClients : csRenderCentral)();
     } catch (e) {
         console.error('csToggleMonitorSite failed', e);
         if (typeof showToast === 'function') showToast(e.message, 'error');
@@ -1658,18 +1658,31 @@ window.csToggleMonitorSite = async function (siteName, monitor) {
 // (the poller never counts them), so these are inventory views like Clients.
 async function csRenderCentralAlerts() {
     csSetToolbar('');
-    const data = await csCentralBrowse();
+    const [data, sitesCfg] = await Promise.all([
+        csCentralBrowse(),
+        csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
     const alerts = (data && data.alerts) || [];
     const warn = _csCentralWarn(data);
     if (!alerts.length) { csSet(`${warn}${csEmpty('No active Central alerts.', 'Active alerts come from Central /network-notifications/v1/alerts.')}`); return; }
-    const rows = alerts.map(a => `<tr>
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
+        .filter(c => c && c.type === 'alert').map(c => String(c.id)));
+    const rows = alerts.map(a => {
+        const id = String((a.name || a.category) || '').trim();
+        const name = a.name || a.category || id;
+        const isMon = id && monSet.has(id);
+        const btn = !id ? '—' : (isMon
+            ? `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert (shows on the dashboard)">Monitor</button>`);
+        return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(a.name || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(a.site || '—')}</td>
       <td class="px-3 py-2">${csStatusBadge(a.severity || 'warning')}</td>
       <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(a.category || '—')}</td>
-      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(a.detail || a.description || '—')}</td>
-    </tr>`).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${alerts.length} active alert(s)</div>${csTable(['Alert', 'Site', 'Severity', 'Category', 'Detail'], rows)}</div></div>`);
+      <td class="px-3 py-2">${btn}</td>
+    </tr>`;
+    }).join('');
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${alerts.length} active alert(s)</div>${csTable(['Alert', 'Site', 'Severity', 'Category', 'Monitor'], rows)}</div></div>`);
 }
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
@@ -1722,7 +1735,7 @@ window.csToggleMonitorCheck = async function (type, id, name, monitor) {
         const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`);
         else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`, 'success');
-        csRenderCentralInsights();
+        (type === 'alert' ? csRenderCentralAlerts : csRenderCentralInsights)();
     } catch (e) {
         console.error('csToggleMonitorCheck failed', e);
         if (typeof showToast === 'function') showToast(e.message, 'error');
@@ -1732,11 +1745,22 @@ window.csToggleMonitorCheck = async function (type, id, name, monitor) {
 // ── Central → Clients ────────────────────────────────────────────────────────
 async function csRenderCentralClients() {
     csSetToolbar('');
-    const data = await csCentralBrowse();
+    const [data, sitesCfg] = await Promise.all([
+        csCentralBrowse(),
+        csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
     const clients = (data && data.clients) || [];
     const warn = _csCentralWarn(data);
     if (!clients.length) { csSet(`${warn}${csEmpty('No Central clients returned.')}`); return; }
-    const rows = clients.map(cl => `<tr>
+    const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
+    const monitored = new Set(Object.values(sm).map(v => String(v)));
+    const rows = clients.map(cl => {
+        const site = cl.site || '';
+        const isMon = site && monitored.has(String(site));
+        const btn = !site ? '—' : (isMon
+            ? `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(site))}, false, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this client's site">✓ Site monitored</button>`
+            : `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(site))}, true, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (client-count on the dashboard)">Monitor site</button>`);
+        return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(cl.hostname || cl.mac || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.ip || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.mac || '—')}</td>
@@ -1744,8 +1768,10 @@ async function csRenderCentralClients() {
       <td class="px-3 py-2 text-slate-500">${csEscape(cl.ap || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(cl.ssid || '—')}</td>
       <td class="px-3 py-2">${csStatusBadge(cl.status || 'unknown')}</td>
-    </tr>`).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${clients.length} client(s)</div>${csTable(['Client', 'IP', 'MAC', 'Site', 'AP', 'SSID', 'Status'], rows)}</div></div>`);
+      <td class="px-3 py-2">${btn}</td>
+    </tr>`;
+    }).join('');
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${clients.length} client(s)</div>${csTable(['Client', 'IP', 'MAC', 'Site', 'AP', 'SSID', 'Status', 'Monitor'], rows)}</div></div>`);
 }
 
 window.CS_CHILD_RENDERERS['Central::Sites']    = csRenderCentral;
