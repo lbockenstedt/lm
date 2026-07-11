@@ -845,6 +845,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     spoke_ids = [sid]
         if not spoke_ids:
             return _PushResult(0)
+        # Always refresh the spoke's in-memory github_config (the Source-of-Truth
+        # push token) so a spoke that restarted AFTER the key was installed — and
+        # before the operator re-saved the GitHub creds — still has the token when
+        # it commits+pushes THIS edit. github_config is in-memory-only on the
+        # spoke (never persisted), so without this re-delivery a post-restart conf
+        # edit silently writes a local hub-override and never pushes — the "old
+        # GitHub version on sync" symptom. Don't override an explicit caller value
+        # (the clear route sends github_config=None to wipe the spoke's copy).
+        if "github_config" not in payload:
+            try:
+                payload = {**payload,
+                           "github_config": await store.get_github_config(tenant_id)}
+            except Exception as exc:  # noqa: BLE001 — best-effort, never block the push
+                logger.debug("CS_CONFIG_UPDATE: github_config merge for %s failed: %s",
+                             tenant_id, exc)
         # Drain-aware push preferred: when a bound cs spoke is mid self-update
         # (draining — about to os._exit + relaunch, or already restarting), a
         # live request_response hangs to its 5s timeout when the spoke drops its

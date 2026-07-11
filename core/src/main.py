@@ -2178,6 +2178,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     override_cfg[_rk] = _gc.get(_rk)
         except Exception:  # noqa: BLE001 — best-effort
             pass
+        # Re-deliver the in-memory github_config (Source-of-Truth push token) so a
+        # spoke that restarted AFTER the key was installed gets it back on reconnect
+        # — github_config is in-memory-only on the spoke, so without this re-delivery
+        # a post-restart conf edit can't commit+push and the repo file reverts on the
+        # next sync (the "old GitHub version on sync" symptom). The conf-save routes
+        # also re-merge it via _push_config; this covers the reconnect path.
+        try:
+            _gh = await self.simulations_store.get_github_config(tenant_id) or {}
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            _gh = {}
+        if _gh:
+            override_cfg["github_config"] = _gh
         if override_cfg:
             try:
                 outcome = await self._drain_aware_config_push(
