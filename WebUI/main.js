@@ -9669,7 +9669,7 @@ function pxmxVmTableHtml(vms) {
         const runCls  = vm.status === 'running' ? 'bg-green-100 text-green-700'
                       : vm.status === 'stopped' ? 'bg-slate-100 text-slate-500'
                       : 'bg-amber-100 text-amber-700';
-        const typeCls = vm.type === 'lxc' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600';
+        const typeCls = vm.type === 'lxc' ? 'bg-blue-50 text-blue-600' : 'bg-[#263040]/10 text-[#263040]';
         // ips: best-effort guest IPv4 list from the pxmx agent (qemu needs
         // qemu-guest-agent; lxc reads the container netns). [] for stopped VMs
         // or when the guest agent is absent/unresponsive → show '—'.
@@ -9771,7 +9771,7 @@ function openVmDetail(uniqueId) {
     const ipList = Array.isArray(vm.ips) ? vm.ips : [];
     const runCls  = vm.status === 'running' ? 'bg-green-100 text-green-700'
                  : vm.status === 'stopped' ? 'bg-slate-100 text-slate-500' : 'bg-amber-100 text-amber-700';
-    const typeCls = vm.type === 'lxc' ? 'bg-blue-50 text-blue-600' : 'bg-purple-50 text-purple-600';
+    const typeCls = vm.type === 'lxc' ? 'bg-blue-50 text-blue-600' : 'bg-[#263040]/10 text-[#263040]';
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const uid = escJs(vm.unique_id);
     container.innerHTML = `
@@ -15661,7 +15661,7 @@ async function showDeviceDashboard(item) {
         if (nac) {
             const statusCls = nac.status_val === 'Known' ? 'bg-green-100 text-green-700' : nac.status_val === 'Unknown' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500';
             const sessCount = (nac.sessions || []).length;
-            cards.push(card('ClearPass NAC', 'bg-purple-50 text-purple-700', `
+            cards.push(card('ClearPass NAC', 'bg-[#263040]/10 text-[#263040]', `
                 ${nac.status_val ? badge(nac.status_val, statusCls) : ''}
                 <div class="mt-2">
                     ${row('Vendor', nac.device_vendor)}

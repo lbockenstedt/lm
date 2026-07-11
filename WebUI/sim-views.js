@@ -1321,7 +1321,7 @@ function csClientsLegend() {
         <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
         <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
         <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">0.75 hrs</span> Last Seen over 30 min ago</span>
-        <span class="flex items-center gap-1.5">${tier('bg-slate-100 text-slate-600', 'T1')} Physical Hardware · ${tier('bg-purple-100 text-purple-700', 'T2')} USB dongle · ${tier('bg-amber-100 text-amber-700', 'T3')} PCI passthrough</span>
+        <span class="flex items-center gap-1.5">${tier('', 'T1')} Physical Hardware · ${tier('', 'T2')} USB dongle · ${tier('', 'T3')} PCI passthrough</span>
       </div>
     </div>`;
 }
@@ -1940,7 +1940,7 @@ function _csCentralTableBuild(id) {
     let bar = '';
     if (monOf) {
         const nMon = rows.filter(r => monOf(r)).length;
-        const mk = (val, label) => `<button onclick="csCentralFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-purple-100 text-purple-700 border-purple-300' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        const mk = (val, label) => `<button onclick="csCentralFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-[#263040]/10 text-[#263040] border-[#263040]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
         bar = `<div class="flex items-center gap-2 mb-3">
             <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
             ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
