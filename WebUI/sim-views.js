@@ -2628,20 +2628,37 @@ function csUORenderCards() {
         const kv = csUserOverridesState[u] || {};
         const fields = Object.keys(kv).map(k => csUOField(u, k, kv[k])).join('');
         const cnt = Object.keys(kv).length;
-        return `<div class="border border-slate-200 rounded-lg p-3 mb-3">
-          <div class="flex items-center justify-between mb-2">
-            <span class="text-sm font-bold text-slate-700">👤 ${csEscape(u)}</span>
-            <div class="flex gap-2">
+        // Collapsible per-user card (the list gets long) — click the header to
+        // expand/collapse; default collapsed so the page stays compact. The
+        // action buttons stopPropagation so clicking them doesn't toggle.
+        return `<div class="border border-slate-200 rounded-lg mb-3">
+          <div class="flex items-center justify-between p-3 cursor-pointer select-none" onclick="csUOToggle(this)">
+            <span class="text-sm font-bold text-slate-700 flex items-center gap-1.5">
+              <span class="cs-uo-chev text-slate-400 inline-block w-3">▸</span>👤 ${csEscape(u)}
+              <span class="text-[10px] font-normal text-slate-400">(${cnt} override${cnt === 1 ? '' : 's'})</span>
+            </span>
+            <div class="flex gap-2" onclick="event.stopPropagation()">
               <button data-uo-user="${csEscape(u)}" onclick="csUODownload(this)"
                       class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-1 rounded-md text-[11px] font-bold">Download</button>
               <button data-uo-user="${csEscape(u)}" onclick="csUORemove(this)"
                       class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-[11px] font-bold">✕ Remove</button>
             </div>
           </div>
-          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">${fields || '<p class="text-xs text-slate-400 italic col-span-full">No fields found in this override.</p>'}</div>
+          <div class="cs-uo-body hidden px-3 pb-3">
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">${fields || '<p class="text-xs text-slate-400 italic col-span-full">No fields found in this override.</p>'}</div>
+          </div>
         </div>`;
     }).join('');
 }
+
+// Toggle a per-user override card open/closed (collapsible list).
+window.csUOToggle = function (headerEl) {
+    const body = headerEl.nextElementSibling;
+    if (!body) return;
+    body.classList.toggle('hidden');
+    const chev = headerEl.querySelector('.cs-uo-chev');
+    if (chev) chev.textContent = body.classList.contains('hidden') ? '▸' : '▾';
+};
 
 function csRenderUserOverridesCard(uo, uoErr) {
     if (uoErr) {
