@@ -5080,7 +5080,8 @@ const _SUBNET_FILTER_MODULES = [
     { key: 'nac',       label: 'Security / NAC' },
     { key: 'firewall',   label: 'Firewall' },
     { key: 'netbox',     label: 'IPAM' },
-    { key: 'dhcp',       label: 'DHCP Leases' },
+    { key: 'dns',        label: 'DNS' },
+    { key: 'dhcp',       label: 'DHCP' },
     { key: 'hypervisor', label: 'Hypervisor' },
     { key: 'cs',         label: 'Simulations (tenant-ID scoped)' },
 ];
