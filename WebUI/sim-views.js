@@ -1308,20 +1308,30 @@ async function csRenderClients(tier) {
 function csClientsLegend() {
     const sw = cls => `<span class="${cls} px-2 py-0.5 rounded-md text-[11px] font-bold">sim</span>`;
     const tier = (cls, t) => `<span class="font-bold text-slate-600">${t}</span>`;
+    const lbl = t => `<span class="font-bold uppercase tracking-wider text-slate-400 mr-1">${t}</span>`;
     return `<div class="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
       <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
-      <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2">
-        <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-green-500"></span> Online</span>
-        <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span> Offline &lt; 30 min</span>
-        <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> Offline &gt; 30 min</span>
-        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/10 text-[#263040] border border-[#263040]')} SID default ON</span>
-        <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} SID default OFF</span>
-        <span class="flex items-center gap-1.5">${sw('bg-white text-[#263040] border-2 border-[#263040]')} Override ON</span>
-        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/5 text-[#263040]/60 border border-[#263040]/40')} Override OFF</span>
-        <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
-        <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
-        <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">0.75 hrs</span> Last Seen over 30 min ago</span>
-        <span class="flex items-center gap-1.5">${tier('', 'T1')} Physical Hardware · ${tier('', 'T2')} USB dongle · ${tier('', 'T3')} PCI passthrough</span>
+      <div class="mt-2 space-y-1.5">
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Status')}
+          <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-green-500"></span> Online</span>
+          <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span> Offline &lt; 30 min</span>
+          <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> Offline &gt; 30 min</span>
+          <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">0.75 hrs</span> Last Seen over 30 min ago</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Sim')}
+          <span class="flex items-center gap-1.5">${sw('bg-[#263040]/10 text-[#263040] border border-[#263040]')} SID default ON</span>
+          <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} SID default OFF</span>
+          <span class="flex items-center gap-1.5">${sw('bg-white text-[#263040] border-2 border-[#263040]')} Override ON</span>
+          <span class="flex items-center gap-1.5">${sw('bg-[#263040]/5 text-[#263040]/60 border border-[#263040]/40')} Override OFF</span>
+          <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
+          <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Tier')}
+          <span class="flex items-center gap-1.5">${tier('', 'T1')} Physical Hardware · ${tier('', 'T2')} USB dongle · ${tier('', 'T3')} PCI passthrough</span>
+        </div>
       </div>
     </div>`;
 }
