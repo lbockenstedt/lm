@@ -2,7 +2,7 @@ import logging
 import asyncio
 import httpx
 import time
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 
 logger = logging.getLogger("ClientSimEngine")
 

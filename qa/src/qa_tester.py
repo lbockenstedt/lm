@@ -7,7 +7,6 @@ import hashlib
 import secrets
 import time
 import os
-from typing import Dict, Any
 
 def load_dotenv():
     if os.path.exists(".env"):

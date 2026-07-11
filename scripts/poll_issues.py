@@ -2,7 +2,7 @@ import os
 import subprocess
 import json
 import argparse
-from typing import List, Dict, Optional
+from typing import Optional
 
 def get_repo_name(path: str) -> Optional[str]:
     try:

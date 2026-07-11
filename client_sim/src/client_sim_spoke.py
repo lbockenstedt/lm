@@ -1,5 +1,4 @@
 import logging
-import asyncio
 from typing import Dict, Any
 from core.src.base_spoke import BaseSpoke
 from client_sim_engine import ClientSimEngine
