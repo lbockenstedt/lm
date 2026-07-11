@@ -60,9 +60,16 @@ class ClientCountTracker:
     the reference instead of showing NO_DATA for an hour. ``scope`` is the
     tenant_id on the hub (a single fixed key on the distributed spoke)."""
 
-    def __init__(self, baseline_path: str, sevenday_path: str) -> None:
+    def __init__(self, baseline_path: str, sevenday_path: str,
+                 samples_path: str = "") -> None:
         self._baseline_path = baseline_path
         self._sevenday_path = sevenday_path
+        # Raw 1h samples persist here too (every poll cycle) so a restart within
+        # the first hour restores the ACTUAL reference, not just the synthetic
+        # seed from the (hourly-written) baseline.
+        self._samples_path = samples_path or (
+            baseline_path.replace("baseline", "samples") if "baseline" in baseline_path
+            else baseline_path + ".samples")
         self._samples: Dict[str, list] = {}    # key -> [(ts, count), ...] (1h)
         self._hourly: Dict[str, list] = {}      # key -> [(ts, hourly_avg), ...] (7d)
         self._baseline: Dict[str, dict] = {}    # key -> {hourly_avg, recorded_at}
@@ -98,6 +105,19 @@ class ClientCountTracker:
             }
         except Exception:  # noqa: BLE001
             self._hourly = {}
+        # Restore the ACTUAL last-hour raw samples (trimmed to the 1h window),
+        # overriding the synthetic seed above so the reference is exact on restart
+        # — including within the first hour before any baseline was ever written.
+        try:
+            with open(self._samples_path, encoding="utf-8") as f:
+                raw_s = json.load(f) or {}
+            scut = now - _CC_WINDOW
+            for key, entries in raw_s.items():
+                kept = [(float(ts), int(v)) for ts, v in entries if float(ts) >= scut]
+                if kept:
+                    self._samples[key] = kept
+        except Exception:  # noqa: BLE001 — absent/corrupt → keep synthetic seed
+            pass
 
     def record(self, scope: str, wsite: str, current: int) -> None:
         """Append a raw sample and trim to the 1-hour window."""
@@ -162,6 +182,18 @@ class ClientCountTracker:
         if self._hourly:
             self._persist(self._sevenday_path, {k: list(v) for k, v in self._hourly.items()})
 
+    def save_samples(self) -> None:
+        """Persist the raw 1h samples (trimmed to the window) every poll cycle so
+        a restart restores the exact reference. Best-effort; small dict."""
+        now = time.time()
+        cutoff = now - _CC_WINDOW
+        trimmed = {
+            k: [(ts, c) for ts, c in v if ts >= cutoff]
+            for k, v in self._samples.items()
+        }
+        trimmed = {k: v for k, v in trimmed.items() if v}
+        self._persist(self._samples_path, trimmed)
+
     def forget(self, scope: str) -> None:
         """Drop all state for a scope (tenant left centralized mode / cleared creds)."""
         prefix = f"{scope}{_CC_KEYSEP}"
@@ -192,6 +224,7 @@ class CentralHubPoller:
         self._cc = ClientCountTracker(
             os.path.join(ddir, "client_count_baseline.json"),
             os.path.join(ddir, "client_count_7day.json"),
+            os.path.join(ddir, "client_count_samples.json"),
         )
 
     @property
@@ -339,6 +372,19 @@ class CentralHubPoller:
         # Append the hourly snapshot to the 7-day baseline history (self-gated to
         # once per hour) and persist — the alarm baseline that flags sustained drops.
         self._cc.maybe_snapshot()
+        # Persist the raw 1h samples EVERY cycle so a restart (even within the
+        # first hour, before any hourly baseline is written) restores the actual
+        # last-hour reference instead of showing NO_DATA for ~15 min while it
+        # rebuilds. Cheap (small dict); best-effort.
+        self._cc.save_samples()
+        # Warm-start persistence for the whole per-tenant dashboard status. Off the
+        # event loop — a bounded write once per 5-min cycle can't starve the WS.
+        save = getattr(self.hub, "_save_central_hub_status", None)
+        if save:
+            try:
+                await asyncio.to_thread(save)
+            except Exception as exc:  # noqa: BLE001 — never let persistence kill the poll
+                logger.debug("central_hub_status persist skipped: %s", exc)
 
     async def run_loop(self) -> None:
         while True:

@@ -820,6 +820,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # in centralized mode); read by SimulationsService as a synthetic "Hub
         # (centralized)" spoke. See simulations/central_hub_poller.py.
         self.central_hub_status: Dict[str, dict] = {}
+        # Warm-start persistence for the per-tenant Central status (the Checks /
+        # Central / Hardware / Client-Count dashboards in centralized mode). Without
+        # this the dict is empty on boot and stays blank until the 5-min poller
+        # cycle completes (token fetch + Central API calls) — a visibly empty
+        # dashboard for minutes after every reboot/update. Persisted encrypted each
+        # poll cycle and reloaded here so the dashboards seed from last-known data
+        # immediately (the block carries fetched_at so staleness is visible), then
+        # the poller refreshes it. The 1h client-count baseline persists separately
+        # in ClientCountTracker (client_count_*.json).
+        self._central_status_path = os.path.join(self.state.data_dir, "central_hub_status.json")
+        self._load_central_hub_status()
         self.central_hub_poller = CentralHubPoller(self)
         self.cache_dir = os.path.join(self.state.data_dir, "cache")
         # Network Devices (nw) module: in-memory fleet + per-device cache,
@@ -4145,6 +4156,45 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             os.replace(tmp, self._sim_cache_path)
         except Exception as e:  # noqa: BLE001
             logger.warning("simulations_cache persist failed (%s): %s", self._sim_cache_path, e)
+
+    def _load_central_hub_status(self) -> None:
+        """Warm-start central_hub_status from disk (best-effort; never fatal) so
+        the centralized-mode Checks/Central/Hardware dashboards seed on a restart
+        instead of blank-until-first-poll. Encrypted at rest (mirrors
+        _load_simulations_cache)."""
+        try:
+            if not os.path.exists(self._central_status_path):
+                return
+            from security.encryption import hub_encryption
+            with open(self._central_status_path, "rb") as f:
+                blob = f.read()
+            if not blob:
+                return
+            data = json.loads(hub_encryption.decrypt(blob)) or {}
+            if isinstance(data, dict):
+                self.central_hub_status = {str(k): v for k, v in data.items()
+                                           if isinstance(v, dict)}
+                if self.central_hub_status:
+                    logger.info("central_hub_status: warm-loaded %d tenant status block(s) from disk",
+                                len(self.central_hub_status))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("central_hub_status warm load failed (%s): %s — starting empty",
+                           self._central_status_path, e)
+
+    def _save_central_hub_status(self) -> None:
+        """Encrypted atomic write of central_hub_status. Never raises — a failed
+        persist must not break the poll loop. Called once per poll cycle."""
+        try:
+            from security.encryption import hub_encryption
+            encrypted = hub_encryption.encrypt(json.dumps(self.central_hub_status, default=str))
+            tmp = self._central_status_path + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(encrypted)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._central_status_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("central_hub_status persist failed (%s): %s", self._central_status_path, e)
 
     async def run_sim_cache_flush_loop(self):
         """Persist simulations_cache to disk when dirty, off the event loop.
