@@ -1314,10 +1314,10 @@ function csClientsLegend() {
         <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-green-500"></span> Online</span>
         <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span> Offline &lt; 30 min</span>
         <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> Offline &gt; 30 min</span>
-        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/10 text-[#263040] border border-[#263040]')} SID default ON</span>
-        <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} SID default OFF</span>
+        <span class="flex items-center gap-1.5">${sw('bg-[#263040] text-white border border-[#263040]')} SID default ON</span>
+        <span class="flex items-center gap-1.5">${sw('bg-white text-[#263040]/70 border border-[#263040]/30')} SID default OFF</span>
         <span class="flex items-center gap-1.5">${sw('bg-white text-[#263040] border-2 border-[#263040]')} Override ON</span>
-        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/5 text-[#263040]/60 border border-[#263040]/40')} Override OFF</span>
+        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/5 text-[#263040]/60 border border-[#263040]/50')} Override OFF</span>
         <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
         <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
         <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">0.75 hrs</span> Last Seen over 30 min ago</span>
@@ -1439,17 +1439,21 @@ function csSimBtnClass(on, isOverride) {
     // faint). The override object is pruned server-side when it matches the
     // bucket default (see ClientRegistry.set_overrides), so an override button
     // only appears for a REAL deviation from the bucket.
-    // HPE-navy (#263040, the header/banner color) with a light fill + solid navy
-    // border — same treatment as the left-menu active items. Filled light-navy =
-    // default ON; navy border = override (bold=on / faint=off); slate = default OFF.
+    // HPE-navy (#263040, the header color). A light TINT of navy reads grey, so
+    // the ON default is a SOLID navy fill (like the header) and every state uses
+    // navy borders/text so the whole list reads navy, not grey:
+    //   default ON  = solid navy + white text
+    //   default OFF = white + faint navy border + navy text
+    //   override ON = white + BOLD navy border   (a set deviation)
+    //   override OFF= faint navy fill + border
     if (isOverride) {
         return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
             (on ? 'bg-white text-[#263040] border-2 border-[#263040] hover:bg-[#263040]/5'
-                : 'bg-[#263040]/5 text-[#263040]/60 border-[#263040]/40 hover:bg-[#263040]/10');
+                : 'bg-[#263040]/5 text-[#263040]/60 border-[#263040]/50 hover:bg-[#263040]/10');
     }
     return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
-        (on ? 'bg-[#263040]/10 text-[#263040] border-[#263040]'
-            : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-100');
+        (on ? 'bg-[#263040] text-white border-[#263040]'
+            : 'bg-white text-[#263040]/70 border-[#263040]/30 hover:bg-[#263040]/5');
 }
 
 function csClientSimBar(c, host) {
