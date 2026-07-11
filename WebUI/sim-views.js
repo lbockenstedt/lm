@@ -1109,7 +1109,22 @@ let csClientTier = 'all'; // 'all' | 't1' | 't2'
 // name/IP/MAC search that works at any level. Each facet is a chip row whose
 // counts reflect the OTHER active facets (standard faceted counting).
 let csFacet = { sim: null, tier: null, site: null };
-const CS_CLIENT_RENDER_CAP = 300;  // cap rendered rows so a huge match set can't freeze the DOM
+// Client-list paging: 10 per page by default; the user can pick up to 100 from
+// a selector at the bottom of the table. Capping the page size at 100 also keeps
+// the DOM bounded no matter how large the match set is.
+let csClientPage = 1;
+let csClientPageSize = 10;
+const CS_CLIENT_PAGE_SIZES = [10, 25, 50, 100];
+
+// Reset to page 1 + re-render — called whenever the filter set changes (facet,
+// search, or status) so the user isn't stranded on a now-empty page.
+window.csClientResetPage = function () { csClientPage = 1; csRenderClientsFaceted(); };
+window.csClientGoPage = function (delta) { csClientPage += Number(delta) || 0; csRenderClientsFaceted(); };
+window.csClientSetPageSize = function (size) {
+    csClientPageSize = Math.max(1, Math.min(100, Number(size) || 10));
+    csClientPage = 1;
+    csRenderClientsFaceted();
+};
 
 // Active simulation flags for a client — a per-client override WINS, else its
 // active_simulations / effective config. Mirrors csClientSimBar's isOn.
@@ -1149,18 +1164,21 @@ function csClientPass(c, skip) {
 window.csFacetSelect = function (dim, val) {
     csFacet[dim] = val || null;   // '' (the All option) clears the facet
     if (dim === 'tier') csClientTier = csFacet.tier || 'all';
+    csClientPage = 1;             // a new filter set → back to page 1
     csRenderClientsFaceted();
 };
 window.csFacetReset = function () {
     csFacet = { sim: null, tier: null, site: null };
     csClientTier = 'all';
+    csClientPage = 1;
     if (csEl('cs-client-search')) csEl('cs-client-search').value = '';
     if (csEl('cs-client-status')) csEl('cs-client-status').value = '';
     csRenderClientsFaceted();
 };
 
 // Render the facet chip bar + either the summary hint (no facet/search) or the
-// filtered, capped client list. Cheap: O(clients × facets), no DOM until drill.
+// filtered, PAGED client list (10/page default, up to 100; pager at the bottom).
+// Cheap: O(clients × facets), and only one page of rows ever hits the DOM.
 function csRenderClientsFaceted() {
     const facetsEl = csEl('cs-facets');
     const bodyEl = csEl('cs-client-body') || csEl('cs-content');
@@ -1210,11 +1228,32 @@ function csRenderClientsFaceted() {
         return;
     }
     const matches = csClientCache.filter(c => csClientPass(c));
-    const shown = matches.slice(0, CS_CLIENT_RENDER_CAP);
-    const note = matches.length > CS_CLIENT_RENDER_CAP
-        ? `<div class="text-xs text-amber-600 mb-2">Showing first ${CS_CLIENT_RENDER_CAP} of ${matches.length.toLocaleString()} — refine Tier / Site or search to narrow.</div>`
-        : `<div class="text-xs text-slate-400 mb-2">${matches.length.toLocaleString()} client(s)</div>`;
-    bodyEl.innerHTML = note + '<div id="cs-client-rows"></div>';
+    // Paginate.
+    const pageSize = csClientPageSize;
+    const totalPages = Math.max(1, Math.ceil(matches.length / pageSize));
+    if (csClientPage > totalPages) csClientPage = totalPages;
+    if (csClientPage < 1) csClientPage = 1;
+    const start = (csClientPage - 1) * pageSize;
+    const shown = matches.slice(start, start + pageSize);
+    const first = matches.length ? start + 1 : 0;
+    const last = Math.min(start + pageSize, matches.length);
+
+    const sizeOpts = CS_CLIENT_PAGE_SIZES.map(n =>
+        `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n}</option>`).join('');
+    const btn = (label, delta, disabled) =>
+        `<button onclick="csClientGoPage(${delta})" ${disabled ? 'disabled' : ''} class="px-2 py-0.5 rounded border ${disabled ? 'border-slate-100 text-slate-300 cursor-not-allowed' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}">${label}</button>`;
+    // Pager sits at the BOTTOM of the table.
+    const pager = `<div class="flex flex-wrap items-center justify-between gap-2 mt-3 text-xs text-slate-500">
+        <span>Showing ${first.toLocaleString()}–${last.toLocaleString()} of ${matches.length.toLocaleString()}</span>
+        <div class="flex items-center gap-2">
+          ${btn('‹ Prev', -1, csClientPage <= 1)}
+          <span>Page ${csClientPage} of ${totalPages}</span>
+          ${btn('Next ›', 1, csClientPage >= totalPages)}
+          <span class="ml-2">Per page</span>
+          <select onchange="csClientSetPageSize(this.value)" class="bg-white border border-slate-200 rounded px-2 py-0.5 text-xs">${sizeOpts}</select>
+        </div>
+      </div>`;
+    bodyEl.innerHTML = `<div class="text-xs text-slate-400 mb-2">${matches.length.toLocaleString()} client(s)</div><div id="cs-client-rows"></div>${pager}`;
     csRenderClientRows(shown, 'cs-client-rows');
 }
 
@@ -1242,7 +1281,7 @@ async function csRenderClients(tier) {
         csFacet.tier = (tier === 'all') ? null : tier;
     }
     csSetToolbar(`<input id="cs-client-search" oninput="csClientFilterKey()" placeholder="Search name / IP / MAC…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
-      <select id="cs-client-status" onchange="csRenderClientsFaceted()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
+      <select id="cs-client-status" onchange="csClientResetPage()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
       </select>`);
     // Initial load: fan out the clients fetch and the demo card together.
@@ -1272,6 +1311,9 @@ function csClientsLegend() {
     return `<div class="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
       <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2">
+        <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-green-500"></span> Online</span>
+        <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span> Offline &lt; 30 min</span>
+        <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> Offline &gt; 30 min</span>
         <span class="flex items-center gap-1.5">${sw('bg-purple-100 text-purple-700 border border-purple-300')} SID default ON</span>
         <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} SID default OFF</span>
         <span class="flex items-center gap-1.5">${sw('bg-white text-purple-700 border-2 border-purple-500')} Override ON</span>
@@ -1325,12 +1367,22 @@ function csNormalizeClients(data) {
 
 // Clients render as TWO rows each (ported from webui-hub's client + control-row
 // pair): a data row — no Spoke column — plus a second "sim bar" row of clickable
-// per-simulation override buttons. The original hid the override panel behind a
-// "Control" button; here the sim buttons are always visible inline on line 2,
-// each showing whether that sim is currently running and toggling a per-client
-// override on click. Columns: Hostname, Site, Sim-ID, PHY, OS, Status, Tier,
-// SSID, Last Seen, Errors, Demo.
-const CS_CLIENT_COLS = 11;
+// per-simulation override buttons. Columns: Hostname (with a status dot), Site,
+// SID, PHY, OS, Tier, SSID, Last Seen, Errors, Demo.
+const CS_CLIENT_COLS = 10;
+
+// Status dot shown next to the hostname (replaces the Status column):
+//   green  = online
+//   yellow = offline, last seen < 30 min ago (just dropped)
+//   red    = offline, last seen > 30 min ago (stale)
+function csClientStatusDot(c) {
+    const ls = csLastSeenAgo(c.last_seen);
+    let color, label;
+    if (c.online) { color = 'bg-green-500'; label = 'Online'; }
+    else if (ls.mins != null && ls.mins > 30) { color = 'bg-red-500'; label = 'Offline > 30 min'; }
+    else { color = 'bg-amber-400'; label = 'Offline < 30 min'; }
+    return `<span class="inline-block w-2 h-2 rounded-full ${color} mr-1.5 align-middle" title="${csEscape(label)}"></span>`;
+}
 function csRenderClientRows(rows, targetId) {
     const body = (targetId && csEl(targetId)) || csEl('cs-client-body') || csEl('cs-content');
     if (!rows || rows.length === 0) {
@@ -1345,12 +1397,11 @@ function csRenderClientRows(rows, targetId) {
         const _demoOn = window._csDemoActive && window._csDemoActive[host];
         const _ls = csLastSeenAgo(c.last_seen);
         const line1 = `<tr class="border-t border-slate-100 ${_demoOn ? 'bg-amber-50' : ''}">
-          <td class="px-4 py-2 font-mono text-xs">${csEscape(host || '—')}</td>
+          <td class="px-4 py-2 font-mono text-xs whitespace-nowrap">${csClientStatusDot(c)}${csEscape(host || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.wsite || '—')}</td>
           <td class="px-4 py-2 font-mono text-xs text-slate-500">${csEscape(c.simulation_id || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.sim_phy || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.platform || c.hw_type || '—')}</td>
-          <td class="px-4 py-2">${csOnlineBadge(c.online)}</td>
           <td class="px-4 py-2"><span class="text-[10px] font-bold px-2 py-0.5 rounded ${t === 't2' ? 'bg-purple-100 text-purple-700' : t === 't3' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'}">${t.toUpperCase()}</span></td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.connected_ssid || '—')}</td>
           <td class="px-4 py-2 ${_ls.mins != null && _ls.mins > 30 ? 'text-red-600 font-bold' : 'text-slate-500'}" title="${csEscape(csLastSeen(c.last_seen))}">${csEscape(_ls.text)}</td>
@@ -1363,11 +1414,11 @@ function csRenderClientRows(rows, targetId) {
         return line1 + line2;
     }).join('');
     body.innerHTML = csTable(
-        ['Hostname', 'Site', 'SID', 'PHY', 'OS', 'Status', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
+        ['Hostname', 'Site', 'SID', 'PHY', 'OS', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
         rowHtml,
-        // First-pass column widths — wide table (11 cols). Tunable: adjust
-        // these and the header order as needed.
-        { colWidths: ['190px', '90px', '70px', '80px', '90px', '80px', '60px',
+        // Column widths (10 cols — Status column dropped; status is now a dot by
+        // the hostname). Tunable: adjust these and the header order as needed.
+        { colWidths: ['200px', '90px', '70px', '80px', '90px', '60px',
                       '130px', '110px', '70px', '230px'] }
     );
     csDemoStartTicker();
@@ -1389,11 +1440,11 @@ function csSimBtnClass(on, isOverride) {
     // bucket default (see ClientRegistry.set_overrides), so an override button
     // only appears for a REAL deviation from the bucket.
     if (isOverride) {
-        return 'px-2 py-0.5 rounded-md text-[11px] font-bold border transition-colors ' +
+        return 'px-2 py-1 rounded-md text-[11px] font-bold border transition-colors ' +
             (on ? 'bg-white text-purple-700 border-2 border-purple-500 hover:bg-purple-50'
                 : 'bg-white text-purple-400 border-purple-200 hover:bg-purple-50');
     }
-    return 'px-2 py-0.5 rounded-md text-[11px] font-bold border transition-colors ' +
+    return 'px-2 py-1 rounded-md text-[11px] font-bold border transition-colors ' +
         (on ? 'bg-purple-100 text-purple-700 border-purple-300'
             : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-100');
 }
@@ -1420,13 +1471,21 @@ function csClientSimBar(c, host) {
         const ovFlag = isOv(f);
         return `<button data-cs-sim-host="${csEscape(host)}" data-cs-sim-flag="${csEscape(f)}" data-cs-sim-on="${on ? '1' : '0'}" data-cs-sim-ov="${ovFlag ? '1' : '0'}"
           onclick="csSimToggle(this)" title="${ovFlag ? 'Override' : 'SID'}: ${csEscape(f)} ${on ? 'on' : 'off'} on ${csEscape(host)} — click to ${on ? 'disable' : 'enable'}"
-          class="${csSimBtnClass(on, ovFlag)}">${csEscape(f)}</button>`;
+          class="${csSimBtnClass(on, ovFlag)} w-full text-center">${csEscape(f)}</button>`;
     }).join('');
-    return `<div class="flex flex-wrap items-center gap-1.5">
-      ${btns}
-      <button data-cs-ctl-host="${csEscape(host)}" onclick="csCtlClear(this)"
-        class="ml-2 px-2 py-0.5 rounded-md text-[11px] font-bold bg-red-50 text-red-600 hover:bg-red-100 border border-red-200">Clear</button>
-      <span id="${csEscape(csCtlId(host, 'msg'))}" class="text-[11px] text-slate-400 ml-1"></span>
+    // Uniform-size sim knobs laid out in a 2-ROW grid (columns = half the flag
+    // count, rounded up) so every button is the same width and the set stays
+    // tidy as more simulations are added (it grows into more columns, still 2
+    // rows; overflow-x-auto scrolls if it ever gets very wide). Clear + status
+    // message sit on their own line below.
+    const _simCols = Math.max(1, Math.ceil(CS_CONTROL_FLAGS.length / 2));
+    return `<div class="space-y-1.5">
+      <div class="grid gap-1.5 overflow-x-auto pb-0.5" style="grid-template-columns: repeat(${_simCols}, minmax(92px, 1fr));">${btns}</div>
+      <div class="flex items-center gap-1.5">
+        <button data-cs-ctl-host="${csEscape(host)}" onclick="csCtlClear(this)"
+          class="px-2 py-1 rounded-md text-[11px] font-bold bg-red-50 text-red-600 hover:bg-red-100 border border-red-200">Clear</button>
+        <span id="${csEscape(csCtlId(host, 'msg'))}" class="text-[11px] text-slate-400 ml-1"></span>
+      </div>
     </div>`;
 }
 
@@ -1795,8 +1854,8 @@ window.csClientFilter = function () { csRenderClientsFaceted(); };
 
 // Keystroke-debounced entry point for the search input (the status <select>
 // re-renders immediately via its onchange=). Search matches name / IP / MAC /
-// SSID / Sim-ID and works at any drill level. See csDebounce.
-window.csClientFilterKey = csDebounce(function () { csRenderClientsFaceted(); }, 200);
+// SSID / Sim-ID and works at any drill level. Resets to page 1. See csDebounce.
+window.csClientFilterKey = csDebounce(function () { csClientResetPage(); }, 200);
 
 /* ===========================================================================
  * 3. Central — sites / alerts / clients + save form
