@@ -278,6 +278,35 @@ class CentralHubPoller:
             for alert_id, devices in (data.get("hw_devices") or {}).items():
                 hw_totals[alert_id] = hw_totals.get(alert_id, 0) + sum(devices.values())
 
+        # Per-device hardware monitoring: look each monitored hardware device up in
+        # the live device list and add a check on its pinned site — DOWN = error
+        # (a monitored switch/AP/gateway is offline). new_central only; best-effort.
+        if hw_checks:
+            try:
+                all_devices = await client._nc_devices()
+            except Exception:  # noqa: BLE001
+                all_devices = []
+            dev_by_key: Dict[str, dict] = {}
+            for d in all_devices:
+                for k in (d.get("serialNumber"), d.get("serial"), d.get("deviceName"), d.get("name")):
+                    if k:
+                        dev_by_key[str(k)] = d
+            for hc in hw_checks:
+                hid = str(hc.get("id") or "")
+                if not hid:
+                    continue
+                hsite = str(hc.get("site") or "").strip().lower()
+                dev = dev_by_key.get(hid)
+                up = str((dev or {}).get("status") or "").upper() in ("UP", "ONLINE")
+                label = str(hc.get("name") or hid)
+                for wsite, csite in site_mappings.items():
+                    if hsite and hsite not in (str(csite).lower(), str(wsite).lower(), "all sites"):
+                        continue
+                    status.setdefault(wsite, {})[label] = {
+                        "status": "ok" if up else "error",
+                        "message": "up" if up else "DOWN",
+                    }
+
         hardware_alerts = [
             {"id": aid, "name": (hw_names.get(aid) or {}).get("name", aid),
              "device_type": (hw_names.get(aid) or {}).get("device_type", ""),

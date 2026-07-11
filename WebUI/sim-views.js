@@ -1801,37 +1801,48 @@ async function csCentralAvailable() {
 
 async function csRenderCentralHardware() {
     csSetToolbar('');
-    const [cat, sitesCfg] = await Promise.all([
-        csCentralAvailable(),
+    const [data, sitesCfg] = await Promise.all([
+        csCentralBrowse(),
         csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
     ]);
-    const items = (cat && cat.hardware) || [];
-    const warn = cat && cat.warning ? `<div class="text-xs text-amber-600 mb-2">${csEscape(cat.warning)}</div>` : '';
-    if (!items.length) { csSet(`${warn}${csEmpty('No hardware check types returned.', 'Verify the Central API token/mode in Setup → Central API.')}`); return; }
-    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.hardware_checks) ? sitesCfg.hardware_checks : []).map(c => String(c.id)));
-    const rows = items.map(it => {
-        const id = it.id, name = it.name || it.id, dt = it.device_type || '';
-        const isMon = monSet.has(String(id));
-        const btn = isMon
-            ? `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this hardware check">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this hardware check (device down) on the dashboard">Monitor</button>`;
+    // Pull ALL hardware devices (APs / switches / gateways) from the browse
+    // inventory, flattened across sites.
+    const dbs = (data && data.devices_by_site) || {};
+    const devices = [];
+    Object.keys(dbs).forEach(site => (dbs[site] || []).forEach(d => devices.push(Object.assign({ site }, d))));
+    const warn = _csCentralWarn(data);
+    if (!devices.length) { csSet(`${warn}${csEmpty('No Central hardware devices returned.', 'Devices (APs, switches, gateways) come from Central for your monitored account.')}`); return; }
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.hardware_checks) ? sitesCfg.hardware_checks : []).map(c => `${c.id}::${c.site || ''}`));
+    const rows = devices.map(d => {
+        const id = String((d.serial || d.name) || '').trim();
+        const name = d.name || d.serial || id;
+        const dt = d.type || '';
+        const site = d.site || '';
+        const isMon = id && monSet.has(`${id}::${site}`);
+        const btn = !id ? '—' : (isMon
+            ? `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
         return `<tr>
       <td class="px-3 py-2 text-sm text-slate-700">${csEscape(name)}</td>
-      <td class="px-3 py-2 font-mono text-xs text-slate-500">${csEscape(id)}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(dt || '—')}</td>
+      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(d.model || '—')}</td>
+      <td class="px-3 py-2 text-slate-500">${csEscape(site || '—')}</td>
+      <td class="px-3 py-2">${csStatusBadge(d.status || 'unknown')}</td>
       <td class="px-3 py-2">${btn}</td>
     </tr>`;
     }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${items.length} hardware check(s) — Monitor one to track device-down across your monitored sites</div>${csTable(['Hardware check', 'ID', 'Device type', 'Monitor'], rows)}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${devices.length} device(s) — Monitor a switch / AP / gateway to track it on the dashboard</div>${csTable(['Device', 'Type', 'Model', 'Site', 'Status', 'Monitor'], rows)}</div></div>`);
 }
 
 // Toggle a hardware check in central_sites_config.hardware_checks (keyed by id),
 // preserving site_mappings + monitored_checks.
-window.csToggleMonitorHardware = async function (id, name, deviceType, monitor) {
+window.csToggleMonitorHardware = async function (id, name, deviceType, site, monitor) {
     try {
         const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
-        let hw = (Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : []).filter(c => String(c.id) !== String(id));
-        if (monitor) hw.push({ id, name, device_type: deviceType });
+        site = site || '';
+        const key = `${id}::${site}`;
+        let hw = (Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : []).filter(c => `${c.id}::${c.site || ''}` !== key);
+        if (monitor) hw.push({ id, name, device_type: deviceType, site });
         const body = {
             site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
             monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
