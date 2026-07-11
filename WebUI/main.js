@@ -415,15 +415,32 @@ function updateHeaderModule() {
     }
 }
 
+// Reload the active view's data — the footer "↻ Refresh" button (present on
+// every view) calls this. Re-runs the current view's loader via the same
+// dispatch setView/initView uses, so one footer button replaces the scattered
+// per-page ↻ Refresh buttons AND the floating bottom-right FAB (which
+// overlapped this footer). cs gets force=true to bypass the auto-refresh
+// throttle, matching the former FAB.
+function refreshCurrentView() {
+    if (currentView === 'cs') {
+        loadCSData(currentSubView, currentSubChild, true);
+        return;
+    }
+    initView(currentView, currentSubView);
+}
+
 // Page-context actions rendered into the persistent footer slot rather than
-// the page body (keeps the content frame clear). The Firewalls page puts its
-// "Refresh Cache" button here, and the global "Update" (hub + spokes) action
-// lives here for admins only — visible on every view, gated by isAdmin() and
+// the page body (keeps the content frame clear). The global "↻ Refresh"
+// (reload the current view) + "Update" (hub + spokes) actions live here —
+// visible on every view; Update is admin-only, gated by isAdmin() and
 // enforced server-side (POST /setup/update requires admin → 403 otherwise).
+// The Firewalls page also puts its "Refresh Cache" button here (a different
+// action — refreshes the opnsense module's remote cache, not the page).
 function updateContextActions() {
     const fa = document.getElementById('footer-actions');
     if (!fa) return;
     const parts = [];
+    parts.push(`<button onclick="refreshCurrentView()" title="Refresh this view" class="text-[10px] uppercase tracking-widest opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Refresh</button>`);
     if (currentView === 'opnsense') {
         parts.push(`<button onclick="refreshOpnsenseCache()" class="text-[10px] uppercase tracking-widest opacity-80 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">↻ Refresh Cache</button>`);
     }
@@ -3000,7 +3017,6 @@ function _viewTemplate(viewId) {
   <div class="${card}" id="all-tenants-card">
     <div class="flex justify-between items-center mb-3">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">All Tenants ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
-      <button onclick="loadAllTenantsOverview(true)" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
     </div>
     <div id="all-tenants-overview"><p class="text-sm text-slate-400 italic">Loading tenants…</p></div>
   </div>
@@ -3010,7 +3026,6 @@ function _viewTemplate(viewId) {
   <div class="${card}" id="tenant-summary-card">
     <div class="flex justify-between items-center mb-3">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Summary — <span id="dash-tenant-name" class="text-[#01A982] font-mono normal-case"></span> ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
-      <button onclick="loadDashboardSummary()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
     </div>
     <div id="tenant-summary-grid" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
       <span><b id="dash-devices" class="text-sm text-slate-700">—</b> Devices</span>
@@ -3111,9 +3126,9 @@ function _viewTemplate(viewId) {
             // content is rendered inline into #cs-content by sim-views.js,
             // calling /sim/api/* directly with the lm_session cookie. Tenant
             // scoping reuses the hub's currentTenant global (like netbox/pxmx).
-            // The ↻ Refresh button is a floating bottom-right FAB (consistent
-            // "all refresh buttons at the bottom right"); the auto-refresh
-            // throttle select stays in the top-right toolbar.
+            // No per-page ↻ Refresh button — the global footer Refresh (calls
+            // refreshCurrentView → loadCSData(force=true)) covers it; the
+            // auto-refresh throttle select stays in the top-right toolbar.
             return `<div class="space-y-3">
   <div class="flex justify-end items-center gap-3">
     ${typeof csAutoRefreshControl === 'function' ? csAutoRefreshControl() : ''}
@@ -3122,7 +3137,6 @@ function _viewTemplate(viewId) {
   <div id="cs-content" class="${card}">
     <div class="py-12 text-center text-slate-400 italic">Loading…</div>
   </div>
-  <button onclick="loadCSData(currentSubView, currentSubChild, true)" title="Refresh" class="fixed bottom-4 right-4 z-40 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-md text-xs font-medium transition-all border border-slate-200 shadow-sm">↻ Refresh</button>
 </div>`;
 
         case 'netbox':
@@ -3153,7 +3167,6 @@ function _viewTemplate(viewId) {
     <button onclick="showLeIssueModal()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-3 py-1 rounded-md text-xs font-medium transition-all">＋ Issue certificate</button>
     <button onclick="leRenewAll()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">↻ Renew all</button>
     <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
-    <button onclick="loadLEData()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200">↻ Refresh</button>
     <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
   </div>
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
@@ -3592,7 +3605,6 @@ function _renderSettingsSection(subMenu) {
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-4">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Active Sessions ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <button onclick="loadActiveSessions()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
                     </div>
                     <div class="overflow-hidden rounded-md border border-slate-200">
                         <table class="w-full text-left text-sm">
@@ -3621,7 +3633,6 @@ function _renderSettingsSection(subMenu) {
             <div class="${card} p-6 space-y-5">
                 <div class="flex justify-between items-center">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">API Tokens ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="loadApiTokens()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
                 </div>
                 <p class="text-[11px] text-slate-400 leading-relaxed">Bearer tokens for programmatic API access — they carry <b>your</b> permissions. Send <code>Authorization: Bearer &lt;access&gt;</code>. The access token expires in <b>4 hours</b>; POST the refresh token to <code>/auth/token/refresh</code> to rotate to a fresh pair with no re-login. Tokens are shown <b>once</b> — store them securely.</p>
                 <div class="flex items-end gap-2">
@@ -3716,9 +3727,6 @@ function _renderSetupSpokesTile(content) {
                 <div class="${saCard}">
                     <div class="flex justify-between items-center mb-2">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <div class="flex items-center gap-3">
-                            <button onclick="loadSpokesAndAgents()" class="text-xs text-slate-400 hover:text-slate-600">↻ Refresh</button>
-                        </div>
                     </div>
                     <div id="spokes-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
                 </div>
