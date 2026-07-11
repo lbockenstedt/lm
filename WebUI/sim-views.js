@@ -1314,10 +1314,10 @@ function csClientsLegend() {
         <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-green-500"></span> Online</span>
         <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span> Offline &lt; 30 min</span>
         <span class="flex items-center gap-1.5"><span class="inline-block w-2 h-2 rounded-full bg-red-500"></span> Offline &gt; 30 min</span>
-        <span class="flex items-center gap-1.5">${sw('bg-[#263040] text-white border border-[#263040]')} SID default ON</span>
-        <span class="flex items-center gap-1.5">${sw('bg-white text-[#263040]/70 border border-[#263040]/30')} SID default OFF</span>
+        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/10 text-[#263040] border border-[#263040]')} SID default ON</span>
+        <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} SID default OFF</span>
         <span class="flex items-center gap-1.5">${sw('bg-white text-[#263040] border-2 border-[#263040]')} Override ON</span>
-        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/5 text-[#263040]/60 border border-[#263040]/50')} Override OFF</span>
+        <span class="flex items-center gap-1.5">${sw('bg-[#263040]/5 text-[#263040]/60 border border-[#263040]/40')} Override OFF</span>
         <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
         <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
         <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">0.75 hrs</span> Last Seen over 30 min ago</span>
@@ -1439,21 +1439,17 @@ function csSimBtnClass(on, isOverride) {
     // faint). The override object is pruned server-side when it matches the
     // bucket default (see ClientRegistry.set_overrides), so an override button
     // only appears for a REAL deviation from the bucket.
-    // HPE-navy (#263040, the header color). A light TINT of navy reads grey, so
-    // the ON default is a SOLID navy fill (like the header) and every state uses
-    // navy borders/text so the whole list reads navy, not grey:
-    //   default ON  = solid navy + white text
-    //   default OFF = white + faint navy border + navy text
-    //   override ON = white + BOLD navy border   (a set deviation)
-    //   override OFF= faint navy fill + border
+    // HPE-navy (#263040) with a light fill + solid navy border (the "gradient"
+    // treatment, same as the left-menu active items): filled light-navy = default
+    // ON; navy border = override (bold=on / faint=off); slate = default OFF.
     if (isOverride) {
         return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
             (on ? 'bg-white text-[#263040] border-2 border-[#263040] hover:bg-[#263040]/5'
-                : 'bg-[#263040]/5 text-[#263040]/60 border-[#263040]/50 hover:bg-[#263040]/10');
+                : 'bg-[#263040]/5 text-[#263040]/60 border-[#263040]/40 hover:bg-[#263040]/10');
     }
     return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
-        (on ? 'bg-[#263040] text-white border-[#263040]'
-            : 'bg-white text-[#263040]/70 border-[#263040]/30 hover:bg-[#263040]/5');
+        (on ? 'bg-[#263040]/10 text-[#263040] border-[#263040]'
+            : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-100');
 }
 
 function csClientSimBar(c, host) {
@@ -1637,7 +1633,7 @@ function csDemoCell(hostname) {
         ${csDemoOptions(a ? a.scenario : 'normal')}
       </select>
       <button data-cs-demo-host="${csEscape(hostname)}" onclick="csDemoTrigger(this)"
-        class="bg-blue-100 hover:bg-blue-200 text-blue-700 px-1.5 py-0.5 rounded-md text-[11px] font-bold">Go</button>
+        class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-1.5 py-0.5 rounded-md text-[11px] font-bold">Go</button>
       <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlClear(this)"
         class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-1.5 py-0.5 rounded-md text-[11px] font-bold" title="Clear this client's sim overrides">Clear</button>
     </td>`;
@@ -1726,7 +1722,7 @@ function csControlPanel(hostname) {
       <div class="grid grid-cols-4 gap-2 mb-3">${flags}</div>
       <div class="flex flex-wrap gap-2">
         <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlApply(this)"
-          class="bg-[#01A982] hover:bg-[#018a6c] text-white px-3 py-1.5 rounded-md text-xs font-bold">Apply</button>
+          class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Apply</button>
         <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlClear(this)"
           class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1.5 rounded-md text-xs font-bold">Clear Overrides</button>
         <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlAll(this)"
@@ -2263,7 +2259,7 @@ async function csRenderConfig() {
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">API Config Push ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-2">Paste a JSON config object to push to all spokes (unwrapped at the spoke's <code>_apply_hub_config</code>).</p>
       <textarea id="cs-configpush" rows="10" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500" placeholder='{ "key": "value" }'></textarea>
-      <button onclick="csSaveConfigPush()" class="mt-3 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button>
+      <button onclick="csSaveConfigPush()" class="mt-3 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button>
     </div>`;
 
     // per-spoke config state (desired vs applied) — best-effort read from cache.
@@ -2523,7 +2519,7 @@ async function csRenderConfigSimulation() {
       <p class="text-xs text-slate-400 mb-3">Edit the labeled fields. Saved as the hub-managed <code>sim_conf_override</code> INI and pushed to the spoke (merged on top of the repo's simulation.conf). Clearing a field reverts it to the repo default.</p>
       <div id="cs-ini-sections">${simBody}</div>
       <div class="flex justify-end items-center gap-3 mt-4">
-        <button onclick="csSaveSimConfStructured()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
+        <button onclick="csSaveSimConfStructured()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
         <button onclick="csRenderConfigSimulation()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Refresh</button>
       </div>
     </div>`;
@@ -2731,8 +2727,8 @@ function csRenderUserOverridesCard(uo, uoErr) {
       </div>
       <p class="text-xs text-slate-400 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the simulation profile for that user).</p>
       <div class="flex items-center gap-3 mb-3">
-        <button onclick="csUOAdd()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
-        <button onclick="csUOSave()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
+        <button onclick="csUOAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
+        <button onclick="csUOSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
       </div>
       <div id="cs-uo-cards">${csUORenderCards()}</div>
       <div class="flex justify-end mt-3">
@@ -3219,7 +3215,7 @@ async function csProcessingModesCard() {
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Processing Modes ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${fields}</div>
-      <button onclick="csSaveProcessingModes()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button>
+      <button onclick="csSaveProcessingModes()" class="mt-4 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button>
     </div>`;
 }
 
@@ -3249,7 +3245,7 @@ async function csNotificationsCard() {
         ${f('cs-notif-teams', 'Teams Webhook URL (new)', '', 'password')}
         ${f('cs-notif-emails', 'To Emails (comma-separated)', Array.isArray(n.to_emails) ? n.to_emails.join(', ') : (n.to_emails || ''))}
       </div>
-      <button onclick="csSaveNotifications()" class="mt-4 bg-[#01A982] hover:bg-[#008c6a] text-white px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button>
+      <button onclick="csSaveNotifications()" class="mt-4 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button>
     </div>`;
 }
 
@@ -3377,7 +3373,7 @@ async function csRenderSetupCentralApi() {
         ${f('cs-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token, 'password')}
       </div>
       <div class="flex gap-2 mt-4">
-        <button onclick="csSaveCentralConn()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
+        <button onclick="csSaveCentralConn()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
         <button onclick="csTestCentral()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Central</button>
       </div>
       <div id="cs-csc-test" class="mt-3 text-xs text-slate-500"></div>
@@ -3410,7 +3406,7 @@ async function csRenderSetupCentralApi() {
       <button onclick="csCscAddHw()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add hardware check</button>
 
       <div class="flex gap-2 mt-4">
-        <button onclick="csSaveCentralSites()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
+        <button onclick="csSaveCentralSites()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
       </div>
     </div>`;
 
@@ -3646,7 +3642,7 @@ async function csRenderSetupGithub() {
           ${f('cs-gh-token', 'GitHub Token ' + (cfg.has_token ? '(set — leave blank to keep)' : '(new)'), '', 'password')}
         </div>
         <div class="flex gap-2 mt-4">
-          <button onclick="csSaveGithub()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-2 rounded-md text-sm font-bold">Save</button>
+          <button onclick="csSaveGithub()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save</button>
           <button onclick="csClearGithub()" class="bg-red-100 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Clear</button>
         </div>
       </div></div>`);
@@ -3689,7 +3685,7 @@ async function csRenderSetupSecurity() {
           ${f('cs-sec-timeout', 'Session Timeout (minutes)', cfg.session_timeout_minutes)}
           ${f('cs-sec-provider', 'Auth Provider', cfg.auth_provider)}
         </div>
-        <button onclick="csSaveSecurity()" class="mt-4 bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-2 rounded-md text-sm font-bold">Save</button>
+        <button onclick="csSaveSecurity()" class="mt-4 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save</button>
       </div></div>`);
 }
 
@@ -3945,7 +3941,7 @@ async function csRenderVmServer() {
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Fleet Reclone</p>
         <div class="flex items-center gap-2">
           <input id="cs-fleet-conc" type="number" min="1" value="1" class="w-16 border border-slate-200 rounded-md px-2 py-1 text-sm"/>
-          <button onclick="csFleetReclone()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-3 py-1.5 rounded-md text-xs font-bold">Reclone All</button>
+          <button onclick="csFleetReclone()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Reclone All</button>
         </div>
         <p class="text-[10px] text-slate-400 mt-2">Concurrency controls how many guests reclone in parallel.</p>
       </div>
@@ -4808,7 +4804,7 @@ async function csRenderVmServerQueue(live) {
           <input id="cs-cmd-target" value="${csVmSelectedHostIds.length === 1 ? csEscape([..._scopeHosts][0] || '') : ''}" class="border border-slate-200 rounded-md px-2 py-1 w-40" placeholder="proxmox"/></div>
         <div><label class="text-xs text-slate-400">Args JSON</label>
           <input id="cs-cmd-args" class="border border-slate-200 rounded-md px-2 py-1 w-56" placeholder='{"vmid":90050}'/></div>
-        <button onclick="csSendCommand()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-3 py-1.5 rounded-md text-xs font-bold">Send</button>
+        <button onclick="csSendCommand()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Send</button>
         <button onclick="csClearCommands()" class="bg-red-100 text-red-700 px-3 py-1.5 rounded-md text-xs font-bold">Clear Queue</button>
       </div></div>`;
     csSet(`<div>${csVmHostBanner()}${sendForm}
@@ -5076,7 +5072,7 @@ async function csRenderSpokeManagement() {
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
         <input id="cs-claim-id" placeholder="spoke-id" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
         <input id="cs-claim-psk" placeholder="onboarding PSK" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono">
-        <button onclick="csClaimSpoke()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-2 rounded-md text-sm font-bold shadow-sm">Claim</button>
+        <button onclick="csClaimSpoke()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold shadow-sm">Claim</button>
       </div>
     </div>`;
 
@@ -5171,7 +5167,7 @@ async function csSpokeMgmtPskCard() {
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <div class="flex justify-between items-center mb-3">
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding PSK <span class="text-slate-400 normal-case font-normal">· tenant ${csEscape(tenant)}</span> ${helpIcon('cs', null, 'Simulations help')}</h3>
-        <button onclick="csSpokeMgmtGenPsk()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-1.5 rounded-md text-xs font-bold shadow-sm">+ Generate</button>
+        <button onclick="csSpokeMgmtGenPsk()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-xs font-bold shadow-sm">+ Generate</button>
       </div>
       ${psks.length ? csTable(['PSK', ''], rows) : '<p class="text-xs text-slate-400 italic py-4 text-center">No PSKs issued.</p>'}
       ${deploy}
