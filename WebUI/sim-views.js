@@ -1308,15 +1308,22 @@ async function csPersistFlagToUserOverrides(host, flag, value) {
         const cur = await csFetch(`/${csTenant()}/config/user-overrides-conf`);
         const state = csParseIni((cur && cur.content) || '');
         const merged = Object.assign({}, state[user] || {});
-        merged[flag] = value;
+        // An empty/null value REMOVES the flag. A pruned override (reverted to the
+        // bucket default) must be DELETED from user-overrides.conf, not written as
+        // flag=off — otherwise turning an override OFF leaves it lingering here.
+        if (value === '' || value === null || value === undefined) {
+            delete merged[flag];
+        } else {
+            merged[flag] = value;
+        }
         state[user] = merged;
         let text = '';
         for (const [u, kv] of Object.entries(state)) {
+            const lines = Object.entries(kv).filter(
+                ([, v]) => !(v === '' || v === null || v === undefined));
+            if (!lines.length) continue;  // drop sections left with no values
             text += `[${u}]\n`;
-            for (const [k, v] of Object.entries(kv)) {
-                if (v === '' || v === null || v === undefined) continue;
-                text += `${k}=${v}\n`;
-            }
+            for (const [k, v] of lines) text += `${k}=${v}\n`;
             text += '\n';
         }
         await csFetch(`/${csTenant()}/config/user-overrides-conf`,
@@ -1348,9 +1355,13 @@ window.csSimToggle = async function (btn) {
     try {
         const r = await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
             { method: 'POST', body: JSON.stringify({ overrides: { [flag]: next } }) });
-        await csPersistFlagToUserOverrides(host, flag, next);
         const newOv = (r && r.overrides) || {};
         const isOv = Object.prototype.hasOwnProperty.call(newOv, flag);
+        // Mirror to user-overrides.conf using the POST-PRUNE result: a real
+        // override persists its value; a PRUNED override (reverted to the bucket/
+        // simulation default) is REMOVED from user-overrides.conf, not written as
+        // flag=off. Do this after the prune check so a revert clears the override.
+        await csPersistFlagToUserOverrides(host, flag, isOv ? String(newOv[flag]) : '');
         // When pruned, the flag reverted to the bucket default = the value the
         // user just chose (on/off), shown as a NON-override (bucket) button.
         const on = isOv ? ['on', 'true', '1'].includes(String(newOv[flag]).toLowerCase())
