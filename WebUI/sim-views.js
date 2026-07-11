@@ -345,10 +345,18 @@ function csTable(headers, rowsHtml, opts = {}) {
     // opts.headerHtml: optional array (same length as headers) of raw HTML to
     // use for a given column's <th> instead of the escaped header text — used
     // by the VM Server VMs table to put a "select all" checkbox in the header.
+    // opts.colWidths: optional array (same length as headers) of CSS widths
+    // (e.g. '180px' / '7rem') emitted as a <colgroup> so wide tables (the
+    // 11-column Clients table) get tunable per-column widths instead of auto.
     const rawHeaders = opts.headerHtml || [];
     const ths = headers.map((h, i) => `<th class="px-4 py-2 text-left font-semibold">${rawHeaders[i] || csEscape(h)}</th>`).join('');
+    const colWidths = opts.colWidths;
+    const colgroup = (Array.isArray(colWidths) && colWidths.length)
+        ? `<colgroup>${colWidths.map(w => `<col style="width:${csEscape(String(w))}">`).join('')}</colgroup>`
+        : '';
     return `<div class="overflow-x-auto">
       <table class="w-full text-sm">
+        ${colgroup}
         <thead class="bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">${ths}</thead>
         <tbody class="divide-y divide-slate-100">${rowsHtml || `<tr><td class="px-4 py-8 text-center text-slate-400 italic" colspan="${headers.length}">No data.</td></tr>`}</tbody>
       </table>
@@ -1182,8 +1190,8 @@ function csNormalizeClients(data) {
 // per-simulation override buttons. The original hid the override panel behind a
 // "Control" button; here the sim buttons are always visible inline on line 2,
 // each showing whether that sim is currently running and toggling a per-client
-// override on click. Columns: Hostname, Platform, Status, Tier, SSID, Last Seen,
-// Errors, Demo.
+// override on click. Columns: Hostname, Site, Sim-ID, PHY, OS, Status, Tier,
+// SSID, Last Seen, Errors, Demo.
 const CS_CLIENT_COLS = 11;
 function csRenderClientRows(rows) {
     const body = csEl('cs-client-body') || csEl('cs-content');
@@ -1217,8 +1225,12 @@ function csRenderClientRows(rows) {
         return line1 + line2;
     }).join('');
     body.innerHTML = csTable(
-        ['Hostname', 'Site', 'Sim-ID', 'PHY', 'Platform', 'Status', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
-        rowHtml
+        ['Hostname', 'Site', 'Sim-ID', 'PHY', 'OS', 'Status', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
+        rowHtml,
+        // First-pass column widths — wide table (11 cols). Tunable: adjust
+        // these and the header order as needed.
+        { colWidths: ['190px', '90px', '70px', '80px', '90px', '80px', '60px',
+                      '130px', '110px', '70px', '230px'] }
     );
     csDemoStartTicker();
 }
@@ -1230,7 +1242,19 @@ function csRenderClientRows(rows) {
 // map, so csSimToggle sends every flag for the host with the clicked one flipped
 // (POST /clients/{host}/control {overrides:{flag:on/off}} — same endpoint the
 // original Apply used). "Clear" removes all overrides for the client.
-function csSimBtnClass(on) {
+function csSimBtnClass(on, isOverride) {
+    // isOverride (truthy) → border-ONLY purple, same color family as the filled
+    // bucket-default-on button, so an operator can tell a per-client override
+    // apart from the bucket default at a glance. Filled purple = bucket-on;
+    // slate border = bucket-off; purple border = override (on = bold, off =
+    // faint). The override object is pruned server-side when it matches the
+    // bucket default (see ClientRegistry.set_overrides), so an override button
+    // only appears for a REAL deviation from the bucket.
+    if (isOverride) {
+        return 'px-2 py-0.5 rounded-md text-[11px] font-bold border transition-colors ' +
+            (on ? 'bg-white text-purple-700 border-2 border-purple-500 hover:bg-purple-50'
+                : 'bg-white text-purple-400 border-purple-200 hover:bg-purple-50');
+    }
     return 'px-2 py-0.5 rounded-md text-[11px] font-bold border transition-colors ' +
         (on ? 'bg-purple-100 text-purple-700 border-purple-300'
             : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-100');
@@ -1249,11 +1273,16 @@ function csClientSimBar(c, host) {
         return active.has(f) ||
             ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
     };
+    // An override button exists iff the registry has an entry for this flag
+    // (the pruned-override object only carries REAL deviations from the bucket,
+    // so this is the signal to render border-only purple).
+    const isOv = f => Object.prototype.hasOwnProperty.call(ov, f);
     const btns = CS_CONTROL_FLAGS.map(f => {
         const on = isOn(f);
-        return `<button data-cs-sim-host="${csEscape(host)}" data-cs-sim-flag="${csEscape(f)}" data-cs-sim-on="${on ? '1' : '0'}"
-          onclick="csSimToggle(this)" title="Click to ${on ? 'disable' : 'enable'} ${csEscape(f)} on ${csEscape(host)}"
-          class="${csSimBtnClass(on)}">${csEscape(f)}</button>`;
+        const ovFlag = isOv(f);
+        return `<button data-cs-sim-host="${csEscape(host)}" data-cs-sim-flag="${csEscape(f)}" data-cs-sim-on="${on ? '1' : '0'}" data-cs-sim-ov="${ovFlag ? '1' : '0'}"
+          onclick="csSimToggle(this)" title="${ovFlag ? 'Override' : 'Bucket'}: ${csEscape(f)} ${on ? 'on' : 'off'} on ${csEscape(host)} — click to ${on ? 'disable' : 'enable'}"
+          class="${csSimBtnClass(on, ovFlag)}">${csEscape(f)}</button>`;
     }).join('');
     return `<div class="flex flex-wrap items-center gap-1.5">
       ${btns}
@@ -1303,15 +1332,30 @@ window.csSimToggle = async function (btn) {
     // disturb the others. Also mirror the flag into user-overrides.conf so the
     // Config/Simulations "User Overrides" card stays in sync. "Clear" drops all
     // overrides for the client.
+    //
+    // The spoke PRUNES the override server-side when the new value matches the
+    // pure bucket default (so toggling OFF a sim that's already off by default
+    // reverts to the bucket instead of leaving flag:"off"). The spoke response
+    // carries the post-prune overrides, so we read it back: if `flag` is absent
+    // the override was pruned → the button reverts to the bucket-default style
+    // (border-only OFF / filled ON); if present it's a real override → border-
+    // only purple.
     csCtlMsg(host, `${next === 'on' ? 'Enabling' : 'Disabling'} ${flag}…`, true);
     try {
-        await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
+        const r = await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
             { method: 'POST', body: JSON.stringify({ overrides: { [flag]: next } }) });
         await csPersistFlagToUserOverrides(host, flag, next);
-        btn.dataset.csSimOn = next === 'on' ? '1' : '0';
-        btn.className = csSimBtnClass(next === 'on');
-        btn.title = `Click to ${next === 'on' ? 'disable' : 'enable'} ${flag} on ${host}`;
-        csCtlMsg(host, `${flag} ${next}`, true);
+        const newOv = (r && r.overrides) || {};
+        const isOv = Object.prototype.hasOwnProperty.call(newOv, flag);
+        // When pruned, the flag reverted to the bucket default = the value the
+        // user just chose (on/off), shown as a NON-override (bucket) button.
+        const on = isOv ? ['on', 'true', '1'].includes(String(newOv[flag]).toLowerCase())
+                        : (next === 'on');
+        btn.dataset.csSimOn = on ? '1' : '0';
+        btn.dataset.csSimOv = isOv ? '1' : '0';
+        btn.className = csSimBtnClass(on, isOv);
+        btn.title = `${isOv ? 'Override' : 'Bucket'}: ${flag} ${on ? 'on' : 'off'} on ${host} — click to ${on ? 'disable' : 'enable'}`;
+        csCtlMsg(host, `${flag} ${next}${isOv ? '' : ' (bucket)'}`, true);
         if (typeof showToast === 'function') showToast(`${flag} ${next} on ${host}`, 'success');
     } catch (e) { console.error('csSimToggle failed', e); csCtlMsg(host, e.message || 'failed', false); }
 };
@@ -1818,7 +1862,7 @@ async function csRenderCentralClients() {
         const isMon = site && monitored.has(String(site));
         const btn = !site ? '—' : (isMon
             ? `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(site))}, false, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this client's site">✓ Site monitored</button>`
-            : `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(site))}, true, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (client-count on the dashboard)">Monitor site</button>`);
+            : `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(site))}, true, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (client-count on the dashboard)">Monitor</button>`);
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(cl.hostname || cl.mac || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.ip || '—')}</td>
