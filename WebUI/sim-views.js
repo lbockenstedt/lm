@@ -1688,6 +1688,84 @@ function _csCentralWarn(data) {
     return data && data.warning ? `<div class="text-xs text-amber-600 mb-3">${csEscape(data.warning)}</div>` : '';
 }
 
+// ── Central shared table: clickable column sort + Monitored on/off filter ────
+// The five Central tabs (Sites/Alerts/Insights/Clients/Hardware) each render a
+// table with a per-row Monitor toggle. This wrapper gives them click-to-sort on
+// any column header (▲/▼ marks the active column; click toggles asc/desc) and a
+// quick All / On / Off filter above the table for the Monitored flag (when
+// opts.monitorOf is supplied). Sort + filter state is kept per table-id across
+// re-renders, so toggling a Monitor button (which re-fetches + re-renders the
+// tab) preserves the user's sort/filter. Re-sorting/re-filtering is LOCAL — it
+// rebuilds only the table slot from the cached rows in _csCentralTbl[id], never
+// re-hitting Central.
+const _csCentralTbl = {};   // id -> {columns, rows, opts, sort:{col,dir}|null, filter:'all'|'mon'|'unmon'}
+
+function csCentralTable(id, columns, rows, opts = {}) {
+    // columns: [{label, render(row)->html, sort(row)->comparable, width?}]
+    // opts.monitorOf: (row)->bool  — enables the Monitored All/On/Off filter
+    // opts.caption:   small grey caption rendered under the filter row
+    const st = _csCentralTbl[id] || (_csCentralTbl[id] = { sort: null, filter: 'all' });
+    st.columns = columns; st.rows = rows; st.opts = opts;
+    return `<div id="cs-central-table-${csEscape(id)}">${_csCentralTableBuild(id)}</div>`;
+}
+
+function _csCentralTableBuild(id) {
+    const st = _csCentralTbl[id]; if (!st) return '';
+    const { columns, rows, opts, sort, filter } = st;
+    const monOf = opts.monitorOf || null;
+    let view = rows;
+    if (monOf && filter !== 'all') view = rows.filter(r => filter === 'mon' ? !!monOf(r) : !monOf(r));
+    if (sort && columns[sort.col] && typeof columns[sort.col].sort === 'function') {
+        const ci = sort.col, dir = sort.dir, acc = columns[ci].sort;
+        view = view.slice().sort((a, b) => {
+            const av = acc(a), bv = acc(b);
+            let cmp;
+            if (typeof av === 'number' && typeof bv === 'number') cmp = av - bv;
+            else {
+                const as = String(av == null ? '' : av).toLowerCase();
+                const bs = String(bv == null ? '' : bv).toLowerCase();
+                cmp = as < bs ? -1 : as > bs ? 1 : 0;
+            }
+            return dir === 'desc' ? -cmp : cmp;
+        });
+    }
+    const ths = columns.map((c, i) => {
+        const active = sort && sort.col === i;
+        const arrow = active ? (sort.dir === 'desc' ? ' ▼' : ' ▲') : '';
+        const w = c.width ? ` style="width:${csEscape(String(c.width))}"` : '';
+        return `<th${w} class="px-3 py-2 text-left font-semibold cursor-pointer select-none hover:text-slate-700" onclick="csCentralSort('${csEscape(id)}', ${i})" title="Sort by ${csEscape(c.label)}">${csEscape(c.label)}${active ? `<span class="text-slate-400">${arrow}</span>` : ''}</th>`;
+    }).join('');
+    const body = view.length
+        ? view.map(r => `<tr>${columns.map(c => `<td class="px-3 py-2">${c.render(r)}</td>`).join('')}</tr>`).join('')
+        : `<tr><td class="px-3 py-8 text-center text-slate-400 italic" colspan="${columns.length}">No data.</td></tr>`;
+    let bar = '';
+    if (monOf) {
+        const nMon = rows.filter(r => monOf(r)).length;
+        const mk = (val, label) => `<button onclick="csCentralFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-purple-100 text-purple-700 border-purple-300' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        bar = `<div class="flex items-center gap-2 mb-3">
+            <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
+            ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
+        </div>`;
+    }
+    const caption = opts.caption ? `<div class="text-xs text-slate-400 mb-2">${csEscape(opts.caption)}</div>` : '';
+    return `${bar}${caption}<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">${ths}</thead><tbody class="divide-y divide-slate-100">${body}</tbody></table></div>`;
+}
+
+// Click handlers — local re-render from the cached rows (NO Central refetch).
+window.csCentralSort = function (id, col) {
+    const st = _csCentralTbl[id]; if (!st) return;
+    if (st.sort && st.sort.col === col) st.sort.dir = st.sort.dir === 'asc' ? 'desc' : 'asc';
+    else st.sort = { col, dir: 'asc' };
+    const wrap = document.getElementById(`cs-central-table-${id}`);
+    if (wrap) wrap.innerHTML = _csCentralTableBuild(id);
+};
+window.csCentralFilter = function (id, val) {
+    const st = _csCentralTbl[id]; if (!st) return;
+    st.filter = val;
+    const wrap = document.getElementById(`cs-central-table-${id}`);
+    if (wrap) wrap.innerHTML = _csCentralTableBuild(id);
+};
+
 async function csRenderCentral() {
     csSetToolbar('');
     // Browse (full site inventory) + the monitoring config, so each row shows a
@@ -1714,16 +1792,18 @@ async function csRenderCentral() {
         const btn = isMon
             ? `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(name))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this site's client count">✓ Monitored</button>`
             : `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(name))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count for change (shows on the dashboard)">Monitor</button>`;
-        return `<tr>
-      <td class="px-3 py-2 font-medium text-slate-700">${csEscape(name || '—')}</td>
-      <td class="px-3 py-2">${st.health_score != null && st.health_score !== '' ? csEscape(st.health_score) : '—'}</td>
-      <td class="px-3 py-2 font-bold text-slate-700">${csEscape(st.wireless_clients != null ? st.wireless_clients : 0)}</td>
-      <td class="px-3 py-2 ${nAlerts ? 'text-amber-600 font-bold' : 'text-slate-400'}">${nAlerts}</td>
-      <td class="px-3 py-2 ${nInsights ? 'text-slate-600' : 'text-slate-400'}">${nInsights}</td>
-      <td class="px-3 py-2">${name ? btn : ''}</td>
-    </tr>`;
-    }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard</div>${csTable(['Site', 'Health', 'Clients', 'Alerts', 'Insights', 'Monitor'], rows)}</div></div>`);
+        return { name, health: st.health_score, clients: st.wireless_clients != null ? st.wireless_clients : 0,
+                 alerts: nAlerts, insights: nInsights, monitored: isMon, btn: name ? btn : '' };
+    });
+    const siteCols = [
+        { label: 'Site',     render: r => `<span class="font-medium text-slate-700">${csEscape(r.name || '—')}</span>`, sort: r => r.name || '' },
+        { label: 'Health',   render: r => r.health != null && r.health !== '' ? csEscape(r.health) : '—', sort: r => (r.health == null || r.health === '' ? -1 : Number(r.health) || 0) },
+        { label: 'Clients',  render: r => `<span class="font-bold text-slate-700">${csEscape(r.clients)}</span>`, sort: r => r.clients },
+        { label: 'Alerts',   render: r => `<span class="${r.alerts ? 'text-amber-600 font-bold' : 'text-slate-400'}">${r.alerts}</span>`, sort: r => r.alerts },
+        { label: 'Insights', render: r => `<span class="${r.insights ? 'text-slate-600' : 'text-slate-400'}">${r.insights}</span>`, sort: r => r.insights },
+        { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-sites', siteCols, rows, { monitorOf: r => r.monitored, caption: `${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard` })}</div></div>`);
 }
 
 // Enroll / un-enroll a Central site for client-count monitoring by toggling it in
@@ -1771,6 +1851,7 @@ async function csRenderCentralAlerts() {
     if (!alerts.length) { csSet(`${warn}${csEmpty('No active Central alerts.', 'Active alerts come from Central /network-notifications/v1/alerts.')}`); return; }
     const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
         .filter(c => c && c.type === 'alert').map(c => `${c.id}::${c.site || ''}`));
+    const _sevRank = { critical: 4, error: 3, fail: 3, failed: 3, warning: 2, degraded: 2, info: 1, unknown: 0 };
     const rows = alerts.map(a => {
         const id = String((a.name || a.category) || '').trim();
         const name = a.name || a.category || id;
@@ -1779,15 +1860,17 @@ async function csRenderCentralAlerts() {
         const btn = !id ? '—' : (isMon
             ? `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
             : `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
-        return `<tr>
-      <td class="px-3 py-2 text-sm">${csEscape(a.name || '—')}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(a.site || '—')}</td>
-      <td class="px-3 py-2">${csStatusBadge(a.severity || 'warning')}</td>
-      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(a.category || '—')}</td>
-      <td class="px-3 py-2">${btn}</td>
-    </tr>`;
-    }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${alerts.length} active alert(s)</div>${csTable(['Alert', 'Site', 'Severity', 'Category', 'Monitor'], rows)}</div></div>`);
+        return { name: a.name || '—', site: a.site || '—', severity: a.severity || 'warning',
+                 category: a.category || '—', monitored: !!isMon, btn };
+    });
+    const alertCols = [
+        { label: 'Alert',    render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
+        { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Severity', render: r => csStatusBadge(r.severity), sort: r => _sevRank[String(r.severity).toLowerCase()] || 0 },
+        { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
+        { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} active alert(s)` })}</div></div>`);
 }
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
@@ -1815,14 +1898,16 @@ async function csRenderCentralInsights() {
         const btn = !id ? '—' : (isMon
             ? `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
             : `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
-        return `<tr>
-      <td class="px-3 py-2 text-sm">${csEscape(i.name || '—')}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(i.category || '—')}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(i.site || '—')}</td>
-      <td class="px-3 py-2">${btn}</td>
-    </tr>`;
-    }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${insights.length} insight(s)</div>${csTable(['Insight', 'Category', 'Site', 'Monitor'], rows)}</div></div>`);
+        return { name: i.name || '—', category: i.category || '—', site: i.site || '—',
+                 monitored: !!isMon, btn };
+    });
+    const insightCols = [
+        { label: 'Insight',  render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
+        { label: 'Category', render: r => `<span class="text-slate-500">${csEscape(r.category)}</span>`, sort: r => r.category },
+        { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
 }
 
 // Toggle an insight (or alert) TYPE in central_sites_config.monitored_checks
@@ -1867,16 +1952,18 @@ async function csRenderCentralClients() {
         const btn = !site ? '—' : (isMon
             ? `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(site))}, false, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this client's site">✓ Site monitored</button>`
             : `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(site))}, true, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (client-count on the dashboard)">Monitor</button>`);
-        return `<tr>
-      <td class="px-3 py-2 text-sm">${csEscape(cl.hostname || cl.mac || '—')}</td>
-      <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.ip || '—')}</td>
-      <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.mac || '—')}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(cl.site || '—')}</td>
-      <td class="px-3 py-2">${csStatusBadge(cl.status || 'unknown')}</td>
-      <td class="px-3 py-2">${btn}</td>
-    </tr>`;
-    }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${clients.length} client(s)</div>${csTable(['Client', 'IP', 'MAC', 'Site', 'Status', 'Monitor'], rows)}</div></div>`);
+        return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
+                 site: cl.site || '—', status: cl.status || 'unknown', monitored: !!isMon, btn };
+    });
+    const clientCols = [
+        { label: 'Client',  render: r => `<span class="text-sm">${csEscape(r.host)}</span>`, sort: r => r.host },
+        { label: 'IP',      render: r => `<span class="font-mono text-xs">${csEscape(r.ip)}</span>`, sort: r => r.ip },
+        { label: 'MAC',     render: r => `<span class="font-mono text-xs">${csEscape(r.mac)}</span>`, sort: r => r.mac },
+        { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
+        { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
 }
 
 // ── Central → Hardware (device-down check types) ─────────────────────────────
@@ -1918,16 +2005,18 @@ async function csRenderCentralHardware() {
         const btn = !id ? '—' : (isMon
             ? `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
             : `<button onclick="csToggleMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
-        return `<tr>
-      <td class="px-3 py-2 text-sm text-slate-700">${csEscape(name)}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(dt || '—')}</td>
-      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(d.model || '—')}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(site || '—')}</td>
-      <td class="px-3 py-2">${csStatusBadge(d.status || 'unknown')}</td>
-      <td class="px-3 py-2">${btn}</td>
-    </tr>`;
-    }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${devices.length} device(s) — Monitor a switch / AP / gateway to track it on the dashboard</div>${csTable(['Device', 'Type', 'Model', 'Site', 'Status', 'Monitor'], rows)}</div></div>`);
+        return { name, type: dt || '—', model: d.model || '—', site: site || '—',
+                 status: d.status || 'unknown', monitored: !!isMon, btn };
+    });
+    const hwCols = [
+        { label: 'Device',  render: r => `<span class="text-sm text-slate-700">${csEscape(r.name)}</span>`, sort: r => r.name },
+        { label: 'Type',    render: r => `<span class="text-slate-500">${csEscape(r.type)}</span>`, sort: r => r.type },
+        { label: 'Model',   render: r => `<span class="text-slate-500 text-xs">${csEscape(r.model)}</span>`, sort: r => r.model },
+        { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
+        { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-hardware', hwCols, rows, { monitorOf: r => r.monitored, caption: `${devices.length} device(s) — Monitor a switch / AP / gateway to track it on the dashboard` })}</div></div>`);
 }
 
 // Toggle a hardware check in central_sites_config.hardware_checks (keyed by id),
