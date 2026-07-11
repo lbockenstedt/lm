@@ -4,7 +4,7 @@
  * whose demo dropdown triggers a 2h auto-reverting simulation. */
 'use strict';
 
-var TONE = { operational: 'op', degraded: 'deg', down: 'down', nodata: 'nodata' };
+var TONE = { operational: 'op', degraded: 'deg', down: 'down', nodata: 'nodata', unknown: 'deg' };
 var BANNER_TEXT = { op: 'All Systems Operational', deg: 'Partial Degradation', down: 'Major Outage' };
 var _clientTick = null;
 
@@ -38,10 +38,12 @@ async function loadStatus() {
     document.getElementById('updated').textContent = 'Updated ' + (ago < 60 ? ago + 's' : Math.round(ago / 60) + 'm') + ' ago';
   }
 
+  var raw = String(data.overall || '').toLowerCase();
   var t = tone(data.overall);
   var banner = document.getElementById('banner');
   banner.className = 'banner ' + t;
-  document.getElementById('banner-text').textContent = BANNER_TEXT[t] || 'Status Unknown';
+  document.getElementById('banner-text').textContent =
+    raw === 'unknown' ? 'Awaiting status data…' : (BANNER_TEXT[t] || 'Status Unknown');
 
   var uptime = data.uptime || {};
   var comps = data.components || [];

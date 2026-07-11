@@ -39,12 +39,14 @@ try:
 except ImportError:  # loaded from the repo root / as core package
     from core.src.base_spoke import BaseSpoke
 
+# Unique module names (statuspage_*) so a multi-role agent's sys.modules cache
+# can't collide these with a same-named module (`web`/`history`) from another role.
 try:
-    from history import UptimeHistory
-    from web import build_status_app
+    from statuspage_history import UptimeHistory
+    from statuspage_web import build_status_app
 except ImportError:  # loaded as a package by the agent role loader
-    from .history import UptimeHistory  # type: ignore
-    from .web import build_status_app  # type: ignore
+    from .statuspage_history import UptimeHistory  # type: ignore
+    from .statuspage_web import build_status_app  # type: ignore
 
 logger = logging.getLogger("StatusPageSpoke")
 
