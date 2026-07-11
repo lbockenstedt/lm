@@ -3101,12 +3101,12 @@ function _viewTemplate(viewId) {
         case 'le':
             return `<div class="space-y-6">
   <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
-  <div class="flex justify-end gap-2">
+  <div class="flex items-center gap-2">
     <button onclick="showLeIssueModal()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-3 py-1 rounded-md text-xs font-medium transition-all">＋ Issue certificate</button>
-    <button onclick="showHeLoginModal()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200" title="Store a Hurricane Electric account login, reused for every HE account-login DNS-01">🔑 HE account</button>
     <button onclick="leRenewAll()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">↻ Renew all</button>
     <button onclick="leDistributeNow()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
     <button onclick="loadLEData()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200">↻ Refresh</button>
+    <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
   </div>
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
@@ -12474,6 +12474,151 @@ async function saveHeLogin() {
         showToast('Hurricane Electric login saved', 'success');
         document.getElementById('he-login-modal')?.remove();
     } catch (e) { alert('Save failed: ' + e.message); }
+}
+
+// ── Per-tenant DNS-01 credential manager (settings screen) ───────────────────
+// Multi-tenant, multi-provider: each tenant keeps named credentials for
+// he-login / cloudflare / rfc2136 / route53. Certs pick one BY NAME at issue.
+const DNS_CRED_PROVIDERS = {
+    'he-login':   { label: 'Hurricane Electric (account login)', fields: [
+        { k: 'username', label: 'Account email', type: 'text' },
+        { k: 'password', label: 'Account password', type: 'password', secret: true } ] },
+    'cloudflare': { label: 'Cloudflare (API token)', fields: [
+        { k: 'api_token', label: 'API token (Zone.DNS edit)', type: 'password', secret: true } ] },
+    'rfc2136':    { label: 'RFC2136 dynamic DNS (TSIG)', fields: [
+        { k: 'server', label: 'DNS server (IP address)', type: 'text', placeholder: 'e.g. 192.0.2.53' },
+        { k: 'name', label: 'TSIG key name', type: 'text' },
+        { k: 'secret', label: 'TSIG key secret', type: 'password', secret: true },
+        { k: 'algorithm', label: 'Algorithm', type: 'text', placeholder: 'HMAC-SHA512' } ] },
+    'route53':    { label: 'AWS Route 53', fields: [
+        { k: 'access_key_id', label: 'AWS access key ID', type: 'text' },
+        { k: 'secret_access_key', label: 'AWS secret access key', type: 'password', secret: true } ] },
+};
+
+async function showDnsCredentialsModal() {
+    const modal = document.createElement('div');
+    modal.id = 'dns-creds-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    const provOpts = Object.entries(DNS_CRED_PROVIDERS).map(([k, v]) => `<option value="${k}">${escapeHtml(v.label)}</option>`).join('');
+    modal.innerHTML = `
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
+        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <h3 class="text-lg font-bold text-[#263040]">DNS-01 credentials</h3>
+          <button onclick="document.getElementById('dns-creds-modal').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
+        </div>
+        <div class="p-6 space-y-4 overflow-y-auto">
+          <p class="text-xs text-slate-500">Saved DNS-01 credentials for <b>your tenant</b>. A certificate picks one by name when issuing via DNS-01. Secrets are stored on the le spoke (0600) and never shown again — leave a secret blank when editing to keep it.</p>
+          <div id="dns-creds-list" class="space-y-2"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+          <div class="border-t border-slate-200 pt-4">
+            <h4 id="dns-cred-form-title" class="text-sm font-bold text-slate-600 mb-2">Add a credential</h4>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Name</label>
+                <input id="dns-cred-name" type="text" placeholder="e.g. HE - lrbtech" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Provider</label>
+                <select id="dns-cred-provider" onchange="dnsCredRenderFields()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${provOpts}</select></div>
+            </div>
+            <div id="dns-cred-fields" class="grid grid-cols-2 gap-3 mt-3"></div>
+            <div class="flex justify-end gap-2 mt-3">
+              <button onclick="dnsCredResetForm()" class="px-3 py-1.5 text-sm text-slate-600 hover:text-slate-800">Clear</button>
+              <button onclick="saveDnsCredential()" class="bg-[#01A982] hover:bg-[#008c6a] text-white px-4 py-1.5 rounded-md text-sm font-bold">Save credential</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    dnsCredRenderFields();
+    await dnsCredReloadList();
+}
+
+function dnsCredRenderFields(values) {
+    const p = document.getElementById('dns-cred-provider')?.value;
+    const def = DNS_CRED_PROVIDERS[p];
+    const box = document.getElementById('dns-cred-fields');
+    if (!def || !box) return;
+    values = values || {};
+    const secretsSet = values.__secrets__ || {};
+    box.innerHTML = def.fields.map(f => `
+      <div class="flex flex-col">
+        <label class="text-[11px] text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
+        <input id="dns-cred-f-${f.k}" type="${f.type}" value="${f.secret ? '' : escapeHtml(values[f.k] || '')}"
+               placeholder="${f.secret && secretsSet[f.k] ? '(keep stored)' : (f.placeholder ? escapeHtml(f.placeholder) : '')}"
+               autocomplete="off" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+      </div>`).join('');
+}
+
+async function dnsCredReloadList() {
+    const box = document.getElementById('dns-creds-list');
+    if (!box) return;
+    let creds = [];
+    try {
+        const r = await _spokeFetch('/api/le/dns-credentials', { method: 'GET' });
+        const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
+        creds = d.credentials || [];
+    } catch (e) { box.innerHTML = `<p class="text-sm text-red-500">Could not load: ${escapeHtml(e.message)}</p>`; return; }
+    if (!creds.length) { box.innerHTML = '<p class="text-sm text-slate-400 italic">No credentials yet — add one below.</p>'; return; }
+    box.innerHTML = creds.map(c => {
+        const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
+        return `<div class="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2">
+          <div><span class="text-sm font-medium text-slate-700">${escapeHtml(c.name)}</span>
+            <span class="text-[11px] text-slate-400 ml-2">${escapeHtml(label)}</span></div>
+          <div class="flex gap-2">
+            <button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded px-2 py-1">Edit</button>
+            <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-1">Delete</button>
+          </div></div>`;
+    }).join('');
+}
+
+function dnsCredEdit(c) {
+    const nameEl = document.getElementById('dns-cred-name');
+    const provEl = document.getElementById('dns-cred-provider');
+    if (nameEl) nameEl.value = c.name || '';
+    if (provEl) provEl.value = c.provider || 'he-login';
+    const title = document.getElementById('dns-cred-form-title');
+    if (title) title.textContent = 'Edit "' + (c.name || '') + '"';
+    dnsCredRenderFields({ ...(c.fields || {}), __secrets__: c.secrets_set || {} });
+}
+
+function dnsCredResetForm() {
+    const nameEl = document.getElementById('dns-cred-name'); if (nameEl) nameEl.value = '';
+    const title = document.getElementById('dns-cred-form-title'); if (title) title.textContent = 'Add a credential';
+    dnsCredRenderFields();
+}
+
+async function saveDnsCredential() {
+    const name = document.getElementById('dns-cred-name')?.value?.trim() || '';
+    const provider = document.getElementById('dns-cred-provider')?.value || '';
+    if (!name) { alert('Credential name is required.'); return; }
+    const def = DNS_CRED_PROVIDERS[provider];
+    const fields = {};
+    def.fields.forEach(f => {
+        const v = document.getElementById('dns-cred-f-' + f.k)?.value ?? '';
+        if (v !== '' || !f.secret) fields[f.k] = v;  // empty secret → omit (keep stored)
+    });
+    try {
+        const r = await _spokeFetch('/api/le/dns-credentials', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, provider, fields }),
+        });
+        const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
+        if (!r.ok || d.status === 'ERROR') { alert('Save failed: ' + (d.message || r.detail || '')); return; }
+        showToast('DNS credential saved', 'success');
+        dnsCredResetForm();
+        await dnsCredReloadList();
+    } catch (e) { alert('Save failed: ' + e.message); }
+}
+
+async function deleteDnsCredential(name) {
+    if (!confirm('Delete DNS credential "' + name + '"?')) return;
+    try {
+        const r = await _spokeFetch('/api/le/dns-credentials', {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
+        if (!r.ok || d.status === 'ERROR') { alert('Delete failed: ' + (d.message || r.detail || '')); return; }
+        showToast('DNS credential deleted', 'success');
+        await dnsCredReloadList();
+    } catch (e) { alert('Delete failed: ' + e.message); }
 }
 
 async function leRenewCert(domain) {
