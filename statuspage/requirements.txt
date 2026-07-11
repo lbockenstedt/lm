@@ -1,0 +1,5 @@
+# Status Page role — its own uvicorn web server for the public status page.
+# BaseSpoke + control_plane deps (websockets, cryptography) come from the agent
+# base requirements; these are the role-specific additions.
+fastapi
+uvicorn[standard]

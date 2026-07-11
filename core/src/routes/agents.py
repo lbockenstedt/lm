@@ -46,6 +46,7 @@ def register(app, hub, ctx):
                 "cppm": "cppm", "cs": "simulation", "dhcp": "dhcp", "dns": "dns",
                 "ldap": "ldap", "netbox": "netbox", "opnsense": "opnsense",
                 "pxmx": "proxmox", "nw": "network", "le": "le", "console": "console",
+                "statuspage": "statuspage",
             }.get(module_id, module_id)
             result = await hub.request_response(agent_id, "LOAD_ROLE", {"role": role})
             return result

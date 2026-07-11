@@ -447,6 +447,7 @@ const AGENT_ROLES = {
     'proxmox':    { name: 'Hypervisor (Proxmox / pxmx)', desc: 'Proxmox spoke bridging the hub to per-host pxmx agents (VM lifecycle, VNC console, USB auto-provisioning).', deploy: false },
     'le':         { name: 'Certificate Management (Let\'s Encrypt)', desc: 'Issues/renews prod Let\'s Encrypt certs via certbot (HTTP-01 / DNS-01) and serves them to the hub for distribution to target spokes (e.g. OPNsense). Installs certbot + DNS-01 plugins.', deploy: false },
     'console':    { name: 'Console Server', desc: 'Serial console access to attached hardware (USB adapters + on-board UART). Auto-detects baud, auto-identifies devices, and relays an xterm.js terminal through the hub.', deploy: false },
+    'statuspage': { name: 'Simulation Status Page', desc: 'Public, read-only status page for one tenant — cloud-provider style (overall banner, per-component status, 90-day uptime history) plus a Clients view whose demo dropdown lets visitors trigger a live 2h simulation. Bind it to a tenant; the hub pushes that tenant\'s redacted dashboard down. Serves its own HTTPS page (cert via the le role).', deploy: false },
     'bugfixer':   { name: 'BugFixer', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
 };
 

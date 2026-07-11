@@ -72,7 +72,7 @@ _UPDATE_SOURCE_PREFIX_MAP = {
 # tree (the class of bug that broke lm-opnsense). Role sub-spokes that DO have
 # their own repo (firewall→opnsense, ipam→netbox, …) resolve via
 # _UPDATE_SOURCE_MODULE_KEY above and are unaffected.
-_IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "console"}
+_IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "console", "statuspage"}
 
 # Canonical default for the hub's own repo. Used to fall back when
 # ``global_config["update_sources"]["hub"]`` is absent OR an empty string. An

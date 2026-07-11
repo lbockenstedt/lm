@@ -301,6 +301,7 @@ stage_role() {
         dns)        ROLE_REQ="$INSTALL_DIR/dns/requirements.txt" ;;
         dhcp)       ROLE_REQ="$INSTALL_DIR/dhcp/requirements.txt" ;;
         console)    ROLE_REQ="$INSTALL_DIR/console/requirements.txt" ;;   # in-repo (pyserial); agent runs as root so /dev/tty* needs no dialout
+        statuspage) ROLE_REQ="$INSTALL_DIR/statuspage/requirements.txt" ;;   # in-repo (fastapi/uvicorn); serves the public status page on its own port
         network)    ROLE_REPO="https://github.com/lbockenstedt/nw.git";        ROLE_CLONE_DIR="nw";       ROLE_REQ="$INSTALL_DIR/nw/requirements.txt" ;;
         netbox)     ROLE_REPO="https://github.com/lbockenstedt/netbox.git";    ROLE_CLONE_DIR="netbox";   ROLE_REQ="$INSTALL_DIR/netbox/requirements.txt" ;;
         opnsense)   ROLE_REPO="https://github.com/lbockenstedt/opnsense.git";  ROLE_CLONE_DIR="opnsense"; ROLE_REQ="$INSTALL_DIR/opnsense/requirements.txt" ;;
@@ -310,7 +311,7 @@ stage_role() {
         proxmox)    ROLE_REPO="https://github.com/lbockenstedt/pxmx.git";      ROLE_CLONE_DIR="pxmx";     ROLE_REQ="$INSTALL_DIR/pxmx/requirements.txt" ;;
         le)         ROLE_REPO="https://github.com/lbockenstedt/le.git";        ROLE_CLONE_DIR="le";       ROLE_REQ="$INSTALL_DIR/le/requirements.txt"
                     ROLE_APT="certbot python3-certbot-dns-cloudflare python3-certbot-dns-route53 openssl" ;;
-        *) echo "❌ Unknown role '$role'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm proxmox le console"; exit 1 ;;
+        *) echo "❌ Unknown role '$role'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage"; exit 1 ;;
     esac
 
     if [[ -n "$ROLE_REPO" ]]; then
@@ -410,6 +411,22 @@ if [[ ",$STARTUP_ROLES_CSV," == *,proxmox,* ]] && $AGENT_COLOCATED; then
 LM_PXMX_AGENT_LOOPBACK=1
 LM_PXMX_AGENT_PORT=8443
 EOF
+fi
+# Status-page role serves its public page on :443 by default (one-tenant-per-box
+# is the intended deployment). Co-located with the hub, :443 is taken, so move it
+# to :8080 so both bind. TLS material (public cert) is delivered later via the le
+# role → STATUS_SET_CERT (or set LM_STATUS_TLS_CERT/KEY here for a manual cert).
+if [[ ",$STARTUP_ROLES_CSV," == *,statuspage,* ]]; then
+    if $AGENT_COLOCATED; then
+        echo "ℹ️  Co-located: status page on :8080 (hub owns :443)."
+        cat >> "$ENV_FILE" <<EOF
+LM_STATUS_PORT=8080
+EOF
+    else
+        cat >> "$ENV_FILE" <<EOF
+LM_STATUS_PORT=443
+EOF
+    fi
 fi
 chmod 600 "$ENV_FILE"
 

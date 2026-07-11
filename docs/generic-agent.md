@@ -37,10 +37,11 @@ role's live status.
 
 ## Key commands / handlers
 
-- **Agent-spoke `_ROLE_MAP`** (11 hosted roles — rel_path, class, module_type, repo):
+- **Agent-spoke `_ROLE_MAP`** (12 hosted roles — rel_path, class, module_type, repo):
   - `dns` → `dns/src/dns_spoke.py::DNSSpoke` (`dns`, in-repo)
   - `dhcp` → `dhcp/src/dhcp_spoke.py::DHCPSpoke` (`dhcp`, in-repo)
   - `console` → `console/src/console_spoke.py::ConsoleSpoke` (`console`, in-repo)
+  - `statuspage` → `statuspage/src/statuspage_spoke.py::StatusPageSpoke` (`statuspage`, in-repo) — one-tenant public status page; serves its own HTTPS page (fastapi/uvicorn), hub pushes the tenant's redacted `STATUS_SNAPSHOT`.
   - `network` → `nw/src/nw_spoke.py::NwSpoke` (`nw`, `lbockenstedt/nw.git`)
   - `netbox` → `netbox/src/netbox_spoke.py::NetboxSpoke` (`ipam`, `lbockenstedt/netbox.git`)
   - `opnsense` → `opnsense/src/opn_spoke.py::OpnSpoke` (`firewall`, `lbockenstedt/opnsense.git`)

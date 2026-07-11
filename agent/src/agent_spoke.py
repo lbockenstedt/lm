@@ -45,6 +45,7 @@ _ROLE_MAP = {
     "proxmox":    ("pxmx/src/proxmox_spoke.py",     "ProxmoxSpoke", "hypervisor", "https://github.com/lbockenstedt/pxmx.git"),
     "le":         ("le/src/le_spoke.py",            "LESpoke",   "certificates", "https://github.com/lbockenstedt/le.git"),
     "console":    ("console/src/console_spoke.py",  "ConsoleSpoke", "console",   None),
+    "statuspage": ("statuspage/src/statuspage_spoke.py", "StatusPageSpoke", "statuspage", None),
 }
 
 # Logger-name prefixes each role emits under. Used by the multi-role agent's
@@ -83,6 +84,7 @@ _ROLE_LOG_PREFIXES: Dict[str, tuple] = {
     "proxmox":    ("Proxmox", "Pxmx"),
     "le":         ("LE", "le."),
     "console":    ("Console",),
+    "statuspage": ("StatusPageSpoke",),
 }
 
 # Deploy roles: instead of morphing the agent into a service, these run an

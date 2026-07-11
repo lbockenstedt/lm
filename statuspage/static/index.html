@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulation Status</title>
+<style>
+  :root {
+    --bg: #f7f8fa; --card: #ffffff; --text: #1f2430; --muted: #6b7280;
+    --border: #e6e8ec; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.04);
+    --op: #16a34a; --op-bg: #dcfce7; --deg: #d97706; --deg-bg: #fef3c7;
+    --down: #dc2626; --down-bg: #fee2e2; --nodata: #d1d5db;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1116; --card: #171b22; --text: #e6e8ec; --muted: #9aa4b2;
+      --border: #262c36; --shadow: none;
+      --op: #34d399; --op-bg: #064e3b; --deg: #fbbf24; --deg-bg: #4a3306;
+      --down: #f87171; --down-bg: #4c1010; --nodata: #374151;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 32px 20px 64px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+  header h1 { font-size: 20px; font-weight: 650; margin: 0; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .banner { border-radius: 12px; padding: 20px 22px; margin-bottom: 28px; display: flex;
+    align-items: center; gap: 14px; font-size: 18px; font-weight: 600; box-shadow: var(--shadow); }
+  .banner .dot { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .banner.op { background: var(--op-bg); color: var(--op); }
+  .banner.deg { background: var(--deg-bg); color: var(--deg); }
+  .banner.down { background: var(--down-bg); color: var(--down); }
+  .banner.op .dot { background: var(--op); } .banner.deg .dot { background: var(--deg); } .banner.down .dot { background: var(--down); }
+  .tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid var(--border); }
+  .tab { padding: 9px 16px; cursor: pointer; color: var(--muted); font-weight: 550; font-size: 14px;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab.active { color: var(--text); border-bottom-color: var(--op); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: var(--shadow); overflow: hidden; }
+  .row { padding: 16px 20px; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: none; }
+  .row .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .row .name { font-weight: 550; }
+  .pill { font-size: 12px; font-weight: 650; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+  .pill.op { background: var(--op-bg); color: var(--op); }
+  .pill.deg { background: var(--deg-bg); color: var(--deg); }
+  .pill.down { background: var(--down-bg); color: var(--down); }
+  .detail { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+  .bars { display: flex; gap: 2px; margin-top: 12px; height: 30px; align-items: stretch; }
+  .bars .tick { flex: 1 1 0; border-radius: 2px; min-width: 2px; }
+  .bars .tick.op { background: var(--op); } .bars .tick.deg { background: var(--deg); }
+  .bars .tick.down { background: var(--down); } .bars .tick.nodata { background: var(--nodata); opacity: .45; }
+  .barmeta { display: flex; justify-content: space-between; color: var(--muted); font-size: 11.5px; margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 12px 20px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tr:last-child td { border-bottom: none; }
+  .last-ok { color: var(--muted); } .last-stale { color: var(--down); font-weight: 600; }
+  select, button { font: inherit; }
+  select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--text); }
+  button.run { padding: 6px 12px; border: none; border-radius: 8px; background: var(--op); color: #fff; font-weight: 600; cursor: pointer; }
+  button.run:disabled { opacity: .5; cursor: not-allowed; }
+  tr.demo-active { background: var(--deg-bg); }
+  .bolt { color: var(--deg); font-weight: 700; }
+  .countdown { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--deg); }
+  .foot { color: var(--muted); font-size: 12px; text-align: center; margin-top: 28px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1 id="tenant-name">Simulation Status</h1>
+        <div class="sub" id="updated">Loading…</div>
+      </div>
+    </header>
+
+    <div class="banner deg" id="banner"><span class="dot"></span><span id="banner-text">Loading status…</span></div>
+
+    <div class="tabs">
+      <div class="tab active" id="tab-status" onclick="showTab('status')">Status</div>
+      <div class="tab" id="tab-clients" onclick="showTab('clients')">Clients</div>
+    </div>
+
+    <div id="view-status">
+      <div class="card" id="components"><div class="row"><span class="detail">Loading components…</span></div></div>
+    </div>
+
+    <div id="view-clients" class="hidden">
+      <div class="card">
+        <table>
+          <thead><tr><th>Client</th><th>Status</th><th>Last Seen</th><th>Run Demo</th></tr></thead>
+          <tbody id="clients-body"><tr><td colspan="4" class="detail">Loading clients…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="foot">Auto-refreshes every 15s · Public read-only status page</div>
+  </div>
+  <script src="/static/statuspage.js"></script>
+</body>
+</html>
