@@ -13681,7 +13681,7 @@ async function showAddUserModal() {
     modal.id = 'add-user-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">Add New User</h3>
                 <button onclick="closeAddUserModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
@@ -13700,7 +13700,7 @@ async function showAddUserModal() {
                     <label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-400 normal-case font-normal">(leave blank to set later)</span></label>
                     <input type="password" id="new-user-password" placeholder="••••••••" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                 </div>
-                <div class="grid grid-cols-2 gap-4">
+                <div class="grid grid-cols-4 gap-3">
                     ${tadm ? '' : `<div><label class="text-xs text-slate-500 uppercase font-bold" title="System-wide admin (all tenants + system config)">Global Admin</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-admin" onchange="document.getElementById('perm-tenant_admin').checked = false" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold" title="Tenant-level admin (admin within assigned tenants only)">Admin (tenant)</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-tenant_admin" onchange="document.getElementById('perm-admin').checked = false" class="w-4 h-4 text-amber-600 border-slate-300 rounded focus:ring-amber-500"></div></div>`}
                     <div><label class="text-xs text-slate-500 uppercase font-bold">View</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-view" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
