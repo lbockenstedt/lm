@@ -8389,8 +8389,18 @@ function _normalizePxmxAgent(a) {
  */
 function _logLineKey(log) {
     return String(log)
+        // Normalize the legacy two-line relay shape
+        //   "[src] <ts> <name> <LEVEL>\n<msg>"   (space-sep, msg on next line)
+        // to the canonical single-line shape
+        //   "[src] <ts> - <name> - <LEVEL> - <msg>"
+        // so both on-the-wire formats key identically and group together.
+        // Some spokes (older cs builds) still relay uvicorn.access this way;
+        // the canonical dash-sep shape is left untouched (it has no newline
+        // right after the level, so this regex won't match it).
+        .replace(/^(\[[^\]]*\]\s*)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(\S+)\s+([A-Z]+)[ \t]*\r?\n/, '$1$2 - $3 - $4 - ')
         .replace(/^\[[^\]]*\]\s*/, '')                                       // leading [source] prefix
         .replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[,.]\d+)?\s*-\s*/, '')  // timestamp (+ optional ,ms/.ms)
+        .replace(/\b\d{1,3}(?:\.\d{1,3}){3}:\d+\b/g, '<addr>')               // client IP:port (uvicorn.access) — ephemeral port varies per request
         .replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, '<uuid>')  // per-request UUID (Request Timeout / Request / Late reply)
         .replace(/\b\d+(?:\.\d+)?(?:ms|s|us)\b/g, '<T>')                      // duration (5.0s / 160s / 30ms)
         .replace(/(\b\w+)=\d+\b/g, '$1=<N>');                                 // counter (queue=16 / uptime_s=0)
@@ -8409,8 +8419,12 @@ function _renderLogLineRow(log, count, lineRowFn) {
     else if (u.includes(' DEBUG ')) { cls = 'text-slate-400'; }
     // Highlight timestamp + source for both prefixed spoke logs
     // (`[lm-svcs-netbox] <ts> - Source - LEVEL - msg`) and bare hub logs
-    // (`<ts> - Source - LEVEL - msg`).
-    const tsMatch = log.match(/^(?:\[([^\]]*)\]\s*)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+?) - ([A-Z]+) - (.*)$/s);
+    // (`<ts> - Source - LEVEL - msg`). Also accept the legacy two-line relay
+    // shape (`[src] <ts> <name> <LEVEL>\n<msg>` — space-sep, no dashes, message
+    // on the next line) so older cs spoke builds render with the same
+    // header + indented-message display and collapse via _logLineKey.
+    const tsMatch = log.match(/^(?:\[([^\]]*)\]\s*)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - ([^-]+?) - ([A-Z]+) - ([\s\S]*)$/)
+        || log.match(/^(?:\[([^\]]*)\]\s*)?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+(\S+)\s+([A-Z]+)[ \t]*\r?\n([\s\S]*)$/);
     const badge = count && count > 1
         ? `<span class="ml-2 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-slate-200 text-slate-600 align-middle whitespace-nowrap" title="${count} identical events (same except timestamp) — click to expand">×${count}</span>`
         : '';
