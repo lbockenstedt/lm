@@ -167,6 +167,83 @@ class SimulationsService:
                     "config": c.get("config") or {},
                     "overrides": c.get("overrides") or {},
                 })
+        # Dedup by hostname across spokes: the same client can be cached by
+        # more than one cs spoke. The common cause is a per-client override
+        # being set on the tenant's PRIMARY cs spoke (CS_SET_CLIENT_OVERRIDES
+        # is forwarded via hub.get_client_sim_spoke(), which may NOT be the
+        # spoke the client is actually connected to); registry.set_overrides
+        # then creates a phantom registry entry on that primary spoke, so BOTH
+        # spokes report the hostname — the real connection on one + an
+        # override-only stub on the other. Without dedup the Clients view
+        # showed two rows for one user. Collapse to one row per hostname,
+        # MERGING so the single row carries BOTH the authoritative bucket sim
+        # (from the online connection) AND the per-client override (from
+        # whichever spoke holds it). Mirrors the get_proxmox_data cross-spoke
+        # dedup; rows with no hostname are kept as-is (unique).
+        def _ckey(c: dict) -> str:
+            return str(c.get("hostname") or c.get("id") or "").strip().lower()
+
+        def _ls(c: dict) -> float:
+            ls = c.get("last_seen")
+            try:
+                return float(ls)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _crank(c: dict):
+            # online first, then most active sims, then most recent last_seen.
+            return (1 if c.get("online") else 0,
+                    len(c.get("active_simulations") or []), _ls(c))
+
+        best: Dict[str, dict] = {}
+        order: List[str] = []
+        extras: List[dict] = []
+        for c in rows:
+            k = _ckey(c)
+            if not k:
+                extras.append(c)
+                continue
+            if k not in best:
+                best[k] = c
+                order.append(k)
+                continue
+            # Keep the richer row as the base (online real connection wins over
+            # an override-only phantom) so its bucket sim / tier / config /
+            # simulation_id survive; fold the other row's overrides +
+            # active_simulations + last_seen in.
+            a, b = best[k], c
+            if _crank(b) > _crank(a):
+                a, b = b, a
+                best[k] = a
+            # Union active simulations (preserve order, dedup case-insensitively).
+            acts = list(a.get("active_simulations") or [])
+            seen = {str(s).lower() for s in acts}
+            for s in (b.get("active_simulations") or []):
+                if str(s).lower() not in seen:
+                    acts.append(s)
+                    seen.add(str(s).lower())
+            a["active_simulations"] = acts
+            # Merge overrides: the base's authoritative value wins for a key it
+            # already has set; the folded row fills any key the base lacks (this
+            # is how the phantom's freshly-set override lands on the real
+            # client's row).
+            ov = dict(a.get("overrides") or {})
+            for ok, ov_b in (b.get("overrides") or {}).items():
+                if ov.get(ok) in (None, "", [], {}):
+                    ov[ok] = ov_b
+            a["overrides"] = ov
+            # online is OR; last_seen is the most recent; error_count the max so
+            # a real error isn't masked by the phantom's 0.
+            if b.get("online"):
+                a["online"] = True
+            if _ls(b) > _ls(a):
+                a["last_seen"] = b.get("last_seen")
+            try:
+                a["error_count"] = max(int(a.get("error_count") or 0),
+                                        int(b.get("error_count") or 0))
+            except (TypeError, ValueError):
+                pass
+        rows = [best[k] for k in order] + extras
         return {"tenant_id": tenant_id, "clients": rows}
 
     async def get_simulations_data(self, tenant_id: str) -> Dict[str, Any]:
