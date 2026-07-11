@@ -1440,11 +1440,11 @@ function csSimBtnClass(on, isOverride) {
     // bucket default (see ClientRegistry.set_overrides), so an override button
     // only appears for a REAL deviation from the bucket.
     if (isOverride) {
-        return 'px-[0.19rem] py-[0.064rem] rounded text-[12px] font-bold border transition-colors ' +
+        return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
             (on ? 'bg-white text-purple-700 border-2 border-purple-500 hover:bg-purple-50'
                 : 'bg-white text-purple-400 border-purple-200 hover:bg-purple-50');
     }
-    return 'px-[0.19rem] py-[0.064rem] rounded text-[12px] font-bold border transition-colors ' +
+    return 'px-[0.152rem] py-[0.051rem] rounded text-[12px] font-bold border transition-colors ' +
         (on ? 'bg-purple-100 text-purple-700 border-purple-300'
             : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-100');
 }
@@ -1480,7 +1480,7 @@ function csClientSimBar(c, host) {
     // message sit on their own line below.
     const _simCols = Math.max(1, Math.ceil(CS_CONTROL_FLAGS.length / 2));
     return `<div class="space-y-1.5">
-      <div class="grid gap-1 overflow-x-auto pb-0.5" style="grid-template-columns: repeat(${_simCols}, minmax(58px, 1fr));">${btns}</div>
+      <div class="grid gap-1 overflow-x-auto pb-0.5" style="grid-template-columns: repeat(${_simCols}, minmax(46px, 1fr));">${btns}</div>
       <div class="flex items-center gap-1.5">
         <span id="${csEscape(csCtlId(host, 'msg'))}" class="text-[11px] text-slate-400"></span>
       </div>
