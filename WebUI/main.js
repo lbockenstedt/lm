@@ -3545,7 +3545,7 @@ function _renderSettingsSection(subMenu) {
                                 <input type="number" id="rl-capacity" min="1" step="1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                             <label class="text-xs text-slate-500">Refill (msg/s)<br>
                                 <input type="number" id="rl-fillrate" min="0.1" step="0.1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
-                            <button onclick="saveRateLimit()" id="rl-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
+                            <button onclick="saveRateLimit()" id="rl-save-btn" class="ml-auto text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
                         </div>
                         <p class="text-[10px] text-slate-400 mt-2">Applies to each spoke on its next (re)connect. Raise both for relay spokes hosting many agents / at scale.</p>
                     </div>
