@@ -696,21 +696,36 @@ function _applyEditVisibility() {
     document.documentElement.classList.toggle('lm-no-edit', !canEdit());
 }
 
+// Single fixed top-right toast container. Toasts append as flex-column
+// children so the stack REFLOWS automatically when one is dismissed — no
+// per-toast fixed top offsets (the old `1.5 + stack*4.0rem` math overlapped
+// the moment a toast between two others was removed (stack count dropped) or
+// a multi-line toast grew past the 4rem step). Mirrors the cs local UI's
+// #cs-toast-region. Lazily created on first toast.
+function _lmToastRegion() {
+    let el = document.getElementById('lm-toast-region');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'lm-toast-region';
+        el.style.cssText = 'position:fixed;top:1.5rem;right:1.5rem;z-index:9999;' +
+            'display:flex;flex-direction:column;gap:.5rem;max-width:22rem;';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
 function showToast(message, type = 'info') {
     const colors = { success: '#01A982', error: '#e53e3e', info: '#4a5568' };
     const toast = document.createElement('div');
     toast.className = 'lm-toast';
-    // Stack under any toasts already on screen so simultaneous ones (e.g. Apply
-    // Schema's result + warning) don't overlap. Top-right of the viewport.
-    const stack = document.querySelectorAll('.lm-toast').length;
-    const topOffset = 1.5 + stack * 4.0; // rem
+    // Appended to the shared #lm-toast-region flex column — the container
+    // handles position + stacking; each toast just styles itself.
     toast.style.cssText = `
-        position:fixed;top:${topOffset}rem;right:1.5rem;z-index:9999;
         display:flex;align-items:center;gap:.75rem;
         background:${colors[type] || colors.info};color:#fff;
         padding:.75rem 1rem .75rem 1.25rem;border-radius:.5rem;font-size:.875rem;
         box-shadow:0 4px 12px rgba(0,0,0,.2);opacity:0;
-        transition:opacity .2s ease;max-width:20rem;`;
+        transition:opacity .2s ease;width:100%;box-sizing:border-box;`;
     const text = document.createElement('span');
     text.style.cssText = 'flex:1;white-space:pre-line;';
     text.textContent = message;
@@ -728,7 +743,7 @@ function showToast(message, type = 'info') {
     closeBtn.addEventListener('mouseleave', () => { closeBtn.style.opacity = '.75'; });
     closeBtn.addEventListener('click', dismiss);
     toast.appendChild(closeBtn);
-    document.body.appendChild(toast);
+    _lmToastRegion().appendChild(toast);
     requestAnimationFrame(() => { toast.style.opacity = '1'; });
     setTimeout(dismiss, window.TOAST_DURATION_MS || 10000);
 }
@@ -743,15 +758,12 @@ function showConfirmToast(message, opts = {}) {
     return new Promise((resolve) => {
         const toast = document.createElement('div');
         toast.className = 'lm-toast';
-        const stack = document.querySelectorAll('.lm-toast').length;
-        const topOffset = 1.5 + stack * 4.0; // rem
         toast.style.cssText = `
-            position:fixed;top:${topOffset}rem;right:1.5rem;z-index:9999;
             display:flex;flex-direction:column;gap:.6rem;
             background:#263040;color:#fff;
             padding:.85rem 1rem;border-radius:.5rem;font-size:.875rem;
             box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;
-            transition:opacity .2s ease;max-width:22rem;`;
+            transition:opacity .2s ease;width:100%;box-sizing:border-box;`;
         const text = document.createElement('div');
         text.style.cssText = 'white-space:pre-line;line-height:1.35;';
         text.textContent = message;
@@ -783,7 +795,7 @@ function showConfirmToast(message, opts = {}) {
         row.appendChild(okBtn);
         toast.appendChild(row);
 
-        document.body.appendChild(toast);
+        _lmToastRegion().appendChild(toast);
         requestAnimationFrame(() => { toast.style.opacity = '1'; });
         okBtn.focus();
         timer = setTimeout(() => close(false), window.CONFIRM_TOAST_DURATION_MS || 12000);
@@ -798,15 +810,12 @@ function showPromptToast(message, opts = {}) {
     return new Promise((resolve) => {
         const toast = document.createElement('div');
         toast.className = 'lm-toast';
-        const stack = document.querySelectorAll('.lm-toast').length;
-        const topOffset = 1.5 + stack * 4.0;
         toast.style.cssText = `
-            position:fixed;top:${topOffset}rem;right:1.5rem;z-index:9999;
             display:flex;flex-direction:column;gap:.6rem;
             background:#263040;color:#fff;
             padding:.85rem 1rem;border-radius:.5rem;font-size:.875rem;
             box-shadow:0 4px 12px rgba(0,0,0,.25);opacity:0;
-            transition:opacity .2s ease;max-width:22rem;`;
+            transition:opacity .2s ease;width:100%;box-sizing:border-box;`;
         const text = document.createElement('div');
         text.style.cssText = 'white-space:pre-line;line-height:1.35;';
         text.textContent = message;
@@ -849,7 +858,7 @@ function showPromptToast(message, opts = {}) {
         row.appendChild(okBtn);
         toast.appendChild(row);
 
-        document.body.appendChild(toast);
+        _lmToastRegion().appendChild(toast);
         requestAnimationFrame(() => { toast.style.opacity = '1'; });
         input.focus();
         timer = setTimeout(() => close(null), window.PROMPT_TOAST_DURATION_MS || 30000);
