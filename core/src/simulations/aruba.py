@@ -490,14 +490,14 @@ class ArubaClient:
 
             # Count insights per site so MONITORED insight checks (enrolled from
             # the Central -> Insights tab) evaluate on the dashboard. Keyed
-            # category||name to match the WebUI monitored-check id. Insights carry
+            # name||category to match the WebUI monitored-check id. Insights carry
             # a site NAME (or "All Sites" for global); _new_central_insights is
             # cached so this adds no extra API call within the TTL.
             for ins in await self._new_central_insights():
                 ins_site = str(ins.get("site") or "").strip()
                 if ins_site and ins_site.lower() not in (site.lower(), "all sites"):
                     continue
-                cat = str(ins.get("category") or ins.get("name") or "").strip()
+                cat = str(ins.get("name") or ins.get("category") or "").strip()
                 if cat:
                     insight_cat_counts[cat] = insight_cat_counts.get(cat, 0) + 1
 

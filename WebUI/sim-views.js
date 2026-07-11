@@ -1675,7 +1675,7 @@ async function csRenderCentralAlerts() {
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
 // Displays live insights (/network-notifications/v1/insights) with a Monitor
-// toggle per row. Monitoring adds {type:'insight', id:category||name, name} to
+// toggle per row. Monitoring adds {type:'insight', id:name||category, name} to
 // central_sites_config.monitored_checks; the new_central poller counts insights
 // per site by that same key so the enrolled insight's status shows on the
 // dashboard Checks tab.
@@ -1691,7 +1691,7 @@ async function csRenderCentralInsights() {
     const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
         .filter(c => c && c.type === 'insight').map(c => String(c.id)));
     const rows = insights.map(i => {
-        const id = String((i.category || i.name) || '').trim();
+        const id = String((i.name || i.category) || '').trim();
         const name = i.name || i.category || id;
         const isMon = id && monSet.has(id);
         const btn = !id ? '—' : (isMon
