@@ -2508,7 +2508,7 @@ async function csRenderConfigSimulation() {
           ${cfgSource === 'hub'
             ? '<span class="inline-block bg-emerald-100 text-emerald-700 rounded-full px-2 py-0.5 text-[10px] font-bold">Hub-owned (GitHub sync ignored)</span>'
             : (cfgWritable
-              ? '<span class="inline-block bg-blue-100 text-blue-700 rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed (commits on save)</span>'
+              ? '<span class="inline-block bg-[#01A982]/10 text-[#01A982] border border-[#01A982] rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed (commits on save)</span>'
               : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed — READ-ONLY (no API key)</span>')}
           ${simSource === 'spoke' ? '' : (simConnected
             ? '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke online — live config fetch timed out, showing stored override</span>'
