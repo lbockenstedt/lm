@@ -1776,13 +1776,11 @@ async function csRenderCentralClients() {
       <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.ip || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(cl.mac || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(cl.site || '—')}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(cl.ap || '—')}</td>
-      <td class="px-3 py-2 text-slate-500">${csEscape(cl.ssid || '—')}</td>
       <td class="px-3 py-2">${csStatusBadge(cl.status || 'unknown')}</td>
       <td class="px-3 py-2">${btn}</td>
     </tr>`;
     }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${clients.length} client(s)</div>${csTable(['Client', 'IP', 'MAC', 'Site', 'AP', 'SSID', 'Status', 'Monitor'], rows)}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${clients.length} client(s)</div>${csTable(['Client', 'IP', 'MAC', 'Site', 'Status', 'Monitor'], rows)}</div></div>`);
 }
 
 // ── Central → Hardware (device-down check types) ─────────────────────────────
