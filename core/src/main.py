@@ -4136,6 +4136,48 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         dur = max(1, min(24, g["window_duration_h"]))
         return any((start + i) % 24 == h for i in range(dur))
 
+    def _compute_version_drift(self):
+        """Footer version-indicator drift computation (called every watchdog
+        bridge cycle). Returns ``(target_version, running_version, behind,
+        update_available)``:
+
+        - ``target_version``  — the on-disk VERSION file (latest pulled code).
+        - ``running_version`` — what THIS process is actually running: the
+          in-memory ``_startup_version`` captured once at boot from the same
+          file. NOT a re-read of the file — a ``git pull`` rewrites VERSION, so
+          re-reading it would make running == target even right after a pull
+          (while the process still serves the old code) and ``behind`` would
+          never flip. ``_startup_version`` only moves on a real restart, so
+          disk-vs-_startup_version IS disk-vs-running. Falls back to the
+          running-version FILE (written at boot) only if ``_startup_version`` is
+          somehow unset.
+        - ``behind``          — True when a newer VERSION is on disk but the hub
+          hasn't restarted into it yet (disk != running). Both sides must be
+          non-empty (never false-yellow on an unreadable file).
+        - ``update_available`` — remote-ahead-not-pulled, cached by
+          ``check_update_health`` (see update_pipeline). The dot is yellow on
+          EITHER signal.
+        """
+        target_ver = ""
+        try:
+            vp = os.path.join(os.path.dirname(__file__), "../../VERSION")
+            if not os.path.exists(vp):
+                vp = os.path.join(os.path.dirname(__file__), "../VERSION")
+            with open(vp) as vf:
+                target_ver = vf.read().strip()
+        except Exception:  # noqa: BLE001
+            pass
+        running_ver = getattr(self, "_startup_version", "") or ""
+        if not running_ver:
+            try:
+                with open("/var/lib/lm/state/running-version") as rf:
+                    running_ver = rf.read().strip()
+            except Exception:  # noqa: BLE001
+                pass
+        behind = bool(target_ver and running_ver and target_ver != running_ver)
+        update_avail = bool(getattr(self, "_update_available", False))
+        return target_ver, running_ver, behind, update_avail
+
     async def run_watchdog_bridge_loop(self):
         """Bridge the ROOT lm-watchdog to the hub, every ~20s:
           1. Write the active-user count to a file the watchdog reads before a
@@ -4205,37 +4247,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     if os.path.isfile(status_file):
                         with open(status_file, "r") as f:
                             hb = f.read().strip()
-                    # Version-drift for the footer indicator: the hub's VERSION
-                    # file is the latest pulled code; the running-version sentinel
-                    # is what THIS hub is actually running (written at startup).
-                    # behind = a newer version is on disk but the hub hasn't
-                    # restarted into it yet (the watchdog will, in-window). Equal →
-                    # up to date. Read VERSION via the SAME path resolution as
-                    # get_local_version / the startup write (the checkout this
-                    # process runs from), NOT a hardcoded /opt/lm/VERSION — a dev
-                    # box running from a different tree would otherwise read the
-                    # wrong file and `behind` would never (or always) flip.
-                    _target_ver = _running_ver = ""
-                    try:
-                        _vp = os.path.join(os.path.dirname(__file__), "../../VERSION")
-                        if not os.path.exists(_vp):
-                            _vp = os.path.join(os.path.dirname(__file__), "../VERSION")
-                        with open(_vp) as _vf:
-                            _target_ver = _vf.read().strip()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    try:
-                        with open("/var/lib/lm/state/running-version") as _rf:
-                            _running_ver = _rf.read().strip()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    _behind = bool(_target_ver and _running_ver
-                                   and _target_ver != _running_ver)
-                    # update_available = a newer version is on the REMOTE but not
-                    # yet pulled (set by check_update_health each repo_sync cycle).
-                    # The dot is yellow on EITHER signal: behind (pulled, pending
-                    # restart) OR update_available (remote ahead, not yet pulled).
-                    _update_avail = bool(getattr(self, "_update_available", False))
+                    # Version-drift for the footer indicator (extracted into
+                    # _compute_version_drift so the disk-vs-running logic is
+                    # unit-testable without standing up the full watchdog loop).
+                    _target_ver, _running_ver, _behind, _update_avail = (
+                        self._compute_version_drift())
                     self._watchdog_status = {
                         "armed": armed,
                         "heartbeat": hb,
@@ -5168,7 +5184,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             cpu = psutil.cpu_percent(interval=None)
             mem = psutil.virtual_memory()
             disk = psutil.disk_usage('/')
-            version = await self.get_local_version()
+            # The footer version is what THIS process is RUNNING, not what's on
+            # disk: get_local_version() re-reads the VERSION file every /status
+            # call, so right after a `git pull` bumps VERSION it would show the
+            # new version while the hub is still serving the OLD code — a
+            # misleading "I'm on .573" while the running process is .572. The
+            # in-memory _startup_version (captured once at boot from the same
+            # file) is the running version; it only moves when the process
+            # actually restarts. Fall back to the disk read only before start()
+            # sets _startup_version (a pre-ready /status poll).
+            version = getattr(self, "_startup_version", None) or await self.get_local_version()
 
             return {
                 "cpu_util": cpu,
