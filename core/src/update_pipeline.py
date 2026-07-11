@@ -1100,6 +1100,16 @@ class UpdatePipelineMixin:
         data: Dict[str, Any] = {"repo_url": repo_url, "branch": branch}
         if extra_data:
             data.update(extra_data)
+        # Mark the spoke DRAINING the instant we push SPOKE_UPDATE. The spoke is
+        # about to git pull + os._exit+relaunch; while draining the hub queues
+        # CS_CONFIG_UPDATE (and other request/reply) pushes to the mailbox
+        # instead of firing a 5s request_response that would time out when the WS
+        # drops mid-reply on exit. The spoke also reports 'draining: true' in its
+        # CS_TELEMETRY (refreshes the window) and 'draining: false' after restart
+        # (clears it); this mark covers the gap before the spoke's first draining
+        # frame arrives. Shared across all three fan-out paths.
+        if hasattr(self, "mark_draining"):
+            self.mark_draining(spoke_id)
         msg = Message(
             header=MessageHeader(
                 message_id=str(uuid.uuid4()),
