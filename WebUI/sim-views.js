@@ -1419,7 +1419,7 @@ function csRenderClientRows(rows, targetId) {
         // Column widths (10 cols — Status column dropped; status is now a dot by
         // the hostname). Tunable: adjust these and the header order as needed.
         { colWidths: ['200px', '90px', '70px', '80px', '90px', '60px',
-                      '216px', '132px', '70px', '300px'] }
+                      '216px', '132px', '35px', '300px'] }
     );
     csDemoStartTicker();
 }
