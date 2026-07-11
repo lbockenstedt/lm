@@ -734,7 +734,7 @@ async function csRenderSimulations() {
     const ids = Array.from(checkIds).sort();
     csSetToolbar(`<input id="cs-sim-q" oninput="csSimChecksFilterKey()" placeholder="Filter by site or check…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-72">
       <select id="cs-sim-bucket" onchange="csSimChecksFilter()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
-        <option value="">All buckets</option><option value="failing">Failing</option><option value="warning">Warning</option><option value="functional">Functional</option><option value="unknown">Unknown</option>
+        <option value="">All statuses</option><option value="failing">Failing</option><option value="warning">Warning</option><option value="functional">Functional</option><option value="unknown">Unknown</option>
       </select>`);
     const pills = csSummaryRow([[spokes.length, 'Spokes'], [ids.length, 'Checks'], [bf, 'Failing'], [bw, 'Warning']]);
     // Build a flat row per (spoke, site, check) for filtering.
@@ -1272,14 +1272,14 @@ function csClientsLegend() {
     return `<div class="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
       <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2">
-        <span class="flex items-center gap-1.5">${sw('bg-purple-100 text-purple-700 border border-purple-300')} Bucket default ON</span>
-        <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} Bucket default OFF</span>
+        <span class="flex items-center gap-1.5">${sw('bg-purple-100 text-purple-700 border border-purple-300')} SID default ON</span>
+        <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} SID default OFF</span>
         <span class="flex items-center gap-1.5">${sw('bg-white text-purple-700 border-2 border-purple-500')} Override ON</span>
         <span class="flex items-center gap-1.5">${sw('bg-white text-purple-400 border border-purple-200')} Override OFF</span>
         <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
         <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
         <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">18m</span> Last Seen over 30 min ago</span>
-        <span class="flex items-center gap-1.5">${tier('bg-slate-100 text-slate-600', 'T1')} no USB · ${tier('bg-purple-100 text-purple-700', 'T2')} USB dongle · ${tier('bg-amber-100 text-amber-700', 'T3')} PCI passthrough</span>
+        <span class="flex items-center gap-1.5">${tier('bg-slate-100 text-slate-600', 'T1')} Physical Hardware · ${tier('bg-purple-100 text-purple-700', 'T2')} USB dongle · ${tier('bg-amber-100 text-amber-700', 'T3')} PCI passthrough</span>
       </div>
     </div>`;
 }
@@ -1419,7 +1419,7 @@ function csClientSimBar(c, host) {
         const on = isOn(f);
         const ovFlag = isOv(f);
         return `<button data-cs-sim-host="${csEscape(host)}" data-cs-sim-flag="${csEscape(f)}" data-cs-sim-on="${on ? '1' : '0'}" data-cs-sim-ov="${ovFlag ? '1' : '0'}"
-          onclick="csSimToggle(this)" title="${ovFlag ? 'Override' : 'Bucket'}: ${csEscape(f)} ${on ? 'on' : 'off'} on ${csEscape(host)} — click to ${on ? 'disable' : 'enable'}"
+          onclick="csSimToggle(this)" title="${ovFlag ? 'Override' : 'SID'}: ${csEscape(f)} ${on ? 'on' : 'off'} on ${csEscape(host)} — click to ${on ? 'disable' : 'enable'}"
           class="${csSimBtnClass(on, ovFlag)}">${csEscape(f)}</button>`;
     }).join('');
     return `<div class="flex flex-wrap items-center gap-1.5">
@@ -1503,8 +1503,8 @@ window.csSimToggle = async function (btn) {
         btn.dataset.csSimOn = on ? '1' : '0';
         btn.dataset.csSimOv = isOv ? '1' : '0';
         btn.className = csSimBtnClass(on, isOv);
-        btn.title = `${isOv ? 'Override' : 'Bucket'}: ${flag} ${on ? 'on' : 'off'} on ${host} — click to ${on ? 'disable' : 'enable'}`;
-        csCtlMsg(host, `${flag} ${next}${isOv ? '' : ' (bucket)'}`, true);
+        btn.title = `${isOv ? 'Override' : 'SID'}: ${flag} ${on ? 'on' : 'off'} on ${host} — click to ${on ? 'disable' : 'enable'}`;
+        csCtlMsg(host, `${flag} ${next}${isOv ? '' : ' (SID default)'}`, true);
         if (typeof showToast === 'function') showToast(`${flag} ${next} on ${host}`, 'success');
     } catch (e) { console.error('csSimToggle failed', e); csCtlMsg(host, e.message || 'failed', false); }
 };
@@ -2427,7 +2427,7 @@ async function csRenderConfigSimulation() {
               <div class="grid grid-cols-1 md:grid-cols-2 gap-3">${serverFields}${addressFields}</div>
             </div>
           </div>
-          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Per-bucket profiles [s0]–[s9]</p>
+          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Per-simulation profiles [s0]–[s9]</p>
           ${bucketCards}
           ${extras.length ? `<p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-3 mb-2">Extra sections</p>${extraBlocks}` : ''}
           <details class="mt-3 text-xs"><summary class="cursor-pointer text-slate-400">Raw merged simulation.conf</summary><pre class="mt-2 p-2 bg-slate-50 rounded font-mono text-[11px] whitespace-pre-wrap break-all">${csEscape(raw)}</pre></details>`;
@@ -2593,7 +2593,7 @@ function csRenderUserOverridesCard(uo, uoErr) {
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">User Overrides ${helpIcon('cs', null, 'Simulations help')}</h3>
         <span class="text-[10px] text-slate-400">Last fetched: ${csEscape(csUserOverridesFetched)}</span>
       </div>
-      <p class="text-xs text-slate-400 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the bucket profile for that user).</p>
+      <p class="text-xs text-slate-400 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the simulation profile for that user).</p>
       <div class="flex items-center gap-3 mb-3">
         <button onclick="csUOAdd()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
         <button onclick="csUOSave()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
