@@ -1,7 +1,7 @@
 """NetBox (IPAM) config + sites/racks/devices/prefixes/IPs routes."""
 from api import (
     HTTPException, Request, _cache_entry, _fetch_module, _hub_msg,
-    _invalidate_module_all_tenants, _refresh_module_all_tenants, _unwrap_netbox,
+    _refresh_module_all_tenants, _unwrap_netbox,
     get_netbox_spoke, get_tenant_scoping, logger,
 )
 

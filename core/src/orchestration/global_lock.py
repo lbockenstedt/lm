@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Awaitable, Optional
 from collections import deque
 

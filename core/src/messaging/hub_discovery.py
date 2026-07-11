@@ -42,7 +42,6 @@ used, so a missing optional dep never breaks discovery (or the hub broadcast).
 
 import concurrent.futures
 import logging
-import os
 import socket
 import sys
 import time

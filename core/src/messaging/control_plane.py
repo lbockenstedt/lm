@@ -21,8 +21,7 @@ import sys
 import fcntl
 import contextlib
 import concurrent.futures
-from typing import Dict, Any, Optional, Type
-from .protocol import Message, MessageHeader, MessagePayload
+from typing import Dict, Any, Optional
 from ..security.signer import MessageSigner, encode_frame, split_frame
 
 try:  # shared helper (lm/core/src); falls back if imported off a stale path

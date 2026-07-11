@@ -48,7 +48,7 @@ import re
 import asyncio
 import datetime as _dt
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 try:
     from access import fetch_tenant_prefixes, attribute_by_prefix  # sibling leaf (no main/api back-import)

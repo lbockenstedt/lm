@@ -17,11 +17,11 @@ Plus ``/setup/oidc-config`` (admin-only via the ``/setup/`` gate) mirroring
 """
 from __future__ import annotations
 
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 
 from api import (
     HTTPException, Request, _SESSION_TTL, _cookie_secure, _record_session,
-    _start_cache_for_tenant, logger, time,
+    _start_cache_for_tenant, logger,
 )
 from security.oidc import (
     OidcError, discover, exchange_code, extract_member_groups,

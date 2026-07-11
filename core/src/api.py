@@ -86,7 +86,6 @@ import os
 import re
 import asyncio
 import base64
-import subprocess
 import json
 import time
 import uuid
@@ -253,8 +252,7 @@ class StarletteWSAdapter:
 
 from messaging.protocol import Message, MessageHeader, MessagePayload
 from simulations.routes import register_simulations_routes
-from simulations.tenant_filter import (filter_items_by_prefixes,
-                                       filter_firewall_rules, filter_record_by_prefixes)
+from simulations.tenant_filter import filter_items_by_prefixes
 
 import access
 import api_tokens

@@ -38,7 +38,6 @@ from urllib.parse import quote as _url_quote
 import httpx
 import jwt
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from access import groups_and_tenants_for_membership, resolve_effective_permissions
 
@@ -108,10 +107,6 @@ def get_oidc_config(hub) -> OidcConfig:
 
 
 # ── PKCE + state cookie ─────────────────────────────────────────────────────
-
-def _b64url(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
-
 
 def _state_secret(hub) -> bytes:
     """HMAC key for the OIDC state cookie. Prefers a dedicated env, then the

@@ -3,10 +3,9 @@ import json
 import logging
 import uuid
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import websockets
 from ..messaging.protocol import Message, MessageHeader, MessagePayload
-from ..base_spoke import BaseSpoke
 from ..messaging.control_plane import BaseControlPlane
 
 logger = logging.getLogger("SpokeGateway")

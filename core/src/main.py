@@ -38,22 +38,15 @@ import datetime as _dt
 import hmac
 import json
 import logging
-import threading
 import time
 import sys
-import subprocess
-import httpx
 import psutil
 import os
 import socket
 import ssl
 import uuid
 import secrets
-import tarfile
-import io
 import shutil
-import tempfile
-from contextlib import AsyncExitStack
 from collections import deque
 from typing import Dict, Any, Optional, List, Tuple, Set
 from dataclasses import asdict
@@ -70,12 +63,8 @@ from simulations.broadcaster import SimulationsBroadcaster
 from simulations.store import SimulationsStore
 from simulations.central_hub_poller import CentralHubPoller
 from security.auth_manager import AuthManager, LDAPAuthProvider
-from api import (build_server, _save_sessions, _refresh_module_all_tenants,
+from api import (build_server, _refresh_module_all_tenants,
                  _invalidate_tenant_module, _fetch_module)
-from update_recovery import (
-    snapshot_code, write_pending, clear_pending,
-    is_version_bad, clear_bad_versions_older_than,
-)
 from update_pipeline import UpdatePipelineMixin
 from endpoint_sync import EndpointSyncMixin
 from vm_sync import VmSyncMixin
