@@ -246,6 +246,12 @@ class CentralHubPoller:
                 cid = str(chk.get("id") or "")
                 if not cid:
                     continue
+                # Per-site monitoring: a check pinned to a site evaluates ONLY on
+                # that site (central_site); an empty/absent site = global (every
+                # mapped site). Lets you monitor an insight/alert at one site.
+                chk_site = str(chk.get("site") or "").strip().lower()
+                if chk_site and chk_site not in (str(central_site).lower(), str(wireless_site).lower(), "all sites"):
+                    continue
                 counts = alert_counts if (chk.get("type") or "alert") == "alert" else insight_counts
                 n = int(counts.get(cid, 0) or 0)
                 # INVERTED semantics: this is a demo/simulation platform that is

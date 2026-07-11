@@ -1674,14 +1674,15 @@ async function csRenderCentralAlerts() {
     const warn = _csCentralWarn(data);
     if (!alerts.length) { csSet(`${warn}${csEmpty('No active Central alerts.', 'Active alerts come from Central /network-notifications/v1/alerts.')}`); return; }
     const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
-        .filter(c => c && c.type === 'alert').map(c => String(c.id)));
+        .filter(c => c && c.type === 'alert').map(c => `${c.id}::${c.site || ''}`));
     const rows = alerts.map(a => {
         const id = String((a.name || a.category) || '').trim();
         const name = a.name || a.category || id;
-        const isMon = id && monSet.has(id);
+        const site = (a.site && a.site !== '—') ? a.site : '';
+        const isMon = id && monSet.has(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert (shows on the dashboard)">Monitor</button>`);
+            ? `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(a.name || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(a.site || '—')}</td>
@@ -1709,14 +1710,15 @@ async function csRenderCentralInsights() {
     const warn = _csCentralWarn(data);
     if (!insights.length) { csSet(`${warn}${csEmpty('No Central insights.', 'AI insights come from Central /network-notifications/v1/insights.')}`); return; }
     const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
-        .filter(c => c && c.type === 'insight').map(c => String(c.id)));
+        .filter(c => c && c.type === 'insight').map(c => `${c.id}::${c.site || ''}`));
     const rows = insights.map(i => {
         const id = String((i.name || i.category) || '').trim();
         const name = i.name || i.category || id;
-        const isMon = id && monSet.has(id);
+        const site = i.site || '';
+        const isMon = id && monSet.has(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight (shows on the dashboard)">Monitor</button>`);
+            ? `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(i.name || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(i.category || '—')}</td>
@@ -1729,12 +1731,13 @@ async function csRenderCentralInsights() {
 
 // Toggle an insight (or alert) TYPE in central_sites_config.monitored_checks
 // (keyed type:id), preserving site_mappings + hardware_checks.
-window.csToggleMonitorCheck = async function (type, id, name, monitor) {
+window.csToggleMonitorCheck = async function (type, id, name, monitor, site) {
     try {
         const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
-        const key = `${type}:${id}`;
-        let checks = (Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : []).filter(c => `${c.type}:${c.id}` !== key);
-        if (monitor) checks.push({ type, id, name });
+        site = site || '';
+        const key = `${type}:${id}:${site}`;
+        let checks = (Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : []).filter(c => `${c.type}:${c.id}:${c.site || ''}` !== key);
+        if (monitor) checks.push({ type, id, name, site });
         const body = {
             site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
             monitored_checks: checks,
