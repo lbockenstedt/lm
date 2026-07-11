@@ -1007,11 +1007,9 @@ function csLastSeenAgo(v) {
     if (isNaN(ms)) return { text: String(v), mins: null };
     if (ms < 1e11) ms *= 1000;
     const mins = Math.max(0, Math.floor((Date.now() - ms) / 60000));
-    let text;
-    if (mins < 1) text = 'just now';
-    else if (mins < 60) text = `${mins} min${mins === 1 ? '' : 's'} ago`;
-    else { const h = Math.floor(mins / 60), m = mins % 60; text = `${h}h${m ? ' ' + m + 'm' : ''} ago`; }
-    return { text, mins };
+    // Decimal hours (can be < 1, e.g. "0.23 hrs"); red when > 0.5 h (mins > 30).
+    const hrs = Math.max(0, (Date.now() - ms) / 3600000);
+    return { text: `${hrs.toFixed(2)} hrs`, mins };
 }
 
 // Compact inline stat row — "<b>N</b> Label <b>N</b> Label …" — the overview
@@ -1322,7 +1320,7 @@ function csClientsLegend() {
         <span class="flex items-center gap-1.5">${sw('bg-white text-purple-400 border border-purple-200')} Override OFF</span>
         <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
         <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
-        <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">18m</span> Last Seen over 30 min ago</span>
+        <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">0.75 hrs</span> Last Seen over 30 min ago</span>
         <span class="flex items-center gap-1.5">${tier('bg-slate-100 text-slate-600', 'T1')} Physical Hardware · ${tier('bg-purple-100 text-purple-700', 'T2')} USB dongle · ${tier('bg-amber-100 text-amber-700', 'T3')} PCI passthrough</span>
       </div>
     </div>`;
@@ -1421,7 +1419,7 @@ function csRenderClientRows(rows, targetId) {
         // Column widths (10 cols — Status column dropped; status is now a dot by
         // the hostname). Tunable: adjust these and the header order as needed.
         { colWidths: ['200px', '90px', '70px', '80px', '90px', '60px',
-                      '130px', '110px', '70px', '230px'] }
+                      '180px', '110px', '70px', '300px'] }
     );
     csDemoStartTicker();
 }
@@ -1484,9 +1482,7 @@ function csClientSimBar(c, host) {
     return `<div class="space-y-1.5">
       <div class="grid gap-1 overflow-x-auto pb-0.5" style="grid-template-columns: repeat(${_simCols}, minmax(72px, 1fr));">${btns}</div>
       <div class="flex items-center gap-1.5">
-        <button data-cs-ctl-host="${csEscape(host)}" onclick="csCtlClear(this)"
-          class="px-2 py-1 rounded-md text-[11px] font-bold bg-red-50 text-red-600 hover:bg-red-100 border border-red-200">Clear</button>
-        <span id="${csEscape(csCtlId(host, 'msg'))}" class="text-[11px] text-slate-400 ml-1"></span>
+        <span id="${csEscape(csCtlId(host, 'msg'))}" class="text-[11px] text-slate-400"></span>
       </div>
     </div>`;
 }
@@ -1635,6 +1631,8 @@ function csDemoCell(hostname) {
       </select>
       <button data-cs-demo-host="${csEscape(hostname)}" onclick="csDemoTrigger(this)"
         class="bg-blue-100 hover:bg-blue-200 text-blue-700 px-1.5 py-0.5 rounded-md text-[11px] font-bold">Go</button>
+      <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlClear(this)"
+        class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-1.5 py-0.5 rounded-md text-[11px] font-bold" title="Clear this client's sim overrides">Clear</button>
     </td>`;
 }
 
