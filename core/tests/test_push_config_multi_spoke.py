@@ -33,13 +33,19 @@ class _Store:
 
 
 class MultiSpokeHub:
-    """Hub with 3 bound cs spokes + a recording push_or_queue_to_spoke."""
+    """Hub with 3 bound cs spokes + a recording push that mirrors the hub's
+    drain-aware config-push preference (_drain_aware_config_push, falling back
+    to push_or_queue_to_spoke). ``draining`` is a per-spoke set: a spoke listed
+    there gets a queued-drain outcome (no live attempt) so we can pin that a
+    config save during an Update fan-out does NOT time out a draining spoke."""
 
     def __init__(self, spoke_ids):
         self._spokes = list(spoke_ids)
         self.simulations_store = _Store()
         self.active_connections = set(spoke_ids)
-        self.pushed = []  # (sid, cmd, payload) per push
+        self.pushed = []  # (sid, cmd, payload) per LIVE push
+        self.queued = []  # (sid, cmd, payload) per DRAIN-QUEUED push
+        self.draining = set()  # spoke_ids to treat as mid self-update
         self.state = type("State", (), {"system_state": {}})()
 
     def get_client_sim_spokes(self, tenant_id):
@@ -48,7 +54,16 @@ class MultiSpokeHub:
     def get_client_sim_spoke(self, tenant_id):
         return self._spokes[0] if self._spokes else None
 
+    async def _drain_aware_config_push(self, sid, cmd_type, payload, timeout=5.0):
+        if sid in self.draining:
+            self.queued.append((sid, cmd_type, payload))
+            return {"status": "ok", "queued": True, "draining": True}
+        self.pushed.append((sid, cmd_type, payload))
+        return {"status": "ok", "queued": False, "result": {"status": "ok"}}
+
     async def push_or_queue_to_spoke(self, sid, cmd_type, payload, timeout=5.0):
+        # Older-hub fallback path — should NOT be reached when
+        # _drain_aware_config_push is present (the test asserts this).
         self.pushed.append((sid, cmd_type, payload))
         return {"queued": False, "message": ""}
 
@@ -114,3 +129,32 @@ def test_toggle_auto_provision_no_spokes_pushes_zero():
     assert r.status_code == 200
     assert r.json()["pushed_to_spokes"] == 0
     assert hub.pushed == []
+
+
+def test_toggle_auto_provision_during_update_queues_draining_spoke():
+    """A config save that fans out while a spoke is mid self-update must NOT
+    fire a live 5s request_response at the draining spoke (the
+    "Request Timeout: [CS_CONFIG_UPDATE] ... after 5.0s" burst during an
+    Update). _push_config routes through _drain_aware_config_push, which
+    short-circuits on drain state and queues straight to the mailbox.
+
+    Regression: _push_config used push_or_queue_to_spoke, which ignores
+    is_draining and live-attempts first — timing out once per spoke before
+    queuing. Here cs-svr-03 is draining (the hub just sent it SPOKE_UPDATE);
+    the live push goes to the other two, cs-svr-03 is queued, and ALL three
+    still count (a queued push applies on reconnect)."""
+    c, hub = _build(["cs-svr-02", "cs-svr-03", "cs-svr-04"])
+    hub.draining.add("cs-svr-03")
+    r = c.post("/sim/api/10/toggle-auto-provision?tenant_id=10",
+               json={"enabled": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["pushed_to_spokes"] == 3   # queued still counts
+    # Live attempts only for the non-draining spokes.
+    live_sids = sorted(sid for sid, _cmd, _pl in hub.pushed)
+    assert live_sids == ["cs-svr-02", "cs-svr-04"]
+    # cs-svr-03 was queued (drain short-circuit), NOT live-attempted.
+    queued_sids = sorted(sid for sid, _cmd, _pl in hub.queued)
+    assert queued_sids == ["cs-svr-03"]
+    assert all(cmd == "CS_CONFIG_UPDATE" for _sid, cmd, _pl in hub.queued)
+    assert all(pl == {"usb_auto_provision": "on"} for _sid, _cmd, pl in hub.queued)

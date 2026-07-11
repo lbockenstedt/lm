@@ -845,14 +845,42 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     spoke_ids = [sid]
         if not spoke_ids:
             return _PushResult(0)
+        # Drain-aware push preferred: when a bound cs spoke is mid self-update
+        # (draining — about to os._exit + relaunch, or already restarting), a
+        # live request_response hangs to its 5s timeout when the spoke drops its
+        # WS mid-reply (the "Request Timeout: [CS_CONFIG_UPDATE] ... after 5.0s"
+        # burst during an Update fan-out — _push_spoke_update already marks the
+        # spoke draining the instant it sends SPOKE_UPDATE, but a CONCURRENT
+        # config write that fans out here used to ignore that and live-attempt
+        # anyway). _drain_aware_config_push short-circuits on drain state and
+        # queues straight to the durable mailbox (no 5s hang, no ERROR log); it
+        # falls through to a normal live-attempt + queue-on-unreachable push
+        # otherwise. Same path push_cs_hub_config + cs_bridge SET_AGENT_CONFIG
+        # already use. Falls back to push_or_queue_to_spoke on an older hub
+        # build without the drain-aware helper, then to a bare request_response.
+        drain_aware = getattr(hub, "_drain_aware_config_push", None)
         push = getattr(hub, "push_or_queue_to_spoke", None)
 
         async def _one(sid: str):
             """Push to one spoke. Returns (1, queued, msg) on delivery (live OR
             queued — a queued push still counts, it WILL apply on reconnect),
             (0, False, '') on transport failure."""
+            if callable(drain_aware):
+                try:
+                    outcome = await drain_aware(sid, "CS_CONFIG_UPDATE", payload, timeout=5.0)
+                    queued = bool(outcome.get("queued"))
+                    msg = str(outcome.get("message", "") or "")
+                    if queued:
+                        logger.info("CS_CONFIG_UPDATE for %s queued (%s): %s", sid,
+                                    "draining" if outcome.get("draining")
+                                    else "spoke unreachable",
+                                    outcome.get("message") or "")
+                    return 1, queued, msg
+                except Exception as exc:
+                    logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", sid, exc)
+                    return 0, False, ""
             if not callable(push):
-                # Fallback for a hub build without push_or_queue_to_spoke yet.
+                # Fallback for an older hub build without either helper.
                 try:
                     await hub.request_response(sid, "CS_CONFIG_UPDATE", payload, timeout=5.0)
                     return 1, False, ""
