@@ -1186,7 +1186,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
+    settings: ['General', 'User Access', 'SSO', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3436,6 +3436,14 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
+    // SSO — Microsoft Entra ID (OIDC) config: enable it, set tenant/client/cert/
+    // group/MFA. Drives /setup/oidc-config and the login "Sign in with Microsoft"
+    // button. Global-Admin only (route is admin-gated server-side).
+    if (subMenu === 'SSO') {
+        _renderSettingsSsoTile(content);
+        return;
+    }
+
     if (subMenu === 'Hub Status') {
         content.innerHTML = `
             <div class="space-y-4">
@@ -4907,6 +4915,93 @@ function _renderSetupGeneralTile(content) {
 // Dispatch table: each Setup submenu → its tile renderer. The General tile is
 // the fallback (run when subMenu matches none of the keys), preserving the
 // original monolithic function's trailing default branch.
+// ── Settings → SSO (Microsoft Entra ID / OIDC) ──────────────────────────────
+// Admin config for Entra ID SSO — enable it, set tenant/client/cert/group/MFA.
+// Reads/writes /setup/oidc-config (core/src/routes/oidc.py); env LM_OIDC_* wins
+// over stored values. Enabling shows the "Sign in with Microsoft" login button.
+function _renderSettingsSsoTile(content) {
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Single Sign-On — Microsoft Entra ID (OIDC)</h3>
+                <span id="oidc-state-pill" class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-bold">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">Users sign in with Microsoft Entra ID. On callback the hub verifies the id_token against Entra's JWKS, maps Entra <strong>group membership</strong> to LM RBAC + tenant scope, and (when required) <strong>hard-enforces MFA</strong> via the <code>amr</code> claim. Auth uses a <strong>client certificate</strong> (cert + key paths on the hub), not a client secret. Enabling this shows the <em>Sign in with Microsoft</em> button on the login page. <strong>Global Admin only.</strong> Environment overrides (<code>LM_OIDC_*</code>) win over these stored values.</p>
+            <div class="flex flex-wrap items-center gap-6 mb-3">
+                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="oidc-enabled" class="w-4 h-4 text-green-600 rounded">Enable Entra ID SSO</label>
+                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="oidc-mfa" class="w-4 h-4 text-green-600 rounded" checked>Require MFA (reject logins without <code>amr=mfa</code>)</label>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Directory (tenant) ID</label><input id="oidc-tenant" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Application (client) ID</label><input id="oidc-client" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Redirect URI</label><input id="oidc-redirect" type="text" placeholder="https://your-hub/auth/oidc/callback" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Allowed group (object ID, optional)</label><input id="oidc-group" type="text" placeholder="Entra group object ID — gate access" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Client certificate path (on hub)</label><input id="oidc-cert" type="text" placeholder="/etc/lm/oidc/client-cert.pem" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Client private-key path (on hub)</label><input id="oidc-key" type="text" placeholder="/etc/lm/oidc/client-key.pem" class="${inputCls}"></div>
+            </div>
+            <div class="mt-4 flex items-center gap-3">
+                <button onclick="saveOidcConfig()" id="oidc-save-btn" class="${btnCls}">Save SSO Config</button>
+                <span id="oidc-save-msg" class="text-xs text-slate-400"></span>
+            </div>
+            <p class="text-[11px] text-slate-400 mt-2">The private key is referenced by <em>path</em> only — key material is never stored or read by the WebUI. In Entra: register the app, add the redirect URI above, upload the certificate, and grant Graph <code>GroupMember.Read.All</code> for the &gt;200-group fallback.</p>
+        </div>`;
+    loadOidcConfig();
+}
+
+async function loadOidcConfig() {
+    try {
+        const res = await setupFetch('/setup/oidc-config');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        const cfg = data.config || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+        const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+        chk('oidc-enabled', cfg.enabled);
+        chk('oidc-mfa', cfg.require_mfa !== false);
+        set('oidc-tenant', cfg.tenant_id); set('oidc-client', cfg.client_id);
+        set('oidc-redirect', cfg.redirect_uri); set('oidc-group', cfg.allowed_group);
+        set('oidc-cert', cfg.cert_path); set('oidc-key', cfg.key_path);
+        const pill = document.getElementById('oidc-state-pill');
+        if (pill) {
+            pill.textContent = cfg.enabled ? 'ENABLED' : 'DISABLED';
+            pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' +
+                (cfg.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500');
+        }
+    } catch (e) { console.error('loadOidcConfig failed', e); }
+}
+
+async function saveOidcConfig() {
+    const btn = document.getElementById('oidc-save-btn');
+    const msg = document.getElementById('oidc-save-msg');
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    const config = {
+        enabled: !!document.getElementById('oidc-enabled')?.checked,
+        require_mfa: !!document.getElementById('oidc-mfa')?.checked,
+        tenant_id: v('oidc-tenant'), client_id: v('oidc-client'),
+        redirect_uri: v('oidc-redirect'), allowed_group: v('oidc-group'),
+        cert_path: v('oidc-cert'), key_path: v('oidc-key'),
+    };
+    if (config.enabled && (!config.tenant_id || !config.client_id)) {
+        if (typeof showToast === 'function') showToast('Tenant ID and Client ID are required to enable SSO', 'error');
+        return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const res = await setupFetch('/setup/oidc-config', { method: 'POST', body: JSON.stringify({ config }) });
+        const ok = res.ok;
+        if (typeof showToast === 'function') showToast(ok ? 'SSO config saved' : 'Save failed', ok ? 'success' : 'error');
+        if (msg) msg.textContent = ok ? 'Saved. The login page shows the Microsoft button when enabled.' : 'Save failed.';
+        if (ok && typeof refreshOidcButton === 'function') refreshOidcButton();
+        if (ok) loadOidcConfig();
+    } catch (e) {
+        console.error('saveOidcConfig failed', e);
+        if (typeof showToast === 'function') showToast('Save failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save SSO Config'; }
+    }
+}
+
 const SETUP_TILES = {
     'Spokes & Agents':  _renderSetupSpokesTile,
     'Module Management': _renderSetupModuleMgmtTile,
