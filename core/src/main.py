@@ -4225,6 +4225,29 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         update_avail = bool(getattr(self, "_update_available", False))
         return target_ver, running_ver, behind, update_avail
 
+    def _live_watchdog_status(self):
+        """The watchdog status dict for /status, with the version-drift keys
+        recomputed LIVE on every call.
+
+        The bridge loop (run_watchdog_bridge_loop) owns the observational keys
+        it alone can produce — ``armed`` (systemctl timer state), ``heartbeat``,
+        ``log_mtime`` — and caches them in ``_watchdog_status``. But the footer
+        version dot must reflect disk-vs-running drift on EVERY /status, not just
+        after that 20s loop has run past its 8s systemctl call. So we start from
+        the cached dict (for armed/heartbeat/log_mtime) and overwrite the drift
+        keys with a fresh ``_compute_version_drift`` — a cheap sync file read.
+        """
+        base = dict(getattr(self, "_watchdog_status", {}) or {})
+        try:
+            target_ver, running_ver, behind, update_avail = self._compute_version_drift()
+            base["target_version"] = target_ver
+            base["running_version"] = running_ver
+            base["behind"] = behind
+            base["update_available"] = update_avail
+        except Exception:  # noqa: BLE001 — never let the dot break /status
+            pass
+        return base
+
     async def run_watchdog_bridge_loop(self):
         """Bridge the ROOT lm-watchdog to the hub, every ~20s:
           1. Write the active-user count to a file the watchdog reads before a
@@ -5295,7 +5318,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "version": version,
                 # Auto-heal watchdog status (armed / last heartbeat) so the WebUI
                 # can show it's alive — populated by run_watchdog_bridge_loop.
-                "watchdog": getattr(self, "_watchdog_status", {}) or {},
+                # The version-drift keys (behind / target_version / running_version /
+                # update_available) are recomputed LIVE here and merged OVER the
+                # cached dict so the footer dot is correct on EVERY /status, not
+                # just after the 20s bridge loop has run. The cached copy alone was
+                # insufficient: it is empty {} for the first ~20-40s after a restart
+                # (dot green while disk may already be ahead), only refreshes every
+                # 20s, and shares a try-block with an 8s `systemctl` subprocess — so
+                # a systemctl hang/failure aborts the whole status update and the
+                # drift keys never get written → dot stuck green. _compute_version_drift
+                # is a cheap sync file-read; safe to call inline on /status.
+                "watchdog": self._live_watchdog_status(),
             }
         except Exception as e:
             logger.error(f"Error collecting system metrics: {e}")
