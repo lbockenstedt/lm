@@ -1611,8 +1611,8 @@ async function csRenderCentral() {
         const name = st.name || '';
         const isMon = monitored.has(String(name));
         const btn = isMon
-            ? `<button onclick="csToggleMonitorSite(${JSON.stringify(name)}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this site's client count">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorSite(${JSON.stringify(name)}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count for change (shows on the dashboard)">Monitor</button>`;
+            ? `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(name))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this site's client count">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(name))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count for change (shows on the dashboard)">Monitor</button>`;
         return `<tr>
       <td class="px-3 py-2 font-medium text-slate-700">${csEscape(name || '—')}</td>
       <td class="px-3 py-2 text-slate-500 font-mono text-xs">${csEscape(st.site_id || '—')}</td>
@@ -1696,8 +1696,8 @@ async function csRenderCentralInsights() {
         const name = i.name || i.category || id;
         const isMon = id && monSet.has(id);
         const btn = !id ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorCheck('insight', ${JSON.stringify(id)}, ${JSON.stringify(name)}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorCheck('insight', ${JSON.stringify(id)}, ${JSON.stringify(name)}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight (shows on the dashboard)">Monitor</button>`);
+            ? `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight (shows on the dashboard)">Monitor</button>`);
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(i.name || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(i.category || '—')}</td>
