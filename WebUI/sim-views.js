@@ -1178,7 +1178,8 @@ function csRenderClientRows(rows) {
         const t = csClassifyClient(c);
         const host = c.hostname || c.id || '';
         const cfg = c.config || {};
-        const line1 = `<tr class="border-t border-slate-100">
+        const _demoOn = window._csDemoActive && window._csDemoActive[host];
+        const line1 = `<tr class="border-t border-slate-100 ${_demoOn ? 'bg-amber-50' : ''}">
           <td class="px-4 py-2 font-mono text-xs">${csEscape(host || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.wsite || '—')}</td>
           <td class="px-4 py-2 font-mono text-xs text-slate-500">${csEscape(c.simulation_id || '—')}</td>
@@ -1200,6 +1201,7 @@ function csRenderClientRows(rows) {
         ['Hostname', 'Site', 'Sim-ID', 'PHY', 'Platform', 'Status', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
         rowHtml
     );
+    csDemoStartTicker();
 }
 
 // The second line under each client: one clickable button per simulation (the
@@ -1323,10 +1325,37 @@ function csDemoOptions(activeScenario) {
     return names.map(n => `<option value="${csEscape(n)}" ${n === activeScenario ? 'selected' : ''}>${csEscape(n)}</option>`).join('');
 }
 
+// Live countdown ticker for active demo scenarios — a ⚡ pill + H:MM:SS that
+// ticks every second from the scenario's expires_at (epoch). Mirrors the source
+// project's active-simulation visual (colored + lightning bolt + countdown).
+function _csFmtCountdown(secs) {
+    secs = Math.max(0, Math.floor(secs));
+    const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+    const pad = n => String(n).padStart(2, '0');
+    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+let _csDemoTicker = null;
+function csDemoStartTicker() {
+    if (_csDemoTicker) return;
+    _csDemoTicker = setInterval(csDemoTickCountdowns, 1000);
+    csDemoTickCountdowns();
+}
+function csDemoTickCountdowns() {
+    const spans = document.querySelectorAll('.cs-demo-countdown[data-demo-expires]');
+    if (!spans.length) { if (_csDemoTicker) { clearInterval(_csDemoTicker); _csDemoTicker = null; } return; }
+    const now = Date.now() / 1000;
+    spans.forEach(el => {
+        const exp = parseFloat(el.getAttribute('data-demo-expires')) || 0;
+        const rem = exp - now;
+        el.textContent = rem <= 0 ? 'expired' : _csFmtCountdown(rem);
+    });
+}
+
 function csDemoCell(hostname) {
     const a = window._csDemoActive[hostname];
-    const badge = a ? `<span class="inline-block bg-amber-100 text-amber-700 rounded px-1.5 py-0.5 text-[10px] font-bold mr-1">${csEscape(a.scenario)} ${csEscape(a.minutes_remaining != null ? a.minutes_remaining + 'm' : '')}</span>` : '';
-    return `<td class="px-4 py-2 whitespace-nowrap">
+    const exp = a && a.expires_at != null ? a.expires_at : '';
+    const badge = a ? `<span class="inline-flex items-center gap-1 bg-amber-100 text-amber-800 border border-amber-300 rounded px-1.5 py-0.5 text-[10px] font-bold mr-1 animate-pulse" title="Simulation '${csEscape(a.scenario)}' active">⚡ ${csEscape(a.scenario)} <span class="cs-demo-countdown font-mono" data-demo-expires="${csEscape(String(exp))}">${csEscape(a.minutes_remaining != null ? Math.round(a.minutes_remaining) + 'm' : '')}</span></span>` : '';
+    return `<td class="px-4 py-2 whitespace-nowrap ${a ? 'bg-amber-50' : ''}">
       ${badge}
       <select id="cs-demo-${csEscape(hostname)}" class="border border-slate-200 rounded-md px-1 py-0.5 text-[11px]">
         ${csDemoOptions(a ? a.scenario : 'normal')}
