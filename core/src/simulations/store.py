@@ -389,6 +389,23 @@ class SimulationsStore:
             self._tenant(tenant_id)["github_config"] = cfg or {}
             await self._asave()
 
+    # ── config Source of Truth (Config screen: Hub vs GitHub) ────────────────
+    async def get_source_of_truth(self, tenant_id: str) -> str:
+        """Where the tenant's simulation.conf / user-overrides.conf are owned:
+        'hub'  = the hub stores the full files; the GitHub repo copy is ignored
+                 and can never revert them (fully hub-owned).
+        'github' = the GitHub repo is authoritative; edits require an API key and
+                 are committed+pushed back. Default 'github' (preserves the
+                 pre-feature behavior where the repo file is the base)."""
+        val = self._data.get(tenant_id, {}).get("source_of_truth")
+        return "hub" if val == "hub" else "github"
+
+    async def set_source_of_truth(self, tenant_id: str, source: str) -> None:
+        """Persist the tenant's config source of truth ('hub' | 'github')."""
+        with self._lock:
+            self._tenant(tenant_id)["source_of_truth"] = "hub" if source == "hub" else "github"
+            await self._asave()
+
     # ── security config (Setup → Security: spoke-local dashboard auth) ──────
     async def get_security_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's spoke-local dashboard security config."""

@@ -1849,9 +1849,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def put_sim_conf(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
         body = await request.json()
         content = body.get("content", "") if isinstance(body, dict) else ""
+        source = await _require_config_writable(tenant_id)  # 403 if github + no key
         await store.set_sim_conf_content(tenant_id, content)
-        pushed = await _push_config(tenant_id, {"sim_conf_override": content})
-        return {"saved": True, "synced_spokes": pushed}
+        pushed = await _push_config(tenant_id, {"sim_conf_override": content,
+                                                "config_source": source})
+        return {"saved": True, "synced_spokes": pushed, "source": source}
 
     @app.get("/sim/api/{tenant}/clients/sim-overrides")
     async def get_client_overrides(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -1936,12 +1938,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """
         body = await request.json()
         content = (body.get("content", "") if isinstance(body, dict) else "") or ""
+        source = await _require_config_writable(tenant_id)  # 403 if github + no key
         # Validate parse before saving so a bad edit doesn't overwrite the canon.
         if content.strip() and not _parse_ini_sections(content):
             raise HTTPException(status_code=422, detail="Invalid INI: could not parse user-overrides.conf")
         await store.set_user_overrides_content(tenant_id, content)
-        pushed = await _push_config(tenant_id, {"user_conf_override": content})
-        return {"saved": True, "synced_spokes": pushed}
+        pushed = await _push_config(tenant_id, {"user_conf_override": content,
+                                                "config_source": source})
+        return {"saved": True, "synced_spokes": pushed, "source": source}
 
     @app.get("/sim/api/{tenant}/settings")
     async def get_settings(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -2237,6 +2241,47 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         await store.set_github_config(tenant_id, {})
         pushed = await _push_config(tenant_id, {"github_config": None})
         return {"cleared": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
+
+    # ── Config Source of Truth (Config screen: Hub vs GitHub) ────────────────
+    async def _config_gate(tenant_id: str):
+        """(source, has_token) for the tenant's config ownership. Writes are only
+        allowed when source='hub' OR source='github' with a token configured."""
+        source = await store.get_source_of_truth(tenant_id)
+        gh = await store.get_github_config(tenant_id) or {}
+        return source, bool(gh.get("github_token"))
+
+    async def _require_config_writable(tenant_id: str) -> str:
+        source, has_token = await _config_gate(tenant_id)
+        if source == "github" and not has_token:
+            raise HTTPException(
+                status_code=403,
+                detail=("GitHub is the source of truth but no API key is configured — "
+                        "the config is read-only. Add a GitHub API key, or switch "
+                        "Source of Truth to Hub."))
+        return source
+
+    @app.get("/sim/api/{tenant}/config/source")
+    async def get_config_source(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        source, has_token = await _config_gate(tenant_id)
+        gh = await store.get_github_config(tenant_id) or {}
+        return {"source": source, "has_token": has_token,
+                "writable": (source == "hub") or has_token,
+                "repo_url": gh.get("repo_url", ""), "repo_branch": gh.get("repo_branch", "")}
+
+    @app.post("/sim/api/{tenant}/config/source")
+    async def set_config_source(request: Request, tenant: str,
+                                tenant_id: str = Depends(get_tenant_id)):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        source = "hub" if str((body or {}).get("source")) == "hub" else "github"
+        await store.set_source_of_truth(tenant_id, source)
+        # Tell the spoke which mode so load_configs resolves the effective conf
+        # accordingly (hub = hub-owned full file, never git-reverted; github =
+        # repo file is the base).
+        pushed = await _push_config(tenant_id, {"config_source": source})
+        return {"saved": True, "source": source, "pushed_to_spokes": pushed}
 
     @app.get("/sim/api/{tenant}/settings/security")
     async def get_security(tenant: str, tenant_id: str = Depends(get_tenant_id)):
