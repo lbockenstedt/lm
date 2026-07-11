@@ -488,6 +488,19 @@ class ArubaClient:
                 else:
                     wireless_clients += 1
 
+            # Count insights per site so MONITORED insight checks (enrolled from
+            # the Central -> Insights tab) evaluate on the dashboard. Keyed
+            # category||name to match the WebUI monitored-check id. Insights carry
+            # a site NAME (or "All Sites" for global); _new_central_insights is
+            # cached so this adds no extra API call within the TTL.
+            for ins in await self._new_central_insights():
+                ins_site = str(ins.get("site") or "").strip()
+                if ins_site and ins_site.lower() not in (site.lower(), "all sites"):
+                    continue
+                cat = str(ins.get("category") or ins.get("name") or "").strip()
+                if cat:
+                    insight_cat_counts[cat] = insight_cat_counts.get(cat, 0) + 1
+
             return {
                 "site_health": site_health,
                 "wireless_clients": wireless_clients,

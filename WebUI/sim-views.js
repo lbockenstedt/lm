@@ -1673,27 +1673,62 @@ async function csRenderCentralAlerts() {
     csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${alerts.length} active alert(s)</div>${csTable(['Alert', 'Site', 'Severity', 'Category', 'Detail'], rows)}</div></div>`);
 }
 
-// ── Central → Insights (live AI insights from Central) ───────────────────────
+// ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
+// Displays live insights (/network-notifications/v1/insights) with a Monitor
+// toggle per row. Monitoring adds {type:'insight', id:category||name, name} to
+// central_sites_config.monitored_checks; the new_central poller counts insights
+// per site by that same key so the enrolled insight's status shows on the
+// dashboard Checks tab.
 async function csRenderCentralInsights() {
     csSetToolbar('');
-    const data = await csCentralBrowse();
+    const [data, sitesCfg] = await Promise.all([
+        csCentralBrowse(),
+        csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
     const insights = (data && data.insights) || [];
     const warn = _csCentralWarn(data);
     if (!insights.length) { csSet(`${warn}${csEmpty('No Central insights.', 'AI insights come from Central /network-notifications/v1/insights.')}`); return; }
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
+        .filter(c => c && c.type === 'insight').map(c => String(c.id)));
     const rows = insights.map(i => {
-        const impact = [];
-        if (i.device_count) impact.push(`${i.device_count} device${i.device_count !== 1 ? 's' : ''}`);
-        if (i.client_count) impact.push(`${i.client_count} client${i.client_count !== 1 ? 's' : ''}`);
+        const id = String((i.category || i.name) || '').trim();
+        const name = i.name || i.category || id;
+        const isMon = id && monSet.has(id);
+        const btn = !id ? '—' : (isMon
+            ? `<button onclick="csToggleMonitorCheck('insight', ${JSON.stringify(id)}, ${JSON.stringify(name)}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCheck('insight', ${JSON.stringify(id)}, ${JSON.stringify(name)}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight (shows on the dashboard)">Monitor</button>`);
         return `<tr>
       <td class="px-3 py-2 text-sm">${csEscape(i.name || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(i.category || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(i.site || '—')}</td>
-      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(impact.join(', ') || '—')}</td>
-      <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(i.description || '—')}</td>
+      <td class="px-3 py-2">${btn}</td>
     </tr>`;
     }).join('');
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${insights.length} insight(s)</div>${csTable(['Insight', 'Category', 'Site', 'Impact', 'Detail'], rows)}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm"><div class="text-xs text-slate-400 mb-2">${insights.length} insight(s)</div>${csTable(['Insight', 'Category', 'Site', 'Monitor'], rows)}</div></div>`);
 }
+
+// Toggle an insight (or alert) TYPE in central_sites_config.monitored_checks
+// (keyed type:id), preserving site_mappings + hardware_checks.
+window.csToggleMonitorCheck = async function (type, id, name, monitor) {
+    try {
+        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
+        const key = `${type}:${id}`;
+        let checks = (Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : []).filter(c => `${c.type}:${c.id}` !== key);
+        if (monitor) checks.push({ type, id, name });
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: checks,
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+        };
+        const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`);
+        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`, 'success');
+        csRenderCentralInsights();
+    } catch (e) {
+        console.error('csToggleMonitorCheck failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+};
 
 // ── Central → Clients ────────────────────────────────────────────────────────
 async function csRenderCentralClients() {
