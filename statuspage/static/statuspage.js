@@ -7,6 +7,7 @@
 var TONE = { operational: 'op', degraded: 'deg', down: 'down', nodata: 'nodata', unknown: 'deg' };
 var BANNER_TEXT = { op: 'All Systems Operational', deg: 'Partial Degradation', down: 'Major Outage' };
 var _clientTick = null;
+var _clients = [];  // last-rendered client rows (index-referenced by demo buttons)
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -86,35 +87,50 @@ async function loadClients() {
     data = await r.json();
   } catch (e) { return; }
 
-  var clients = data.clients || [];
+  _clients = data.clients || [];
   var scenarios = Object.keys(data.scenarios || { normal: 1 });
   if (scenarios.indexOf('normal') === -1) scenarios.unshift('normal');
 
   var body = document.getElementById('clients-body');
-  if (!clients.length) { body.innerHTML = '<tr><td colspan="4" class="detail">No clients.</td></tr>'; return; }
+  if (!_clients.length) { body.innerHTML = '<tr><td colspan="4" class="detail">No clients.</td></tr>'; return; }
 
-  body.innerHTML = clients.map(function (c) {
+  // Index-referenced rows (data-idx) — no hostname is ever interpolated into
+  // HTML/attributes, so a hostile hostname can't inject markup or break out of
+  // an onclick. The click handler is delegated (bound once below).
+  body.innerHTML = _clients.map(function (c, i) {
     var host = esc(c.name || c.hostname || '');
     var st = tone(c.status === 'up' ? 'operational' : (c.status || 'down'));
     var active = c.demo_active;
     var lastSeen = lastSeenCell(c.last_seen_secs);
+    var running = !!(active && active.scenario && active.scenario !== 'normal');
     var demoCell;
-    if (active && active.scenario && active.scenario !== 'normal') {
+    if (running) {
       demoCell = '<span class="bolt">⚡</span> ' + esc(active.scenario) +
-        ' <span class="countdown" data-exp="' + (active.expires_at || 0) + '">' +
+        ' <span class="countdown" data-exp="' + Number(active.expires_at || 0) + '">' +
         fmtCountdown(active.expires_in) + '</span>';
     } else {
       var opts = scenarios.map(function (s) { return '<option value="' + esc(s) + '">' + esc(s) + '</option>'; }).join('');
-      demoCell = '<select id="sc-' + host + '">' + opts + '</select> ' +
-        '<button class="run" onclick="runDemo(\'' + host.replace(/'/g, "\\'") + '\')">Run</button>';
+      demoCell = '<select data-idx="' + i + '">' + opts + '</select> ' +
+        '<button class="run" data-idx="' + i + '">Run</button>';
     }
-    return '<tr class="' + (active && active.scenario && active.scenario !== 'normal' ? 'demo-active' : '') + '">' +
+    return '<tr class="' + (running ? 'demo-active' : '') + '">' +
       '<td>' + host + '</td>' +
       '<td><span class="pill ' + st + '">' + (c.status === 'up' ? 'Up' : 'Down') + '</span></td>' +
       '<td>' + lastSeen + '</td>' +
       '<td>' + demoCell + '</td></tr>';
   }).join('');
 }
+
+// Delegated click handler for the demo Run buttons — bound once.
+document.addEventListener('click', function (ev) {
+  var btn = ev.target.closest ? ev.target.closest('button.run[data-idx]') : null;
+  if (!btn) return;
+  var idx = Number(btn.getAttribute('data-idx'));
+  var c = _clients[idx];
+  if (!c) return;
+  var sel = document.querySelector('select[data-idx="' + idx + '"]');
+  runDemo(c.hostname || c.name || '', sel ? sel.value : 'normal');
+});
 
 function lastSeenCell(secs) {
   if (secs == null) return '<span class="last-ok">—</span>';
@@ -130,13 +146,12 @@ function fmtCountdown(secs) {
   return m + ':' + (s < 10 ? '0' : '') + s;
 }
 
-async function runDemo(hostname) {
-  var sel = document.getElementById('sc-' + hostname);
-  var scenario = sel ? sel.value : 'normal';
+async function runDemo(hostname, scenario) {
+  if (!hostname) return;
   try {
     await fetch('/api/demo', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ hostname: hostname, scenario: scenario })
+      body: JSON.stringify({ hostname: hostname, scenario: scenario || 'normal' })
     });
   } catch (e) { /* ignore — reconcile on next snapshot */ }
   // Optimistic: reload the clients view shortly (hub reflects it on next push).
