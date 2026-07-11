@@ -3225,7 +3225,7 @@ async function csProcessingModesCard() {
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Processing Modes ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${fields}</div>
-      <button onclick="csSaveProcessingModes()" class="mt-4 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button>
+      <div class="flex justify-end mt-4"><button onclick="csSaveProcessingModes()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button></div>
     </div>`;
 }
 
@@ -3382,7 +3382,7 @@ async function csRenderSetupCentralApi() {
         ${f('cs-csc-accesstoken', 'Access Token (classic)', hc.access_token, 'password')}
         ${f('cs-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token, 'password')}
       </div>
-      <div class="flex gap-2 mt-4">
+      <div class="flex justify-end gap-2 mt-4">
         <button onclick="csSaveCentralConn()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
         <button onclick="csTestCentral()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Central</button>
       </div>
@@ -3415,7 +3415,7 @@ async function csRenderSetupCentralApi() {
       <div id="cs-csc-hw-rows" class="space-y-2">${hwRows || '<p class="text-xs text-slate-400 italic">No hardware checks.</p>'}</div>
       <button onclick="csCscAddHw()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add hardware check</button>
 
-      <div class="flex gap-2 mt-4">
+      <div class="flex justify-end gap-2 mt-4">
         <button onclick="csSaveCentralSites()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
       </div>
     </div>`;
@@ -3651,7 +3651,7 @@ async function csRenderSetupGithub() {
           ${f('cs-gh-url', 'Repo URL', cfg.repo_url)}${branchField}
           ${f('cs-gh-token', 'GitHub Token ' + (cfg.has_token ? '(set — leave blank to keep)' : '(new)'), '', 'password')}
         </div>
-        <div class="flex gap-2 mt-4">
+        <div class="flex justify-end gap-2 mt-4">
           <button onclick="csSaveGithub()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save</button>
           <button onclick="csClearGithub()" class="bg-red-100 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Clear</button>
         </div>
