@@ -1414,12 +1414,12 @@ function csRenderClientRows(rows, targetId) {
         return line1 + line2;
     }).join('');
     body.innerHTML = csTable(
-        ['Name', 'Site', 'SID', 'PHY', 'OS', 'Tier', 'SSID', 'Last Seen', 'Errors', 'Demo'],
+        ['Name', 'Site', 'SID', 'PHY', 'OS', 'Tier', 'SSID', 'Last Seen', 'Err', 'Demo'],
         rowHtml,
         // Column widths (10 cols — Status column dropped; status is now a dot by
         // the hostname). Tunable: adjust these and the header order as needed.
         { colWidths: ['200px', '90px', '70px', '80px', '90px', '60px',
-                      '180px', '110px', '70px', '300px'] }
+                      '216px', '132px', '70px', '300px'] }
     );
     csDemoStartTicker();
 }
