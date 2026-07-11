@@ -898,24 +898,38 @@ class ArubaClient:
                 # Fetch all active alerts (max 100 per page, follow pagination).
                 # NOTE: OData filter parameter is "$filter" (with $), not "filter".
                 # "sort" is not a supported query param on this endpoint.
-                params: dict[str, Any] = {
-                    "limit": 100,
-                    "$filter": "status eq 'Active'",
-                }
+                # New Central "List Events" (the Alerts & Events page) lives under
+                # the network-monitoring service — /network-monitoring/v1/events,
+                # a sibling of /network-monitoring/v1/aps. The old
+                # /network-notifications/v1/alerts path returns nothing on New
+                # Central. OData: limit up to 1000, cursor pagination via "next".
+                params: dict[str, Any] = {"limit": 1000}
                 raw_alerts: list[dict[str, Any]] = []
                 while True:
-                    payload = await self._get(http, "/network-notifications/v1/alerts", params=params)
-                    items = payload.get("items") or []
+                    payload = await self._get(http, "/network-monitoring/v1/events", params=params)
+                    items = payload.get("items") or payload.get("events") or []
                     raw_alerts.extend(items)
                     next_cursor = payload.get("next")
-                    if not next_cursor or len(items) < 100:
+                    if not next_cursor or len(items) < 1000:
                         break
                     params["next"] = next_cursor
 
-                # Group by (name, siteName) — same alert type can fire multiple times
+                # Diagnostic: log the field names of the first event once so the
+                # real response shape is visible in the log (values NOT logged).
+                if raw_alerts:
+                    logger.info("new_central events sample keys [%s]: %s",
+                                self._config_hash, sorted(raw_alerts[0].keys()))
+
+                # Group by (name, siteName) — same event type can fire many times.
+                # Keep only active/open events (the demo's expected errors); drop
+                # cleared/closed/resolved so a monitored error reads as present.
                 groups: dict[tuple[str, str], dict[str, Any]] = {}
                 for item in raw_alerts:
-                    name = str(item.get("name") or item.get("alertType") or "Alert").strip()
+                    state = str(item.get("state") or item.get("status") or "").strip().lower()
+                    if state in ("cleared", "closed", "resolved"):
+                        continue
+                    name = str(item.get("name") or item.get("eventType") or item.get("type")
+                               or item.get("alertType") or "Event").strip()
                     site = str(item.get("siteName") or item.get("site") or "—").strip() or "—"
                     key = (name.lower(), site.lower())
                     if key not in groups:
@@ -924,9 +938,9 @@ class ArubaClient:
                             "site": site,
                             "severity": self._nc_alert_severity(item.get("severity", "")),
                             "category": str(item.get("category") or "").strip(),
-                            "device_type": str(item.get("deviceType") or "").strip(),
-                            "detail": str(item.get("summary") or "").strip(),
-                            "ts": item.get("createdAt") or None,
+                            "device_type": str(item.get("deviceType") or item.get("deviceRole") or "").strip(),
+                            "detail": str(item.get("summary") or item.get("description") or item.get("message") or "").strip(),
+                            "ts": item.get("createdAt") or item.get("timestamp") or item.get("occurredAt") or None,
                             "count": 0,
                         }
                     groups[key]["count"] += 1
@@ -940,7 +954,7 @@ class ArubaClient:
         except Exception as exc:
             body = getattr(getattr(exc, "response", None), "text", None)
             logger.warning("new_central alerts fetch [%s]: %s%s", self._config_hash, exc, f" — {body}" if body else "")
-        logger.info("new_central alerts fetched [%s]: %d alert groups from /network-notifications/v1/alerts", self._config_hash, len(alerts))
+        logger.info("new_central events fetched [%s]: %d event groups from /network-monitoring/v1/events", self._config_hash, len(alerts))
         ttl_offset = 0 if alerts else (_ALERTS_CACHE_TTL - 60)
         _alerts_cache[self._config_hash] = (time.time() - ttl_offset, alerts)
         return alerts
