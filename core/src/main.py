@@ -4420,6 +4420,31 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception as e:  # noqa: BLE001
             logger.debug("status snapshot demo-active failed for %s: %s", tenant_id, e)
 
+        # One-time-per-tenant shape log so a fresh deploy can confirm the snapshot
+        # populated correctly (component/client counts, how many last_seen values
+        # parsed to minutes-ago, how many clients have a resolved active demo) —
+        # then it goes quiet so the 15s push loop doesn't spam. Samples one
+        # component + one client so the field shapes are visible in the hub log.
+        try:
+            logged = getattr(self, "_status_snap_logged", None)
+            if logged is None:
+                logged = self._status_snap_logged = set()
+            if tenant_id not in logged:
+                logged.add(tenant_id)
+                ls_parsed = sum(1 for c in clients if c.get("last_seen_secs") is not None)
+                demos = sum(1 for c in clients if c.get("demo_active"))
+                logger.info(
+                    "STATUS_SNAPSHOT[%s] overall=%s components=%d clients=%d "
+                    "last_seen_parsed=%d/%d demo_active=%d sample_component=%s "
+                    "sample_client=%s",
+                    tenant_id, overall, len(components), len(clients),
+                    ls_parsed, len(clients), demos,
+                    (components[0] if components else None),
+                    ({k: clients[0].get(k) for k in ("name", "status", "last_seen_secs", "demo_active")}
+                     if clients else None))
+        except Exception:  # noqa: BLE001 — logging must never break the snapshot
+            pass
+
         return {
             "tenant_name": tenant_name,
             "overall": overall,
