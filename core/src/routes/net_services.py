@@ -191,6 +191,42 @@ def register(app, hub, ctx):
         _hub, _sid, payload = await _le_request("LE_GET_HE_LOGIN", {})
         return payload
 
+    # ── Per-tenant multi-provider DNS-01 credential store ────────────────────
+    # Each tenant manages its OWN named DNS credentials (HE / Cloudflare /
+    # rfc2136 / route53). tenant_id is derived from the session and injected into
+    # the le command — NEVER taken from the request body — so one tenant can't
+    # read or write another's creds.
+    def _le_tenant(request):
+        sess = _session_user(request)
+        return ((sess.get("user", {}).get("tenant_id") if sess else None) or "default")
+
+    @app.get("/api/le/dns-credentials")
+    async def le_list_dns_creds(request: Request):
+        """This tenant's saved DNS-01 credentials (names + providers; NO secrets),
+        plus the provider field catalog for the editor."""
+        _hub, _sid, payload = await _le_request(
+            "LE_LIST_DNS_CREDS", {"tenant_id": _le_tenant(request)})
+        return payload
+
+    @app.post("/api/le/dns-credentials")
+    async def le_set_dns_cred(request: Request):
+        """Add/update one of THIS tenant's DNS-01 credentials. Empty secret fields
+        keep the stored value (sentinel-merge)."""
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        body["tenant_id"] = _le_tenant(request)  # server-derived; ignore any client value
+        _hub, _sid, payload = await _le_request("LE_SET_DNS_CRED", body)
+        return payload
+
+    @app.delete("/api/le/dns-credentials")
+    async def le_delete_dns_cred(request: Request):
+        """Delete one of this tenant's DNS-01 credentials by name."""
+        body = await request.json()
+        name = (body.get("name") if isinstance(body, dict) else None)
+        _hub, _sid, payload = await _le_request(
+            "LE_DELETE_DNS_CRED", {"tenant_id": _le_tenant(request), "name": name})
+        return payload
+
     @app.get("/api/le/certs")
     async def le_list_certs():
         """List managed certificates from the le spoke."""
@@ -209,8 +245,12 @@ def register(app, hub, ctx):
     async def le_issue_cert(request: Request):
         """Issue a cert via the le spoke, then hub-broker the new material to
         its targets. Returns the spoke result with an added ``distribution``
-        per-target summary."""
-        hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", await request.json())
+        per-target summary. Injects the session tenant so a named DNS credential
+        (``dns_credential``) resolves against THIS tenant's store."""
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        body["tenant_id"] = _le_tenant(request)  # server-derived; scopes dns_credential
+        hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", body)
         inner = _le_inner(payload)
         domain = inner.get("domain")
         targets = inner.get("targets")
