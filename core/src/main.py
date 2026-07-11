@@ -87,10 +87,10 @@ from hub_bug_store import HubBugStoreMixin
 # (same deploy-order class as the base_spoke import). Single source of truth
 # for format/level/destination across every hub/spoke/agent entrypoint.
 try:
-    from logging_setup import configure_logging, set_log_level
+    from logging_setup import configure_logging, set_log_level, truncate_log_files
 except ImportError:
     try:
-        from core.src.logging_setup import configure_logging, set_log_level
+        from core.src.logging_setup import configure_logging, set_log_level, truncate_log_files
     except ImportError:
         import logging as _logging
         _FMT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -106,6 +106,24 @@ except ImportError:
             for _n in list(_logging.root.manager.loggerDict):
                 _logging.getLogger(_n).setLevel(lvl)
             return lvl
+        def truncate_log_files(log_dir="/var/log/lm"):
+            truncated = []
+            try:
+                names = os.listdir(log_dir)
+            except Exception:
+                return truncated
+            for name in names:
+                if not name.endswith(".log"):
+                    continue
+                path = os.path.join(log_dir, name)
+                try:
+                    if os.path.isfile(path):
+                        with open(path, "w"):
+                            pass
+                        truncated.append(name)
+                except Exception:  # noqa: BLE001
+                    pass
+            return truncated
 
 configure_logging()
 logger = logging.getLogger("Hub")
@@ -2217,6 +2235,77 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def broadcast_clear_logs(self):
+        """Broadcast ``CLEAR_LOGS`` to every connected spoke/agent so each box
+        truncates its own on-disk ``/var/log/lm/*.log`` in place. Mirrors
+        ``broadcast_log_level``. Fire-and-forget (no ack-wait): the hub clears
+        its OWN in-memory view synchronously in ``clear_all_logs`` before this,
+        so the UI is empty the instant the route returns; the spoke-side disk
+        truncation lands whenever each spoke dispatches the command."""
+        logger.info("Broadcasting CLEAR_LOGS to connected spokes/agents")
+        tasks = []
+        for sid in list(self.active_connections.keys()):
+            spoke_msg = Message(
+                header=MessageHeader(
+                    message_id=str(uuid.uuid4()),
+                    timestamp=time.time(),
+                    sender_id="hub",
+                    destination_id=sid,
+                ),
+                payload=MessagePayload(type="CLEAR_LOGS", data={}),
+            )
+            tasks.append(self.send_to_spoke(spoke_msg))
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def clear_all_logs(self):
+        """Wipe every log source the Hub Log UI can show — the hub's own
+        in-memory deque, every relayed agent/spoke deque in ``agent_logs``,
+        and the on-disk ``/var/log/lm/*.log`` files on the hub box (the hub's
+        own ``hub.log`` plus any co-located spoke files). Then broadcasts
+        ``CLEAR_LOGS`` to every connected spoke so each remote box truncates
+        its OWN on-disk logs too. Used by the WebUI "Clear Logs" button
+        (``POST /setup/logs/clear``, admin-only).
+
+        On-disk files are truncated in place (``O_TRUNC``, same inode) by
+        ``truncate_log_files`` so each process's open ``RotatingFileHandler``
+        keeps writing at offset 0 instead of detaching to a stale inode —
+        see its docstring. Returns a summary dict for the route response."""
+        # In-memory: hub's own deque + every relayed agent/spoke deque. Clear
+        # each deque IN PLACE (not agent_logs.clear()) to preserve the keys
+        # the UI keys its tabs on — a still-connected spoke keeps its buffer
+        # entry, just empty, instead of dropping out of the agents list.
+        hub_lines = len(self.logs)
+        self.logs.clear()
+        agent_counts = {}
+        for aid, dq in list(self.agent_logs.items()):
+            agent_counts[aid] = len(dq)
+            dq.clear()
+        agent_lines = sum(agent_counts.values())
+
+        # On-disk on this box (hub's own + co-located spokes). Off the hub
+        # loop: os.listdir + N open()s shouldn't block heartbeats.
+        files = await asyncio.to_thread(truncate_log_files)
+
+        # Remote spokes' on-disk logs — best-effort broadcast; failures are
+        # per-spoke (return_exceptions=True above) and don't fail the call.
+        spoke_count = len(self.active_connections)
+        await self.broadcast_clear_logs()
+
+        logger.warning(
+            "[diag] Clear Logs: hub deque %d + agent/spoke %d lines across %d "
+            "buffer(s); truncated %d on-disk file(s) on hub; broadcast to %d "
+            "connected spoke(s)",
+            hub_lines, agent_lines, len(agent_counts), len(files), spoke_count)
+        return {
+            "status": "ok",
+            "hub_lines": hub_lines,
+            "agent_buffers": len(agent_counts),
+            "agent_lines": agent_lines,
+            "disk_files_truncated": files,
+            "spokes_broadcast": spoke_count,
+        }
 
     async def approve_and_bind_spoke(self, spoke_id: str, tenant_id: str) -> None:
         """Approve a spoke, bind it to a tenant, persist, and — if it is

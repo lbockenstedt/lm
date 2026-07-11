@@ -3236,6 +3236,12 @@ function _renderLogsSection(subMenu) {
     const isRecovery = subMenu === 'logs-recovery';
     const isBugs = subMenu === 'logs-bugs';
     const refreshCall = isRecovery ? "loadRecoveryLogs()" : isBugs ? "loadBugReports()" : `loadModuleLogs('${module}')`;
+    // Clear Logs is destructive + fleet-wide (hub deque + every relayed
+    // agent/spoke deque + on-disk /var/log/lm/*.log on the hub AND, via a
+    // CLEAR_LOGS broadcast, every connected spoke's own disk). Hidden on the
+    // Bug Reports tab — that's a separate store, not a log source.
+    const clearBtn = isBugs ? '' :
+        `<button onclick="clearLogs(()=>${refreshCall})" class="text-xs text-red-500 hover:text-red-700 font-medium">Clear</button>`;
     content.innerHTML = `
         <div class="${card}">
             <div class="px-4 py-3 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -3246,6 +3252,7 @@ function _renderLogsSection(subMenu) {
                         <span id="debug-mode-text">Debug Logging: OFF</span>
                     </button>
                     <button onclick="copyLogs()" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Copy</button>
+                    ${clearBtn}
                     <button onclick="${refreshCall}" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Refresh</button>
                 </div>
             </div>
@@ -8626,6 +8633,33 @@ async function loadModuleLogs(module, isRefresh = false) {
         if (!isRefresh) {
             container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${module} logs: ${err.message}</div>`;
         }
+    }
+}
+
+async function clearLogs(refreshFn) {
+    // Destructive + fleet-wide: clears the hub's in-memory deque, every
+    // relayed agent/spoke deque, the on-disk /var/log/lm/*.log files on the
+    // hub box, AND broadcasts CLEAR_LOGS to every connected spoke so each
+    // remote box truncates its own on-disk logs. Admin-only server-side.
+    // After clearing, refresh the current tab (the loader passed in) so the
+    // view empties immediately instead of showing the stale cached lines.
+    if (!confirm('Clear ALL logs?\n\nThis wipes the hub logs, every agent/spoke log buffer, and the on-disk /var/log/lm/*.log files on the hub AND every connected spoke. This cannot be undone.')) {
+        return;
+    }
+    try {
+        const resp = await fetch('/setup/logs/clear', { method: 'POST' });
+        if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+        }
+        const data = await resp.json().catch(() => ({}));
+        const n = (data.disk_files_truncated || []).length;
+        if (typeof showToast === 'function') {
+            showToast(`Cleared logs: ${data.hub_lines || 0} hub + ${data.agent_lines || 0} agent/spoke lines, ${n} file(s) on disk, broadcast to ${data.spokes_broadcast || 0} spoke(s).`, 'success');
+        }
+        if (typeof refreshFn === 'function') refreshFn();
+    } catch (err) {
+        console.error('Clear logs failed:', err);
+        if (typeof showToast === 'function') showToast('Failed to clear logs: ' + err.message, 'error');
     }
 }
 

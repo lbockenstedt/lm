@@ -25,7 +25,7 @@ from typing import Dict, Any, Optional
 from ..security.signer import MessageSigner, encode_frame, split_frame
 
 try:  # shared helper (lm/core/src); falls back if imported off a stale path
-    from logging_setup import set_log_level
+    from logging_setup import set_log_level, truncate_log_files
 except ImportError:
     def set_log_level(enabled):
         level = logging.DEBUG if enabled else logging.INFO
@@ -33,6 +33,25 @@ except ImportError:
         for name in list(logging.root.manager.loggerDict):
             logging.getLogger(name).setLevel(level)
         return level
+
+    def truncate_log_files(log_dir="/var/log/lm"):
+        truncated = []
+        try:
+            names = os.listdir(log_dir)
+        except Exception:
+            return truncated
+        for name in names:
+            if not name.endswith(".log"):
+                continue
+            path = os.path.join(log_dir, name)
+            try:
+                if os.path.isfile(path):
+                    with open(path, "w"):
+                        pass
+                    truncated.append(name)
+            except Exception:  # noqa: BLE001 — per-file best-effort
+                pass
+        return truncated
 
 logger = logging.getLogger("BaseControlPlane")
 
@@ -1871,6 +1890,22 @@ class BaseControlPlane:
             level = set_log_level(enabled)
             logger.info(f"Log level set to {logging.getLevelName(level)}")
             return {"status": "SUCCESS", "message": f"Log level set to {logging.getLevelName(level)}"}
+
+        if cmd_type == "CLEAR_LOGS":
+            # WebUI "Clear Logs" — truncate every on-disk /var/log/lm/*.log on
+            # this spoke/agent box in place (O_TRUNC, same inode) so the open
+            # RotatingFileHandlers keep writing at offset 0 instead of
+            # detaching to a stale inode and losing every future line. The
+            # hub clears its OWN in-memory relay view (agent_logs/hub.logs)
+            # separately; this only touches this box's disk. Off the event
+            # loop because os.listdir + N open()s can block on a slow/fsync-y
+            # filesystem, and CLEAR_LOGS is fire-and-forget, not request/reply
+            # the operator is waiting on. In-memory deques are NOT cleared
+            # here — the spoke doesn't keep one (its logs relay up; the hub
+            # holds the buffer the UI reads).
+            files = await asyncio.to_thread(truncate_log_files)
+            logger.info("[diag] CLEAR_LOGS: truncated %d log file(s)", len(files))
+            return {"status": "SUCCESS", "truncated": files}
 
         # Unified status command - works for all spokes by calling module.get_status()
         # This is the preferred way for the Hub to request status from any spoke.

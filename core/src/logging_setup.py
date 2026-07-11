@@ -226,3 +226,47 @@ def set_log_level(enabled: bool) -> int:
     for name in list(logging.root.manager.loggerDict):
         logging.getLogger(name).setLevel(level)
     return level
+
+
+def truncate_log_files(log_dir: str = "/var/log/lm"):
+    """Truncate every ``*.log`` file in ``log_dir`` to zero bytes, in place.
+
+    Used by the WebUI "Clear Logs" button (``POST /setup/logs/clear`` on the
+    hub, and the ``CLEAR_LOGS`` command the hub broadcasts to every connected
+    spoke/agent) so an operator can wipe the on-disk log trail across the whole
+    fleet from one place — the hub's own ``/var/log/lm/hub.log`` plus every
+    co-located spoke file on the hub box, and each remote spoke's own
+    ``/var/log/lm/<x>.log`` via the broadcast.
+
+    Truncation is ``open(path, "w")`` (``O_TRUNC`` on the existing inode) — NOT
+    an unlink+recreate. The :class:`logging.handlers.RotatingFileHandler` each
+    process holds open for its own log file keeps the same file descriptor
+    pointing at the same (now-empty) inode, so its next ``emit`` writes at
+    offset 0 (``shouldRollover`` seeks to end → 0 → no rollover, then the write
+    lands at 0). Unlinking instead would detach the handler to a stale inode
+    and silently lose every subsequent log line — the classic logrotate pitfall
+    that ``copytruncate`` exists to avoid, sidestepped here by truncating in
+    place. Returns the list of filenames truncated (best-effort per file:
+    a permission error on one file is logged + skipped, not raised)."""
+    truncated = []
+    try:
+        names = os.listdir(log_dir)
+    except FileNotFoundError:
+        return truncated
+    except Exception:  # noqa: BLE001 — never let log-clearing crash the caller
+        return truncated
+    for name in names:
+        if not name.endswith(".log"):
+            continue
+        path = os.path.join(log_dir, name)
+        try:
+            if not os.path.isfile(path):
+                continue
+            with open(path, "w"):
+                pass  # O_TRUNC in place — see docstring on why not unlink
+            truncated.append(name)
+        except Exception:  # noqa: BLE001 — per-file best-effort
+            logging.getLogger(__name__).warning(
+                "truncate_log_files: could not truncate %s: %s", path,
+                exc_info=True if logging.getLogger().isEnabledFor(logging.DEBUG) else None)
+    return truncated

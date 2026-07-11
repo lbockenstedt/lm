@@ -291,6 +291,29 @@ def register(app, hub, ctx):
             logger.error(f"Error reading logs for {module}: {e}")
             raise HTTPException(status_code=500, detail=f"Permission or I/O error reading {log_path}: {str(e)}")
 
+    @app.post("/setup/logs/clear")
+    async def clear_all_logs(request: Request):
+        """Clear Logs button in the Logs view. Wipes every log source the Hub
+        Log UI can show: the hub's in-memory deque, every relayed agent/spoke
+        deque (``agent_logs``), and the on-disk ``/var/log/lm/*.log`` files on
+        the hub box; then broadcasts ``CLEAR_LOGS`` to every connected spoke so
+        each remote box truncates its own on-disk logs. Admin-only — the
+        ``/setup/*`` middleware already gates admin, this is belt-and-suspenders
+        (mirrors ``reset_rate_limit_drops``). The clear is destructive and
+        fleet-wide, hence the explicit re-check + a [diag] audit line."""
+        hub = app.state.hub
+        sess = ctx._session_user(request)
+        if not sess or not ctx._is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        result = await hub.clear_all_logs()
+        logger.warning("[diag] Clear Logs by %s: hub %d + agent/spoke %d lines, "
+                       "%d on-disk file(s), broadcast to %d spoke(s)",
+                       (sess.get("username") if isinstance(sess, dict) else "?"),
+                       result.get("hub_lines", 0), result.get("agent_lines", 0),
+                       len(result.get("disk_files_truncated", [])),
+                       result.get("spokes_broadcast", 0))
+        return result
+
     @app.get("/setup/api-probe")
     async def probe_spoke_api(spoke_id: str, path: str):
         hub = app.state.hub
