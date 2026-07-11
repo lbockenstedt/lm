@@ -2443,6 +2443,12 @@ async function csRenderConfigSimulation() {
     catch (e) { console.error('csRenderConfigSimulation: simulation-conf-parsed load failed', e); simErr = e; }
     try { uo = await csFetch(`/${csTenant()}/config/user-overrides-conf`); }
     catch (e) { console.error('csRenderConfigSimulation: user-overrides-conf load failed', e); uoErr = e; }
+    // Config Source of Truth (Hub vs GitHub) — drives the toggle + read-only gate.
+    let srcCfg = null;
+    try { srcCfg = await csFetch(`/${csTenant()}/config/source`); }
+    catch (e) { srcCfg = { source: 'github', has_token: false, writable: true }; }
+    const cfgSource = (srcCfg && srcCfg.source) || 'github';
+    const cfgWritable = !!(srcCfg && srcCfg.writable);
 
     const fetchedSim = (sim && sim.fetched_at) ? csFmtFetched(sim.fetched_at) : '—';
     const simSource = (sim && sim.source) || 'spoke';
@@ -2498,7 +2504,11 @@ async function csRenderConfigSimulation() {
       <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
         <div class="flex items-center gap-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Config ${helpIcon('cs', null, 'Simulations help')}</h3>
-          <span class="inline-block bg-slate-100 text-slate-500 rounded-full px-2 py-0.5 text-[10px] font-bold">Hub-managed override (no GitHub API key)</span>
+          ${cfgSource === 'hub'
+            ? '<span class="inline-block bg-emerald-100 text-emerald-700 rounded-full px-2 py-0.5 text-[10px] font-bold">Hub-owned (GitHub sync ignored)</span>'
+            : (cfgWritable
+              ? '<span class="inline-block bg-blue-100 text-blue-700 rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed (commits on save)</span>'
+              : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">GitHub-managed — READ-ONLY (no API key)</span>')}
           ${simSource === 'spoke' ? '' : (simConnected
             ? '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke online — live config fetch timed out, showing stored override</span>'
             : '<span class="inline-block bg-amber-100 text-amber-700 rounded-full px-2 py-0.5 text-[10px] font-bold">spoke offline — showing stored override</span>')}
@@ -2520,8 +2530,50 @@ async function csRenderConfigSimulation() {
     let hubCard = '';
     try { hubCard = await csHubConfigCard('/tenant/' + csTenant() + '/hub-config'); }
     catch (e) { console.error('csRenderConfigSimulation: hub-config load failed', e); hubCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('Hub Config', e).replace('py-10', 'py-6')}</div>`; }
-    csSet(`<div class="space-y-4">${simCard}${uoCard}${hubCard}</div>`);
+    // Source of Truth toggle (top) + read-only wrapper for the conf editors when
+    // GitHub-managed with no API key. The Hub Config card stays editable (it's
+    // central/notification config, not the simulation.conf files).
+    const sotCard = csConfigSourceCard(cfgSource, srcCfg);
+    const roBanner = cfgWritable ? '' :
+        `<div class="rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-xs px-4 py-2">GitHub is the source of truth and no API key is configured — the config below is read-only. Add a GitHub API key (Setup → GitHub) or switch Source of Truth to Hub.</div>`;
+    const roWrap = cfgWritable ? '' : 'pointer-events-none opacity-60 select-none';
+    csSet(`<div class="space-y-4">${sotCard}${roBanner}<div class="${roWrap} space-y-4">${simCard}${uoCard}</div>${hubCard}</div>`);
 }
+
+// Source of Truth toggle card (top of the Config screen).
+function csConfigSourceCard(source, cfg) {
+    cfg = cfg || {};
+    const isHub = source === 'hub';
+    const hasToken = !!cfg.has_token;
+    const repo = cfg.repo_url || '';
+    const branch = cfg.repo_branch || 'main';
+    const btn = (val, label, active) =>
+        `<button onclick="csSetConfigSource('${val}')" class="px-3 py-1.5 rounded-md text-sm font-bold border transition-colors ${active ? 'bg-green-600 text-white border-green-600' : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'}">${label}</button>`;
+    let status;
+    if (isHub) {
+        status = '<span class="text-emerald-700">Hub-owned — the GitHub sync is ignored; your edits are authoritative and are never reverted by a repo pull.</span>';
+    } else if (hasToken) {
+        status = `<span class="text-slate-500">GitHub-managed — edits commit + push to <span class="font-mono">${csEscape(repo || 'the configured repo')}</span> @ <span class="font-mono">${csEscape(branch)}</span>.</span>`;
+    } else {
+        status = '<span class="text-amber-700 font-semibold">GitHub-managed, no API key — the config is READ-ONLY. Add a key (Setup → GitHub) or switch to Hub.</span>';
+    }
+    return `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <div class="flex flex-wrap items-center gap-3">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth</h3>
+        <div class="flex gap-2">${btn('hub', 'Hub', isHub)}${btn('github', 'GitHub', !isHub)}</div>
+      </div>
+      <p class="text-xs mt-2">${status}</p>
+    </div>`;
+}
+window.csSetConfigSource = async function (val) {
+    try {
+        await csFetch(`/${csTenant()}/config/source`, { method: 'POST', body: JSON.stringify({ source: val }) });
+        if (typeof showToast === 'function') showToast(`Source of Truth: ${val === 'hub' ? 'Hub' : 'GitHub'}`, 'success');
+        csRenderConfigSimulation();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Failed to set source: ' + (e.message || e), 'error');
+    }
+};
 
 // Serialize the labeled sim-conf inputs (+ extra-section textareas) back into
 // INI text. Walk [data-cs-section]/[data-cs-key] inputs; empty values are
