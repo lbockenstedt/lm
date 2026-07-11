@@ -1440,11 +1440,11 @@ function csSimBtnClass(on, isOverride) {
     // bucket default (see ClientRegistry.set_overrides), so an override button
     // only appears for a REAL deviation from the bucket.
     if (isOverride) {
-        return 'px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors ' +
+        return 'px-[0.3rem] py-[0.1rem] rounded text-[10px] font-bold border transition-colors ' +
             (on ? 'bg-white text-purple-700 border-2 border-purple-500 hover:bg-purple-50'
                 : 'bg-white text-purple-400 border-purple-200 hover:bg-purple-50');
     }
-    return 'px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors ' +
+    return 'px-[0.3rem] py-[0.1rem] rounded text-[10px] font-bold border transition-colors ' +
         (on ? 'bg-purple-100 text-purple-700 border-purple-300'
             : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-100');
 }
