@@ -136,6 +136,15 @@ class BaseControlPlane:
         # Updater worker state
         self._updater_stop = threading.Event()
         self._updater_thread = None
+        # DRAINING: True while a self-update (hub-driven SPOKE_UPDATE or the
+        # autonomous self-update timer) is running git pull + about to
+        # os._exit+relaunch. Reported in CS_TELEMETRY so the hub stops firing
+        # 5s request/reply commands (which time out when the WS drops mid-reply
+        # on exit) and queues them to the mailbox instead. Per-process: a fresh
+        # process starts False, so the first post-restart telemetry frame
+        # ('draining: false') tells the hub to clear drain + resume live pushes.
+        self._draining: bool = False
+        self._spoke_update_in_progress: bool = False
         # Log relay: ALL captured log entries (INFO+) are queued here and flushed
         # to the hub every few seconds by _log_relay_task, plus a final flush is
         # attempted before a self-update restart so the spoke's last lines reach
@@ -489,6 +498,11 @@ class BaseControlPlane:
         to boot. Known-bad commits (rolled back before) are skipped. Returns
         True only in the never-reached tail that exits the process; the normal
         "applied an update" path exits with status 3 so systemd relaunches."""
+        # Mark draining for the autonomous self-update path (LM_SPOKE_SELF_UPDATE)
+        # just as the hub-driven SPOKE_UPDATE handler does, so the hub queues
+        # request/reply pushes instead of timing them out on the exit. Off by
+        # default (the hub drives updates via SPOKE_UPDATE); cheap when unused.
+        self._draining = True
         try:
             cwd = self._repo_root()
             self._ensure_git_pull_strategy(cwd)
@@ -1861,12 +1875,16 @@ class BaseControlPlane:
                 return {"status": "SUCCESS",
                         "message": "update already in progress"}
             self._spoke_update_in_progress = True
+            self._draining = True  # hub queues request/reply pushes; we os._exit at the end
             try:
                 return await asyncio.to_thread(
                     self._perform_spoke_update_sync, repo_url,
                     core_repo_url=core_repo_url, core_branch=core_branch)
             finally:
                 self._spoke_update_in_progress = False
+                # _draining stays True — the process is about to os._exit+relaunch
+                # (or just failed the update); a fresh process starts False and
+                # reports 'draining: false' on its first telemetry frame.
 
         if cmd_type == "SPOKE_SET_HUB_SECRET":
             new_secret = data.get("hub_secret")
