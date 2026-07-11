@@ -717,6 +717,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # { msg_id: expire_ts }
         self._recent_request_timeouts: Dict[str, float] = {}
         self._RECENT_TIMEOUT_TTL = 60.0
+        # Fire-and-forget broadcast command message_ids (SET_LOG_LEVEL,
+        # CLEAR_LOGS, …) sent via the LOW-LEVEL send_to_spoke — NOT through
+        # mailbox.push, so they're never in mailbox.pending_ack. The spoke still
+        # returns a COMMAND_RESULT for each (every command acks), so without
+        # this set those acks fall through to mailbox.acknowledge → "Received
+        # acknowledgement for unknown message ID" WARNING on every broadcast
+        # (e.g. every Clear-Logs click, every Enable-Debug toggle). Registering
+        # them here lets the COMMAND_RESULT dispatch recognize a broadcast ack
+        # and log it DEBUG (expected) instead of WARNING (stray). TTL-bounded
+        # like _recent_request_timeouts; pruned on each new registration.
+        # { msg_id: expire_ts }
+        self._pending_broadcast_ids: Dict[str, float] = {}
+        self._BROADCAST_ACK_TTL = 60.0
         # Spokes currently DRAINING (mid self-update — git pull then os._exit +
         # systemd relaunch). While draining the hub does NOT fire request/reply
         # commands (CS_CONFIG_UPDATE, ...) at the spoke: the spoke is about to
@@ -1285,6 +1298,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         now = time.time()
         self._recent_request_timeouts = {k: v for k, v in self._recent_request_timeouts.items()
                                          if v > now}
+
+    def _register_broadcast_ack(self, msg_id: str) -> None:
+        """Register a fire-and-forget broadcast command id so its COMMAND_RESULT
+        ack is recognized (logged DEBUG) instead of mislabeled "unknown message
+        ID" (WARNING) by mailbox.acknowledge — broadcast sends go through the
+        low-level send_to_spoke, NOT mailbox.push, so the id is never in
+        pending_ack. TTL-bounded + pruned on each call."""
+        if not msg_id:
+            return
+        now = time.time()
+        self._pending_broadcast_ids[msg_id] = now + self._BROADCAST_ACK_TTL
+        self._pending_broadcast_ids = {k: v for k, v in self._pending_broadcast_ids.items()
+                                       if v > now}
 
     # ── spoke drain state (mid self-update) ─────────────────────────────────
     def mark_draining(self, spoke_id: str, window: float = None) -> None:
@@ -2231,6 +2257,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 ),
                 payload=MessagePayload(type="SET_LOG_LEVEL", data={"enabled": enabled})
             )
+            # Fire-and-forget: send via low-level send_to_spoke (NOT mailbox.push),
+            # and register the id so the spoke's COMMAND_RESULT ack is recognized
+            # as an expected broadcast ack (DEBUG) instead of "unknown message ID"
+            # (WARNING) — see the COMMAND_RESULT dispatch in handle_connection.
+            self._register_broadcast_ack(spoke_msg.header.message_id)
             tasks.append(self.send_to_spoke(spoke_msg))
 
         if tasks:
@@ -2255,6 +2286,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 ),
                 payload=MessagePayload(type="CLEAR_LOGS", data={}),
             )
+            # Fire-and-forget: low-level send (not mailbox.push) + register the id
+            # so the spoke's COMMAND_RESULT ack is recognized as an expected
+            # broadcast ack (DEBUG) instead of "unknown message ID" (WARNING) —
+            # which fired on every Clear-Logs click before this.
+            self._register_broadcast_ack(spoke_msg.header.message_id)
             tasks.append(self.send_to_spoke(spoke_msg))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -3541,6 +3577,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                                 "Late reply for %s from %s (request_response already "
                                 "timed out) — dropped (message_type=%s, source_ip=%s)",
                                 corr_id, spoke_id, payload.get("type"), remote_ip)
+                    elif corr_id in self._pending_broadcast_ids:
+                        # Fire-and-forget broadcast command ack (SET_LOG_LEVEL,
+                        # CLEAR_LOGS, …): sent via low-level send_to_spoke, not
+                        # mailbox.push, so it's not in pending_ack. Expected —
+                        # log DEBUG + drop instead of WARNING "unknown message ID"
+                        # (which fired on every Clear-Logs click / debug toggle).
+                        self._pending_broadcast_ids.pop(corr_id, None)
+                        logger.debug(
+                            "Broadcast command ack for %s from %s — dropped "
+                            "(message_type=%s, source_ip=%s)",
+                            corr_id, spoke_id, payload.get("type"), remote_ip)
                     else:
                         # mailbox.push reply, or a genuinely unknown ack. Status:
                         # spoke reply frames carry the real outcome in
