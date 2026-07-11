@@ -39,7 +39,8 @@ _POLL_INTERVAL_S = 300  # 5 min — matches the spoke poller + aruba.py cache TT
 # baseline sagging to match it.
 _CC_WINDOW = 3600          # seconds of raw samples kept (the "current hourly")
 _CC_MIN_SAMPLES = 3        # minimum live samples before flagging
-_CC_DROP_PCT = 25.0        # percent drop below baseline that flags DEGRADED
+_CC_WARN_PCT = 20.0        # >20% below the hour average -> WARNING
+_CC_ERROR_PCT = 50.0       # >50% below -> ERROR        # percent drop below baseline that flags DEGRADED
 _CC_7DAY_WINDOW = 7 * 86400
 _CC_SNAPSHOT_INTERVAL = 3600  # append one hourly snapshot to the 7-day history / hr
 _CC_KEYSEP = "\x1f"        # composite (tenant, wsite) key separator
@@ -108,49 +109,34 @@ class ClientCountTracker:
         self._samples[key] = [s for s in samples if s[0] >= cutoff]
 
     def entry(self, scope: str, wsite: str, central_site: str) -> Dict[str, Any]:
-        """Per-site {current, hourly_avg, baseline_7day, drop_pct, status, ...} —
-        mirrors the source _client_count_payload per-site branch (7-day baseline,
-        persisted-baseline fallback before MIN_SAMPLES, NO_DATA when empty)."""
+        """Per-site client-count status. Baseline = the AVERAGE over the last hour;
+        the site goes WARNING when the current count is >20%% below that hourly
+        average and ERROR when >50%% below (needs _CC_MIN_SAMPLES first -> no_data).
+        Detects sim-client die-off within the last hour (the demo's failure mode).
+        Status values (ok/warning/error/no_data) double as dashboard CHECK statuses."""
         now = time.time()
         key = self._key(scope, wsite)
         samples = self._samples.get(key, [])
-        hist = self._hourly.get(key, [])
-        has_7day = len(hist) >= 2
-        baseline_7day = (sum(v for _, v in hist) / len(hist)) if has_7day else None
         if not samples:
             return {"site_name": central_site, "current": 0, "hourly_avg": 0,
-                    "baseline_7day": round(baseline_7day, 1) if baseline_7day is not None else None,
-                    "baseline_source": "7day" if has_7day else "none",
-                    "drop_pct": 0.0, "status": "NO_DATA", "ts": now}
+                    "drop_pct": 0.0, "status": "no_data", "ts": now}
         current = samples[-1][1]
-        if len(samples) < _CC_MIN_SAMPLES:
-            saved = self._baseline.get(key)
-            if saved:
-                hourly_avg = saved["hourly_avg"]
-                baseline = baseline_7day if has_7day else hourly_avg
-                drop_pct = max(0.0, (baseline - hourly_avg) / baseline * 100.0) if baseline >= 1 else 0.0
-                status = "DEGRADED" if drop_pct >= _CC_DROP_PCT else "OK"
-                return {"site_name": central_site, "current": current, "hourly_avg": hourly_avg,
-                        "baseline_7day": round(baseline_7day, 1) if baseline_7day is not None else None,
-                        "baseline_source": "7day" if has_7day else "hourly",
-                        "drop_pct": round(drop_pct, 1), "status": status,
-                        "ts": samples[-1][0], "baseline_stale": True}
-            return {"site_name": central_site, "current": current, "hourly_avg": current,
-                    "baseline_7day": round(baseline_7day, 1) if baseline_7day is not None else None,
-                    "baseline_source": "7day" if has_7day else "none",
-                    "drop_pct": 0.0, "status": "NO_DATA", "ts": samples[-1][0]}
         hourly_avg = sum(s[1] for s in samples) / len(samples)
-        baseline = baseline_7day if has_7day else hourly_avg
-        if baseline < 1:
-            drop_pct, status = 0.0, "OK"
+        if len(samples) < _CC_MIN_SAMPLES:
+            drop_pct, status = 0.0, "no_data"
+        elif hourly_avg >= 1:
+            drop_pct = max(0.0, (hourly_avg - current) / hourly_avg * 100.0)
+            if drop_pct > _CC_ERROR_PCT:
+                status = "error"
+            elif drop_pct > _CC_WARN_PCT:
+                status = "warning"
+            else:
+                status = "ok"
         else:
-            drop_pct = (baseline - hourly_avg) / baseline * 100.0
-            status = "DEGRADED" if drop_pct >= _CC_DROP_PCT else "OK"
-        return {"site_name": central_site, "current": current, "hourly_avg": round(hourly_avg, 1),
-                "baseline_7day": round(baseline_7day, 1) if baseline_7day is not None else None,
-                "baseline_source": "7day" if has_7day else "hourly",
-                "drop_pct": round(max(0.0, drop_pct), 1), "status": status,
-                "ts": samples[-1][0], "baseline_stale": False}
+            drop_pct, status = 0.0, "ok"
+        return {"site_name": central_site, "current": current,
+                "hourly_avg": round(hourly_avg, 1), "drop_pct": round(drop_pct, 1),
+                "status": status, "ts": samples[-1][0]}
 
     def maybe_snapshot(self) -> None:
         """Once per hour: append each site's current hourly average to the 7-day
@@ -269,16 +255,19 @@ class CentralHubPoller:
                 # Monitor-for-absence: notify when the expected error goes missing.
                 checks[cid] = {"status": "ok" if n > 0 else "error",
                                "message": f"{n} active (as expected)" if n else "Expected error NOT detected"}
-            if not checks and data.get("site_health") is not None:
-                checks["site_health"] = {
-                    "status": "ok" if (data.get("site_health") or 0) >= 80 else "warning",
-                    "message": f"Site health {data.get('site_health')}",
-                }
             status[wireless_site] = checks
             current = int(data.get("client_count", 0) or 0)
             self._cc.record(tenant_id, wireless_site, current)
-            client_count_status[wireless_site] = self._cc.entry(
-                tenant_id, wireless_site, central_site)
+            cc_entry = self._cc.entry(tenant_id, wireless_site, central_site)
+            client_count_status[wireless_site] = cc_entry
+            # Surface the site's client-count monitor as a CHECK so "everything
+            # monitored" shows on the dashboard Checks view. Direct (NOT inverted)
+            # semantics: a DROP in clients means the sim clients died -> warning
+            # (>20% below the hour average) / error (>50%). See ClientCountTracker.
+            checks["client_count"] = {
+                "status": cc_entry["status"],
+                "message": f"{cc_entry['current']} clients vs {cc_entry['hourly_avg']} hr-avg (down {cc_entry['drop_pct']}%)",
+            }
             central_clients_by_site[wireless_site] = current
             for alert_id, devices in (data.get("hw_devices") or {}).items():
                 hw_totals[alert_id] = hw_totals.get(alert_id, 0) + sum(devices.values())
