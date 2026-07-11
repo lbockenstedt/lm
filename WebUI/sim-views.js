@@ -1146,11 +1146,9 @@ function csClientPass(c, skip) {
     if (skip !== 'site' && csFacet.site && csClientSite(c) !== csFacet.site) return false;
     return true;
 }
-window.csFacetSet = function (dim, val) {
-    csFacet[dim] = (csFacet[dim] === val) ? null : val;  // re-click a chip to deselect
+window.csFacetSelect = function (dim, val) {
+    csFacet[dim] = val || null;   // '' (the All option) clears the facet
     if (dim === 'tier') csClientTier = csFacet.tier || 'all';
-    // Deselecting Simulation clears the narrower facets so counts stay coherent.
-    if (dim === 'sim' && !csFacet.sim) { csFacet.tier = null; csFacet.site = null; csClientTier = 'all'; }
     csRenderClientsFaceted();
 };
 window.csFacetReset = function () {
@@ -1179,39 +1177,36 @@ function csRenderClientsFaceted() {
         if (csClientPass(c, 'site')) { const s = csClientSite(c); siteCounts[s] = (siteCounts[s] || 0) + 1; }
     });
 
-    const chip = (label, count, active, onclick) =>
-        `<button onclick="${onclick}" class="px-2.5 py-1 rounded-full text-xs font-semibold border transition-colors ${active ? 'bg-green-600 text-white border-green-600' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${csEscape(label)}${count != null ? ` <span class="opacity-70">${count}</span>` : ''}</button>`;
-    const rowCls = 'flex items-start gap-2';
-    const lblCls = 'text-[11px] font-bold text-slate-400 uppercase tracking-wider w-20 pt-1.5 shrink-0';
+    // Compact <select> dropdowns (Simulation / Tier / Site) — all available from
+    // the start, so there can be many simulations/sites without overflowing.
+    // Option labels carry the (other-facet-scoped) counts; the value is passed at
+    // runtime via this.value (no interpolation into the handler → injection-safe).
+    const selCls = 'bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    const lblCls = 'text-[11px] font-bold text-slate-400 uppercase tracking-wider';
+    const opt = (v, label, count, cur) =>
+        `<option value="${csEscape(v)}"${v === cur ? ' selected' : ''}>${csEscape(label)}${count != null ? ` (${count})` : ''}</option>`;
+    const dropdown = (dim, allLabel, opts, cur) =>
+        `<select onchange="csFacetSelect('${dim}', this.value)" class="${selCls}"><option value="">${csEscape(allLabel)}</option>${opts.join('')}</select>`;
 
-    // csEscape(JSON.stringify(x)) — JSON quotes the string; csEscape turns the
-    // double quotes into &quot; so they don't break the double-quoted onclick=""
-    // (site names can be arbitrary). The 'sim'/'tier'/'site' literals are single-
-    // quoted and safe as-is.
-    const simChips = CS_CONTROL_FLAGS.filter(f => simCounts[f] > 0 || csFacet.sim === f)
-        .map(f => chip(f, simCounts[f], csFacet.sim === f, `csFacetSet('sim',${csEscape(JSON.stringify(f))})`)).join(' ');
-    const tierChips = ['t1', 't2', 't3'].map(t =>
-        chip(t.toUpperCase(), tierCounts[t], csFacet.tier === t, `csFacetSet('tier',${csEscape(JSON.stringify(t))})`)).join(' ');
-    const siteChips = Object.keys(siteCounts).sort().map(s =>
-        chip(s, siteCounts[s], csFacet.site === s, `csFacetSet('site',${csEscape(JSON.stringify(s))})`)).join(' ');
+    const simOpts = CS_CONTROL_FLAGS.filter(f => simCounts[f] > 0 || csFacet.sim === f)
+        .map(f => opt(f, f, simCounts[f], csFacet.sim));
+    const tierOpts = ['t1', 't2', 't3'].map(t => opt(t, t.toUpperCase(), tierCounts[t], csFacet.tier));
+    const siteOpts = Object.keys(siteCounts).sort().map(s => opt(s, s, siteCounts[s], csFacet.site));
 
-    // Show the Tier/Site refinement rows whenever any facet/search is set (so a
-    // T1/T2/T3 sub-nav pick is reflected); list clients only once a Simulation is
-    // chosen OR a search is active — Simulation is the entry point, so a tier
-    // pre-selected from the sub-nav still shows the summary, not thousands of rows.
-    const showRefine = !!(csFacet.sim || csFacet.tier || csFacet.site || q);
-    const showList = !!(csFacet.sim || q);
+    // Any facet OR search lists clients (Simulation, Tier, and Site are all entry
+    // points); nothing selected → the summary hint.
+    const showList = !!(csFacet.sim || csFacet.tier || csFacet.site || q);
+    const total = csClientCache.length;
     facetsEl.innerHTML = `
-      <div class="space-y-2 mb-3">
-        <div class="${rowCls}"><span class="${lblCls}">Simulation</span><div class="flex flex-wrap gap-1.5">${simChips || '<span class="text-xs text-slate-400 italic pt-1">No active simulations.</span>'}</div></div>
-        ${showRefine ? `<div class="${rowCls}"><span class="${lblCls}">Tier</span><div class="flex flex-wrap gap-1.5">${tierChips}</div></div>
-        <div class="${rowCls}"><span class="${lblCls}">Site</span><div class="flex flex-wrap gap-1.5">${siteChips || '<span class="text-xs text-slate-400 italic pt-1">—</span>'}</div></div>
-        <button onclick="csFacetReset()" class="text-xs text-slate-400 hover:text-slate-600 underline">Clear filters</button>` : ''}
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-2 mb-3">
+        <span class="${lblCls}">Simulation</span>${dropdown('sim', `All Simulations (${total})`, simOpts, csFacet.sim)}
+        <span class="${lblCls} ml-2">Tier</span>${dropdown('tier', 'All Tiers', tierOpts, csFacet.tier)}
+        <span class="${lblCls} ml-2">Site</span>${dropdown('site', 'All Sites', siteOpts, csFacet.site)}
+        ${showList ? `<button onclick="csFacetReset()" class="text-xs text-slate-400 hover:text-slate-600 underline ml-2">Clear</button>` : ''}
       </div>`;
 
     if (!showList) {
-        const total = csClientCache.length;
-        bodyEl.innerHTML = `<div class="text-center text-slate-400 text-sm py-10 border border-dashed border-slate-200 rounded-lg">${total.toLocaleString()} client(s). Pick a <span class="font-semibold text-slate-600">Simulation</span> above (then Tier, then Site) — or search by name / IP / MAC — to list clients.</div>`;
+        bodyEl.innerHTML = `<div class="text-center text-slate-400 text-sm py-10 border border-dashed border-slate-200 rounded-lg">${total.toLocaleString()} client(s). Pick a <span class="font-semibold text-slate-600">Simulation</span>, <span class="font-semibold text-slate-600">Tier</span>, or <span class="font-semibold text-slate-600">Site</span> above — or search by name / IP / MAC — to list clients.</div>`;
         return;
     }
     const matches = csClientCache.filter(c => csClientPass(c));
