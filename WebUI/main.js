@@ -5079,9 +5079,9 @@ function _renderSetupSection(subMenu, container) {
 const _SUBNET_FILTER_MODULES = [
     { key: 'nac',       label: 'Security / NAC' },
     { key: 'firewall',   label: 'Firewall' },
-    { key: 'netbox',     label: 'IPAM / NetBox' },
+    { key: 'netbox',     label: 'IPAM' },
     { key: 'dhcp',       label: 'DHCP Leases' },
-    { key: 'hypervisor', label: 'Hypervisor / Proxmox' },
+    { key: 'hypervisor', label: 'Hypervisor' },
     { key: 'cs',         label: 'Simulations (tenant-ID scoped)' },
 ];
 let _subnetFilterState = {};
@@ -7951,7 +7951,7 @@ async function showGroupModal(groupId) {
     modal.id = 'group-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">${groupId ? 'Edit' : 'New'} Permission Group</h3>
                 <button onclick="closeGroupModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
@@ -7962,7 +7962,7 @@ async function showGroupModal(groupId) {
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Description</label><input type="text" id="grp-desc" value="${g.description || ''}" placeholder="Optional" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">LDAP Group <span class="text-slate-400 normal-case font-normal">(optional — maps a directory group to this bundle)</span></label><input type="text" id="grp-ldap" value="${g.ldap_group || ''}" placeholder="cn=noc,ou=groups,dc=example,dc=com" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 font-mono"></div>
                 <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Tenant Scope <span class="text-slate-400 normal-case font-normal">(optional — grants tenant access to members; pairs with Entra/LDAP group login)</span></label><div class="grid grid-cols-2 gap-1 mt-2 max-h-36 overflow-y-auto pr-1">${tenantRows}</div></div>
-                <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Permissions</label><div class="grid grid-cols-2 gap-2 mt-2">${rightRows}</div></div>
+                <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Permissions</label><div class="grid grid-cols-4 gap-x-4 gap-y-1 mt-2">${rightRows}</div></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeGroupModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
