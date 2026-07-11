@@ -946,6 +946,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             out[sid] = data or {}
         return out
 
+    def _patch_cached_client_overrides(tenant_id: str, hostname: str, overrides: dict) -> None:
+        """Patch the tenant's cached client's ``overrides`` in simulations_cache
+        immediately after an override write. The Clients view is served from this
+        cache (CS_TELEMETRY), which only refreshes every ~10s — so without this
+        patch a just-pruned/updated override reads STALE until the next frame,
+        making a removed override reappear when the user navigates back in. The
+        spoke returns its POST-PRUNE overrides; we mirror them so the next read is
+        correct. Best-effort; the authoritative telemetry frame overwrites it."""
+        hostname = str(hostname or "")
+        ov = dict(overrides or {})
+        for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
+            try:
+                if hub.state.get_spoke_tenant(sid) != tenant_id:
+                    continue
+            except Exception:
+                continue
+            for c in (data.get("clients") or []):
+                if isinstance(c, dict) and (c.get("hostname") == hostname or c.get("id") == hostname):
+                    c["overrides"] = dict(ov)
+
     # ── platform-wide USB approval helpers (superadmin global + effective merge) ──
     # Mirrors the cs source: global (superadmin) USB certified/ignored lists are
     # merged with each tenant's lists into an "effective" set that is pushed to
@@ -1768,14 +1788,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # the spoke's HTTP client_api endpoint.
             overrides = {k: v for k, v in (body or {}).items()
                          if isinstance(body, dict)}
-        return await _cs_forward(tenant_id, "CS_SET_CLIENT_OVERRIDES",
-                                 {"hostname": hostname, "overrides": overrides})
+        res = await _cs_forward(tenant_id, "CS_SET_CLIENT_OVERRIDES",
+                                {"hostname": hostname, "overrides": overrides})
+        # Mirror the spoke's post-prune overrides into the hub cache so the
+        # Clients view doesn't show a stale (removed) override until the next
+        # telemetry frame — see _patch_cached_client_overrides.
+        if isinstance(res, dict):
+            _patch_cached_client_overrides(tenant_id, hostname, res.get("overrides") or {})
+        return res
 
     @app.delete("/sim/api/{tenant}/clients/{hostname}/control")
     async def cs_clear_client_control(tenant: str, hostname: str,
                                       tenant_id: str = Depends(get_tenant_id)):
-        return await _cs_forward(tenant_id, "CS_CLEAR_CLIENT_OVERRIDES",
-                                 {"hostname": hostname})
+        res = await _cs_forward(tenant_id, "CS_CLEAR_CLIENT_OVERRIDES",
+                                {"hostname": hostname})
+        # Clear removes ALL overrides — reflect that in the cache immediately.
+        _patch_cached_client_overrides(tenant_id, hostname, {})
+        return res
 
     # ── per-host USB VMID overrides ─────────────────────────────────────────
     # Optional per-host vmid_start/vmid_end/vm_set_override that override the

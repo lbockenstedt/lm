@@ -1257,10 +1257,31 @@ async function csRenderClients(tier) {
     ]);
     csClientCache = csNormalizeClients(data);
     // Faceted drill-down: the demo card, then the Simulation/Tier/Site facet bar,
-    // then the (drill-gated, capped) client list. Kill switch stays in the
-    // secondary-nav chip (renderSecondaryNav → csKillSwitchMountChip).
-    csSet(`<div class="space-y-4">${demoCard}<div id="cs-facets"></div><div id="cs-client-body"></div></div>`);
+    // then the (drill-gated, capped) client list, then a static legend. Kill
+    // switch stays in the secondary-nav chip (renderSecondaryNav → csKillSwitchMountChip).
+    csSet(`<div class="space-y-4">${demoCard}<div id="cs-facets"></div><div id="cs-client-body"></div>${csClientsLegend()}</div>`);
     csRenderClientsFaceted();
+}
+
+// Static legend under the Clients view — what the sim-bar button colors, the
+// demo mark, the red last-seen, and the tier badges mean. Swatch classes mirror
+// csSimBtnClass / the row renderer so the samples match the live UI exactly.
+function csClientsLegend() {
+    const sw = cls => `<span class="${cls} px-2 py-0.5 rounded-md text-[11px] font-bold">sim</span>`;
+    const tier = (cls, t) => `<span class="text-[10px] font-bold px-2 py-0.5 rounded ${cls}">${t}</span>`;
+    return `<div class="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
+      <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2 mt-2">
+        <span class="flex items-center gap-1.5">${sw('bg-purple-100 text-purple-700 border border-purple-300')} Bucket default ON</span>
+        <span class="flex items-center gap-1.5">${sw('bg-white text-slate-400 border border-slate-200')} Bucket default OFF</span>
+        <span class="flex items-center gap-1.5">${sw('bg-white text-purple-700 border-2 border-purple-500')} Override ON</span>
+        <span class="flex items-center gap-1.5">${sw('bg-white text-purple-400 border border-purple-200')} Override OFF</span>
+        <span class="flex items-center gap-1.5"><span class="bolt text-amber-600 font-bold">⚡</span> Demo scenario active (auto-reverts in 2h)</span>
+        <span class="flex items-center gap-1.5"><span class="bg-amber-50 border border-amber-200 px-1.5 rounded">row</span> highlighted while a demo runs</span>
+        <span class="flex items-center gap-1.5"><span class="text-red-600 font-bold">18m</span> Last Seen over 30 min ago</span>
+        <span class="flex items-center gap-1.5">${tier('bg-slate-100 text-slate-600', 'T1')} no USB · ${tier('bg-purple-100 text-purple-700', 'T2')} USB dongle · ${tier('bg-amber-100 text-amber-700', 'T3')} PCI passthrough</span>
+      </div>
+    </div>`;
 }
 
 // "Purge Clients" — ports the original solutions-hpe cs-webui button
