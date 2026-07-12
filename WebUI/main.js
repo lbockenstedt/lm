@@ -12562,6 +12562,21 @@ async function loadLEData(subMenu) {
             window._leAvailableTargets = (ab && Array.isArray(ab.targets)) ? ab.targets : [];
         } catch (e) { window._leAvailableTargets = []; }
         const inflightMap = window._leInflightMap || {};
+        // Friendly "how long ago" for a target's last_pushed_at — relative time
+        // makes a re-push loop obvious at a glance (e.g. "2m ago" that keeps
+        // resetting), with the absolute local time in parentheses.
+        const _leWhen = (iso) => {
+            if (!iso) return 'never';
+            const dt = new Date(iso);
+            if (isNaN(dt)) return String(iso);
+            const secs = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 1000));
+            let rel;
+            if (secs < 60) rel = `${secs}s ago`;
+            else if (secs < 3600) rel = `${Math.floor(secs / 60)}m ago`;
+            else if (secs < 86400) rel = `${Math.floor(secs / 3600)}h ago`;
+            else rel = `${Math.floor(secs / 86400)}d ago`;
+            return `${rel} (${dt.toLocaleString()})`;
+        };
         const tgtBadge = (t, domain) => {
             const dEsc = escJsAttr(String(domain || ''));
             const mtEsc = escJsAttr(String(t.module_type || ''));
@@ -12580,9 +12595,15 @@ async function loadLEData(subMenu) {
             const cls = ok ? 'bg-green-100 text-green-700' : (t.last_status === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500');
             const mark = ok ? '✓' : (t.last_status === 'ERROR' ? '✗' : '·');
             const label = `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`;
-            // Click-to-deploy: clicking a target badge pushes this cert to that
-            // one target only (mirrors the CS spoke-clients click-to-act pattern).
-            return `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="Click to deploy this cert to ${label}">${mark} ${label}</button>`;
+            // Surface the last push OUTCOME (status + message + when) in the
+            // tooltip so an operator sees success/errors without SSHing to the
+            // node — the whole point of the le.distribution log, brought to the
+            // badge. Failed targets also get an inline red line below (errNote).
+            const when = t.last_pushed_at ? _leWhen(t.last_pushed_at) : 'never';
+            const statusTxt = t.last_status || 'not pushed yet';
+            const msgPart = t.last_message ? ` — ${t.last_message}` : '';
+            const tip = `${label}: ${statusTxt}${msgPart} (last push: ${when}). Click to deploy now.`;
+            return `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="${escJsAttr(tip)}">${mark} ${label}</button>`;
         };
         // Available connected cert-capable spokes/agents as click-to-add chips,
         // rendered directly on the main Certificates screen beside each cert's
@@ -12668,7 +12689,16 @@ async function loadLEData(subMenu) {
                      <span>Both a group (<b>all nodes</b>) and an individual node target are selected for <b>${escapeHtml(_redund.join(', '))}</b> — these deploy the same cert to the same node(s) and cause repeated restarts. Keep one or the other.</span>
                    </div>`
                 : '';
-            const tgtCell = `${tgtBadges}${redundNote}${leAvailChips(c.domain, tgts)}`;
+            // Inline last-push OUTCOME for failed targets — the error message +
+            // when, shown WITHOUT a hover so an operator sees why a deploy failed
+            // (and spots a re-push loop via the ticking "Xs ago") straight from
+            // the Certificates list instead of SSHing to the node.
+            const _failed = tgts.filter(t => t.last_status === 'ERROR');
+            const errNote = _failed.length
+                ? `<div class="mt-1 space-y-0.5">${_failed.map(t =>
+                    `<div class="text-[11px] text-red-600 flex items-start gap-1"><span class="leading-4">✗</span><span><b>${escapeHtml(t.module_type + (t.identifier ? '/' + t.identifier : ''))}</b>: ${escapeHtml(t.last_message || 'failed')}${t.last_pushed_at ? ` <span class="text-red-400">— ${escapeHtml(_leWhen(t.last_pushed_at))}</span>` : ''}</span></div>`).join('')}</div>`
+                : '';
+            const tgtCell = `${tgtBadges}${redundNote}${errNote}${leAvailChips(c.domain, tgts)}`;
             const exp = leExpiry(c.not_after);
             const retryBtn = isFailed
                 ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`

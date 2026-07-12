@@ -112,6 +112,17 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
             summary.append(entry)
             continue
 
+        # Not skipped → say WHY we're (re)pushing so a distribution loop is
+        # visible in WebUI Logs → Certificates without SSHing to a node.
+        _prev = t.get("last_status")
+        if _prev and _prev != "SUCCESS":
+            logger.info("[cert] %s → %s: (re)pushing — previous push %s%s",
+                        domain, tgt_label, _prev,
+                        (": " + str(t.get("last_message"))) if t.get("last_message") else "")
+        elif _prev == "SUCCESS" and t.get("last_pushed_hash") != material_hash:
+            logger.info("[cert] %s → %s: pushing — cert material changed since last push",
+                        domain, tgt_label)
+
         if mt not in capable:
             entry.update(status="ERROR",
                          message=f"module type '{mt}' does not support cert install yet")
