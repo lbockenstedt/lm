@@ -1242,7 +1242,7 @@ const VIEW_CHILDREN = {
         'Clients':     ['All', 'T1', 'T2', 'T3'],
         'Central':     ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware'],
         'VM Server':   ['Overview', 'VMs', 'Console', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
-        'Config':      ['Sim Quotas', 'Raw Config'],
+        'Config':      ['Sim Quotas', 'PXMX Sites', 'Raw Config'],
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications'],
     },
 };

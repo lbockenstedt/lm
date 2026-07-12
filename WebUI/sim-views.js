@@ -2723,6 +2723,111 @@ window.csSimQuotaSave = async function () {
     }
 };
 
+// ── PXMX Sites: assign each connected pxmx server (agent host) to a site ──────
+// The SimQuotaEngine resolves a client's site via its hosting server's entry
+// here (after a per-client wsite override, before the bucket-default wsite), so
+// a site-specific quota ("10 DNS-fail in MIA") fills from clients whose hosting
+// server is in MIA. Mirrored in both sim-views.js copies (hub + spoke).
+let csPxmxSiteMap = {};
+let csPxmxAgents = [];
+let csPxmxSites = [];
+
+async function csRenderPxmxSiteMap() {
+    csSetToolbar('');
+    try {
+        const [mapRes, cat] = await Promise.all([
+            csFetch(`/${csTenant()}/pxmx-site-map?tenant_id=${csTenant()}`).catch(() => null),
+            csFetch(`/${csTenant()}/sim-quota-catalog?tenant_id=${csTenant()}`).catch(() => null),
+        ]);
+        csPxmxSiteMap = (mapRes && mapRes.pxmx_site_map) || {};
+        csPxmxAgents = Array.isArray(mapRes && mapRes.agents) ? mapRes.agents : [];
+        csPxmxSites = (cat && cat.sites) || [];
+        csRenderPxmxSiteMapEditor();
+    } catch (e) {
+        console.error('csRenderPxmxSiteMap: load failed', e);
+        csSet(csErrorBox('Could not load PXMX site assignments', e));
+    }
+}
+
+function csRenderPxmxSiteMapEditor() {
+    // Rows = every connected agent (so the operator can assign a newly-joined
+    // server) PLUS any mapped host not currently connected (so a temporarily-
+    // offline server keeps its assignment and is flagged).
+    const seen = new Set();
+    const rows = [];
+    csPxmxAgents.forEach(a => {
+        const h = a.agent_id || a.hostname;
+        if (!h || seen.has(h)) return;
+        seen.add(h);
+        rows.push({ host: h, connected: true, last_seen: a.last_seen || 0 });
+    });
+    Object.keys(csPxmxSiteMap).forEach(h => {
+        if (!seen.has(h)) rows.push({ host: h, connected: false, last_seen: 0 });
+    });
+    rows.sort((a, b) => a.host.localeCompare(b.host));
+    const siteOpts = (sel) =>
+        `<option value="" ${(!sel) ? 'selected' : ''}>— unassigned —</option>` +
+        csPxmxSites.map(s => `<option value="${csEscape(s)}" ${s === sel ? 'selected' : ''}>${csEscape(s)}</option>`).join('');
+    const rowHtml = rows.map((r, i) => {
+        const sel = csPxmxSiteMap[r.host] || '';
+        const badge = r.connected
+            ? '<span class="text-emerald-600 text-[10px] font-bold uppercase">connected</span>'
+            : '<span class="text-amber-600 text-[10px] font-bold uppercase">offline</span>';
+        return `<div class="grid grid-cols-1 md:grid-cols-3 gap-2 items-center bg-white border border-slate-200 rounded-md p-2" data-cs-pxrow="${i}">
+          <label class="text-xs text-slate-600 font-mono">${csEscape(r.host)} ${badge}</label>
+          <select data-cs-px="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">${siteOpts(sel)}</select>
+          <button onclick="csPxmxSiteClear('${csEscape(r.host)}')" class="text-red-600 hover:text-red-800 text-xs font-bold py-1 justify-self-end">Clear</button>
+        </div>`;
+    }).join('');
+    csSet(`<div class="space-y-4">
+      <div class="hpe-card rounded-lg p-5 shadow-sm">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">PXMX Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <button onclick="csPxmxSiteSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Assignments</button>
+        </div>
+        <p class="text-xs text-slate-500 mb-2">Assign each pxmx server (the agent host) to a site. The Sim Quota engine fills a site-specific quota from clients whose <span class="font-semibold">hosting server</span> is in that site — e.g. a "MIA" quota draws from clients on MIA-assigned servers. A client's own wsite override still wins; the bucket-default wsite is the fallback. Sites come from <span class="font-semibold">Raw Config</span> (simulation.conf) and Central site mappings.</p>
+        <div class="space-y-2 mt-2" id="cs-px-rows">${rowHtml || '<div class="text-xs text-slate-400 italic">No pxmx servers connected and no assignments saved. A server appears here once its agent connects to this spoke.</div>'}</div>
+      </div>
+    </div>`);
+}
+
+window.csPxmxSiteClear = function (host) {
+    // Reflect the clear in the DOM select so the subsequent save picks it up.
+    document.querySelectorAll('[data-cs-pxrow]').forEach(el => {
+        const lbl = el.querySelector('label');
+        if (lbl && lbl.textContent.trim().startsWith(host)) {
+            const sel = el.querySelector('[data-cs-px="site"]');
+            if (sel) sel.value = '';
+        }
+    });
+};
+
+window.csPxmxSiteSave = async function () {
+    const map = {};
+    document.querySelectorAll('[data-cs-pxrow]').forEach(el => {
+        const lbl = el.querySelector('label');
+        const sel = el.querySelector('[data-cs-px="site"]');
+        if (!lbl || !sel) return;
+        // The host is the label's leading text (before the badge span).
+        const host = lbl.textContent.trim().split(/\s+/)[0];
+        const site = sel.value.trim();
+        if (host) map[host] = site;
+    });
+    try {
+        const r = await csFetch(`/${csTenant()}/pxmx-site-map?tenant_id=${csTenant()}`, {
+            method: 'POST', body: JSON.stringify({ pxmx_site_map: map }),
+        });
+        csPxmxSiteMap = (r && r.pxmx_site_map) || map;
+        const errs = Array.isArray(r && r.errors) ? r.errors : [];
+        csRenderPxmxSiteMapEditor();
+        if (errs.length) showToast(`Saved with ${errs.length} issue(s): ${errs.join('; ')}`, 'error');
+        else showToast('PXMX site assignments saved.', 'success');
+    } catch (e) {
+        console.error('csPxmxSiteSave: save failed', e);
+        showToast(e.message, 'error');
+    }
+};
+
 // Source of Truth toggle card (top of the Config screen).
 function csConfigSourceCard(source, cfg) {
     cfg = cfg || {};
@@ -3896,6 +4001,7 @@ async function csRenderSetupNotifications() {
 // config). VIEW_CHILDREN.cs.Config (main.js) lists both; the existing
 // case 'Config' dispatch is the no-children fallback and stays as a safety net.
 window.CS_CHILD_RENDERERS['Config::Sim Quotas']    = csRenderConfigSimQuotas;
+window.CS_CHILD_RENDERERS['Config::PXMX Sites']    = csRenderPxmxSiteMap;
 window.CS_CHILD_RENDERERS['Config::Raw Config']    = csRenderConfigSimulation;
 
 // ── Register Setup children ────────────────────────────────────────────────

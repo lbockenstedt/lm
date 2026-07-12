@@ -2437,6 +2437,47 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cat["warning"] = "Client-Sim spoke not connected — catalog from cached config."
             return cat
 
+    # ── PXMX server → site assignments (Config → PXMX Sites) ──────────────────
+    # An operator assigns each connected pxmx server (agent host = short
+    # hostname) to a site; the spoke's SimQuotaEngine resolves a client's site
+    # via its hosting server's entry. Forwarded to the cs spoke (which owns the
+    # agents + the map); 503 when no spoke is connected so the UI can say so.
+    @app.get("/sim/api/{tenant}/pxmx-site-map")
+    async def get_pxmx_site_map(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        try:
+            return await _cs_forward(tenant_id, "CS_GET_PXMX_SITE_MAP", {}, timeout=15.0)
+        except HTTPException as he:
+            if he.status_code == 503:
+                return {"status": "SUCCESS", "pxmx_site_map": {}, "agents": [],
+                        "warning": "Client-Sim spoke not connected."}
+            raise
+
+    @app.post("/sim/api/{tenant}/pxmx-site-map")
+    async def set_pxmx_site_map(tenant: str, request: Request,
+                                tenant_id: str = Depends(get_tenant_id)):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        payload = body if isinstance(body, dict) else {}
+        if "pxmx_site_map" not in payload and isinstance(body, dict):
+            payload = {"pxmx_site_map": body}
+        res = await _cs_forward(tenant_id, "CS_SET_PXMX_SITE_MAP", payload, timeout=20.0)
+        return {"saved": res.get("status") == "SUCCESS",
+                "pxmx_site_map": res.get("pxmx_site_map", {}),
+                "errors": res.get("errors", [])}
+
+    @app.get("/sim/api/{tenant}/cs-agents")
+    async def get_cs_agents(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Connected pxmx agents for the tenant's cs spoke (PXMX Sites dropdown)."""
+        try:
+            return await _cs_forward(tenant_id, "GET_AGENTS", {}, timeout=15.0)
+        except HTTPException as he:
+            if he.status_code == 503:
+                return {"status": "SUCCESS", "agents": [], "pending_agents": [],
+                        "warning": "Client-Sim spoke not connected."}
+            raise
+
     # ── Sim-Quota global defaults (Setup → Simulations, superadmin) ──────────
     # Platform-wide default templates a tenant inherits unless it overrides per
     # alert_type:alert_id:site in Config → Sim Quotas. Validates against the full
