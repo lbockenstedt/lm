@@ -95,6 +95,53 @@ def test_distribute_pushes_to_capable_target():
     assert installs[0]["timeout"] == 120.0
 
 
+def test_distribute_hypervisor_uses_generous_640s_timeout():
+    """The hypervisor path relays INSTALL_CERT to a per-node pxmx agent that
+    runs `pvenode cert set` + restarts pveproxy (the agent's pvenode wait is
+    600s, the pxmx spoke's relay 620s). The hub must NOT time out first and
+    mask an in-progress deploy, so it uses 640s — > both downstream windows."""
+    _HV = "pxmx-spoke-1"
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        (_HV, "INSTALL_CERT"): _install_ok(),
+    })
+    get_by_type = lambda mt: _HV if mt == "hypervisor" else None
+    targets = [{"module_type": "hypervisor", "identifier": "node-1"}]
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
+    assert summary[0]["status"] == "SUCCESS"
+    installs = [c for c in calls if c["cmd"] == "INSTALL_CERT"]
+    assert len(installs) == 1 and installs[0]["timeout"] == 640.0
+    assert installs[0]["data"]["module_type"] == "hypervisor"
+
+
+def test_distribute_simulation_is_cert_capable_and_uses_640s_timeout():
+    """simulation (cs/lm-spoke) is cert-capable: in the split topology it owns
+    the pxmx agents directly and relays INSTALL_CERT to each → pvenode cert set,
+    exactly like the hypervisor path. So it (a) is in CERT_CAPABLE_MODULES
+    (else the gate ERRORs "does not support cert install yet" — the red state
+    the user saw), (b) resolves to the connected simulation spoke, and (c) uses
+    the same generous 640s hub window as hypervisor (the cs spoke's 620s
+    send_to_agent relay > the agent's 600s pvenode wait). The cs spoke
+    aggregates per-node results itself; the hub just sees one INSTALL_CERT to
+    the simulation spoke."""
+    assert "simulation" in cd.CERT_CAPABLE_MODULES
+    _CS = "cs-spoke-1"
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        (_CS, "INSTALL_CERT"): _install_ok(),
+    })
+    get_by_type = lambda mt: _CS if mt == "simulation" else None
+    targets = [{"module_type": "simulation", "identifier": ""}]
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
+    assert summary[0]["status"] == "SUCCESS"
+    installs = [c for c in calls if c["cmd"] == "INSTALL_CERT"]
+    assert len(installs) == 1
+    assert installs[0]["data"]["module_type"] == "simulation"
+    assert installs[0]["timeout"] == 640.0  # shares the hypervisor window
+
+
 def test_distribute_skips_up_to_date_target():
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
     get_by_type = lambda mt: _FW

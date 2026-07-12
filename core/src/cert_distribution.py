@@ -38,7 +38,7 @@ logger = logging.getLogger("le.distribution")
 # installs the cert on ITSELF (writes LM_TLS_CERT/LM_TLS_KEY + schedules
 # lm-self-restart) via the ``install_on_hub`` callable threaded in by the
 # HubCertDistributionMixin._distribute_one_cert wrapper.
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam"}
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation"}
 
 
 def _unwrap(result: Any) -> Dict[str, Any]:
@@ -130,17 +130,21 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                 entry.update(status="ERROR", message=f"no connected {mt} spoke")
                 logger.warning("[cert] %s → %s: no connected %s spoke", domain, tgt_label, mt)
             else:
-                # The hypervisor path forwards INSTALL_CERT to a per-node agent
-                # that runs `pvenode cert set --restart`; on a loaded node the
-                # pveproxy restart can take many minutes and we can't predict
-                # it, so give that path a generous window (640s > the spoke's
-                # 620s relay > the agent's 600s pvenode wait) so the hub never
-                # times out first and masks a deploy that's still in progress
-                # (the agent verifies the cert by fingerprint on its own
-                # timeout, so a slow restart still reports SUCCESS, not ERROR).
-                # Fast targets (firewall/ipam) stay at 120s — the timeout is
-                # just the upper bound, not the time they take.
-                install_timeout = 640.0 if mt == "hypervisor" else 120.0
+                # The hypervisor + simulation paths forward INSTALL_CERT to a
+                # per-node pxmx agent that runs `pvenode cert set --restart`; on
+                # a loaded node the pveproxy restart can take many minutes and
+                # we can't predict it, so give those paths a generous window
+                # (640s > the spoke's 620s relay > the agent's 600s pvenode
+                # wait) so the hub never times out first and masks a deploy
+                # that's still in progress (the agent verifies the cert by
+                # fingerprint on its own timeout, so a slow restart still
+                # reports SUCCESS, not ERROR). In the split topology the
+                # simulation (cs/lm-spoke) owns the pxmx agents directly and
+                # relays INSTALL_CERT to each — same pvenode wait, so it shares
+                # the 640s window. Fast targets (firewall/ipam/directory/
+                # statuspage) stay at 120s — the timeout is just the upper
+                # bound, not the time they take.
+                install_timeout = 640.0 if mt in ("hypervisor", "simulation") else 120.0
                 res = await rr(target_sid, "INSTALL_CERT", {
                     "domain": domain, "fullchain": fullchain,
                     "privkey": privkey, "chain": chain, "identifier": ident,
