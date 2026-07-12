@@ -12117,26 +12117,70 @@ async function loadLEData(subMenu) {
             return { text: `${dt.toISOString().slice(0, 10)} · ${label}`, cls, days };
         };
         const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Targets', 'Actions'];
+        // Per-domain last-issue indicator from window._leIssueStatus (the
+        // client-side tracker fed by _leRunIssue). Green = last issue
+        // succeeded, red = last issue failed (hover for the message), amber
+        // spinner = issue in progress. Sits in front of the domain name so a
+        // glance at the table shows issue health; the expiry badge still owns
+        // validity.
+        const issueDot = domain => {
+            const st = window._leIssueStatus && window._leIssueStatus[domain];
+            if (!st) return '';
+            if (st.state === 'pending') return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse mr-2 align-middle" title="Issuing…"></span>`;
+            if (st.state === 'success') return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-green-500 mr-2 align-middle" title="Last issue succeeded"></span>`;
+            if (st.state === 'failed') return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 align-middle" title="Last issue failed: ${escJsAttr(st.message || '')}"></span>`;
+            return '';
+        };
         const rows = certs.map(c => {
             const dEsc = escJsAttr(c.domain || '');
+            const st = window._leIssueStatus && window._leIssueStatus[c.domain];
+            const isFailed = st && st.state === 'failed';
             const tgts = c.targets || [];
             const tgtCell = tgts.length
                 ? `<div class="flex flex-wrap gap-1">${tgts.map(tgtBadge).join('')}</div>`
                 : `<span class="text-xs text-slate-400 italic">none</span>`;
             const exp = leExpiry(c.not_after);
+            const retryBtn = isFailed
+                ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
+                : '';
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                <td class="px-4 py-2 font-mono font-medium">${c.domain || '—'}</td>
+                <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${c.challenge || '—'}</span></td>
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls}">${exp.text}</span></td>
                 <td class="px-4 py-2"><div class="flex items-center gap-2">${tgtCell}<button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium">manage</button></div></td>
                 <td class="px-4 py-2"><div class="flex items-center gap-3 whitespace-nowrap">
+                    ${retryBtn}
                     <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
                     <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
                 </div></td>
             </tr>`;
         }).join('');
+        // Pending / failed attempt rows for domains that have NO cert yet —
+        // surfaced above the cert rows so a red indicator + Retry appear even
+        // before a cert exists (the issue failed, nothing was issued). On a
+        // successful retry the domain graduates to a green cert row and the
+        // attempt row drops out (certsDomains then contains it).
+        const certsDomains = new Set(certs.map(c => c.domain));
+        const tracked = window._leIssueStatus || {};
+        const attemptRows = Object.entries(tracked)
+            .filter(([dom, s]) => !certsDomains.has(dom) && (s.state === 'pending' || s.state === 'failed'))
+            .sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0))
+            .map(([dom, s]) => {
+                const dEsc = escJsAttr(dom);
+                if (s.state === 'pending') {
+                    return `<tr class="border-b border-slate-100 bg-amber-50/60">
+                        <td class="px-4 py-2 font-mono font-medium"><span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse mr-2 align-middle"></span>${escapeHtml(dom)}</td>
+                        <td class="px-4 py-2 text-xs italic text-amber-700" colspan="6">issuing…</td>
+                    </tr>`;
+                }
+                return `<tr class="border-b border-slate-100 bg-red-50/60">
+                    <td class="px-4 py-2 font-mono font-medium"><span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 align-middle"></span>${escapeHtml(dom)}</td>
+                    <td class="px-4 py-2 text-xs text-red-700" colspan="5">last issue failed: ${escapeHtml(s.message || '')}</td>
+                    <td class="px-4 py-2"><button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue">Retry</button></td>
+                </tr>`;
+            }).join('');
         // Top-of-card banner if any cert is expiring soon / expired / stuck
         // renewing (the le loop renews <30d, so amber+red here mean a renewal
         // that didn't land — worth surfacing above the table).
@@ -12150,9 +12194,9 @@ async function loadLEData(subMenu) {
             return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs ${cls}">${msg}</div>`;
         })();
         const note = body.message ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${body.message}</p>` : '';
-        container.innerHTML = certs.length === 0
+        container.innerHTML = (certs.length === 0 && !attemptRows)
             ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet. Click <b class="text-slate-600 not-italic">＋ Issue certificate</b> above to configure an ACME account (email + challenge type) and issue your first cert.</p>`
-            : expBanner + note + tw(th(cols) + `<tbody>${rows}</tbody>`);
+            : expBanner + note + tw(th(cols) + `<tbody>${attemptRows}${rows}</tbody>`);
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     }
@@ -12541,7 +12585,7 @@ function showLeIssueModal() {
         </div>
         <div class="flex justify-end gap-2 mt-5">
             <button onclick="document.getElementById('le-issue-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Cancel</button>
-            <button onclick="leIssueCert()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
+            <button id="le-issue-submit" onclick="leIssueCert()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
         </div>
     </div>`;
     document.body.appendChild(modal);
@@ -12653,7 +12697,31 @@ async function leIssueCert() {
     }
     if (_leIssueTargets.length) body.targets = _leIssueTargets;
 
-    const btn = document.querySelector('#le-issue-modal button.bg-\\[\\#01A982\\]');
+    // Hand off to the shared runner — it toasts on queue, tracks per-domain
+    // status, logs success/fail, and refreshes the cert list. The modal stays
+    // OPEN on failure so the operator can tweak a field and click Issue again
+    // (retry without re-filling); it closes only on success.
+    return _leRunIssue(body, { closeModalOnSuccess: true });
+}
+
+// Client-side LE issue job tracker: per-domain latest issue attempt.
+//   state: 'pending' | 'success' | 'failed'
+// Lets the cert list show a green/red/spinner indicator for the last issue and a
+// Retry button that re-posts the stored params without re-filling the form.
+window._leIssueStatus = window._leIssueStatus || {};
+
+// Core issue runner — shared by the modal submit (leIssueCert) and the Retry
+// button (leRetryIssue). Queues the request with a toast, tracks per-domain
+// status, logs success/fail to the console, and refreshes the cert list so the
+// indicator flips live. The spoke call can take ~3 min for DNS-01 (hub
+// _LE_CERTBOT_TIMEOUT=200s), so this is fire-and-forget from the UI's POV: the
+// toast is shown immediately and the row gets a spinner while we wait.
+async function _leRunIssue(body, { closeModalOnSuccess = false } = {}) {
+    const domain = body.domain;
+    window._leIssueStatus[domain] = { state: 'pending', ts: Date.now(), message: 'Issuing…', params: body };
+    showToast('Issuing ' + domain + '… (DNS-01 can take a couple minutes)', 'info');
+    await loadLEData(); // show the pending spinner row immediately
+    const btn = document.getElementById('le-issue-submit');
     if (btn) { btn.disabled = true; btn.textContent = 'Issuing…'; }
     try {
         const { ok, data, detail } = await _spokeFetch('/api/le/issue', {
@@ -12661,8 +12729,11 @@ async function leIssueCert() {
             body: JSON.stringify(body),
         });
         if (!ok) {
-            alert('Issue failed: ' + (detail || ''));
+            window._leIssueStatus[domain] = { state: 'failed', ts: Date.now(), message: detail || 'Issue failed', params: body };
+            showToast('Issue failed for ' + domain + ': ' + (detail || ''), 'error');
+            console.warn('[le] issue failed', domain, detail);
             if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
+            await loadLEData();
             return;
         }
         // The spoke returns nested {status, data:{...}}; the hub adds
@@ -12670,18 +12741,33 @@ async function leIssueCert() {
         const inner = (data && data.data) ? data.data : (data || {});
         const dist = inner.distribution || [];
         const distMsg = dist.length
-            ? '\n\nDistribution:\n' + dist.map(d => {
-                const st = d.status === 'SUCCESS' ? '✓' : '✗';
-                return `  ${st} ${d.module_type || ''}${d.identifier ? '/' + d.identifier : ''}${d.message ? ' — ' + d.message : ''}`;
-            }).join('\n')
+            ? ' · distributed to ' + dist.length + ' target(s)'
             : '';
-        alert('Issued ' + domain + (staging ? ' (staging)' : '') + '.' + distMsg);
-        document.getElementById('le-issue-modal')?.remove();
+        window._leIssueStatus[domain] = { state: 'success', ts: Date.now(), message: 'Issued' + distMsg, params: body };
+        showToast('Issued ' + domain + (body.staging ? ' (staging)' : '') + distMsg, 'success');
+        console.info('[le] issued', domain, dist);
+        if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
+        if (closeModalOnSuccess) document.getElementById('le-issue-modal')?.remove();
         await loadLEData();
     } catch (e) {
-        alert('Issue failed: ' + e.message);
+        window._leIssueStatus[domain] = { state: 'failed', ts: Date.now(), message: e.message || 'Issue failed', params: body };
+        showToast('Issue failed for ' + domain + ': ' + e.message, 'error');
+        console.warn('[le] issue error', domain, e);
         if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
+        await loadLEData();
     }
+}
+
+// Retry the last failed issue for a domain using the stored params — fired from
+// the Retry button on a failed cert/attempt row. Re-enters the shared runner so
+// the toast + indicator + log behave exactly like a fresh submit; no modal.
+async function leRetryIssue(domain) {
+    const st = window._leIssueStatus && window._leIssueStatus[domain];
+    if (!st || !st.params) {
+        showToast('No stored issue params for ' + domain + ' — open Issue certificate to re-file.', 'error');
+        return;
+    }
+    return _leRunIssue(st.params, { closeModalOnSuccess: false });
 }
 
 // Hurricane Electric account-login knob — stored once on the le spoke (0600) and
