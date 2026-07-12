@@ -6950,7 +6950,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 ],
                 badges: [
                     `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${typeLabel}</span>`,
-                    `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${moduleLabelCell}</span>`,
+                    ...(a._module ? [`<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${escapeHtml(String(a._module))}</span>`] : []),  // no module badge for a role-hosting agent (was a bare "—")
                     `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${statusLabel}</span>`,
                     ...(extras ? extras.badges : []),
                 ],
