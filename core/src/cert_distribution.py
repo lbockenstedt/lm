@@ -359,10 +359,18 @@ async def distribute_wildcard_to_all_spokes(
     for t in stale_spokes:
         sid = t["spoke_id"]; mt = t["module_type"]
         entry = {"domain": domain, "module_type": mt, "identifier": sid, "wildcard": True}
+        # Same generous window as the explicit-target path: hypervisor +
+        # simulation relay INSTALL_CERT to a per-node pxmx agent that runs
+        # `pvenode cert set --restart`, and a loaded pveproxy restart can take
+        # minutes. 640s (> spoke 620s relay > agent 600s pvenode wait) keeps the
+        # hub from timing out FIRST and recording ERROR for a deploy that
+        # actually succeeded on the node — the "installed to Proxmox but UI says
+        # failed" symptom. Fast targets stay at 120s (upper bound, not duration).
+        install_timeout = 640.0 if mt in ("hypervisor", "simulation") else 120.0
         res = await rr(sid, "INSTALL_CERT", {
             "domain": domain, "fullchain": fullchain, "privkey": privkey,
             "chain": chain, "identifier": sid, "module_type": mt,
-        }, timeout=120.0)
+        }, timeout=install_timeout)
         rret = _unwrap(res)
         if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
             entry.update(status="SUCCESS", message=rret.get("message") or "installed")
