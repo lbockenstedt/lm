@@ -12230,10 +12230,33 @@ async function loadLEData(subMenu) {
 
 // Re-push any stale cert material to its targets now (no certbot invocation —
 // the hub pulls LE_GET_CERT and pushes INSTALL_CERT for changed targets only).
+// The route returns inner.distribution (a flat per-target summary, mirrors
+// /api/le/issue) so we can show a per-target toast — without it, Distribute now
+// gave zero UI feedback (results were only in Logs/Certificates, which needs a
+// manual refresh). SKIPPED entries (no targets / all current) are surfaced so
+// the operator sees WHY nothing was pushed instead of an unexplained no-op.
 async function leDistributeNow() {
     try {
-        const { ok, detail } = await _spokeFetch('/api/le/distribute', { method: 'POST' });
-        if (!ok) alert('Distribute failed: ' + (detail || ''));
+        const { ok, data, detail } = await _spokeFetch('/api/le/distribute', { method: 'POST' });
+        if (!ok) { alert('Distribute failed: ' + (detail || '')); await loadLEData(); return; }
+        const inner = (data && data.data) ? data.data : (data || {});
+        const dist = inner.distribution || [];
+        let msg = '';
+        let failed = false;
+        if (dist.length) {
+            const okN = dist.filter(d => d.status === 'SUCCESS').length;
+            const skipN = dist.filter(d => d.skipped || d.status === 'SKIPPED').length;
+            const failN = dist.filter(d => d.status === 'ERROR').length;
+            failed = failN > 0;
+            const firstErr = dist.find(d => d.status === 'ERROR');
+            msg = ` · ${okN} OK` +
+                  (skipN ? ` · ${skipN} skipped` : '') +
+                  (failN ? ` — ${failN} FAILED` + (firstErr && firstErr.message ? `: ${firstErr.message}` : '') : '');
+        } else {
+            msg = ' · no certs to distribute';
+        }
+        showToast('Distribute complete' + msg, failed ? 'error' : 'success');
+        console.info('[le] distribute', dist);
         await loadLEData();
     } catch (e) { alert('Distribute failed: ' + e.message); }
 }
