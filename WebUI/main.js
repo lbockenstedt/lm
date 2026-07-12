@@ -4878,11 +4878,11 @@ function _renderSetupModuleMgmtTile(content) {
 function _renderSetupSimulationsTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
-            <div class="flex items-center gap-1 border-b border-slate-200 mb-4">
-                <button id="simtab-btn-usb" onclick="_simSetupTab('usb')" class="px-4 py-2 text-sm font-bold border-b-2 border-[#01A982] text-[#01A982] -mb-px transition-colors">USB</button>
-                <button id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="px-4 py-2 text-sm font-bold border-b-2 border-transparent text-slate-500 hover:text-slate-700 -mb-px transition-colors">PCI (Tiers)</button>
-                <button id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="px-4 py-2 text-sm font-bold border-b-2 border-transparent text-slate-500 hover:text-slate-700 -mb-px transition-colors">DHCP</button>
-                <button id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="px-4 py-2 text-sm font-bold border-b-2 border-transparent text-slate-500 hover:text-slate-700 -mb-px transition-colors">Sim Quotas</button>
+            <div class="flex items-center gap-5 border-b border-slate-200 mb-4">
+                <div id="simtab-btn-usb" onclick="_simSetupTab('usb')" class="sub-nav-item active px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">USB</div>
+                <div id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">PCI (Tiers)</div>
+                <div id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">DHCP</div>
+                <div id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Sim Quotas</div>
             </div>
             <div id="simtab-usb" class="space-y-4">
             <div class="${card}">
@@ -4974,13 +4974,7 @@ function _simSetupTab(name) {
         const panel = document.getElementById('simtab-' + n);
         const btn = document.getElementById('simtab-btn-' + n);
         if (panel) panel.classList.toggle('hidden', n !== name);
-        if (btn) {
-            const active = (n === name);
-            btn.classList.toggle('border-[#01A982]', active);
-            btn.classList.toggle('text-[#01A982]', active);
-            btn.classList.toggle('border-transparent', !active);
-            btn.classList.toggle('text-slate-500', !active);
-        }
+        if (btn) btn.classList.toggle('active', n === name);  // .sub-nav-item.active = HPE-green underline
     });
 }
 
