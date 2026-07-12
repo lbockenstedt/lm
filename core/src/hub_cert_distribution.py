@@ -8,6 +8,7 @@ import os
 import ssl
 import subprocess
 import tempfile
+import time
 
 # Pure transport helpers live in cert_distribution.py (no heavy imports, so they
 # are unit-testable without constructing a LabManagerHub, which pulls in at-rest
@@ -59,7 +60,7 @@ class HubCertDistributionMixin:
         (plus the hub). The flag is OFF by default so this is a no-op while the
         operator is still testing cert distribution."""
         explicit = await _distribute_cert_to_targets(
-            self.request_response, self.get_spoke_by_type,
+            self._inflight_rr(self.request_response), self.get_spoke_by_type,
             self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets,
             install_on_hub=self._install_cert_on_hub)
         if self._wildcard_all_spokes_enabled() and _is_wildcard(domain):
@@ -79,7 +80,7 @@ class HubCertDistributionMixin:
         wildcard fan-out params (gated by the hub flag — OFF by default →
         no-op while the operator is testing)."""
         out = await _distribute_all_certs_impl(
-            self.request_response, self.get_spoke_by_type,
+            self._inflight_rr(self.request_response), self.get_spoke_by_type,
             self.CERT_CAPABLE_MODULES, le_spoke_id,
             install_on_hub=self._install_cert_on_hub,
             wildcard_enabled=self._wildcard_all_spokes_enabled(),
@@ -114,6 +115,46 @@ class HubCertDistributionMixin:
         if hours <= 0:
             return 3600.0
         return max(hours * 3600.0, 60.0)
+
+    # ── in-flight distribution tracking (yellow target badge + live timer) ───
+    # While the hub is awaiting an INSTALL_CERT confirmation, the target is
+    # "in flight". We can't predict how fast a cert will transfer or install
+    # (the hypervisor path's pveproxy restart can take many minutes), so the
+    # WebUI surfaces in-flight targets as yellow badges with an elapsed timer
+    # (fetched from /api/le/inflight) instead of showing only the stale
+    # last_status. Tracked hub-side (where the loop lives) and keyed by
+    # domain|module_type|identifier — the same identity the le ledger uses.
+    def _cert_inflight(self) -> Dict[str, Dict[str, Any]]:
+        d = getattr(self, "cert_dist_inflight", None)
+        if d is None:
+            d = {}
+            self.cert_dist_inflight = d
+        return d
+
+    def _inflight_rr(self, rr):
+        """Wrap ``request_response`` so an in-flight INSTALL_CERT is recorded
+        for the WebUI. The pure helpers call ``rr(target_sid, "INSTALL_CERT",
+        {domain, module_type, identifier, ...})``; we record the target before
+        the await and clear it in a finally so the badge transitions the moment
+        the push returns (SUCCESS or ERROR). Non-INSTALL_CERT rr calls
+        (LE_GET_CERT / LE_MARK_DISTRIBUTED) pass through untouched."""
+        hub = self
+
+        async def _wrapped(spoke_id, command, data=None, timeout=None):
+            if command == "INSTALL_CERT" and isinstance(data, dict):
+                key = f"{data.get('domain', '')}|{data.get('module_type', '')}|{data.get('identifier', '')}"
+                hub._cert_inflight()[key] = {
+                    "domain": data.get("domain", ""),
+                    "module_type": data.get("module_type", ""),
+                    "identifier": data.get("identifier", ""),
+                    "since": time.time(),
+                }
+                try:
+                    return await rr(spoke_id, command, data, timeout=timeout)
+                finally:
+                    hub._cert_inflight().pop(key, None)
+            return await rr(spoke_id, command, data, timeout=timeout)
+        return _wrapped
 
     def _wildcard_push_state(self) -> Dict[str, str]:
         """Persistent ``{f"{domain}|{spoke_id}": material_hash}`` so the hourly

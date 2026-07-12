@@ -65,6 +65,11 @@ class _Hub:
         # is harmless).
         self._distribute_one_cert = main.LabManagerHub._distribute_one_cert.__get__(self)
         self._install_cert_on_hub = main.LabManagerHub._install_cert_on_hub.__get__(self)
+        # _distribute_one_cert wraps request_response via _inflight_rr (so the
+        # WebUI can show a yellow in-flight badge); bind both it + the lazy
+        # in-flight dict helper it uses (no other hub attrs needed).
+        self._inflight_rr = main.LabManagerHub._inflight_rr.__get__(self)
+        self._cert_inflight = main.LabManagerHub._cert_inflight.__get__(self)
 
     async def request_response(self, spoke_id, cmd, data, timeout=5.0):
         return await self._rr(spoke_id, cmd, data, timeout)

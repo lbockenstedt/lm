@@ -248,6 +248,18 @@ def register(app, hub, ctx):
         return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_LIST_CERTS",
                                   log_name="le_list_certs")
 
+    @app.get("/api/le/inflight")
+    async def le_inflight():
+        """Targets the hub is currently pushing INSTALL_CERT to (waiting on
+        deployment confirmation). Hub-side — not relayed to the le spoke. The
+        WebUI merges this onto the cert target badges (yellow + elapsed timer)
+        so the operator can see what's in flight, since we can't predict how
+        fast a cert will transfer or install (hypervisor pveproxy restart can
+        take many minutes). Cleared the moment a push returns."""
+        hub = app.state.hub
+        items = list(getattr(hub, "cert_dist_inflight", {}).values())
+        return {"status": "SUCCESS", "inflight": items}
+
     @app.get("/api/le/status")
     async def le_status():
         """le spoke module status (version, certbot present, cert count)."""

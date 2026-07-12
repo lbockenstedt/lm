@@ -144,6 +144,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                 res = await rr(target_sid, "INSTALL_CERT", {
                     "domain": domain, "fullchain": fullchain,
                     "privkey": privkey, "chain": chain, "identifier": ident,
+                    "module_type": mt,
                 }, timeout=install_timeout)
                 rret = _unwrap(res)
                 if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
@@ -342,7 +343,7 @@ async def distribute_wildcard_to_all_spokes(
         entry = {"domain": domain, "module_type": mt, "identifier": sid, "wildcard": True}
         res = await rr(sid, "INSTALL_CERT", {
             "domain": domain, "fullchain": fullchain, "privkey": privkey,
-            "chain": chain, "identifier": sid,
+            "chain": chain, "identifier": sid, "module_type": mt,
         }, timeout=120.0)
         rret = _unwrap(res)
         if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
