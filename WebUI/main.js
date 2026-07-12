@@ -12554,11 +12554,11 @@ async function loadLEData(subMenu) {
                 const lbl = t.label || `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`;
                 const lblE = escapeHtml(lbl);
                 if (haveKeys.has(k)) {
-                    return `<span class="px-1.5 py-0.5 rounded text-xs bg-slate-100 text-slate-400 border border-slate-200" title="Already added">${lblE} ✓</span>`;
+                    return `<span class="px-1.5 py-0.5 rounded text-xs bg-[#01A982]/10 text-[#01A982] border border-[#01A982]" title="Added — this cert deploys to this target">${lblE} ✓</span>`;
                 }
                 const mtE = escJsAttr(String(t.module_type || ''));
                 const idE = escJsAttr(String(t.identifier || ''));
-                return `<button onclick="addLeTarget('${dEsc}',{module_type:'${mtE}',identifier:'${idE}'})" class="px-1.5 py-0.5 rounded text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] cursor-pointer transition" title="Enable this cert to deploy to ${lbl}">${lblE} +</button>`;
+                return `<button onclick="addLeTarget('${dEsc}',{module_type:'${mtE}',identifier:'${idE}'})" class="px-1.5 py-0.5 rounded text-xs bg-slate-100 hover:bg-slate-200 text-slate-500 border border-slate-200 cursor-pointer transition" title="Enable this cert to deploy to ${lbl}">${lblE} +</button>`;
             }).join('');
             return `<div class="flex flex-wrap items-center gap-1 mt-1.5"><span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1">Add</span>${chips}</div>`;
         };
