@@ -4876,6 +4876,12 @@ function _renderSetupModuleMgmtTile(content) {
 function _renderSetupSimulationsTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
+            <div class="flex items-center gap-1 border-b border-slate-200 mb-4">
+                <button id="simtab-btn-usb" onclick="_simSetupTab('usb')" class="px-4 py-2 text-sm font-bold border-b-2 border-[#01A982] text-[#01A982] -mb-px transition-colors">USB</button>
+                <button id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="px-4 py-2 text-sm font-bold border-b-2 border-transparent text-slate-500 hover:text-slate-700 -mb-px transition-colors">PCI (Tiers)</button>
+                <button id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="px-4 py-2 text-sm font-bold border-b-2 border-transparent text-slate-500 hover:text-slate-700 -mb-px transition-colors">DHCP</button>
+            </div>
+            <div id="simtab-usb" class="space-y-4">
             <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Discovered USB Devices ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Every USB VID:PID seen across all tenants' spokes (plus tenant-certified/ignored entries not yet in telemetry). Approve or ignore a device type globally — applies to every tenant.</p>
@@ -4906,6 +4912,13 @@ function _renderSetupSimulationsTile(content) {
                 </div>
             </div>
             <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Per-Tenant USB ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <p class="text-xs text-slate-500 mb-3">Each tenant's own certified/ignored VID:PIDs (merged with the global list when pushed to their spoke). Approve/ignore per tenant below.</p>
+                <div id="tenant-usb-list" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
+            </div>
+            <div id="simtab-pci" class="space-y-4 hidden">
+            <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Global Tier PCI VID:PIDs ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide PCI-passthrough device IDs that classify a VM's tier — applies to every tenant (merged with each tenant's own list). <b>T1</b> = physical / base PCI (e.g. <span class="font-mono">1912:0015</span>); <b>T3</b> = the IoT adapter (e.g. <span class="font-mono">168c:0034</span>). T2 = USB dongle (above). Only T2 is ever auto-deleted under resource pressure; T1/T3 are never torn down.</p>
                 <div class="grid grid-cols-2 gap-6">
@@ -4927,19 +4940,35 @@ function _renderSetupSimulationsTile(content) {
                     </div>
                 </div>
             </div>
-            <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Per-Tenant USB ${helpIcon('cs', null, 'Simulations help')}</h3>
-                <p class="text-xs text-slate-500 mb-3">Each tenant's own certified/ignored VID:PIDs (merged with the global list when pushed to their spoke). Approve/ignore per tenant below.</p>
-                <div id="tenant-usb-list" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
+            <div id="simtab-dhcp" class="space-y-4 hidden">
             <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">DHCP Server (Kea) ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Isolated sim-client DHCP (Kea <span class="font-mono">kea-dhcp4-sim</span>) on each cs spoke's second NIC (provisioned by install_cs.sh). Shows whether Kea is running and how full the lease pool is. A spoke without Kea shows "Not configured".</p>
                 <div id="cs-dhcp-server-status" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
             </div>`;
     loadSimAdminOverview();
     loadGlobalTierPci();
 }
+
+// In-tile sub-tabs for Setup → Simulations: group USB / PCI / DHCP so the tile
+// isn't one long stack. Pure show/hide of the three panels + active styling.
+function _simSetupTab(name) {
+    ['usb', 'pci', 'dhcp'].forEach(n => {
+        const panel = document.getElementById('simtab-' + n);
+        const btn = document.getElementById('simtab-btn-' + n);
+        if (panel) panel.classList.toggle('hidden', n !== name);
+        if (btn) {
+            const active = (n === name);
+            btn.classList.toggle('border-[#01A982]', active);
+            btn.classList.toggle('text-[#01A982]', active);
+            btn.classList.toggle('border-transparent', !active);
+            btn.classList.toggle('text-slate-500', !active);
+        }
+    });
+}
+
 
 // ── Global Tier PCI VID:PIDs (T1/T3) — superadmin, platform-wide ──────────
 // Mirrors the Global USB ignored-list handlers (bare vid:pid strings). Each PUT
