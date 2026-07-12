@@ -1497,33 +1497,49 @@ class UpdatePipelineMixin:
             # transient unit owned by PID 1 (independent of lm.service), then
             # polls /status and rolls back the pre-swap snapshot if the new
             # version fails to boot (see core/src/update_recovery.py).
-            logger.info("Hub was updated. Scheduling self-restart via transient unit...")
-            # Flush the in-memory session store to disk so any login/logout since the
-            # last save survives the restart (best-effort; save-on-mutation already
-            # covers the common path, this closes the last-few-seconds window).
-            try:
-                from api import _save_sessions  # lazy: avoid a module-level api dep
-                _save_sessions(self)
-            except Exception as _e:
-                logger.warning(f"Pre-restart session flush failed: {_e}")
-            try:
-                # DETACH the restart helper into its own session with std streams
-                # sent to /dev/null. Launched un-detached from inside the asyncio
-                # hub daemon, the child sudo lives in the hub's process group and
-                # is killed before it can `systemd-run` the restart — which is why
-                # the hub logged "Scheduling self-restart…" every cycle but never
-                # actually restarted (no sudo in the journal, process stayed STALE).
-                # start_new_session=True lets it survive to escape the cgroup and
-                # fire the restart, exactly like a manual invocation from a tty.
-                subprocess.Popen(
-                    ["sudo", "-n", "/usr/local/bin/lm-update-restart"],
-                    start_new_session=True, close_fds=True,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                logger.info("Self-restart helper (lm-update-restart) launched (detached).")
-            except Exception as _e:
-                logger.warning(f"Could not schedule hub self-restart: {_e}")
+            # GATE the DIRECT self-restart on the maintenance-window/idle policy
+            # (update_gate) — the direct lm-update-restart helper runs `systemctl
+            # restart lm` immediately and does NOT itself consult the gate, so a
+            # routine repo-sync update would restart the hub (logging every active
+            # operator out) even with users connected. Only fire it now when the
+            # gate allows (nobody logged in, or inside the maintenance window), OR
+            # when forced ("Update now" button — operator asked), OR on a
+            # stale-reload (serving stale code, an error state → reload ASAP).
+            # Otherwise DEFER: the non-force watchdog sentinel below still carries
+            # the request and the external lm-watchdog fires it once idle/in-window.
+            _restart_now = bool(force) or stale_reload or self._gate_allows_restart_now()
+            if _restart_now:
+                logger.info("Hub was updated. Scheduling self-restart via transient unit...")
+                # Flush the in-memory session store to disk so any login/logout since the
+                # last save survives the restart (best-effort; save-on-mutation already
+                # covers the common path, this closes the last-few-seconds window).
+                try:
+                    from api import _save_sessions  # lazy: avoid a module-level api dep
+                    _save_sessions(self)
+                except Exception as _e:
+                    logger.warning(f"Pre-restart session flush failed: {_e}")
+                try:
+                    # DETACH the restart helper into its own session with std streams
+                    # sent to /dev/null. Launched un-detached from inside the asyncio
+                    # hub daemon, the child sudo lives in the hub's process group and
+                    # is killed before it can `systemd-run` the restart — which is why
+                    # the hub logged "Scheduling self-restart…" every cycle but never
+                    # actually restarted (no sudo in the journal, process stayed STALE).
+                    # start_new_session=True lets it survive to escape the cgroup and
+                    # fire the restart, exactly like a manual invocation from a tty.
+                    subprocess.Popen(
+                        ["sudo", "-n", "/usr/local/bin/lm-update-restart"],
+                        start_new_session=True, close_fds=True,
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    logger.info("Self-restart helper (lm-update-restart) launched (detached).")
+                except Exception as _e:
+                    logger.warning(f"Could not schedule hub self-restart: {_e}")
+            else:
+                logger.info("Hub updated on disk but a user is logged in and it's outside "
+                            "the maintenance window (update_gate) — DEFERRING the hub "
+                            "restart; the watchdog will restart once idle / in-window.")
             # Also request the restart via the RELIABLE external watchdog path —
             # the in-process helper above can silently fail to fire from the
             # daemon. force → the watchdog restarts immediately, bypassing the
