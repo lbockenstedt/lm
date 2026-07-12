@@ -13397,11 +13397,15 @@ window._leIssueStatus = window._leIssueStatus || {};
 // toast is shown immediately and the row gets a spinner while we wait.
 async function _leRunIssue(body, { closeModalOnSuccess = false } = {}) {
     const domain = body.domain;
-    window._leIssueStatus[domain] = { state: 'pending', ts: Date.now(), message: 'Issuing…', params: body };
-    showToast('Issuing ' + domain + '… (DNS-01 can take a couple minutes)', 'info');
+    window._leIssueStatus[domain] = { state: 'pending', ts: Date.now(), message: 'Queued — issuing…', params: body };
+    // Issuing (esp. DNS-01) + distribution can take minutes. Don't hold the modal
+    // open on a synchronous wait: close it NOW and tell the operator to check
+    // back. The request runs in the background (this fn is not awaited by the
+    // click handler); the pending row + per-domain status update the table when
+    // it finishes.
+    document.getElementById('le-issue-modal')?.remove();
+    showToast('Certificate request for ' + domain + ' queued — check the Certificates page in ~15 minutes for details.', 'info');
     await loadLEData(); // show the pending spinner row immediately
-    const btn = document.getElementById('le-issue-submit');
-    if (btn) { btn.disabled = true; btn.textContent = 'Issuing…'; }
     try {
         const { ok, data, detail } = await _spokeFetch('/api/le/issue', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -13411,7 +13415,6 @@ async function _leRunIssue(body, { closeModalOnSuccess = false } = {}) {
             window._leIssueStatus[domain] = { state: 'failed', ts: Date.now(), message: detail || 'Issue failed', params: body };
             showToast('Issue failed for ' + domain + ': ' + (detail || ''), 'error');
             console.warn('[le] issue failed', domain, detail);
-            if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
             await loadLEData();
             return;
         }
@@ -13440,18 +13443,11 @@ async function _leRunIssue(body, { closeModalOnSuccess = false } = {}) {
         showToast('Issued ' + domain + (body.staging ? ' (staging)' : '') + distMsg,
             distFailed ? 'error' : 'success');
         console.info('[le] issued', domain, dist);
-        if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
-        // The Issue operation succeeded (certbot ran); close the modal. A dist
-        // failure is surfaced via the error toast + the per-target red badge
-        // in the targets modal + Logs/Certificates — the fix is "Distribute
-        // now", not re-Issue, so don't keep the Issue form open.
-        if (closeModalOnSuccess) document.getElementById('le-issue-modal')?.remove();
         await loadLEData();
     } catch (e) {
         window._leIssueStatus[domain] = { state: 'failed', ts: Date.now(), message: e.message || 'Issue failed', params: body };
         showToast('Issue failed for ' + domain + ': ' + e.message, 'error');
         console.warn('[le] issue error', domain, e);
-        if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
         await loadLEData();
     }
 }
