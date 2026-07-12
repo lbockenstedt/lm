@@ -37,8 +37,14 @@ logger = logging.getLogger("le.distribution")
 # is not a spoke, so it has no get_spoke_by_type resolution — instead the hub
 # installs the cert on ITSELF (writes LM_TLS_CERT/LM_TLS_KEY + schedules
 # lm-self-restart) via the ``install_on_hub`` callable threaded in by the
-# HubCertDistributionMixin._distribute_one_cert wrapper.
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation"}
+# HubCertDistributionMixin._distribute_one_cert wrapper. ``nac`` (ClearPass)
+# installs the cert via the ClearPass REST server-cert API (PKCS12 hosted at a
+# URL ClearPass fetches — see cppm spoke ``import_cert``). ``nw`` (network
+# devices) currently installs certs only on ``cx_switch`` (AOS-CX REST v10);
+# other nw families (aos_switch/ex_switch/gateway) return a clear ERROR from
+# the spoke (external-key / SSH-SFTP plumbing not yet built). Both are fast
+# REST targets → 120s install tier (no pvenode wait).
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation", "nac", "nw"}
 
 
 def _unwrap(result: Any) -> Dict[str, Any]:

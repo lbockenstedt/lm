@@ -142,6 +142,56 @@ def test_distribute_simulation_is_cert_capable_and_uses_640s_timeout():
     assert installs[0]["timeout"] == 640.0  # shares the hypervisor window
 
 
+def test_distribute_nac_is_cert_capable_and_routes_to_spoke():
+    """nac (ClearPass) is cert-capable: the cppm spoke installs the cert via
+    ClearPass's REST server-cert API (PKCS12 hosted at a URL ClearPass fetches
+    — see cppm spoke import_cert). It's a fast REST target, so it stays on the
+    120s install tier (no pvenode wait). Verifies (a) it's in
+    CERT_CAPABLE_MODULES, (b) INSTALL_CERT routes to the connected nac spoke
+    with the cert material + identifier, (c) 120s timeout."""
+    assert "nac" in cd.CERT_CAPABLE_MODULES
+    _NAC = "cppm-spoke-1"
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        (_NAC, "INSTALL_CERT"): _install_ok(),
+    })
+    get_by_type = lambda mt: _NAC if mt == "nac" else None
+    targets = [{"module_type": "nac", "identifier": "clearpass-1"}]
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
+    assert summary[0]["status"] == "SUCCESS"
+    installs = [c for c in calls if c["cmd"] == "INSTALL_CERT"]
+    assert len(installs) == 1
+    assert installs[0]["data"]["module_type"] == "nac"
+    assert installs[0]["data"]["identifier"] == "clearpass-1"
+    assert installs[0]["timeout"] == 120.0  # fast REST tier
+
+
+def test_distribute_nw_is_cert_capable_and_routes_to_spoke():
+    """nw (network devices) is cert-capable: the nw spoke resolves the target
+    device by identifier and installs the cert (cx_switch via AOS-CX REST v10
+    today; other families return a clear ERROR from the spoke). Fast REST →
+    120s install tier. Verifies (a) it's in CERT_CAPABLE_MODULES, (b)
+    INSTALL_CERT routes to the connected nw spoke carrying identifier (the
+    device id) + cert material, (c) 120s timeout."""
+    assert "nw" in cd.CERT_CAPABLE_MODULES
+    _NW = "nw-spoke-1"
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        (_NW, "INSTALL_CERT"): _install_ok(),
+    })
+    get_by_type = lambda mt: _NW if mt == "nw" else None
+    targets = [{"module_type": "nw", "identifier": "edge-sw-1"}]
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
+    assert summary[0]["status"] == "SUCCESS"
+    installs = [c for c in calls if c["cmd"] == "INSTALL_CERT"]
+    assert len(installs) == 1
+    assert installs[0]["data"]["module_type"] == "nw"
+    assert installs[0]["data"]["identifier"] == "edge-sw-1"
+    assert installs[0]["timeout"] == 120.0  # fast REST tier
+
+
 def test_distribute_skips_up_to_date_target():
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
     get_by_type = lambda mt: _FW
@@ -545,17 +595,18 @@ def test_available_targets_lists_cert_capable_connected_spokes():
     """One entry per cert-capable CONNECTED spoke (by module_type); offline +
     non-capable spokes are omitted (they'd only ERROR on distribute)."""
     smt = {"opn-1": "firewall", "netbox-1": "ipam", "ldap-1": "directory",
-           "nw-1": "nw", "dns-1": "dns", "pxmx-1": "hypervisor"}
-    active = {"opn-1", "netbox-1", "ldap-1", "nw-1"}  # dns-1 + pxmx-1 offline
-    names = {"opn-1": "edge-fw", "netbox-1": "netbox"}
+           "nw-1": "nw", "nac-1": "nac", "dns-1": "dns", "pxmx-1": "hypervisor"}
+    active = {"opn-1", "netbox-1", "ldap-1", "nw-1", "nac-1"}  # dns-1 + pxmx-1 offline
+    names = {"opn-1": "edge-fw", "netbox-1": "netbox", "nac-1": "clearpass"}
     out = cd.build_available_targets(smt, active, names, cd.CERT_CAPABLE_MODULES, [])
     by_mt = {t["module_type"]: t for t in out if not t["identifier"]}
-    # cert-capable + connected: firewall, ipam, directory. nw is NOT capable.
-    assert set(by_mt) == {"firewall", "ipam", "directory"}
-    # Offline spokes (dns-1, pxmx-1) absent; non-capable nw absent.
-    assert "dns" not in by_mt and "nw" not in by_mt and "hypervisor" not in by_mt
+    # cert-capable + connected: firewall, ipam, directory, nw, nac.
+    assert set(by_mt) == {"firewall", "ipam", "directory", "nw", "nac"}
+    # Offline spokes (dns-1, pxmx-1) absent; non-capable dns absent.
+    assert "dns" not in by_mt and "hypervisor" not in by_mt
     assert by_mt["firewall"]["label"] == "firewall — edge-fw"
     assert by_mt["ipam"]["label"] == "ipam — netbox"
+    assert by_mt["nac"]["label"] == "nac — clearpass"
     # Falls back to spoke_id when no display name.
     assert by_mt["directory"]["label"] == "directory — ldap-1"
     # identifier empty for spoke-level targets.
@@ -588,7 +639,7 @@ def test_available_targets_lists_each_pxmx_agent_as_per_node_target():
 def test_available_targets_omits_agents_whose_parent_spoke_not_cert_capable():
     """An agent whose parent spoke's module_type isn't cert-capable is skipped
     (e.g. a future agent-hosting type that isn't wired) — defensive guard."""
-    smt = {"foo-1": "nac"}
+    smt = {"foo-1": "foo"}  # 'foo' is not a cert-capable module_type
     active = {"foo-1"}
     agents = [{"agent_id": "x-1", "spoke_id": "foo-1", "hostname": "x"}]
     out = cd.build_available_targets(smt, active, {}, cd.CERT_CAPABLE_MODULES, agents)
