@@ -6866,6 +6866,14 @@ function _mgmtBtn(label, onclick, extraCls) {
 //
 // o = { dot, name, sid, identityBanner, metaLines: [html], badges: [html],
 //       actions: [html] }
+// _bslot(w, html) — wrap a badge in a FIXED-WIDTH inline-block column so the
+// badge values land in the SAME x-position on every Spokes/Agents tile instead
+// of shifting with the module-name length. An absent badge renders an EMPTY
+// fixed-width slot (reserves the column, shows no "—" placeholder).
+function _bslot(w, html) {
+    return `<span class="inline-block ${w} shrink-0 overflow-hidden align-middle whitespace-nowrap">${html || ''}</span>`;
+}
+
 function _mgmtEntryCard(o) {
     const badges  = (o.badges || []).filter(Boolean).join(' ');
     const meta    = (o.metaLines || []).filter(Boolean).join('');
@@ -6964,9 +6972,9 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                         ...(extras ? extras.metaLines : []),
                     ],
                     badges: [
-                        `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${kindLabel === 'Module' ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-600'}">${kindLabel}</span>`,
-                        ...((modLabel && modLabel !== '—') ? [`<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${modLabel}</span>`] : []),
-                        `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${approved ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}">${approved ? 'Approved' : 'Pending'}</span>`,
+                        _bslot('w-16', `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${kindLabel === 'Module' ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-600'}">${kindLabel}</span>`),
+                        _bslot('w-44', (modLabel && modLabel !== '—') ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700" title="${escapeHtml(modLabel)}">${modLabel}</span>` : ''),
+                        _bslot('w-24', `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${approved ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}">${approved ? 'Approved' : 'Pending'}</span>`),
                         ...(extras ? extras.badges : []),
                     ],
                     actions: [
@@ -7117,9 +7125,9 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                     ...(extras ? extras.metaLines : []),
                 ],
                 badges: [
-                    `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${typeLabel}</span>`,
-                    ...(a._module ? [`<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${escapeHtml(String(a._module))}</span>`] : []),  // no module badge for a role-hosting agent (was a bare "—")
-                    `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${statusLabel}</span>`,
+                    _bslot('w-16', `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${typeLabel}</span>`),
+                    _bslot('w-44', a._module ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700" title="${escapeHtml(String(a._module))}">${escapeHtml(String(a._module))}</span>` : ''),
+                    _bslot('w-24', `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${statusLabel}</span>`),
                     ...(extras ? extras.badges : []),
                 ],
                 actions: [
@@ -8617,8 +8625,8 @@ function _diagTelemetryExtras(s, fns) {
         // div — saves vertical space on the Spokes & Agents tiles.
         status,
         badges: [
-            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600" title="Time since last inbound heartbeat frame (&lt;120s healthy, 120–300s slow, &gt;=300s/never stale — see the row's status dot)">${hbAge}</span>`,
-            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase font-mono ${_verTone}" title="${_verTitle}">${escapeHtml(_ver)}</span>`,
+            _bslot('w-14', `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600" title="Time since last inbound heartbeat frame (&lt;120s healthy, 120–300s slow, &gt;=300s/never stale — see the row's status dot)">${hbAge}</span>`),
+            _bslot('w-16', `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase font-mono ${_verTone}" title="${_verTitle}">${escapeHtml(_ver)}</span>`),
             ...(badge.text !== '—' ? [`<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600" title="${escapeHtml(badge.title)}">${badge.text}</span>`] : []),
             alertBadge,
         ],
