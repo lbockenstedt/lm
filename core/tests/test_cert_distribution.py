@@ -302,3 +302,149 @@ def test_distribute_cert_no_targets_logs_skip(caplog):
     assert summary == []
     assert any("no targets configured" in r.message for r in caplog.records)
     assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
+
+
+# ── distribute_wildcard_to_all_spokes ─────────────────────────────────────────
+# Fan-out is gated hub-side (only invoked when global_config["certs"]
+# ["wildcard_all_spokes"] is ON + domain is a wildcard); these tests exercise
+# the pure fan-out helper directly. push_state is a mutable dict the hub owns.
+
+def _wc_all_by_type(spokes):
+    """get_all_spokes_by_type: returns the list of connected spoke_ids for a
+    module_type (vs get_spoke_by_type which returns one)."""
+    def f(mt):
+        return spokes.get(mt, [])
+    return f
+
+
+def test_wildcard_fans_out_to_every_capable_spoke():
+    """Every connected cert-capable spoke (by spoke_id, so multiple per
+    module_type) gets the cert; each push is recorded on the ledger."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        ("opn-1", "INSTALL_CERT"): _install_ok(),
+        ("opn-2", "INSTALL_CERT"): _install_ok(),
+        ("hv-1", "INSTALL_CERT"): _install_ok(),
+    })
+    get_all = _wc_all_by_type({"firewall": ["opn-1", "opn-2"],
+                               "hypervisor": ["hv-1"]})
+    push_state = {}
+    summary = _run(cd.distribute_wildcard_to_all_spokes(
+        rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+        None, push_state, install_on_hub=None))
+    installs = [c for c in calls if c["cmd"] == "INSTALL_CERT"]
+    assert {c["spoke"] for c in installs} == {"opn-1", "opn-2", "hv-1"}
+    assert all(s["status"] == "SUCCESS" and s.get("wildcard") for s in summary)
+    # push_state records the current hash for each pushed spoke (no re-push).
+    assert push_state["*.lab.example.com|opn-1"] == _H
+    assert push_state["*.lab.example.com|hv-1"] == _H
+    # Each push is acked on the le ledger with wildcard: True.
+    marks = [c for c in calls if c["cmd"] == "LE_MARK_DISTRIBUTED"]
+    assert len(marks) == 3 and all(m["data"].get("wildcard") for m in marks)
+
+
+def test_wildcard_skips_all_current_no_pull(caplog):
+    """When push_state shows every spoke at the current hash, no LE_GET_CERT
+    pull + no INSTALL_CERT — the operator sees 'all N current' (not silence)."""
+    get_all = _wc_all_by_type({"firewall": ["opn-1"]})
+    push_state = {"*.lab.example.com|opn-1": _H}
+    rr, calls = _fake_rr({})  # no stubs needed — nothing should be called
+    with caplog.at_level("INFO", logger="le.distribution"):
+        summary = _run(cd.distribute_wildcard_to_all_spokes(
+            rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+            _H, push_state, install_on_hub=None))
+    assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
+    assert not [c for c in calls if c["cmd"] == "INSTALL_CERT"]
+    assert summary and summary[0].get("skipped") and summary[0].get("wildcard")
+    assert any("wildcard" in r.message and "all 1 target(s) current" in r.message
+               for r in caplog.records)
+
+
+def test_wildcard_no_connected_spokes_noop(caplog):
+    """No cert-capable spokes connected + no hub self-install → surfaced
+    'nothing to fan out', not a silent empty return."""
+    get_all = _wc_all_by_type({})
+    rr, calls = _fake_rr({})
+    with caplog.at_level("INFO", logger="le.distribution"):
+        summary = _run(cd.distribute_wildcard_to_all_spokes(
+            rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+            _H, {}, install_on_hub=None))
+    assert summary == []
+    assert any("nothing to fan out" in r.message for r in caplog.records)
+    assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
+
+
+def test_wildcard_install_failure_records_error_keeps_going():
+    """One spoke failing doesn't abort the fan-out; the failure is recorded on
+    the ledger and push_state is NOT advanced for that spoke (retry next loop)."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        ("opn-1", "INSTALL_CERT"): {"payload": {"data": {
+            "status": "ERROR", "message": "scp refused"}}},
+        ("hv-1", "INSTALL_CERT"): _install_ok(),
+    })
+    get_all = _wc_all_by_type({"firewall": ["opn-1"], "hypervisor": ["hv-1"]})
+    push_state = {}
+    summary = _run(cd.distribute_wildcard_to_all_spokes(
+        rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+        None, push_state, install_on_hub=None))
+    by_spoke = {s["identifier"]: s for s in summary}
+    assert by_spoke["opn-1"]["status"] == "ERROR"
+    assert "scp refused" in by_spoke["opn-1"]["message"]
+    assert by_spoke["hv-1"]["status"] == "SUCCESS"
+    # Failed spoke NOT advanced in push_state (retry); successful one is.
+    assert "*.lab.example.com|opn-1" not in push_state
+    assert push_state["*.lab.example.com|hv-1"] == _H
+    marks = [c for c in calls if c["cmd"] == "LE_MARK_DISTRIBUTED"]
+    assert {m["data"]["status"] for m in marks} == {"SUCCESS", "ERROR"}
+
+
+def test_wildcard_get_cert_failure_returns_error():
+    """If the le spoke can't produce the wildcard material, the whole fan-out
+    is a single ERROR entry (no INSTALL_CERT attempted on stale spokes)."""
+    rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): {
+        "payload": {"data": {"status": "ERROR", "message": "no live wildcard"}}}})
+    get_all = _wc_all_by_type({"firewall": ["opn-1"]})
+    summary = _run(cd.distribute_wildcard_to_all_spokes(
+        rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+        None, {}, install_on_hub=None))
+    assert len(summary) == 1 and summary[0]["status"] == "ERROR"
+    assert "no live wildcard" in summary[0]["message"]
+    assert not [c for c in calls if c["cmd"] == "INSTALL_CERT"]
+
+
+def test_wildcard_includes_hub_self_install():
+    """The hub (one TLS endpoint) gets the cert via install_on_hub, tagged
+    module_type 'hub', and is tracked in push_state under '<domain>|hub'."""
+    rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+                           ("opn-1", "INSTALL_CERT"): _install_ok()})
+    get_all = _wc_all_by_type({"firewall": ["opn-1"]})
+    hub_installs = []
+
+    async def install_on_hub(domain, fullchain, privkey, chain, identifier):
+        hub_installs.append(identifier)
+        return {"status": "SUCCESS", "message": "installed on hub"}
+
+    push_state = {}
+    summary = _run(cd.distribute_wildcard_to_all_spokes(
+        rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+        None, push_state, install_on_hub=install_on_hub))
+    hub_entries = [s for s in summary if s["module_type"] == "hub"]
+    assert len(hub_entries) == 1 and hub_entries[0]["status"] == "SUCCESS"
+    assert hub_installs == ["hub"]  # identifier "hub" for the single TLS endpoint
+    assert push_state["*.lab.example.com|hub"] == _H
+    # hub is NOT treated as a spoke — no INSTALL_CERT relay for it.
+    assert not [c for c in calls if c["cmd"] == "INSTALL_CERT"
+                and c["spoke"] not in ("opn-1",)]
+
+
+def test_wildcard_non_wildcard_domain_is_noop():
+    """A non-wildcard domain short-circuits (the hub only calls this for
+    wildcards, but the helper defends)."""
+    rr, calls = _fake_rr({})
+    get_all = _wc_all_by_type({"firewall": ["opn-1"]})
+    summary = _run(cd.distribute_wildcard_to_all_spokes(
+        rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "plain.example.com",
+        None, {}, install_on_hub=None))
+    assert summary == []
+    assert not [c for c in calls if c["cmd"] != ""]  # no calls at all
