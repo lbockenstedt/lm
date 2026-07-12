@@ -12177,7 +12177,10 @@ async function loadLEData(subMenu) {
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${c.challenge || '—'}</span></td>
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
-                <td class="px-4 py-2 whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls} whitespace-nowrap">${exp.text}</span></td>
+                <td class="px-4 py-2 whitespace-nowrap">
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls} whitespace-nowrap">${exp.text}</span>
+                    <div class="text-[11px] text-slate-400 mt-0.5" title="Renewal loop triggers this many days before expiry (per-cert override; default 7)">renew @ ${c.renew_window_days_effective ?? 7}d</div>
+                </td>
                 <td class="px-4 py-2"><div class="flex items-center gap-2">${tgtCell}<button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium">manage</button></div></td>
             </tr>
             <tr class="border-b border-slate-200 hover:bg-slate-50">
@@ -12653,6 +12656,11 @@ function showLeIssueModal() {
                     <input id="le-issue-staging" type="checkbox" class="rounded border-slate-300" />
                     Use Let's Encrypt <b>staging</b> (untrusted — for testing)
                 </label>
+                <label class="flex items-center gap-1 text-sm text-slate-700" title="How many days before expiry the renewal loop triggers for THIS cert. Default 7. A larger window renews earlier (more retry slack before it actually expires); a smaller one renews later.">
+                    Renew before expiry
+                    <input id="le-issue-renew-window" type="number" min="1" value="7" class="w-16 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                    days
+                </label>
             </div>
             <div class="border-t border-slate-200 pt-3">
                 <label class="text-xs text-slate-500 mb-1 block">Initial distribution targets (optional)</label>
@@ -12763,6 +12771,11 @@ async function leIssueCert() {
     }
 
     const body = { domain, email, challenge, staging, key_type: keyType };
+    // Per-cert renewal window (days before expiry the loop triggers). Send only
+    // a positive int; blank/invalid → omitted → spoke stores None → uses the
+    // 7-day default. The le spoke validates + normalizes (bad → None).
+    const rwd = parseInt(document.getElementById('le-issue-renew-window')?.value, 10);
+    if (Number.isFinite(rwd) && rwd > 0) body.renew_window_days = rwd;
     if (chSel === 'http-webroot') body.webroot = webroot;
     // Resolve frontend provider aliases (e.g. Hurricane Electric → rfc2136) so
     // the spoke receives the real certbot plugin name.
