@@ -5652,6 +5652,31 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         out.reverse()
         return out
 
+    def get_spoke_log_events(self, spoke_id: str, limit: int = 30) -> list:
+        """Most-recent WARNING/ERROR/CRITICAL RELAYED LOG lines for a spoke — the
+        operational errors/warnings surfaced in the per-spoke events panel so an
+        operator sees actual failures, not just connection-lifecycle events. Parses
+        the relayed log format ``<asctime> - <name> - <levelname> - <msg>`` from
+        ``agent_logs[spoke_id]``; lines that don't parse or are below WARNING are
+        skipped. Newest first, capped at ``limit``."""
+        buf = self.agent_logs.get(spoke_id)
+        if not buf:
+            return []
+        levels = {"WARNING", "ERROR", "CRITICAL"}
+        out = []
+        for entry in list(buf):
+            line = entry if isinstance(entry, str) else str(entry)
+            parts = line.split(" - ", 3)
+            if len(parts) < 4:
+                continue
+            level = parts[2].strip()
+            if level not in levels:
+                continue
+            out.append({"ts_str": parts[0].strip(), "level": level,
+                        "name": parts[1].strip(), "msg": parts[3].strip()})
+        out.reverse()
+        return out[:limit]
+
     def _rate_limit_params(self) -> tuple:
         """(capacity, fill_rate) for the per-spoke TokenBucket, read fresh from
         ``global_config["rate_limit"]`` so the knob can be tuned for scale /

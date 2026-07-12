@@ -8464,6 +8464,17 @@ function spokeEventRow(e) {
     return `<div class="py-0.5"><span class="text-slate-400">${when}</span> <span class="${meta.tone} font-medium">${meta.label}</span><span class="text-slate-500">${detail}</span></div>`;
 }
 
+// Render one relayed WARNING/ERROR/CRITICAL log line in the per-spoke events
+// panel (operational errors/warnings, distinct from the lifecycle events).
+function spokeLogEventRow(le) {
+    const lvl = String(le.level || '').toUpperCase();
+    const tone = (lvl === 'ERROR' || lvl === 'CRITICAL') ? 'text-red-600'
+               : lvl === 'WARNING' ? 'text-amber-600' : 'text-slate-600';
+    const t = String(le.ts_str || '');
+    const when = (t.split(' ')[1] || t).split(',')[0];
+    return `<div class="py-0.5"><span class="text-slate-400">${escapeHtml(when)}</span> <span class="${tone} font-bold">${escapeHtml(lvl)}</span> <span class="text-slate-400">${escapeHtml(le.name || '')}</span> <span class="text-slate-600 break-all">${escapeHtml(le.msg || '')}</span></div>`;
+}
+
 function toggleSpokeEvents(spokeId) {
     const panel = document.getElementById(`events-${spokeId}`);
     if (!panel) return;
@@ -8564,7 +8575,7 @@ function _diagTelemetryExtras(s, fns) {
     // resetFn/allowReset are no longer consumed here — Reset Secret moved into
     // the spoke Edit modal (openSpokeMetadataModal). Callers may still pass them.
     const status = spokeStatusMessage(s);
-    const evCount = (s.events || []).length;
+    const evCount = (s.events || []).length + (s.log_events || []).length;
     const rec = s.recovery || {};
     const badge = recoveryBadge(rec);
     // Heartbeat: status color + age since last heartbeat frame.
@@ -8643,7 +8654,7 @@ function _diagTelemetryExtras(s, fns) {
             `<button onclick="toggleSpokeEvents('${eSid}')" class="text-blue-500 hover:text-blue-700 font-medium text-xs">${evCount} events ▾</button>`,
             evCount ? `<button onclick="copySpokeEvents('${eSid}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Copy</button>` : '',
         ],
-        eventsPanel: `<div id="events-${s.spoke_id}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.events || []).map(spokeEventRow).join('') || '<span class="text-slate-400 italic">No connection events recorded.</span>'}</div>`,
+        eventsPanel: `<div id="events-${s.spoke_id}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.log_events || []).length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Errors &amp; warnings</div>${(s.log_events || []).map(spokeLogEventRow).join('')}<div class="border-t border-slate-200 my-1.5"></div>` : ''}${(s.events || []).length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Lifecycle</div>${(s.events || []).map(spokeEventRow).join('')}` : ((s.log_events || []).length ? '' : '<span class="text-slate-400 italic">No events recorded.</span>')}</div>`,
     };
 }
 

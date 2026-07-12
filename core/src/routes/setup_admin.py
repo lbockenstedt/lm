@@ -404,6 +404,7 @@ def register(app, hub, ctx):
             ws = hub.active_connections.get(sid)
             telemetry = hub.spoke_telemetry.get(sid, {})
             events = hub.get_spoke_events(sid, limit=50)
+            log_events = hub.get_spoke_log_events(sid, limit=30)
 
             # Flapping detector: count connect/close cycles in the last 5 min.
             # A "flap" is a connection_closed / connection_error / auth_failed
@@ -492,6 +493,7 @@ def register(app, hub, ctx):
                 "flapping": flapping,
                 "recent_drops": flap_drops,
                 "events": events,
+                "log_events": log_events,
                 "cpu_util": telemetry.get("cpu_util"),
                 "mem_util": telemetry.get("mem_util"),
                 # Watchdog recovery (see run_spoke_recovery_loop). in_progress =
