@@ -1901,7 +1901,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         await store.set_sim_conf_content(tenant_id, content)
         pushed = await _push_config(tenant_id, {"sim_conf_override": content,
                                                 "config_source": source})
-        return {"saved": True, "synced_spokes": pushed, "source": source}
+        # Re-merge + re-push effective quotas so a config change that removes a
+        # sim primitive re-validates the tenant's quotas against SIM_META (a
+        # quota pointing at a now-unknown sim is dropped) and the spoke
+        # reconciles against the refreshed list.
+        try:
+            qpushed = await _push_sim_quotas(tenant_id)
+        except Exception:  # noqa: BLE001
+            qpushed = 0
+        return {"saved": True, "synced_spokes": pushed, "quota_spokes": qpushed,
+                "source": source}
 
     @app.get("/sim/api/{tenant}/clients/sim-overrides")
     async def get_client_overrides(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -1993,7 +2002,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         await store.set_user_overrides_content(tenant_id, content)
         pushed = await _push_config(tenant_id, {"user_conf_override": content,
                                                 "config_source": source})
-        return {"saved": True, "synced_spokes": pushed, "source": source}
+        # Per-user wsite/sim-flag overrides shift a quota's site pool + sim
+        # eligibility, so re-merge + re-push effective quotas (the spoke
+        # reconciles against the refreshed list).
+        try:
+            qpushed = await _push_sim_quotas(tenant_id)
+        except Exception:  # noqa: BLE001
+            qpushed = 0
+        return {"saved": True, "synced_spokes": pushed, "quota_spokes": qpushed,
+                "source": source}
 
     @app.get("/sim/api/{tenant}/settings")
     async def get_settings(tenant: str, tenant_id: str = Depends(get_tenant_id)):

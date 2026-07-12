@@ -131,6 +131,20 @@ def test_merge_tenant_multiple_sites_for_one_alert():
     assert all(q["alert_id"] == "A" for q in eff)
 
 
+def test_merge_drops_tenant_quota_for_unknown_sim():
+    # Tenant side is filtered against SIM_META — a quota pointing at a sim not in
+    # SIM_META (typo, or a primitive removed in a refresh) is dropped, so the
+    # global default for that alert reinstates (tenant no longer "owns" it).
+    g = [{"alert_id": "A", "sim_id": "dns_fail", "count": 8, "site": "", "enabled": True}]
+    t = [{"alert_id": "A", "sim_id": "not_a_real_sim", "count": 5, "site": "MIA",
+          "enabled": True}]
+    eff = sim_quota.merge_effective_quotas(g, t)
+    # The bogus tenant row is dropped → tenant doesn't own alert A → global wins.
+    assert len(eff) == 1
+    assert eff[0]["sim_id"] == "dns_fail"
+    assert eff[0]["site"] == "" and eff[0]["count"] == 8
+
+
 # ── catalog from raw INI text (centralized mode) ───────────────────────────
 def test_available_sims_from_ini():
     sims = sim_quota.available_sims_from_ini(_SIM_CONF)

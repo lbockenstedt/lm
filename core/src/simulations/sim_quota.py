@@ -129,7 +129,14 @@ def merge_effective_quotas(
     consumes the resulting list.
     """
     g_clean, _ = validate_sim_quotas(global_quotas, list(SIM_META.keys()))
-    t_clean, _ = validate_sim_quotas(tenant_quotas, None)
+    # Tenant side is filtered against the full SIM_META primitive set (NOT the
+    # bucket-derived available_sims — a sim not yet placed in any bucket is still
+    # runnable via a per-client override) so a quota pointing at a non-existent
+    # sim_id (typo, or a sim removed from SIM_META) is dropped here, and a
+    # sim-config refresh that removes a sim re-merges cleanly without it.
+    t_clean, t_errs = validate_sim_quotas(tenant_quotas, list(SIM_META.keys()))
+    if t_errs:
+        logger.warning("merge_effective_quotas: tenant quota errors: %s", t_errs)
 
     def _grp(qs: List[Dict[str, Any]]) -> Dict[tuple, List[Dict[str, Any]]]:
         m: Dict[tuple, List[Dict[str, Any]]] = {}
