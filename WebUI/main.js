@@ -3737,6 +3737,17 @@ function _renderSetupSpokesTile(content) {
     // shorter card from stretching to match the taller one's height (which
     // would re-introduce empty space below its last row).
     content.innerHTML = `
+            <div class="${saCard}">
+                <div class="flex justify-between items-center mb-1">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub Connection URL</h3>
+                </div>
+                <p class="text-xs text-slate-500 mb-2">The wss:// address agents and spokes check in to. Changing it repoints every connected remote agent/spoke to the new address (each restarts once to reconnect). Co-located (loopback) and auto-discovering spokes are left alone. Use when the hub's DNS name/IP changes — e.g. after issuing a new cert for a new name. <b>Set this before retiring the old DNS name</b>, while spokes are still connected via it.</p>
+                <div class="flex items-center gap-2">
+                    <input id="sa-hub-url" type="text" placeholder="wss://hub.example.com:443  or  172.16.1.31" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800" />
+                    <button onclick="saveSaHubUrl()" class="${btnCls} whitespace-nowrap">Save</button>
+                </div>
+                <div id="sa-hub-url-note" class="text-[11px] text-slate-400 mt-1"></div>
+            </div>
             <div id="spokes-summary" class="flex flex-wrap items-center gap-3 text-xs"></div>
             <div class="flex items-center gap-2 text-xs mb-1">
                 <label for="sa-tenant-filter" class="font-bold text-slate-500 uppercase tracking-wider">Tenant</label>
@@ -3763,6 +3774,56 @@ function _renderSetupSpokesTile(content) {
             </div>`;
     _populateSaTenantFilter();
     loadSpokesAndAgents();
+    loadSaHubUrl();
+}
+
+// Hub Connection URL (Setup → Spokes & Agents). The operator sets the address
+// agents/spokes check in to; the hub pushes it to every spoke on (re)connect
+// and immediately on save, so a hub DNS-name change (e.g. a new cert for a new
+// name) propagates without manually editing each agent's .env. See the matching
+// POST /api/setup/hub-url backend + SPOKE_SET_HUB_URL handler in core.
+async function loadSaHubUrl() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const url = ((data.global_config || {}).hub || {}).url || '';
+        const el = document.getElementById('sa-hub-url');
+        if (el) el.value = url;
+    } catch (e) { console.error('loadSaHubUrl failed', e); }
+}
+
+async function saveSaHubUrl() {
+    const el = document.getElementById('sa-hub-url');
+    const note = document.getElementById('sa-hub-url-note');
+    const url = (el ? el.value : '').trim();
+    if (note) note.textContent = '';
+    try {
+        const r = await setupFetch('/api/setup/hub-url', {
+            method: 'POST',
+            body: JSON.stringify({ url })
+        });
+        const data = r.ok ? await r.json().catch(() => ({})) : {};
+        if (r.ok) {
+            const pushed = (data.pushed || []).length;
+            const queued = (data.queued || []).length;
+            const failed = (data.failed || []).length;
+            if (url === '') {
+                showToast('Hub URL override cleared.', 'success');
+            } else {
+                let msg = `Hub URL saved — pushed to ${pushed}`;
+                if (queued) msg += `, queued for ${queued} offline`;
+                if (failed) msg += `, ${failed} failed`;
+                msg += '. Agents will reconnect shortly.';
+                showToast(msg, failed ? 'error' : 'success');
+            }
+            if (note) note.textContent = data.message || '';
+        } else {
+            showToast('Failed to save hub URL: ' + (data.detail || r.status), 'error');
+        }
+    } catch (e) {
+        showToast('Error saving hub URL: ' + e.message, 'error');
+    }
 }
 
 // Tenant filter for the Spokes & Agents tile. Reads the tenant list from
