@@ -190,7 +190,14 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
         # the UI can't distinguish from "everything current".
         logger.warning("[cert] LE_LIST_CERTS failed — cannot enumerate certs to distribute")
         return aggregate
-    for cert in ret.get("certs") or []:
+    # The le spoke returns ``{"status":"SUCCESS", "data":{"certs":[...]}}`` —
+    # certs are nested under ``data`` (the table path's _le_inner unwraps it;
+    # _unwrap only strips the request_response payload envelope, NOT the spoke's
+    # own ``data`` wrapper). Without this unwrap the loop saw ``ret.get("certs")``
+    # == None → zero iterations → "no certs to distribute" + no per-cert logs,
+    # even though the cert table (which DOES unwrap) showed the certs.
+    list_data = ret.get("data") if isinstance(ret.get("data"), dict) else ret
+    for cert in list_data.get("certs") or []:
         domain = cert.get("domain") or ""
         targets = cert.get("targets") or []
         cur_hash = cert.get("material_hash")

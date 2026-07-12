@@ -49,6 +49,18 @@ def _install_ok():
     return {"payload": {"data": {"status": "SUCCESS", "message": "imported"}}}
 
 
+def _le_list_certs(certs):
+    """LE_LIST_CERTS spoke return — certs nested under the spoke's ``data``
+    wrapper, mirroring the real le spoke (``{"status":"SUCCESS","data":{
+    "certs":[...]}}``). ``_unwrap`` only strips the request_response payload
+    envelope, NOT the spoke's own ``data`` wrapper, so this is the shape that
+    exercises the distributor's data-unwrap. (Tests previously used a flat
+    ``{"status","certs"}`` → passed while production saw ``ret.get("certs")``
+    == None → "no certs to distribute".)"""
+    return {"payload": {"data": {"status": "SUCCESS", "data": {
+        "certs": certs, "count": len(certs), "certbot_present": True}}}}
+
+
 # ── distribute_cert_to_targets ───────────────────────────────────────────────
 
 def test_distribute_pushes_to_capable_target():
@@ -219,7 +231,7 @@ def test_distribute_hub_target_callable_raise_is_caught():
 # ── distribute_all_certs ─────────────────────────────────────────────────────
 
 def test_distribute_all_skips_current_and_pushes_stale():
-    list_resp = {"payload": {"data": {"status": "SUCCESS", "certs": [
+    list_resp = _le_list_certs([
         # current — every target up to date → no LE_GET_CERT pull
         {"domain": "current.com", "material_hash": _H, "targets": [
             {"module_type": "firewall", "last_pushed_hash": _H,
@@ -228,7 +240,7 @@ def test_distribute_all_skips_current_and_pushes_stale():
         {"domain": "stale.com", "material_hash": _H2, "targets": [
             {"module_type": "firewall", "last_pushed_hash": "old",
              "last_status": "SUCCESS"}]},
-    ]}}}
+    ])
     rr, calls = _fake_rr({
         (_LE, "LE_LIST_CERTS"): list_resp,
         (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
@@ -244,8 +256,7 @@ def test_distribute_all_skips_current_and_pushes_stale():
 
 
 def test_distribute_all_no_certs_no_calls():
-    rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): {
-        "payload": {"data": {"status": "SUCCESS", "certs": []}}}})
+    rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): _le_list_certs([])})
     _run(cd.distribute_all_certs(rr, lambda mt: None,
                                  cd.CERT_CAPABLE_MODULES, _LE))
     assert not [c for c in calls if c["cmd"] != "LE_LIST_CERTS"]
@@ -263,9 +274,9 @@ def test_distribute_all_no_targets_logs_skip_not_silence(caplog):
     """A cert with no targets is a no-op but must NOT be silent — the operator
     sees 'no targets configured' so they know distribution was skipped (not
     broken). Was a silent skip before the fix."""
-    list_resp = {"payload": {"data": {"status": "SUCCESS", "certs": [
+    list_resp = _le_list_certs([
         {"domain": "orphan.com", "material_hash": _H, "targets": []},
-    ]}}}
+    ])
     rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): list_resp})
     with caplog.at_level("INFO", logger="le.distribution"):
         _run(cd.distribute_all_certs(rr, lambda mt: None,
@@ -278,11 +289,11 @@ def test_distribute_all_all_current_logs_skip_not_silence(caplog):
     """A cert whose every target is current is a no-op but must NOT be silent
     — 'all N target(s) current' tells the operator the cert IS deployed (not
     missing). Was a silent skip before the fix."""
-    list_resp = {"payload": {"data": {"status": "SUCCESS", "certs": [
+    list_resp = _le_list_certs([
         {"domain": "fresh.com", "material_hash": _H, "targets": [
             {"module_type": "firewall", "last_pushed_hash": _H,
              "last_status": "SUCCESS"}]},
-    ]}}}
+    ])
     rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): list_resp})
     with caplog.at_level("INFO", logger="le.distribution"):
         _run(cd.distribute_all_certs(rr, lambda mt: _FW,
