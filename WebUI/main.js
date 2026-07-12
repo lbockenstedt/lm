@@ -398,7 +398,7 @@ for (const _cls of Object.keys(MODULE_CLASSES)) {
     for (const _p of MODULE_CLASSES[_cls]) PRODUCT_LABEL[_p] = _cls;
 }
 const VIEW_LABEL = {
-    dashboard: 'Dashboard', setup: 'Setup', settings: 'System', logs: 'Logs', ldap: 'Directory',
+    dashboard: 'Dashboard', setup: 'Setup', settings: 'System', logs: 'Logs', ldap: 'Directory', bugs: 'Bug Report',
 };
 function updateHeaderModule() {
     const sep = document.getElementById('header-module-sep');
@@ -1284,9 +1284,9 @@ function logsSubmenu() {
     const hasAgents = !!window.hasAgents;
     // Preserve the canonical order: hub first, then installed module tabs in
     // their fixed sequence, agents, then the hub-native filtered views last.
-    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-le', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'];
+    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-le', 'logs-agents', 'logs-recovery', 'logs-errors'];
     return order.filter(m => {
-        if (m === 'logs-hub' || m === 'logs-recovery' || m === 'logs-errors' || m === 'logs-bugs') return true;
+        if (m === 'logs-hub' || m === 'logs-recovery' || m === 'logs-errors') return true;
         if (m === 'logs-agents') return hasAgents;
         const product = LOG_MODULE_PRODUCT[m];
         return !product || products.has(product);
@@ -2631,6 +2631,11 @@ function _rebuildMainNav(allSpokes, connections) {
     // Tenant-admins don't get Setup/Logs/System, but they DO manage the
     // firewall/network/NAC/IPAM/directory/DNS/DHCP devices bound to their own
     // tenant via the "My Devices" view (session-scoped /tenant/devices/*).
+    const _bugReportNavHtml = () => `
+        <div onclick="setView('bugs')" id="nav-bugs" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M4.5 8.5l2-1.5m13 1.5l-2-1.5M4.5 15.5l2 1.5m13-1.5l-2 1.5M12 4a4 4 0 014 4v4a4 4 0 01-8 0V8a4 4 0 014-4z"></path></svg></div>
+            <span>Bug Report</span>
+        </div>`;
     const _myDevicesNavHtml = () => `
         <div onclick="setView('mydevices')" id="nav-mydevices" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg></div>
@@ -2642,8 +2647,9 @@ function _rebuildMainNav(allSpokes, connections) {
         ${dynamicHtml}
         <div class="pt-4 mt-4 border-t border-slate-200"></div>
         ${isAdmin() ? adminSetup : ''}
-        ${isAdmin() ? adminLogs : ''}
         ${isAdmin() ? adminSettings : ''}
+        ${isAdmin() ? adminLogs : ''}
+        ${isAdmin() ? _bugReportNavHtml() : ''}
         ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
     `;
 
@@ -2818,7 +2824,7 @@ function renderSpokeIndicators() {
 }
 
 async function setView(viewId) {
-    if ((viewId === 'setup' || viewId === 'settings' || viewId === 'logs') && !isAdmin()) {
+    if ((viewId === 'setup' || viewId === 'settings' || viewId === 'logs' || viewId === 'bugs') && !isAdmin()) {
         return;  // silently block — nav items are hidden, this guards deep-links
     }
     // My Devices is the tenant-admin device surface — reachable only by a
@@ -3102,6 +3108,11 @@ function _viewTemplate(viewId) {
   <div id="logs-content"></div>
 </div>`;
 
+        case 'bugs':
+            return `<div class="space-y-6">
+  <div id="logs-content"></div>
+</div>`;
+
         case 'setup':
             return `<div class="space-y-6">
   <div id="setup-content"></div>
@@ -3199,6 +3210,9 @@ function initView(viewId, subView) {
             break;
         case 'logs':
             _renderLogsSection(subView || 'logs-hub');
+            break;
+        case 'bugs':
+            _renderLogsSection('logs-bugs');
             break;
         case 'setup':
             _renderSetupSection(subView || 'Spokes & Agents');
