@@ -2786,6 +2786,15 @@ async function csRenderSimQuotaState() {
         const eff = Array.isArray(st.effective) ? st.effective : [];
         const ledger = (st.ledger && typeof st.ledger === 'object') ? st.ledger : {};
         const keyOf = (q) => `${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`;
+        // Join alert/insight IDs to their friendly names via the monitored_checks
+        // slice the spoke returns alongside the ledger (a quota row stores only
+        // the bare id). Falls back to the id when no monitored check matches.
+        const mc = Array.isArray(st.monitored_checks) ? st.monitored_checks : [];
+        const nameOf = (type, id) => {
+            const t = type || 'alert', i = String(id || '');
+            const hit = mc.find(c => c && String(c.id) === i && (c.type || 'alert') === t);
+            return hit && hit.name ? hit.name : '';
+        };
         const chips = (hosts) => (hosts || []).map(h =>
             `<span class="inline-block bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 mr-1 mb-1 font-mono text-[11px]">${csEscape(h)}</span>`).join('');
         const rows = eff.map(q => {
@@ -2796,9 +2805,13 @@ async function csRenderSimQuotaState() {
             const fill = clients.length >= target
                 ? `<span class="text-[#01A982] font-semibold">${clients.length}/${target}</span>`
                 : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
+            const fname = nameOf(q.alert_type, q.alert_id);
+            const idCell = fname
+                ? `<span class="text-slate-700">${csEscape(fname)}</span> <span class="font-mono text-slate-400 text-[11px]">${csEscape(q.alert_id || '')}</span>`
+                : `<span class="font-mono">${csEscape(q.alert_id || '')}</span>`;
             return `<tr class="border-t border-slate-100">
               <td class="px-2 py-1.5 text-xs capitalize">${csEscape(q.alert_type || 'alert')}</td>
-              <td class="px-2 py-1.5 text-xs font-mono">${csEscape(q.alert_id || '')}</td>
+              <td class="px-2 py-1.5 text-xs">${idCell}</td>
               <td class="px-2 py-1.5 text-xs font-mono">${csEscape(q.sim_id || '')}</td>
               <td class="px-2 py-1.5 text-xs">${csEscape(q.site || '<all>')}</td>
               <td class="px-2 py-1.5 text-xs text-center">${fill}</td>
@@ -2814,7 +2827,12 @@ async function csRenderSimQuotaState() {
         const orphanHtml = orphans.length ? `
             <div class="mt-4">
               <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Releasing (no longer effective)</p>
-              ${orphans.map(([k, e]) => `<p class="text-xs text-slate-500 mb-1"><span class="font-mono">${csEscape(k)}</span> → ${chips(e.clients)}</p>`).join('')}
+              ${orphans.map(([k, e]) => {
+                  const parts = k.split(':');
+                  const on = nameOf(parts[0], parts[1]);
+                  const lbl = on ? `${csEscape(on)} <span class="font-mono text-slate-400">(${csEscape(k)})</span>` : `<span class="font-mono">${csEscape(k)}</span>`;
+                  return `<p class="text-xs text-slate-500 mb-1">${lbl} → ${chips(e.clients)}</p>`;
+              }).join('')}
             </div>` : '';
         csSet(`<div class="space-y-4">
           <div class="hpe-card rounded-lg p-5 shadow-sm">

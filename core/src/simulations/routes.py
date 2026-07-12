@@ -2488,6 +2488,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except HTTPException as he:
             if he.status_code == 503:
                 return {"status": "SUCCESS", "effective": [], "ledger": {},
+                        "monitored_checks": [],
                         "warning": "Client-Sim spoke not connected."}
             raise
 
