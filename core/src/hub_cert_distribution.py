@@ -55,10 +55,11 @@ class HubCertDistributionMixin:
             self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets,
             install_on_hub=self._install_cert_on_hub)
 
-    async def _distribute_all_certs(self, le_spoke_id: str) -> None:
-        """Distribute every managed cert whose targets are stale. See
-        _distribute_all_certs_impl."""
-        await _distribute_all_certs_impl(
+    async def _distribute_all_certs(self, le_spoke_id: str) -> list:
+        """Distribute every managed cert whose targets are stale. Returns a
+        flat per-target summary (see _distribute_all_certs_impl) so the
+        /api/le/distribute route can show a per-target toast."""
+        return await _distribute_all_certs_impl(
             self.request_response, self.get_spoke_by_type,
             self.CERT_CAPABLE_MODULES, le_spoke_id,
             install_on_hub=self._install_cert_on_hub)

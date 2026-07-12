@@ -161,26 +161,49 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
 
 async def distribute_all_certs(rr: Callable, get_by_type: Callable,
                                capable: Set[str], le_spoke_id: str,
-                               install_on_hub: Optional[Callable] = None) -> None:
+                               install_on_hub: Optional[Callable] = None
+                               ) -> List[Dict[str, Any]]:
     """Distribute every managed cert whose targets are stale. Skips the
-    ``LE_GET_CERT`` pull entirely when every target of a cert is current."""
+    ``LE_GET_CERT`` pull entirely when every target of a cert is current.
+
+    Returns a flat per-target summary (each entry tagged with its ``domain``)
+    so the /api/le/distribute route can show a per-target toast — certs with no
+    targets or all targets current contribute a synthetic ``SKIPPED`` entry so
+    the operator sees them in the toast instead of a silent no-op. The hourly
+    run_cert_distribution_loop caller ignores the return."""
+    aggregate: List[Dict[str, Any]] = []
     res = await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0)
     ret = _unwrap(res)
     if not (isinstance(ret, dict) and ret.get("status") == "SUCCESS"):
-        return
+        # The last silent skip: if the le spoke can't enumerate certs, there's
+        # nothing to distribute — surface it instead of returning an empty list
+        # the UI can't distinguish from "everything current".
+        logger.warning("[cert] LE_LIST_CERTS failed — cannot enumerate certs to distribute")
+        return aggregate
     for cert in ret.get("certs") or []:
         domain = cert.get("domain")
         targets = cert.get("targets") or []
         if not domain or not targets:
             logger.info("[cert] %s: no targets configured — skipping",
                          domain or "<unknown>")
+            aggregate.append({"domain": domain or "<unknown>", "module_type": None,
+                              "identifier": None, "status": "SKIPPED",
+                              "message": "no targets configured", "skipped": True})
             continue
         cur_hash = cert.get("material_hash")
         if cur_hash and all(t.get("last_pushed_hash") == cur_hash
                             and t.get("last_status") == "SUCCESS" for t in targets):
             logger.info("[cert] %s: all %d target(s) current — skipping",
                          domain, len(targets))
+            aggregate.append({"domain": domain, "module_type": None, "identifier": None,
+                              "status": "SKIPPED",
+                              "message": f"all {len(targets)} target(s) current",
+                              "skipped": True})
             continue  # every target current — skip the LE_GET_CERT pull
-        await distribute_cert_to_targets(rr, get_by_type, capable,
-                                         le_spoke_id, domain, targets,
-                                         install_on_hub=install_on_hub)
+        summary = await distribute_cert_to_targets(rr, get_by_type, capable,
+                                                    le_spoke_id, domain, targets,
+                                                    install_on_hub=install_on_hub)
+        for e in summary:
+            e["domain"] = domain
+        aggregate.extend(summary)
+    return aggregate

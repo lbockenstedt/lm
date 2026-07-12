@@ -316,16 +316,21 @@ def register(app, hub, ctx):
     async def le_distribute():
         """Re-push any stale cert material to its targets now (no certbot
         invocation — just LE_GET_CERT → INSTALL_CERT for targets whose
-        last_pushed_hash differs). Returns the refreshed cert list so the UI
-        shows fresh last_pushed_* state."""
+        last_pushed_hash differs). Returns the refreshed cert list (for the
+        table) with an added ``distribution`` per-target summary so the UI can
+        show a per-target toast — mirrors /api/le/issue. Without the summary,
+        Distribute now gave the UI zero feedback (results were only in
+        Logs/Certificates, which needs a manual refresh)."""
         hub = app.state.hub
         le_sid = _get_le_spoke(hub)
         try:
-            await hub._distribute_all_certs(le_sid)
+            dist = await hub._distribute_all_certs(le_sid)
         except Exception as e:
             logger.exception("le_distribute failed")
             raise HTTPException(status_code=500, detail=str(e))
-        return await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_distribute")
+        payload = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_distribute")
+        _le_inner(payload)["distribution"] = dist or []
+        return payload
 
     # ── per-cert distribution targets ──────────────────────────────────────────
     # Each target = {module_type, identifier?} describing which spoke/device a
