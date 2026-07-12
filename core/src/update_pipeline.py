@@ -1525,7 +1525,7 @@ class UpdatePipelineMixin:
                 _rmsg = f"Updated Hub to {remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."
             else:
                 _rmsg = "Hub code on disk was newer than the running process (stale process) — restarting to load it. Spoke updates triggered."
-            return {"status": "success", "message": _rmsg}
+            return {"status": "success", "message": _rmsg, "spokes": update_results}
 
         if update_failed:
             # An update WAS available and we tried to apply it, but the code did
@@ -1535,10 +1535,11 @@ class UpdatePipelineMixin:
             # "Hub is current" message that made every failed update look like a
             # no-op success (the reason a stale hub could sit un-updated silently).
             return {"status": "error",
+                    "spokes": update_results,
                     "message": (f"Hub update FAILED — still at {local_v}, target was {remote_v}. "
                                 f"Check hub logs (update_pipeline). "
                                 f"{len(update_results)} spoke update(s) attempted.")}
-        return {"status": "checked", "message": f"Update successful. Hub is current at {local_v}. {len(update_results)} spoke(s) updating to latest."}
+        return {"status": "checked", "spokes": update_results, "message": f"Update successful. Hub is current at {local_v}. {len(update_results)} spoke(s) updating to latest."}
 
     async def update_spokes_only(self):
         """Send SPOKE_UPDATE to every approved spoke without touching the Hub itself.

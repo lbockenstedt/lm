@@ -5694,17 +5694,46 @@ async function loadRepoSyncStatus() {
         return `<div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full ${dot}"></span>
             <span class="text-xs text-slate-600">${esc(r.name)}</span>
             <span class="text-xs text-slate-400">${esc(r.message || r.status)}</span></div>`;
-    }).join('') : '<p class="text-xs text-slate-400 italic">No provisioning_repos present.</p>';
+    }).join('') : '<p class="text-xs text-slate-400 italic">No provisioning source repos present.</p>';
+    // Per-module spoke fan-out results (from perform_update, threaded through
+    // repo_sync). Each entry is "sid: <outcome> (repo)"; classify the outcome
+    // into a colored dot so the REAL module updates (le, pxmx, opnsense, …) are
+    // visible and distinct from the auxiliary provisioning_repos above.
+    const spokes = Array.isArray(data.spokes) ? data.spokes : [];
+    const _spokeDot = t => {
+        const s = t.toLowerCase();
+        if (s.includes('triggered')) return 'bg-green-500';
+        if (s.includes('up-to-date')) return 'bg-slate-400';
+        if (s.includes('offline') || s.includes('deferred') || s.includes('cooldown') || s.includes('backstop')) return 'bg-amber-400';
+        if (s.includes('failed') || s.includes('unknown module') || s.includes('no repo')) return 'bg-red-500';
+        return 'bg-slate-300';
+    };
+    const spokeRows = spokes.length ? spokes.map(line => {
+        const str = String(line);
+        const i = str.indexOf(':');
+        const sid = i >= 0 ? str.slice(0, i) : str;
+        const txt = i >= 0 ? str.slice(i + 1).trim() : '';
+        return `<div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full ${_spokeDot(txt)}"></span>
+            <span class="text-xs text-slate-600 font-medium">${esc(sid)}</span>
+            <span class="text-xs text-slate-400">${esc(txt)}</span></div>`;
+    }).join('') : '<p class="text-xs text-slate-400 italic">No module updates this sync (the hub was current — spokes fan out only when the hub or a module repo advances, or on a forced Sync).</p>';
     wrap.innerHTML = `<div class="border border-slate-200 rounded-md p-3">
         <div class="flex items-center justify-between mb-1">
             <span class="text-sm font-bold text-slate-700">Hub update</span>
             <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(hs || '—')}</span>
         </div>
-        <p class="text-xs text-slate-500">provisioning_repos: ${okN} ok · ${errN} error · ${skipN} skipped <span class="text-slate-400">· last ${fmtDate(data.last_sync_ts)}</span></p>
-        ${changed.length ? `<p class="text-xs text-slate-500 mt-1">changed: ${esc(changed.join(', '))}</p>` : ''}
-        ${data.message ? `<p class="text-xs text-slate-400 mt-1">${esc(data.message)}</p>` : ''}
         ${hub.message ? `<p class="text-xs text-slate-400 mt-1">${esc(hub.message)}</p>` : ''}
-        <div class="mt-2 space-y-1">${provRows}</div>
+        <div class="mt-3">
+            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Module updates <span class="text-slate-400 font-normal normal-case">(spokes — pxmx / opnsense / cs / cppm / netbox / ldap / nw / le / roles)</span></div>
+            <div class="space-y-1">${spokeRows}</div>
+        </div>
+        <div class="mt-3 pt-2 border-t border-slate-100">
+            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Provisioning source repos <span class="text-slate-400 font-normal normal-case">(auxiliary services on the hub — not LM modules)</span></div>
+            <p class="text-xs text-slate-500">${okN} ok · ${errN} error · ${skipN} skipped <span class="text-slate-400">· last ${fmtDate(data.last_sync_ts)}</span></p>
+            ${changed.length ? `<p class="text-xs text-slate-500 mt-1">changed: ${esc(changed.join(', '))}</p>` : ''}
+            <div class="mt-1 space-y-1">${provRows}</div>
+        </div>
+        ${data.message ? `<p class="text-xs text-slate-400 mt-2 pt-2 border-t border-slate-100">${esc(data.message)}</p>` : ''}
     </div>`;
 }
 

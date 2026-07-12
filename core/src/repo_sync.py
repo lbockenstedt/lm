@@ -248,6 +248,11 @@ class RepoSyncMixin:
 
         status = {"last_sync_ts": now, "hub": hub_result,
                   "provisioning_repos": repo_results, "message": message,
+                  # Per-module spoke fan-out results ("sid: triggered/up-to-date/
+                  # offline-deferred/…") from perform_update, surfaced so the Sync
+                  # card can itemize the ACTUAL module updates (le, pxmx, …)
+                  # distinctly from the auxiliary provisioning_repos above.
+                  "spokes": (hub_result.get("spokes") if isinstance(hub_result, dict) else None) or [],
                   "update_health": update_health}
         try:
             await self.simulations_store.set_repo_sync_status(status)
