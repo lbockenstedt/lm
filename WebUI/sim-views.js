@@ -1138,8 +1138,11 @@ function csClientActiveSims(c) {
     return CS_CONTROL_FLAGS.filter(f => {
         if (Object.prototype.hasOwnProperty.call(ov, f))
             return ['on', 'true', '1'].includes(String(ov[f]).toLowerCase());
-        return active.has(f) ||
-            ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
+        // "Enabled" reflects the resolved CONFIG (per-client override wins, else
+        // the bucket/user-overrides effective config) — NOT active_simulations
+        // (what the client is momentarily running), so a cleared override drops
+        // off immediately instead of lingering until the client stops the sim.
+        return ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
     });
 }
 function csClientSite(c) { return (c.config && c.config.wsite) || c.wsite || '—'; }
@@ -1476,8 +1479,11 @@ function csClientSimBar(c, host) {
     const isOn = f => {
         if (Object.prototype.hasOwnProperty.call(ov, f))
             return ['on', 'true', '1'].includes(String(ov[f]).toLowerCase());
-        return active.has(f) ||
-            ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
+        // "Enabled" reflects the resolved CONFIG (per-client override wins, else
+        // the bucket/user-overrides effective config) — NOT active_simulations
+        // (what the client is momentarily running), so a cleared override drops
+        // off immediately instead of lingering until the client stops the sim.
+        return ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
     };
     // An override button exists iff the registry has an entry for this flag
     // (the pruned-override object only carries REAL deviations from the bucket,
