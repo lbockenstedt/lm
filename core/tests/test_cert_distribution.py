@@ -538,3 +538,58 @@ def test_wildcard_non_wildcard_domain_is_noop():
         None, {}, install_on_hub=None))
     assert summary == []
     assert not [c for c in calls if c["cmd"] != ""]  # no calls at all
+
+# ── build_available_targets (LE modal click-to-add list) ─────────────────────
+
+def test_available_targets_lists_cert_capable_connected_spokes():
+    """One entry per cert-capable CONNECTED spoke (by module_type); offline +
+    non-capable spokes are omitted (they'd only ERROR on distribute)."""
+    smt = {"opn-1": "firewall", "netbox-1": "ipam", "ldap-1": "directory",
+           "nw-1": "nw", "dns-1": "dns", "pxmx-1": "hypervisor"}
+    active = {"opn-1", "netbox-1", "ldap-1", "nw-1"}  # dns-1 + pxmx-1 offline
+    names = {"opn-1": "edge-fw", "netbox-1": "netbox"}
+    out = cd.build_available_targets(smt, active, names, cd.CERT_CAPABLE_MODULES, [])
+    by_mt = {t["module_type"]: t for t in out if not t["identifier"]}
+    # cert-capable + connected: firewall, ipam, directory. nw is NOT capable.
+    assert set(by_mt) == {"firewall", "ipam", "directory"}
+    # Offline spokes (dns-1, pxmx-1) absent; non-capable nw absent.
+    assert "dns" not in by_mt and "nw" not in by_mt and "hypervisor" not in by_mt
+    assert by_mt["firewall"]["label"] == "firewall — edge-fw"
+    assert by_mt["ipam"]["label"] == "ipam — netbox"
+    # Falls back to spoke_id when no display name.
+    assert by_mt["directory"]["label"] == "directory — ldap-1"
+    # identifier empty for spoke-level targets.
+    assert all(t["identifier"] == "" for t in by_mt.values())
+
+
+def test_available_targets_lists_each_pxmx_agent_as_per_node_target():
+    """Agent-hosting types (hypervisor/simulation) list EACH connected pxmx
+    agent as a per-node target (identifier = agent_id) — the click-a-specific-
+    node UX — PLUS an 'all nodes' broadcast entry per connected spoke."""
+    smt = {"pxmx-1": "hypervisor", "cs-1": "simulation", "opn-1": "firewall"}
+    active = {"pxmx-1", "cs-1", "opn-1"}
+    agents = [
+        {"agent_id": "node-a", "spoke_id": "pxmx-1", "hostname": "pve01"},
+        {"agent_id": "node-b", "spoke_id": "pxmx-1", "display_name": "pve02"},
+        {"agent_id": "node-c", "spoke_id": "cs-1", "hostname": "pve03"},
+    ]
+    out = cd.build_available_targets(smt, active, {}, cd.CERT_CAPABLE_MODULES, agents)
+    per_node = {t["identifier"]: t for t in out if t["identifier"]}
+    assert per_node["node-a"]["module_type"] == "hypervisor"
+    assert per_node["node-a"]["label"] == "hypervisor/pve01"
+    assert per_node["node-b"]["label"] == "hypervisor/pve02"  # display_name wins
+    assert per_node["node-c"]["module_type"] == "simulation"
+    allnodes = [t for t in out if t["module_type"] in ("hypervisor", "simulation")
+                and not t["identifier"]]
+    assert {t["module_type"] for t in allnodes} == {"hypervisor", "simulation"}
+    assert all("all nodes" in t["label"] for t in allnodes)
+
+
+def test_available_targets_omits_agents_whose_parent_spoke_not_cert_capable():
+    """An agent whose parent spoke's module_type isn't cert-capable is skipped
+    (e.g. a future agent-hosting type that isn't wired) — defensive guard."""
+    smt = {"foo-1": "nac"}
+    active = {"foo-1"}
+    agents = [{"agent_id": "x-1", "spoke_id": "foo-1", "hostname": "x"}]
+    out = cd.build_available_targets(smt, active, {}, cd.CERT_CAPABLE_MODULES, agents)
+    assert out == []

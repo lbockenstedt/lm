@@ -12340,7 +12340,7 @@ async function loadLEData(subMenu) {
             else { cls = 'bg-green-100 text-green-700'; label = `${days}d left`; }
             return { text: `${dt.toISOString().slice(0, 10)} · ${label}`, cls, days };
         };
-        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires'];
+        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Actions'];
         // Per-domain last-issue indicator from window._leIssueStatus (the
         // client-side tracker fed by _leRunIssue). Green = last issue
         // succeeded, red = last issue failed (hover for the message), amber
@@ -12367,12 +12367,13 @@ async function loadLEData(subMenu) {
             const retryBtn = isFailed
                 ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
                 : '';
-            // 2-row group per cert: data on row 1; row 2 carries the clickable
-            // targets list (left) + the Manage/Renew/Revoke actions stacked
-            // vertically and pinned to the far right. The targets moved out of
-            // the data row so each badge has room to be a click-to-deploy button
-            // (mirrors the CS spoke-clients click-to-act pattern); the actions
-            // stack vertically so they never wrap/squeeze the expiry column.
+            // 2-row group per cert: row 1 = the data (domain, email, challenge,
+            // staging, expiry+renew-window) WITH the Manage/Renew/Revoke actions
+            // stacked vertically in a pinned-right Actions cell on that same row
+            // (so the cert name + renewal time sit beside the buttons that act on
+            // them); row 2 = the clickable targets list alone (full width below).
+            // Targets moved out of the data row so each badge has room to be a
+            // click-to-deploy button (mirrors the CS spoke-clients click-to-act).
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
@@ -12382,20 +12383,20 @@ async function loadLEData(subMenu) {
                     <span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls} whitespace-nowrap">${exp.text}</span>
                     <div class="text-[11px] text-slate-400 mt-0.5" title="Renewal loop triggers this many days before expiry (per-cert override; default 7)">renew @ ${c.renew_window_days_effective ?? 7}d</div>
                 </td>
+                <td class="px-4 py-2 whitespace-nowrap">
+                    <div class="flex flex-col items-end gap-1.5">
+                        ${retryBtn ? `<div>${retryBtn}</div>` : ''}
+                        <button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Manage distribution targets">Manage</button>
+                        <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
+                        <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
+                    </div>
+                </td>
             </tr>
             <tr class="border-b border-slate-200 hover:bg-slate-50">
-                <td colspan="5" class="px-4 py-2">
-                    <div class="flex items-center justify-between gap-4">
-                        <div class="flex flex-wrap items-center gap-1.5 flex-1 min-w-0">
-                            <span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1">Targets</span>
-                            ${tgtCell}
-                        </div>
-                        <div class="flex flex-col items-end gap-1.5 whitespace-nowrap">
-                            ${retryBtn ? `<div>${retryBtn}</div>` : ''}
-                            <button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Manage distribution targets">Manage</button>
-                            <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
-                            <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
-                        </div>
+                <td colspan="6" class="px-4 py-2">
+                    <div class="flex flex-wrap items-center gap-1.5">
+                        <span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1">Targets</span>
+                        ${tgtCell}
                     </div>
                 </td>
             </tr>`;
@@ -12415,13 +12416,15 @@ async function loadLEData(subMenu) {
                 if (s.state === 'pending') {
                     return `<tr class="border-b border-slate-100 bg-amber-50/60">
                         <td class="px-4 py-2 font-mono font-medium"><span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse mr-2 align-middle"></span>${escapeHtml(dom)}</td>
-                        <td class="px-4 py-2 text-xs italic text-amber-700" colspan="5">issuing…</td>
+                        <td class="px-4 py-2 text-xs italic text-amber-700" colspan="4">issuing…</td>
+                        <td class="px-4 py-2"></td>
                     </tr>`;
                 }
                 return `<tr class="border-b border-slate-100 bg-red-50/60">
                     <td class="px-4 py-2 font-mono font-medium"><span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 align-middle"></span>${escapeHtml(dom)}</td>
-                    <td class="px-4 py-2 text-xs text-red-700" colspan="4">last issue failed: ${escapeHtml(s.message || '')}</td>
+                    <td class="px-4 py-2 text-xs text-red-700" colspan="3">last issue failed: ${escapeHtml(s.message || '')}</td>
                     <td class="px-4 py-2"><button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue">Retry</button></td>
+                    <td class="px-4 py-2"></td>
                 </tr>`;
             }).join('');
         // Top-of-card banner if any cert is expiring soon / expired / stuck
@@ -12624,10 +12627,12 @@ const LE_MODULE_TYPES = [
     ['dns', 'dns'], ['dhcp', 'dhcp'],
 ];
 
-function showLeTargetsModal(domain) {
+async function showLeTargetsModal(domain) {
     const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
     const tgts = cert.targets || [];
     const esc = s => String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    const tgtKey = t => `${t.module_type}|${t.identifier || ''}`;
+    const haveKeys = new Set(tgts.map(tgtKey));
     const row = (t, i) => {
         const ok = t.last_status === 'SUCCESS';
         const cls = ok ? 'bg-green-100 text-green-700' : (t.last_status === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500');
@@ -12646,7 +12651,7 @@ function showLeTargetsModal(domain) {
     modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6">
         <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
         <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device.</p>
-        <div class="overflow-x-auto mb-4"><table class="w-full text-sm">
+        <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
             <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
                 <th class="px-3 py-2 text-left font-medium">Target</th>
                 <th class="px-3 py-2 text-left font-medium">Status</th>
@@ -12654,8 +12659,12 @@ function showLeTargetsModal(domain) {
                 <th class="px-3 py-2 text-left font-medium">Message</th>
                 <th></th>
             </tr></thead>
-            <tbody>${tgts.length ? tgts.map(row).join('') : '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-400 italic">No targets yet — add one below, then “Distribute now”.</td></tr>'}</tbody>
+            <tbody>${tgts.length ? tgts.map(row).join('') : '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-400 italic">No targets yet — click one below to add it.</td></tr>'}</tbody>
         </table></div>
+        <div class="border-t border-slate-200 pt-3 mb-4">
+            <div class="text-xs text-slate-500 uppercase tracking-wide mb-2">Available targets — click to add</div>
+            <div id="le-available-targets" class="flex flex-wrap gap-1.5 text-xs">Loading…</div>
+        </div>
         <div class="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-4">
             <div class="flex flex-col">
                 <label class="text-xs text-slate-500 mb-1">Module type</label>
@@ -12671,11 +12680,40 @@ function showLeTargetsModal(domain) {
         </div>
     </div>`;
     document.body.appendChild(modal);
+    // Fetch the live list of connected cert-capable spokes/agents and render it
+    // as click-to-add chips (already-added targets show as disabled ✓). One
+    // click = addLeTarget with that {module_type, identifier} — no manual typing
+    // needed. Agent-hosting types (hypervisor/simulation) list each connected
+    // pxmx node as its own chip (identifier = agent_id) + an "all nodes" chip.
+    try {
+        const { ok, data } = await _spokeFetch('/api/le/targets/available');
+        const inner = (data && data.data) ? data.data : (data || {});
+        const avail = inner.targets || [];
+        const box = document.getElementById('le-available-targets');
+        if (!ok || !avail.length) {
+            box.innerHTML = '<span class="text-slate-400 italic">No connected cert-capable spokes/agents. Approve + connect a spoke first.</span>';
+            return;
+        }
+        box.innerHTML = avail.map(t => {
+            const k = `${t.module_type}|${t.identifier || ''}`;
+            const lblE = escapeHtml(t.label || `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`);
+            if (haveKeys.has(k)) {
+                return `<span class="px-2 py-1 rounded-md text-xs bg-slate-100 text-slate-400 border border-slate-200" title="Already added">${lblE} ✓</span>`;
+            }
+            const mtE = esc(t.module_type), idE = esc(t.identifier || '');
+            return `<button onclick="addLeTarget('${esc(domain)}',{module_type:'${mtE}',identifier:'${idE}'})" class="px-2 py-1 rounded-md text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition" title="Add this target">${lblE} +</button>`;
+        }).join('');
+    } catch (e) {
+        const box = document.getElementById('le-available-targets');
+        if (box) box.innerHTML = '<span class="text-slate-400 italic">Could not load available targets.</span>';
+    }
 }
 
-async function addLeTarget(domain) {
-    const mt = document.getElementById('le-tgt-mt')?.value;
-    const identifier = document.getElementById('le-tgt-id')?.value?.trim() || '';
+async function addLeTarget(domain, preset) {
+    // ``preset`` ({module_type, identifier}) comes from a click on an available-
+    // target chip; without it we read the manual add form below.
+    const mt = preset ? preset.module_type : document.getElementById('le-tgt-mt')?.value;
+    const identifier = preset ? (preset.identifier || '') : (document.getElementById('le-tgt-id')?.value?.trim() || '');
     if (!mt) { alert('Module type required'); return; }
     try {
         const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/targets`, {

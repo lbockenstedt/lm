@@ -2,6 +2,7 @@
 from api import (
     HTTPException, Request, _spoke_payload_or_raise, access, logger,
 )
+from cert_distribution import build_available_targets
 
 
 def register(app, hub, ctx):
@@ -370,6 +371,37 @@ def register(app, hub, ctx):
             logger.exception("le_distribute_target failed")
             raise HTTPException(status_code=500, detail=str(e))
         return {"status": "SUCCESS", "distribution": dist or []}
+
+    @app.get("/api/le/targets/available")
+    async def le_available_targets():
+        """All connected spokes/agents this cert could be distributed to — the
+        click-to-add list in the LE targets modal ("list all available targets
+        so I can click and add that agent/module"). One entry per cert-capable
+        connected spoke (by module_type), EXCEPT agent-hosting types
+        (hypervisor/simulation) which list EACH connected pxmx agent as a
+        per-node target (identifier = agent_id) plus an "all nodes" broadcast
+        entry per connected spoke of those types. Offline / non-cert-capable
+        spokes are omitted — they'd only ERROR on distribute. Returns
+        {targets: [{module_type, identifier, label, spoke_id?}]}. The per-node
+        agent list reuses the /api/pxmx/agents stale-while-revalidate cache so
+        opening the modal doesn't block on a fresh GET_AGENTS fan-out. List
+        shaping is in cert_distribution.build_available_targets (pure, tested)."""
+        hub = app.state.hub
+        agent_spokes = list(dict.fromkeys(
+            hub.get_all_spokes_by_type("hypervisor")
+            + hub.get_all_spokes_by_type("simulation")))
+        agents: list = []
+        if agent_spokes:
+            try:
+                from routes import pxmx as _pxmx
+                agg = await _pxmx._maybe_refresh_agents(hub, agent_spokes)
+                agents = (agg or {}).get("agents", []) or []
+            except Exception as e:  # noqa: BLE001 - modal still usable w/o agents
+                logger.debug("le_available_targets: agents gather failed: %s", e)
+        module_names = hub.state.system_state.get("module_names", {}) or {}
+        return {"targets": build_available_targets(
+            dict(hub.spoke_module_types), hub.active_connections,
+            module_names, hub.CERT_CAPABLE_MODULES, agents)}
 
     # ── per-cert distribution targets ──────────────────────────────────────────
     # Each target = {module_type, identifier?} describing which spoke/device a

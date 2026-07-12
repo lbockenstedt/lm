@@ -403,3 +403,55 @@ async def distribute_wildcard_to_all_spokes(
                 domain, ok, len(summary))
     return summary
     return aggregate
+
+
+def build_available_targets(spoke_module_types: Dict[str, str],
+                            active_connections, module_names: Dict[str, str],
+                            capable: Set[str],
+                            agents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build the click-to-add list of cert distribution targets from live hub
+    state — the ``GET /api/le/targets/available`` payload. One entry per
+    cert-capable CONNECTED spoke (by ``module_type``), EXCEPT agent-hosting
+    types (``hypervisor``/``simulation``) which list EACH connected pxmx agent
+    as a per-node target (``identifier`` = ``agent_id``) plus an "all nodes"
+    broadcast entry per connected agent-hosting spoke. Offline / non-cert-capable
+    spokes are omitted — they'd only ERROR on distribute.
+
+    Pure (no hub/relay deps) so the route is thin and this is unit-testable.
+
+    ``spoke_module_types``: ``{spoke_id: module_type}`` (live registrations).
+    ``active_connections``: container supporting ``in`` for connected spoke_ids.
+    ``module_names``: ``{spoke_id: display_name}``.
+    ``capable``: ``CERT_CAPABLE_MODULES`` set.
+    ``agents``: pxmx ``GET_AGENTS`` aggregate entries
+    (``{agent_id, spoke_id, display_name?, hostname?}``); may be empty/None.
+
+    Returns a list of ``{module_type, identifier, label, ...}`` (``spoke_id`` on
+    spoke-level entries, ``agent_id`` on per-node entries)."""
+    agent_hosting = {"hypervisor", "simulation"}
+    names = module_names if isinstance(module_names, dict) else {}
+    targets: List[Dict[str, Any]] = []
+    # Non-agent-hosting cert-capable connected spokes: one entry each.
+    for sid, mt in spoke_module_types.items():
+        if sid not in active_connections:
+            continue
+        if mt not in capable or mt in agent_hosting:
+            continue
+        label = names.get(sid, sid) or sid
+        targets.append({"module_type": mt, "identifier": "",
+                        "label": f"{mt} — {label}", "spoke_id": sid})
+    # Agent-hosting: each connected pxmx agent = a per-node target.
+    for a in agents or []:
+        mt = spoke_module_types.get(a.get("spoke_id"))
+        if mt not in capable:
+            continue
+        aid = a.get("agent_id") or ""
+        label = a.get("display_name") or a.get("hostname") or aid
+        targets.append({"module_type": mt, "identifier": aid,
+                        "label": f"{mt}/{label}", "agent_id": aid})
+    # "all nodes" broadcast entry per connected agent-hosting spoke.
+    for sid, mt in spoke_module_types.items():
+        if sid in active_connections and mt in capable and mt in agent_hosting:
+            targets.append({"module_type": mt, "identifier": "",
+                            "label": f"{mt} — all nodes", "spoke_id": sid})
+    return targets
