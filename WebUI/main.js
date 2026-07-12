@@ -12605,7 +12605,12 @@ async function loadLEData(subMenu) {
                 }
                 const mtE = escJsAttr(String(t.module_type || ''));
                 const idE = escJsAttr(String(t.identifier || ''));
-                return `<button onclick="addLeTarget('${dEsc}',{module_type:'${mtE}',identifier:'${idE}'})" class="px-1.5 py-0.5 rounded text-xs bg-slate-100 hover:bg-slate-200 text-slate-500 border border-slate-200 cursor-pointer transition" title="Enable this cert to deploy to ${lbl}">${lblE} +</button>`;
+                // Agent-hosting chips carry the "pick one granularity" hint so
+                // hovering explains the group-vs-individual rule before a click.
+                const tip = _LE_AGENT_HOSTING.includes(String(t.module_type || ''))
+                    ? `Enable this cert to deploy to ${lbl} — ${_LE_TARGET_OVERLAP_HINT}`
+                    : `Enable this cert to deploy to ${lbl}`;
+                return `<button onclick="addLeTarget('${dEsc}',{module_type:'${mtE}',identifier:'${idE}'})" class="px-1.5 py-0.5 rounded text-xs bg-slate-100 hover:bg-slate-200 text-slate-500 border border-slate-200 cursor-pointer transition" title="${escJsAttr(tip)}">${lblE} +</button>`;
             }).join('');
             return `<div class="flex flex-wrap items-center gap-1 mt-1.5"><span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1">Add</span>${chips}</div>`;
         };
@@ -12647,7 +12652,19 @@ async function loadLEData(subMenu) {
             const tgtBadges = tgts.length
                 ? `<div class="flex flex-wrap gap-1">${tgts.map(t => tgtBadge(t, c.domain)).join('')}</div>`
                 : `<span class="text-xs text-slate-400 italic">none yet — click a target below to add</span>`;
-            const tgtCell = `${tgtBadges}${leAvailChips(c.domain, tgts)}`;
+            // Warn when a group ("all nodes") AND an individual node target are
+            // both selected for the same agent-hosting type — they deploy the
+            // same cert to the same node(s) (in the split topology hypervisor +
+            // simulation share the cs-owned agents), causing pveproxy restart
+            // contention. Surfaces an existing overlap; addLeTarget also confirms.
+            const _redund = _leRedundantTargetTypes(tgts);
+            const redundNote = _redund.length
+                ? `<div class="mt-1 flex items-start gap-1 text-[11px] text-amber-700" title="${escJsAttr(_LE_TARGET_OVERLAP_HINT)}">
+                     <span class="leading-4">⚠</span>
+                     <span>Both a group (<b>all nodes</b>) and an individual node target are selected for <b>${escapeHtml(_redund.join(', '))}</b> — these deploy the same cert to the same node(s) and cause repeated restarts. Keep one or the other.</span>
+                   </div>`
+                : '';
+            const tgtCell = `${tgtBadges}${redundNote}${leAvailChips(c.domain, tgts)}`;
             const exp = leExpiry(c.not_after);
             const retryBtn = isFailed
                 ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
@@ -12961,12 +12978,56 @@ async function showLeTargetsModal(domain) {
     document.body.appendChild(modal);
 }
 
+// Agent-hosting cert targets (simulation/hypervisor) can be added as a GROUP
+// ("all nodes", identifier empty) OR as an individual node (identifier =
+// agent_id). Selecting BOTH for the same module_type deploys the same cert to
+// the same node(s) — and in the split topology hypervisor + simulation share
+// the cs-owned pxmx agents — which causes pveproxy restart contention (and,
+// before the agent verify-on-disk fix, a re-push loop). Pick one or the other.
+const _LE_AGENT_HOSTING = ['simulation', 'hypervisor'];
+// The one-liner reused by the inline ⚠ note, the chip tooltips, and the add
+// confirm so the guidance reads identically everywhere (and matches the docs
+// "Distribution targets — pick one granularity" warning).
+const _LE_TARGET_OVERLAP_HINT =
+    'Pick ONE granularity per module: a group ("all nodes") OR individual node '
+    + 'targets — not both. Both deploy the same cert to the same node(s) and '
+    + 'cause repeated pveproxy restarts.';
+// Return the agent-hosting module_types in `tgts` that have BOTH a group
+// (identifier empty) and an individual (identifier set) target selected.
+function _leRedundantTargetTypes(tgts) {
+    const out = [];
+    for (const mt of _LE_AGENT_HOSTING) {
+        const ofType = (tgts || []).filter(t => (t.module_type || '') === mt);
+        const hasGroup = ofType.some(t => !String(t.identifier || '').trim());
+        const hasIndividual = ofType.some(t => String(t.identifier || '').trim());
+        if (hasGroup && hasIndividual) out.push(mt);
+    }
+    return out;
+}
+
 async function addLeTarget(domain, preset) {
     // ``preset`` ({module_type, identifier}) comes from a click on an available-
     // target chip; without it we read the manual add form below.
     const mt = preset ? preset.module_type : document.getElementById('le-tgt-mt')?.value;
     const identifier = preset ? (preset.identifier || '') : (document.getElementById('le-tgt-id')?.value?.trim() || '');
     if (!mt) { alert('Module type required'); return; }
+    // Guard the group-vs-individual overlap for agent-hosting types: if adding
+    // this target would leave the cert with BOTH a group and an individual
+    // target of the same module_type, confirm before proceeding (see
+    // _LE_TARGET_OVERLAP_HINT / docs "Distribution targets" warning).
+    if (_LE_AGENT_HOSTING.includes(mt)) {
+        const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
+        const projected = [...(cert.targets || []), { module_type: mt, identifier }];
+        if (_leRedundantTargetTypes(projected).includes(mt)) {
+            const adding = String(identifier).trim()
+                ? `the individual node "${mt}/${identifier}"`
+                : `the group "${mt} — all nodes"`;
+            if (!confirm(`${_LE_TARGET_OVERLAP_HINT}\n\nThis cert already has the other `
+                + `kind of "${mt}" target. Add ${adding} anyway?`)) {
+                return;
+            }
+        }
+    }
     try {
         const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/targets`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
