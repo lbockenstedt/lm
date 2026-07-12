@@ -1383,12 +1383,40 @@ class UpdatePipelineMixin:
         for repo_url, spoke_ids in repo_spokes.items():
             tip = await self.get_remote_commit(repo_url, branch)
             for sid in spoke_ids:
-                if not spoke_force and tip != "unknown" and last_pushed.get(sid) == tip:
+                # Version-evidence override for the "believed current but never
+                # applied" strand. last_pushed[sid]==tip advances the instant a
+                # SPOKE_UPDATE is DELIVERED to a connected spoke — a PROXY for
+                # "applied", not a confirmation. If that delivery was lost (the
+                # mailbox is in-memory; a hub restart between marker-save and send
+                # drops it), the spoke's git pull failed, or its WS dropped
+                # mid-send, the spoke keeps running OLD code while the hub believes
+                # it is on `tip` and never retries until the tip moves again. When
+                # the spoke's REPORTED running .NN is provably older than its
+                # repo's latest .NN, the SHA proxy is a false-positive — don't let
+                # it suppress the corrective re-push. _version_behind NEVER
+                # false-positives (False whenever either side is unknown / non-.NN),
+                # so a hub with no version info for this spoke behaves exactly as
+                # before (pure SHA proxy). See spoke-update-fanout-per-repo-gating.
+                _latest = self.latest_version_for_module(self._effective_module_type(sid))
+                _running = (getattr(self, "spoke_versions", {}) or {}).get(sid)
+                behind = _version_behind(_running, _latest)
+                at_tip = tip != "unknown" and last_pushed.get(sid) == tip
+                if not spoke_force and at_tip and not behind:
                     update_results.append(f"{sid}: up-to-date ({repo_url})")
                     continue
-                if not spoke_force and (_now - float(pushed_ts.get(sid, 0) or 0)) < SPOKE_UPDATE_COOLDOWN_S:
-                    _left = int(SPOKE_UPDATE_COOLDOWN_S - (_now - float(pushed_ts.get(sid, 0) or 0)))
-                    update_results.append(f"{sid}: recently pushed - cooldown {_left}s ({repo_url})")
+                # A spoke we ALREADY pushed the current tip to but that is STILL
+                # provably behind (received-but-didn't-apply) is re-pushed on the
+                # LONG backstop, not the 600s cooldown — so a genuinely broken /
+                # rolled-back update (the spoke's update_recovery reverts it and it
+                # never advances) can't storm-restart it every 10 min. A spoke that
+                # just legitimately needs the update (marker != tip) uses the
+                # normal cooldown.
+                _stale_at_tip = at_tip and behind
+                _cool = SPOKE_UPDATE_BLIND_BACKSTOP_S if _stale_at_tip else SPOKE_UPDATE_COOLDOWN_S
+                if not spoke_force and (_now - float(pushed_ts.get(sid, 0) or 0)) < _cool:
+                    _left = int(_cool - (_now - float(pushed_ts.get(sid, 0) or 0)))
+                    _why = "stale re-push backstop" if _stale_at_tip else "cooldown"
+                    update_results.append(f"{sid}: recently pushed - {_why} {_left}s ({repo_url})")
                     continue
                 # Blind-re-push storm guard: tip unresolvable + already pushed
                 # once → defer (don't restart the spoke every cooldown while the
@@ -1404,7 +1432,10 @@ class UpdatePipelineMixin:
                     update_results.append(f"{sid}: offline - deferred ({repo_url})")
                     continue
                 logger.info(f"Triggering update for spoke {sid} from {repo_url}@{branch}"
-                            + (f" (tip {tip[:10]})" if tip != "unknown" else "") + "...")
+                            + (f" (tip {tip[:10]})" if tip != "unknown" else "")
+                            + (f" [corrective: reports {_running}, latest {_latest} — "
+                               f"prior push never landed]" if _stale_at_tip else "")
+                            + "...")
                 err = await self._push_spoke_update(sid, repo_url, branch,
                                                     extra_data=core_extra)
                 if err is None:

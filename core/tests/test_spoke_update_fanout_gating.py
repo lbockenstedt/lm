@@ -237,6 +237,61 @@ async def test_fanout_threads_core_repo_url_and_branch_into_push():
     assert extra_data["core_branch"] == "main"
 
 
+class _VerHub(_StubHub):
+    """Stub that also reports a spoke's running .NN and the repo's latest .NN, so
+    the version-evidence override (a spoke believed-current by the SHA marker but
+    provably running OLD code) can be exercised deterministically."""
+
+    def __init__(self, remote_tip, running_ver, latest_ver):
+        super().__init__(remote_tip)
+        self.spoke_versions = {"lm-opnsense-spoke-1": running_ver}
+        self._latest_ver = latest_ver
+
+    def latest_version_for_module(self, module_type):
+        return self._latest_ver
+
+
+@pytest.mark.asyncio
+async def test_stale_at_tip_repushes_on_backstop_not_cooldown(patched_clock):
+    """The 'delivered but never applied' strand. last_pushed[sid]==tip advances
+    on DELIVERY to a connected spoke (a proxy for 'applied'). If that push never
+    landed (lost mailbox msg on a hub restart, failed git pull, WS drop mid-send)
+    the spoke keeps running OLD code while the hub believes it is current and
+    never retries. When the spoke's reported .NN is provably older than the
+    repo's latest .NN, the SHA up-to-date skip must be OVERRIDDEN — but the
+    corrective re-push is rate-limited to the LONG backstop, not the 600s
+    cooldown, so a genuinely broken/rolled-back update can't storm-restart it."""
+    backstop = 6 * 3600
+    hub = _VerHub(remote_tip="cccc1", running_ver=".10", latest_ver=".20")
+    # First cycle: marker != tip -> normal push; marker recorded == tip.
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    assert hub.state.get_global_config()["spoke_update_commits"][
+        "lm-opnsense-spoke-1"] == "cccc1"
+    # Cooldown elapses; spoke STILL reports .10 (never applied). at_tip+behind ->
+    # the backstop governs, so it is deferred, NOT re-pushed at the cooldown.
+    patched_clock.advance(_COOLDOWN_S + 1)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    # Backstop elapses -> one corrective re-push.
+    patched_clock.advance(backstop)
+    await hub.perform_update()
+    assert len(hub.pushes) == 2
+
+
+@pytest.mark.asyncio
+async def test_confirmed_current_version_still_skipped(patched_clock):
+    """A spoke at tip whose reported .NN MATCHES the repo's latest is genuinely
+    current -> still skipped as up-to-date (the override only fires on provable
+    behindness; it must never manufacture an extra push for a current spoke)."""
+    hub = _VerHub(remote_tip="cccc1", running_ver=".20", latest_ver=".20")
+    await hub.perform_update()
+    assert len(hub.pushes) == 1  # first push (marker != tip yet)
+    patched_clock.advance(_COOLDOWN_S + 1)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1  # at_tip and not behind -> up-to-date skip
+
+
 @pytest.mark.asyncio
 async def test_fanout_core_repo_url_none_when_hub_source_absent():
     """Air-gapped deploy with ``update_sources.hub`` blank → core_repo_url is
