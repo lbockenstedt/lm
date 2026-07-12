@@ -2038,7 +2038,7 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
             <div class="flex items-center gap-3">
                 <div class="w-2 h-2 rounded-full ${dot}"></div>
                 <span class="${nameCls}">${label}</span>
-                <span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-600">${mod}</span>
+                ${(mod && mod !== '—') ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-600">${mod}</span>` : ''}
                 ${tenantChip}
             </div>
             <div class="flex items-center gap-2">
@@ -6817,7 +6817,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                     ],
                     badges: [
                         `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${kindLabel === 'Module' ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-600'}">${kindLabel}</span>`,
-                        `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${modLabel}</span>`,
+                        ...((modLabel && modLabel !== '—') ? [`<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-700">${modLabel}</span>`] : []),
                         `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${approved ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}">${approved ? 'Approved' : 'Pending'}</span>`,
                         ...(extras ? extras.badges : []),
                     ],
