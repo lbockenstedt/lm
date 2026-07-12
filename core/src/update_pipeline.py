@@ -96,6 +96,27 @@ def _resolve_hub_repo(sources: Dict[str, Any]) -> str:
     return (sources or {}).get("hub") or _DEFAULT_HUB_REPO
 
 
+def _default_repo_for_key(module_key, sources):
+    """Fallback repo URL when ``update_sources`` has no explicit entry for a
+    module_key — so a missing key never silently strands a whole class of spokes
+    with 'no repo configured'. The base generic agents + the in-repo
+    dns/dhcp/console/statuspage roles resolve to the ``agent`` key, and the le
+    role to ``le`` — NEITHER is in the Setup form, so both were empty and every
+    such spoke was skipped. The ``agent`` key IS the lm/hub repo; any other
+    sibling key derives from the hub repo's owner (github.com/<owner>/<key>.git).
+    None only when the hub repo itself is unresolvable (air-gapped)."""
+    if not module_key:
+        return None
+    hub_repo = _resolve_hub_repo(sources)
+    if module_key == "agent":
+        return hub_repo or None
+    if not hub_repo:
+        return None
+    import re as _re
+    m = _re.match(r"^(.*/)[^/]+?(?:\.git)?$", hub_repo)
+    return f"{m.group(1)}{module_key}.git" if m else None
+
+
 # module_type (as reported by a spoke) → the repo directory basename that ships
 # that module's code. Mirrors agent_spoke._ROLE_MAP: each role's spoke code lives
 # in the sibling repo named here. Both the canonical module_type (left column of
@@ -1336,7 +1357,7 @@ class UpdatePipelineMixin:
             if not module_key:
                 update_results.append(f"{spoke_id}: unknown module type")
                 continue
-            repo_url = sources.get(module_key)
+            repo_url = sources.get(module_key) or _default_repo_for_key(module_key, sources)
             if not repo_url:
                 update_results.append(f"{spoke_id}: no repo configured")
                 continue
@@ -1578,6 +1599,8 @@ class UpdatePipelineMixin:
             if not repo_url and module_key == "opnsense":
                 repo_url = sources.get("opn")
             if not repo_url:
+                repo_url = _default_repo_for_key(module_key, sources)
+            if not repo_url:
                 skipped.append(f"{spoke_id}: no repo_url in update_sources.{module_key}")
                 continue
             err = await self._push_spoke_update(spoke_id, repo_url, branch,
@@ -1618,7 +1641,7 @@ class UpdatePipelineMixin:
         config = self.state.get_global_config()
         sources = config.get("update_sources", {})
         branch = config.get("global_branch", "main")
-        repo_url = sources.get("agent")
+        repo_url = sources.get("agent") or _default_repo_for_key("agent", sources)
         # Thread lm/core source. For agents the spoke's own repo is typically the
         # lm repo itself (all-in-one /opt/lm layout), so core_repo_url == repo_url
         # and the spoke's _resolve_core_root sees core_root == cwd → skips the

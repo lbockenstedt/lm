@@ -306,3 +306,17 @@ async def test_fanout_core_repo_url_none_when_hub_source_absent():
     assert extra_data is not None
     assert extra_data["core_repo_url"] is None
     assert extra_data["core_branch"] == "main"
+
+
+def test_default_repo_for_missing_update_sources_keys():
+    """Regression: a module_key absent from update_sources must NOT strand its
+    spokes with 'no repo configured'. The base agents + in-repo roles ('agent'
+    key) resolve to the lm/hub repo; sibling keys (le, cppm) derive from the hub
+    owner. This is why lm-agent / lm-svcs / lm-agent-le showed 'no repo configured'."""
+    from update_pipeline import _default_repo_for_key
+    hub = "https://github.com/lbockenstedt/lm.git"
+    sources = {"hub": hub}
+    assert _default_repo_for_key("agent", sources) == hub
+    assert _default_repo_for_key("le", sources) == "https://github.com/lbockenstedt/le.git"
+    assert _default_repo_for_key("cppm", sources) == "https://github.com/lbockenstedt/cppm.git"
+    assert _default_repo_for_key("", sources) is None
