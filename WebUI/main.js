@@ -3862,14 +3862,6 @@ function _spokesAgentsLegend() {
           <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-600', '2s')} Since last heartbeat</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
-          ${lbl('Recovery')}
-          <span class="text-slate-400 italic">shown only when active:</span>
-          <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-600', 'Recovering n/3')}</span>
-          <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-600', 'Recovered')}</span>
-          <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-600', 'Gave up')}</span>
-          <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-500', 'Paused')}</span>
-        </div>
-        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Badges')}
           <span class="flex items-center gap-1.5">${pill('bg-indigo-50 text-indigo-700', 'Module')} / ${pill('bg-slate-100 text-slate-600', 'Agent')} / ${pill('bg-slate-100 text-slate-600', 'Role')} node kind</span>
           <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-700', 'Approved')} / ${pill('bg-yellow-100 text-yellow-700', 'Pending')}</span>
