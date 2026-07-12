@@ -6874,17 +6874,22 @@ function _bslot(w, html) {
     return `<span class="inline-block ${w} shrink-0 overflow-hidden align-middle whitespace-nowrap">${html || ''}</span>`;
 }
 
+// _quietMeta(parts) — join non-empty metadata fragments into ONE muted line
+// separated by a faint middot. The Spokes/Agents rows use this instead of a row
+// of fixed-width colored pills, so the row reads as calm secondary text and
+// only EXCEPTIONS (out-of-date version, Pending, recovery, alerts) carry color.
+function _quietMeta(parts) {
+    return (parts || []).filter(p => p != null && p !== '')
+        .join(' <span class="text-slate-300">·</span> ');
+}
+
 function _mgmtEntryCard(o) {
-    const badges  = (o.badges || []).filter(Boolean).join(' ');
     const meta    = (o.metaLines || []).filter(Boolean).join('');
     const actions = (o.actions || []).filter(Boolean).join('');
-    // Corner actions (e.g. Events / Copy) pin to the top-right of the header row,
-    // across from the name/ID.
+    // Corner actions (e.g. Events / Copy) pin to the top-right of the header row.
     const corner  = (o.cornerActions || []).filter(Boolean).join(' ');
-    // Layout (deterministic — same for Spokes and Agents): name/ID top-left with
-    // Events/Copy top-right; then the badges (SPOKE/module/status/version…) on
-    // their OWN line, LEFT-aligned + indented (pl-6) under the name — not
-    // right-floated, which wrapped inconsistently by content width; then the
+    // Layout: name top-left with Events/Copy top-right; a single quiet metadata
+    // line (sid · type · module · version · seen …) under the name; then the
     // host/tenant/status meta line; then the action buttons.
     return `<div class="lm-mgmt-card border border-slate-200 rounded-md bg-white p-2.5 hover:bg-slate-50 space-y-1.5">
         <div class="flex items-start justify-between gap-3">
@@ -6892,13 +6897,14 @@ function _mgmtEntryCard(o) {
                 <div class="w-2 h-2 mt-1.5 rounded-full ${o.dot} shrink-0"></div>
                 <div class="min-w-0">
                     <div class="font-medium text-slate-700 break-words">${o.name}</div>
-                    <div class="text-[10px] font-mono text-slate-400 break-all">${escapeHtml(o.sid)}</div>
+                    <div class="text-[11px] text-slate-500 break-words leading-relaxed">
+                        <span class="font-mono text-slate-400">${escapeHtml(o.sid)}</span>${o.metaInline ? ` <span class="text-slate-300">·</span> ${o.metaInline}` : ''}
+                    </div>
                     ${o.identityBanner || ''}
                 </div>
             </div>
             ${corner ? `<div class="flex items-center gap-2 shrink-0">${corner}</div>` : ''}
         </div>
-        ${badges ? `<div class="flex items-center gap-0.5 flex-wrap pl-1">${badges}</div>` : ''}
         ${meta}
         ${actions ? `<div class="flex items-center gap-2 flex-wrap pl-6">${actions}</div>` : ''}
     </div>`;
@@ -6971,12 +6977,12 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                           + `</div>`,
                         ...(extras ? extras.metaLines : []),
                     ],
-                    badges: [
-                        _bslot('w-24', `<span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase ${kindLabel === 'Module' ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-600'}">${kindLabel}</span>`),
-                        _bslot('w-[8.5rem]', (modLabel && modLabel !== '—') ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold bg-slate-200 text-slate-700" title="${escapeHtml(modLabel)}">${modLabel}</span>` : ''),
-                        _bslot('w-16', `<span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase ${approved ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}">${approved ? 'Approved' : 'Pending'}</span>`),
-                        ...(extras ? extras.badges : []),
-                    ],
+                    metaInline: _quietMeta([
+                        escapeHtml(kindLabel),
+                        (modLabel && modLabel !== '—') ? escapeHtml(modLabel) : '',
+                        ...(extras ? extras.metaParts : []),
+                        approved ? '' : '<span class="text-amber-600 font-semibold">Pending approval</span>',
+                    ]),
                     actions: [
                         // Edit now hosts Reset Secret + Un-approve (moved off the
                         // row to declutter); pass `approved` so the modal shows
@@ -7124,12 +7130,12 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                     rolesLine,
                     ...(extras ? extras.metaLines : []),
                 ],
-                badges: [
-                    _bslot('w-24', `<span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600">${typeLabel}</span>`),
-                    _bslot('w-[8.5rem]', a._module ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold bg-slate-200 text-slate-700" title="${escapeHtml(String(a._module))}">${escapeHtml(String(a._module))}</span>` : ''),
-                    _bslot('w-16', `<span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase ${isPending ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}">${statusLabel}</span>`),
-                    ...(extras ? extras.badges : []),
-                ],
+                metaInline: _quietMeta([
+                    escapeHtml(typeLabel),
+                    a._module ? escapeHtml(String(a._module)) : '',
+                    ...(extras ? extras.metaParts : []),
+                    isPending ? '<span class="text-amber-600 font-semibold">Pending approval</span>' : '',
+                ]),
                 actions: [
                     // Spoke-kind agents route Edit → openSpokeMetadataModal, which
                     // now hosts Reset Secret + Un-approve; pass approved (=!isPending)
@@ -8578,6 +8584,9 @@ function _diagTelemetryExtras(s, fns) {
     const evCount = (s.events || []).length + (s.log_events || []).length;
     const rec = s.recovery || {};
     const badge = recoveryBadge(rec);
+    const _recTextTone = rec.gave_up ? 'text-red-600'
+                       : rec.in_progress ? 'text-amber-600'
+                       : rec.attempts > 0 ? 'text-green-600' : 'text-slate-500';
     // Heartbeat: status color + age since last heartbeat frame.
     const hbStatus = String(s.heartbeat_status || '');
     const hbAge = (s.heartbeat_age_s == null) ? 'never'
@@ -8632,11 +8641,13 @@ function _diagTelemetryExtras(s, fns) {
         // INLINE on the host/tenant row (one line) instead of its own stacked
         // div — saves vertical space on the Spokes & Agents tiles.
         status,
-        badges: [
-            _bslot('w-12', `<span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase font-mono ${_verTone}" title="${_verTitle}">${escapeHtml(_ver)}</span>`),
-            ...(badge.text !== '—' ? [`<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600" title="${escapeHtml(badge.title)}">${badge.text}</span>`] : []),
-            alertBadge,
-            _bslot('w-10', `<span class="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600" title="Time since last inbound heartbeat frame (&lt;120s healthy, 120–300s slow, &gt;=300s/never stale — see the row's status dot)">${hbAge}</span>`),
+        // Quiet metadata fragments (version · seen · recovery · alert). Colour
+        // ONLY when it matters: out-of-date version red, recovery/alert states.
+        metaParts: [
+            _verUnknown ? '' : `<span class="${_outOfDate ? 'text-red-600 font-semibold' : ''}" title="${_verTitle}">v${escapeHtml(_ver)}${_outOfDate ? ' · out of date' : ''}</span>`,
+            `<span title="Time since the last inbound heartbeat frame">${hbAge === 'never' ? 'never seen' : (hbAge === 'now' ? 'seen just now' : `seen ${escapeHtml(hbAge)} ago`)}</span>`,
+            (badge.text !== '—') ? `<span class="${_recTextTone} font-semibold" title="${escapeHtml(badge.title)}">${escapeHtml(badge.text)}</span>` : '',
+            (aTier === 'error' || aTier === 'warning') ? `<span class="${aTier === 'error' ? 'text-red-600' : 'text-amber-600'} font-semibold" title="Out of contact ${Math.round((s.alert_duration_s || 0) / 60)}m — forgiving alert tier">alert: ${escapeHtml(aTier)}</span>` : '',
         ],
         metaLines: [
             // status text moved INLINE to the caller's host/tenant row.
