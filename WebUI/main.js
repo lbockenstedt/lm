@@ -3188,6 +3188,11 @@ function _viewTemplate(viewId) {
       <input type="checkbox" id="le-wildcard-all-spokes" class="w-4 h-4 rounded" onchange="saveLeWildcardAllSpokes(this.checked)">
       Fan wildcard → all spokes
     </label>
+    <label class="flex items-center gap-1 text-xs text-slate-600 select-none" title="How soon the hub retries a FAILED cert distribution to a target. The hub sweeps on this cadence and re-pushes any target whose last push errored (successful targets are skipped). Default 1 hour. Lower = faster retry but more hub→spoke chatter.">
+      Retry failed every
+      <input type="number" id="le-distribution-retry-hours" min="1" step="1" value="1" class="w-14 px-1 py-0.5 rounded border border-slate-300 text-xs" onchange="saveLeRetryInterval(this.value)">
+      hrs
+    </label>
     <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
   </div>
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
@@ -12152,6 +12157,8 @@ async function loadLEData(subMenu) {
 
     // Hub-level wildcard fan-out toggle (OFF while testing).
     loadLeWildcardAllSpokes();
+    // Hub-level failed-distribution retry interval (hours; default 1).
+    loadLeRetryInterval();
 
     const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
     const tw = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
@@ -12335,6 +12342,37 @@ async function saveLeWildcardAllSpokes(checked) {
             : 'Wildcard fan-out disabled.', 'success');
         else showToast('Failed to save wildcard toggle.', 'error');
     } catch (e) { showToast('Error saving wildcard toggle: ' + e.message, 'error'); }
+}
+
+// distribution_retry_hours: how soon the hub retries a FAILED cert distribution
+// to a target. The hub's run_cert_distribution_loop sweeps on this cadence and
+// re-pushes any target whose last push errored (successful targets are skipped
+// by the le-ledger skip-check). Default 1h. Saved via POST /setup/config
+// (shallow-merged into global_config.certs alongside wildcard_all_spokes).
+async function loadLeRetryInterval() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        let hrs = ((data.global_config || {}).certs || {}).distribution_retry_hours;
+        if (hrs == null || isNaN(Number(hrs)) || Number(hrs) <= 0) hrs = 1;
+        const el = document.getElementById('le-distribution-retry-hours');
+        if (el) el.value = String(Math.max(1, Math.round(Number(hrs))));
+    } catch (e) { console.error('loadLeRetryInterval failed', e); }
+}
+
+async function saveLeRetryInterval(v) {
+    let hrs = parseInt(v, 10);
+    if (!Number.isFinite(hrs) || hrs < 1) { showToast('Retry interval must be a whole number of hours (>= 1).', 'error'); loadLeRetryInterval(); return; }
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { certs: { distribution_retry_hours: hrs } } })
+        });
+        if (r.ok) showToast(`Failed-distribution retry set to every ${hrs}h.`, 'success');
+        else showToast('Failed to save retry interval.', 'error');
+    } catch (e) { showToast('Error saving retry interval: ' + e.message, 'error'); }
+    loadLeRetryInterval();
 }
 
 async function leDistributeNow() {
