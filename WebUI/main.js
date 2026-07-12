@@ -1231,16 +1231,18 @@ const VIEW_SUBMENUS = {
 // a primary. Only cs (Simulations) uses this today — its primaries mirror the
 // solutions-hpe webui-hub tenant sub-nav, and the child sets mirror webui-hub's
 // own subtab lists (VM Server 11, Setup 7, Central 3, Simulations 3, Clients 3,
-// Config 0). Primaries not listed here (Spoke Management) have no
-// children → render directly, no secondary strip. Config has NO sub-tabs — the
-// former "Simulation" tab is now the Config root (the "API" tab was dropped);
-// loadCSData's `case 'Config'` renders csRenderConfigSimulation directly.
+// Config 2). Primaries not listed here (Spoke Management) have no
+// children → render directly, no secondary strip. Config has two sub-tabs:
+// "Sim Quotas" (alert→sim marriages + per-site client quotas the engine keeps
+// filled) and "Raw Config" (the former flat Config view — Source of Truth +
+// simulation.conf + user-overrides + hub config).
 const VIEW_CHILDREN = {
     cs: {
         'Dashboard': ['Checks', 'Hardware', 'Client Count'],
         'Clients':     ['All', 'T1', 'T2', 'T3'],
         'Central':     ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware'],
         'VM Server':   ['Overview', 'VMs', 'Console', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
+        'Config':      ['Sim Quotas', 'Raw Config'],
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications'],
     },
 };
@@ -4880,6 +4882,7 @@ function _renderSetupSimulationsTile(content) {
                 <button id="simtab-btn-usb" onclick="_simSetupTab('usb')" class="px-4 py-2 text-sm font-bold border-b-2 border-[#01A982] text-[#01A982] -mb-px transition-colors">USB</button>
                 <button id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="px-4 py-2 text-sm font-bold border-b-2 border-transparent text-slate-500 hover:text-slate-700 -mb-px transition-colors">PCI (Tiers)</button>
                 <button id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="px-4 py-2 text-sm font-bold border-b-2 border-transparent text-slate-500 hover:text-slate-700 -mb-px transition-colors">DHCP</button>
+                <button id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="px-4 py-2 text-sm font-bold border-b-2 border-transparent text-slate-500 hover:text-slate-700 -mb-px transition-colors">Sim Quotas</button>
             </div>
             <div id="simtab-usb" class="space-y-4">
             <div class="${card}">
@@ -4947,15 +4950,27 @@ function _renderSetupSimulationsTile(content) {
                 <p class="text-xs text-slate-500 mb-3">Isolated sim-client DHCP (Kea <span class="font-mono">kea-dhcp4-sim</span>) on each cs spoke's second NIC (provisioned by install_cs.sh). Shows whether Kea is running and how full the lease pool is. A spoke without Kea shows "Not configured".</p>
                 <div id="cs-dhcp-server-status" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
+            </div>
+            <div id="simtab-simq" class="space-y-4 hidden">
+            <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Sim Quota Defaults ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <p class="text-xs text-slate-500 mb-3">Platform-wide default templates a tenant inherits unless it overrides per alert/insight + site in Config → Sim Quotas. Site blank = "all sites". The engine (Chunk 2) merges these with each tenant's overrides. Sims come from the full primitive catalog; a tenant's simulation.conf may offer a subset.</p>
+                <div class="flex flex-wrap gap-2 mb-3">
+                    <button onclick="addSimQuotaDefault()" class="${btnCls} text-xs px-3 py-1">+ Add Default</button>
+                    <button onclick="saveSimQuotaDefaults()" class="${btnCls} text-xs px-3 py-1">Save Defaults</button>
+                </div>
+                <div id="sim-quota-defaults-rows" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
             </div>`;
     loadSimAdminOverview();
     loadGlobalTierPci();
+    loadSimQuotaDefaults();
 }
 
 // In-tile sub-tabs for Setup → Simulations: group USB / PCI / DHCP so the tile
 // isn't one long stack. Pure show/hide of the three panels + active styling.
 function _simSetupTab(name) {
-    ['usb', 'pci', 'dhcp'].forEach(n => {
+    ['usb', 'pci', 'dhcp', 'simq'].forEach(n => {
         const panel = document.getElementById('simtab-' + n);
         const btn = document.getElementById('simtab-btn-' + n);
         if (panel) panel.classList.toggle('hidden', n !== name);
@@ -5022,6 +5037,160 @@ async function removeGlobalTierPci(tier, vp) {
         });
         loadGlobalTierPci();
     } catch (e) { if (typeof showToast === 'function') showToast('Failed: ' + e.message, 'error'); }
+}
+
+// ── Sim Quota Defaults (Setup → Simulations → Sim Quotas) — superadmin ──────
+// Platform-wide default templates a tenant inherits unless it overrides per
+// alert/insight + site in Config → Sim Quotas. GET/PUT /sim/api/superadmin/
+// sim-quota-defaults (admin-gated). Site is free-text here (blank = "all
+// sites"); sims come from the full primitive catalog (a tenant's
+// simulation.conf may offer a subset). Mirrors the per-tenant Config → Sim
+// Quotas row editor (sim-views.js) but with a free-text site input.
+const SIM_QUOTA_DEFAULTS_URL = '/sim/api/superadmin/sim-quota-defaults';
+let _simQuotaDefaults = [];
+let _simQuotaDefaultsCatalog = { sims: [], sites: [], suggested: {}, meta: {} };
+
+function _simQuotaDefaultFromServer(q) {
+    return {
+        alert_type: q.alert_type || 'alert',
+        alert_id: q.alert_id || '',
+        sim_id: q.sim_id || '',
+        count: q.count != null ? q.count : 10,
+        site: q.site || '',
+        multi_capable: !!q.multi_capable,
+        enabled: !!q.enabled,
+    };
+}
+
+function _simQuotaDefaultSelect(selected, items, placeholder) {
+    return `<option value="">${placeholder}</option>` +
+        items.map(it => `<option value="${it}" ${it === selected ? 'selected' : ''}>${it}</option>`).join('');
+}
+
+function _renderSimQuotaDefaultsEditor() {
+    const { inputCls, labelCls } = _SETUP_CLS;
+    const cat = _simQuotaDefaultsCatalog || { sims: [], suggested: {}, meta: {} };
+    const simIds = (cat.sims || []).map(s => s.sim_id);
+    const suggested = cat.suggested || {};
+    const rowsEl = document.getElementById('sim-quota-defaults-rows');
+    if (!rowsEl) return;
+    const rowHtml = _simQuotaDefaults.map((r, i) => {
+        const simOpts = _simQuotaDefaultSelect(r.sim_id, simIds, '— select sim —');
+        return `<div class="grid grid-cols-1 md:grid-cols-7 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-sqd-row="${i}">
+          <label class="${labelCls}">Type
+            <select data-sqd="alert_type" class="w-full ${inputCls} text-sm mt-1">
+              <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
+              <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
+            </select>
+          </label>
+          <label class="${labelCls}">Alert / Insight ID
+            <input data-sqd="alert_id" value="${r.alert_id.replace(/"/g, '&quot;')}" placeholder="CLIENT_DHCP_FAILURE" class="w-full ${inputCls} text-sm mt-1">
+          </label>
+          <label class="${labelCls}">Simulation
+            <select data-sqd="sim_id" class="w-full ${inputCls} text-sm mt-1">${simOpts}</select>
+          </label>
+          <label class="${labelCls}">Clients
+            <input data-sqd="count" type="number" min="1" value="${r.count}" class="w-full ${inputCls} text-sm mt-1">
+          </label>
+          <label class="${labelCls}">Site (blank = all)
+            <input data-sqd="site" value="${r.site.replace(/"/g, '&quot;')}" placeholder="all sites" class="w-full ${inputCls} text-sm mt-1">
+          </label>
+          <label class="${labelCls} flex flex-col gap-1">
+            <span class="flex items-center gap-1"><input data-sqd="multi_capable" type="checkbox" ${r.multi_capable ? 'checked' : ''}> Multi-capable</span>
+            <span class="flex items-center gap-1"><input data-sqd="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
+          </label>
+          <button onclick="removeSimQuotaDefault(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
+        </div>`;
+    }).join('');
+    const suggestHtml = Object.keys(suggested).length ? `
+        <details class="text-xs text-slate-500 mb-2">
+          <summary class="cursor-pointer">Suggested alert → sim marriages</summary>
+          <ul class="mt-1 list-disc list-inside space-y-0.5">
+            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${a}</span> → <span class="font-mono">${s}</span> <button onclick="addSimQuotaDefaultSuggested('${a}','${s}')" class="text-[#01A982] hover:underline ml-1">add</button></li>`).join('')}
+          </ul>
+        </details>` : '';
+    rowsEl.innerHTML = suggestHtml + (rowHtml || '<p class="text-xs text-slate-400 italic">No default quotas defined. Add one or pick a suggested marriage above.</p>');
+}
+
+function _simQuotaDefaultsSyncFromDom() {
+    const rows = [];
+    document.querySelectorAll('[data-sqd-row]').forEach(el => {
+        const g = (k) => el.querySelector(`[data-sqd="${k}"]`);
+        rows.push({
+            alert_type: g('alert_type').value,
+            alert_id: g('alert_id').value.trim(),
+            sim_id: g('sim_id').value,
+            count: parseInt(g('count').value || '1', 10) || 1,
+            site: g('site').value.trim(),
+            multi_capable: !!g('multi_capable').checked,
+            enabled: !!g('enabled').checked,
+        });
+    });
+    _simQuotaDefaults = rows;
+    return rows;
+}
+
+async function loadSimQuotaDefaults() {
+    const rowsEl = document.getElementById('sim-quota-defaults-rows');
+    if (!rowsEl) return;
+    try {
+        const r = await fetch(SIM_QUOTA_DEFAULTS_URL, { credentials: 'same-origin' });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        _simQuotaDefaultsCatalog = data.catalog || { sims: [], sites: [], suggested: {}, meta: {} };
+        _simQuotaDefaults = (data.defaults || []).map(_simQuotaDefaultFromServer);
+        _renderSimQuotaDefaultsEditor();
+    } catch (e) {
+        rowsEl.innerHTML = '<p class="text-xs text-red-400 italic">Failed to load sim quota defaults</p>';
+        console.error('loadSimQuotaDefaults failed', e);
+    }
+}
+
+function addSimQuotaDefault(preset) {
+    _simQuotaDefaultsSyncFromDom();
+    const p = preset || {};
+    _simQuotaDefaults.push({
+        alert_type: p.alert_type || 'alert',
+        alert_id: p.alert_id || '',
+        sim_id: p.sim_id || '',
+        count: p.count != null ? p.count : 10,
+        site: p.site || '',
+        multi_capable: p.multi_capable != null ? !!p.multi_capable : false,
+        enabled: p.enabled != null ? !!p.enabled : false,
+    });
+    _renderSimQuotaDefaultsEditor();
+}
+
+function addSimQuotaDefaultSuggested(alertId, simId) {
+    addSimQuotaDefault({ alert_id: alertId, sim_id: simId, count: 10 });
+}
+
+function removeSimQuotaDefault(i) {
+    _simQuotaDefaultsSyncFromDom();
+    _simQuotaDefaults.splice(i, 1);
+    _renderSimQuotaDefaultsEditor();
+}
+
+async function saveSimQuotaDefaults() {
+    const rows = _simQuotaDefaultsSyncFromDom();
+    try {
+        const r = await fetch(SIM_QUOTA_DEFAULTS_URL, {
+            method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ defaults: rows }),
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        const data = await r.json();
+        _simQuotaDefaults = (data.defaults || rows).map(_simQuotaDefaultFromServer);
+        _renderSimQuotaDefaultsEditor();
+        const errs = data.errors || [];
+        if (typeof showToast === 'function') {
+            if (errs.length) showToast(`Saved with ${errs.length} issue(s): ${errs.join('; ')}`, 'error');
+            else showToast('Sim quota defaults saved.', 'success');
+        }
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Failed: ' + e.message, 'error');
+        console.error('saveSimQuotaDefaults failed', e);
+    }
 }
 
 // Setup → General (default) tile. Cache config + update sources + appearance.

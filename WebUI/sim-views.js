@@ -433,8 +433,8 @@ function csAutoRefreshControl() {
 // reload, the Refresh button) always render.
 const CS_NO_REFRESH = new Set([
     'Setup::Proxmox',   // Proxmox hypervisor config — manual Refresh only
-    'Config',           // Config (form-heavy) — manual Refresh only. No sub-tabs;
-                        // the former "Simulation" tab is now the Config root.
+    'Config',           // Config (form-heavy) — manual Refresh only. Both
+                        // sub-tabs (Sim Quotas, Raw Config) are form editors.
     'VM Server::Command Queue', // loads serve from the cached CS_TELEMETRY
                                 // command_queue (instant); kept manual-refresh so
                                 // a busy spoke's live=1 re-fetch after a mutation
@@ -2551,6 +2551,178 @@ async function csRenderConfigSimulation() {
     csSet(`<div class="space-y-4">${sotCard}${roBanner}<div class="${roWrap} space-y-4">${simCard}${uoCard}</div>${hubCard}</div>`);
 }
 
+// ── Config → Sim Quotas sub-tab ────────────────────────────────────────────
+// Declares alert/insight → simulation marriages + the per-site client quota
+// the SimQuotaEngine (Chunk 2) keeps filled from the online pool. Renders
+// against the cs spoke's /sim-quota-catalog (sims + sites derived from this
+// tenant's simulation.conf + the global suggested marriages). Save is a
+// GET-merge-POST on central-sites-config so site_mappings / monitored_checks /
+// hardware_checks are preserved (mirrors csToggleMonitorCheck). The server
+// re-validates + dedups and returns the cleaned rows, which we adopt.
+let csSimQuotaCatalog = null;       // {sims, sites, suggested, meta}
+let csSimQuotaRows = [];            // working set of quota rows
+
+async function csRenderConfigSimQuotas() {
+    csSetToolbar('');
+    try {
+        const [cat, cfg] = await Promise.all([
+            csFetch(`/${csTenant()}/sim-quota-catalog?tenant_id=${csTenant()}`).catch(() => null),
+            csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+        ]);
+        csSimQuotaCatalog = cat || { sims: [], sites: [], suggested: {}, meta: {} };
+        const quotas = Array.isArray(cfg && cfg.sim_quotas) ? cfg.sim_quotas : [];
+        csSimQuotaRows = quotas.map(csSimQuotaRowFromServer);
+        csRenderSimQuotaEditor();
+    } catch (e) {
+        console.error('csRenderConfigSimQuotas: load failed', e);
+        csSet(csErrorBox('Could not load Sim Quotas', e));
+    }
+}
+
+function csSimQuotaRowFromServer(q) {
+    return {
+        alert_type: q.alert_type || 'alert',
+        alert_id: q.alert_id || '',
+        sim_id: q.sim_id || '',
+        count: q.count != null ? q.count : 10,
+        site: q.site || '',
+        multi_capable: !!q.multi_capable,
+        enabled: !!q.enabled,
+    };
+}
+
+function csSimQuotaSelect(selected, items, placeholder) {
+    return `<option value="">${csEscape(placeholder)}</option>` +
+        items.map(it => `<option value="${csEscape(it)}" ${it === selected ? 'selected' : ''}>${csEscape(it)}</option>`).join('');
+}
+
+function csRenderSimQuotaEditor() {
+    const cat = csSimQuotaCatalog || { sims: [], sites: [], suggested: {}, meta: {} };
+    const simIds = (cat.sims || []).map(s => s.sim_id);
+    const sites = cat.sites || [];
+    const meta = cat.meta || {};
+    const suggested = cat.suggested || {};
+    const rowHtml = csSimQuotaRows.map((r, i) => {
+        const simOpts = csSimQuotaSelect(r.sim_id, simIds, '— select sim —');
+        const siteOpts = csSimQuotaSelect(r.site, sites, '— all sites —');
+        return `<div class="grid grid-cols-1 md:grid-cols-7 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-sqrow="${i}">
+          <label class="text-xs text-slate-500">Type
+            <select data-cs-sq="alert_type" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
+              <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
+              <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
+            </select>
+          </label>
+          <label class="text-xs text-slate-500">Alert / Insight ID
+            <input data-cs-sq="alert_id" value="${csEscape(r.alert_id)}" placeholder="CLIENT_DHCP_FAILURE" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
+          </label>
+          <label class="text-xs text-slate-500">Simulation
+            <select data-cs-sq="sim_id" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${simOpts}</select>
+          </label>
+          <label class="text-xs text-slate-500">Clients
+            <input data-cs-sq="count" type="number" min="1" value="${csEscape(String(r.count))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
+          </label>
+          <label class="text-xs text-slate-500">Site
+            <select data-cs-sq="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${siteOpts}</select>
+          </label>
+          <label class="text-xs text-slate-500 flex flex-col gap-1">
+            <span class="flex items-center gap-1"><input data-cs-sq="multi_capable" type="checkbox" ${r.multi_capable ? 'checked' : ''}> Multi-capable</span>
+            <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
+          </label>
+          <button onclick="csSimQuotaDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
+        </div>`;
+    }).join('');
+    const suggestHtml = Object.keys(suggested).length ? `
+        <details class="text-xs text-slate-500 mt-2">
+          <summary class="cursor-pointer">Suggested alert → sim marriages</summary>
+          <ul class="mt-1 list-disc list-inside space-y-0.5">
+            ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${csEscape(a)}</span> → <span class="font-mono">${csEscape(s)}</span> <button onclick="csSimQuotaAddSuggested('${csEscape(a)}','${csEscape(s)}')" class="text-[#01A982] hover:underline ml-1">add</button></li>`).join('')}
+          </ul>
+        </details>` : '';
+    csSet(`<div class="space-y-4">
+      <div class="hpe-card rounded-lg p-5 shadow-sm">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Sim Quotas ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <div class="flex gap-2">
+            <button onclick="csSimQuotaAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Quota</button>
+            <button onclick="csSimQuotaSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Quotas</button>
+          </div>
+        </div>
+        <p class="text-xs text-slate-500 mb-2">Marry an alert or insight to the simulation that produces it, then set how many online clients the engine keeps running that sim in the chosen site. The engine auto-selects from the online pool and self-heals when a runner dies. Sims + sites come from this tenant's <span class="font-semibold">Raw Config</span> (simulation.conf) and Central site mappings.</p>
+        ${suggestHtml}
+        <div class="space-y-2 mt-2" id="cs-sq-rows">${rowHtml || '<div class="text-xs text-slate-400 italic">No quotas defined. Add one or pick a suggested marriage above.</div>'}</div>
+      </div>
+    </div>`);
+}
+
+// Read the working rows back from the DOM so Add/Remove/Suggest keep current
+// edits without forcing a save first.
+function csSimQuotaSyncFromDom() {
+    const rows = [];
+    document.querySelectorAll('[data-cs-sqrow]').forEach(el => {
+        const g = (k) => el.querySelector(`[data-cs-sq="${k}"]`);
+        rows.push({
+            alert_type: g('alert_type').value,
+            alert_id: g('alert_id').value.trim(),
+            sim_id: g('sim_id').value,
+            count: parseInt(g('count').value || '1', 10) || 1,
+            site: g('site').value,
+            multi_capable: !!g('multi_capable').checked,
+            enabled: !!g('enabled').checked,
+        });
+    });
+    csSimQuotaRows = rows;
+    return rows;
+}
+
+window.csSimQuotaAdd = function (preset) {
+    csSimQuotaSyncFromDom();
+    const p = preset || {};
+    csSimQuotaRows.push({
+        alert_type: p.alert_type || 'alert',
+        alert_id: p.alert_id || '',
+        sim_id: p.sim_id || '',
+        count: p.count != null ? p.count : 10,
+        site: p.site || '',
+        multi_capable: p.multi_capable != null ? !!p.multi_capable : false,
+        enabled: p.enabled != null ? !!p.enabled : false,
+    });
+    csRenderSimQuotaEditor();
+};
+
+window.csSimQuotaAddSuggested = function (alertId, simId) {
+    csSimQuotaAdd({ alert_id: alertId, sim_id: simId, count: 10 });
+};
+
+window.csSimQuotaDel = function (i) {
+    csSimQuotaSyncFromDom();
+    csSimQuotaRows.splice(i, 1);
+    csRenderSimQuotaEditor();
+};
+
+window.csSimQuotaSave = async function () {
+    const rows = csSimQuotaSyncFromDom();
+    try {
+        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+            sim_quotas: rows,
+        };
+        const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        // Server re-validates + dedups; adopt its cleaned rows so the UI matches.
+        const clean = Array.isArray(r && r.sim_quotas) ? r.sim_quotas : rows;
+        const errs = Array.isArray(r && r.sim_quota_errors) ? r.sim_quota_errors : [];
+        csSimQuotaRows = clean.map(csSimQuotaRowFromServer);
+        csRenderSimQuotaEditor();
+        if (errs.length) showToast(`Saved with ${errs.length} issue(s): ${errs.join('; ')}`, 'error');
+        else showToast('Sim quotas saved.', 'success');
+    } catch (e) {
+        console.error('csSimQuotaSave: save failed', e);
+        showToast(e.message, 'error');
+    }
+};
+
 // Source of Truth toggle card (top of the Config screen).
 function csConfigSourceCard(source, cfg) {
     cfg = cfg || {};
@@ -3716,6 +3888,15 @@ async function csRenderSetupNotifications() {
     try { csSet(`<div class="space-y-4">${await csNotificationsCard()}</div>`); }
     catch (e) { console.error('csRenderSetupNotifications: notifications load failed', e); csSet(csErrorBox('Could not load Notifications', e)); }
 }
+
+// ── Register Config children ───────────────────────────────────────────────
+// Config is now two sub-tabs: "Sim Quotas" (alert→sim marriages + per-site
+// client quotas the engine keeps filled) and "Raw Config" (the former flat
+// Config view — Source of Truth + simulation.conf + user-overrides + hub
+// config). VIEW_CHILDREN.cs.Config (main.js) lists both; the existing
+// case 'Config' dispatch is the no-children fallback and stays as a safety net.
+window.CS_CHILD_RENDERERS['Config::Sim Quotas']    = csRenderConfigSimQuotas;
+window.CS_CHILD_RENDERERS['Config::Raw Config']    = csRenderConfigSimulation;
 
 // ── Register Setup children ────────────────────────────────────────────────
 window.CS_CHILD_RENDERERS['Setup::General']        = csRenderSetup;

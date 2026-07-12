@@ -2368,6 +2368,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # the rest of central_sites_config passes through unchanged. The spoke
         # re-validates on CS_SET_CENTRAL_SITES_CONFIG apply (defense in depth).
         sim_quota_errors: list[str] = []
+        clean: list = list(cfg.get("sim_quotas") or [])
         try:
             sim_txt = await store.get_sim_conf_content(tenant_id) or ""
             sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
@@ -2381,6 +2382,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         pushed = await _push_config(tenant_id, {"central_sites_config": cfg})
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
+                "sim_quotas": clean,
                 "sim_quota_errors": sim_quota_errors}
 
     @app.get("/sim/api/{tenant}/sim-quota-catalog")
