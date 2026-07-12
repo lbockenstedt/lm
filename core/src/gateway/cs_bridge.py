@@ -192,7 +192,7 @@ class CSBridgePoller:
     # ── helpers ────────────────────────────────────────────────────────────
 
     async def _connected_agents(self, host_spoke: str) -> list:
-        resp = await self.hub.request_response(host_spoke, "GET_AGENTS", {}, timeout=5.0)
+        resp = await self.hub.request_response(host_spoke, "GET_AGENTS", {}, timeout=30.0)
         data = _unwrap(resp)
         agents = data.get("agents", []) if isinstance(data, dict) else []
         return [a for a in agents if isinstance(a, dict) and a.get("agent_id")]
