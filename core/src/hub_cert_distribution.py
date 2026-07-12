@@ -97,6 +97,24 @@ class HubCertDistributionMixin:
         gc = (self.state.get_global_config() or {}).get("certs", {}) or {}
         return bool(gc.get("wildcard_all_spokes", False))
 
+    def _cert_distribution_retry_seconds(self) -> float:
+        """Configurable cadence for ``run_cert_distribution_loop``, in seconds.
+        Reads ``global_config["certs"]["distribution_retry_hours"]`` (default 1h,
+        matching the prior hard-coded 3600s). A target whose last push FAILED is
+        never skipped (the le-ledger skip-check requires ``last_status ==
+        "SUCCESS"``, see cert_distribution.distribute_cert_to_targets), so it is
+        re-pushed on every sweep — this knob sets how soon that retry happens.
+        Clamp to >= 60s so a typo can't turn the loop into a tight retry storm;
+        a non-numeric/missing/zero/negative value falls back to the 1h default."""
+        gc = (self.state.get_global_config() or {}).get("certs", {}) or {}
+        try:
+            hours = float(gc.get("distribution_retry_hours", 1))
+        except (TypeError, ValueError):
+            return 3600.0
+        if hours <= 0:
+            return 3600.0
+        return max(hours * 3600.0, 60.0)
+
     def _wildcard_push_state(self) -> Dict[str, str]:
         """Persistent ``{f"{domain}|{spoke_id}": material_hash}`` so the hourly
         loop doesn't re-push a wildcard to spokes that already have the current
@@ -200,10 +218,12 @@ class HubCertDistributionMixin:
             raise
 
     async def run_cert_distribution_loop(self):
-        """Hourly: push renewed cert material from the le spoke to each cert's
-        target spokes (hub-brokered transport). Also fired inline on
-        /api/le/issue + /api/le/renew for immediate effect after a
-        (re)issue. See _distribute_one_cert / _distribute_all_certs."""
+        """Periodic: push renewed cert material from the le spoke to each cert's
+        target spokes (hub-brokered transport). Failed targets are retried every
+        sweep — the cadence is configurable via
+        ``global_config["certs"]["distribution_retry_hours"]`` (default 1h). Also
+        fired inline on /api/le/issue + /api/le/renew for immediate effect after
+        a (re)issue. See _distribute_one_cert / _distribute_all_certs."""
         await asyncio.sleep(60)  # let the le spoke connect + reconcile its ledger
         while True:
             try:
@@ -212,7 +232,7 @@ class HubCertDistributionMixin:
                     await self._distribute_all_certs(le_sid)
             except Exception as e:
                 logger.warning("[sync-error] cert-distribution loop failed: %s", e)
-            await asyncio.sleep(3600)  # hourly
+            await asyncio.sleep(self._cert_distribution_retry_seconds())
 
     async def _on_le_cert_renewed(self, le_spoke_id: str, domain: str,
                                   targets: list) -> None:
