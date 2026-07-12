@@ -1470,28 +1470,18 @@ function csSimBtnClass(on, isOverride) {
 }
 
 function csClientSimBar(c, host) {
-    const active = new Set((Array.isArray(c.active_simulations) ? c.active_simulations : [])
-        .map(s => String(s).toLowerCase()));
     const cfg = c.effective_config || c.config || {};
-    const ov = c.overrides || {};
-    // A per-client override WINS (so a set override reflects + stays across
-    // refreshes); otherwise fall back to what the client is actually running.
-    const isOn = f => {
-        if (Object.prototype.hasOwnProperty.call(ov, f))
-            return ['on', 'true', '1'].includes(String(ov[f]).toLowerCase());
-        // "Enabled" reflects the resolved CONFIG (per-client override wins, else
-        // the bucket/user-overrides effective config) — NOT active_simulations
-        // (what the client is momentarily running), so a cleared override drops
-        // off immediately instead of lingering until the client stops the sim.
-        return ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
-    };
-    // An override button exists iff the registry has an entry for this flag
-    // (the pruned-override object only carries REAL deviations from the bucket,
-    // so this is the signal to render border-only purple).
-    const isOv = f => Object.prototype.hasOwnProperty.call(ov, f);
+    // Model A: a button is "on" iff the client's RESOLVED config has the flag on.
+    // Per-user overrides (user-overrides.conf [username]) and the 2h demo are
+    // already folded into that resolved config by the spoke, so this single
+    // source matches exactly what the client is configured to run — a cleared
+    // override drops off as soon as the next telemetry frame lands. There is no
+    // separate registry-override layer to style anymore (isOv = false).
+    const isOn = f =>
+        ['on', 'true', '1'].includes(String(cfg[f] == null ? '' : cfg[f]).toLowerCase());
     const btns = CS_CONTROL_FLAGS.map(f => {
         const on = isOn(f);
-        const ovFlag = isOv(f);
+        const ovFlag = false;
         return `<button data-cs-sim-host="${csEscape(host)}" data-cs-sim-flag="${csEscape(f)}" data-cs-sim-on="${on ? '1' : '0'}" data-cs-sim-ov="${ovFlag ? '1' : '0'}"
           onclick="csSimToggle(this)" title="${ovFlag ? 'Override' : 'SID'}: ${csEscape(f)} ${on ? 'on' : 'off'} on ${csEscape(host)} — click to ${on ? 'disable' : 'enable'}"
           class="${csSimBtnClass(on, ovFlag)} w-full text-center">${csEscape(f)}</button>`;
@@ -1510,83 +1500,40 @@ function csClientSimBar(c, host) {
     </div>`;
 }
 
-// Persist a single flag override into the [username] section of
-// user-overrides.conf (mirrors csCtlSaveUO for one flag) so Config/Simulations
-// "User Overrides" reflects the same change. Best-effort: a failure here must
-// NOT undo the runtime registry toggle already sent, so it logs + toasts and
-// never throws.
-async function csPersistFlagToUserOverrides(host, flag, value) {
-    const user = String(host || '').split('-')[0] || host;
-    if (!user) return;
-    try {
-        const cur = await csFetch(`/${csTenant()}/config/user-overrides-conf`);
-        const state = csParseIni((cur && cur.content) || '');
-        const merged = Object.assign({}, state[user] || {});
-        // An empty/null value REMOVES the flag. A pruned override (reverted to the
-        // bucket default) must be DELETED from user-overrides.conf, not written as
-        // flag=off — otherwise turning an override OFF leaves it lingering here.
-        if (value === '' || value === null || value === undefined) {
-            delete merged[flag];
-        } else {
-            merged[flag] = value;
-        }
-        state[user] = merged;
-        let text = '';
-        for (const [u, kv] of Object.entries(state)) {
-            const lines = Object.entries(kv).filter(
-                ([, v]) => !(v === '' || v === null || v === undefined));
-            if (!lines.length) continue;  // drop sections left with no values
-            text += `[${u}]\n`;
-            for (const [k, v] of lines) text += `${k}=${v}\n`;
-            text += '\n';
-        }
-        await csFetch(`/${csTenant()}/config/user-overrides-conf`,
-            { method: 'PUT', body: JSON.stringify({ content: text.trim() }) });
-    } catch (e) {
-        console.error('csPersistFlagToUserOverrides failed', e);
-        if (typeof showToast === 'function') showToast(`user-overrides save failed: ${e.message || 'error'}`, 'error');
-    }
-}
-
+// ── Per-client sim toggle (model A: per-USER override in user-overrides.conf) ─
+// A single click toggles one sim for the client's USER (username = host minus
+// the trailing -N). The HUB owns the write: cs_set_client_control edits the
+// [username] section of user-overrides.conf, pushes it through the source-of-
+// truth flow, commits+pushes to GitHub when a token is configured, and clears
+// any legacy per-client registry override. No client-side user-overrides mirror
+// is needed here — the dashboard just flips the button and lets the next
+// telemetry frame confirm the resolved config.
 window.csSimToggle = async function (btn) {
     const host = btn.dataset.csSimHost, flag = btn.dataset.csSimFlag;
     if (!host || !flag) return;
     const next = btn.dataset.csSimOn === '1' ? 'off' : 'on';
-    // Set just THIS flag's override — the endpoint merges it into the client's
-    // persisted overrides (registry.set_overrides), so toggling one sim doesn't
-    // disturb the others. Also mirror the flag into user-overrides.conf so the
-    // Config/Simulations "User Overrides" card stays in sync. "Clear" drops all
-    // overrides for the client.
-    //
-    // The spoke PRUNES the override server-side when the new value matches the
-    // pure bucket default (so toggling OFF a sim that's already off by default
-    // reverts to the bucket instead of leaving flag:"off"). The spoke response
-    // carries the post-prune overrides, so we read it back: if `flag` is absent
-    // the override was pruned → the button reverts to the bucket-default style
-    // (border-only OFF / filled ON); if present it's a real override → border-
-    // only purple.
+    const user = String(host || '').split('-')[0] || host;
     csCtlMsg(host, `${next === 'on' ? 'Enabling' : 'Disabling'} ${flag}…`, true);
+    // Optimistic flip; cs_set_client_control patches the hub cache so the next
+    // render already reflects it, and the ~10s telemetry frame is authoritative.
+    const on = (next === 'on');
+    const prevOn = btn.dataset.csSimOn;
+    btn.dataset.csSimOn = on ? '1' : '0';
+    btn.className = csSimBtnClass(on, false) + ' w-full text-center';
     try {
-        const r = await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
+        await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
             { method: 'POST', body: JSON.stringify({ overrides: { [flag]: next } }) });
-        const newOv = (r && r.overrides) || {};
-        const isOv = Object.prototype.hasOwnProperty.call(newOv, flag);
-        // Mirror to user-overrides.conf using the POST-PRUNE result: a real
-        // override persists its value; a PRUNED override (reverted to the bucket/
-        // simulation default) is REMOVED from user-overrides.conf, not written as
-        // flag=off. Do this after the prune check so a revert clears the override.
-        await csPersistFlagToUserOverrides(host, flag, isOv ? String(newOv[flag]) : '');
-        // When pruned, the flag reverted to the bucket default = the value the
-        // user just chose (on/off), shown as a NON-override (bucket) button.
-        const on = isOv ? ['on', 'true', '1'].includes(String(newOv[flag]).toLowerCase())
-                        : (next === 'on');
-        btn.dataset.csSimOn = on ? '1' : '0';
-        btn.dataset.csSimOv = isOv ? '1' : '0';
-        btn.className = csSimBtnClass(on, isOv);
-        btn.title = `${isOv ? 'Override' : 'SID'}: ${flag} ${on ? 'on' : 'off'} on ${host} — click to ${on ? 'disable' : 'enable'}`;
-        csCtlMsg(host, `${flag} ${next}${isOv ? '' : ' (SID default)'}`, true);
-        if (typeof showToast === 'function') showToast(`${flag} ${next} on ${host}`, 'success');
-    } catch (e) { console.error('csSimToggle failed', e); csCtlMsg(host, e.message || 'failed', false); }
+        btn.title = `${flag} ${on ? 'on' : 'off'} for ${user} — click to ${on ? 'disable' : 'enable'}`;
+        csCtlMsg(host, `${flag} ${next} (user override)`, true);
+        if (typeof showToast === 'function') showToast(`${flag} ${next} for ${user} (user override)`, 'success');
+    } catch (e) {
+        // Revert the optimistic flip so the button matches the true state.
+        btn.dataset.csSimOn = prevOn;
+        btn.className = csSimBtnClass(prevOn === '1', false) + ' w-full text-center';
+        console.error('csSimToggle failed', e);
+        csCtlMsg(host, e.message || 'failed', false);
+        if (typeof showToast === 'function') showToast(`toggle failed: ${e.message || 'error'}`, 'error');
+    }
 };
 
 // ── Demo scenarios (named per-client failure presets, 120-min TTL) ───────────

@@ -982,6 +982,114 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if isinstance(c, dict) and (c.get("hostname") == hostname or c.get("id") == hostname):
                     c["overrides"] = dict(ov)
 
+    # ── Per-user sim overrides → user-overrides.conf [username] (model A) ──────
+    # A dashboard per-client sim toggle now writes a per-USER override (username =
+    # hostname minus the trailing "-N") into user-overrides.conf and goes through
+    # the SAME source-of-truth push as the Config Editor: hub-owned in Hub mode,
+    # committed+pushed to GitHub when a token is configured, 403 in GitHub
+    # read-only. Replaces the hidden per-client registry layer; the legacy
+    # registry override is cleared on write so nothing double-applies.
+    _CS_SIM_FLAGS = {'assoc_fail', 'auth_fail', 'dhcp_fail', 'dns_fail', 'download',
+                     'iperf', 'kill_switch', 'ping_test', 'port_flap', 'ssidpw_fail',
+                     'www_traffic'}
+
+    def _username_for(hostname: str) -> str:
+        """Mirror sim_config.username_for: hostname minus the trailing '-N'."""
+        h = str(hostname or "").strip()
+        return h.split("-", 1)[0] if "-" in h else h
+
+    async def _current_user_overrides_text(tenant_id: str) -> str:
+        """Effective user-overrides.conf text (repo base + hub override), read
+        live from the spoke; falls back to the hub-owned override content when
+        the spoke is offline so an edit never starts from a blank file."""
+        try:
+            data = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
+            if isinstance(data, dict) and data.get("user_overrides") is not None:
+                return data.get("user_overrides") or ""
+        except HTTPException:
+            pass
+        try:
+            return await store.get_user_overrides_content(tenant_id)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _edit_user_override_flags(text, username, flags, clear):
+        """Return user-overrides.conf text with the [username] section's SIM
+        flags updated. clear=True with empty flags removes ALL sim flags from the
+        section; clear=True with flags removes just those; otherwise each flag is
+        set on/off. Non-sim keys (wsite/ssid/sim_phy/…) are preserved."""
+        import io
+        p = configparser.ConfigParser()
+        p.optionxform = str
+        try:
+            p.read_string(text or "")
+        except Exception:  # noqa: BLE001 — start clean on a malformed file
+            p = configparser.ConfigParser(); p.optionxform = str
+        if clear and not flags:
+            if p.has_section(username):
+                for k in list(p.options(username)):
+                    if k in _CS_SIM_FLAGS:
+                        p.remove_option(username, k)
+        else:
+            if not p.has_section(username):
+                p.add_section(username)
+            for k, v in (flags or {}).items():
+                if clear:
+                    if p.has_option(username, k):
+                        p.remove_option(username, k)
+                else:
+                    on = str(v).strip().lower() in ("on", "true", "1", "yes")
+                    p.set(username, k, "on" if on else "off")
+        if p.has_section(username) and not p.options(username):
+            p.remove_section(username)
+        buf = io.StringIO()
+        p.write(buf)
+        return buf.getvalue()
+
+    def _patch_cached_client_config(tenant_id: str, username: str, flags: dict) -> None:
+        """Patch effective_config[flag] for every cached client of `username` so a
+        just-set per-user override shows immediately (before the ~10s telemetry
+        frame). Best-effort; the authoritative frame overwrites it."""
+        for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
+            try:
+                if hub.state.get_spoke_tenant(sid) != tenant_id:
+                    continue
+            except Exception:  # noqa: BLE001
+                continue
+            for c in (data.get("clients") or []):
+                if not isinstance(c, dict):
+                    continue
+                if _username_for(c.get("hostname") or c.get("id") or "") != username:
+                    continue
+                cfg = c.get("config")
+                if not isinstance(cfg, dict):
+                    cfg = {}
+                    c["config"] = cfg
+                for k, v in (flags or {}).items():
+                    cfg[k] = "on" if str(v).strip().lower() in ("on", "true", "1", "yes") else "off"
+
+    async def _write_user_override(tenant_id, hostname, flags, clear):
+        """Set/clear a per-user sim override in user-overrides.conf and push it via
+        the source-of-truth flow. Also clears the legacy per-client registry
+        override so the old hidden layer never double-applies."""
+        source = await _require_config_writable(tenant_id)   # 403 if github + no key
+        username = _username_for(hostname)
+        flags = {k: v for k, v in (flags or {}).items() if k in _CS_SIM_FLAGS}
+        cur = await _current_user_overrides_text(tenant_id)
+        new_text = _edit_user_override_flags(cur, username, flags, clear)
+        await store.set_user_overrides_content(tenant_id, new_text)
+        pushed = await _push_config(tenant_id,
+                                    {"user_conf_override": new_text, "config_source": source})
+        if not clear and flags:
+            _patch_cached_client_config(tenant_id, username, flags)   # instant feedback
+        try:
+            await _cs_forward(tenant_id, "CS_CLEAR_CLIENT_OVERRIDES", {"hostname": hostname})
+        except HTTPException:
+            pass
+        _patch_cached_client_overrides(tenant_id, hostname, {})
+        return {"saved": True, "username": username, "source": source,
+                "pushed_to_spokes": pushed}
+
     # ── platform-wide USB approval helpers (superadmin global + effective merge) ──
     # Mirrors the cs source: global (superadmin) USB certified/ignored lists are
     # merged with each tenant's lists into an "effective" set that is pushed to
@@ -1817,10 +1925,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.get("/sim/api/{tenant}/clients/{hostname}/control")
     async def cs_get_client_control(tenant: str, hostname: str,
                                     tenant_id: str = Depends(get_tenant_id)):
+        # Model A: per-client sim overrides live in user-overrides.conf
+        # [username], so seed the control panel from there (the same place the
+        # toggles write) rather than the legacy per-client registry.
+        username = _username_for(hostname)
         try:
-            return await _cs_forward(tenant_id, "CS_GET_CLIENT_OVERRIDES",
-                                     {"hostname": hostname})
-        except HTTPException:
+            text = await _current_user_overrides_text(tenant_id)
+            p = configparser.ConfigParser()
+            p.optionxform = str
+            try:
+                p.read_string(text or "")
+            except Exception:  # noqa: BLE001
+                p = None
+            ov = {}
+            if p is not None and p.has_section(username):
+                for k in p.options(username):
+                    if k in _CS_SIM_FLAGS:
+                        ov[k] = p.get(username, k)
+            return {"status": "SUCCESS", "hostname": hostname,
+                    "username": username, "overrides": ov}
+        except Exception:  # noqa: BLE001
             return {"status": "SUCCESS", "hostname": hostname, "overrides": {}}
 
     @app.post("/sim/api/{tenant}/clients/{hostname}/control")
@@ -1836,23 +1960,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # the spoke's HTTP client_api endpoint.
             overrides = {k: v for k, v in (body or {}).items()
                          if isinstance(body, dict)}
-        res = await _cs_forward(tenant_id, "CS_SET_CLIENT_OVERRIDES",
-                                {"hostname": hostname, "overrides": overrides})
-        # Mirror the spoke's post-prune overrides into the hub cache so the
-        # Clients view doesn't show a stale (removed) override until the next
-        # telemetry frame — see _patch_cached_client_overrides.
-        if isinstance(res, dict):
-            _patch_cached_client_overrides(tenant_id, hostname, res.get("overrides") or {})
-        return res
+        # Model A: write a per-USER override to user-overrides.conf (visible in
+        # the Config Editor; synced to GitHub when a token is configured).
+        return await _write_user_override(tenant_id, hostname, overrides, clear=False)
 
     @app.delete("/sim/api/{tenant}/clients/{hostname}/control")
     async def cs_clear_client_control(tenant: str, hostname: str,
                                       tenant_id: str = Depends(get_tenant_id)):
-        res = await _cs_forward(tenant_id, "CS_CLEAR_CLIENT_OVERRIDES",
-                                {"hostname": hostname})
-        # Clear removes ALL overrides — reflect that in the cache immediately.
-        _patch_cached_client_overrides(tenant_id, hostname, {})
-        return res
+        return await _write_user_override(tenant_id, hostname, {}, clear=True)
 
     # ── per-host USB VMID overrides ─────────────────────────────────────────
     # Optional per-host vmid_start/vmid_end/vm_set_override that override the
