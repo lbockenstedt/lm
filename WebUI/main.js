@@ -5064,39 +5064,49 @@ function _simQuotaDefaultSelect(selected, items, placeholder) {
 }
 
 function _renderSimQuotaDefaultsEditor() {
-    const { inputCls, labelCls } = _SETUP_CLS;
-    const cat = _simQuotaDefaultsCatalog || { sims: [], suggested: {}, meta: {} };
+    const cat = _simQuotaDefaultsCatalog || { sims: [], sites: [], suggested: {}, meta: {} };
     const simIds = (cat.sims || []).map(s => s.sim_id);
+    const sites = cat.sites || [];
     const suggested = cat.suggested || {};
+    // One shared label + control class so the field labels, dropdowns, and
+    // free-form text boxes all render at the same font size / family (text-sm).
+    const lblCls = 'text-sm text-slate-600 font-medium';
+    const ctlCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm text-slate-800 outline-none focus:ring-2 focus:ring-green-500 mt-1';
     const rowsEl = document.getElementById('sim-quota-defaults-rows');
     if (!rowsEl) return;
     const rowHtml = _simQuotaDefaults.map((r, i) => {
         const simOpts = _simQuotaDefaultSelect(r.sim_id, simIds, '— select sim —');
+        // Site is a dropdown sourced from simulation.conf (platform-wide union).
+        // Fall back to a free-text input when no conf has been seen yet so an
+        // admin can still type a site before any spoke reports in.
+        const siteCtl = sites.length
+            ? `<select data-sqd="site" class="${ctlCls}">${_simQuotaDefaultSelect(r.site, sites, '— all sites —')}</select>`
+            : `<input data-sqd="site" value="${r.site.replace(/"/g, '&quot;')}" placeholder="all sites" class="${ctlCls}">`;
         return `<div class="grid grid-cols-1 md:grid-cols-7 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-sqd-row="${i}">
-          <label class="${labelCls}">Type
-            <select data-sqd="alert_type" class="w-full ${inputCls} text-sm mt-1">
+          <label class="${lblCls}">Type
+            <select data-sqd="alert_type" class="${ctlCls}">
               <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
               <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
             </select>
           </label>
-          <label class="${labelCls}">Alert / Insight ID
-            <input data-sqd="alert_id" value="${r.alert_id.replace(/"/g, '&quot;')}" placeholder="CLIENT_DHCP_FAILURE" class="w-full ${inputCls} text-sm mt-1">
+          <label class="${lblCls}">Alert / Insight ID
+            <input data-sqd="alert_id" value="${r.alert_id.replace(/"/g, '&quot;')}" placeholder="CLIENT_DHCP_FAILURE" class="${ctlCls}">
           </label>
-          <label class="${labelCls}">Simulation
-            <select data-sqd="sim_id" class="w-full ${inputCls} text-sm mt-1">${simOpts}</select>
+          <label class="${lblCls}">Simulation
+            <select data-sqd="sim_id" class="${ctlCls}">${simOpts}</select>
           </label>
-          <label class="${labelCls}">Clients
-            <input data-sqd="count" type="number" min="1" value="${r.count}" class="w-full ${inputCls} text-sm mt-1">
+          <label class="${lblCls}">Clients
+            <input data-sqd="count" type="number" min="1" value="${r.count}" class="${ctlCls}">
           </label>
-          <label class="${labelCls}">Site (blank = all)
-            <input data-sqd="site" value="${r.site.replace(/"/g, '&quot;')}" placeholder="all sites" class="w-full ${inputCls} text-sm mt-1">
+          <label class="${lblCls}">Site (blank = all)
+            ${siteCtl}
           </label>
-          <label class="${labelCls} flex flex-col gap-1">
+          <label class="${lblCls} flex flex-col gap-1">
             <span class="flex items-center gap-1"><input data-sqd="multi_capable" type="checkbox" ${r.multi_capable ? 'checked' : ''}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-sqd="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-sqd="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
           </label>
-          <button onclick="removeSimQuotaDefault(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
+          <button onclick="removeSimQuotaDefault(${i})" class="text-red-600 hover:text-red-800 text-sm font-bold py-2">Remove</button>
         </div>`;
     }).join('');
     const suggestHtml = Object.keys(suggested).length ? `

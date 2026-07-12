@@ -2520,8 +2520,49 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def get_sim_quota_defaults(request: Request):
         _require_admin(request)
         from .sim_quota import sim_quota_catalog_from_ini
+        catalog = sim_quota_catalog_from_ini("")
+        # Platform-wide Site list for the Defaults editor dropdown: the union of
+        # sites every tenant's simulation.conf offers (relayed sim_conf_content in
+        # the simulations_cache OR the stored override) plus each tenant's Central
+        # site_mappings. Sims stay the full primitive catalog (a tenant's
+        # simulation.conf may offer a subset); sites are pulled from the confs so
+        # the editor offers a dropdown instead of free-text.
+        catalog["sites"] = await _platform_wide_sim_quota_sites()
         return {"defaults": await store.get_sim_quota_defaults(),
-                "catalog": sim_quota_catalog_from_ini("")}
+                "catalog": catalog}
+
+    async def _platform_wide_sim_quota_sites() -> list:
+        """Union of sites known across all tenants — from each tenant's
+        simulation.conf (cached relayed ``sim_conf_content`` or the stored
+        override) and ``central_sites_config.site_mappings`` — so the
+        platform-wide Sim Quota Defaults editor can offer a Site dropdown
+        sourced from the actual simulation.conf content."""
+        from .sim_quota import available_sites_from_ini
+        sites: set = set()
+        for data in (getattr(hub, "simulations_cache", {}) or {}).values():
+            txt = (data or {}).get("sim_conf_content") or ""
+            if txt:
+                try:
+                    sites.update(available_sites_from_ini(txt))
+                except Exception:  # noqa: BLE001
+                    pass
+        for tid in _all_tenant_ids():
+            try:
+                txt = await store.get_sim_conf_content(tid) or ""
+                if txt:
+                    sites.update(available_sites_from_ini(txt))
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                csc = await store.get_central_sites_config(tid) or {}
+                for k, v in (csc.get("site_mappings") or {}).items():
+                    if k:
+                        sites.add(str(k))
+                    if v:
+                        sites.add(str(v))
+            except Exception:  # noqa: BLE001
+                pass
+        return sorted(s for s in sites if s)
 
     @app.put("/sim/api/superadmin/sim-quota-defaults")
     async def put_sim_quota_defaults(request: Request):
