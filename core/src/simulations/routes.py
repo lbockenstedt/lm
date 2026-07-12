@@ -23,6 +23,7 @@ import logging
 import re
 from .service import SimulationsService
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
+from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini
 from access import safe_external_url, host_resolves_external
 from urllib.parse import urlsplit
 
@@ -2362,9 +2363,42 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception:
             body = {}
         cfg = body if isinstance(body, dict) else {}
+        # Validate the additive sim_quotas field against the sims the tenant's
+        # simulation.conf offers. Unknown/invalid quotas are dropped + reported;
+        # the rest of central_sites_config passes through unchanged. The spoke
+        # re-validates on CS_SET_CENTRAL_SITES_CONFIG apply (defense in depth).
+        sim_quota_errors: list[str] = []
+        try:
+            sim_txt = await store.get_sim_conf_content(tenant_id) or ""
+            sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
+            clean, sim_quota_errors = validate_sim_quotas(cfg.get("sim_quotas"), sim_ids)
+            if sim_quota_errors:
+                logger.warning("set_central_sites(%s): sim_quotas errors: %s", tenant_id, sim_quota_errors)
+            cfg = {**cfg, "sim_quotas": clean}
+        except Exception as exc:  # noqa: BLE001 — never block the save
+            logger.warning("set_central_sites(%s): sim_quotas validate failed: %s", tenant_id, exc)
         await store.set_central_sites_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"central_sites_config": cfg})
-        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
+        return {"saved": True, "pushed_to_spokes": pushed,
+                "queued": bool(getattr(pushed, "queued", False)),
+                "sim_quota_errors": sim_quota_errors}
+
+    @app.get("/sim/api/{tenant}/sim-quota-catalog")
+    async def get_sim_quota_catalog(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Catalog the Sim-Quota UI (Config → Sim Quotas) renders against: the
+        sims + sites derived from the tenant's ``simulation.conf`` + the global
+        suggested alert→sim marriages + per-sim metadata. Forwards to the cs
+        spoke (which reads ``simulation.conf`` directly — the source of truth);
+        falls back to parsing the hub's cached ``sim_conf_content`` when no
+        spoke is connected so the editor still works offline."""
+        try:
+            return await _cs_forward(tenant_id, "CS_GET_SIM_QUOTA_CATALOG", {}, timeout=15.0)
+        except HTTPException:
+            sim_txt = await store.get_sim_conf_content(tenant_id) or ""
+            csc = await store.get_central_sites_config(tenant_id) or {}
+            cat = sim_quota_catalog_from_ini(sim_txt, csc.get("site_mappings"))
+            cat["warning"] = "Client-Sim spoke not connected — catalog from cached config."
+            return cat
 
     @app.get("/sim/api/{tenant}/central/available")
     async def get_central_available(tenant: str, tenant_id: str = Depends(get_tenant_id)):
