@@ -529,69 +529,25 @@ class AgentControlPlane(BaseControlPlane):
                     except Exception:
                         logger.exception("Startup role %s load failed", role)
             asyncio.create_task(_seed_startup_roles())
-        # Self-heal the "pulled-but-not-restarted" trap: if a SPOKE_UPDATE / manual
-        # pull advanced a repo on disk but this process never restarted (so it keeps
-        # serving old code AND the next update sees "already up to date"), restart.
-        self._drift_task = asyncio.create_task(self._code_drift_watchdog(agent))
+        # The code-drift self-heal is armed by BaseControlPlane.run(); this agent
+        # only widens the watch set (see _drift_watched_dirs) to include each
+        # loaded role's sibling repo.
         await super().run()
 
-    async def _code_drift_watchdog(self, agent, interval_s: float = 300.0):
-        """Restart the agent when code on disk drifts AHEAD of the running process.
-
-        Captures each watched repo's HEAD at startup (the base /opt/lm checkout +
-        every loaded role's sibling repo) and, every ``interval_s``, re-reads it.
-        Any drift → ``os._exit(3)`` so systemd ``Restart=on-failure`` reloads the
-        current code. This closes the gap that stranded a role at an old class in
-        memory even though its repo had been pulled to a newer HEAD on disk."""
-        async def _head(d):
+    def _drift_watched_dirs(self) -> list:
+        """Extend the base watch set (own repo + shared /opt/lm core) with each
+        loaded role's sibling repo, so a role pulled-but-not-restarted also
+        self-heals. The base watchdog (BaseControlPlane._code_drift_watchdog)
+        calls this every cycle and baselines any repo that first appears here."""
+        dirs = set(super()._drift_watched_dirs())
+        agent = self.modules.get("agent")
+        for role in list(getattr(agent, "_roles", {}) or {}):
             try:
-                p = await asyncio.create_subprocess_exec(
-                    "git", "-C", str(d), "rev-parse", "HEAD",
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-                out, _ = await asyncio.wait_for(p.communicate(), timeout=10.0)
-                return out.decode().strip() if p.returncode == 0 else ""
-            except Exception:  # noqa: BLE001 — never let the watchdog crash the agent
-                return ""
-
-        def _watched_dirs():
-            dirs = {self._lm_root()}  # /opt/lm — the agent + shared core checkout
-            for role in list(getattr(agent, "_roles", {}) or {}):
-                try:
-                    clone = _ROLE_MAP[role][0].split("/")[0]
-                    dirs.add(self._lm_root() / clone)
-                except Exception:  # noqa: BLE001
-                    pass
-            return [d for d in dirs if (Path(d) / ".git").exists()]
-
-        baseline = {}
-        for d in _watched_dirs():
-            baseline[str(d)] = await _head(d)
-        logger.info("code-drift watchdog armed (every %ss): %s", int(interval_s),
-                    {k: v[:8] for k, v in baseline.items() if v})
-        while True:
-            try:
-                await asyncio.sleep(interval_s)
-                for d in _watched_dirs():
-                    key, now = str(d), await _head(d)
-                    if not now:
-                        continue
-                    was = baseline.get(key)
-                    if was and now != was:
-                        logger.warning("code-drift: %s advanced %s→%s on disk but the "
-                                       "process never restarted — exiting so systemd "
-                                       "reloads current code.", d, was[:8], now[:8])
-                        try:
-                            await self._flush_log_relay_async()
-                        except Exception:  # noqa: BLE001
-                            pass
-                        os._exit(3)
-                    if key not in baseline:  # newly-loaded role → baseline, don't restart
-                        baseline[key] = now
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001 — never fatal
-                logger.debug("code-drift watchdog cycle failed: %s", e)
-
+                clone = _ROLE_MAP[role][0].split("/")[0]
+                dirs.add(str(self._lm_root() / clone))
+            except Exception:  # noqa: BLE001
+                pass
+        return [d for d in dirs if os.path.isdir(os.path.join(str(d), ".git"))]
 
 if __name__ == "__main__":
     import socket as _socket
