@@ -170,6 +170,20 @@ class AgentHostingControlPlane(BaseControlPlane):
 
     # ── Agent WebSocket server ──────────────────────────────────────────────
 
+    def _agent_listener_tls_paths(self):
+        """Return the ``(cert, key)`` paths the ``/ws/agent`` listener should
+        present. Default: the ``LM_TLS_CERT`` / ``LM_TLS_KEY`` env the installer
+        provisioned. A subclass that applies a cert at runtime (cs
+        ``_apply_local_cert``) overrides this to prefer the persisted LE-cert
+        paths so the 443 agent listener serves the same cert as the 8080 webui
+        — otherwise the agent→spoke leg keeps the old/self-signed cert (or
+        plaintext) after INSTALL_CERT applies a fresh LE cert to the webui.
+        Returns paths that may be ``('', '')`` when no cert is configured →
+        ``run_agent_server`` falls back to plaintext (legacy/cert-less)."""
+        cert = os.environ.get("LM_TLS_CERT", "").strip()
+        key = os.environ.get("LM_TLS_KEY", "").strip()
+        return cert, key
+
     async def run_agent_server(self):
         """Serve the agent listener. Three modes:
 
@@ -177,9 +191,10 @@ class AgentHostingControlPlane(BaseControlPlane):
           plaintext, on ``<AGENT_PORT_ENV>`` (default ``AGENT_LOOPBACK_PORT``).
           TLS terminates upstream (the hub's ``/ws/agent`` byte-proxy on the
           all-in-one path); the port is NOT advertised externally.
-        * **Standalone wss** — a cert is present (``LM_TLS_CERT``/``LM_TLS_KEY``)
-          and loopback is OFF: ``wss`` on ``0.0.0.0:<AGENT_PORT_ENV>`` (default
-          ``AGENT_WSS_PORT``); a standalone spoke sets it to 443 so agents dial
+        * **Standalone wss** — a cert is present (``_agent_listener_tls_paths``
+          returns one) and loopback is OFF: ``wss`` on
+          ``0.0.0.0:<AGENT_PORT_ENV>`` (default ``AGENT_WSS_PORT``); a
+          standalone spoke sets it to 443 so agents dial
           ``wss://<spoke>:443/ws/agent`` directly.
         * **Standalone plaintext (legacy / cert-less)** — no cert, loopback OFF:
           ``ws`` on ``0.0.0.0:<AGENT_PORT_ENV>`` (default ``AGENT_FALLBACK_PORT``).
@@ -187,8 +202,9 @@ class AgentHostingControlPlane(BaseControlPlane):
         Retries up to 10× on EADDRINUSE.
         """
         loopback = os.environ.get(self.AGENT_LOOPBACK_ENV, "").strip() in ("1", "true", "True")
-        cert = os.environ.get("LM_TLS_CERT", "").strip()
-        key = os.environ.get("LM_TLS_KEY", "").strip()
+        cert, key = self._agent_listener_tls_paths()
+        cert = (cert or "").strip()
+        key = (key or "").strip()
         if loopback:
             # TLS terminates upstream; the loopback hop is plaintext.
             host = "127.0.0.1"
@@ -247,6 +263,26 @@ class AgentHostingControlPlane(BaseControlPlane):
                     await asyncio.sleep(5)
 
         self._agent_server_task = asyncio.create_task(_run_agent_server_logged())
+
+    async def _rebind_agent_server(self) -> None:
+        """Stop the current ``/ws/agent`` listener and start a fresh one so it
+        picks up a newly-applied TLS cert (mirrors the cs 8080-webui
+        ``_rebind_api_server``). ``run_agent_server`` reads the cert at
+        serve-start, so a cert renewed mid-run isn't served until the listener
+        restarts. Connected agents drop and reconnect — the spoke re-onboards
+        them on reconnect (agent_id is stable), so this is safe during a cert
+        renew. No-op when the listener isn't running or isn't enabled."""
+        old = self._agent_server_task
+        if old is not None and not old.done():
+            old.cancel()
+            try:
+                await old
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._agent_server_task = None
+        if self._agent_listener_enabled():
+            logger.info("Re-binding /ws/agent listener to serve the new TLS cert")
+            self._start_agent_server_task()
 
     # ── Pending approval / revocation ───────────────────────────────────────
 
