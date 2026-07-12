@@ -8449,7 +8449,7 @@ function _diagTelemetryExtras(s, fns) {
         // div — saves vertical space on the Spokes & Agents tiles.
         status,
         badges: [
-            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600" title="Time since last inbound heartbeat frame (GREEN &lt;120s, YELLOW 120–300s, RED &gt;=300s/never)">${hbStatus || '—'} · ${hbAge}</span>`,
+            `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600" title="Time since last inbound heartbeat frame (&lt;120s healthy, 120–300s slow, &gt;=300s/never stale — see the row's status dot)">${hbAge}</span>`,
             `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase font-mono ${_verTone}" title="${_verTitle}">${escapeHtml(_ver)}</span>`,
             `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-600" title="${escapeHtml(badge.title)}">${badge.text}</span>`,
             alertBadge,
