@@ -4877,6 +4877,11 @@ function _renderSetupSimulationsTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
             <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Discovered USB Devices ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <p class="text-xs text-slate-500 mb-3">Every USB VID:PID seen across all tenants' spokes (plus tenant-certified/ignored entries not yet in telemetry). Approve or ignore a device type globally — applies to every tenant.</p>
+                <div id="global-usb-discovered" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
+            <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Global USB Approvals ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide USB dongle approvals — applies to every tenant (merged with each tenant's own list).</p>
                 <div class="space-y-6">
@@ -4921,11 +4926,6 @@ function _renderSetupSimulationsTile(content) {
                         </div>
                     </div>
                 </div>
-            </div>
-            <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Discovered USB Devices ${helpIcon('cs', null, 'Simulations help')}</h3>
-                <p class="text-xs text-slate-500 mb-3">Every USB VID:PID seen across all tenants' spokes (plus tenant-certified/ignored entries not yet in telemetry). Approve or ignore a device type globally — applies to every tenant.</p>
-                <div id="global-usb-discovered" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Per-Tenant USB ${helpIcon('cs', null, 'Simulations help')}</h3>
