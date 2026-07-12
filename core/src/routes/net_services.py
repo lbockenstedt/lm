@@ -346,6 +346,31 @@ def register(app, hub, ctx):
         _le_inner(payload)["distribution"] = dist or []
         return payload
 
+    @app.post("/api/le/certs/{domain}/distribute")
+    async def le_distribute_target(domain: str, request: Request):
+        """Re-push cert material for ``domain`` to ONE target only — the
+        per-target click-to-deploy in the LE table (click a spoke/agent badge
+        → deploy this cert to that target). Mirrors /api/le/issue's
+        single-cert distribution but narrows to a single target so the operator
+        can re-deploy to a failed node without re-pushing every target. The
+        target dict is built WITHOUT ``last_pushed_hash``/``last_status``, so
+        ``distribute_cert_to_targets``' skip-check never short-circuits — a
+        click is an explicit re-deploy, even on an already-green target. Returns
+        a one-entry per-target summary."""
+        body = await request.json()
+        if not isinstance(body, dict) or not body.get("module_type"):
+            raise HTTPException(status_code=400, detail="module_type required")
+        target = {"module_type": body["module_type"],
+                  "identifier": body.get("identifier") or ""}
+        hub = app.state.hub
+        le_sid = _get_le_spoke(hub)
+        try:
+            dist = await hub._distribute_one_cert(le_sid, domain, [target])
+        except Exception as e:
+            logger.exception("le_distribute_target failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "SUCCESS", "distribution": dist or []}
+
     # ── per-cert distribution targets ──────────────────────────────────────────
     # Each target = {module_type, identifier?} describing which spoke/device a
     # cert should be installed on. The hub resolves the spoke by module_type and

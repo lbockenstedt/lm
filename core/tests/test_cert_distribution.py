@@ -156,6 +156,31 @@ def test_distribute_skips_up_to_date_target():
     assert not [c for c in calls if c["cmd"] == "LE_MARK_DISTRIBUTED"]
 
 
+def test_distribute_single_target_without_ledger_always_pushes():
+    """Click-to-deploy: the per-target route builds the target WITHOUT
+    ``last_pushed_hash``/``last_status`` (the operator clicked a badge, not the
+    hourly sweep). The skip-check needs BOTH ``last_pushed_hash == material_hash``
+    AND ``last_status == "SUCCESS"`` — a target fresh from the route has neither,
+    so it always pushes (a click is an explicit re-deploy, even on a target that
+    was already green). Guards against the click-to-deploy silently no-op'ing."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        (_FW, "INSTALL_CERT"): _install_ok(),
+    })
+    get_by_type = lambda mt: _FW if mt == "firewall" else None
+    # No last_pushed_hash / last_status — exactly what the route sends.
+    targets = [{"module_type": "firewall", "identifier": "edge-1"}]
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
+    assert summary[0]["status"] == "SUCCESS"
+    assert summary[0].get("skipped") is not True
+    installs = [c for c in calls if c["cmd"] == "INSTALL_CERT"]
+    assert len(installs) == 1
+    assert installs[0]["data"]["identifier"] == "edge-1"
+    marks = [c for c in calls if c["cmd"] == "LE_MARK_DISTRIBUTED"]
+    assert len(marks) == 1
+
+
 def test_distribute_unsupported_module_records_error():
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
     get_by_type = lambda mt: None

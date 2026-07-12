@@ -12304,11 +12304,15 @@ async function loadLEData(subMenu) {
         } catch (e) { window._leInflightMap = {}; }
         const inflightMap = window._leInflightMap || {};
         const tgtBadge = (t, domain) => {
+            const dEsc = escJsAttr(String(domain || ''));
+            const mtEsc = escJsAttr(String(t.module_type || ''));
+            const idEsc = escJsAttr(String(t.identifier || ''));
             const ifk = `${domain}|${t.module_type}|${t.identifier || ''}`;
             const since = inflightMap[ifk];
             if (since) {
                 // Yellow while we wait for deployment confirmation. The elapsed
-                // span is updated every 1s by updateLeInflightTimers.
+                // span is updated every 1s by updateLeInflightTimers. Not
+                // clickable — a deploy is already running for this target.
                 return `<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300" data-inflight-since="${since}" title="Deployment in progress…">
                     <span class="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse mr-1 align-middle"></span>${t.module_type}${t.identifier ? '/' + t.identifier : ''} <span class="le-inflight-elapsed" data-elapsed-since="${since}">0s</span>
                 </span>`;
@@ -12316,7 +12320,10 @@ async function loadLEData(subMenu) {
             const ok = t.last_status === 'SUCCESS';
             const cls = ok ? 'bg-green-100 text-green-700' : (t.last_status === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500');
             const mark = ok ? '✓' : (t.last_status === 'ERROR' ? '✗' : '·');
-            return `<span class="px-1.5 py-0.5 rounded text-xs font-medium ${cls}">${mark} ${t.module_type}${t.identifier ? '/' + t.identifier : ''}</span>`;
+            const label = `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`;
+            // Click-to-deploy: clicking a target badge pushes this cert to that
+            // one target only (mirrors the CS spoke-clients click-to-act pattern).
+            return `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="Click to deploy this cert to ${label}">${mark} ${label}</button>`;
         };
         // Color-coded expiry badge from not_after. The le renewal loop renews
         // within 30d, so amber (<30d) = renew pending/failed, red (<7d / expired)
@@ -12333,7 +12340,7 @@ async function loadLEData(subMenu) {
             else { cls = 'bg-green-100 text-green-700'; label = `${days}d left`; }
             return { text: `${dt.toISOString().slice(0, 10)} · ${label}`, cls, days };
         };
-        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Targets'];
+        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires'];
         // Per-domain last-issue indicator from window._leIssueStatus (the
         // client-side tracker fed by _leRunIssue). Green = last issue
         // succeeded, red = last issue failed (hover for the message), amber
@@ -12355,15 +12362,17 @@ async function loadLEData(subMenu) {
             const tgts = c.targets || [];
             const tgtCell = tgts.length
                 ? `<div class="flex flex-wrap gap-1">${tgts.map(t => tgtBadge(t, c.domain)).join('')}</div>`
-                : `<span class="text-xs text-slate-400 italic">none</span>`;
+                : `<span class="text-xs text-slate-400 italic">none — Manage to add</span>`;
             const exp = leExpiry(c.not_after);
             const retryBtn = isFailed
                 ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
                 : '';
-            // 2-row group per cert: data on row 1, Actions pinned right on row 2
-            // (the 7-column table was cramped — the Expires date wrapped and the
-            // Actions cell squeezed manage/Renew/Revoke/Retry together). Actions
-            // sit on their own line, right-aligned, so the data row breathes.
+            // 2-row group per cert: data on row 1; row 2 carries the clickable
+            // targets list (left) + the Manage/Renew/Revoke actions stacked
+            // vertically and pinned to the far right. The targets moved out of
+            // the data row so each badge has room to be a click-to-deploy button
+            // (mirrors the CS spoke-clients click-to-act pattern); the actions
+            // stack vertically so they never wrap/squeeze the expiry column.
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
@@ -12373,15 +12382,20 @@ async function loadLEData(subMenu) {
                     <span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls} whitespace-nowrap">${exp.text}</span>
                     <div class="text-[11px] text-slate-400 mt-0.5" title="Renewal loop triggers this many days before expiry (per-cert override; default 7)">renew @ ${c.renew_window_days_effective ?? 7}d</div>
                 </td>
-                <td class="px-4 py-2"><div class="flex items-center gap-2">${tgtCell}</div></td>
             </tr>
             <tr class="border-b border-slate-200 hover:bg-slate-50">
-                <td colspan="6" class="px-4 py-2 text-right">
-                    <div class="flex items-center justify-end gap-3 whitespace-nowrap">
-                        ${retryBtn}
-                        <button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Manage distribution targets">Manage</button>
-                        <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
-                        <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
+                <td colspan="5" class="px-4 py-2">
+                    <div class="flex items-center justify-between gap-4">
+                        <div class="flex flex-wrap items-center gap-1.5 flex-1 min-w-0">
+                            <span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1">Targets</span>
+                            ${tgtCell}
+                        </div>
+                        <div class="flex flex-col items-end gap-1.5 whitespace-nowrap">
+                            ${retryBtn ? `<div>${retryBtn}</div>` : ''}
+                            <button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Manage distribution targets">Manage</button>
+                            <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
+                            <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
+                        </div>
                     </div>
                 </td>
             </tr>`;
@@ -12562,6 +12576,32 @@ async function leDistributeNow() {
         console.info('[le] distribute', dist);
         await loadLEData();
     } catch (e) { alert('Distribute failed: ' + e.message); }
+}
+
+async function leDeployTarget(domain, module_type, identifier) {
+    // Per-target click-to-deploy: push this cert to ONE target only (the
+    // clicked spoke/agent badge). The server builds the target without
+    // last_pushed_hash so the skip-check always fires the push — a click is an
+    // explicit re-deploy, even on an already-green target. Mirrors the CS
+    // spoke-clients click-to-act pattern.
+    const tgt = `${module_type}${identifier ? '/' + identifier : ''}`;
+    try {
+        const body = { module_type };
+        if (identifier) body.identifier = identifier;
+        const { ok, data, detail } = await _spokeFetch(
+            `/api/le/certs/${encodeURIComponent(domain)}/distribute`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (!ok) { showToast(`Deploy to ${tgt} failed: ` + (detail || ''), 'error'); await loadLEData(); return; }
+        const inner = (data && data.data) ? data.data : (data || {});
+        const dist = inner.distribution || [];
+        const d0 = dist[0] || {};
+        if (d0.status === 'SUCCESS') {
+            showToast(`${tgt}: ${d0.skipped ? 'already up to date' : 'deployed'}`, 'success');
+        } else {
+            showToast(`${tgt} deploy failed: ${d0.message || detail || ''}`, 'error');
+        }
+        await loadLEData();
+    } catch (e) { showToast(`Deploy to ${tgt} failed: ` + e.message, 'error'); }
 }
 
 // Per-cert target manager modal. The hub brokers cert material from the le
