@@ -4550,6 +4550,7 @@ async function csRenderVmServerVms() {
         <button onclick="csVmBulk('delete_vm')" class="bg-red-100 text-red-700 px-2 py-1 rounded font-bold">Delete</button>
       </div>
       <div id="cs-vm-list">${csVmTable(rows)}</div>
+      ${csVmStatusLegend()}
     </div>`);
     window._csVmGrouped = grouped;
     window._csVmByKey = {};
@@ -4575,6 +4576,30 @@ const CS_VM_TABLE_HEADER_HTML = [
 ];
 function csVmTable(rows) {
     return csTable(CS_VM_TABLE_HEADERS, rows, {id: 'cs-vm-table', headerHtml: CS_VM_TABLE_HEADER_HTML});
+}
+
+// Legend for the VM STATUS column — explains each transient-operation + steady
+// badge so an operator can read the list at a glance. Keep the swatch colors in
+// sync with csVmStatusBadge / csStatusBadge / csShedBadge.
+function csVmStatusLegend() {
+    const item = (cls, label, desc) =>
+        `<span class="inline-flex items-center gap-1.5" title="${csEscape(desc)}">
+           <span class="w-2.5 h-2.5 rounded-full ${cls}"></span>
+           <span class="text-slate-600">${csEscape(label)}</span>
+           <span class="text-slate-400">— ${csEscape(desc)}</span>
+         </span>`;
+    const items = [
+        ['bg-green-500', 'Running', 'VM is powered on'],
+        ['bg-slate-400', 'Stopped', 'VM is powered off'],
+        ['bg-indigo-500', 'Recloning', 'being destroyed + re-cloned from template (in progress)'],
+        ['bg-sky-500', 'Provisioning / Configuring', 'auto-provision: cloning then configuring a new sim VM'],
+        ['bg-amber-500', 'Shedding', 'countdown to teardown — its USB dongle is missing'],
+        ['bg-red-500', 'Deleting', 'being torn down (destroy in progress)'],
+    ];
+    return `<div class="mt-3 px-1">
+      <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Status legend</p>
+      <div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">${items.map(i => item(i[0], i[1], i[2])).join('')}</div>
+    </div>`;
 }
 
 // Toggles every visible row checkbox (the current category tab only — matches
@@ -4663,6 +4688,11 @@ function csVmStatusBadge(v) {
     const ps = String(v.prov_status || '').toLowerCase();
     if (ps === 'tearing_down') {
         return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700"><span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>Deleting…</span>`;
+    }
+    // An active reclone (destroy + clone + boot + guest-agent wait) wins over the
+    // steady status — the agent stamps prov_status="recloning" for its duration.
+    if (ps === 'recloning') {
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-indigo-100 text-indigo-700"><span class="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse"></span>Recloning…</span>`;
     }
     // Missing-dongle shed countdown wins over the steady status (it's imminent).
     const shed = csShedBadge(v);
