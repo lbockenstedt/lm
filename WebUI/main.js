@@ -3776,7 +3776,8 @@ function _renderSetupSpokesTile(content) {
                     </div>
                     <div id="agents-table-wrap"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
                 </div>
-            </div>`;
+            </div>
+            ${_spokesAgentsLegend()}`;
     _populateSaTenantFilter();
     loadSpokesAndAgents();
     loadSaHubUrl();
@@ -3829,6 +3830,54 @@ async function saveSaHubUrl() {
     } catch (e) {
         showToast('Error saving hub URL: ' + e.message, 'error');
     }
+}
+
+// Static legend under the Spokes & Agents tile — explains the row status dot,
+// version chip, recovery badge, and the kind/status/tenant badges. Swatch
+// classes mirror _diagTelemetryExtras / recoveryBadge / the row renderer so the
+// samples match the live UI. Same look as the Simulations → Clients legend.
+function _spokesAgentsLegend() {
+    const dot = cls => `<span class="inline-block w-2 h-2 rounded-full ${cls}"></span>`;
+    const pill = (cls, t) => `<span class="${cls} px-2 py-0.5 rounded-full text-[10px] font-bold uppercase">${t}</span>`;
+    const lbl = t => `<span class="font-bold uppercase tracking-wider text-slate-400 mr-1">${t}</span>`;
+    return `<div class="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
+      <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
+      <div class="mt-2 space-y-1.5">
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Status')}
+          <span class="flex items-center gap-1.5">${dot('bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]')} Online / healthy</span>
+          <span class="flex items-center gap-1.5">${dot('bg-amber-400')} Slow heartbeat or pending approval</span>
+          <span class="flex items-center gap-1.5">${dot('bg-red-500')} Offline / no heartbeat</span>
+          <span class="flex items-center gap-1.5">${dot('bg-slate-300')} No telemetry yet</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Version')}
+          <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-700 font-mono', '.NN')} Up to date</span>
+          <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-700 font-mono', '.NN')} Out of date (behind / non-.NN)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-600 font-mono', '?')} Unknown</span>
+          <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-600', '2s')} Since last heartbeat</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Recovery')}
+          <span class="text-slate-400 italic">shown only when active:</span>
+          <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-600', 'Recovering n/3')}</span>
+          <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-600', 'Recovered')}</span>
+          <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-600', 'Gave up')}</span>
+          <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-500', 'Paused')}</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Badges')}
+          <span class="flex items-center gap-1.5">${pill('bg-indigo-50 text-indigo-700', 'Module')} / ${pill('bg-slate-100 text-slate-600', 'Agent')} / ${pill('bg-slate-100 text-slate-600', 'Role')} node kind</span>
+          <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-700', 'Approved')} / ${pill('bg-yellow-100 text-yellow-700', 'Pending')}</span>
+          <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-700', '⚠ Offending')} over rate · ${pill('bg-orange-100 text-orange-700', '⏳ Throttled')} fleet slow-down</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Tenant')}
+          <span class="flex items-center gap-1.5">${pill('bg-emerald-50 text-emerald-700', 'tenant')} bound to one tenant (private)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-800', 'shared · tenant')} shared — visible to all tenants</span>
+        </div>
+      </div>
+    </div>`;
 }
 
 // Tenant filter for the Spokes & Agents tile. Reads the tenant list from
