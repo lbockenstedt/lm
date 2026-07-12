@@ -772,6 +772,25 @@ class BaseControlPlane:
         except Exception as e:
             logger.debug("Pre-exit async log flush failed: %s", e)
 
+    async def _deferred_repoint_exit(self) -> None:
+        """Scheduled by the ``SPOKE_SET_HUB_URL`` handler ~0.5s after it returns.
+
+        The handler persists the new ``HUB_URL`` to ``.env`` and returns a
+        SUCCESS ack so the hub's mailbox clears the push (vs. SPOKE_UPDATE,
+        which exits before acking and relies on idempotent re-delivery). This
+        task then flushes the log relay — so the "repointing … restarting" line
+        actually reaches the hub — and exits NON-ZERO (3) so systemd
+        ``Restart=always``/``on-failure`` relaunches the process, which on boot
+        reads the now-persisted ``HUB_URL`` and dials the new hub address. The
+        short sleep lets the ack + any final relay frames land first."""
+        try:
+            await asyncio.sleep(0.5)
+            await self._flush_log_relay_async()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Deferred repoint-exit pre-flush failed: %s", e)
+        finally:
+            os._exit(3)
+
     # ------------------------------------------------------------------
 
     def register_module(self, name: str, module_instance: Any):
@@ -1122,6 +1141,23 @@ class BaseControlPlane:
         elif path not in ("", "/"):
             path = path.rstrip("/")
         return urlunsplit((scheme, netloc, path, "", ""))
+
+    @staticmethod
+    def _hub_url_is_loopback(url: str) -> bool:
+        """True if ``url`` points at a loopback / same-box address — a co-located
+        spoke that must NOT be repointed to the hub's public URL on a DNS-name
+        change (loopback is still correct after the hub's public name moves; a
+        public URL may not even route from the same box — NAT hairpin, etc.).
+        Mirrors the loopback test used by ``_connect_and_serve`` for TLS-mode
+        logging (control_plane.py ``_is_loopback``). A ``ws://`` scheme is
+        treated as loopback too: the unified-443 hub speaks ``wss://`` on 443,
+        so a ``ws://`` pin is either the legacy plaintext loopback listener
+        (``:8765``) or an explicit plaintext loopback — either way same-box."""
+        if not url:
+            return False
+        u = url.lower()
+        return ("127.0.0.1" in u or "localhost" in u or "::1" in u
+                or u.startswith("ws://"))
 
     async def _resolve_hub_url(self) -> None:
         """When ``self.hub_url`` is empty/``auto``/None, auto-discover the hub via
@@ -2062,6 +2098,73 @@ class BaseControlPlane:
                 logger.info(f"Hub secret updated for {self.spoke_id}. Current window size: {len(self.hub_secrets)}")
                 return {"status": "SUCCESS", "message": "Hub secret updated successfully"}
             return {"status": "ERROR", "message": "Missing hub_secret in data"}
+
+        if cmd_type == "SPOKE_SET_HUB_URL":
+            # Hub-initiated repoint: the operator changed the hub's external
+            # URL/DNS name in Setup → Spokes & Agents (global_config["hub"][
+            # "url"]) and the hub is pushing the new address so pinned remote
+            # spokes/agents reconnect to it instead of dying on the retired old
+            # name. The hub sends this on every (re)connect (push_config_to_spoke
+            # reconcile path) AND once per save (push_hub_url_to_all_spokes
+            # fan-out via push_or_queue_to_spoke, which expects an ack — hence
+            # the deferred-exit below so the SUCCESS ack clears the mailbox
+            # BEFORE the process restarts, instead of stranding the message as
+            # an unacked retry like SPOKE_UPDATE does).
+            #
+            # Guards (return SUCCESS, no restart):
+            #   * loopback/localhost current pin — a co-located spoke dialing
+            #     loopback is still correct after the hub's PUBLIC name moves;
+            #     repointing it to the public URL could break same-box routing.
+            #   * the ``auto``/empty/None sentinel — an auto-discovering spoke
+            #     already re-resolves on every reconnect and will follow the
+            #     hub's new mDNS/DNS advertisement on its own; pinning it would
+            #     remove that self-healing.
+            #   * already on the requested URL (after normalization) —
+            #     idempotent no-op. This is what makes the reconcile-on-every-
+            #     connect path safe: apply once → restart → reconnect → pushed
+            #     URL == current → no-op. No restart loop.
+            new_url = (data.get("hub_url") or "").strip()
+            if not new_url:
+                return {"status": "ERROR", "message": "Missing hub_url in data"}
+            new_norm = self._normalize_hub_url(new_url)
+            if not new_norm or new_norm == "auto":
+                return {"status": "ERROR",
+                        "message": "Invalid hub_url (empty or 'auto' sentinel)"}
+            cur = self.hub_url
+            if self._hub_url_is_loopback(cur):
+                logger.info(
+                    "SPOKE_SET_HUB_URL: current hub URL is loopback (%s); "
+                    "skipping repoint to %s (co-located spoke stays on "
+                    "loopback).", cur, new_norm)
+                return {"status": "SUCCESS",
+                        "message": "skipped (loopback) — co-located spoke keeps "
+                                   "dialing loopback"}
+            if cur in ("", "auto", None):
+                logger.info(
+                    "SPOKE_SET_HUB_URL: current hub URL is the auto sentinel; "
+                    "skipping repoint to %s (auto-discovery keeps self-healing "
+                    "and will follow the hub's new advertisement).", new_norm)
+                return {"status": "SUCCESS",
+                        "message": "skipped (auto) — spoke keeps auto-discovering"}
+            if new_norm == self._normalize_hub_url(cur):
+                logger.debug("SPOKE_SET_HUB_URL: already on %s; no-op.", new_norm)
+                return {"status": "SUCCESS", "message": "already current"}
+
+            # Apply: persist the new URL to .env so the systemd unit's
+            # EnvironmentFile re-reads it on relaunch (ExecStart … --hub
+            # $HUB_URL — install_agent.sh), then exit NON-ZERO so systemd
+            # Restart=always (agent) / on-failure (spokes) relaunches us dialed
+            # to the new address. The exit is deferred 0.5s so this handler's
+            # SUCCESS ack is sent first (clearing any mailbox retry).
+            logger.warning(
+                "SPOKE_SET_HUB_URL: repointing %s → %s; restarting to reconnect "
+                "to the new hub address.", cur, new_norm)
+            self._persist_secret_to_env("HUB_URL", new_norm)
+            self.hub_url = new_norm  # in case the deferred exit is interrupted
+            self._draining = True  # hub queues request/reply pushes during the exit window
+            asyncio.create_task(self._deferred_repoint_exit())
+            return {"status": "SUCCESS",
+                    "message": f"repointing to {new_norm}; restarting to reconnect"}
 
         if cmd_type == "SPOKE_UPDATE_SESSION_KEY":
             new_secret = data.get("secret")
