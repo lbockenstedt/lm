@@ -4449,14 +4449,14 @@ function _renderSetupSyncTile(content) {
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub Repo Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="repo-sync-run-btn" onclick="runRepoSyncNow()" class="${btnCls}">Sync now</button>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Scheduled replication of <strong>all repos</strong>: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes <code>SPOKE_UPDATE</code> to every approved spoke (pxmx / opnsense / cs / cppm / netbox / ldap / nw) every <em>interval</em> (default 15 min). The hub self-restarts only when its own code changed (rolled back if it fails to boot); each spoke self-pulls and restarts only on its own version change. Replaces the old 1-hour auto-update loop — this is the single scheduled sync.</p>
+                <p class="text-xs text-slate-400 mb-3">Scheduled replication of <strong>all repos</strong>: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes <code>SPOKE_UPDATE</code> to every approved spoke (pxmx / opnsense / cs / cppm / netbox / ldap / nw / le, plus the in-repo dns / dhcp / console / statuspage roles) every <em>interval</em> (default 15 min). The hub self-restarts only when its own code changed (rolled back if it fails to boot); each spoke self-pulls and restarts only on its own version change. Replaces the old 1-hour auto-update loop — this is the single scheduled sync.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="repo-sync-enabled" class="w-4 h-4 text-green-600 rounded" checked>Enable scheduled sync</label>
                     <div class="space-y-1">
                         <label class="${labelCls}">Interval (minutes)</label>
                         <input type="number" id="repo-sync-interval" min="1" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button>
+                    <button onclick="saveRepoSyncConfig()" class="${btnCls} ml-auto">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync</div>
@@ -4492,7 +4492,7 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Daily time (HH:MM, 24h)</label>
                         <input type="time" id="ep-sync-time" value="02:00" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveEndpointSyncConfig()" class="${btnCls}">Save Schedule</button>
+                    <button onclick="saveEndpointSyncConfig()" class="${btnCls} ml-auto">Save Schedule</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
@@ -4514,7 +4514,7 @@ function _renderSetupSyncTile(content) {
                             <label class="${labelCls}">Lookback (minutes)</label>
                             <input type="number" id="rt-nac-sync-lookback" min="1" value="2" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         </div>
-                        <button onclick="saveRealtimeNacSyncConfig()" class="${btnCls}">Save</button>
+                        <button onclick="saveRealtimeNacSyncConfig()" class="${btnCls} ml-auto">Save</button>
                     </div>
                     <div class="mt-4">
                         <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last reverse sync per tenant</div>
@@ -4557,7 +4557,7 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Daily time (HH:MM, 24h)</label>
                         <input type="time" id="vm-sync-time" value="03:00" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveVmSyncConfig()" class="${btnCls}">Save Schedule</button>
+                    <button onclick="saveVmSyncConfig()" class="${btnCls} ml-auto">Save Schedule</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
@@ -4623,7 +4623,7 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4 flex items-center gap-3">
-                    <button onclick="saveFwDiscoveryConfig()" class="${btnCls}">Save Schedule</button>
+                    <button onclick="saveFwDiscoveryConfig()" class="${btnCls} ml-auto">Save Schedule</button>
                     <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
                 </div>
                 <div class="mt-4">
@@ -4676,7 +4676,7 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4 flex items-center gap-3">
-                    <button onclick="saveNwDiscoveryConfig()" class="${btnCls}">Save Schedule</button>
+                    <button onclick="saveNwDiscoveryConfig()" class="${btnCls} ml-auto">Save Schedule</button>
                     <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
                 </div>
                 <div class="mt-4">
@@ -4704,7 +4704,7 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Delete after (days)</label>
                         <input type="number" id="staleness-sweep-delete-days" min="1" value="30" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveStalenessSweepConfig()" class="${btnCls}">Save</button>
+                    <button onclick="saveStalenessSweepConfig()" class="${btnCls} ml-auto">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sweep</div>
