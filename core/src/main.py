@@ -667,7 +667,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         cert_dist_handler.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'))
-        logging.getLogger("le.distribution").addHandler(cert_dist_handler)
+        # Pin the le.distribution logger to INFO so distribution activity
+        # (per-target push outcomes, no-targets / all-current skips, hub
+        # self-install) is ALWAYS captured into cert_dist_logs regardless of
+        # the root level — without this, flipping the root to WARNING (or a
+        # stale LOG_LEVEL) would silently filter the INFO lines and the
+        # Certificates tab would show no distribution activity at all.
+        _le_dist_log = logging.getLogger("le.distribution")
+        _le_dist_log.setLevel(logging.INFO)
+        _le_dist_log.addHandler(cert_dist_handler)
 
         # Route uncaught SYNC exceptions through the "Hub" logger so they land in
         # self.logs → Error Log tab (collect_error_logs) + BugFixer, instead of

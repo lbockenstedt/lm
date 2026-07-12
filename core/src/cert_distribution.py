@@ -65,6 +65,11 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
     ERROR (so the absence is visible rather than silently dropped)."""
     summary: List[Dict[str, Any]] = []
     if not targets or not domain:
+        # A cert with no targets (or no domain) is a SILENT no-op without this
+        # line — the operator sees "no distribution logs" and can't tell whether
+        # distribution ran, was skipped, or was never wired. Surface it.
+        logger.info("[cert] %s: no targets configured — nothing to distribute",
+                     domain or "<unknown>")
         return summary
     logger.info("[cert] distributing %s to %d target(s)", domain, len(targets))
     mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
@@ -167,10 +172,14 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
         domain = cert.get("domain")
         targets = cert.get("targets") or []
         if not domain or not targets:
+            logger.info("[cert] %s: no targets configured — skipping",
+                         domain or "<unknown>")
             continue
         cur_hash = cert.get("material_hash")
         if cur_hash and all(t.get("last_pushed_hash") == cur_hash
                             and t.get("last_status") == "SUCCESS" for t in targets):
+            logger.info("[cert] %s: all %d target(s) current — skipping",
+                         domain, len(targets))
             continue  # every target current — skip the LE_GET_CERT pull
         await distribute_cert_to_targets(rr, get_by_type, capable,
                                          le_spoke_id, domain, targets,

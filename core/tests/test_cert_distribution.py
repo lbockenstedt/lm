@@ -93,7 +93,7 @@ def test_distribute_skips_up_to_date_target():
 def test_distribute_unsupported_module_records_error():
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
     get_by_type = lambda mt: None
-    targets = [{"module_type": "ipam"}]
+    targets = [{"module_type": "dns"}]  # dns is NOT cert-capable (no INSTALL_CERT)
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
     assert summary[0]["status"] == "ERROR"
@@ -256,4 +256,49 @@ def test_distribute_all_list_error_is_noop():
         "payload": {"data": {"status": "ERROR", "message": "down"}}}})
     _run(cd.distribute_all_certs(rr, lambda mt: None,
                                  cd.CERT_CAPABLE_MODULES, _LE))
+    assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
+
+
+def test_distribute_all_no_targets_logs_skip_not_silence(caplog):
+    """A cert with no targets is a no-op but must NOT be silent — the operator
+    sees 'no targets configured' so they know distribution was skipped (not
+    broken). Was a silent skip before the fix."""
+    list_resp = {"payload": {"data": {"status": "SUCCESS", "certs": [
+        {"domain": "orphan.com", "material_hash": _H, "targets": []},
+    ]}}}
+    rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): list_resp})
+    with caplog.at_level("INFO", logger="le.distribution"):
+        _run(cd.distribute_all_certs(rr, lambda mt: None,
+                                     cd.CERT_CAPABLE_MODULES, _LE))
+    assert any("no targets configured" in r.message for r in caplog.records)
+    assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
+
+
+def test_distribute_all_all_current_logs_skip_not_silence(caplog):
+    """A cert whose every target is current is a no-op but must NOT be silent
+    — 'all N target(s) current' tells the operator the cert IS deployed (not
+    missing). Was a silent skip before the fix."""
+    list_resp = {"payload": {"data": {"status": "SUCCESS", "certs": [
+        {"domain": "fresh.com", "material_hash": _H, "targets": [
+            {"module_type": "firewall", "last_pushed_hash": _H,
+             "last_status": "SUCCESS"}]},
+    ]}}}
+    rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): list_resp})
+    with caplog.at_level("INFO", logger="le.distribution"):
+        _run(cd.distribute_all_certs(rr, lambda mt: _FW,
+                                     cd.CERT_CAPABLE_MODULES, _LE))
+    assert any("all 1 target(s) current" in r.message for r in caplog.records)
+    assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
+
+
+def test_distribute_cert_no_targets_logs_skip(caplog):
+    """distribute_cert_to_targets (the per-cert path) must also surface a
+    no-targets skip, not a silent empty return."""
+    rr, calls = _fake_rr({})
+    with caplog.at_level("INFO", logger="le.distribution"):
+        summary = _run(cd.distribute_cert_to_targets(
+            rr, lambda mt: None, cd.CERT_CAPABLE_MODULES,
+            _LE, "solo.com", []))
+    assert summary == []
+    assert any("no targets configured" in r.message for r in caplog.records)
     assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]

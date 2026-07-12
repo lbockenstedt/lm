@@ -268,9 +268,13 @@ def register(app, hub, ctx):
                                                   timeout=_LE_CERTBOT_TIMEOUT)
         inner = _le_inner(payload)
         domain = inner.get("domain")
-        targets = inner.get("targets")
+        targets = inner.get("targets") or []
         dist = []
-        if domain and targets:
+        # Always invoke distribution (even with no targets) so the no-targets
+        # skip is logged under Certificates — otherwise a freshly-issued cert
+        # with no targets is a silent no-op and the operator can't tell why
+        # nothing deployed. distribute_cert_to_targets handles the empty case.
+        if domain:
             try:
                 dist = await hub._distribute_one_cert(le_sid, domain, targets)
             except Exception as e:
