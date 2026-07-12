@@ -12313,6 +12313,15 @@ async function loadLEData(subMenu) {
             for (const it of ifList) imap[`${it.domain}|${it.module_type}|${it.identifier || ''}`] = it.since;
             window._leInflightMap = imap;
         } catch (e) { window._leInflightMap = {}; }
+        // Available cert-capable targets (connected spokes/agents) — fetched once
+        // per load and cached so each cert row can render click-to-add chips
+        // directly on the main Certificates screen (the operator enables a cert
+        // to deploy to a target with one click, no Manage modal needed).
+        try {
+            const ar = await _spokeFetch('/api/le/targets/available');
+            const ab = (ar && ar.ok) ? inner(ar.data) : null;
+            window._leAvailableTargets = (ab && Array.isArray(ab.targets)) ? ab.targets : [];
+        } catch (e) { window._leAvailableTargets = []; }
         const inflightMap = window._leInflightMap || {};
         const tgtBadge = (t, domain) => {
             const dEsc = escJsAttr(String(domain || ''));
@@ -12335,6 +12344,31 @@ async function loadLEData(subMenu) {
             // Click-to-deploy: clicking a target badge pushes this cert to that
             // one target only (mirrors the CS spoke-clients click-to-act pattern).
             return `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="Click to deploy this cert to ${label}">${mark} ${label}</button>`;
+        };
+        // Available connected cert-capable spokes/agents as click-to-add chips,
+        // rendered directly on the main Certificates screen beside each cert's
+        // existing target badges — the "enable this cert to deploy to this
+        // target" UX (was inside the Manage modal; moved here per request).
+        // Already-added targets show as a disabled ✓; a click on a + chip calls
+        // addLeTarget(domain, {module_type, identifier}). Returns '' when no
+        // connected cert-capable spokes/agents are available.
+        const leAvailChips = (domain, tgts) => {
+            const avail = window._leAvailableTargets || [];
+            if (!avail.length) return '';
+            const haveKeys = new Set((tgts || []).map(t => `${t.module_type}|${t.identifier || ''}`));
+            const dEsc = escJsAttr(String(domain || ''));
+            const chips = avail.map(t => {
+                const k = `${t.module_type}|${t.identifier || ''}`;
+                const lbl = t.label || `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`;
+                const lblE = escapeHtml(lbl);
+                if (haveKeys.has(k)) {
+                    return `<span class="px-1.5 py-0.5 rounded text-xs bg-slate-100 text-slate-400 border border-slate-200" title="Already added">${lblE} ✓</span>`;
+                }
+                const mtE = escJsAttr(String(t.module_type || ''));
+                const idE = escJsAttr(String(t.identifier || ''));
+                return `<button onclick="addLeTarget('${dEsc}',{module_type:'${mtE}',identifier:'${idE}'})" class="px-1.5 py-0.5 rounded text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] cursor-pointer transition" title="Enable this cert to deploy to ${lbl}">${lblE} +</button>`;
+            }).join('');
+            return `<div class="flex flex-wrap items-center gap-1 mt-1.5"><span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1">Add</span>${chips}</div>`;
         };
         // Color-coded expiry badge from not_after. The le renewal loop renews
         // within 30d, so amber (<30d) = renew pending/failed, red (<7d / expired)
@@ -12371,9 +12405,10 @@ async function loadLEData(subMenu) {
             const st = window._leIssueStatus && window._leIssueStatus[c.domain];
             const isFailed = st && st.state === 'failed';
             const tgts = c.targets || [];
-            const tgtCell = tgts.length
+            const tgtBadges = tgts.length
                 ? `<div class="flex flex-wrap gap-1">${tgts.map(t => tgtBadge(t, c.domain)).join('')}</div>`
-                : `<span class="text-xs text-slate-400 italic">none — Manage to add</span>`;
+                : `<span class="text-xs text-slate-400 italic">none yet — click a target below to add</span>`;
+            const tgtCell = `${tgtBadges}${leAvailChips(c.domain, tgts)}`;
             const exp = leExpiry(c.not_after);
             const retryBtn = isFailed
                 ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
@@ -12642,8 +12677,6 @@ async function showLeTargetsModal(domain) {
     const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
     const tgts = cert.targets || [];
     const esc = s => String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
-    const tgtKey = t => `${t.module_type}|${t.identifier || ''}`;
-    const haveKeys = new Set(tgts.map(tgtKey));
     const row = (t, i) => {
         const ok = t.last_status === 'SUCCESS';
         const cls = ok ? 'bg-green-100 text-green-700' : (t.last_status === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500');
@@ -12670,12 +12703,8 @@ async function showLeTargetsModal(domain) {
                 <th class="px-3 py-2 text-left font-medium">Message</th>
                 <th></th>
             </tr></thead>
-            <tbody>${tgts.length ? tgts.map(row).join('') : '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-400 italic">No targets yet — click one below to add it.</td></tr>'}</tbody>
+            <tbody>${tgts.length ? tgts.map(row).join('') : '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-400 italic">No targets yet — add one below.</td></tr>'}</tbody>
         </table></div>
-        <div class="border-t border-slate-200 pt-3 mb-4">
-            <div class="text-xs text-slate-500 uppercase tracking-wide mb-2">Available targets — click to add</div>
-            <div id="le-available-targets" class="flex flex-wrap gap-1.5 text-xs">Loading…</div>
-        </div>
         <div class="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-4">
             <div class="flex flex-col">
                 <label class="text-xs text-slate-500 mb-1">Module type</label>
@@ -12691,33 +12720,6 @@ async function showLeTargetsModal(domain) {
         </div>
     </div>`;
     document.body.appendChild(modal);
-    // Fetch the live list of connected cert-capable spokes/agents and render it
-    // as click-to-add chips (already-added targets show as disabled ✓). One
-    // click = addLeTarget with that {module_type, identifier} — no manual typing
-    // needed. Agent-hosting types (hypervisor/simulation) list each connected
-    // pxmx node as its own chip (identifier = agent_id) + an "all nodes" chip.
-    try {
-        const { ok, data } = await _spokeFetch('/api/le/targets/available');
-        const inner = (data && data.data) ? data.data : (data || {});
-        const avail = inner.targets || [];
-        const box = document.getElementById('le-available-targets');
-        if (!ok || !avail.length) {
-            box.innerHTML = '<span class="text-slate-400 italic">No connected cert-capable spokes/agents. Approve + connect a spoke first.</span>';
-            return;
-        }
-        box.innerHTML = avail.map(t => {
-            const k = `${t.module_type}|${t.identifier || ''}`;
-            const lblE = escapeHtml(t.label || `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`);
-            if (haveKeys.has(k)) {
-                return `<span class="px-2 py-1 rounded-md text-xs bg-slate-100 text-slate-400 border border-slate-200" title="Already added">${lblE} ✓</span>`;
-            }
-            const mtE = esc(t.module_type), idE = esc(t.identifier || '');
-            return `<button onclick="addLeTarget('${esc(domain)}',{module_type:'${mtE}',identifier:'${idE}'})" class="px-2 py-1 rounded-md text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition" title="Add this target">${lblE} +</button>`;
-        }).join('');
-    } catch (e) {
-        const box = document.getElementById('le-available-targets');
-        if (box) box.innerHTML = '<span class="text-slate-400 italic">Could not load available targets.</span>';
-    }
 }
 
 async function addLeTarget(domain, preset) {
@@ -12733,7 +12735,9 @@ async function addLeTarget(domain, preset) {
         });
         if (!ok) { alert('Add target failed: ' + (detail || '')); return; }
         await loadLEData();
-        showLeTargetsModal(domain);
+        // Re-open the modal only if it's already open (an add from the main
+        // screen's click-to-add chip shouldn't pop the modal open).
+        if (document.getElementById('le-targets-modal')) showLeTargetsModal(domain);
     } catch (e) { alert('Add target failed: ' + e.message); }
 }
 
@@ -12742,7 +12746,7 @@ async function removeLeTarget(domain, idx) {
         const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/targets/${idx}`, { method: 'DELETE' });
         if (!ok) { alert('Remove target failed: ' + (detail || '')); return; }
         await loadLEData();
-        showLeTargetsModal(domain);
+        if (document.getElementById('le-targets-modal')) showLeTargetsModal(domain);
     } catch (e) { alert('Remove target failed: ' + e.message); }
 }
 
