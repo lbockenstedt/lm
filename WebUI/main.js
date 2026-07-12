@@ -3184,6 +3184,10 @@ function _viewTemplate(viewId) {
     <button onclick="showLeIssueModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">＋ Issue certificate</button>
     <button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">↻ Renew all</button>
     <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
+    <label class="flex items-center gap-1 text-xs text-amber-700 cursor-pointer select-none" title="When ON, a wildcard cert (*.domain) is pushed to EVERY connected cert-capable spoke + the hub on each distribution, not just its explicit targets. OFF by default while cert distribution is being tested — flip on once explicit-target distribution is confirmed working.">
+      <input type="checkbox" id="le-wildcard-all-spokes" class="w-4 h-4 rounded" onchange="saveLeWildcardAllSpokes(this.checked)">
+      Fan wildcard → all spokes
+    </label>
     <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
   </div>
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
@@ -12085,6 +12089,9 @@ async function loadLEData(subMenu) {
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
+    // Hub-level wildcard fan-out toggle (OFF while testing).
+    loadLeWildcardAllSpokes();
+
     const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
     const tw = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
     // The le spoke returns nested {status, data:{...}}; unwrap to the inner data
@@ -12235,6 +12242,37 @@ async function loadLEData(subMenu) {
 // gave zero UI feedback (results were only in Logs/Certificates, which needs a
 // manual refresh). SKIPPED entries (no targets / all current) are surfaced so
 // the operator sees WHY nothing was pushed instead of an unexplained no-op.
+// Wildcard-all-spokes toggle (hub-level, lives in global_config.certs
+// .wildcard_all_spokes; OFF by default while the operator tests explicit-target
+// distribution). When ON, a wildcard cert (*.domain) is fanned to EVERY
+// connected cert-capable spoke + the hub on each distribution, not just its
+// explicit targets. Saved via POST /setup/config (shallow-merged into
+// global_config; only wildcard_all_spokes lives under "certs" today, so the
+// whole-section replace is safe — DNS creds live in the per-tenant store).
+async function loadLeWildcardAllSpokes() {
+    try {
+        const r = await setupFetch('/setup/config');
+        if (!r.ok) return;
+        const data = await r.json();
+        const on = ((data.global_config || {}).certs || {}).wildcard_all_spokes === true;
+        const el = document.getElementById('le-wildcard-all-spokes');
+        if (el) el.checked = on;
+    } catch (e) { console.error('loadLeWildcardAllSpokes failed', e); }
+}
+
+async function saveLeWildcardAllSpokes(checked) {
+    try {
+        const r = await setupFetch('/setup/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: { certs: { wildcard_all_spokes: !!checked } } })
+        });
+        if (r.ok) showToast(checked
+            ? 'Wildcard fan-out ENABLED — next distribution pushes to every cert-capable spoke.'
+            : 'Wildcard fan-out disabled.', 'success');
+        else showToast('Failed to save wildcard toggle.', 'error');
+    } catch (e) { showToast('Error saving wildcard toggle: ' + e.message, 'error'); }
+}
+
 async function leDistributeNow() {
     try {
         const { ok, data, detail } = await _spokeFetch('/api/le/distribute', { method: 'POST' });
