@@ -2286,6 +2286,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             _gh = {}
         if _gh:
             override_cfg["github_config"] = _gh
+        # Re-deliver the tenant's effective sim quotas (global defaults merged
+        # with tenant overrides, enabled-only) so a reconnecting cs spoke's
+        # SimQuotaEngine reconciles immediately instead of waiting for the next
+        # Config → Sim Quotas save. Mirrors the effective-USB re-push above.
+        try:
+            from simulations.routes import _effective_sim_quotas as _eff_sq
+            eff_sq = await _eff_sq(tenant_id)
+        except Exception as exc:  # noqa: BLE001 — best-effort
+            eff_sq = []
+            logger.debug("push_cs_hub_config: effective_sim_quotas for %s failed: %s",
+                         spoke_id, exc)
+        if eff_sq:
+            override_cfg["effective_sim_quotas"] = eff_sq
         if override_cfg:
             try:
                 outcome = await self._drain_aware_config_push(

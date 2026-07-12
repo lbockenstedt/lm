@@ -112,6 +112,40 @@ def resolve_effective_quotas(
     return [q for q in clean if q["enabled"]]
 
 
+def merge_effective_quotas(
+    global_quotas: Any, tenant_quotas: Any,
+) -> List[Dict[str, Any]]:
+    """Merge platform-wide default quotas with a tenant's overrides.
+
+    Per ``(alert_type, alert_id)``: if the tenant declares ANY quota row for
+    that alert (enabled OR disabled), the tenant OWNS that alert — its enabled
+    rows are used and the global default for that alert is suppressed (so a
+    tenant can explicitly turn an alert OFF by adding a disabled row). Alerts
+    the tenant hasn't touched inherit the global default's enabled rows. Both
+    sides are validated + deduped (last-wins per ``alert_type:alert_id:site``)
+    before the merge; the result is enabled-only. The cs spoke's SimQuotaEngine
+    consumes the resulting list.
+    """
+    g_clean, _ = validate_sim_quotas(global_quotas, list(SIM_META.keys()))
+    t_clean, _ = validate_sim_quotas(tenant_quotas, None)
+
+    def _grp(qs: List[Dict[str, Any]]) -> Dict[tuple, List[Dict[str, Any]]]:
+        m: Dict[tuple, List[Dict[str, Any]]] = {}
+        for q in qs:
+            m.setdefault((q["alert_type"], q["alert_id"]), []).append(q)
+        return m
+    # Ownership is keyed on ALL rows (enabled+disabled) so a tenant's disabled
+    # row suppresses the global default for that alert; output is enabled-only.
+    gmap_all, tmap_all = _grp(g_clean), _grp(t_clean)
+    out: List[Dict[str, Any]] = []
+    for key, rows in tmap_all.items():
+        out.extend(r for r in rows if r.get("enabled"))
+    for key, rows in gmap_all.items():
+        if key not in tmap_all:
+            out.extend(r for r in rows if r.get("enabled"))
+    return out
+
+
 # ── Catalog from raw INI text (hub centralized mode) ──────────────────────
 def _parse_ini(text: str) -> configparser.ConfigParser:
     p = configparser.ConfigParser()

@@ -92,6 +92,45 @@ def test_resolve_effective_quotas_only_enabled():
     assert len(eff) == 1 and eff[0]["alert_id"] == "A"
 
 
+# ── merge_effective_quotas (global defaults + tenant overrides) ────────────
+def test_merge_tenant_overrides_win_per_alert():
+    g = [{"alert_id": "A", "sim_id": "dhcp_fail", "count": 10, "site": "", "enabled": True},
+         {"alert_id": "B", "sim_id": "dns_fail", "count": 8, "site": "", "enabled": True}]
+    t = [{"alert_id": "A", "sim_id": "dhcp_fail", "count": 5, "site": "MIA", "enabled": True}]
+    eff = sim_quota.merge_effective_quotas(g, t)
+    # Tenant owns alert A entirely (global A dropped); alert B inherits global.
+    by = {(q["alert_id"], q["site"]): q for q in eff}
+    assert ("A", "MIA") in by and by[("A", "MIA")]["count"] == 5
+    assert ("A", "") not in by                       # global A superseded
+    assert ("B", "") in by and by[("B", "")]["count"] == 8
+
+
+def test_merge_global_applies_when_tenant_silent():
+    g = [{"alert_id": "A", "sim_id": "dhcp_fail", "count": 10, "site": "", "enabled": True}]
+    eff = sim_quota.merge_effective_quotas(g, [])
+    assert len(eff) == 1 and eff[0]["alert_id"] == "A" and eff[0]["count"] == 10
+
+
+def test_merge_disabled_rows_excluded():
+    g = [{"alert_id": "A", "sim_id": "dhcp_fail", "count": 10, "enabled": True},
+         {"alert_id": "B", "sim_id": "dns_fail", "count": 8, "enabled": False}]
+    t = [{"alert_id": "A", "sim_id": "dhcp_fail", "count": 3, "enabled": False}]
+    eff = sim_quota.merge_effective_quotas(g, t)
+    # Tenant's A is disabled → tenant owns alert A but contributes no enabled
+    # rows → A drops entirely (global A NOT reinstated). B disabled globally.
+    assert eff == []
+
+
+def test_merge_tenant_multiple_sites_for_one_alert():
+    g = [{"alert_id": "A", "sim_id": "dhcp_fail", "count": 10, "site": "", "enabled": True}]
+    t = [{"alert_id": "A", "sim_id": "dhcp_fail", "count": 5, "site": "MIA", "enabled": True},
+         {"alert_id": "A", "sim_id": "dhcp_fail", "count": 7, "site": "DFW", "enabled": True}]
+    eff = sim_quota.merge_effective_quotas(g, t)
+    sites = sorted(q["site"] for q in eff if q["alert_id"] == "A")
+    assert sites == ["DFW", "MIA"]                   # tenant's two sites; global "" gone
+    assert all(q["alert_id"] == "A" for q in eff)
+
+
 # ── catalog from raw INI text (centralized mode) ───────────────────────────
 def test_available_sims_from_ini():
     sims = sim_quota.available_sims_from_ini(_SIM_CONF)

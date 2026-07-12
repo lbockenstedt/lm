@@ -1141,6 +1141,38 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             pushed += await _push_usb_to_tenant(tid)
         return pushed
 
+    # ── Sim-Quota effective merge + push ─────────────────────────────────────
+    async def _effective_sim_quotas(tenant_id: str) -> list:
+        """Merge platform-wide default sim quotas with the tenant's overrides,
+        enabled-only (per-alert: tenant wins if it declares any enabled row for
+        that alert, else the global default applies). The cs spoke's
+        SimQuotaEngine consumes this list. Pure merge in sim_quota.merge_effective_quotas."""
+        from .sim_quota import merge_effective_quotas
+        try:
+            g_defaults = await store.get_sim_quota_defaults()
+        except Exception:  # noqa: BLE001
+            g_defaults = []
+        try:
+            t_csc = await store.get_central_sites_config(tenant_id) or {}
+        except Exception:  # noqa: BLE001
+            t_csc = {}
+        return merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
+
+    async def _push_sim_quotas(tenant_id: str) -> int:
+        """Push the tenant's effective sim quotas to its cs spoke(s) as a
+        CS_CONFIG_UPDATE payload key the SimQuotaEngine reconciles against."""
+        return await _push_config(tenant_id, {
+            "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
+        })
+
+    async def _push_sim_quotas_all_tenants() -> int:
+        """Re-push effective sim quotas to every tenant after a global-defaults
+        change (Setup → Simulations → Sim Quotas)."""
+        pushed = 0
+        for tid in _all_tenant_ids():
+            pushed += await _push_sim_quotas(tid)
+        return pushed
+
     # ── aggregate reads (literal "aggregate" first segment) ────────────────
     @app.get("/sim/api/aggregate/dashboard")
     async def get_dashboard(tenant_id: str = Depends(get_tenant_id)):
@@ -2379,7 +2411,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception as exc:  # noqa: BLE001 — never block the save
             logger.warning("set_central_sites(%s): sim_quotas validate failed: %s", tenant_id, exc)
         await store.set_central_sites_config(tenant_id, cfg)
-        pushed = await _push_config(tenant_id, {"central_sites_config": cfg})
+        pushed = await _push_config(tenant_id, {
+            "central_sites_config": cfg,
+            "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
+        })
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
                 "sim_quotas": clean,
@@ -2429,7 +2464,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if errs:
             logger.warning("set_sim_quota_defaults: errors: %s", errs)
         await store.set_sim_quota_defaults(clean)
-        return {"status": "saved", "defaults": clean, "errors": errs}
+        # A global-defaults change can shift every tenant's effective quotas —
+        # re-push so each cs spoke's SimQuotaEngine reconciles to the new set.
+        pushed = await _push_sim_quotas_all_tenants()
+        return {"status": "saved", "defaults": clean, "errors": errs,
+                "pushed_to_spokes": pushed}
 
     @app.get("/sim/api/{tenant}/central/available")
     async def get_central_available(tenant: str, tenant_id: str = Depends(get_tenant_id)):
