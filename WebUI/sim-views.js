@@ -433,8 +433,12 @@ function csAutoRefreshControl() {
 // reload, the Refresh button) always render.
 const CS_NO_REFRESH = new Set([
     'Setup::Proxmox',   // Proxmox hypervisor config — manual Refresh only
-    'Config',           // Config (form-heavy) — manual Refresh only. Both
-                        // sub-tabs (Sim Quotas, Config Editor) are form editors.
+    // Config form editors are manual-refresh only (a telemetry-driven rebuild
+    // would stomp a half-edited form). Listed per child so Config::Quota State
+    // — a live ledger view, not a form — is NOT here and auto-refreshes.
+    'Config::Sim Quotas',    // Sim Quotas editor — manual Refresh only
+    'Config::PXMX Sites',    // PXMX site assignments — manual Refresh only
+    'Config::Config Editor', // raw config editor — manual Refresh only
     'VM Server::Command Queue', // loads serve from the cached CS_TELEMETRY
                                 // command_queue (instant); kept manual-refresh so
                                 // a busy spoke's live=1 re-fetch after a mutation
