@@ -7684,6 +7684,7 @@ async function openAgentConfigModal(agentId, currentLabel) {
     let displayName = (currentLabel && currentLabel !== agentId) ? currentLabel : '';
     let csEnabled = false;
     let tenantId = '';
+    let managedCrontab = '';
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/config`, { credentials: 'same-origin' });
         if (res.ok) {
@@ -7693,14 +7694,16 @@ async function openAgentConfigModal(agentId, currentLabel) {
             const cs = cfg.client_simulation || {};
             csEnabled = !!cs.enabled;
             tenantId = cs.tenant_id || '';
+            managedCrontab = typeof cfg.managed_crontab === 'string' ? cfg.managed_crontab : '';
         }
     } catch (e) { console.error('Error fetching agent config:', e); }
 
     const safeName = (displayName || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeTenant = (tenantId || '').replace(/"/g, '&quot;');
+    const safeCron = (managedCrontab || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">Agent Configuration</h3>
                 <button onclick="this.closest('#agent-config-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
@@ -7722,6 +7725,11 @@ async function openAgentConfigModal(agentId, currentLabel) {
                     <p class="text-[11px] text-slate-400">When enabled, this Proxmox agent activates the Client-Sim feature set (USB provisioning, VM clone/reclone, watchdogs, backup, reseed). Features are ported in incrementally.</p>
                 </div>
                 <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Managed Crontab</label>
+                    <textarea id="agent-cfg-crontab" rows="5" spellcheck="false" placeholder="# One crontab line per job, e.g.\n0 2 * * * /usr/bin/vzdump --all --compress zstd\n*/15 * * * * /root/health-check.sh" class="w-full bg-slate-50 border border-slate-300 rounded-md px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500 resize-y">${safeCron}</textarea>
+                    <p class="text-[11px] text-slate-400">Standard crontab lines the agent keeps in sync inside a managed block of <b>root's crontab</b> on this Proxmox server — your own crontab entries are left untouched. Applies to any host (simulation or not). Saving replaces the managed block; clearing this box removes it. Drift is re-corrected every ~10&nbsp;min.</p>
+                </div>
+                <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
                     <input type="hidden" id="agent-cfg-tenant" value="${safeTenant}">
                     <p class="text-sm text-slate-700">${tenantId ? `<span class="font-mono">${tenantId.replace(/</g, '&lt;')}</span>` : '<span class="italic text-slate-400">(unbound)</span>'}</p>
@@ -7741,14 +7749,19 @@ async function saveAgentConfig(agentId) {
     const displayName = document.getElementById('agent-cfg-display-name').value.trim();
     const csEnabled = document.getElementById('agent-cfg-cs-enabled').checked;
     const tenantId = document.getElementById('agent-cfg-tenant').value;
+    const cronEl = document.getElementById('agent-cfg-crontab');
     try {
+        const body = {
+            display_name: displayName || agentId,
+            client_simulation: { enabled: csEnabled, tenant_id: tenantId },
+        };
+        // Only send managed_crontab when the field is present (this modal) so
+        // other callers of this endpoint don't inadvertently clear it.
+        if (cronEl) body.managed_crontab = cronEl.value;
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/config`, {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                display_name: displayName || agentId,
-                client_simulation: { enabled: csEnabled, tenant_id: tenantId },
-            }),
+            body: JSON.stringify(body),
         });
         const d = await res.json().catch(() => ({}));
         if (res.ok) {

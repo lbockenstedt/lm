@@ -486,6 +486,14 @@ def register(app, hub, ctx):
                 "enabled": bool(cs.get("enabled")),
                 "tenant_id": (cs.get("tenant_id") or "").strip() or None,
             }
+            # Managed crontab (optional): the operator-pasted crontab content this
+            # node's agent keeps root's crontab in sync with. Only touched when the
+            # key is present in the request so a client_simulation-only save (or a
+            # node that never uses crontab) leaves it alone; sending "" clears it.
+            has_cron = "managed_crontab" in data
+            cron_val = data.get("managed_crontab")
+            if has_cron:
+                cron_val = "" if cron_val is None else str(cron_val)
 
             # Persist (merge with any existing entry so partial updates keep fields).
             store = hub.state.system_state.setdefault("agent_config", {})
@@ -493,8 +501,16 @@ def register(app, hub, ctx):
             if display_name:
                 entry["display_name"] = display_name
             entry["client_simulation"] = cs_cfg
+            if has_cron:
+                entry["managed_crontab"] = cron_val
             store[agent_id] = entry
             hub.state.save_state()
+
+            # The config pushed down to the agent — include managed_crontab only
+            # when this save carried it (the agent applies it on UPDATE_CONFIG).
+            push_cfg = {"client_simulation": cs_cfg}
+            if has_cron:
+                push_cfg["managed_crontab"] = cron_val
 
             # Best-effort push to a live agent. SET_AGENT_CONFIG persists spoke-side
             # even when the agent is offline, so a failure here just means the agent
@@ -518,7 +534,7 @@ def register(app, hub, ctx):
                     if callable(push):
                         outcome = await push(owning_spoke, "SET_AGENT_CONFIG", {
                             "agent_id": agent_id,
-                            "config": {"client_simulation": cs_cfg},
+                            "config": push_cfg,
                         })
                         queued = bool(outcome.get("queued"))
                         rdata = outcome.get("result") or {}
@@ -527,7 +543,7 @@ def register(app, hub, ctx):
                     else:
                         res = await hub.request_response(owning_spoke, "SET_AGENT_CONFIG", {
                             "agent_id": agent_id,
-                            "config": {"client_simulation": cs_cfg},
+                            "config": push_cfg,
                         })
                         rdata = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
                         pushed = rdata.get("status") == "SUCCESS"

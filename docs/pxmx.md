@@ -66,6 +66,7 @@ The pxmx spoke's agent listener has two modes. **Which mode is deployed determin
 - **VNC ticket = RFB password** — `VNC_START` must use `request_response` end-to-end so the Proxmox ticket reaches the browser (noVNC `credentials.password`); `send_to_spoke_command` is fire-and-forget and drops it.
 - **Toggle key-name duality** — `usb_auto_provision`/`auto_provision`, `usb_missing_timeout`/`missing_timeout`, `usb_max_slots`/`max_slots` (webui-spoke 6-key blob vs lm-spoke 27-key payload); readers take the union.
 - **Kernel crash-hardening** files are `lm-pxmx`-prefixed so `retire_bash_agent.sh` won't clobber them; the softdog `rmmod` is guarded.
+- **Managed crontab** (`managed_crontab.py`) — the Agent Configuration modal (any Proxmox agent, simulation or not) has a *Managed Crontab* textarea. The pasted crontab lines are stored per-agent on the hub (`agent_config[agent_id].managed_crontab`), pushed down via `SET_AGENT_CONFIG` → `UPDATE_CONFIG`, and the agent keeps root's crontab in sync inside a marked block (`# BEGIN LM-MANAGED … # END LM-MANAGED`). The operator's own crontab entries outside the block are never touched; clearing the box removes the block; the agent re-reconciles on config push and every ~10 min (drift-correct), and reports `managed_crontab_status` (configured line count + in-sync) in telemetry. The block-reconcile logic (`reconcile_block`) is pure + unit-tested (`tests/test_managed_crontab.py`).
 
 ## How it works
 
