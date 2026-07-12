@@ -69,7 +69,7 @@ def test_distribute_pushes_to_capable_target():
         (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
         (_FW, "INSTALL_CERT"): _install_ok(),
     })
-    get_by_type = lambda mt: _FW if mt == "firewall" else None
+    get_by_type = lambda mt, ident="": _FW if mt == "firewall" else None
     targets = [{"module_type": "firewall", "identifier": "edge-1"}]
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
@@ -105,7 +105,7 @@ def test_distribute_hypervisor_uses_generous_640s_timeout():
         (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
         (_HV, "INSTALL_CERT"): _install_ok(),
     })
-    get_by_type = lambda mt: _HV if mt == "hypervisor" else None
+    get_by_type = lambda mt, ident="": _HV if mt == "hypervisor" else None
     targets = [{"module_type": "hypervisor", "identifier": "node-1"}]
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
@@ -113,6 +113,28 @@ def test_distribute_hypervisor_uses_generous_640s_timeout():
     installs = [c for c in calls if c["cmd"] == "INSTALL_CERT"]
     assert len(installs) == 1 and installs[0]["timeout"] == 640.0
     assert installs[0]["data"]["module_type"] == "hypervisor"
+
+
+def test_distribute_threads_identifier_to_resolver():
+    """The hub resolver receives the target identifier (not just module_type)
+    so agent-hosting types can route to the spoke that owns the target agent
+    (split topology: a 'hypervisor' target's agent dials the cs spoke). The
+    pure helper passes ``identifier`` through to ``get_by_type``."""
+    _CS = "cs-spoke-1"
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        (_CS, "INSTALL_CERT"): _install_ok(),
+    })
+    seen = []
+    def get_by_type(mt, ident=""):
+        seen.append((mt, ident))
+        return _CS if mt == "hypervisor" else None
+    targets = [{"module_type": "hypervisor", "identifier": "pxmx-agent-7"}]
+    _run(cd.distribute_cert_to_targets(
+        rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
+    # The resolver was called with BOTH the module_type and the identifier,
+    # so the hub can route a hypervisor target to the agent-owning spoke.
+    assert ("hypervisor", "pxmx-agent-7") in seen
 
 
 def test_distribute_simulation_is_cert_capable_and_uses_640s_timeout():
@@ -131,7 +153,7 @@ def test_distribute_simulation_is_cert_capable_and_uses_640s_timeout():
         (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
         (_CS, "INSTALL_CERT"): _install_ok(),
     })
-    get_by_type = lambda mt: _CS if mt == "simulation" else None
+    get_by_type = lambda mt, ident="": _CS if mt == "simulation" else None
     targets = [{"module_type": "simulation", "identifier": ""}]
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
@@ -155,7 +177,7 @@ def test_distribute_nac_is_cert_capable_and_routes_to_spoke():
         (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
         (_NAC, "INSTALL_CERT"): _install_ok(),
     })
-    get_by_type = lambda mt: _NAC if mt == "nac" else None
+    get_by_type = lambda mt, ident="": _NAC if mt == "nac" else None
     targets = [{"module_type": "nac", "identifier": "clearpass-1"}]
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
@@ -180,7 +202,7 @@ def test_distribute_nw_is_cert_capable_and_routes_to_spoke():
         (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
         (_NW, "INSTALL_CERT"): _install_ok(),
     })
-    get_by_type = lambda mt: _NW if mt == "nw" else None
+    get_by_type = lambda mt, ident="": _NW if mt == "nw" else None
     targets = [{"module_type": "nw", "identifier": "edge-sw-1"}]
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
@@ -194,7 +216,7 @@ def test_distribute_nw_is_cert_capable_and_routes_to_spoke():
 
 def test_distribute_skips_up_to_date_target():
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
-    get_by_type = lambda mt: _FW
+    get_by_type = lambda mt, ident="": _FW
     targets = [{"module_type": "firewall", "identifier": "edge-1",
                 "last_pushed_hash": _H, "last_status": "SUCCESS"}]
     summary = _run(cd.distribute_cert_to_targets(
@@ -217,7 +239,7 @@ def test_distribute_single_target_without_ledger_always_pushes():
         (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
         (_FW, "INSTALL_CERT"): _install_ok(),
     })
-    get_by_type = lambda mt: _FW if mt == "firewall" else None
+    get_by_type = lambda mt, ident="": _FW if mt == "firewall" else None
     # No last_pushed_hash / last_status — exactly what the route sends.
     targets = [{"module_type": "firewall", "identifier": "edge-1"}]
     summary = _run(cd.distribute_cert_to_targets(
@@ -233,7 +255,7 @@ def test_distribute_single_target_without_ledger_always_pushes():
 
 def test_distribute_unsupported_module_records_error():
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
-    get_by_type = lambda mt: None
+    get_by_type = lambda mt, ident="": None
     targets = [{"module_type": "dns"}]  # dns is NOT cert-capable (no INSTALL_CERT)
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
@@ -248,7 +270,7 @@ def test_distribute_unsupported_module_records_error():
 
 def test_distribute_no_connected_target_spoke():
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
-    get_by_type = lambda mt: None  # firewall capable but none connected
+    get_by_type = lambda mt, ident="": None  # firewall capable but none connected
     targets = [{"module_type": "firewall"}]
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com", targets))
@@ -259,7 +281,7 @@ def test_distribute_no_connected_target_spoke():
 def test_distribute_get_cert_failure_returns_error():
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): {
         "payload": {"data": {"status": "ERROR", "message": "no live cert"}}}})
-    get_by_type = lambda mt: _FW
+    get_by_type = lambda mt, ident="": _FW
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com",
         [{"module_type": "firewall"}]))
@@ -275,7 +297,7 @@ def test_distribute_install_failure_records_error():
         (_FW, "INSTALL_CERT"): {"payload": {"data": {
             "status": "ERROR", "message": "missing CA key"}}},
     })
-    get_by_type = lambda mt: _FW
+    get_by_type = lambda mt, ident="": _FW
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "example.com",
         [{"module_type": "firewall"}]))
@@ -288,7 +310,7 @@ def test_distribute_install_failure_records_error():
 def test_distribute_empty_targets_returns_empty():
     rr, _ = _fake_rr({})
     summary = _run(cd.distribute_cert_to_targets(
-        rr, lambda mt: None, cd.CERT_CAPABLE_MODULES, _LE, "example.com", []))
+        rr, lambda mt, ident="": None, cd.CERT_CAPABLE_MODULES, _LE, "example.com", []))
     assert summary == []
 
 
@@ -298,7 +320,7 @@ def test_distribute_hub_target_calls_install_on_hub():
     """A "hub" target is handled by the install_on_hub callable (the hub
     installing a cert on itself), NOT by get_spoke_by_type / INSTALL_CERT."""
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
-    get_by_type = lambda mt: (_FW if mt == "firewall" else None)
+    get_by_type = lambda mt, ident="": (_FW if mt == "firewall" else None)
     installs = []
 
     async def install_on_hub(domain, fullchain, privkey, chain, identifier):
@@ -326,7 +348,7 @@ def test_distribute_hub_target_without_callable_records_error():
     not silently dropped). "hub" is in CERT_CAPABLE_MODULES so it does NOT take
     the 'does not support cert install' branch."""
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
-    get_by_type = lambda mt: None
+    get_by_type = lambda mt, ident="": None
     summary = _run(cd.distribute_cert_to_targets(
         rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
         [{"module_type": "hub"}]))
@@ -340,7 +362,7 @@ def test_distribute_hub_target_install_error_surfaces_message():
         return {"status": "ERROR", "message": "permission denied writing /opt/lm/tls"}
     rr, _ = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
     summary = _run(cd.distribute_cert_to_targets(
-        rr, lambda mt: None, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
+        rr, lambda mt, ident="": None, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
         [{"module_type": "hub"}], install_on_hub=install_on_hub))
     assert summary[0]["status"] == "ERROR"
     assert "permission denied" in summary[0]["message"]
@@ -351,7 +373,7 @@ def test_distribute_hub_target_callable_raise_is_caught():
         raise RuntimeError("boom")
     rr, _ = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
     summary = _run(cd.distribute_cert_to_targets(
-        rr, lambda mt: None, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
+        rr, lambda mt, ident="": None, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
         [{"module_type": "hub"}], install_on_hub=install_on_hub))
     assert summary[0]["status"] == "ERROR"
     assert "boom" in summary[0]["message"]
@@ -375,7 +397,7 @@ def test_distribute_all_skips_current_and_pushes_stale():
         (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
         (_FW, "INSTALL_CERT"): _install_ok(),
     })
-    get_by_type = lambda mt: _FW
+    get_by_type = lambda mt, ident="": _FW
     _run(cd.distribute_all_certs(rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE))
     # Only the stale cert's domain is pulled + installed.
     gets = [c for c in calls if c["cmd"] == "LE_GET_CERT"]
@@ -386,7 +408,7 @@ def test_distribute_all_skips_current_and_pushes_stale():
 
 def test_distribute_all_no_certs_no_calls():
     rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): _le_list_certs([])})
-    _run(cd.distribute_all_certs(rr, lambda mt: None,
+    _run(cd.distribute_all_certs(rr, lambda mt, ident="": None,
                                  cd.CERT_CAPABLE_MODULES, _LE))
     assert not [c for c in calls if c["cmd"] != "LE_LIST_CERTS"]
 
@@ -394,7 +416,7 @@ def test_distribute_all_no_certs_no_calls():
 def test_distribute_all_list_error_is_noop():
     rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): {
         "payload": {"data": {"status": "ERROR", "message": "down"}}}})
-    _run(cd.distribute_all_certs(rr, lambda mt: None,
+    _run(cd.distribute_all_certs(rr, lambda mt, ident="": None,
                                  cd.CERT_CAPABLE_MODULES, _LE))
     assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
 
@@ -408,7 +430,7 @@ def test_distribute_all_no_targets_logs_skip_not_silence(caplog):
     ])
     rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): list_resp})
     with caplog.at_level("INFO", logger="le.distribution"):
-        _run(cd.distribute_all_certs(rr, lambda mt: None,
+        _run(cd.distribute_all_certs(rr, lambda mt, ident="": None,
                                      cd.CERT_CAPABLE_MODULES, _LE))
     assert any("no targets configured" in r.message for r in caplog.records)
     assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
@@ -425,7 +447,7 @@ def test_distribute_all_all_current_logs_skip_not_silence(caplog):
     ])
     rr, calls = _fake_rr({(_LE, "LE_LIST_CERTS"): list_resp})
     with caplog.at_level("INFO", logger="le.distribution"):
-        _run(cd.distribute_all_certs(rr, lambda mt: _FW,
+        _run(cd.distribute_all_certs(rr, lambda mt, ident="": _FW,
                                      cd.CERT_CAPABLE_MODULES, _LE))
     assert any("all 1 target(s) current" in r.message for r in caplog.records)
     assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
@@ -437,7 +459,7 @@ def test_distribute_cert_no_targets_logs_skip(caplog):
     rr, calls = _fake_rr({})
     with caplog.at_level("INFO", logger="le.distribution"):
         summary = _run(cd.distribute_cert_to_targets(
-            rr, lambda mt: None, cd.CERT_CAPABLE_MODULES,
+            rr, lambda mt, ident="": None, cd.CERT_CAPABLE_MODULES,
             _LE, "solo.com", []))
     assert summary == []
     assert any("no targets configured" in r.message for r in caplog.records)

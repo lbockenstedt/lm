@@ -60,7 +60,7 @@ class HubCertDistributionMixin:
         (plus the hub). The flag is OFF by default so this is a no-op while the
         operator is still testing cert distribution."""
         explicit = await _distribute_cert_to_targets(
-            self._inflight_rr(self.request_response), self.get_spoke_by_type,
+            self._inflight_rr(self.request_response), self._cert_target_spoke,
             self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets,
             install_on_hub=self._install_cert_on_hub)
         if self._wildcard_all_spokes_enabled() and _is_wildcard(domain):
@@ -80,7 +80,7 @@ class HubCertDistributionMixin:
         wildcard fan-out params (gated by the hub flag — OFF by default →
         no-op while the operator is testing)."""
         out = await _distribute_all_certs_impl(
-            self._inflight_rr(self.request_response), self.get_spoke_by_type,
+            self._inflight_rr(self.request_response), self._cert_target_spoke,
             self.CERT_CAPABLE_MODULES, le_spoke_id,
             install_on_hub=self._install_cert_on_hub,
             wildcard_enabled=self._wildcard_all_spokes_enabled(),

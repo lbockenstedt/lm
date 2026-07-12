@@ -1683,6 +1683,39 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return self.get_hypervisor_spoke()
         return None
 
+    def _cert_target_spoke(self, module_type: str, identifier: str = "") -> Optional[str]:
+        """Resolve the spoke to receive ``INSTALL_CERT`` for a cert-distribution
+        target. For agent-hosting types (``hypervisor``/``simulation``) the
+        target spoke is the one that OWNS the target pxmx agent — in the split
+        topology the agents dial the cs (simulation) spoke, so a ``hypervisor``
+        target must route THERE, not to a connected-but-agent-less pxmx spoke
+        (which returns ``No agent resolved for cert install`` and leaves a
+        deployed-cert target showing red on the UI).
+
+        A specific ``identifier`` (the per-node agent_id from
+        ``build_available_targets``) resolves via the ``agent_info`` index
+        (``get_spoke_for_agent`` with the hypervisor fallback OFF so a
+        cs-dialed agent isn't misrouted to the pxmx spoke). An empty
+        identifier (the "all nodes" broadcast target) resolves to any
+        connected agent-hosting spoke that has an indexed agent. The
+        ``agent_info`` index lags connect by ~30s, so the final fallback
+        prefers ``simulation`` (where split-topology agents live) over a bare
+        pxmx spoke that may have none. Non-agent-hosting types resolve by
+        ``module_type`` exactly as before."""
+        if module_type in ("hypervisor", "simulation"):
+            if identifier:
+                sid = self.get_spoke_for_agent(identifier, fallback_hypervisor=False)
+                if sid:
+                    return sid
+            for info in (self.agent_info or {}).values():
+                sid = (info or {}).get("spoke_id")
+                if (sid and sid in self.active_connections
+                        and self.spoke_module_types.get(sid) in ("hypervisor", "simulation")):
+                    return sid
+            return (self.get_spoke_by_type("simulation")
+                    or self.get_spoke_by_type("hypervisor"))
+        return self.get_spoke_by_type(module_type)
+
     def get_hypervisor_spoke(self) -> Optional[str]:
         """Return a connected spoke that can answer Proxmox-agent commands —
         either a dedicated hypervisor (pxmx) spoke, or, in the split-topology

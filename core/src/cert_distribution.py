@@ -68,7 +68,15 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
     target (the hub installing a cert on ITSELF — there is no hub spoke to
     resolve). Signature: ``async def(domain, fullchain, privkey, chain,
     identifier) -> {"status", "message"}``. When None, a hub target records an
-    ERROR (so the absence is visible rather than silently dropped)."""
+    ERROR (so the absence is visible rather than silently dropped).
+
+    ``get_by_type(module_type, identifier)`` resolves the target spoke. The
+    identifier is passed so agent-hosting types (hypervisor/simulation) can
+    route to the spoke that actually OWNS the target pxmx agent — in the split
+    topology the agents dial the cs (simulation) spoke, so a 'hypervisor'
+    target must route there, not to a connected-but-agent-less pxmx spoke
+    (which would return 'No agent resolved for cert install'). Non-agent-
+    hosting types ignore the identifier and resolve by module_type."""
     summary: List[Dict[str, Any]] = []
     if not targets or not domain:
         # A cert with no targets (or no domain) is a SILENT no-op without this
@@ -131,7 +139,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                                           else "hub self-install failed"))
                     logger.warning("[cert] %s → hub: FAILED — %s", domain, entry["message"])
         else:
-            target_sid = get_by_type(mt)
+            target_sid = get_by_type(mt, ident)
             if not target_sid:
                 entry.update(status="ERROR", message=f"no connected {mt} spoke")
                 logger.warning("[cert] %s → %s: no connected %s spoke", domain, tgt_label, mt)
