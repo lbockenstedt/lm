@@ -1261,6 +1261,7 @@ const SUBMENU_LABELS = {
     'logs-cppm': 'Security/NAC',
     'logs-netbox': 'IPAM',
     'logs-cs': 'Simulations',
+    'logs-le': 'Certificates',
     'logs-agents': 'Agents',
 };
 
@@ -1276,13 +1277,14 @@ const LOG_MODULE_PRODUCT = {
     'logs-netbox': 'netbox',
     'logs-cppm':   'cppm',
     'logs-cs':     'cs',
+    'logs-le':     'le',
 };
 function logsSubmenu() {
     const products = window.activeProducts || new Set();
     const hasAgents = !!window.hasAgents;
     // Preserve the canonical order: hub first, then installed module tabs in
     // their fixed sequence, agents, then the hub-native filtered views last.
-    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'];
+    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-le', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'];
     return order.filter(m => {
         if (m === 'logs-hub' || m === 'logs-recovery' || m === 'logs-errors' || m === 'logs-bugs') return true;
         if (m === 'logs-agents') return hasAgents;
@@ -12116,7 +12118,7 @@ async function loadLEData(subMenu) {
             else { cls = 'bg-green-100 text-green-700'; label = `${days}d left`; }
             return { text: `${dt.toISOString().slice(0, 10)} · ${label}`, cls, days };
         };
-        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Targets', 'Actions'];
+        const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Targets'];
         // Per-domain last-issue indicator from window._leIssueStatus (the
         // client-side tracker fed by _leRunIssue). Green = last issue
         // succeeded, red = last issue failed (hover for the message), amber
@@ -12143,18 +12145,26 @@ async function loadLEData(subMenu) {
             const retryBtn = isFailed
                 ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
                 : '';
+            // 2-row group per cert: data on row 1, Actions pinned right on row 2
+            // (the 7-column table was cramped — the Expires date wrapped and the
+            // Actions cell squeezed manage/Renew/Revoke/Retry together). Actions
+            // sit on their own line, right-aligned, so the data row breathes.
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${c.challenge || '—'}</span></td>
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
-                <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls}">${exp.text}</span></td>
+                <td class="px-4 py-2 whitespace-nowrap"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls} whitespace-nowrap">${exp.text}</span></td>
                 <td class="px-4 py-2"><div class="flex items-center gap-2">${tgtCell}<button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium">manage</button></div></td>
-                <td class="px-4 py-2"><div class="flex items-center gap-3 whitespace-nowrap">
-                    ${retryBtn}
-                    <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
-                    <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
-                </div></td>
+            </tr>
+            <tr class="border-b border-slate-200 hover:bg-slate-50">
+                <td colspan="6" class="px-4 py-2 text-right">
+                    <div class="flex items-center justify-end gap-3 whitespace-nowrap">
+                        ${retryBtn}
+                        <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
+                        <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
+                    </div>
+                </td>
             </tr>`;
         }).join('');
         // Pending / failed attempt rows for domains that have NO cert yet —
@@ -12172,12 +12182,12 @@ async function loadLEData(subMenu) {
                 if (s.state === 'pending') {
                     return `<tr class="border-b border-slate-100 bg-amber-50/60">
                         <td class="px-4 py-2 font-mono font-medium"><span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse mr-2 align-middle"></span>${escapeHtml(dom)}</td>
-                        <td class="px-4 py-2 text-xs italic text-amber-700" colspan="6">issuing…</td>
+                        <td class="px-4 py-2 text-xs italic text-amber-700" colspan="5">issuing…</td>
                     </tr>`;
                 }
                 return `<tr class="border-b border-slate-100 bg-red-50/60">
                     <td class="px-4 py-2 font-mono font-medium"><span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 align-middle"></span>${escapeHtml(dom)}</td>
-                    <td class="px-4 py-2 text-xs text-red-700" colspan="5">last issue failed: ${escapeHtml(s.message || '')}</td>
+                    <td class="px-4 py-2 text-xs text-red-700" colspan="4">last issue failed: ${escapeHtml(s.message || '')}</td>
                     <td class="px-4 py-2"><button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue">Retry</button></td>
                 </tr>`;
             }).join('');
