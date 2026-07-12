@@ -4318,7 +4318,10 @@ async function csRenderVmServer() {
     const online = hosts.filter(h => h.spoke_online).length;
     const vms = hosts.reduce((n, h) => n + csSimVmCount(h), 0);
     const usbs = hosts.reduce((n, h) => n + csUsbCount(h), 0);
-    const recloneRunning = hosts.filter(h => h.reclone_state && h.reclone_state.status === 'running').length;
+    // Count VMs the agents report as actively recloning (prov_status stamped
+    // from reclone_vmids) — the reclone_state placeholder was always empty.
+    const recloneRunning = hosts.reduce((n, h) =>
+        n + ((h.proxmox_vms || []).filter(v => String(v.prov_status || '').toLowerCase() === 'recloning').length), 0);
     const summary = `<div class="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-xs text-slate-500">
       <span><b class="text-sm text-slate-700">${hosts.length}</b> Hosts</span>
       <span><b class="text-sm text-slate-700">${online}</b> Online</span>
