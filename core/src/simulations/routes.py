@@ -2424,7 +2424,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def get_sim_quota_catalog(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         """Catalog the Sim-Quota UI (Config → Sim Quotas) renders against: the
         sims + sites derived from the tenant's ``simulation.conf`` + the global
-        suggested alert→sim marriages + per-sim metadata. Forwards to the cs
+        suggested alert→sim linkage + per-sim metadata. Forwards to the cs
         spoke (which reads ``simulation.conf`` directly — the source of truth);
         falls back to parsing the hub's cached ``sim_conf_content`` when no
         spoke is connected so the editor still works offline."""
@@ -2483,7 +2483,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # alert_type:alert_id:site in Config → Sim Quotas. Validates against the full
     # SIM_META primitive set (global defaults aren't tied to one tenant's
     # simulation.conf). The catalog for this editor is the static SIM_META list
-    # + the suggested marriages — no per-tenant site list (site is free-text /
+    # + the suggested linkage — no per-tenant site list (site is free-text /
     # "all sites" at the global level).
     @app.get("/sim/api/superadmin/sim-quota-defaults")
     async def get_sim_quota_defaults(request: Request):

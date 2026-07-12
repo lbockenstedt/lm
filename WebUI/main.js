@@ -1233,7 +1233,7 @@ const VIEW_SUBMENUS = {
 // own subtab lists (VM Server 11, Setup 7, Central 3, Simulations 3, Clients 3,
 // Config 2). Primaries not listed here (Spoke Management) have no
 // children → render directly, no secondary strip. Config has two sub-tabs:
-// "Sim Quotas" (alert→sim marriages + per-site client quotas the engine keeps
+// "Sim Quotas" (alert→sim linkage + per-site client quotas the engine keeps
 // filled) and "Raw Config" (the former flat Config view — Source of Truth +
 // simulation.conf + user-overrides + hub config).
 const VIEW_CHILDREN = {
@@ -5052,6 +5052,7 @@ function _simQuotaDefaultFromServer(q) {
         count: q.count != null ? q.count : 10,
         site: q.site || '',
         multi_capable: !!q.multi_capable,
+        rehome: !!q.rehome,
         enabled: !!q.enabled,
     };
 }
@@ -5091,6 +5092,7 @@ function _renderSimQuotaDefaultsEditor() {
           </label>
           <label class="${labelCls} flex flex-col gap-1">
             <span class="flex items-center gap-1"><input data-sqd="multi_capable" type="checkbox" ${r.multi_capable ? 'checked' : ''}> Multi-capable</span>
+            <span class="flex items-center gap-1"><input data-sqd="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-sqd="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
           </label>
           <button onclick="removeSimQuotaDefault(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
@@ -5098,12 +5100,12 @@ function _renderSimQuotaDefaultsEditor() {
     }).join('');
     const suggestHtml = Object.keys(suggested).length ? `
         <details class="text-xs text-slate-500 mb-2">
-          <summary class="cursor-pointer">Suggested alert → sim marriages</summary>
+          <summary class="cursor-pointer">Suggested alert → sim linkage</summary>
           <ul class="mt-1 list-disc list-inside space-y-0.5">
             ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${a}</span> → <span class="font-mono">${s}</span> <button onclick="addSimQuotaDefaultSuggested('${a}','${s}')" class="text-[#01A982] hover:underline ml-1">add</button></li>`).join('')}
           </ul>
         </details>` : '';
-    rowsEl.innerHTML = suggestHtml + (rowHtml || '<p class="text-xs text-slate-400 italic">No default quotas defined. Add one or pick a suggested marriage above.</p>');
+    rowsEl.innerHTML = suggestHtml + (rowHtml || '<p class="text-xs text-slate-400 italic">No default quotas defined. Add one or pick a suggested linkage above.</p>');
 }
 
 function _simQuotaDefaultsSyncFromDom() {
@@ -5117,6 +5119,7 @@ function _simQuotaDefaultsSyncFromDom() {
             count: parseInt(g('count').value || '1', 10) || 1,
             site: g('site').value.trim(),
             multi_capable: !!g('multi_capable').checked,
+            rehome: !!g('rehome').checked,
             enabled: !!g('enabled').checked,
         });
     });
@@ -5150,6 +5153,7 @@ function addSimQuotaDefault(preset) {
         count: p.count != null ? p.count : 10,
         site: p.site || '',
         multi_capable: p.multi_capable != null ? !!p.multi_capable : false,
+        rehome: p.rehome != null ? !!p.rehome : false,
         enabled: p.enabled != null ? !!p.enabled : false,
     });
     _renderSimQuotaDefaultsEditor();

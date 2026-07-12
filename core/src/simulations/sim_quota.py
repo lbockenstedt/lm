@@ -6,8 +6,8 @@ serves the catalog to the WebUI. In **centralized** mode it parses the tenant's
 ``sim_conf_content`` (raw INI text in the store); in **distributed** mode the
 route forwards ``CS_GET_SIM_QUOTA_CATALOG`` to the cs spoke, which reads
 ``simulation.conf`` directly. Sims are pulled from the simulation config (not a
-hardcoded list); the alert→sim marriage is a tenant user action; the global
-catalog supplies per-sim metadata defaults + suggested marriages.
+hardcoded list); the alert→sim linkage is a tenant user action; the global
+catalog supplies per-sim metadata defaults + suggested linkage.
 
 Keep this file in sync with the cs twin. The schema/validation block is
 intentionally byte-identical so hub and spoke agree on the contract.
@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Tuple
 logger = logging.getLogger("SimQuota")
 
 # ── Schema (byte-identical to cs/lm-spoke/src/sim_quota.py) ───────────────
-SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site", "multi_capable", "enabled")
+SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
+                  "multi_capable", "rehome", "enabled")
 ALERT_TYPES = ("alert", "insight")
 
 SIM_META: Dict[str, Dict[str, object]] = {
@@ -79,6 +80,7 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         "count": _as_int(raw.get("count"), 1),
         "site": str(raw.get("site") or "").strip(),
         "multi_capable": _as_bool(raw.get("multi_capable"), bool(meta.get("multi_capable", False))),
+        "rehome": _as_bool(raw.get("rehome"), False),
         "enabled": _as_bool(raw.get("enabled"), False),
     }
 
