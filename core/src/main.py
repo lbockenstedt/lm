@@ -2025,6 +2025,34 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             await self.send_to_spoke(secret_msg)
             logger.info(f"Pushed hub secret to {spoke_id}")
 
+            # Reconcile the operator-set hub URL on every (re)connect: if
+            # global_config["hub"]["url"] is set, re-push SPOKE_SET_HUB_URL so a
+            # spoke that was offline when the hub's DNS name changed (or that
+            # is reconnecting after its own repoint restart) receives the
+            # current desired address. Fire-and-forget (send_to_spoke, no ack):
+            # the spoke's handler is idempotent — a spoke already on the URL
+            # no-ops, a pinned remote spoke persists + restarts onto it, and a
+            # loopback/auto spoke skips. This runs for EVERY spoke (agents and
+            # dedicated modules) BEFORE the module_key early-return below (that
+            # return is what otherwise skips agents, which have no module_key).
+            try:
+                hub_url = self.state.get_global_config().get("hub", {}).get("url")
+                if hub_url:
+                    url_msg = Message(
+                        header=MessageHeader(
+                            message_id=str(uuid.uuid4()),
+                            timestamp=time.time(),
+                            sender_id="hub",
+                            destination_id=spoke_id,
+                        ),
+                        payload=MessagePayload(
+                            type="SPOKE_SET_HUB_URL", data={"hub_url": hub_url}),
+                    )
+                    await self.send_to_spoke(url_msg)
+                    logger.debug(f"Re-pushed hub URL to {spoke_id}")
+            except Exception as e:
+                logger.warning(f"Failed to re-push hub URL to {spoke_id}: {e}")
+
             # Resolve the push_config branch tag from the module_type registry
             # first, then fall back to a spoke_id prefix match for legacy spokes.
             # See _PUSH_CONFIG_MODULE_KEY / _PUSH_CONFIG_PREFIX_MAP (branch-tag
@@ -2567,6 +2595,37 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         failed = [sid for sid in targets if sid not in rotated]
         logger.info(f"On-demand rotate-all: {len(rotated)} rotated, {len(failed)} failed.")
         return {"status": "SUCCESS", "rotated": rotated, "failed": failed}
+
+    async def push_hub_url_to_all_spokes(self, hub_url: str) -> Dict[str, Any]:
+        """Fan out a hub-URL change to every approved spoke immediately (the
+        save-time path; the reconcile-on-every-connect path in
+        ``push_config_to_spoke`` covers spokes that connect later). Uses
+        ``push_or_queue_to_spoke`` so a spoke mid-reconnect (or that restarts
+        onto the new URL before replying — the apply path os._exits) is queued
+        in the durable mailbox and re-delivered on its next connect, where the
+        idempotent handler no-ops (it's already on the new URL) and clears the
+        ack. Loopback/auto spokes skip in-handler, so the fan-out is safe to
+        send to everyone. Returns ``{"status","pushed","queued","failed"}``."""
+        targets = [sid for sid, ap in self.approved_modules.items() if ap]
+
+        async def _one(sid):
+            try:
+                r = await self.push_or_queue_to_spoke(
+                    sid, "SPOKE_SET_HUB_URL", {"hub_url": hub_url})
+                if r.get("queued"):
+                    return sid, "queued"
+                return sid, "pushed"
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"push-hub-url: failed for {sid}: {e}")
+                return sid, "failed"
+
+        results = await asyncio.gather(*(_one(sid) for sid in targets)) if targets else []
+        pushed = [sid for sid, kind in results if kind == "pushed"]
+        queued = [sid for sid, kind in results if kind == "queued"]
+        failed = [sid for sid, kind in results if kind == "failed"]
+        logger.info(f"Hub-URL fan-out: {len(pushed)} pushed, {len(queued)} queued, "
+                    f"{len(failed)} failed.")
+        return {"status": "SUCCESS", "pushed": pushed, "queued": queued, "failed": failed}
 
     async def revoke_spoke(self, spoke_id: str) -> Dict[str, Any]:
         """Immediate, non-destructive revocation of a spoke (item 9c).

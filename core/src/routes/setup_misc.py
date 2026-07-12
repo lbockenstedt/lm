@@ -29,6 +29,18 @@ _URL_SOURCE_KEYS = {
     "le", "agent",
 }
 
+# Operator-set hub URL (global_config["hub"]["url"]) — the address agents/spokes
+# check in to and get repointed to on a DNS-name change. Accepts a full
+# ``wss://host:443/ws/spoke`` URL OR a bare ``host[:port]`` / IP (the spoke's
+# ``_normalize_hub_url`` fills in wss:// + :443 + /ws/spoke on apply). Tight
+# charset: no spaces or shell metachars — this value is sent to every spoke and
+# written into each agent's .env as ``HUB_URL=`` (read back by the systemd
+# unit's ExecStart ``--hub $HUB_URL``).
+_HUB_URL_RE = re.compile(
+    r"^(?:wss|ws)://[A-Za-z0-9._:\[\]-]{1,253}(?:/[A-Za-z0-9._/-]*)?$"  # full ws/wss URL
+    r"|^[A-Za-z0-9._:\[\]-]{1,253}$"                                    # bare host[:port]
+)
+
 
 def _validate_update_config(config: dict) -> None:
     """Charset-allowlist the update_sources.* URLs and global_branch before they
@@ -230,3 +242,43 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
+
+    @app.post("/api/setup/hub-url")
+    async def set_hub_url(request: Request):
+        """Set the operator hub URL (``global_config["hub"]["url"]``) and fan it
+        out to every approved spoke immediately. The reconcile-on-connect path in
+        ``push_config_to_spoke`` re-sends it on every (re)connect, so spokes
+        offline at save time (or that come back later) still self-heal. Admin-only
+        — repointing every spoke is high-impact (each applying spoke restarts
+        once onto the new address). Empty ``url`` clears the override (spokes keep
+        their install-time pin / auto-discovery; no fan-out)."""
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin only")
+        hub = app.state.hub
+        try:
+            data = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        url = (data.get("url") or "").strip() if isinstance(data, dict) else ""
+        if url == "":
+            gc = hub.state.system_state.setdefault("global_config", {})
+            gc.setdefault("hub", {})["url"] = ""
+            hub.state.save_state()
+            return {"status": "ok", "message": "Hub URL override cleared.",
+                    "pushed": [], "queued": [], "failed": []}
+        if not _HUB_URL_RE.match(url):
+            raise HTTPException(
+                status_code=400,
+                detail="hub URL must be a wss:// URL or a bare host/IP "
+                       "(e.g. wss://hub.example.com:443 or 172.16.1.31).")
+        gc = hub.state.system_state.setdefault("global_config", {})
+        gc.setdefault("hub", {})["url"] = url
+        hub.state.save_state()
+        result = await hub.push_hub_url_to_all_spokes(url)
+        return {"status": "ok",
+                "message": (f"Hub URL set to {url}; pushed to "
+                            f"{len(result['pushed'])}, queued for "
+                            f"{len(result['queued'])} offline."),
+                "pushed": result["pushed"], "queued": result["queued"],
+                "failed": result["failed"]}
