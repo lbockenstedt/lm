@@ -1235,7 +1235,7 @@ const VIEW_SUBMENUS = {
 // children → render directly, no secondary strip. Config sub-tabs: "Sim Quotas"
 // (alert→sim linkage + per-site client quotas the engine keeps filled), "PXMX
 // Sites" (assign pxmx servers to sites → per-site runner pools), "Quota State"
-// (live engine ledger), and "Raw Config" (the former flat Config view — Source
+// (live engine ledger), and "Config Editor" (the former flat Config view — Source
 // of Truth + simulation.conf + user-overrides + hub config).
 const VIEW_CHILDREN = {
     cs: {
@@ -1243,7 +1243,7 @@ const VIEW_CHILDREN = {
         'Clients':     ['All', 'T1', 'T2', 'T3'],
         'Central':     ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware'],
         'VM Server':   ['Overview', 'VMs', 'Console', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
-        'Config':      ['Sim Quotas', 'PXMX Sites', 'Quota State', 'Raw Config'],
+        'Config':      ['Sim Quotas', 'PXMX Sites', 'Quota State', 'Config Editor'],
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications'],
     },
 };

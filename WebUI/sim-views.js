@@ -434,7 +434,7 @@ function csAutoRefreshControl() {
 const CS_NO_REFRESH = new Set([
     'Setup::Proxmox',   // Proxmox hypervisor config — manual Refresh only
     'Config',           // Config (form-heavy) — manual Refresh only. Both
-                        // sub-tabs (Sim Quotas, Raw Config) are form editors.
+                        // sub-tabs (Sim Quotas, Config Editor) are form editors.
     'VM Server::Command Queue', // loads serve from the cached CS_TELEMETRY
                                 // command_queue (instant); kept manual-refresh so
                                 // a busy spoke's live=1 re-fetch after a mutation
@@ -2680,7 +2680,7 @@ function csRenderSimQuotaEditor() {
             <button onclick="csSimQuotaSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Quotas</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mb-2">Link a monitored alert or insight (Central → Alerts/Insights → Monitor) to the simulation that produces it, then set how many online clients the engine keeps running that sim in the chosen site. The engine auto-selects from the online pool and self-heals when a runner dies. <span class="font-semibold">Re-home</span> lets it borrow runners from other sites (re-homing their <span class="font-mono">wsite</span>) when this site's pool can't fill the count. Sims + sites come from this tenant's <span class="font-semibold">Raw Config</span> (simulation.conf) and Central site mappings.</p>
+        <p class="text-xs text-slate-500 mb-2">Link a monitored alert or insight (Central → Alerts/Insights → Monitor) to the simulation that produces it, then set how many online clients the engine keeps running that sim in the chosen site. The engine auto-selects from the online pool and self-heals when a runner dies. <span class="font-semibold">Re-home</span> lets it borrow runners from other sites (re-homing their <span class="font-mono">wsite</span>) when this site's pool can't fill the count. Sims + sites come from this tenant's <span class="font-semibold">Config Editor</span> (simulation.conf) and Central site mappings.</p>
         ${suggestHtml}
         <div class="space-y-2 mt-2" id="cs-sq-rows">${rowHtml || '<div class="text-xs text-slate-400 italic">No quotas defined. Add one or pick a suggested linkage above.</div>'}</div>
       </div>
@@ -2903,7 +2903,7 @@ function csRenderPxmxSiteMapEditor() {
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">PXMX Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
           <button onclick="csPxmxSiteSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Assignments</button>
         </div>
-        <p class="text-xs text-slate-500 mb-2">Assign each pxmx server (the agent host) to a site. The Sim Quota engine fills a site-specific quota from clients whose <span class="font-semibold">hosting server</span> is in that site — e.g. a "MIA" quota draws from clients on MIA-assigned servers. A client's own wsite override still wins; the bucket-default wsite is the fallback. Sites come from <span class="font-semibold">Raw Config</span> (simulation.conf) and Central site mappings.</p>
+        <p class="text-xs text-slate-500 mb-2">Assign each pxmx server (the agent host) to a site. The Sim Quota engine fills a site-specific quota from clients whose <span class="font-semibold">hosting server</span> is in that site — e.g. a "MIA" quota draws from clients on MIA-assigned servers. A client's own wsite override still wins; the bucket-default wsite is the fallback. Sites come from <span class="font-semibold">Config Editor</span> (simulation.conf) and Central site mappings.</p>
         <div class="space-y-2 mt-2" id="cs-px-rows">${rowHtml || '<div class="text-xs text-slate-400 italic">No pxmx servers connected and no assignments saved. A server appears here once its agent connects to this spoke.</div>'}</div>
       </div>
     </div>`);
@@ -4114,14 +4114,14 @@ async function csRenderSetupNotifications() {
 
 // ── Register Config children ───────────────────────────────────────────────
 // Config is now two sub-tabs: "Sim Quotas" (alert→sim linkage + per-site
-// client quotas the engine keeps filled) and "Raw Config" (the former flat
+// client quotas the engine keeps filled) and "Config Editor" (the former flat
 // Config view — Source of Truth + simulation.conf + user-overrides + hub
 // config). VIEW_CHILDREN.cs.Config (main.js) lists both; the existing
 // case 'Config' dispatch is the no-children fallback and stays as a safety net.
 window.CS_CHILD_RENDERERS['Config::Sim Quotas']    = csRenderConfigSimQuotas;
 window.CS_CHILD_RENDERERS['Config::PXMX Sites']    = csRenderPxmxSiteMap;
 window.CS_CHILD_RENDERERS['Config::Quota State']   = csRenderSimQuotaState;
-window.CS_CHILD_RENDERERS['Config::Raw Config']    = csRenderConfigSimulation;
+window.CS_CHILD_RENDERERS['Config::Config Editor']    = csRenderConfigSimulation;
 
 // ── Register Setup children ────────────────────────────────────────────────
 window.CS_CHILD_RENDERERS['Setup::General']        = csRenderSetup;
