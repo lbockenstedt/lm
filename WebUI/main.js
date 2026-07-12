@@ -2920,6 +2920,10 @@ const VIEW_LOADERS = {
 
 async function setSubView(subMenu) {
     currentSubView = subMenu;
+    // Leaving the Certificates tab: stop the in-flight distribution poller/
+    // ticker so it doesn't keep fetching /api/le/inflight in the background.
+    // (loadLEData restarts them when the tab is re-entered.)
+    if (currentView !== 'le') clearLeInflightPollers();
     // Reset the child for the newly-selected primary (two-tier nav). For
     // non-cs modules _csDefaultChild returns '' and the secondary strip is
     // hidden by renderSecondaryNav.
@@ -12200,10 +12204,16 @@ async function loadDNSData(subMenu) {
 // are structured stubs until certbot/acme.sh is wired, so the table is usually
 // empty and the status bar carries the "not yet wired" message from the spoke.
 async function loadLEData(subMenu) {
+    if (window._leLoading) return;  // don't overlap the inflight poller
     const container = document.getElementById('le-content');
     if (!container) return;
+    window._leLoading = true;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
+    // Live in-flight indicators (yellow target badges + elapsed timer) need a
+    // periodic refresh so a deploy transitions when it completes — start the
+    // poller/ticker for this tab (idempotent; cleared on tab switch).
+    startLeInflightPollers();
     // Hub-level wildcard fan-out toggle (OFF while testing).
     loadLeWildcardAllSpokes();
     // Hub-level failed-distribution retry interval (hours; default 1).
@@ -12237,7 +12247,30 @@ async function loadLEData(subMenu) {
         const body = inner(d);
         const certs = body.certs || [];
         window._leCerts = certs;
-        const tgtBadge = t => {
+        // In-flight distributions: targets the hub is currently pushing (waiting
+        // on INSTALL_CERT confirmation). Fetched from the hub (not the le spoke)
+        // and merged into the badges by domain|module_type|identifier so a
+        // deploying target shows yellow with a live elapsed timer instead of its
+        // stale last_status. See startLeInflightPollers for the periodic refresh.
+        try {
+            const ifr = await _spokeFetch('/api/le/inflight');
+            const ifb = (ifr && ifr.ok) ? inner(ifr.data) : null;
+            const ifList = (ifb && Array.isArray(ifb.inflight)) ? ifb.inflight : [];
+            const imap = {};
+            for (const it of ifList) imap[`${it.domain}|${it.module_type}|${it.identifier || ''}`] = it.since;
+            window._leInflightMap = imap;
+        } catch (e) { window._leInflightMap = {}; }
+        const inflightMap = window._leInflightMap || {};
+        const tgtBadge = (t, domain) => {
+            const ifk = `${domain}|${t.module_type}|${t.identifier || ''}`;
+            const since = inflightMap[ifk];
+            if (since) {
+                // Yellow while we wait for deployment confirmation. The elapsed
+                // span is updated every 1s by updateLeInflightTimers.
+                return `<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300" data-inflight-since="${since}" title="Deployment in progress…">
+                    <span class="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse mr-1 align-middle"></span>${t.module_type}${t.identifier ? '/' + t.identifier : ''} <span class="le-inflight-elapsed" data-elapsed-since="${since}">0s</span>
+                </span>`;
+            }
             const ok = t.last_status === 'SUCCESS';
             const cls = ok ? 'bg-green-100 text-green-700' : (t.last_status === 'ERROR' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500');
             const mark = ok ? '✓' : (t.last_status === 'ERROR' ? '✗' : '·');
@@ -12279,7 +12312,7 @@ async function loadLEData(subMenu) {
             const isFailed = st && st.state === 'failed';
             const tgts = c.targets || [];
             const tgtCell = tgts.length
-                ? `<div class="flex flex-wrap gap-1">${tgts.map(tgtBadge).join('')}</div>`
+                ? `<div class="flex flex-wrap gap-1">${tgts.map(t => tgtBadge(t, c.domain)).join('')}</div>`
                 : `<span class="text-xs text-slate-400 italic">none</span>`;
             const exp = leExpiry(c.not_after);
             const retryBtn = isFailed
@@ -12298,12 +12331,13 @@ async function loadLEData(subMenu) {
                     <span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls} whitespace-nowrap">${exp.text}</span>
                     <div class="text-[11px] text-slate-400 mt-0.5" title="Renewal loop triggers this many days before expiry (per-cert override; default 7)">renew @ ${c.renew_window_days_effective ?? 7}d</div>
                 </td>
-                <td class="px-4 py-2"><div class="flex items-center gap-2">${tgtCell}<button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium">manage</button></div></td>
+                <td class="px-4 py-2"><div class="flex items-center gap-2">${tgtCell}</div></td>
             </tr>
             <tr class="border-b border-slate-200 hover:bg-slate-50">
                 <td colspan="6" class="px-4 py-2 text-right">
                     <div class="flex items-center justify-end gap-3 whitespace-nowrap">
                         ${retryBtn}
+                        <button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Manage distribution targets">Manage</button>
                         <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
                         <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
                     </div>
@@ -12352,7 +12386,45 @@ async function loadLEData(subMenu) {
             : expBanner + note + tw(th(cols) + `<tbody>${attemptRows}${rows}</tbody>`);
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
+    } finally {
+        window._leLoading = false;
     }
+}
+
+// ── In-flight distribution indicator (yellow target badge + live timer) ─────
+// While the hub is pushing INSTALL_CERT to a target, the target badge turns
+// yellow with an elapsed timer — we can't predict how fast a cert will transfer
+// or install (esp. the hypervisor path's pveproxy restart, which can take many
+// minutes), so "what's in flight" needs a live indicator, not just the stale
+// last_status. The 1s ticker updates the elapsed text purely client-side; the
+// 12s poller re-renders so a deploy transitions yellow→green/red on completion.
+// Started when the Certificates tab loads, cleared on tab switch (setSubView).
+let _leInflightPoller = null;
+let _leInflightTicker = null;
+
+function updateLeInflightTimers() {
+    const now = Date.now();
+    document.querySelectorAll('[data-elapsed-since]').forEach(el => {
+        const since = Number(el.getAttribute('data-elapsed-since'));
+        if (!since) return;
+        const secs = Math.max(0, Math.floor((now - since * 1000) / 1000));
+        el.textContent = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m${secs % 60}s`;
+    });
+}
+
+function clearLeInflightPollers() {
+    if (_leInflightPoller) { clearInterval(_leInflightPoller); _leInflightPoller = null; }
+    if (_leInflightTicker) { clearInterval(_leInflightTicker); _leInflightTicker = null; }
+}
+
+function startLeInflightPollers() {
+    if (_leInflightPoller) return;  // idempotent — don't stack intervals
+    _leInflightTicker = setInterval(updateLeInflightTimers, 1000);
+    _leInflightPoller = setInterval(() => {
+        if (window._leLoading) return;  // don't overlap a manual load
+        if (!document.getElementById('le-content')) { clearLeInflightPollers(); return; }
+        loadLEData();
+    }, 12000);
 }
 
 // Re-push any stale cert material to its targets now (no certbot invocation —
