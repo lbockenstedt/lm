@@ -882,7 +882,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             (0, False, '') on transport failure."""
             if callable(drain_aware):
                 try:
-                    outcome = await drain_aware(sid, "CS_CONFIG_UPDATE", payload, timeout=5.0)
+                    outcome = await drain_aware(sid, "CS_CONFIG_UPDATE", payload, timeout=30.0)
                     queued = bool(outcome.get("queued"))
                     msg = str(outcome.get("message", "") or "")
                     if queued:
@@ -897,13 +897,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             if not callable(push):
                 # Fallback for an older hub build without either helper.
                 try:
-                    await hub.request_response(sid, "CS_CONFIG_UPDATE", payload, timeout=5.0)
+                    await hub.request_response(sid, "CS_CONFIG_UPDATE", payload, timeout=30.0)
                     return 1, False, ""
                 except Exception as exc:
                     logger.warning("CS_CONFIG_UPDATE push to %s failed: %s", sid, exc)
                     return 0, False, ""
             try:
-                outcome = await push(sid, "CS_CONFIG_UPDATE", payload, timeout=5.0)
+                outcome = await push(sid, "CS_CONFIG_UPDATE", payload, timeout=30.0)
                 queued = bool(outcome.get("queued"))
                 msg = str(outcome.get("message", "") or "")
                 if queued:

@@ -2256,7 +2256,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if override_cfg:
             try:
                 outcome = await self._drain_aware_config_push(
-                    spoke_id, "CS_CONFIG_UPDATE", override_cfg, timeout=5.0)
+                    spoke_id, "CS_CONFIG_UPDATE", override_cfg, timeout=30.0)
                 if outcome.get("queued"):
                     logger.info("CS override re-push to %s %s (tenant %s)",
                                 spoke_id,
@@ -2311,7 +2311,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return
         try:
             outcome = await self._drain_aware_config_push(
-                spoke_id, "CS_CONFIG_UPDATE", cfg, timeout=5.0)
+                spoke_id, "CS_CONFIG_UPDATE", cfg, timeout=30.0)
             if outcome.get("queued"):
                 logger.info("CS hub config re-push to %s %s (tenant %s)",
                             spoke_id,
