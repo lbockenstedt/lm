@@ -31,7 +31,8 @@ def _fake_rr(responses):
     calls = []
 
     async def rr(spoke_id, command, data=None, timeout=None):
-        calls.append({"spoke": spoke_id, "cmd": command, "data": data})
+        calls.append({"spoke": spoke_id, "cmd": command, "data": data,
+                      "timeout": timeout})
         return responses.get((spoke_id, command),
                              {"payload": {"data": {"status": "ERROR",
                                                    "message": "no stub"}}})
@@ -86,6 +87,12 @@ def test_distribute_pushes_to_capable_target():
     assert len(marks) == 1
     assert marks[0]["data"]["status"] == "SUCCESS"
     assert marks[0]["data"]["hash"] == _H
+    # INSTALL_CERT allows 120s — the hypervisor path relays to a per-node agent
+    # that runs `pvenode cert set` + restarts pveproxy (the pxmx spoke's own
+    # relay timeout is 120s). 20s (the old value) timed out the hub while the
+    # spoke was still waiting on the agent → "Timed out waiting for spoke
+    # response" even though the cert install was still in progress.
+    assert installs[0]["timeout"] == 120.0
 
 
 def test_distribute_skips_up_to_date_target():

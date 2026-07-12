@@ -130,10 +130,18 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                 entry.update(status="ERROR", message=f"no connected {mt} spoke")
                 logger.warning("[cert] %s → %s: no connected %s spoke", domain, tgt_label, mt)
             else:
+                # 120s matches the pxmx spoke's own relay timeout: the
+                # hypervisor path forwards INSTALL_CERT to a per-node agent
+                # that runs `pvenode cert set` + restarts pveproxy (a slow
+                # service restart). 20s (the old value) timed the hub out
+                # while the spoke was still waiting on the agent → a spurious
+                # "Timed out waiting for spoke response" ERROR even though the
+                # install was still in progress. Fast targets (firewall/ipam)
+                # return well under this; the timeout is just the upper bound.
                 res = await rr(target_sid, "INSTALL_CERT", {
                     "domain": domain, "fullchain": fullchain,
                     "privkey": privkey, "chain": chain, "identifier": ident,
-                }, timeout=20.0)
+                }, timeout=120.0)
                 rret = _unwrap(res)
                 if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
                     entry.update(status="SUCCESS",
@@ -332,7 +340,7 @@ async def distribute_wildcard_to_all_spokes(
         res = await rr(sid, "INSTALL_CERT", {
             "domain": domain, "fullchain": fullchain, "privkey": privkey,
             "chain": chain, "identifier": sid,
-        }, timeout=20.0)
+        }, timeout=120.0)
         rret = _unwrap(res)
         if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
             entry.update(status="SUCCESS", message=rret.get("message") or "installed")
