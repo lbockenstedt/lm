@@ -3842,35 +3842,36 @@ async function saveSaHubUrl() {
 // samples match the live UI. Same look as the Simulations → Clients legend.
 function _spokesAgentsLegend() {
     const dot = cls => `<span class="inline-block w-2 h-2 rounded-full ${cls}"></span>`;
-    const pill = (cls, t) => `<span class="${cls} px-2 py-0.5 rounded-full text-[10px] font-bold uppercase">${t}</span>`;
+    const box = cls => `<span class="inline-block w-4 h-3 rounded border ${cls} align-middle"></span>`;
     const lbl = t => `<span class="font-bold uppercase tracking-wider text-slate-400 mr-1">${t}</span>`;
     return `<div class="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
       <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
       <div class="mt-2 space-y-1.5">
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
-          ${lbl('Status')}
+          ${lbl('Status dot')}
           <span class="flex items-center gap-1.5">${dot('bg-green-500 shadow-[0_0_6px_rgba(34,197,94,0.5)]')} Online / healthy</span>
           <span class="flex items-center gap-1.5">${dot('bg-amber-400')} Slow heartbeat or pending approval</span>
           <span class="flex items-center gap-1.5">${dot('bg-red-500')} Offline / no heartbeat</span>
           <span class="flex items-center gap-1.5">${dot('bg-slate-300')} No telemetry yet</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
-          ${lbl('Version')}
-          <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-700 font-mono', '.NN')} Up to date</span>
-          <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-700 font-mono', '.NN')} Out of date (behind / non-.NN)</span>
-          <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-600 font-mono', '?')} Unknown</span>
-          <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-600', '2s')} Since last heartbeat</span>
+          ${lbl('Row color')}
+          <span class="flex items-center gap-1.5">${box('bg-amber-50 border-amber-300')} Out of date (needs update)</span>
+          <span class="flex items-center gap-1.5">${box('bg-red-50 border-red-300')} Last contact &gt; 30 min (stale)</span>
+          <span class="flex items-center gap-1.5">${box('bg-white border-slate-200')} Healthy &amp; current</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
-          ${lbl('Badges')}
-          <span class="flex items-center gap-1.5">${pill('bg-indigo-50 text-indigo-700', 'Module')} / ${pill('bg-slate-100 text-slate-600', 'Agent')} / ${pill('bg-slate-100 text-slate-600', 'Role')} node kind</span>
-          <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-700', 'Approved')} / ${pill('bg-yellow-100 text-yellow-700', 'Pending')}</span>
-          <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-700', '⚠ Offending')} over rate · ${pill('bg-orange-100 text-orange-700', '⏳ Throttled')} fleet slow-down</span>
+          ${lbl('Flags')}
+          <span class="text-slate-400">the line under each name shows</span>
+          <span class="font-mono text-slate-400">id</span><span class="text-slate-300">·</span><span>type·module·version·seen&nbsp;Ns&nbsp;ago</span>,
+          <span class="text-red-600 font-semibold">out of date</span>
+          <span class="text-amber-600 font-semibold">Pending approval</span>
+          <span class="text-amber-600 font-semibold">alert: warning</span>/<span class="text-red-600 font-semibold">error</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Tenant')}
-          <span class="flex items-center gap-1.5">${pill('bg-emerald-50 text-emerald-700', 'tenant')} bound to one tenant (private)</span>
-          <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-800', 'shared · tenant')} shared — visible to all tenants</span>
+          <span class="flex items-center gap-1.5"><span class="font-mono text-amber-700 font-semibold">shared</span> visible to all tenants</span>
+          <span class="flex items-center gap-1.5"><span class="font-mono text-slate-600">&lt;name&gt;</span> private to one tenant</span>
         </div>
       </div>
     </div>`;
