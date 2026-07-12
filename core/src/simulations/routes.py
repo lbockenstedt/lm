@@ -2291,12 +2291,47 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception:
             body = {}
         source = "hub" if str((body or {}).get("source")) == "hub" else "github"
+        # Seed the hub-owned config on the FIRST switch to Hub mode. In hub mode
+        # the hub-owned override files ARE the whole config (repo base ignored);
+        # until they exist the spoke's load_configs falls back to the repo copy —
+        # a window where "Hub" silently serves the GitHub version. Close it: if a
+        # hub-owned bucket is still empty, seed it from the current EFFECTIVE
+        # config (repo base + any existing override, read live from the spoke) and
+        # bundle it into the SAME push as the config_source flag so the spoke
+        # writes the hub-owned files and flips mode atomically (no empty-override
+        # gap). Only EMPTY buckets are seeded, so hub→github→hub never clobbers a
+        # prior edit; an offline spoke skips seeding gracefully (the first save
+        # still seeds later).
+        seeded = {}
+        if source == "hub":
+            need_sim = not (await store.get_sim_conf_content(tenant_id) or "").strip()
+            need_user = not (await store.get_user_overrides_content(tenant_id) or "").strip()
+            if need_sim or need_user:
+                eff = None
+                try:
+                    eff = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
+                except HTTPException as exc:
+                    logger.info("config/source→hub: skipping seed, spoke round-trip "
+                                "failed (%s); first save will seed instead", exc.detail)
+                if isinstance(eff, dict):
+                    if need_sim:
+                        sim_txt = (eff.get("simulation_conf", "") or "")
+                        if sim_txt.strip():
+                            await store.set_sim_conf_content(tenant_id, sim_txt)
+                            seeded["sim_conf_override"] = sim_txt
+                    if need_user:
+                        user_txt = (eff.get("user_overrides", "") or "")
+                        if user_txt.strip():
+                            await store.set_user_overrides_content(tenant_id, user_txt)
+                            seeded["user_conf_override"] = user_txt
         await store.set_source_of_truth(tenant_id, source)
         # Tell the spoke which mode so load_configs resolves the effective conf
         # accordingly (hub = hub-owned full file, never git-reverted; github =
-        # repo file is the base).
-        pushed = await _push_config(tenant_id, {"config_source": source})
-        return {"saved": True, "source": source, "pushed_to_spokes": pushed}
+        # repo file is the base). Bundle any freshly-seeded hub-owned override
+        # text in the same message so mode + files land together.
+        pushed = await _push_config(tenant_id, {"config_source": source, **seeded})
+        return {"saved": True, "source": source, "pushed_to_spokes": pushed,
+                "seeded": sorted(seeded.keys())}
 
     @app.get("/sim/api/{tenant}/settings/security")
     async def get_security(tenant: str, tenant_id: str = Depends(get_tenant_id)):
