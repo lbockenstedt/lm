@@ -16,8 +16,10 @@ import tempfile
 # self.CERT_CAPABLE_MODULES. See cert_distribution.py for the architecture.
 from cert_distribution import (
     CERT_CAPABLE_MODULES as _CERT_CAPABLE_MODULES,
+    _is_wildcard,
     distribute_cert_to_targets as _distribute_cert_to_targets,
     distribute_all_certs as _distribute_all_certs_impl,
+    distribute_wildcard_to_all_spokes as _distribute_wildcard_to_all_spokes,
 )
 
 logger = logging.getLogger("Hub")
@@ -47,22 +49,65 @@ class HubCertDistributionMixin:
     CERT_CAPABLE_MODULES = _CERT_CAPABLE_MODULES  # v1: opnsense (firewall)
 
     async def _distribute_one_cert(self, le_spoke_id: str, domain: str,
-                                   targets: list) -> list:
+                                   targets: list,
+                                   material_hash: Optional[str] = None) -> list:
         """Pull cert material for ``domain`` from le → INSTALL_CERT to each
-        target spoke (resolved by module_type). See _distribute_cert_to_targets."""
-        return await _distribute_cert_to_targets(
+        target spoke (resolved by module_type). See _distribute_cert_to_targets.
+
+        When the hub's ``wildcard_all_spokes`` flag is ON and ``domain`` is a
+        wildcard, ALSO fan the cert out to every connected cert-capable spoke
+        (plus the hub). The flag is OFF by default so this is a no-op while the
+        operator is still testing cert distribution."""
+        explicit = await _distribute_cert_to_targets(
             self.request_response, self.get_spoke_by_type,
             self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets,
             install_on_hub=self._install_cert_on_hub)
+        if self._wildcard_all_spokes_enabled() and _is_wildcard(domain):
+            wc = await _distribute_wildcard_to_all_spokes(
+                self.request_response, self.get_all_spokes_by_type,
+                self.CERT_CAPABLE_MODULES, le_spoke_id, domain, material_hash,
+                self._wildcard_push_state(),
+                install_on_hub=self._install_cert_on_hub)
+            self._save_wildcard_push_state()
+            return (explicit or []) + (wc or [])
+        return explicit
 
     async def _distribute_all_certs(self, le_spoke_id: str) -> list:
         """Distribute every managed cert whose targets are stale. Returns a
         flat per-target summary (see _distribute_all_certs_impl) so the
-        /api/le/distribute route can show a per-target toast."""
-        return await _distribute_all_certs_impl(
+        /api/le/distribute route can show a per-target toast. Passes the
+        wildcard fan-out params (gated by the hub flag — OFF by default →
+        no-op while the operator is testing)."""
+        out = await _distribute_all_certs_impl(
             self.request_response, self.get_spoke_by_type,
             self.CERT_CAPABLE_MODULES, le_spoke_id,
-            install_on_hub=self._install_cert_on_hub)
+            install_on_hub=self._install_cert_on_hub,
+            wildcard_enabled=self._wildcard_all_spokes_enabled(),
+            get_all_by_type=self.get_all_spokes_by_type,
+            push_state=self._wildcard_push_state())
+        self._save_wildcard_push_state()
+        return out
+
+    # ── wildcard-all-spokes toggle (OFF by default; the operator's testing
+    # gate). Lives in global_config["certs"]["wildcard_all_spokes"]. When ON, a
+    # wildcard cert (``*.domain``) is fanned out to EVERY connected cert-capable
+    # spoke + the hub, not just its explicit targets. See
+    # distribute_wildcard_to_all_spokes in cert_distribution.py.
+    def _wildcard_all_spokes_enabled(self) -> bool:
+        gc = (self.state.get_global_config() or {}).get("certs", {}) or {}
+        return bool(gc.get("wildcard_all_spokes", False))
+
+    def _wildcard_push_state(self) -> Dict[str, str]:
+        """Persistent ``{f"{domain}|{spoke_id}": material_hash}`` so the hourly
+        loop doesn't re-push a wildcard to spokes that already have the current
+        material. Stored in system_state (saved via _save_wildcard_push_state)."""
+        return self.state.system_state.setdefault("wildcard_push_state", {})
+
+    def _save_wildcard_push_state(self) -> None:
+        try:
+            self.state.save_state()
+        except Exception as e:  # never block distribution on a state-save
+            cert_log.debug("wildcard push-state save failed: %s", e)
 
     async def _install_cert_on_hub(self, domain: str, fullchain: str,
                                    privkey: str, chain: str,

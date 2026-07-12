@@ -276,7 +276,8 @@ def register(app, hub, ctx):
         # nothing deployed. distribute_cert_to_targets handles the empty case.
         if domain:
             try:
-                dist = await hub._distribute_one_cert(le_sid, domain, targets)
+                dist = await hub._distribute_one_cert(le_sid, domain, targets,
+                                                      material_hash=inner.get("material_hash"))
             except Exception as e:
                 logger.warning("cert distribution after issue failed: %s", e)
                 dist = [{"status": "ERROR", "message": str(e)}]
@@ -295,7 +296,8 @@ def register(app, hub, ctx):
         for r in inner.get("renewed") or []:
             if r.get("renewed") and r.get("domain") and r.get("targets"):
                 try:
-                    d = await hub._distribute_one_cert(le_sid, r["domain"], r["targets"])
+                    d = await hub._distribute_one_cert(le_sid, r["domain"], r["targets"],
+                                                       material_hash=r.get("material_hash"))
                     r["distribution"] = d
                     agg.extend(d)
                 except Exception as e:

@@ -161,7 +161,10 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
 
 async def distribute_all_certs(rr: Callable, get_by_type: Callable,
                                capable: Set[str], le_spoke_id: str,
-                               install_on_hub: Optional[Callable] = None
+                               install_on_hub: Optional[Callable] = None,
+                               wildcard_enabled: bool = False,
+                               get_all_by_type: Optional[Callable] = None,
+                               push_state: Optional[Dict[str, str]] = None,
                                ) -> List[Dict[str, Any]]:
     """Distribute every managed cert whose targets are stale. Skips the
     ``LE_GET_CERT`` pull entirely when every target of a cert is current.
@@ -170,7 +173,14 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
     so the /api/le/distribute route can show a per-target toast — certs with no
     targets or all targets current contribute a synthetic ``SKIPPED`` entry so
     the operator sees them in the toast instead of a silent no-op. The hourly
-    run_cert_distribution_loop caller ignores the return."""
+    run_cert_distribution_loop caller ignores the return.
+
+    ``wildcard_enabled`` (default False — the operator's testing toggle) gates
+    the wildcard fan-out: when True AND a cert's domain is a wildcard, the cert
+    is also pushed to EVERY connected cert-capable spoke (see
+    ``distribute_wildcard_to_all_spokes``) in addition to its explicit targets.
+    False → the wildcard path is never invoked (no-op while the operator is
+    still testing cert distribution)."""
     aggregate: List[Dict[str, Any]] = []
     res = await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0)
     ret = _unwrap(res)
@@ -181,29 +191,192 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
         logger.warning("[cert] LE_LIST_CERTS failed — cannot enumerate certs to distribute")
         return aggregate
     for cert in ret.get("certs") or []:
-        domain = cert.get("domain")
+        domain = cert.get("domain") or ""
         targets = cert.get("targets") or []
-        if not domain or not targets:
+        cur_hash = cert.get("material_hash")
+        is_wc = wildcard_enabled and _is_wildcard(domain)
+
+        # Explicit-target path (skip the LE_GET_CERT pull when all current).
+        explicit_summary: List[Dict[str, Any]] = []
+        if not targets:
             logger.info("[cert] %s: no targets configured — skipping",
                          domain or "<unknown>")
-            aggregate.append({"domain": domain or "<unknown>", "module_type": None,
-                              "identifier": None, "status": "SKIPPED",
-                              "message": "no targets configured", "skipped": True})
-            continue
-        cur_hash = cert.get("material_hash")
-        if cur_hash and all(t.get("last_pushed_hash") == cur_hash
-                            and t.get("last_status") == "SUCCESS" for t in targets):
+            explicit_summary.append({"domain": domain or "<unknown>", "module_type": None,
+                                      "identifier": None, "status": "SKIPPED",
+                                      "message": "no targets configured", "skipped": True})
+        elif cur_hash and all(t.get("last_pushed_hash") == cur_hash
+                              and t.get("last_status") == "SUCCESS" for t in targets):
             logger.info("[cert] %s: all %d target(s) current — skipping",
                          domain, len(targets))
-            aggregate.append({"domain": domain, "module_type": None, "identifier": None,
-                              "status": "SKIPPED",
-                              "message": f"all {len(targets)} target(s) current",
-                              "skipped": True})
-            continue  # every target current — skip the LE_GET_CERT pull
-        summary = await distribute_cert_to_targets(rr, get_by_type, capable,
-                                                    le_spoke_id, domain, targets,
-                                                    install_on_hub=install_on_hub)
-        for e in summary:
-            e["domain"] = domain
-        aggregate.extend(summary)
+            explicit_summary.append({"domain": domain, "module_type": None, "identifier": None,
+                                      "status": "SKIPPED",
+                                      "message": f"all {len(targets)} target(s) current",
+                                      "skipped": True})
+        else:
+            explicit_summary = await distribute_cert_to_targets(
+                rr, get_by_type, capable, le_spoke_id, domain, targets,
+                install_on_hub=install_on_hub)
+            for e in explicit_summary:
+                e["domain"] = domain
+        aggregate.extend(explicit_summary)
+
+        # Wildcard fan-out (gated; no-op when disabled). Runs even when the
+        # explicit path skipped (all current / no targets) — wildcard targets
+        # are separate spokes, tracked by hub-side push-state, and the skip
+        # check uses cur_hash from the cert list (no LE_GET_CERT pull when all
+        # wildcard spokes are current).
+        if is_wc and get_all_by_type is not None and push_state is not None:
+            wc_summary = await distribute_wildcard_to_all_spokes(
+                rr, get_all_by_type, capable, le_spoke_id, domain, cur_hash,
+                push_state, install_on_hub=install_on_hub)
+            aggregate.extend(wc_summary)
+    return aggregate
+
+
+def _is_wildcard(domain: str) -> bool:
+    """A wildcard cert domain — leftmost label is ``*`` (e.g. ``*.lab.example.com``).
+    certbot issues these via a DNS-01 challenge; the resulting cert matches every
+    subdomain, so the hub can fan it out to ALL cert-capable spokes without each
+    one being an explicit target."""
+    return bool(domain) and domain.lstrip().startswith("*.")
+
+
+async def distribute_wildcard_to_all_spokes(
+        rr: Callable, get_all_by_type: Callable, capable: Set[str],
+        le_spoke_id: str, domain: str,
+        material_hash: Optional[str],
+        push_state: Dict[str, str],
+        install_on_hub: Optional[Callable] = None,
+        ) -> List[Dict[str, Any]]:
+    """Fan a wildcard cert out to EVERY connected cert-capable spoke (resolved
+    directly by ``spoke_id`` — so multiple spokes of the same module_type each
+    get it, unlike ``distribute_cert_to_targets`` which resolves one spoke per
+    module_type) plus the hub itself. Gated hub-side: the caller only invokes
+    this when the hub's ``wildcard_all_spokes`` flag is ON and the domain is a
+    wildcard, so this is a no-op while the operator is still testing cert
+    distribution (flag default OFF).
+
+    Skip: ``push_state`` is a mutable ``{f"{domain}|{spoke_id}": hash}`` dict
+    the hub owns + persists. When a spoke's recorded hash already equals the
+    current ``material_hash`` the push is skipped (no re-push storm on the
+    hourly loop). ``material_hash`` from ``LE_LIST_CERTS`` lets us skip the
+    ``LE_GET_CERT`` pull entirely when every spoke is current; pass None to
+    force a pull (the issue path, which has no pre-listed hash).
+
+    Returns a per-target summary (each entry tagged with ``domain`` + ``wildcard``
+    so the UI toast can distinguish wildcard fan-out from explicit-target pushes).
+    """
+    summary: List[Dict[str, Any]] = []
+    if not _is_wildcard(domain):
+        return summary
+
+    # Enumerate every connected cert-capable spoke (direct by spoke_id, so all
+    # instances of a module_type are covered). "hub" is not a spoke — handled
+    # via install_on_hub below.
+    spoke_targets: List[Dict[str, Any]] = []
+    for mt in capable:
+        if mt == "hub":
+            continue
+        for sid in get_all_by_type(mt):
+            spoke_targets.append({"module_type": mt, "identifier": sid, "spoke_id": sid})
+    include_hub = "hub" in capable and install_on_hub is not None
+
+    if not spoke_targets and not include_hub:
+        logger.info("[cert] wildcard %s: no connected cert-capable spokes — nothing to fan out", domain)
+        return summary
+
+    # Skip check against hub-side push-state. material_hash may be None (issue
+    # path) → treat as "stale" so we pull + push (issue is rare + the cert is fresh).
+    def _current(sid: str) -> bool:
+        return bool(material_hash) and push_state.get(f"{domain}|{sid}") == material_hash
+
+    stale_spokes = [t for t in spoke_targets if not _current(t["spoke_id"])]
+    hub_current = (not include_hub) or (bool(material_hash)
+                                        and push_state.get(f"{domain}|hub") == material_hash)
+    if not stale_spokes and hub_current:
+        logger.info("[cert] wildcard %s: all %d target(s) current — skipping",
+                     domain, len(spoke_targets) + (1 if include_hub else 0))
+        return [{"domain": domain, "module_type": None, "identifier": None,
+                 "status": "SUCCESS",
+                 "message": f"all {len(spoke_targets) + (1 if include_hub else 0)} wildcard target(s) current",
+                 "skipped": True, "wildcard": True}]
+
+    # Pull material (only when something is stale). material_hash from the list
+    # avoids the pull when every target is current; here at least one is stale.
+    mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
+    mat_ret = _unwrap(mat)
+    if not (isinstance(mat_ret, dict) and mat_ret.get("status") == "SUCCESS"):
+        msg = mat_ret.get("message") if isinstance(mat_ret, dict) else "LE_GET_CERT failed"
+        logger.warning("[cert] wildcard %s: LE_GET_CERT failed — %s", domain, msg)
+        return [{"domain": domain, "module_type": None, "identifier": None,
+                 "status": "ERROR", "message": msg, "wildcard": True}]
+    cert = mat_ret.get("data") or {}
+    fullchain = cert.get("fullchain", "")
+    privkey = cert.get("privkey", "")
+    chain = cert.get("chain", "")
+    cur_hash = material_hash or cert.get("material_hash")
+
+    logger.info("[cert] wildcard %s: fanning out to %d spoke(s)%s",
+                domain, len(stale_spokes), " + hub" if (include_hub and not hub_current) else "")
+
+    for t in stale_spokes:
+        sid = t["spoke_id"]; mt = t["module_type"]
+        entry = {"domain": domain, "module_type": mt, "identifier": sid, "wildcard": True}
+        res = await rr(sid, "INSTALL_CERT", {
+            "domain": domain, "fullchain": fullchain, "privkey": privkey,
+            "chain": chain, "identifier": sid,
+        }, timeout=20.0)
+        rret = _unwrap(res)
+        if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
+            entry.update(status="SUCCESS", message=rret.get("message") or "installed")
+            if cur_hash:
+                push_state[f"{domain}|{sid}"] = cur_hash
+            logger.info("[cert] wildcard %s → %s/%s: installed — %s",
+                         domain, mt, sid, entry["message"])
+        else:
+            entry.update(status="ERROR",
+                         message=(rret.get("message") if isinstance(rret, dict)
+                                  else "INSTALL_CERT failed"))
+            logger.warning("[cert] wildcard %s → %s/%s: FAILED — %s",
+                           domain, mt, sid, entry["message"])
+        # Record on the le ledger (gates explicit-target re-push + surfaces in UI).
+        try:
+            await rr(le_spoke_id, "LE_MARK_DISTRIBUTED", {
+                "domain": domain, "module_type": mt, "identifier": sid,
+                "hash": cur_hash, "status": entry["status"],
+                "message": entry["message"], "wildcard": True}, timeout=5.0)
+        except Exception as e:
+            logger.debug("LE_MARK_DISTRIBUTED failed for wildcard %s/%s: %s", domain, sid, e)
+        summary.append(entry)
+
+    # Hub self-install (one TLS endpoint; identifier "hub").
+    if include_hub and not hub_current:
+        hentry = {"domain": domain, "module_type": "hub", "identifier": "hub", "wildcard": True}
+        try:
+            hret = await install_on_hub(domain, fullchain, privkey, chain, "hub")
+        except Exception as e:  # never let a self-install crash the fan-out
+            hret = {"status": "ERROR", "message": str(e)}
+        if isinstance(hret, dict) and hret.get("status") == "SUCCESS":
+            hentry.update(status="SUCCESS", message=hret.get("message") or "installed on hub")
+            if cur_hash:
+                push_state[f"{domain}|hub"] = cur_hash
+            logger.info("[cert] wildcard %s → hub: installed — %s", domain, hentry["message"])
+        else:
+            hentry.update(status="ERROR",
+                          message=(hret.get("message") if isinstance(hret, dict)
+                                   else "hub self-install failed"))
+            logger.warning("[cert] wildcard %s → hub: FAILED — %s", domain, hentry["message"])
+        try:
+            await rr(le_spoke_id, "LE_MARK_DISTRIBUTED", {
+                "domain": domain, "module_type": "hub", "identifier": "hub",
+                "hash": cur_hash, "status": hentry["status"],
+                "message": hentry["message"], "wildcard": True}, timeout=5.0)
+        except Exception as e:
+            logger.debug("LE_MARK_DISTRIBUTED failed for wildcard %s/hub: %s", domain, e)
+        summary.append(hentry)
+
+    ok = sum(1 for s in summary if s.get("status") == "SUCCESS")
+    logger.info("[cert] wildcard %s: fanned out %d/%d target(s) OK",
+                domain, ok, len(summary))
+    return summary
     return aggregate
