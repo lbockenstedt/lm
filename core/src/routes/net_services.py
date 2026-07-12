@@ -36,7 +36,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="Certificate spoke not connected")
         return spoke_id
 
-    async def _relay_spoke(spoke_id, command, payload=None, log_name=""):
+    async def _relay_spoke(spoke_id, command, payload=None, log_name="", timeout=None):
         """Relay ``command`` to a spoke and return its SUCCESS payload.
 
         Shared core of every DNS/DHCP relay handler (10 routes were near-
@@ -51,10 +51,15 @@ def register(app, hub, ctx):
         full SUCCESS dict — is returned verbatim so existing field access
         (``data["records"]`` / ``data["subnets"]`` …) is unchanged. Spoke-down
         (503) is raised by the ``_get_*_spoke`` caller before we run.
+
+        ``timeout`` overrides the request_response default (5s) for long-running
+        spoke commands — e.g. LE certbot issuance/renewal/revoke, which can run
+        certbot for up to ~180s.
         """
         hub = app.state.hub
         try:
-            result = await hub.request_response(spoke_id, command, payload or {})
+            kw = {"timeout": timeout} if timeout else {}
+            result = await hub.request_response(spoke_id, command, payload or {}, **kw)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             return _spoke_payload_or_raise(data)
         except HTTPException:
@@ -155,19 +160,28 @@ def register(app, hub, ctx):
     # INSTALL_CERT per target → LE_MARK_DISTRIBUTED), and a background
     # run_cert_distribution_loop re-pushes stale targets hourly.
 
+    # Hub-side wait for a certbot ACME run. The le spoke caps certbot at 180s
+    # (acme._run timeout), so 200s gives margin; the request_response default
+    # (5s) timed out long before certbot finished — "Issue failed: Timed out
+    # waiting for spoke response" even though issuance was still running.
+    _LE_CERTBOT_TIMEOUT = 200.0
+
     def _le_inner(payload):
         """The le spoke returns nested {status, data:{...}}; pull out data."""
         if isinstance(payload, dict) and isinstance(payload.get("data"), dict):
             return payload["data"]
         return payload if isinstance(payload, dict) else {}
 
-    async def _le_request(command, body):
+    async def _le_request(command, body, timeout=None):
         """Relay command to the le spoke; return (hub, le_sid, payload) with the
-        SUCCESS payload (raises 502/503/500 on spoke error/down)."""
+        SUCCESS payload (raises 502/503/500 on spoke error/down). ``timeout``
+        overrides the request_response default (5s) for long-running certbot
+        commands (issue/renew/revoke — certbot can run up to ~180s)."""
         hub = app.state.hub
         le_sid = _get_le_spoke(hub)
         try:
-            result = await hub.request_response(le_sid, command, body or {})
+            kw = {"timeout": timeout} if timeout else {}
+            result = await hub.request_response(le_sid, command, body or {}, **kw)
         except HTTPException:
             raise
         except Exception as e:
@@ -250,7 +264,8 @@ def register(app, hub, ctx):
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         body["tenant_id"] = _le_tenant(request)  # server-derived; scopes dns_credential
-        hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", body)
+        hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", body,
+                                                  timeout=_LE_CERTBOT_TIMEOUT)
         inner = _le_inner(payload)
         domain = inner.get("domain")
         targets = inner.get("targets")
@@ -269,7 +284,8 @@ def register(app, hub, ctx):
         """Renew one (body.domain) or all managed certs via the le spoke, then
         hub-broker renewed material to each renewed cert's targets. Returns the
         spoke result with per-cert + aggregate ``distribution`` summaries."""
-        hub, le_sid, payload = await _le_request("LE_RENEW_CERT", await request.json())
+        hub, le_sid, payload = await _le_request("LE_RENEW_CERT", await request.json(),
+                                                  timeout=_LE_CERTBOT_TIMEOUT)
         inner = _le_inner(payload)
         agg = []
         for r in inner.get("renewed") or []:
@@ -289,7 +305,8 @@ def register(app, hub, ctx):
     @app.post("/api/le/revoke")
     async def le_revoke_cert(request: Request):
         return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REVOKE_CERT",
-                                  await request.json(), log_name="le_revoke_cert")
+                                  await request.json(), log_name="le_revoke_cert",
+                                  timeout=_LE_CERTBOT_TIMEOUT)
 
     @app.post("/api/le/distribute")
     async def le_distribute():
