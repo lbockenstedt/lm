@@ -12600,11 +12600,15 @@ async function loadLEData(subMenu) {
                 const k = `${t.module_type}|${t.identifier || ''}`;
                 const lbl = t.label || `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`;
                 const lblE = escapeHtml(lbl);
-                if (haveKeys.has(k)) {
-                    return `<span class="px-1.5 py-0.5 rounded text-xs bg-[#01A982]/10 text-[#01A982] border border-[#01A982]" title="Added — this cert deploys to this target">${lblE} ✓</span>`;
-                }
                 const mtE = escJsAttr(String(t.module_type || ''));
                 const idE = escJsAttr(String(t.identifier || ''));
+                if (haveKeys.has(k)) {
+                    // Enabled → clickable to DISABLE (remove the target so this
+                    // cert stops distributing to it). Green normally; red on
+                    // hover to signal the click turns distribution off. The
+                    // status badge above still owns click-to-deploy.
+                    return `<button onclick="removeLeTargetByKey('${dEsc}','${mtE}','${idE}')" class="px-1.5 py-0.5 rounded text-xs bg-[#01A982]/10 text-[#01A982] border border-[#01A982] cursor-pointer hover:bg-red-50 hover:text-red-600 hover:border-red-300 active:scale-95 transition" title="Distribution ENABLED for ${lbl} — click to disable (stop deploying this cert here)">${lblE} ✓</button>`;
+                }
                 // Agent-hosting chips carry the "pick one granularity" hint so
                 // hovering explains the group-vs-individual rule before a click.
                 const tip = _LE_AGENT_HOSTING.includes(String(t.module_type || ''))
@@ -12612,7 +12616,7 @@ async function loadLEData(subMenu) {
                     : `Enable this cert to deploy to ${lbl}`;
                 return `<button onclick="addLeTarget('${dEsc}',{module_type:'${mtE}',identifier:'${idE}'})" class="px-1.5 py-0.5 rounded text-xs bg-slate-100 hover:bg-slate-200 text-slate-500 border border-slate-200 cursor-pointer transition" title="${escJsAttr(tip)}">${lblE} +</button>`;
             }).join('');
-            return `<div class="flex flex-wrap items-center gap-1 mt-1.5"><span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1">Add</span>${chips}</div>`;
+            return `<div class="flex flex-wrap items-center gap-1 mt-1.5"><span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1" title="Click a node to enable (+) or disable (✓) cert distribution to it">Distribute</span>${chips}</div>`;
         };
         // Color-coded expiry badge from not_after. The le renewal loop renews
         // within 30d, so amber (<30d) = renew pending/failed, red (<7d / expired)
@@ -13039,6 +13043,21 @@ async function addLeTarget(domain, preset) {
         // screen's click-to-add chip shouldn't pop the modal open).
         if (document.getElementById('le-targets-modal')) showLeTargetsModal(domain);
     } catch (e) { alert('Add target failed: ' + e.message); }
+}
+
+// Disable distribution to a target by (module_type, identifier) — the first-page
+// toggle-off (the DELETE endpoint is index-based, so resolve the index from the
+// cached cert targets first). No confirm: it's trivially re-enabled with a click.
+async function removeLeTargetByKey(domain, mt, identifier) {
+    const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
+    const idx = (cert.targets || []).findIndex(
+        t => String(t.module_type || '') === String(mt || '')
+            && String(t.identifier || '') === String(identifier || ''));
+    if (idx < 0) { await loadLEData(); return; }   // already gone — just refresh
+    await removeLeTarget(domain, idx);
+    if (typeof showToast === 'function') {
+        showToast(`Distribution disabled for ${mt}${identifier ? '/' + identifier : ''}`, 'success');
+    }
 }
 
 async function removeLeTarget(domain, idx) {
