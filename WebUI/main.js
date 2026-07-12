@@ -12448,6 +12448,38 @@ async function loadDNSData(subMenu) {
 // Status bar (managed count) + a certificates table. The le spoke's handlers
 // are structured stubs until certbot/acme.sh is wired, so the table is usually
 // empty and the status bar carries the "not yet wired" message from the spoke.
+// Static legend under the Certificates table — what the target status badges,
+// the Add chips, and the expiry colors mean. Same look as the Spokes/Clients
+// legends.
+function _leLegend() {
+    const pill = (cls, t) => `<span class="${cls} px-1.5 py-0.5 rounded text-xs font-medium">${t}</span>`;
+    const lbl = t => `<span class="font-bold uppercase tracking-wider text-slate-400 mr-1">${t}</span>`;
+    return `<div class="mt-4 mx-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500 pb-3">
+      <span class="font-bold uppercase tracking-wider text-slate-400">Legend</span>
+      <div class="mt-2 space-y-1.5">
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Target')}
+          <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-700', '\u2713 target')} deployed OK</span>
+          <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-700', '\u2717 target')} last push failed</span>
+          <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-500', '\u00b7 target')} pending (not pushed yet)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-800 border border-amber-300', '\u25cf target 3s')} deploying now</span>
+          <span class="text-slate-400">click a target badge to re-deploy</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Add')}
+          <span class="flex items-center gap-1.5">${pill('bg-[#01A982]/10 text-[#01A982] border border-[#01A982]', 'target \u2713')} added (this cert deploys here)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-500 border border-slate-200', 'target +')} available — click to add</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Expiry')}
+          <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-700', '&gt; 30d')} healthy</span>
+          <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-700', '&lt; 30d')} renew due</span>
+          <span class="flex items-center gap-1.5">${pill('bg-red-100 text-red-700', '&lt; 7d / expired')} at risk</span>
+        </div>
+      </div>
+    </div>`;
+}
+
 async function loadLEData(subMenu) {
     if (window._leLoading) return;  // don't overlap the inflight poller
     const container = document.getElementById('le-content');
@@ -12680,7 +12712,7 @@ async function loadLEData(subMenu) {
         const note = body.message ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${body.message}</p>` : '';
         container.innerHTML = (certs.length === 0 && !attemptRows)
             ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet. Click <b class="text-slate-600 not-italic">＋ Issue certificate</b> above to configure an ACME account (email + challenge type) and issue your first cert.</p>`
-            : expBanner + note + tw(th(cols) + `<tbody>${attemptRows}${rows}</tbody>`);
+            : expBanner + note + tw(th(cols) + `<tbody>${attemptRows}${rows}</tbody>`) + _leLegend();
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     } finally {
