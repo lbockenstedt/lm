@@ -259,8 +259,20 @@ def register(app, hub, ctx):
                 for sid in matching_sids:
                     for line in hub.agent_logs.get(sid, []):
                         flat.append(f"[{sid}] {line}")
+                # Hub-side cert-distribution activity (the le.distribution logger
+                # — per-target push outcomes, hub self-install, LE_GET_CERT
+                # failures) lives on the HUB, not the le spoke, so it isn't in
+                # agent_logs; merge it into the same Certificates view so an
+                # operator sees issue + distribution + install in one place.
+                if module == "le":
+                    flat.extend(hub.cert_dist_logs)
                 if flat:
                     return {"logs": flat[-500:]}
+
+            # No connected le spoke right now — still surface the hub-side
+            # distribution buffer (issue/distribute outcomes) under Certificates.
+            if module == "le" and hub.cert_dist_logs:
+                return {"logs": list(hub.cert_dist_logs)[-500:]}
 
             # Map WebUI module keys → actual log filenames under /var/log/lm/
             log_name_map = {

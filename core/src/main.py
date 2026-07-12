@@ -559,6 +559,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # --- System Diagnostics ---
         self.logs = deque(maxlen=500)
         self.agent_logs = {} # { agent_id: deque(logs) }
+        # Hub-side cert-distribution activity (le.distribution logger) — merged
+        # into GET /setup/logs/le so it surfaces under WebUI Logs → Certificates
+        # alongside the le spoke's own relayed logs. See CertDistLogHandler below
+        # + setup_admin.get_module_logs.
+        self.cert_dist_logs = deque(maxlen=500)
         self.max_log_size = 1000
         # Per-agent index populated from AGENT_RELAY_UP: agent_id →
         # {spoke_id, hostname, last_seen}. Lets the hub route a command to the
@@ -641,6 +646,28 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'))
         logger.addHandler(log_handler)
+
+        # Route hub-side cert-distribution activity (the le.distribution logger
+        # in cert_distribution.py / hub_cert_distribution.py — per-target push
+        # outcomes, hub self-install, LE_GET_CERT failures) into a dedicated
+        # buffer merged into GET /setup/logs/le so it surfaces under WebUI Logs
+        # → Certificates. The le spoke's own logs reach that tab via SPOKE_LOG
+        # relay (agent_logs[le_sid]); this handler puts the hub's transport
+        # activity in the same view. Same canonical format as HubLogHandler.
+        class CertDistLogHandler(logging.Handler):
+            def __init__(self, hub):
+                super().__init__()
+                self.hub = hub
+            def emit(self, record):
+                try:
+                    self.hub.cert_dist_logs.append(self.format(record))
+                except Exception:  # noqa: BLE001 — never block a log emit
+                    pass
+        cert_dist_handler = CertDistLogHandler(self)
+        cert_dist_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'))
+        logging.getLogger("le.distribution").addHandler(cert_dist_handler)
 
         # Route uncaught SYNC exceptions through the "Hub" logger so they land in
         # self.logs → Error Log tab (collect_error_logs) + BugFixer, instead of
@@ -2345,6 +2372,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # entry, just empty, instead of dropping out of the agents list.
         hub_lines = len(self.logs)
         self.logs.clear()
+        cert_dist_lines = len(self.cert_dist_logs)
+        self.cert_dist_logs.clear()
         agent_counts = {}
         for aid, dq in list(self.agent_logs.items()):
             agent_counts[aid] = len(dq)
@@ -2361,13 +2390,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         await self.broadcast_clear_logs()
 
         logger.warning(
-            "[diag] Clear Logs: hub deque %d + agent/spoke %d lines across %d "
-            "buffer(s); truncated %d on-disk file(s) on hub; broadcast to %d "
-            "connected spoke(s)",
-            hub_lines, agent_lines, len(agent_counts), len(files), spoke_count)
+            "[diag] Clear Logs: hub deque %d + cert-dist %d + agent/spoke %d lines "
+            "across %d buffer(s); truncated %d on-disk file(s) on hub; broadcast "
+            "to %d connected spoke(s)",
+            hub_lines, cert_dist_lines, agent_lines, len(agent_counts),
+            len(files), spoke_count)
         return {
             "status": "ok",
             "hub_lines": hub_lines,
+            "cert_dist_lines": cert_dist_lines,
             "agent_buffers": len(agent_counts),
             "agent_lines": agent_lines,
             "disk_files_truncated": files,

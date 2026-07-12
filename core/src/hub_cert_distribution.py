@@ -21,6 +21,12 @@ from cert_distribution import (
 )
 
 logger = logging.getLogger("Hub")
+# Cert-distribution activity (the hub-brokered transport: per-target push
+# outcomes, hub self-install) is logged to the "le.distribution" logger so it
+# surfaces under WebUI Logs → Certificates (the hub routes le.* into the
+# /setup/logs/le buffer). The module-level `logger` ("Hub") is kept for any
+# non-cert hub lines. See cert_distribution.py for the architecture.
+cert_log = logging.getLogger("le.distribution")
 
 # Path to the sudoers-allowed hub self-restart helper (provisioned by
 # install_all.sh). Schedules `systemctl restart lm` from a transient systemd
@@ -76,10 +82,14 @@ class HubCertDistributionMixin:
         cert_path = os.environ.get("LM_TLS_CERT", "").strip()
         key_path = os.environ.get("LM_TLS_KEY", "").strip()
         if not cert_path or not key_path:
+            cert_log.warning("[cert] %s → hub: FAILED — hub TLS paths not configured "
+                              "(set LM_TLS_CERT + LM_TLS_KEY env on the hub, then restart "
+                              "lm.service so they load)", domain)
             return {"status": "ERROR",
                     "message": "hub TLS paths not configured — set LM_TLS_CERT + "
                                "LM_TLS_KEY env on the hub to a writable location"}
         if not fullchain or not privkey:
+            cert_log.warning("[cert] %s → hub: FAILED — missing cert material", domain)
             return {"status": "ERROR", "message": "missing cert material"}
 
         # Validate BEFORE touching the live paths: load_cert_chain into a
@@ -99,6 +109,8 @@ class HubCertDistributionMixin:
                 os.unlink(cf_path)
                 os.unlink(kf_path)
         except Exception as e:
+            cert_log.warning("[cert] %s → hub: FAILED — cert validation failed (not "
+                              "written): %s", domain, e)
             return {"status": "ERROR",
                     "message": f"cert validation failed (not written): {e}"}
 
@@ -107,6 +119,8 @@ class HubCertDistributionMixin:
             self._atomic_write(cert_path, fullchain, 0o644)
             self._atomic_write(key_path, privkey, 0o600)
         except Exception as e:
+            cert_log.warning("[cert] %s → hub: FAILED — write to %s/%s failed: %s",
+                              domain, cert_path, key_path, e)
             return {"status": "ERROR",
                     f"message": f"write to {cert_path}/{key_path} failed: {e}"}
 
@@ -117,7 +131,7 @@ class HubCertDistributionMixin:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
             restart_msg = f"cert written; could not schedule self-restart ({e}) — restart lm.service manually"
-        logger.info("[cert] installed %s on hub (%s) — %s", domain, cert_path, restart_msg)
+        cert_log.info("[cert] %s → hub: installed on %s — %s", domain, cert_path, restart_msg)
         return {"status": "SUCCESS", "message": f"installed to {cert_path}; {restart_msg}"}
 
     @staticmethod

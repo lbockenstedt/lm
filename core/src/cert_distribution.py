@@ -19,7 +19,14 @@ wrappers that pass ``self.request_response`` / ``self.get_spoke_by_type`` /
 import logging
 from typing import Any, Callable, Dict, List, Optional, Set
 
-logger = logging.getLogger("CertDistribution")
+# Hub-side cert distribution logs to the "le.distribution" logger so they surface
+# under the WebUI Logs → Certificates tab (the hub routes le.* loggers into a
+# dedicated buffer merged into /setup/logs/le; see main.py CertDistLogHandler +
+# setup_admin.get_module_logs). The le SPOKE's own logs relay up via SPOKE_LOG
+# into the same tab, so the cert authority + the hub's transport activity share
+# one Logs view — an operator sees issue, distribution, and per-target install
+# outcomes in one place.
+logger = logging.getLogger("le.distribution")
 
 # Module types whose spokes implement INSTALL_CERT. v1: opnsense (firewall) +
 # pxmx (hypervisor — the spoke relays INSTALL_CERT to the per-node agent, which
@@ -59,10 +66,12 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
     summary: List[Dict[str, Any]] = []
     if not targets or not domain:
         return summary
+    logger.info("[cert] distributing %s to %d target(s)", domain, len(targets))
     mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
     mat_ret = _unwrap(mat)
     if not (isinstance(mat_ret, dict) and mat_ret.get("status") == "SUCCESS"):
         msg = mat_ret.get("message") if isinstance(mat_ret, dict) else "LE_GET_CERT failed"
+        logger.warning("[cert] %s: LE_GET_CERT failed — %s", domain, msg)
         return [{"module_type": None, "identifier": None,
                  "status": "ERROR", "message": msg}]
     cert = mat_ret.get("data") or {}
@@ -75,22 +84,27 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
         mt = t.get("module_type")
         ident = t.get("identifier", "") or ""
         entry: Dict[str, Any] = {"module_type": mt, "identifier": ident}
+        tgt_label = f"{mt}{('/' + ident) if ident else ''}"
         # Up-to-date target — skip the push (idempotent distribution).
         if (t.get("last_pushed_hash") == material_hash
                 and t.get("last_status") == "SUCCESS" and material_hash):
             entry.update(status="SUCCESS", message="already up to date", skipped=True)
+            logger.info("[cert] %s → %s: up to date (skipped)", domain, tgt_label)
             summary.append(entry)
             continue
 
         if mt not in capable:
             entry.update(status="ERROR",
                          message=f"module type '{mt}' does not support cert install yet")
+            logger.warning("[cert] %s → %s: not cert-capable (no INSTALL_CERT handler "
+                           "for module_type '%s')", domain, tgt_label, mt)
         elif mt == "hub":
             # The hub is not a spoke — install on itself via the threaded
             # callable. No get_by_type resolution; no INSTALL_CERT relay.
             if install_on_hub is None:
                 entry.update(status="ERROR",
                              message="hub self-install not wired on this hub")
+                logger.warning("[cert] %s → hub: self-install not wired on this hub", domain)
             else:
                 try:
                     hret = await install_on_hub(domain, fullchain, privkey, chain, ident)
@@ -99,14 +113,17 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                 if isinstance(hret, dict) and hret.get("status") == "SUCCESS":
                     entry.update(status="SUCCESS",
                                  message=hret.get("message") or "installed on hub")
+                    logger.info("[cert] %s → hub: installed — %s", domain, entry["message"])
                 else:
                     entry.update(status="ERROR",
                                  message=(hret.get("message") if isinstance(hret, dict)
                                           else "hub self-install failed"))
+                    logger.warning("[cert] %s → hub: FAILED — %s", domain, entry["message"])
         else:
             target_sid = get_by_type(mt)
             if not target_sid:
                 entry.update(status="ERROR", message=f"no connected {mt} spoke")
+                logger.warning("[cert] %s → %s: no connected %s spoke", domain, tgt_label, mt)
             else:
                 res = await rr(target_sid, "INSTALL_CERT", {
                     "domain": domain, "fullchain": fullchain,
@@ -116,10 +133,12 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                 if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
                     entry.update(status="SUCCESS",
                                  message=rret.get("message") or "installed")
+                    logger.info("[cert] %s → %s: installed — %s", domain, tgt_label, entry["message"])
                 else:
                     entry.update(status="ERROR",
                                  message=(rret.get("message") if isinstance(rret, dict)
                                           else "INSTALL_CERT failed"))
+                    logger.warning("[cert] %s → %s: FAILED — %s", domain, tgt_label, entry["message"])
 
         # Record the push on the le ledger (gates re-pushes + surfaces in UI).
         try:
@@ -130,6 +149,8 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
         except Exception as e:
             logger.debug("LE_MARK_DISTRIBUTED failed for %s/%s: %s", domain, mt, e)
         summary.append(entry)
+    ok = sum(1 for s in summary if s.get("status") == "SUCCESS")
+    logger.info("[cert] distributed %s: %d/%d target(s) OK", domain, ok, len(summary))
     return summary
 
 
