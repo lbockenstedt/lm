@@ -130,18 +130,21 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                 entry.update(status="ERROR", message=f"no connected {mt} spoke")
                 logger.warning("[cert] %s → %s: no connected %s spoke", domain, tgt_label, mt)
             else:
-                # 120s matches the pxmx spoke's own relay timeout: the
-                # hypervisor path forwards INSTALL_CERT to a per-node agent
-                # that runs `pvenode cert set` + restarts pveproxy (a slow
-                # service restart). 20s (the old value) timed the hub out
-                # while the spoke was still waiting on the agent → a spurious
-                # "Timed out waiting for spoke response" ERROR even though the
-                # install was still in progress. Fast targets (firewall/ipam)
-                # return well under this; the timeout is just the upper bound.
+                # The hypervisor path forwards INSTALL_CERT to a per-node agent
+                # that runs `pvenode cert set --restart`; on a loaded node the
+                # pveproxy restart can take many minutes and we can't predict
+                # it, so give that path a generous window (640s > the spoke's
+                # 620s relay > the agent's 600s pvenode wait) so the hub never
+                # times out first and masks a deploy that's still in progress
+                # (the agent verifies the cert by fingerprint on its own
+                # timeout, so a slow restart still reports SUCCESS, not ERROR).
+                # Fast targets (firewall/ipam) stay at 120s — the timeout is
+                # just the upper bound, not the time they take.
+                install_timeout = 640.0 if mt == "hypervisor" else 120.0
                 res = await rr(target_sid, "INSTALL_CERT", {
                     "domain": domain, "fullchain": fullchain,
                     "privkey": privkey, "chain": chain, "identifier": ident,
-                }, timeout=120.0)
+                }, timeout=install_timeout)
                 rret = _unwrap(res)
                 if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
                     entry.update(status="SUCCESS",
