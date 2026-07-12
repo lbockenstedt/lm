@@ -4883,7 +4883,7 @@ function _renderSetupSimulationsTile(content) {
                 <div id="simtab-btn-usb" onclick="_simSetupTab('usb')" class="sub-nav-item active px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">USB</div>
                 <div id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">PCI (Tiers)</div>
                 <div id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">DHCP</div>
-                <div id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Sim Quotas</div>
+                <div id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Quotas</div>
             </div>
             <div id="simtab-usb" class="space-y-4">
             <div class="${card}">
