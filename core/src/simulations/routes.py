@@ -2478,6 +2478,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         "warning": "Client-Sim spoke not connected."}
             raise
 
+    @app.get("/sim/api/{tenant}/sim-quota-state")
+    async def get_sim_quota_state(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Live SimQuotaEngine ledger for Config → Quota State: effective quotas +
+        which clients are currently assigned to each. Forwards to the cs spoke;
+        empty ledger when the spoke is down."""
+        try:
+            return await _cs_forward(tenant_id, "CS_GET_SIM_QUOTA_STATE", {}, timeout=15.0)
+        except HTTPException as he:
+            if he.status_code == 503:
+                return {"status": "SUCCESS", "effective": [], "ledger": {},
+                        "warning": "Client-Sim spoke not connected."}
+            raise
+
     # ── Sim-Quota global defaults (Setup → Simulations, superadmin) ──────────
     # Platform-wide default templates a tenant inherits unless it overrides per
     # alert_type:alert_id:site in Config → Sim Quotas. Validates against the full

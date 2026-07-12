@@ -1232,17 +1232,18 @@ const VIEW_SUBMENUS = {
 // solutions-hpe webui-hub tenant sub-nav, and the child sets mirror webui-hub's
 // own subtab lists (VM Server 11, Setup 7, Central 3, Simulations 3, Clients 3,
 // Config 2). Primaries not listed here (Spoke Management) have no
-// children → render directly, no secondary strip. Config has two sub-tabs:
-// "Sim Quotas" (alert→sim linkage + per-site client quotas the engine keeps
-// filled) and "Raw Config" (the former flat Config view — Source of Truth +
-// simulation.conf + user-overrides + hub config).
+// children → render directly, no secondary strip. Config sub-tabs: "Sim Quotas"
+// (alert→sim linkage + per-site client quotas the engine keeps filled), "PXMX
+// Sites" (assign pxmx servers to sites → per-site runner pools), "Quota State"
+// (live engine ledger), and "Raw Config" (the former flat Config view — Source
+// of Truth + simulation.conf + user-overrides + hub config).
 const VIEW_CHILDREN = {
     cs: {
         'Dashboard': ['Checks', 'Hardware', 'Client Count'],
         'Clients':     ['All', 'T1', 'T2', 'T3'],
         'Central':     ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware'],
         'VM Server':   ['Overview', 'VMs', 'Console', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
-        'Config':      ['Sim Quotas', 'PXMX Sites', 'Raw Config'],
+        'Config':      ['Sim Quotas', 'PXMX Sites', 'Quota State', 'Raw Config'],
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications'],
     },
 };

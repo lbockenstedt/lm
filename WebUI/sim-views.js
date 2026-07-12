@@ -2770,6 +2770,77 @@ window.csSimQuotaSave = async function () {
     }
 };
 
+// ── Quota State: live SimQuotaEngine ledger (Config → Quota State) ──────────
+// Read-only view of which clients the engine currently has assigned to each
+// effective quota, the target vs. assigned count, and the multi_capable /
+// rehome flags. Manual-refresh under Config (shares the Config primary's
+// no-auto-refresh). Mirrored in both sim-views.js copies (hub + spoke).
+async function csRenderSimQuotaState() {
+    csSetToolbar('');
+    try {
+        const st = await csFetch(`/${csTenant()}/sim-quota-state?tenant_id=${csTenant()}`) || {};
+        if (st.warning) {
+            csSet(`<div class="hpe-card p-5 shadow-sm"><p class="text-xs text-slate-500">${csEscape(st.warning)}</p></div>`);
+            return;
+        }
+        const eff = Array.isArray(st.effective) ? st.effective : [];
+        const ledger = (st.ledger && typeof st.ledger === 'object') ? st.ledger : {};
+        const keyOf = (q) => `${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`;
+        const chips = (hosts) => (hosts || []).map(h =>
+            `<span class="inline-block bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 mr-1 mb-1 font-mono text-[11px]">${csEscape(h)}</span>`).join('');
+        const rows = eff.map(q => {
+            const k = keyOf(q);
+            const e = ledger[k] || {};
+            const clients = Array.isArray(e.clients) ? e.clients : [];
+            const target = q.count != null ? q.count : 0;
+            const fill = clients.length >= target
+                ? `<span class="text-[#01A982] font-semibold">${clients.length}/${target}</span>`
+                : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
+            return `<tr class="border-t border-slate-100">
+              <td class="px-2 py-1.5 text-xs capitalize">${csEscape(q.alert_type || 'alert')}</td>
+              <td class="px-2 py-1.5 text-xs font-mono">${csEscape(q.alert_id || '')}</td>
+              <td class="px-2 py-1.5 text-xs font-mono">${csEscape(q.sim_id || '')}</td>
+              <td class="px-2 py-1.5 text-xs">${csEscape(q.site || '<all>')}</td>
+              <td class="px-2 py-1.5 text-xs text-center">${fill}</td>
+              <td class="px-2 py-1.5 text-xs text-center">${q.multi_capable ? '✓' : '—'}</td>
+              <td class="px-2 py-1.5 text-xs text-center">${q.rehome ? '✓' : '—'}</td>
+              <td class="px-2 py-1.5 text-xs">${chips(clients) || '<span class="text-slate-400 italic">none</span>'}</td>
+            </tr>`;
+        }).join('');
+        // Ledger entries no longer in the effective set (quota removed but
+        // clients not yet released) — surfaced so they're not invisible.
+        const effKeys = new Set(eff.map(keyOf));
+        const orphans = Object.entries(ledger).filter(([k]) => !effKeys.has(k));
+        const orphanHtml = orphans.length ? `
+            <div class="mt-4">
+              <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Releasing (no longer effective)</p>
+              ${orphans.map(([k, e]) => `<p class="text-xs text-slate-500 mb-1"><span class="font-mono">${csEscape(k)}</span> → ${chips(e.clients)}</p>`).join('')}
+            </div>` : '';
+        csSet(`<div class="space-y-4">
+          <div class="hpe-card rounded-lg p-5 shadow-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Quota State ${helpIcon('cs', null, 'Simulations help')}</h3>
+              <button onclick="csRenderSimQuotaState()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
+            </div>
+            <p class="text-xs text-slate-500 mb-3">Live SimQuotaEngine ledger — which clients are currently assigned to each effective quota. The engine tops up to the target count from the online pool each 60s sweep; amber = under-filled.</p>
+            ${eff.length ? `<table class="w-full text-left">
+              <thead><tr class="text-[11px] text-slate-400 uppercase tracking-wider">
+                <th class="px-2 py-1">Type</th><th class="px-2 py-1">Alert / Insight ID</th>
+                <th class="px-2 py-1">Sim</th><th class="px-2 py-1">Site</th>
+                <th class="px-2 py-1 text-center">Assigned</th><th class="px-2 py-1 text-center">Multi</th>
+                <th class="px-2 py-1 text-center">Re-home</th><th class="px-2 py-1">Clients</th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table>` : '<p class="text-xs text-slate-400 italic">No effective sim quotas. Define some in Config → Sim Quotas.</p>'}
+            ${orphanHtml}
+          </div>
+        </div>`);
+    } catch (e) {
+        console.error('csRenderSimQuotaState: load failed', e);
+        csSet(csErrorBox('Could not load Quota State', e));
+    }
+}
+
 // ── PXMX Sites: assign each connected pxmx server (agent host) to a site ──────
 // The SimQuotaEngine resolves a client's site via its hosting server's entry
 // here (after a per-client wsite override, before the bucket-default wsite), so
@@ -4049,6 +4120,7 @@ async function csRenderSetupNotifications() {
 // case 'Config' dispatch is the no-children fallback and stays as a safety net.
 window.CS_CHILD_RENDERERS['Config::Sim Quotas']    = csRenderConfigSimQuotas;
 window.CS_CHILD_RENDERERS['Config::PXMX Sites']    = csRenderPxmxSiteMap;
+window.CS_CHILD_RENDERERS['Config::Quota State']   = csRenderSimQuotaState;
 window.CS_CHILD_RENDERERS['Config::Raw Config']    = csRenderConfigSimulation;
 
 // ── Register Setup children ────────────────────────────────────────────────
