@@ -638,6 +638,21 @@ class SimulationsStore:
             self._data[self._GLOBAL_KEY] = g
         return g
 
+    async def get_sim_quota_defaults(self) -> List[Dict[str, Any]]:
+        """Platform-wide Sim-Quota default templates (Setup → Simulations).
+        Same schema as a tenant's ``central_sites_config.sim_quotas`` rows but
+        site is optional (blank = "all sites"). A tenant's enabled sim_quotas
+        override these per ``alert_type:alert_id:site``; the engine (Chunk 2)
+        merges global defaults + tenant overrides."""
+        return [dict(d) for d in (self._global().get("sim_quota_defaults") or [])
+                if isinstance(d, dict)]
+
+    async def set_sim_quota_defaults(self, quotas: List[Dict[str, Any]]) -> None:
+        with self._lock:
+            self._global()["sim_quota_defaults"] = [
+                dict(d) for d in (quotas or []) if isinstance(d, dict)]
+            await self._asave()
+
     async def get_global_usb_vidpids(self) -> List[Dict[str, Any]]:
         """Platform-wide (superadmin-certified) USB device list —
         {vidpid, type, label} dicts (the cs-spoke re-filter shape)."""

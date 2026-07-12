@@ -2400,6 +2400,35 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cat["warning"] = "Client-Sim spoke not connected — catalog from cached config."
             return cat
 
+    # ── Sim-Quota global defaults (Setup → Simulations, superadmin) ──────────
+    # Platform-wide default templates a tenant inherits unless it overrides per
+    # alert_type:alert_id:site in Config → Sim Quotas. Validates against the full
+    # SIM_META primitive set (global defaults aren't tied to one tenant's
+    # simulation.conf). The catalog for this editor is the static SIM_META list
+    # + the suggested marriages — no per-tenant site list (site is free-text /
+    # "all sites" at the global level).
+    @app.get("/sim/api/superadmin/sim-quota-defaults")
+    async def get_sim_quota_defaults(request: Request):
+        _require_admin(request)
+        from .sim_quota import sim_quota_catalog_from_ini
+        return {"defaults": await store.get_sim_quota_defaults(),
+                "catalog": sim_quota_catalog_from_ini("")}
+
+    @app.put("/sim/api/superadmin/sim-quota-defaults")
+    async def put_sim_quota_defaults(request: Request):
+        _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        from .sim_quota import SIM_META, validate_sim_quotas
+        clean, errs = validate_sim_quotas(
+            (body or {}).get("defaults"), list(SIM_META.keys()))
+        if errs:
+            logger.warning("set_sim_quota_defaults: errors: %s", errs)
+        await store.set_sim_quota_defaults(clean)
+        return {"status": "saved", "defaults": clean, "errors": errs}
+
     @app.get("/sim/api/{tenant}/central/available")
     async def get_central_available(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         """Available-checks catalog (alerts/insights/hardware) for the Central API

@@ -120,3 +120,20 @@ def test_available_sims_from_empty_ini_still_lists_all_primitives():
     # Empty/broken INI → fall back to the full SIM_META catalog.
     sims = sim_quota.available_sims_from_ini("")
     assert len(sims) == len(sim_quota.SIM_META)
+
+
+# ── global defaults store (Setup → Simulations) ────────────────────────────
+async def test_global_sim_quota_defaults_roundtrip_and_isolation(tmp_path):
+    from simulations.store import SimulationsStore
+    s = SimulationsStore(str(tmp_path))
+    assert await s.get_sim_quota_defaults() == []
+    await s.set_sim_quota_defaults([
+        {"alert_id": "CLIENT_DHCP_FAILURE", "sim_id": "dhcp_fail", "count": 10, "site": ""},
+        {"alert_id": "CLIENT_DNS_FAILURE", "sim_id": "dns_fail", "count": 8, "site": "MIA"},
+    ])
+    got = await s.get_sim_quota_defaults()
+    assert len(got) == 2 and got[0]["sim_id"] == "dhcp_fail"
+    # Global defaults live under __global__ — must NOT bleed into a tenant's
+    # central_sites_config.sim_quotas (tenant isolation).
+    csc = await s.get_central_sites_config("acme")
+    assert csc.get("sim_quotas") in (None, [], {})
