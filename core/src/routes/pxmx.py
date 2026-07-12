@@ -73,7 +73,7 @@ async def _aggregate_agents(hub, agent_spokes):
     async def _one(parent_spoke):
         try:
             async with _FANOUT_SEM:
-                return await hub.request_response(parent_spoke, "GET_AGENTS", {})
+                return await hub.request_response(parent_spoke, "GET_AGENTS", {}, timeout=30.0)
         except Exception as exc:  # noqa: BLE001 — one dead spoke shouldn't blank the tile
             logger.warning("GET_AGENTS failed for spoke %s: %s", parent_spoke, exc)
             return None

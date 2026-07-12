@@ -770,7 +770,7 @@ def register(app, hub, ctx):
         pxmx_spoke = hub.get_hypervisor_spoke()
         if pxmx_spoke:
             try:
-                r = await hub.request_response(pxmx_spoke, "GET_AGENTS", {}, timeout=15.0)
+                r = await hub.request_response(pxmx_spoke, "GET_AGENTS", {}, timeout=30.0)
                 d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
                 for a in (d or {}).get("agents", []) if isinstance(d, dict) else []:
                     agents.append({

@@ -463,9 +463,21 @@ def build_available_targets(spoke_module_types: Dict[str, str],
         label = a.get("display_name") or a.get("hostname") or aid
         targets.append({"module_type": mt, "identifier": aid,
                         "label": f"{mt}/{label}", "agent_id": aid})
-    # "all nodes" broadcast entry per connected agent-hosting spoke.
-    for sid, mt in spoke_module_types.items():
-        if sid in active_connections and mt in capable and mt in agent_hosting:
+    # "all nodes" broadcast entry per connected agent-hosting spoke. Include the
+    # spoke's display name so multiple spokes of the SAME agent-hosting type
+    # (e.g. three "simulation" cs spokes) render as DISTINCT entries instead of
+    # three identical "simulation — all nodes" rows — each broadcasts to the
+    # nodes under that ONE spoke, so they are genuinely different targets. The
+    # name is appended only when there is more than one spoke of this type.
+    _by_type = {}
+    for _sid, _mt in spoke_module_types.items():
+        if _sid in active_connections and _mt in capable and _mt in agent_hosting:
+            _by_type.setdefault(_mt, []).append(_sid)
+    for mt, sids in _by_type.items():
+        multi = len(sids) > 1
+        for sid in sids:
+            nm = names.get(sid, sid) or sid
+            label = f"{mt} — all nodes ({nm})" if multi else f"{mt} — all nodes"
             targets.append({"module_type": mt, "identifier": "",
-                            "label": f"{mt} — all nodes", "spoke_id": sid})
+                            "label": label, "spoke_id": sid})
     return targets
