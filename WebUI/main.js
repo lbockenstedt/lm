@@ -6880,23 +6880,25 @@ function _mgmtEntryCard(o) {
     const actions = (o.actions || []).filter(Boolean).join('');
     // Corner actions (e.g. Events / Copy) pin to the top-right of the header row.
     const corner  = (o.cornerActions || []).filter(Boolean).join(' ');
-    // Layout: name top-left with Events/Copy top-right; a single quiet metadata
-    // line (sid · type · module · version · seen …) under the name; then the
-    // host/tenant/status meta line; then the action buttons.
-    return `<div class="lm-mgmt-card border border-slate-200 rounded-md bg-white p-2.5 hover:bg-slate-50 space-y-1.5">
-        <div class="flex items-start justify-between gap-3">
-            <div class="flex items-start gap-2.5 min-w-0">
-                <div class="w-2 h-2 mt-1.5 rounded-full ${o.dot} shrink-0"></div>
-                <div class="min-w-0">
-                    <div class="font-medium text-slate-700 break-words">${o.name}</div>
-                    <div class="text-[11px] text-slate-500 break-words leading-relaxed">
-                        <span class="font-mono text-slate-400">${escapeHtml(o.sid)}</span>${o.metaInline ? ` <span class="text-slate-300">·</span> ${o.metaInline}` : ''}
-                    </div>
-                    ${o.identityBanner || ''}
-                </div>
+    // Card tone: amber = out of date, red = last seen > 30m (stale). The quiet
+    // metadata line lives on its OWN full-width line BELOW the header so it can
+    // use the whole card width instead of being boxed against the Events/Copy
+    // corner (which is what made it wrap).
+    const tone = o.cardTone === 'stale' ? 'border-red-300 bg-red-50 hover:bg-red-100'
+               : o.cardTone === 'warn'  ? 'border-amber-300 bg-amber-50 hover:bg-amber-100'
+               : 'border-slate-200 bg-white hover:bg-slate-50';
+    return `<div class="lm-mgmt-card border ${tone} rounded-md p-2.5 space-y-1 transition-colors">
+        <div class="flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2.5 min-w-0">
+                <div class="w-2 h-2 rounded-full ${o.dot} shrink-0"></div>
+                <div class="font-medium text-slate-700 break-words min-w-0">${o.name}</div>
             </div>
             ${corner ? `<div class="flex items-center gap-2 shrink-0">${corner}</div>` : ''}
         </div>
+        <div class="text-[11px] text-slate-500 break-words leading-relaxed pl-[18px]">
+            <span class="font-mono text-slate-400">${escapeHtml(o.sid)}</span>${o.metaInline ? ` <span class="text-slate-300">·</span> ${o.metaInline}` : ''}
+        </div>
+        ${o.identityBanner || ''}
         ${meta}
         ${actions ? `<div class="flex items-center gap-2 flex-wrap pl-6">${actions}</div>` : ''}
     </div>`;
@@ -6969,6 +6971,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                           + `</div>`,
                         ...(extras ? extras.metaLines : []),
                     ],
+                    cardTone: extras ? extras.cardTone : '',
                     metaInline: _quietMeta([
                         escapeHtml(kindLabel),
                         (modLabel && modLabel !== '—') ? escapeHtml(modLabel) : '',
@@ -7122,6 +7125,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                     rolesLine,
                     ...(extras ? extras.metaLines : []),
                 ],
+                cardTone: extras ? extras.cardTone : '',
                 metaInline: _quietMeta([
                     escapeHtml(typeLabel),
                     a._module ? escapeHtml(String(a._module)) : '',
@@ -8603,6 +8607,8 @@ function _diagTelemetryExtras(s, fns) {
     const _behind = !!s.version_behind;
     const _stale = !!s.version_skew;
     const _outOfDate = _behind || _stale;
+    // Card warning states: out-of-date (amber) or last contact > 30 min (stale, red).
+    const _stale30 = (s.heartbeat_age_s != null && s.heartbeat_age_s > 1800);
     const _verTone = _verUnknown ? 'bg-slate-100 text-slate-600'
                    : (_outOfDate ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700');
     const _verTitle = _verUnknown ? 'Version unknown — no telemetry to compare'
@@ -8629,6 +8635,7 @@ function _diagTelemetryExtras(s, fns) {
     const eSid = s.spoke_id.replace(/'/g, "\\'");
     return {
         dot,
+        cardTone: _stale30 ? 'stale' : (_outOfDate ? 'warn' : ''),
         // Raw {text, tone} so the caller can render the Online/Offline status
         // INLINE on the host/tenant row (one line) instead of its own stacked
         // div — saves vertical space on the Spokes & Agents tiles.
