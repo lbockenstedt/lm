@@ -8561,7 +8561,6 @@ async function setRecoveryPause(spokeId, pause) {
 function _diagTelemetryExtras(s, fns) {
     fns = fns || {};
     const deleteFn = fns.deleteFn || 'deleteSpoke';
-    const allowRecoveryPause = fns.allowRecoveryPause !== false;
     // resetFn/allowReset are no longer consumed here — Reset Secret moved into
     // the spoke Edit modal (openSpokeMetadataModal). Callers may still pass them.
     const status = spokeStatusMessage(s);
@@ -8615,8 +8614,6 @@ function _diagTelemetryExtras(s, fns) {
               : hbStatus === 'YELLOW' ? 'bg-amber-400'
               : hbStatus === 'RED' ? 'bg-red-500'
               : 'bg-slate-300';
-    const isPaused = !!rec.manual_pause;
-    const pauseLabel = isPaused ? 'Resume' : 'Pause';
     const eSid = s.spoke_id.replace(/'/g, "\\'");
     return {
         dot,
@@ -8639,9 +8636,6 @@ function _diagTelemetryExtras(s, fns) {
             // to declutter the row; pxmx agents never showed it (allowReset=false),
             // so removing it here changes nothing for the Agents card.
             _mgmtBtn('Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
-            allowRecoveryPause
-                ? _mgmtBtn(pauseLabel, `setRecoveryPause('${eSid}', ${!isPaused})`, isPaused ? 'text-green-600' : 'text-slate-400 hover:underline')
-                : '',
         ],
         // Events (+ Copy) pinned to the far right of the header row (next to the
         // ID) via _mgmtEntryCard's cornerActions slot, not the bottom action row.
