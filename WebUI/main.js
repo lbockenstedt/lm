@@ -12243,7 +12243,7 @@ function showLeTargetsModal(domain) {
             <td class="px-3 py-2 text-xs font-mono">${t.module_type || '—'}${t.identifier ? ' / ' + esc(t.identifier) : ''}</td>
             <td class="px-3 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${t.last_status || 'pending'}</span></td>
             <td class="px-3 py-2 text-xs text-slate-500">${(t.last_pushed_at || '—').slice(0, 19).replace('T', ' ')}</td>
-            <td class="px-3 py-2 text-xs text-slate-400">${t.last_message ? esc(t.last_message).slice(0, 60) : ''}</td>
+            <td class="px-3 py-2 text-xs text-slate-500">${t.last_message ? `<span title="${escapeHtml(t.last_message)}">${escapeHtml(t.last_message)}</span>` : ''}</td>
             <td class="px-3 py-2"><button onclick="removeLeTarget('${esc(domain)}', ${i})" class="text-xs text-red-600 hover:text-red-700 font-medium">remove</button></td>
         </tr>`;
     };
@@ -12740,13 +12740,32 @@ async function _leRunIssue(body, { closeModalOnSuccess = false } = {}) {
         // data.distribution (per-target push summary from net_services.py:le_issue_cert).
         const inner = (data && data.data) ? data.data : (data || {});
         const dist = inner.distribution || [];
-        const distMsg = dist.length
-            ? ' · distributed to ' + dist.length + ' target(s)'
-            : '';
+        // Per-target outcome: ✓/✗ count + the first error message inline so a
+        // distribution failure (the common "issued but not distributed" case)
+        // is visible in the toast — not buried. The cert-level indicator
+        // stays GREEN on a dist failure (the cert WAS issued — re-issuing would
+        // waste a certbot run / risk rate-limiting); the retry path is the
+        // "Distribute now" button or the targets modal, not re-Issue.
+        let distMsg = '';
+        let distFailed = false;
+        if (dist.length) {
+            const okN = dist.filter(d => d.status === 'SUCCESS').length;
+            const failN = dist.length - okN;
+            distFailed = failN > 0;
+            const firstErr = dist.find(d => d.status === 'ERROR');
+            distMsg = ` · distributed ${okN}/${dist.length}` +
+                (failN > 0 ? ` — ${failN} FAILED` +
+                    (firstErr && firstErr.message ? `: ${firstErr.message}` : '') : '');
+        }
         window._leIssueStatus[domain] = { state: 'success', ts: Date.now(), message: 'Issued' + distMsg, params: body };
-        showToast('Issued ' + domain + (body.staging ? ' (staging)' : '') + distMsg, 'success');
+        showToast('Issued ' + domain + (body.staging ? ' (staging)' : '') + distMsg,
+            distFailed ? 'error' : 'success');
         console.info('[le] issued', domain, dist);
         if (btn) { btn.disabled = false; btn.textContent = 'Issue certificate'; }
+        // The Issue operation succeeded (certbot ran); close the modal. A dist
+        // failure is surfaced via the error toast + the per-target red badge
+        // in the targets modal + Logs/Certificates — the fix is "Distribute
+        // now", not re-Issue, so don't keep the Issue form open.
         if (closeModalOnSuccess) document.getElementById('le-issue-modal')?.remove();
         await loadLEData();
     } catch (e) {
