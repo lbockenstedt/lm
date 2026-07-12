@@ -40,7 +40,12 @@ def register(app, hub, ctx):
     @app.get("/setup/docs/{section}")
     async def get_docs(section: str):
         try:
-            readme_path = os.path.join(os.path.dirname(__file__), "../../README.md")
+            readme_path = next(
+                (r for r in (
+                    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../README.md")),
+                    os.path.abspath(os.path.join(os.path.dirname(__file__), "../../README.md")),
+                ) if os.path.exists(r)),
+                os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../README.md")))
             if not os.path.exists(readme_path):
                 raise HTTPException(status_code=404, detail="README.md documentation not found")
 
@@ -69,7 +74,16 @@ def register(app, hub, ctx):
     # canonical, hand-authored docs referenced everywhere else (per-repo copies
     # are downstream mirrors). No second doc set: the tooltip/help panel renders
     # these files directly. ``/docs`` lists them; ``/docs/{name}`` returns one.
-    _DOCS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../docs"))
+    # docs/ lives at the lm repo ROOT (/opt/lm/docs), i.e. ../../../docs from
+    # core/src/routes/. The old ../../docs resolved to core/docs (nonexistent) →
+    # every Help fetch 404'd. Probe the canonical path first, then a legacy
+    # fallback, so a future layout change can't silently break the Help drawer.
+    _DOCS_DIR = next(
+        (d for d in (
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "../../docs")),
+        ) if os.path.isdir(d)),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")))
 
     def _safe_doc_path(name: str) -> str:
         """Resolve ``name`` to a .md file strictly inside _DOCS_DIR (no traversal)."""
