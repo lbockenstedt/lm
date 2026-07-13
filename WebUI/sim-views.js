@@ -453,11 +453,43 @@ function connectCSWebSocket() {
         csWs = new WebSocket(`${proto}//${location.host}/sim/ws`);
         csWs.onmessage = (ev) => {
             let m; try { m = JSON.parse(ev.data); } catch (e) { console.error('connectCSWebSocket: non-JSON telemetry frame ignored', e); return; }
+            if (m && m.type === 'cs_progress') { csHandleLiveOp(m.data || {}); return; }
             if (m && (m.type === 'telemetry' || m.type === 'aruba_update')) csWsRefresh();
         };
         csWs.onclose = () => { csWs = null; scheduleCSReconnect(); };
         csWs.onerror = () => { try { csWs && csWs.close(); } catch (e) { console.error('connectCSWebSocket: error closing ws on onerror', e); } };
     } catch (e) { console.error('connectCSWebSocket: ws open failed, scheduling reconnect', e); csWs = null; scheduleCSReconnect(); }
+}
+
+// ── Realtime operations feed (per-VM reclone/provision/delete/clone phases) ──
+// Fed by CS_PROGRESS events broadcast over /sim/ws (hub main.py). Each event is
+// {cs_cmd_id, action, status, step, pct, vmid, message}. We keep a live map keyed
+// by VM and render a compact feed; entries auto-expire ~12s after their last
+// update (an op that finishes stops emitting progress), so no terminal is needed.
+window._csLiveOps = window._csLiveOps || {};
+const _CS_OP_LABEL = { reclone_vm: 'Recloning', delete_vm: 'Deleting', clone_lxc: 'Cloning CT', provision_unassigned: 'Provisioning', update_agent: 'Updating' };
+function csHandleLiveOp(d) {
+    const key = (d.vmid != null && d.vmid !== '') ? 'vm' + d.vmid : (d.cs_cmd_id || '');
+    if (!key) return;
+    const st = String(d.status || '').toLowerCase();
+    if (st === 'completed' || st === 'failed') { delete window._csLiveOps[key]; }
+    else { window._csLiveOps[key] = { vmid: d.vmid, action: d.action, step: d.step, pct: d.pct, ts: Date.now() }; }
+    csRenderLiveOps();
+    if (!window._csLiveOpsTicker) window._csLiveOpsTicker = setInterval(csRenderLiveOps, 2000);
+}
+function csRenderLiveOps() {
+    const el = document.getElementById('cs-live-ops');
+    if (!el) return;
+    const now = Date.now();
+    Object.keys(window._csLiveOps).forEach(k => { if (now - window._csLiveOps[k].ts > 12000) delete window._csLiveOps[k]; });
+    const ops = Object.values(window._csLiveOps).sort((a, b) => (Number(a.vmid) || 0) - (Number(b.vmid) || 0));
+    if (!ops.length) { el.innerHTML = ''; return; }
+    el.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <p class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Live operations <span class="text-slate-400 font-normal normal-case">(${ops.length} active)</span></p>
+      <div class="space-y-1 max-h-48 overflow-y-auto">${ops.map(o => `<div class="flex items-center justify-between gap-2 text-xs py-0.5 border-b border-slate-100 last:border-0">
+        <span class="font-mono text-slate-600">${csEscape(_CS_OP_LABEL[o.action] || o.action || 'op')} · VM ${csEscape(String(o.vmid != null ? o.vmid : '—'))}</span>
+        <span class="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-bold uppercase tracking-wider text-[10px]"><span class="animate-spin inline-block w-2 h-2 rounded-full border-2 border-sky-500 border-t-transparent align-middle mr-1"></span>${csEscape(o.step || 'working')}${o.pct != null ? ' ' + o.pct + '%' : ''}</span>
+      </div>`).join('')}</div></div>`;
 }
 
 function scheduleCSReconnect() {
@@ -2036,7 +2068,7 @@ async function csRenderCentralAlerts() {
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} active showToast(s, 'success')` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} active alert(s)` })}</div></div>`);
 }
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
@@ -4464,7 +4496,8 @@ async function csRenderVmServer() {
            </div>`
         : '';
 
-    csSet(`<div class="space-y-4">${summary}${fleetCards}${bulkBar}${table}</div>`);
+    csSet(`<div class="space-y-4">${summary}<div id="cs-live-ops"></div>${fleetCards}${bulkBar}${table}</div>`);
+    csRenderLiveOps();
     // populate auto-provision status + the live panels (host data from csVmLoad).
     csRefreshAutoProvStatus();
     csAutoProvLivePanel();

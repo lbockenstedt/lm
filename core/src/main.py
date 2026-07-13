@@ -3977,6 +3977,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     self._telemetry_processed += 1
                     continue
 
+                # --- Client-Sim per-op progress (realtime operations feed) ---
+                # The agent emits CS_PROGRESS per phase (destroying/cloning/starting/
+                # …) for reclone/provision/delete — far faster than the ~30s
+                # CS_TELEMETRY frame. Fan these out to the tenant's /sim/ws browsers
+                # for a live feed. Fire-and-forget passthrough (no ingest/state).
+                if payload.get("type") == "CS_PROGRESS":
+                    try:
+                        await self.simulations_broadcaster.broadcast(
+                            spoke_id, {"type": "cs_progress", "data": payload.get("data", {})},
+                            self.state.get_spoke_tenant(spoke_id))
+                    except Exception:  # noqa: BLE001 — feed is best-effort
+                        pass
+                    continue
+
                 # --- Spoke log forwarding (SPOKE_LOG) ---
                 # See _handle_spoke_log for the ingest + agent_logs buffering.
                 if payload.get("type") == "SPOKE_LOG":
