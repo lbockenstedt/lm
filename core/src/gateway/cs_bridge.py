@@ -89,6 +89,24 @@ class CSBridgePoller:
         # Slightly above the pxmx spoke's send_to_agent 15s sync window so a
         # slow-but-successful fast command isn't falsely timed out by the hub.
         self.relay_timeout = _env_int("CS_RELAY_TIMEOUT_S", 16, 5) + 0.0
+        # Long ops (delete_vm / reclone_vm / snapshot_vm / clone_lxc /
+        # provision_unassigned / reclone_all) get a wider hub relay window: the
+        # agent may be mid-op (a prior mass-delete VM, auto-prov cloning) and
+        # can't ACCEPT the next CS_COMMAND within the 16s fast window — the
+        # relay would time out and the command would be marked dead even though
+        # the agent is alive, just busy. This sits slightly above the spoke's
+        # ``agent_relay_timeout_long_s`` (60s default) so the spoke's own
+        # send_to_agent long-op window can complete before the hub gives up.
+        self.relay_timeout_long = _env_int("CS_RELAY_TIMEOUT_LONG_S", 65, 10) + 0.0
+        # On a relay timeout (agent too busy to ACCEPT), re-queue the command
+        # for the next poll tick up to this many times before marking it
+        # failed — "retry 5 then give up" instead of a single timeout killing a
+        # mass-delete on a busy agent. 0 = fail-fast (old behavior).
+        self.max_retries = _env_int("CS_RELAY_MAX_RETRIES", 5, 0)
+        # Long-op actions (mirror cs_spoke._LONG so the bridge picks the long
+        # relay window without a round-trip). Keep in sync with the spoke set.
+        self._long_actions = {"delete_vm", "reclone_vm", "snapshot_vm", "clone_lxc",
+                              "provision_unassigned", "reclone_all", "proxmox_reclone_all"}
         # Per-agent USB-config sync state.
         self._last_usb_cfg: Dict[str, str] = {}   # agent_id -> canonical blob sig
         self._last_usb_push: Dict[str, float] = {}  # agent_id -> ts (last check)
@@ -300,14 +318,21 @@ class CSBridgePoller:
         if isinstance(args, dict):
             relay_data.update(args)
 
+        # Long ops get the wider hub relay window (relay_timeout_long) — a busy
+        # agent (mid mass-delete / auto-prov) can take longer than the 16s fast
+        # window just to ACCEPT, and a false "Timed out waiting for spoke
+        # response" here would mark a perfectly-runnable command dead.
+        timeout = (self.relay_timeout_long if action in self._long_actions
+                   else self.relay_timeout)
+
         try:
             raw = await hub.request_response(
                 host_spoke, "SPOKE_RELAY",
                 {"target_agent_id": agent_id, "command": "CS_COMMAND", "data": relay_data},
-                timeout=self.relay_timeout,
+                timeout=timeout,
             )
-        except Exception as exc:  # noqa: BLE001
-            await self._ack(cs_spoke, cmd_id, "failed", f"relay error: {exc}")
+        except Exception as exc:  # noqa: BLE001 — spoke mid-reconnect: retry, don't fail.
+            await self._requeue_or_fail(cs_spoke, cmd_id, action, f"relay error: {exc}")
             return
 
         data = _unwrap(raw)
@@ -324,12 +349,59 @@ class CSBridgePoller:
         if status == "SUCCESS":
             ack_status, ack_msg = "completed", message or ""
         elif status in ("ERROR", "FAILED", "TIMEOUT"):
+            # Distinguish a relay TIMEOUT (the agent was too busy to ACCEPT —
+            # transient; retry up to max_retries via requeue) from a genuine
+            # agent ERROR/FAILED (the op ran and the agent rejected it — don't
+            # retry, that just repeats the same rejection forever). The hub's
+            # request_response returns the exact "Timed out waiting for spoke
+            # response" string on its own timeout; an agent returning TIMEOUT
+            # is also a transient "couldn't complete now" → retry.
+            is_relay_timeout = (
+                status == "ERROR"
+                and str(message).strip() == "Timed out waiting for spoke response"
+            ) or status == "TIMEOUT"
+            if is_relay_timeout:
+                await self._requeue_or_fail(cs_spoke, cmd_id, action,
+                                           message or "relay timed out")
+                return
             ack_status, ack_msg = "failed", message or f"agent returned {status}"
         else:
-            # Unknown / empty (e.g. timed-out request_response) → failed.
-            ack_status, ack_msg = "failed", message or "agent command did not complete"
+            # Unknown / empty (e.g. a timed-out request_response that lost the
+            # race before the timeout string was set) → treat as retryable.
+            await self._requeue_or_fail(cs_spoke, cmd_id, action,
+                                        message or "agent command did not complete")
+            return
 
         await self._ack(cs_spoke, cmd_id, ack_status, ack_msg)
+
+    async def _requeue_or_fail(self, cs_spoke: str, cmd_id: str, action: str,
+                               message: str) -> None:
+        """Re-queue a command whose relay TIMED OUT (agent too busy to ACCEPT,
+        or the owning spoke was mid-reconnect) for the next poll tick, up to
+        ``max_retries``. Once exhausted, the cs spoke's ``requeue_command``
+        marks it ``failed`` itself — so this never acks a "failed" that would
+        short-circuit a later, legitimate retry. ``max_retries <= 0`` (or a
+        non-positive env) falls back to the old fail-fast behavior."""
+        if self.max_retries <= 0:
+            await self._ack(cs_spoke, cmd_id, "failed", message)
+            return
+        try:
+            raw = await self.hub.request_response(
+                cs_spoke, "CS_REQUEUE_COMMAND",
+                {"id": cmd_id, "max_retries": self.max_retries, "message": message},
+                timeout=5.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("CS bridge: requeue %s failed: %s", cmd_id, exc)
+            return
+        data = _unwrap(raw)
+        if data.get("requeued"):
+            logger.info("[cs-bridge] %s %s relay timed out — re-queued (attempt %s/%s)",
+                        cmd_id, action, data.get("attempts"), data.get("max_retries"))
+        else:
+            # Exhausted retries → the queue already marked it failed.
+            logger.warning("[cs-bridge] %s %s gave up after %s relay attempt(s): %s",
+                            cmd_id, action, data.get("attempts"), message)
 
     async def _ack(self, cs_spoke: str, cmd_id: str, status: str, message: str) -> None:
         try:
