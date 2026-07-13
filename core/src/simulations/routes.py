@@ -2671,7 +2671,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         concurrency = int((body or {}).get("concurrency", 0) or 0)
         payload = {"target": "proxmox", "action": "proxmox_reclone_all",
                     "type": "proxmox_reclone_all", "args": {"concurrency": concurrency}}
-        return await _cs_forward(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=10.0)
+        # Fan out to EVERY server concurrently (was _cs_forward → only the first
+        # bound spoke, so a 3-server tenant reclonled one host at a time). Each
+        # agent then runs `concurrency` reclones in parallel internally, so the
+        # fleet does concurrency×servers at once.
+        results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=15.0)
+        return {"queued": True, "servers": len(results),
+                "dispatched": sum(1 for _s, d in results if d is not None)}
+
+    @app.post("/sim/api/{tenant}/fleet-reclone-stop")
+    async def cs_fleet_reclone_stop(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Stop the running fleet reclone on every server. `proxmox_reclone_stop`
+        is a FAST op on the agent (it only sets a flag), so it isn't blocked
+        behind the batch that holds the agent's long-op semaphore; in-flight
+        reclones finish, the rest are skipped."""
+        payload = {"target": "proxmox", "action": "proxmox_reclone_stop",
+                   "type": "proxmox_reclone_stop", "args": {}}
+        results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=10.0)
+        return {"stopped": sum(1 for _s, d in results
+                               if isinstance(d, dict) and d.get("stopped")),
+                "servers": len(results)}
 
     @app.post("/sim/api/{tenant}/update-all")
     async def cs_update_all(tenant: str, tenant_id: str = Depends(get_tenant_id)):

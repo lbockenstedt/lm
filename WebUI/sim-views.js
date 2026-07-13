@@ -236,6 +236,7 @@ const SIM_ROUTES = {
 
     // ── Fleet (reclone / auto-provision toggle / update-all) ──
     csFleetReclone:              { m: 'POST',   p: '/{tenant}/fleet-reclone',                    api: 'cs_fleet_reclone' },
+    csFleetRecloneStop:          { m: 'POST',   p: '/{tenant}/fleet-reclone-stop',               api: 'cs_fleet_reclone_stop' },
     csToggleAutoProvision:       { m: 'POST',   p: '/{tenant}/toggle-auto-provision',            api: 'cs_toggle_auto_provision' },
     csUpdateAll:                 { m: 'POST',   p: '/{tenant}/update-all',                       api: 'cs_update_all' },
 
@@ -4909,6 +4910,7 @@ async function csRenderVmServer() {
         <div class="flex items-center gap-2">
           <input id="cs-fleet-conc" type="number" min="1" value="1" class="w-16 border border-slate-200 rounded-md px-2 py-1 text-sm"/>
           <button onclick="csFleetReclone()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold" title="Destroy and re-clone every VM in the fleet from its template — all in-VM state is lost">Reclone All</button>
+          <button id="cs-fleet-reclone-stop" onclick="csFleetRecloneStop()" class="hidden bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Stop the running fleet reclone — VMs already in progress finish, the rest are skipped">Stop</button>
         </div>
         <p class="text-[10px] text-slate-400 mt-2">Concurrency controls how many guests reclone in parallel.</p>
         <div id="cs-fleet-reclone-progress" class="mt-2 text-[11px] text-slate-500 space-y-1">No reclone in progress.</div>
@@ -5005,6 +5007,9 @@ function csFleetRecloneProgress() {
     // Per-host reclone_state; only hosts with a non-idle/non-empty state are "running".
     const active = (csVmHosts || []).map(h => ({ h, rs: h.reclone_state || {} }))
         .filter(x => x.rs.status === 'running' || (x.rs.status && x.rs.status !== 'idle' && Object.keys(x.rs).length));
+    // Show the Stop button only while a batch is actually running on some server.
+    const stopBtn = csEl('cs-fleet-reclone-stop');
+    if (stopBtn) stopBtn.classList.toggle('hidden', !active.some(x => x.rs.status === 'running'));
     if (!active.length) { el.textContent = 'No reclone in progress.'; return; }
     el.innerHTML = active.map(({ h, rs }) => {
         const total = Number(rs.total || 0);
@@ -5159,6 +5164,14 @@ window.csFleetReclone = async function () {
         if (typeof showToast === 'function') showToast('Fleet reclone started.', 'success');
         csRenderVmServer();
     } catch (e) { console.error('csFleetReclone: fleet reclone failed', e); if (typeof showToast === 'function') showToast('Fleet reclone failed: ' + (e.message || e), 'error'); }
+};
+
+window.csFleetRecloneStop = async function () {
+    try {
+        await csFetch(`/${csTenant()}/fleet-reclone-stop?tenant_id=${csTenant()}`, { method: 'POST' });
+        if (typeof showToast === 'function') showToast('Stopping fleet reclone — in-flight VMs finish, the rest are skipped.', 'success');
+        csRenderVmServer();
+    } catch (e) { console.error('csFleetRecloneStop: stop failed', e); if (typeof showToast === 'function') showToast('Stop failed: ' + (e.message || e), 'error'); }
 };
 
 window.csToggleAutoProvision = async function (enabled) {
