@@ -72,9 +72,29 @@ def register(app, hub, ctx):
         agent_id = str(body.get("agent_id") or "").strip()
         vmid = body.get("vmid")
         node = str(body.get("node") or "").strip()
+        unique_id = str(body.get("unique_id") or "").strip()
+        # The WebUI passes the VM's unique_id ("cluster/node/vmid"); derive vmid +
+        # node from it when not given explicitly (mirrors the VM-action routes).
+        if unique_id and "/" in unique_id:
+            parts = unique_id.split("/")
+            if len(parts) >= 3:
+                node = node or parts[-2]
+                if vmid is None:
+                    try:
+                        vmid = int(parts[-1])
+                    except (TypeError, ValueError):
+                        pass
+        # Resolve the owning agent by node hostname (agent_info index) when the
+        # caller didn't hand us an explicit agent_id.
+        if not agent_id and node:
+            for aid, info in (getattr(hub, "agent_info", {}) or {}).items():
+                if str((info or {}).get("hostname") or "").lower() == node.lower():
+                    agent_id = aid
+                    break
         name = str(body.get("name") or "").strip() or (f"vmid-{vmid}" if vmid is not None else "")
         if not agent_id or vmid is None:
-            raise HTTPException(status_code=400, detail="agent_id and vmid are required")
+            raise HTTPException(status_code=400,
+                                detail="could not resolve the owning agent/vmid (need agent_id+vmid or a unique_id)")
 
         owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
             or hub.get_hypervisor_spoke()

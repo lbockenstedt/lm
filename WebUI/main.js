@@ -398,7 +398,7 @@ for (const _cls of Object.keys(MODULE_CLASSES)) {
     for (const _p of MODULE_CLASSES[_cls]) PRODUCT_LABEL[_p] = _cls;
 }
 const VIEW_LABEL = {
-    dashboard: 'Dashboard', setup: 'Setup', settings: 'System', logs: 'Logs', ldap: 'Directory', bugs: 'Bug Report',
+    dashboard: 'Dashboard', setup: 'Setup', settings: 'System', logs: 'Logs', ldap: 'Directory', bugs: 'Bug Report', templates: 'Template Repo',
 };
 function updateHeaderModule() {
     const sep = document.getElementById('header-module-sep');
@@ -2641,6 +2641,11 @@ function _rebuildMainNav(allSpokes, connections) {
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M4.5 8.5l2-1.5m13 1.5l-2-1.5M4.5 15.5l2 1.5m13-1.5l-2 1.5M12 4a4 4 0 014 4v4a4 4 0 01-8 0V8a4 4 0 014-4z"></path></svg></div>
             <span>Bug Report</span>
         </div>`;
+    const _templateRepoNavHtml = () => `
+        <div onclick="setView('templates')" id="nav-templates" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg></div>
+            <span>Template Repo</span>
+        </div>`;
     const _myDevicesNavHtml = () => `
         <div onclick="setView('mydevices')" id="nav-mydevices" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-sm font-medium">
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg></div>
@@ -2654,6 +2659,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminSetup : ''}
         ${isAdmin() ? adminSettings : ''}
         ${isAdmin() ? adminLogs : ''}
+        ${isAdmin() ? _templateRepoNavHtml() : ''}
         ${isAdmin() ? _bugReportNavHtml() : ''}
         ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
     `;
@@ -3122,6 +3128,9 @@ function _viewTemplate(viewId) {
   <div id="logs-content"></div>
 </div>`;
 
+        case 'templates':
+            return `<div id="template-repo-content" class="space-y-6"></div>`;
+
         case 'setup':
             return `<div class="space-y-6">
   <div id="setup-content"></div>
@@ -3231,6 +3240,9 @@ function initView(viewId, subView) {
             break;
         case 'bugs':
             _renderLogsSection('logs-bugs');
+            break;
+        case 'templates':
+            renderTemplateRepo();
             break;
         case 'setup':
             _renderSetupSection(subView || 'Spokes & Agents');
@@ -10271,6 +10283,7 @@ function openVmDetail(uniqueId) {
             <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
             <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors">📷 Snapshot</button>
             <button onclick="pxmxVmAction('${uid}','backup')" title="vzdump backup to the storage configured in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-colors">💾 Backup</button>
+            <button onclick="pxmxBackupToHub('${uid}')" title="vzdump this template and store a copy in the hub's Template Repo (Template Repo page)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition-colors">⬆ Back up to Hub</button>
             <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" title="Open VNC console (noVNC)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors">🖥 Console</button>
             ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>` : ''; })()}
             <span id="pxmx-vm-action-status" class="text-xs text-slate-400"></span>
@@ -10424,6 +10437,165 @@ async function pxmxVmAction(uniqueId, action) {
         showToast(`${action} failed: ${e.message || e}`, 'error');
         setStat(`${action} failed`);
     }
+}
+
+// Back up a Proxmox template to the hub's Template Repo. Sends the VM's unique_id
+// (the hub resolves the owning agent + vmid + node); the agent runs vzdump and
+// streams the archive up. Long-running — the trigger just queues it.
+async function pxmxBackupToHub(uniqueId) {
+    const vms = window._pxmxVms || [];
+    const vm = vms.find(v => v.unique_id === uniqueId);
+    if (!vm) { showToast('VM not found in cache', 'error'); return; }
+    if (!window.confirm(`Run vzdump on "${vm.name || vm.vmid}" and stream a copy to the hub Template Repo?\n\nThis can take several minutes for a large template.`)) return;
+    const statusEl = document.getElementById('pxmx-vm-action-status');
+    if (statusEl) statusEl.textContent = 'Backing up to hub…';
+    try {
+        const r = await setupFetch('/setup/templates/backup', {
+            method: 'POST',
+            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, name: vm.name || '' })
+        });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data && data.status === 'SUCCESS') {
+            showToast(data.message || 'Backup queued — check the Template Repo in a few minutes.', 'success');
+            if (statusEl) statusEl.textContent = 'Backup queued — see Template Repo';
+        } else {
+            showToast(`Backup failed: ${(data && (data.message || data.detail)) || r.status}`, 'error');
+            if (statusEl) statusEl.textContent = 'Backup failed';
+        }
+    } catch (e) { showToast(`Backup failed: ${e.message || e}`, 'error'); }
+}
+
+// ── Template Repo (admin) — Proxmox template backups stored on the hub ────────
+let _templateRepoTimer = null;
+function _tplBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    const u = ['KB', 'MB', 'GB', 'TB']; let i = -1;
+    do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+    return n.toFixed(1) + ' ' + u[i];
+}
+function _tplStatusBadge(t) {
+    const s = String(t.status || '').toLowerCase();
+    if (s === 'complete') return '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">Complete</span>';
+    if (s === 'failed') return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700" title="${escJsAttr(t.error || '')}">Failed</span>`;
+    const label = s === 'dumping' ? 'Dumping' : (s === 'uploading' ? 'Uploading' : 'Pending');
+    const pct = Math.max(0, Math.min(100, Number(t.progress) || 0));
+    return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-sky-100 text-sky-700"><span class="animate-spin inline-block w-2.5 h-2.5 rounded-full border-2 border-sky-500 border-t-transparent align-middle mr-1"></span>${label} ${pct}%</span>`;
+}
+async function renderTemplateRepo() {
+    const host = document.getElementById('template-repo-content');
+    if (!host) return;
+    let templates = [];
+    try {
+        const r = await setupFetch('/setup/templates');
+        const d = await r.json().catch(() => ({}));
+        templates = (d && d.templates) || [];
+    } catch (e) {
+        host.innerHTML = `<div class="hpe-card rounded-lg p-6 text-red-600">Could not load templates: ${escapeHtml(e.message || String(e))}</div>`;
+        return;
+    }
+    window._templateRepo = templates;
+    const anyBusy = templates.some(t => !['complete', 'failed'].includes(String(t.status || '').toLowerCase()));
+    const rows = templates.length
+        ? templates.map(_templateRepoRow).join('')
+        : `<tr><td colspan="9" class="px-4 py-6 text-center text-sm text-slate-400 italic">No templates yet — use “⬆ Back up to Hub” on a Proxmox template VM (Hypervisors → open a template).</td></tr>`;
+    host.innerHTML = `
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-xl font-bold text-[#263040]">Template Repo</h2>
+          <p class="text-sm text-slate-500">Proxmox template backups (vzdump) stored on the hub. Trigger one with “⬆ Back up to Hub” on a template VM; edit each template’s metadata here.</p>
+        </div>
+        <button onclick="renderTemplateRepo()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">↻ Refresh</button>
+      </div>
+      <div class="hpe-card rounded-lg overflow-hidden">
+        <div class="overflow-x-auto"><table class="w-full text-sm">
+          <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
+            <th class="px-4 py-2 text-left font-medium">Name</th>
+            <th class="px-4 py-2 text-left font-medium">OS</th>
+            <th class="px-4 py-2 text-left font-medium">Version</th>
+            <th class="px-4 py-2 text-left font-medium">Purpose</th>
+            <th class="px-4 py-2 text-left font-medium">Tenant</th>
+            <th class="px-4 py-2 text-left font-medium">Source</th>
+            <th class="px-4 py-2 text-right font-medium">Size</th>
+            <th class="px-4 py-2 text-left font-medium">Status</th>
+            <th class="px-4 py-2 text-right font-medium">Actions</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </div>`;
+    if (_templateRepoTimer) { clearTimeout(_templateRepoTimer); _templateRepoTimer = null; }
+    if (anyBusy && document.getElementById('template-repo-content')) {
+        _templateRepoTimer = setTimeout(() => { if (document.getElementById('template-repo-content')) renderTemplateRepo(); }, 5000);
+    }
+}
+function _templateRepoRow(t) {
+    const id = escJsAttr(t.id);
+    const src = `${escapeHtml(t.source_node || '—')} · vmid ${escapeHtml(String(t.source_vmid == null ? '—' : t.source_vmid))}`;
+    const when = t.created_at ? new Date(t.created_at).toLocaleString() : '';
+    return `<tr class="border-t border-slate-100 hover:bg-slate-50">
+      <td class="px-4 py-2 font-medium text-slate-700">${escapeHtml(t.name || '—')}<div class="text-[11px] text-slate-400">${escapeHtml(when)}</div></td>
+      <td class="px-4 py-2 text-slate-600">${escapeHtml(t.os || '—')}</td>
+      <td class="px-4 py-2 text-slate-600">${escapeHtml(t.version || '—')}</td>
+      <td class="px-4 py-2 text-slate-600">${escapeHtml(t.purpose || '—')}</td>
+      <td class="px-4 py-2 text-slate-600">${escapeHtml(t.tenant || '—')}</td>
+      <td class="px-4 py-2 text-xs text-slate-500">${src}</td>
+      <td class="px-4 py-2 text-right text-slate-600">${t.size ? _tplBytes(t.size) : '—'}</td>
+      <td class="px-4 py-2">${_tplStatusBadge(t)}</td>
+      <td class="px-4 py-2 text-right whitespace-nowrap">
+        <button onclick="templateRepoEdit('${id}')" class="px-2 py-1 rounded text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600">Edit</button>
+        <button onclick="templateRepoDelete('${id}')" class="px-2 py-1 rounded text-xs font-bold bg-red-100 hover:bg-red-200 text-red-700">Delete</button>
+      </td>
+    </tr>`;
+}
+function templateRepoEdit(id) {
+    const t = (window._templateRepo || []).find(x => x.id === id);
+    if (!t) return;
+    const esc = s => (s == null ? '' : String(s)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const modal = document.createElement('div');
+    modal.id = 'template-edit-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <h3 class="text-lg font-bold text-[#263040]">Edit template metadata</h3>
+          <button onclick="this.closest('#template-edit-modal').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
+        </div>
+        <div class="p-6 space-y-3">
+          <div class="text-[11px] text-slate-400 font-mono">${esc(t.source_node)}/vmid ${esc(t.source_vmid)} · sha256 ${esc((t.sha256 || '').slice(0, 12))} · ${t.size ? _tplBytes(t.size) : '—'}</div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input id="tpl-edit-name" value="${esc(t.name)}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">OS</label><input id="tpl-edit-os" value="${esc(t.os)}" placeholder="Debian 12, Windows 11…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Version</label><input id="tpl-edit-version" value="${esc(t.version)}" placeholder="v3, 2026-07 golden…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Purpose</label><textarea id="tpl-edit-purpose" rows="2" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm">${esc(t.purpose)}</textarea></div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Tenant / owner</label><input id="tpl-edit-tenant" value="${esc(t.tenant)}" placeholder="(blank = shared)" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div class="pt-3 flex justify-end gap-3">
+            <button onclick="this.closest('#template-edit-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
+            <button onclick="templateRepoSaveMeta('${escJsAttr(id)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+}
+async function templateRepoSaveMeta(id) {
+    const g = i => (document.getElementById(i) || {}).value || '';
+    try {
+        const r = await setupFetch(`/setup/templates/${encodeURIComponent(id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ name: g('tpl-edit-name'), os: g('tpl-edit-os'), version: g('tpl-edit-version'), purpose: g('tpl-edit-purpose'), tenant: g('tpl-edit-tenant') })
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.status === 'SUCCESS') { showToast('Template metadata saved', 'success'); document.getElementById('template-edit-modal')?.remove(); renderTemplateRepo(); }
+        else showToast(d.detail || 'Save failed', 'error');
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+}
+async function templateRepoDelete(id) {
+    const t = (window._templateRepo || []).find(x => x.id === id);
+    if (!window.confirm(`Delete template "${t ? (t.name || id) : id}" from the hub repo? This removes the stored archive.`)) return;
+    try {
+        const r = await setupFetch(`/setup/templates/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.status === 'SUCCESS') { showToast('Template deleted', 'success'); renderTemplateRepo(); }
+        else showToast(d.detail || 'Delete failed', 'error');
+    } catch (e) { showToast('Delete failed: ' + (e.message || e), 'error'); }
 }
 
 // Clone-from-template: opens a small modal prompting for the new VM's name (a
