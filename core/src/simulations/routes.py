@@ -878,15 +878,33 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         push = getattr(hub, "push_or_queue_to_spoke", None)
 
         # Tenant-wide split: when a tenant has SEVERAL cs spokes, a quota/placement
-        # target N is divided across them (largest-remainder, sum == N) so the
-        # tenant TOTAL is N — not N on each spoke. Each spoke fills its share from
-        # its own client pool; the Quota State view sums the ledgers back to N.
+        # target N is apportioned across them so the tenant TOTAL is N (not N on
+        # each spoke). The split is PROPORTIONAL to each spoke's pool size (from
+        # telemetry) via largest-remainder, so a bigger spoke takes a bigger share
+        # and small spokes aren't over-asked; falls back to even when telemetry is
+        # absent. Each spoke fills its share from its own clients; Quota State sums
+        # the ledgers back to N.
         _k = len(spoke_ids)
         _idx_of = {sid: i for i, sid in enumerate(spoke_ids)}
 
-        def _split_int(total, idx: int) -> int:
-            base, extra = divmod(int(total or 0), _k)
-            return base + (1 if idx < extra else 0)
+        def _spoke_weight(sid: str) -> int:
+            try:
+                return len((getattr(hub, "simulations_cache", {}).get(sid) or {}).get("clients") or [])
+            except Exception:  # noqa: BLE001
+                return 0
+        _weights = [_spoke_weight(s) for s in spoke_ids]
+        if sum(_weights) <= 0:
+            _weights = [1] * _k
+
+        def _apportion(total, idx: int) -> int:
+            total = int(total or 0)
+            tw = sum(_weights) or 1
+            raw = [total * w / tw for w in _weights]
+            shares = [int(x) for x in raw]
+            rem = total - sum(shares)
+            for i in sorted(range(_k), key=lambda j: raw[j] - shares[j], reverse=True)[:max(0, rem)]:
+                shares[i] += 1
+            return shares[idx]
 
         def _payload_for(sid: str) -> dict:
             if _k <= 1:
@@ -895,11 +913,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             p = dict(payload)
             if isinstance(p.get("effective_sim_quotas"), list):
                 p["effective_sim_quotas"] = [
-                    {**q, "count": _split_int(q.get("count") or 0, idx)}
+                    {**q, "count": _apportion(q.get("count") or 0, idx)}
                     for q in p["effective_sim_quotas"]]
             if isinstance(p.get("ssid_placement"), dict):
                 p["ssid_placement"] = {
-                    site: ({**pc, "targets": {c: _split_int(n or 0, idx)
+                    site: ({**pc, "targets": {c: _apportion(n or 0, idx)
                                              for c, n in (pc.get("targets") or {}).items()}}
                            if isinstance(pc, dict) else pc)
                     for site, pc in p["ssid_placement"].items()}
