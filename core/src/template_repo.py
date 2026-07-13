@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 # Keys never exposed in the public (WebUI/API) view of a record.
-_PRIVATE_KEYS = {"_upload_token"}
+_PRIVATE_KEYS = {"_upload_token", "_refresh_token"}
 # Metadata fields an operator may edit after upload. ``tenant`` is NOT here — it
 # is DERIVED from the source PXMX host's tenant binding at backup time and is
 # authoritative (the repo is tenant-driven, per host), so it can't be re-typed.
@@ -166,6 +166,41 @@ class TemplateRepo:
             rec.update(size=int(size), sha256=str(sha256), status="complete",
                        progress=100, error="", updated_at=_now())
             rec.pop("_upload_token", None)
+            self._persist(tid)
+
+    # ── refresh (restore to a host) ─────────────────────────────────────────
+    def mint_refresh_token(self, tid: str) -> Optional[str]:
+        """Mint a fresh token the target agent presents to DOWNLOAD the archive
+        during a refresh. Not one-time (a resumed download may re-GET); a new
+        refresh overwrites it. Returns None if the template isn't complete."""
+        import uuid as _uuid
+        with self._lock:
+            rec = self._index.get(tid)
+            if rec is None or rec.get("status") != "complete":
+                return None
+            tok = _uuid.uuid4().hex
+            rec["_refresh_token"] = tok
+            self._persist(tid)
+            return tok
+
+    def verify_refresh_token(self, tid: str, token: str) -> bool:
+        with self._lock:
+            rec = self._index.get(tid)
+            return bool(rec) and bool(token) and rec.get("_refresh_token") == token
+
+    def set_refresh_status(self, tid: str, status: str, *, step: str = "",
+                           error: str = "") -> None:
+        """Track a refresh in progress on the record so the WebUI can show
+        'killing VMs…', 'restoring…', etc. (status = pending/pausing/killing/
+        downloading/restoring/resuming/complete/failed)."""
+        with self._lock:
+            rec = self._index.get(tid)
+            if not rec:
+                return
+            rec["refresh_status"] = status
+            rec["refresh_step"] = step
+            rec["refresh_error"] = str(error)[:500] if error else ""
+            rec["refresh_updated_at"] = _now()
             self._persist(tid)
 
     def update_meta(self, tid: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:

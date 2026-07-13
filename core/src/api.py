@@ -1104,11 +1104,14 @@ def create_app(hub):
         if path in _PUBLIC or (request.method == "GET" and path in _PUBLIC_GET):
             return await call_next(request)
 
-        # Agent-facing template-repo upload/progress — the owning node's agent has
-        # no browser session, so these are gated by the per-backup one-time
-        # upload token INSIDE the route (routes/templates.py), not by a session.
-        # Exact shape only: /api/templates/{id}/upload and /{id}/progress.
-        if path.startswith("/api/templates/") and (path.endswith("/upload") or path.endswith("/progress")):
+        # Agent-facing template-repo endpoints — the owning node's agent has no
+        # browser session, so these are gated by a per-op token INSIDE the route
+        # (routes/templates.py), not by a session: the backup upload/progress
+        # (upload token) and the refresh download/refresh-progress (refresh token).
+        # Exact shape only: /api/templates/{id}/{upload,progress,download,refresh-progress}.
+        if path.startswith("/api/templates/") and (
+                path.endswith("/upload") or path.endswith("/progress")
+                or path.endswith("/download")):
             return await call_next(request)
 
         sess = _session_user(request)

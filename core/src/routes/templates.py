@@ -254,3 +254,113 @@ def register(app, hub, ctx):
         _repo().set_status(tid, status, progress=body.get("progress"),
                            error=str(body.get("error") or ""))
         return {"status": "SUCCESS"}
+
+    # ── refresh (restore a stored template onto its host) ────────────────────
+    # Destructive orchestration: pause auto-prov → delete the host's sim VMs +
+    # the template → download this backup → qmrestore to the original VMID +
+    # re-mark as a template → resume auto-prov. The agent does the sequence
+    # (REFRESH_TEMPLATE); the hub just authorizes + relays.
+    def _acting_tenants(sess):
+        return (sess or {}).get("user", {}).get("tenants") or []
+
+    def _owns_tenant(sess, tenant_id):
+        # Global Admin → any; tenant-admin → only their assigned tenants.
+        if _is_admin(sess):
+            return True
+        return bool(tenant_id) and tenant_id in _acting_tenants(sess)
+
+    async def _orchestrate_refresh(tid: str, request: Request):
+        rec = _repo().get(tid, public=False)
+        if rec is None:
+            raise HTTPException(status_code=404, detail="template not found")
+        if rec.get("status") != "complete":
+            raise HTTPException(status_code=409, detail="template backup is not complete")
+        agent_id = str(rec.get("source_agent") or "")
+        if not agent_id:
+            raise HTTPException(status_code=409, detail="template has no recorded source host")
+        owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
+            or hub.get_hypervisor_spoke()
+        if not owning_spoke:
+            raise HTTPException(status_code=503, detail="the source host's spoke is not connected")
+
+        dl_token = _repo().mint_refresh_token(tid)
+        base = (os.environ.get("LM_HUB_PUBLIC_URL") or str(request.base_url)).rstrip("/")
+        download_url = f"{base}/api/templates/{tid}/download"
+        _repo().set_refresh_status(tid, "pending", step="queued")
+        try:
+            result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
+                "target_agent_id": agent_id,
+                "command": "REFRESH_TEMPLATE",
+                "data": {"template_id": tid, "template_vmid": rec.get("source_vmid"),
+                         "download_url": download_url, "refresh_token": dl_token},
+            })
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            if not (isinstance(data, dict) and data.get("status") in ("SUCCESS", "ACCEPTED")):
+                msg = (data.get("message") if isinstance(data, dict) else None) or "agent did not accept the refresh"
+                _repo().set_refresh_status(tid, "failed", error=msg)
+                return {"status": "ERROR", "message": msg}
+        except Exception as e:  # noqa: BLE001
+            _repo().set_refresh_status(tid, "failed", error=f"relay failed: {e}")
+            raise HTTPException(status_code=502, detail=f"REFRESH_TEMPLATE relay failed: {e}")
+        logger.info("[template-repo] refresh queued %s → agent %s (vmid %s)",
+                    tid, agent_id, rec.get("source_vmid"))
+        return {"status": "SUCCESS",
+                "message": "Refresh queued — pausing auto-provisioning, clearing the host's sim VMs + template, restoring the backup, then resuming auto-provisioning."}
+
+    @app.post("/setup/templates/{tid}/refresh")
+    async def refresh_template_admin(tid: str, request: Request):
+        _require_admin(request)
+        return await _orchestrate_refresh(tid, request)
+
+    @app.get("/tenant/templates")
+    async def list_templates_tenant(request: Request):
+        # /tenant/* is gated to tenant-admin + admin by the middleware. Admin sees
+        # all; a tenant-admin sees only templates whose derived tenant is theirs.
+        sess = _session_user(request)
+        allt = _repo().list()
+        if _is_admin(sess):
+            return {"templates": allt}
+        mine = set(_acting_tenants(sess))
+        return {"templates": [t for t in allt if (t.get("tenant_id") or "") in mine]}
+
+    @app.post("/tenant/templates/{tid}/refresh")
+    async def refresh_template_tenant(tid: str, request: Request):
+        sess = _session_user(request)
+        rec = _repo().get(tid)  # public view (no tokens)
+        # Anti-IDOR: a template the caller can't own reads as not-found.
+        if rec is None or not _owns_tenant(sess, rec.get("tenant_id")):
+            raise HTTPException(status_code=404, detail="template not found")
+        return await _orchestrate_refresh(tid, request)
+
+    # ── agent-facing download + refresh progress (token-authed) ──────────────
+    def _check_refresh_token(tid: str, request: Request):
+        token = request.headers.get("x-refresh-token") or request.query_params.get("token") or ""
+        if not _repo().verify_refresh_token(tid, token):
+            raise HTTPException(status_code=403, detail="invalid refresh token")
+
+    @app.get("/api/templates/{tid}/download")
+    async def download_template(tid: str, request: Request):
+        """Stream a stored archive to the target agent during a refresh
+        (refresh-token-authed; middleware-exempt)."""
+        from fastapi.responses import FileResponse
+        _check_refresh_token(tid, request)
+        rec = _repo().get(tid, public=False)
+        if rec is None or rec.get("status") != "complete":
+            raise HTTPException(status_code=404, detail="template not found or incomplete")
+        path = _repo().image_path(tid)
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail="archive missing on disk")
+        return FileResponse(path, media_type="application/octet-stream",
+                            filename=rec.get("filename") or "image.vma.zst")
+
+    @app.post("/api/templates/{tid}/refresh-progress")
+    async def refresh_progress(tid: str, request: Request):
+        _check_refresh_token(tid, request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        status = str(body.get("status") or "restoring")
+        _repo().set_refresh_status(tid, status, step=str(body.get("step") or ""),
+                                   error=str(body.get("error") or ""))
+        return {"status": "SUCCESS"}
