@@ -2046,7 +2046,7 @@ async function csRenderCentralAlerts() {
     ]);
     const alerts = (data && data.alerts) || [];
     const warn = _csCentralWarn(data);
-    if (!alerts.length) { csSet(`${warn}${csEmpty('No active Central alerts.', 'Active alerts come from Central /network-notifications/v1/alerts.')}`); return; }
+    if (!alerts.length) { csSet(`${warn}${csEmpty('No Central alerts.', 'Alerts come from Central /network-notifications/v1/alerts (active + recently closed).')}`); return; }
     const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
         .filter(c => c && c.type === 'alert').map(c => `${c.id}::${c.site || ''}`));
     const _sevRank = { critical: 4, error: 3, fail: 3, failed: 3, warning: 2, degraded: 2, info: 1, unknown: 0 };
@@ -2059,16 +2059,21 @@ async function csRenderCentralAlerts() {
             ? `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
             : `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return { name: a.name || '—', site: a.site || '—', severity: a.severity || 'warning',
-                 category: a.category || '—', monitored: !!isMon, btn };
+                 category: a.category || '—', status: a.status || 'active', monitored: !!isMon, btn };
     });
     const alertCols = [
         { label: 'Alert',    render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
         { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
         { label: 'Severity', render: r => csStatusBadge(r.severity), sort: r => _sevRank[String(r.severity).toLowerCase()] || 0 },
+        { label: 'State',    render: r => r.status === 'cleared'
+            ? `<span class="text-[11px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
+            : `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
+          sort: r => r.status === 'cleared' ? 0 : 1 },
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} active alert(s)` })}</div></div>`);
+    const _active = rows.filter(r => r.status !== 'cleared').length;
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} alert(s) — ${_active} active, ${alerts.length - _active} closed` })}</div></div>`);
 }
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
@@ -2551,14 +2556,29 @@ async function csRenderConfigSimulation() {
 let csSimQuotaCatalog = null;       // {sims, sites, suggested, meta}
 let csSimQuotaRows = [];            // working set of quota rows
 let csSimQuotaMonitored = [];       // monitored_checks → {type,id,name,site} for the ID dropdown
+let csSimQuotaAvailable = [];        // all Central alerts+insights (active+closed) → {type,id,name,site} for the ID dropdown
 
 async function csRenderConfigSimQuotas() {
     csSetToolbar('');
     try {
-        const [cat, cfg] = await Promise.all([
+        const [cat, cfg, browse] = await Promise.all([
             csFetch(`/${csTenant()}/sim-quota-catalog?tenant_id=${csTenant()}`).catch(() => null),
             csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+            (typeof csCentralBrowse === 'function' ? csCentralBrowse() : Promise.resolve(null)).catch(() => null),
         ]);
+        // Full Central alert/insight universe (active AND closed) so the ID field
+        // can link a quota to any alert/insight Central has ever reported — not
+        // just the ones currently being monitored.
+        const _av = [];
+        ((browse && browse.alerts) || []).forEach(a => {
+            const id = String((a.name || a.category) || '').trim();
+            if (id) _av.push({ type: 'alert', id, name: a.name || a.category || id, site: (a.site && a.site !== '—') ? a.site : '', status: a.status || 'active' });
+        });
+        ((browse && browse.insights) || []).forEach(i => {
+            const id = String((i.name || i.category) || '').trim();
+            if (id) _av.push({ type: 'insight', id, name: i.name || i.category || id, site: (i.site && i.site !== '—' && i.site !== 'All Sites') ? i.site : '', status: i.status || 'active' });
+        });
+        csSimQuotaAvailable = _av;
         csSimQuotaCatalog = cat || { sims: [], sites: [], suggested: {}, meta: {} };
         // Per-sim shareable/stackable overrides (Simulation Sharing tile).
         window._csSimShareable = (cat && cat.sim_shareable && typeof cat.sim_shareable === 'object') ? { ...cat.sim_shareable } : {};
@@ -2618,16 +2638,26 @@ function csSimQuotaSimOptions(selected, simIds) {
 function csSimQuotaAlertIdOptions(alertType, selectedId) {
     const opts = [];
     const seen = new Set();
+    // Monitored checks first (the tenant explicitly watches these), then the full
+    // Central universe (active + closed) so a quota can link to any reported
+    // alert/insight — closed ones are labelled so the operator knows the state.
     (csSimQuotaMonitored || []).forEach(c => {
         if (c.type !== alertType || !c.id || seen.has(c.id)) return;
         seen.add(c.id);
         const label = c.name && c.name !== c.id ? `${c.name} — ${c.id}` : c.id;
         opts.push({ id: c.id, label, selected: c.id === selectedId });
     });
+    (csSimQuotaAvailable || []).forEach(c => {
+        if (c.type !== alertType || !c.id || seen.has(c.id)) return;
+        seen.add(c.id);
+        const base = c.name && c.name !== c.id ? `${c.name} — ${c.id}` : c.id;
+        const label = c.status === 'cleared' ? `${base} (closed)` : base;
+        opts.push({ id: c.id, label, selected: c.id === selectedId });
+    });
     if (selectedId && !seen.has(selectedId)) {
-        opts.push({ id: selectedId, label: `${selectedId} (not monitored)`, selected: true });
+        opts.push({ id: selectedId, label: `${selectedId} (not reported)`, selected: true });
     }
-    const ph = opts.length ? '— select alert/insight —' : '— monitor an alert/insight first —';
+    const ph = opts.length ? '— select alert/insight —' : '— no alerts/insights reported yet —';
     return `<option value="">${csEscape(ph)}</option>` +
         opts.map(o => `<option value="${csEscape(o.id)}" ${o.selected ? 'selected' : ''}>${csEscape(o.label)}</option>`).join('');
 }
