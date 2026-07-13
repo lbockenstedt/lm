@@ -4453,7 +4453,6 @@ async function csRenderVmServer() {
       <tbody>${rows}</tbody>
     </table></div>`;
 
-<<<<<<< Updated upstream
     // Fleet template refresh — pick one/some/all hosts and refresh each host's
     // template from its stored backup. Tenant-admin (own hosts) + Global Admin.
     const _canRefresh = (typeof isAdmin === 'function' && isAdmin())
@@ -4466,11 +4465,7 @@ async function csRenderVmServer() {
         : '';
 
     csSet(`<div class="space-y-4">${summary}${fleetCards}${bulkBar}${table}</div>`);
-    // populate auto-provision status
-=======
-    csSet(`<div class="space-y-4">${summary}${fleetCards}${table}</div>`);
     // populate auto-provision status + the live panels (host data from csVmLoad).
->>>>>>> Stashed changes
     csRefreshAutoProvStatus();
     csAutoProvLivePanel();
     csFleetRecloneProgress();
