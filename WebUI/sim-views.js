@@ -3256,16 +3256,26 @@ let csPxmxSiteMap = {};
 let csPxmxAgents = [];
 let csPxmxSites = [];
 
+let csSiteLinks = [];        // [{name, wsite, central_site}] — wsite↔Central links
+let csCentralSitesList = []; // Central site names for the link editor dropdown
 async function csRenderPxmxSiteMap() {
     csSetToolbar('');
     try {
-        const [mapRes, cat] = await Promise.all([
+        const [mapRes, cat, cfg, browse] = await Promise.all([
             csFetch(`/${csTenant()}/pxmx-site-map?tenant_id=${csTenant()}`).catch(() => null),
             csFetch(`/${csTenant()}/sim-quota-catalog?tenant_id=${csTenant()}`).catch(() => null),
+            csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+            (typeof csCentralBrowse === 'function' ? csCentralBrowse() : Promise.resolve(null)).catch(() => null),
         ]);
         csPxmxSiteMap = (mapRes && mapRes.pxmx_site_map) || {};
         csPxmxAgents = Array.isArray(mapRes && mapRes.agents) ? mapRes.agents : [];
         csPxmxSites = (cat && cat.sites) || [];
+        csSiteLinks = Array.isArray(cfg && cfg.site_links) ? cfg.site_links.map(l => ({ ...l })) : [];
+        // Central site names: from browse (sites/alerts) + the configured mappings.
+        const cs = new Set();
+        ((browse && browse.sites) || []).forEach(s => { const n = (s && (s.name || s.site)) || s; if (n) cs.add(String(n)); });
+        Object.values((cfg && cfg.site_mappings) || {}).forEach(v => { if (v) cs.add(String(v)); });
+        csCentralSitesList = [...cs].sort();
         csRenderPxmxSiteMapEditor();
     } catch (e) {
         console.error('csRenderPxmxSiteMap: load failed', e);
@@ -3289,10 +3299,16 @@ function csRenderPxmxSiteMapEditor() {
         if (!seen.has(h)) rows.push({ host: h, connected: false, last_seen: 0 });
     });
     rows.sort((a, b) => a.host.localeCompare(b.host));
+    // Dropdown = the Tenant-Wide Pool + each Site Link (shown by its NAME, value =
+    // its wsite so the engine's site match still works) + any raw sim site not
+    // yet covered by a link.
     const siteOpts = (sel) =>
         `<option value="" ${(!sel) ? 'selected' : ''}>— choose a pool —</option>` +
         `<option value="Tenant-Wide Pool" ${sel === 'Tenant-Wide Pool' ? 'selected' : ''}>Tenant-Wide Pool (site-based SSID)</option>` +
-        csPxmxSites.map(s => `<option value="${csEscape(s)}" ${s === sel ? 'selected' : ''}>${csEscape(s)} (site pool)</option>`).join('');
+        csSiteLinks.filter(l => l.wsite).map(l =>
+            `<option value="${csEscape(l.wsite)}" ${l.wsite === sel ? 'selected' : ''}>${csEscape(l.name || l.wsite)} (site pool)</option>`).join('') +
+        csPxmxSites.filter(s => !csSiteLinks.some(l => l.wsite === s)).map(s =>
+            `<option value="${csEscape(s)}" ${s === sel ? 'selected' : ''}>${csEscape(s)} (site pool)</option>`).join('');
     const rowHtml = rows.map((r, i) => {
         const sel = csPxmxSiteMap[r.host] || '';
         const badge = r.connected
@@ -3305,6 +3321,7 @@ function csRenderPxmxSiteMapEditor() {
         </div>`;
     }).join('');
     csSet(`<div class="space-y-4">
+      ${csSiteLinksCardHtml()}
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">PXMX Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
@@ -3315,6 +3332,71 @@ function csRenderPxmxSiteMapEditor() {
       </div>
     </div>`);
 }
+
+// ── Site Links (wsite ↔ Central site) — Config → PXMX Sites ──────────────────
+// Tie a simulation wsite (the SSID prefix, e.g. MIA) to its Central site name
+// (e.g. Miami). The link's Name shows in the PXMX assignment dropdown; the link
+// lets alert-driven quotas match where the alert actually fires in Central.
+function csSiteLinksCardHtml() {
+    const esc = s => csEscape(String(s == null ? '' : s));
+    const wsiteOpts = (sel) => `<option value="">— wsite —</option>` +
+        csPxmxSites.map(s => `<option value="${esc(s)}" ${s === sel ? 'selected' : ''}>${esc(s)}</option>`).join('');
+    const centralOpts = (sel) => {
+        const list = csCentralSitesList.slice();
+        if (sel && list.indexOf(sel) < 0) list.push(sel);
+        return `<option value="">— Central site —</option>` +
+            list.map(s => `<option value="${esc(s)}" ${s === sel ? 'selected' : ''}>${esc(s)}</option>`).join('');
+    };
+    const rows = csSiteLinks.map((l, i) =>
+        `<div class="grid grid-cols-1 sm:grid-cols-4 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-link="${i}">
+          <label class="text-xs text-slate-500">Name<input data-cs-link-k="name" value="${esc(l.name)}" placeholder="Miami" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
+          <label class="text-xs text-slate-500">wsite (SSID)<select data-cs-link-k="wsite" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${wsiteOpts(l.wsite)}</select></label>
+          <label class="text-xs text-slate-500">Central site<select data-cs-link-k="central_site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${centralOpts(l.central_site)}</select></label>
+          <button onclick="csSiteLinkDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1 justify-self-end">Remove</button>
+        </div>`).join('');
+    return `<div class="hpe-card rounded-lg p-5 shadow-sm">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Site Links (wsite ↔ Central)</h3>
+          <div class="flex justify-end gap-2">
+            <button onclick="csSiteLinkAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Link</button>
+            <button onclick="csSiteLinkSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Links</button>
+          </div>
+        </div>
+        <p class="text-xs text-slate-500 mb-3">Tie a simulation <b>wsite</b> (the SSID prefix, e.g. <span class="font-mono">MIA</span>) to its <b>Central site</b> (e.g. <span class="font-mono">Miami</span>). The link <b>Name</b> is what shows in the assignment dropdown below, and it lets an alert-driven quota at that site match where the alert fires in Central.</p>
+        <div class="space-y-2">${rows || '<div class="text-xs text-slate-400 italic">No links. Add one to name your sites.</div>'}</div>
+      </div>`;
+}
+
+function csSiteLinksSyncFromDom() {
+    const out = [];
+    document.querySelectorAll('[data-cs-link]').forEach(el => {
+        const g = k => { const i = el.querySelector(`[data-cs-link-k="${k}"]`); return i ? String(i.value).trim() : ''; };
+        const name = g('name'), wsite = g('wsite'), central_site = g('central_site');
+        if (name || wsite || central_site) out.push({ name, wsite, central_site });
+    });
+    csSiteLinks = out;
+    return out;
+}
+window.csSiteLinkAdd = function () { csSiteLinksSyncFromDom(); csSiteLinks.push({ name: '', wsite: '', central_site: '' }); csRenderPxmxSiteMapEditor(); };
+window.csSiteLinkDel = function (i) { csSiteLinksSyncFromDom(); csSiteLinks.splice(i, 1); csRenderPxmxSiteMapEditor(); };
+window.csSiteLinkSave = async function () {
+    csSiteLinksSyncFromDom();
+    try {
+        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+            sim_quotas: Array.isArray(cfg.sim_quotas) ? cfg.sim_quotas : [],
+            site_links: csSiteLinks,
+        };
+        await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        showToast('Site links saved.', 'success');
+        csRenderPxmxSiteMapEditor();
+    } catch (e) {
+        showToast((e && e.message) || 'Save failed', 'error');
+    }
+};
 
 window.csPxmxSiteClear = function (host) {
     // Reflect the clear in the DOM select so the subsequent save picks it up.

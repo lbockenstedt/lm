@@ -1403,6 +1403,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if sites is None:
             return False
         site = str(q.get("site") or "").strip()
+        # Map the quota's wsite (SSID site, e.g. MIA) to its CENTRAL site name
+        # (e.g. Miami) via the tenant's site_links, so the firing check compares
+        # against where the alert actually fires in Central.
+        if site:
+            try:
+                csc = await store.get_central_sites_config(tenant_id) or {}
+                for lk in (csc.get("site_links") or []):
+                    if str(lk.get("wsite") or "").strip() == site and lk.get("central_site"):
+                        site = str(lk.get("central_site")).strip()
+                        break
+            except Exception:  # noqa: BLE001
+                pass
         return True if not site else (site in sites or "" in sites or "—" in sites)
 
     async def _run_adaptive_controller() -> None:
@@ -2861,11 +2873,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             body = await request.json()
         except Exception:
             body = {}
-        cfg = body if isinstance(body, dict) else {}
-        # Validate the additive sim_quotas field against the sims the tenant's
-        # simulation.conf offers. Unknown/invalid quotas are dropped + reported;
-        # the rest of central_sites_config passes through unchanged. The spoke
-        # re-validates on CS_SET_CENTRAL_SITES_CONFIG apply (defense in depth).
+        body = body if isinstance(body, dict) else {}
+        # MERGE the incoming body into the existing config so a PARTIAL save (just
+        # quotas, just the Pool & SSID card, just Site Links, just the sharing
+        # toggle) updates only the keys it sends and never wipes the other
+        # sections. Each editor fetches + resends the sections it owns; anything
+        # it omits is preserved here. (Previously this replaced the whole config,
+        # so saving quotas dropped the pool config, saving pool dropped the links,
+        # etc.) Validate the sim_quotas field the same way.
+        try:
+            existing = await store.get_central_sites_config(tenant_id) or {}
+        except Exception:  # noqa: BLE001
+            existing = {}
+        cfg = {**existing, **body}
         sim_quota_errors: list[str] = []
         clean: list = list(cfg.get("sim_quotas") or [])
         try:
