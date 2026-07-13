@@ -2560,6 +2560,9 @@ async function csRenderConfigSimQuotas() {
             csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
         ]);
         csSimQuotaCatalog = cat || { sims: [], sites: [], suggested: {}, meta: {} };
+        // Per-sim shareable/stackable overrides (Simulation Sharing tile).
+        window._csSimShareable = (cat && cat.sim_shareable && typeof cat.sim_shareable === 'object') ? { ...cat.sim_shareable } : {};
+        window._csSimCfgOther = { site_mappings: (cfg && cfg.site_mappings) || {}, hardware_checks: Array.isArray(cfg && cfg.hardware_checks) ? cfg.hardware_checks : [] };
         // Monitored alerts/insights (Central → Alerts/Insights → Monitor) are the
         // source for the row's Alert / Insight ID dropdown — a quota is linked to
         // an alert/insight the tenant actually monitors.
@@ -2683,7 +2686,40 @@ function csRenderSimQuotaEditor() {
             ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${csEscape(a)}</span> → <span class="font-mono">${csEscape(s)}</span> <button onclick="csSimQuotaAddSuggested('${csEscape(a)}','${csEscape(s)}')" class="text-[#01A982] hover:underline ml-1">add</button></li>`).join('')}
           </ul>
         </details>` : '';
+    // ── Simulation Sharing (stacking) tile ──────────────────────────────────
+    // All on/off sims from simulation.conf with a per-sim Shareable toggle.
+    // Authoritative: a non-shareable sim can NEVER be stacked by the quota engine
+    // (overrides the per-row Multi-capable). "Applicable" = a quota-stackable sim
+    // (in the catalog); non-applicable (e.g. kill_switch) can be hidden.
+    const _metaMap = meta || {};
+    const _applicable = new Set((cat.sims || []).map(s => s.sim_id));
+    Object.keys(_metaMap).forEach(k => _applicable.add(k));
+    const _shareMap = window._csSimShareable || {};
+    const _hideNA = !!window._csSimHideNA;
+    const _simList = (typeof CS_CONTROL_FLAGS !== 'undefined' ? CS_CONTROL_FLAGS : [])
+        .filter(f => !_hideNA || _applicable.has(f));
+    const _shareRows = _simList.map(f => {
+        const ap = _applicable.has(f);
+        const def = !!(_metaMap[f] && _metaMap[f].multi_capable);
+        const cur = Object.prototype.hasOwnProperty.call(_shareMap, f) ? !!_shareMap[f] : def;
+        return `<label class="flex items-center justify-between gap-2 py-1 border-b border-slate-100 last:border-0 ${ap ? '' : 'opacity-50'}">
+          <span class="text-xs font-mono text-slate-600">${csEscape(f)}${ap ? '' : ' <span class="text-[10px] text-slate-400 font-sans">(n/a for stacking)</span>'}</span>
+          <span class="flex items-center gap-1.5 text-xs"><input data-cs-share="${csEscape(f)}" type="checkbox" ${cur ? 'checked' : ''} ${ap ? '' : 'disabled'}> Shareable</span>
+        </label>`;
+    }).join('');
+    const sharingCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Sharing (Stacking)</h3>
+          <div class="flex items-center gap-3">
+            <label class="text-[11px] text-slate-500 flex items-center gap-1"><input type="checkbox" onchange="csSimSharingToggleHide(this)" ${_hideNA ? 'checked' : ''}> Hide ones that don't apply</label>
+            <button onclick="csSimSharingSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Sharing</button>
+          </div>
+        </div>
+        <p class="text-xs text-slate-500 mb-2">Which simulations (from <span class="font-semibold">simulation.conf</span>) may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — the Quota Engine never packs it onto a client running other sims. Authoritative: this overrides the per-quota Multi-capable setting.</p>
+        <div class="space-y-0.5">${_shareRows}</div>
+      </div>`;
     csSet(`<div class="space-y-4">
+      ${sharingCard}
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Sim Quotas ${helpIcon('cs', null, 'Simulations help')}</h3>
@@ -2722,6 +2758,39 @@ function csSimQuotaSyncFromDom() {
     csSimQuotaRows = rows;
     return rows;
 }
+
+// Simulation Sharing (stacking) tile — hide non-applicable + save.
+window.csSimSharingToggleHide = function (cb) {
+    window._csSimHideNA = !!(cb && cb.checked);
+    csRenderSimQuotaEditor();
+};
+
+window.csSimSharingSave = async function () {
+    const map = {};
+    document.querySelectorAll('[data-cs-share]').forEach(el => {
+        map[el.getAttribute('data-cs-share')] = !!el.checked;
+    });
+    // Merge over the loaded map so a hide-filter can't drop hidden entries.
+    const merged = { ...(window._csSimShareable || {}), ...map };
+    window._csSimShareable = merged;
+    try {
+        // Preserve every other central-sites-config field; only replace sim_shareable.
+        const cfg = (await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`)) || {};
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+            sim_quotas: Array.isArray(cfg.sim_quotas) ? cfg.sim_quotas : [],
+            sim_shareable: merged,
+        };
+        await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, {
+            method: 'POST', body: JSON.stringify(body),
+        });
+        showToast('Simulation sharing saved.', 'success');
+    } catch (e) {
+        showToast((e && e.message) || 'Save failed', 'error');
+    }
+};
 
 window.csSimQuotaAdd = function (preset) {
     csSimQuotaSyncFromDom();

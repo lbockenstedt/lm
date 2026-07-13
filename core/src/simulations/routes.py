@@ -1266,11 +1266,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             t_csc = {}
         return merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
 
+    async def _sim_shareable(tenant_id: str) -> dict:
+        """The tenant's per-simulation shareable/stackable overrides (authoritative
+        — a sim set non-shareable can NEVER be stacked by the quota engine).
+        Stored in central_sites_config.sim_shareable = {sim_id: bool}."""
+        try:
+            csc = await store.get_central_sites_config(tenant_id) or {}
+        except Exception:  # noqa: BLE001
+            csc = {}
+        v = csc.get("sim_shareable")
+        return v if isinstance(v, dict) else {}
+
     async def _push_sim_quotas(tenant_id: str) -> int:
-        """Push the tenant's effective sim quotas to its cs spoke(s) as a
-        CS_CONFIG_UPDATE payload key the SimQuotaEngine reconciles against."""
+        """Push the tenant's effective sim quotas + per-sim shareable overrides to
+        its cs spoke(s) as a CS_CONFIG_UPDATE the SimQuotaEngine reconciles against."""
         return await _push_config(tenant_id, {
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
+            "sim_shareable": await _sim_shareable(tenant_id),
         })
 
     async def _push_sim_quotas_all_tenants() -> int:
@@ -2568,6 +2580,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         pushed = await _push_config(tenant_id, {
             "central_sites_config": cfg,
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
+            "sim_shareable": await _sim_shareable(tenant_id),
         })
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
@@ -2583,13 +2596,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         falls back to parsing the hub's cached ``sim_conf_content`` when no
         spoke is connected so the editor still works offline."""
         try:
-            return await _cs_forward(tenant_id, "CS_GET_SIM_QUOTA_CATALOG", {}, timeout=15.0)
+            cat = await _cs_forward(tenant_id, "CS_GET_SIM_QUOTA_CATALOG", {}, timeout=15.0)
         except HTTPException:
             sim_txt = await store.get_sim_conf_content(tenant_id) or ""
-            csc = await store.get_central_sites_config(tenant_id) or {}
-            cat = sim_quota_catalog_from_ini(sim_txt, csc.get("site_mappings"))
+            csc0 = await store.get_central_sites_config(tenant_id) or {}
+            cat = sim_quota_catalog_from_ini(sim_txt, csc0.get("site_mappings"))
             cat["warning"] = "Client-Sim spoke not connected — catalog from cached config."
-            return cat
+        # Attach the tenant's saved per-sim shareable overrides so the Sim Sharing
+        # tile renders current state (authoritative; empty = use the SIM_META default).
+        if isinstance(cat, dict):
+            cat["sim_shareable"] = await _sim_shareable(tenant_id)
+        return cat
 
     # ── PXMX server → site assignments (Config → PXMX Sites) ──────────────────
     # An operator assigns each connected pxmx server (agent host = short
