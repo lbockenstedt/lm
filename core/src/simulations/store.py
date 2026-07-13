@@ -379,6 +379,18 @@ class SimulationsStore:
             self._tenant(tenant_id)["central_sites_config"] = cfg or {}
             await self._asave()
 
+    # ── adaptive harvest controller state (design doc §9) ────────────────────
+    # Per-tenant {quota_key: {target, floor, mode, last_change}} — the running
+    # state of the min/max ramp-decay-learn controller. Small (tens of quotas).
+    async def get_adaptive_state(self, tenant_id: str) -> Dict[str, Any]:
+        v = self._data.get(tenant_id, {}).get("adaptive_quota_state")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_adaptive_state(self, tenant_id: str, state: Dict[str, Any]) -> None:
+        with self._lock:
+            self._tenant(tenant_id)["adaptive_quota_state"] = dict(state) if isinstance(state, dict) else {}
+            await self._asave()
+
     # ── shared alert/insight history (GLOBAL — all tenants + system defaults) ──
     # A single hub-wide catalog of every Central alert/insight NAME ever observed,
     # so the Sim-Quota "Alert / Insight ID" picker can offer them BEFORE they fire

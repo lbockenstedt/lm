@@ -6451,6 +6451,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # tabs render (distributed mode gets it from the spoke's CentralPoller
         # via CS_TELEMETRY instead). See simulations/central_hub_poller.py.
         central_hub_poll_task = asyncio.create_task(self.central_hub_poller.run_loop())
+        # Adaptive sim-quota controller: modulates each adaptive quota's count
+        # between min/max to keep its alert firing (ramp/decay/learn — design §9).
+        # Registered on the Hub by register_simulations_routes.
+        _adaptive_loop = getattr(self, "_adaptive_controller_loop", None)
+        if _adaptive_loop is not None:
+            asyncio.create_task(_adaptive_loop())
         # Certificate distribution: the hub is the transport for cert material
         # from the le (Let's Encrypt) spoke to each cert's target spokes. For
         # every managed cert with stale targets it pulls fullchain+key from le

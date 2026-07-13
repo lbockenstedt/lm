@@ -81,7 +81,7 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
     if alert_type not in ALERT_TYPES:
         alert_type = "alert"
     is_presence = not sim_id
-    return {
+    q = {
         "alert_id": str(raw.get("alert_id") or "").strip(),
         "alert_type": alert_type,
         "sim_id": sim_id,
@@ -92,6 +92,13 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         "rehome": _as_bool(raw.get("rehome"), False),
         "enabled": _as_bool(raw.get("enabled"), False),
     }
+    # Adaptive-controller fields (design doc §9) — carried through only when the
+    # quota declares them, so a fixed-count quota stays exactly as before. The
+    # hub-side controller reads min/max/step/settle/buffer and modulates `count`.
+    for k in ("min", "max", "step", "settle", "buffer"):
+        if raw.get(k) is not None:
+            q[k] = raw.get(k)
+    return q
 
 
 def quota_dedup_key(q: Dict[str, Any]) -> str:

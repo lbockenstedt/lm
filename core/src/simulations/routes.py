@@ -1268,7 +1268,163 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             g_defaults = await store.get_sim_quota_defaults()
         except Exception:  # noqa: BLE001
             g_defaults = []
-        return merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
+        merged = merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
+        return await _apply_adaptive_targets(tenant_id, merged)
+
+    def _adaptive_is_on(q: dict) -> bool:
+        """A quota is adaptive when it declares a max above its min (design §9).
+        Fixed-count quotas (no min/max, or min==max) are left untouched."""
+        try:
+            return int(q.get("max")) > int(q.get("min") or 1)
+        except (TypeError, ValueError):
+            return False
+
+    def _adaptive_key(q: dict) -> str:
+        return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
+
+    async def _apply_adaptive_targets(tenant_id: str, quotas: list) -> list:
+        """Replace an adaptive quota's ``count`` with the controller's current
+        target (stored state; the controller loop advances it). A quota with no
+        controller state yet starts at its ``min``."""
+        adaptive = [q for q in quotas if _adaptive_is_on(q)]
+        if not adaptive:
+            return quotas
+        try:
+            state = await store.get_adaptive_state(tenant_id)
+        except Exception:  # noqa: BLE001
+            state = {}
+        for q in adaptive:
+            st = state.get(_adaptive_key(q)) or {}
+            tgt = st.get("target")
+            q["count"] = int(tgt) if tgt is not None else int(q.get("min") or 1)
+        return quotas
+
+    def _ceil(x: float) -> int:
+        xi = int(x)
+        return xi + 1 if x > xi else xi
+
+    def _adaptive_step(st: dict, q: dict, firing, now: float) -> dict:
+        """Advance one controller tick (design §9). ``firing`` is True/False/None
+        (None = unknown → hold). Ramp up fast when not firing; when firing, learn
+        the floor (min sufficient) and hold at floor×(1+buffer), decaying slowly
+        toward it. Respects a settle window between changes."""
+        mn = int(q.get("min") or 1)
+        mx = max(mn, int(q.get("max") or mn))
+        step = max(1, int(q.get("step") or 1))
+        settle = float(q.get("settle") or 120)
+        buffer = float(q.get("buffer") if q.get("buffer") is not None else 0.20)
+        target = st.get("target")
+        floor = st.get("floor")
+        last = float(st.get("last_change") or 0)
+        mode = st.get("mode") or "learning"
+        if target is None:  # cold start (or warm-start from a persisted floor)
+            if floor is not None:
+                target = min(mx, max(mn, _ceil(float(floor) * (1 + buffer))))
+                mode = "stable"
+            else:
+                target, mode = mn, "learning"
+        target = max(mn, min(mx, int(target)))
+        if (now - last) >= settle:
+            if firing is False:
+                if target >= mx:
+                    mode = "at_max"
+                else:
+                    target = min(mx, target + step); mode = "learning"; last = now
+            elif firing is True:
+                floor = target if floor is None else min(int(floor), target)
+                op = max(mn, _ceil(float(floor) * (1 + buffer)))
+                if target > op:  # decay toward the operating point to probe lower
+                    target = max(op, target - step); last = now
+                mode = "stable"
+            # firing None → hold
+        return {"target": max(mn, min(mx, int(target))), "floor": floor,
+                "mode": mode, "last_change": last}
+
+    _adaptive_firing_cache: dict = {}
+
+    async def _alert_firing(tenant_id: str, q: dict):
+        """Best-effort: is this quota's alert currently firing at its site?
+        Reads active Central alerts (mode-aware, cached ~30s). Returns None when
+        the signal is unavailable, so the controller safely holds."""
+        import time as _t
+        now = _t.time()
+        cached = _adaptive_firing_cache.get(tenant_id)
+        if cached and now - cached[0] < 30:
+            fmap = cached[1]
+        else:
+            fmap = {}
+            try:
+                modes = await store.get_processing_modes(tenant_id)
+                if modes.get("central_api") == "centralized":
+                    browse = await browse_all_from_config(await store.get_central_config(tenant_id) or {})
+                else:
+                    browse = await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=20.0)
+                for a in (browse or {}).get("alerts", []) or []:
+                    if str(a.get("status") or "active").lower() == "cleared":
+                        continue
+                    nm = str(a.get("name") or a.get("category") or "").strip().lower()
+                    if nm:
+                        fmap.setdefault(nm, set()).add(str(a.get("site") or "").strip())
+            except Exception:  # noqa: BLE001
+                fmap = {}
+            _adaptive_firing_cache[tenant_id] = (now, fmap)
+        if not fmap:
+            return None
+        sites = fmap.get(str(q.get("alert_id") or "").strip().lower())
+        if sites is None:
+            return False
+        site = str(q.get("site") or "").strip()
+        return True if not site else (site in sites or "" in sites or "—" in sites)
+
+    async def _run_adaptive_controller() -> None:
+        """One controller pass over every tenant's adaptive quotas — advance the
+        target and re-push when it moves. Small (per-quota state)."""
+        import time as _t
+        from .sim_quota import normalize_quota
+        now = _t.time()
+        for tid in _all_tenant_ids():
+            try:
+                csc = await store.get_central_sites_config(tid) or {}
+                adaptive = [q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
+                            if q.get("enabled") and _adaptive_is_on(q)]
+                if not adaptive:
+                    continue
+                state = await store.get_adaptive_state(tid)
+                changed = False
+                live = set()
+                for q in adaptive:
+                    k = _adaptive_key(q); live.add(k)
+                    firing = await _alert_firing(tid, q)
+                    before = dict(state.get(k) or {})
+                    after = _adaptive_step(before, q, firing, now)
+                    if after != before:
+                        state[k] = after; changed = True
+                for k in list(state.keys()):
+                    if k not in live:
+                        state.pop(k, None); changed = True
+                if changed:
+                    await store.set_adaptive_state(tid, state)
+                    await _push_sim_quotas(tid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("adaptive controller (%s): %s", tid, exc)
+
+    async def _adaptive_controller_loop() -> None:
+        """Periodic adaptive-quota controller sweep. Started from main.py."""
+        while True:
+            try:
+                await _run_adaptive_controller()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a sweep must not kill the loop
+                logger.warning("adaptive controller loop: %s", exc)
+            await asyncio.sleep(45)
+
+    # Expose the loop so the Hub's startup can schedule it (a running event loop
+    # isn't guaranteed at route-registration time).
+    try:
+        hub._adaptive_controller_loop = _adaptive_controller_loop
+    except Exception:  # noqa: BLE001
+        pass
 
     async def _sim_shareable(tenant_id: str = "") -> dict:
         """The GLOBAL (all-tenant) per-simulation shareable/stackable overrides
