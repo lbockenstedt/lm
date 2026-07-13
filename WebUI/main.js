@@ -4998,7 +4998,7 @@ function _renderSetupSimulationsTile(content) {
                   </div>
                 </div>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide (all tenants): which simulations may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — no tenant's Quota Engine will pack it onto a client running other sims (authoritative, overrides a quota's Multi-capable). Mark a sim <b>N/A</b> to hide it via Hide N/A.</p>
-                <div id="sim-sharing-rows" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+                <div id="sim-sharing-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             </div>`;
     loadSimAdminOverview();
@@ -5320,7 +5320,7 @@ function _renderSimSharing() {
     const sims = (cat.sims || []).map(s => s.sim_id).filter(Boolean);
     Object.keys(_simSharing).forEach(k => { if (sims.indexOf(k) < 0) sims.push(k); });
     Object.keys(_simSharingNA).forEach(k => { if (sims.indexOf(k) < 0) sims.push(k); });
-    sims.sort();
+    sims.sort((a, b) => String(a).toLowerCase().localeCompare(String(b).toLowerCase()));
     const naVal = f => Object.prototype.hasOwnProperty.call(_simSharingNA, f) ? !!_simSharingNA[f] : false;
     const list = sims.filter(f => !_simSharingHideNA || !naVal(f));
     if (!list.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No simulations found.</p>'; return; }
