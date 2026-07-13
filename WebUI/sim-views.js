@@ -4388,7 +4388,7 @@ async function csRenderVmServer() {
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Fleet Reclone</p>
         <div class="flex items-center gap-2">
           <input id="cs-fleet-conc" type="number" min="1" value="1" class="w-16 border border-slate-200 rounded-md px-2 py-1 text-sm"/>
-          <button onclick="csFleetReclone()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Reclone All</button>
+          <button onclick="csFleetReclone()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold" title="Destroy and re-clone every VM in the fleet from its template — all in-VM state is lost">Reclone All</button>
         </div>
         <p class="text-[10px] text-slate-400 mt-2">Concurrency controls how many guests reclone in parallel.</p>
         <div id="cs-fleet-reclone-progress" class="mt-2 text-[11px] text-slate-500 space-y-1">No reclone in progress.</div>
@@ -4746,8 +4746,8 @@ async function csRenderVmServerVms() {
         <button onclick="csVmBulk('start_vm')" class="bg-green-100 text-green-700 px-2 py-1 rounded font-bold">Start</button>
         <button onclick="csVmBulk('stop_vm')" class="bg-amber-100 text-amber-700 px-2 py-1 rounded font-bold">Stop</button>
         <button onclick="csVmBulk('reboot_vm')" class="bg-slate-200 text-slate-700 px-2 py-1 rounded font-bold">Reboot</button>
-        <button onclick="csVmBulk('reclone_vm')" class="bg-blue-100 text-blue-700 px-2 py-1 rounded font-bold">Reclone</button>
-        <button onclick="csVmBulk('delete_vm')" class="bg-red-100 text-red-700 px-2 py-1 rounded font-bold">Delete</button>
+        <button onclick="csVmBulk('reclone_vm')" class="bg-blue-100 text-blue-700 px-2 py-1 rounded font-bold" title="Wipe and re-clone the selected VMs from template (discards current disk state)">Reclone</button>
+        <button onclick="csVmBulk('delete_vm')" class="bg-red-100 text-red-700 px-2 py-1 rounded font-bold" title="Permanently delete the selected VMs from Proxmox">Delete</button>
       </div>
       <div id="cs-vm-list">${csVmTable(rows)}</div>
       ${csVmStatusLegend()}
@@ -5744,7 +5744,7 @@ async function csRenderSpokeManagement() {
             ? `<button onclick="csSpokeDiag('${csEscape(s.spoke_id)}')" class="text-xs text-slate-500 hover:underline whitespace-nowrap">Diag</button>`
             : '';
         const delBtn = admin
-            ? `<button onclick="csSpokeDelete('${csEscape(s.spoke_id)}')" class="text-xs text-red-500 hover:underline whitespace-nowrap">Delete</button>`
+            ? `<button onclick="csSpokeDelete('${csEscape(s.spoke_id)}')" class="text-xs text-red-500 hover:underline whitespace-nowrap" title="Remove this spoke and its registration from the hub">Delete</button>`
             : '';
         const actions = admin
             ? `<div class="flex flex-wrap items-center gap-4">${assignBtn}${approveBtn}${labelBtn}${cfgBtn}${diagBtn}${delBtn}</div>`
@@ -5862,7 +5862,7 @@ async function csSpokeMgmtPskCard() {
     const tenant = csTenantRaw();
     const rows = psks.map(p => `<tr>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(p)}</td>
-      <td class="px-3 py-2 text-right"><button onclick="csSpokeMgmtRevokePsk('${csEscape(p)}')" class="text-xs text-red-500 hover:underline">Revoke</button></td>
+      <td class="px-3 py-2 text-right"><button onclick="csSpokeMgmtRevokePsk('${csEscape(p)}')" class="text-xs text-red-500 hover:underline" title="Revoke this pre-shared key — agents using it will be disconnected">Revoke</button></td>
     </tr>`).join('');
     const deploy = psks.length
         ? `<div class="mt-3 text-[11px] text-slate-500 bg-slate-50 border border-slate-200 rounded-md p-3">

@@ -5308,7 +5308,7 @@ function _renderSetupGeneralTile(content) {
                     <input type="number" id="cache-max-concurrent" min="1" max="20" value="3"
                         class="w-16 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     <button onclick="saveCacheConfig()" class="${btnCls}">Save</button>
-                    <button onclick="purgeAllCaches()" class="${btnSecCls}">Purge All</button>
+                    <button onclick="purgeAllCaches()" class="${btnSecCls}" title="Clear all cached tenant data; the next load re-fetches everything from the spokes">Purge All</button>
                 </div>
             </div>
             <div id="cache-config-rows" class="mt-3 grid grid-cols-3 gap-x-8 text-sm">
@@ -6994,7 +6994,7 @@ async function loadFirewallsList() {
                 <div><span class="text-sm font-medium text-slate-700">${fw.name || fw.id}</span><span class="ml-2 text-xs text-slate-400">${fw.model} · ${fw.host || ''}:${fw.port || ''}</span></div>
                 <div class="flex gap-2">
                     <button onclick="editFirewall('${fw.id}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
-                    <button onclick="deleteFirewallEntry('${fw.id}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
+                    <button onclick="deleteFirewallEntry('${fw.id}')" class="text-xs text-red-400 hover:text-red-600 font-medium" title="Delete this firewall entry">Delete</button>
                 </div>
             </div>`).join('');
     } catch (e) {
@@ -8100,7 +8100,7 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
                 <div class="pt-4 border-t border-slate-200 space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Spoke Actions</label>
                     <div class="flex flex-wrap gap-2">
-                        <button onclick="resetSpokeSecret('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 transition-colors">Reset Secret</button>
+                        <button onclick="resetSpokeSecret('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-md bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 transition-colors" title="Regenerate this spoke's shared secret — the spoke must be reconfigured with the new value">Reset Secret</button>
                         ${approved ? `<button onclick="unapproveSpoke('${eId}'); this.closest('#spoke-metadata-modal').remove()" class="px-3 py-1.5 text-xs font-medium rounded-md bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 transition-colors">Un-approve</button>` : ''}
                     </div>
                     <p class="text-[11px] text-slate-400">Reset Secret wipes stored keys and forces re-onboarding. Un-approve revokes access until re-approved.</p>
@@ -8274,7 +8274,7 @@ async function loadUsers() {
                 : lockedForTadm
                     ? `<span class="text-slate-300 text-xs italic select-none">Admin${lockIcon}</span>`
                     : `<button onclick="editUser('${userId}')" class="text-blue-400 hover:text-blue-600 text-xs font-bold mr-3">Edit</button>
-                       <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold">Delete</button>`;
+                       <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold" title="Permanently delete this user account">Delete</button>`;
 
             return `
                 <tr class="hover:bg-slate-50 transition-colors">
@@ -8595,7 +8595,7 @@ async function loadApiTokens() {
                 <td class="px-4 py-3 font-medium text-slate-700">${escapeHtml(t.name || '(unnamed)')}</td>
                 <td class="px-4 py-3 text-slate-500">${fmt(t.created)}</td>
                 <td class="px-4 py-3 text-slate-500">${fmt(t.expires)}</td>
-                <td class="px-4 py-3 text-right"><button onclick="revokeApiToken('${escJsAttr(String(t.id))}')" class="text-xs text-red-600 hover:text-red-700 font-medium">Revoke</button></td>
+                <td class="px-4 py-3 text-right"><button onclick="revokeApiToken('${escJsAttr(String(t.id))}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Immediately invalidate this API token">Revoke</button></td>
             </tr>`).join('');
     } catch (e) {
         body.innerHTML = '<tr><td colspan="4" class="px-4 py-6 text-center text-red-400 italic">Failed to load.</td></tr>';
@@ -8676,7 +8676,7 @@ async function loadActiveSessions() {
                 <td class="px-4 py-3 text-slate-500 text-xs">${s.tenants.length ? s.tenants.join(', ') : '—'}</td>
                 <td class="px-4 py-3 text-slate-500 text-xs">${fmtExpiry(s.expires_in)}</td>
                 <td class="px-4 py-3 text-right">
-                    <button onclick="revokeSession('${s.sid}')"
+                    <button onclick="revokeSession('${s.sid}')" title="Force sign-out of this session"
                         class="text-xs text-red-400 hover:text-red-600 font-medium">Revoke</button>
                 </td>
             </tr>`).join('');
@@ -10644,7 +10644,7 @@ function _templateRepoRow(t) {
       <td class="px-4 py-2">${_tplStatusBadge(t)}</td>
       <td class="px-4 py-2 text-right whitespace-nowrap">
         <button onclick="templateRepoEdit('${id}')" class="px-2 py-1 rounded text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600">Edit</button>
-        <button onclick="templateRepoDelete('${id}')" class="px-2 py-1 rounded text-xs font-bold bg-red-100 hover:bg-red-200 text-red-700">Delete</button>
+        <button onclick="templateRepoDelete('${id}')" class="px-2 py-1 rounded text-xs font-bold bg-red-100 hover:bg-red-200 text-red-700" title="Delete this template backup from the hub repository (irreversible)">Delete</button>
       </td>
     </tr>`;
 }
@@ -14071,7 +14071,7 @@ async function dnsCredReloadList() {
             <span class="text-[11px] text-slate-400 ml-2">${escapeHtml(label)}</span></div>
           <div class="flex gap-2">
             <button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded px-2 py-1">Edit</button>
-            <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-1">Delete</button>
+            <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-1" title="Delete this stored DNS provider credential">Delete</button>
           </div></div>`;
     }).join('');
 }
