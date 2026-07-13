@@ -3185,8 +3185,23 @@ async function csRenderSimQuotaState() {
                   return `<p class="text-xs text-slate-500 mb-1">${lbl} → ${chips(e.clients)}</p>`;
               }).join('')}
             </div>` : '';
+        // Warnings: adaptive quotas pinned at max + still not firing, and SSID
+        // placement cells that couldn't reach their floor (pool too small).
+        const _warns = [];
+        Object.entries((st.adaptive_state || {})).forEach(([k, v]) => {
+            if (v && v.mode === 'at_max') _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is at max (${csEscape(String(v.target != null ? v.target : ''))}) and still not firing.`);
+        });
+        (Array.isArray(st.placement_warnings) ? st.placement_warnings : []).forEach(w => {
+            _warns.push(`SSID <span class="font-mono">${csEscape(w.cell || '')}</span> under min (${csEscape(String(w.have))}/${csEscape(String(w.want))}) — not enough online clients at ${csEscape(w.site || '')}.`);
+        });
+        const warnBanner = _warns.length
+            ? `<div class="bg-amber-50 border border-amber-200 rounded-md p-3 mb-3 text-xs text-amber-800">
+                 <div class="font-bold mb-1">⚠️ ${_warns.length} warning${_warns.length === 1 ? '' : 's'}</div>
+                 ${_warns.map(w => `<div>• ${w}</div>`).join('')}
+               </div>` : '';
         csSet(`<div class="space-y-4">
           <div class="hpe-card rounded-lg p-5 shadow-sm">
+            ${warnBanner}
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
               <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Quota State ${helpIcon('cs', null, 'Simulations help')}</h3>
               <button onclick="csRenderSimQuotaState()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
