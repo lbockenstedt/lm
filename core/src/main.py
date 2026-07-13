@@ -3040,6 +3040,41 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     self.agent_logs[spoke_id].append(entry)
             logger.debug(f"SPOKE_LOG: stored {len(entries)} entries for {spoke_id}")
 
+    def _inherit_agent_tenant(self, agent_id: str, spoke_id: str) -> None:
+        """Stamp the spoke's tenant onto the agent's ``client_simulation.tenant_id``.
+
+        A pxmx agent's owning spoke can be tenant-assigned (``module_metadata``
+        ``tenant_id``) while the agent's own ``agent_config[agent_id]`` entry
+        has no tenant — or a stale one saved before the spoke was bound. Always
+        overwrite to match (per the user's "always overwrite to match" choice):
+        the spoke's binding is authoritative for the agent's tenant. Preserves
+        ``enabled`` + ``usb_config``; only ``tenant_id`` is stamped. Tolerant
+        (try/except + ``or {}``) like ``_relay_cs_event_inner`` / cs_bridge. A
+        no-op when the spoke has no tenant (unassigned spoke) so the agent's
+        existing tenant_id is left intact. Persisted via ``save_state``.
+        Best-effort: never raises into the relay path."""
+        if not agent_id:
+            return
+        try:
+            spoke_tenant = self.state.get_spoke_tenant(spoke_id)
+        except Exception:
+            spoke_tenant = None
+        if not spoke_tenant:
+            return
+        try:
+            store = self.state.system_state.setdefault("agent_config", {})
+            entry = store.get(agent_id)
+            if not isinstance(entry, dict):
+                entry = {"display_name": agent_id}
+                store[agent_id] = entry
+            cs_cfg = dict(entry.get("client_simulation") or {})
+            if cs_cfg.get("tenant_id") != spoke_tenant:
+                cs_cfg["tenant_id"] = spoke_tenant
+                entry["client_simulation"] = cs_cfg
+                self.state.save_state()
+        except Exception as _e:  # noqa: BLE001 — best-effort; never break relay
+            logger.debug("agent tenant-inheritance write failed: %s", _e)
+
     async def _handle_agent_relay_up(self, spoke_id: str, msg_data, payload) -> bool:
         """Dispatch a relayed agent frame (AGENT_RELAY_UP) from a pxmx spoke.
 
@@ -3085,6 +3120,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "hostname":  (relay_data.get("hostname") or "").strip() or agent_id,
                 "last_seen": time.time(),
             }
+
+        # Inherit the spoke's tenant onto the agent's client_simulation.tenant_id
+        # so a pxmx server attached to a tenant-assigned cs spoke carries that
+        # tenant — the agent's own config can drift from the spoke's binding.
+        self._inherit_agent_tenant(agent_id, spoke_id)
 
         logger.debug(f"Relayed message from Agent {agent_id} via Spoke {spoke_id}: {original_msg.get('payload', {}).get('type')}")
 
