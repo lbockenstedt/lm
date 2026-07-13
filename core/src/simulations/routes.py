@@ -877,10 +877,39 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         drain_aware = getattr(hub, "_drain_aware_config_push", None)
         push = getattr(hub, "push_or_queue_to_spoke", None)
 
+        # Tenant-wide split: when a tenant has SEVERAL cs spokes, a quota/placement
+        # target N is divided across them (largest-remainder, sum == N) so the
+        # tenant TOTAL is N — not N on each spoke. Each spoke fills its share from
+        # its own client pool; the Quota State view sums the ledgers back to N.
+        _k = len(spoke_ids)
+        _idx_of = {sid: i for i, sid in enumerate(spoke_ids)}
+
+        def _split_int(total, idx: int) -> int:
+            base, extra = divmod(int(total or 0), _k)
+            return base + (1 if idx < extra else 0)
+
+        def _payload_for(sid: str) -> dict:
+            if _k <= 1:
+                return payload
+            idx = _idx_of.get(sid, 0)
+            p = dict(payload)
+            if isinstance(p.get("effective_sim_quotas"), list):
+                p["effective_sim_quotas"] = [
+                    {**q, "count": _split_int(q.get("count") or 0, idx)}
+                    for q in p["effective_sim_quotas"]]
+            if isinstance(p.get("ssid_placement"), dict):
+                p["ssid_placement"] = {
+                    site: ({**pc, "targets": {c: _split_int(n or 0, idx)
+                                             for c, n in (pc.get("targets") or {}).items()}}
+                           if isinstance(pc, dict) else pc)
+                    for site, pc in p["ssid_placement"].items()}
+            return p
+
         async def _one(sid: str):
             """Push to one spoke. Returns (1, queued, msg) on delivery (live OR
             queued — a queued push still counts, it WILL apply on reconnect),
             (0, False, '') on transport failure."""
+            payload = _payload_for(sid)
             if callable(drain_aware):
                 try:
                     outcome = await drain_aware(sid, "CS_CONFIG_UPDATE", payload, timeout=30.0)
