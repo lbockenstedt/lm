@@ -2856,15 +2856,7 @@ function csPoolConfigCardHtml() {
             <button onclick="csSavePoolConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Pool</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mb-3">Define SSIDs (site × auth), how clients spread across them (weight / hold N), and which sims run as ambient random traffic. <b>PXMX</b> site source = a client's site is its hosting server (RF chamber); <b>assigned</b> = weighted logical placement + site-based SSID.</p>
-        <div class="flex flex-wrap items-center gap-4 mb-3">
-          <label class="text-xs text-slate-500">Site source
-            <select data-cs-pool="site_source" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm ml-1">
-              <option value="pxmx" ${src === 'pxmx' ? 'selected' : ''}>PXMX (RF chamber)</option>
-              <option value="assigned" ${src === 'assigned' ? 'selected' : ''}>Assigned (site-based SSID)</option>
-            </select>
-          </label>
-        </div>
+        <p class="text-xs text-slate-500 mb-3">Define SSIDs (site × auth), how clients spread across them (weight / hold N), and which sims run as ambient random traffic. Whether a client is physically site-bound (RF chamber) or assignable (site-based SSID) is set <span class="font-semibold">per PXMX server</span> in <span class="font-semibold">Config → PXMX Sites</span> (Site Pool vs Tenant-Wide Pool). Placement below assigns Tenant-Wide-Pool clients to these SSIDs.</p>
         <div class="mb-3">
           <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Randomizable (ambient) sims</div>
           <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-1">${simChecks}</div>
@@ -3298,8 +3290,9 @@ function csRenderPxmxSiteMapEditor() {
     });
     rows.sort((a, b) => a.host.localeCompare(b.host));
     const siteOpts = (sel) =>
-        `<option value="" ${(!sel) ? 'selected' : ''}>— unassigned —</option>` +
-        csPxmxSites.map(s => `<option value="${csEscape(s)}" ${s === sel ? 'selected' : ''}>${csEscape(s)}</option>`).join('');
+        `<option value="" ${(!sel) ? 'selected' : ''}>— choose a pool —</option>` +
+        `<option value="Tenant-Wide Pool" ${sel === 'Tenant-Wide Pool' ? 'selected' : ''}>Tenant-Wide Pool (site-based SSID)</option>` +
+        csPxmxSites.map(s => `<option value="${csEscape(s)}" ${s === sel ? 'selected' : ''}>${csEscape(s)} (site pool)</option>`).join('');
     const rowHtml = rows.map((r, i) => {
         const sel = csPxmxSiteMap[r.host] || '';
         const badge = r.connected
@@ -3317,7 +3310,7 @@ function csRenderPxmxSiteMapEditor() {
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">PXMX Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
           <button onclick="csPxmxSiteSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Assignments</button>
         </div>
-        <p class="text-xs text-slate-500 mb-2">Assign each pxmx server (the agent host) to a site. The Sim Quota engine fills a site-specific quota from clients whose <span class="font-semibold">hosting server</span> is in that site — e.g. a "MIA" quota draws from clients on MIA-assigned servers. A client's own wsite override still wins; the bucket-default wsite is the fallback. Sites come from <span class="font-semibold">Config Editor</span> (simulation.conf) and Central site mappings.</p>
+        <p class="text-xs text-slate-500 mb-2">Assign <span class="font-semibold">every</span> pxmx server to a pool: a <span class="font-semibold">Site Pool</span> (RF chamber — its clients are physically at that site and only run that site's SSID) or the <span class="font-semibold">Tenant-Wide Pool</span> (site-based SSID — its clients are assignable to any site/SSID by the Pool &amp; SSID placement). A deployment can mix both. Pools are always per-tenant. A client's own wsite override still wins; the bucket-default wsite is the fallback.</p>
         <div class="space-y-2 mt-2" id="cs-px-rows">${rowHtml || '<div class="text-xs text-slate-400 italic">No pxmx servers connected and no assignments saved. A server appears here once its agent connects to this spoke.</div>'}</div>
       </div>
     </div>`);
