@@ -332,6 +332,46 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404, detail="template not found")
         return await _orchestrate_refresh(tid, request)
 
+    @app.post("/tenant/templates/refresh-hosts")
+    async def refresh_templates_by_host(request: Request):
+        """Fleet multi-select refresh (VM Server / VMs): refresh the template on
+        each selected PXMX host. Body: ``{spoke_ids: [...]}``. For each host we
+        resolve its latest complete template (by source_spoke), enforce tenant
+        ownership, and orchestrate the destructive refresh. Returns a per-host
+        result so the UI can toast successes + skips."""
+        sess = _session_user(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_ids = body.get("spoke_ids") or []
+        if not isinstance(spoke_ids, list) or not spoke_ids:
+            raise HTTPException(status_code=400, detail="spoke_ids (non-empty list) required")
+        results = []
+        for sid in spoke_ids:
+            sid = str(sid or "")
+            rec = _repo().latest_complete_for_spoke(sid)
+            if rec is None:
+                results.append({"spoke_id": sid, "status": "SKIPPED",
+                                "message": "no completed template backup for this host"})
+                continue
+            if not _owns_tenant(sess, rec.get("tenant_id")):
+                # Anti-IDOR: don't reveal a template the caller can't own.
+                results.append({"spoke_id": sid, "status": "SKIPPED",
+                                "message": "not permitted for this host's tenant"})
+                continue
+            try:
+                r = await _orchestrate_refresh(rec["id"], request)
+                results.append({"spoke_id": sid, "template_id": rec["id"],
+                                "name": rec.get("name"),
+                                "status": r.get("status"), "message": r.get("message")})
+            except HTTPException as e:
+                results.append({"spoke_id": sid, "template_id": rec.get("id"),
+                                "status": "ERROR", "message": str(e.detail)})
+        ok = sum(1 for r in results if r.get("status") == "SUCCESS")
+        return {"status": "SUCCESS" if ok else "ERROR",
+                "refreshed": ok, "total": len(results), "results": results}
+
     # ── agent-facing download + refresh progress (token-authed) ──────────────
     def _check_refresh_token(tid: str, request: Request):
         token = request.headers.get("x-refresh-token") or request.query_params.get("token") or ""

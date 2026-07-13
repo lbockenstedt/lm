@@ -95,6 +95,18 @@ class TemplateRepo:
             return sorted((self._public(r) for r in self._index.values()),
                           key=lambda r: r.get("created_at") or "", reverse=True)
 
+    def latest_complete_for_spoke(self, spoke_id: str) -> Optional[Dict[str, Any]]:
+        """The newest COMPLETE template backup taken from ``spoke_id``'s host —
+        the "template for this server", used by the fleet multi-host refresh.
+        Returns the private view (has ids) or None."""
+        with self._lock:
+            cands = [r for r in self._index.values()
+                     if r.get("source_spoke") == spoke_id and r.get("status") == "complete"]
+            if not cands:
+                return None
+            cands.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+            return dict(cands[0])
+
     # ── lifecycle ───────────────────────────────────────────────────────────
     def create_pending(self, *, name: str, source_vmid: Any, source_node: str,
                         source_agent: str, source_spoke: str, created_by: str,

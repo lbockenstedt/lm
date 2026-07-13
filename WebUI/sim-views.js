@@ -4419,6 +4419,7 @@ async function csRenderVmServer() {
         const qtPill = qtList.length ? `<span class="ml-1 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[9px] font-bold uppercase tracking-wider" title="${csEscape(qtList.map(q => q.bus_path + ': ' + (q.reason || '')).join('; '))}">🚫 ${qtList.length} QT</span>` : '';
         const selCls = csVmHostId(h) === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
         return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(csVmHostId(h))}','VMs')">
+          <td class="px-4 py-2 text-center" onclick="event.stopPropagation()"><input type="checkbox" class="cs-host-sel" data-spoke="${csEscape(h.spoke_id || '')}" data-name="${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id || '')}"></td>
           <td class="px-4 py-2"><span class="font-medium text-slate-700">${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id)}</span></td>
           <td class="px-4 py-2 text-center">${csOnlineBadge(h.spoke_online)}</td>
           <td class="px-4 py-2 text-center">${vmN}</td>
@@ -4434,15 +4435,58 @@ async function csRenderVmServer() {
     // left-align Host + the version columns.
     const ths = ['Host', 'Online', 'VMs', 'USB', 'CPU 1h', 'Mem 1h', 'Auto-Prov', 'Agent', 'PVE']
         .map((c, i) => `<th class="px-4 py-2 ${i >= 1 && i <= 6 ? 'text-center' : 'text-left'} font-medium">${c}</th>`).join('');
+    const selTh = `<th class="px-4 py-2 text-center"><input type="checkbox" onclick="csFleetSelectAll(this)" title="Select all hosts"></th>`;
     const table = `<div class="overflow-x-auto"><table class="w-full text-sm">
-      <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${ths}</tr></thead>
+      <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${selTh}${ths}</tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
 
-    csSet(`<div class="space-y-4">${summary}${fleetCards}${table}</div>`);
+    // Fleet template refresh — pick one/some/all hosts and refresh each host's
+    // template from its stored backup. Tenant-admin (own hosts) + Global Admin.
+    const _canRefresh = (typeof isAdmin === 'function' && isAdmin())
+        || (typeof isTenantAdmin === 'function' && isTenantAdmin());
+    const bulkBar = _canRefresh
+        ? `<div class="flex items-center gap-2 flex-wrap">
+             <button onclick="csFleetRefreshTemplates()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Refresh the template on the selected host(s): pause auto-provisioning, delete the sim VMs + template, restore the stored backup, then resume auto-provisioning.">↻ Refresh Template(s)</button>
+             <span class="text-[11px] text-slate-400">Select host(s) above, then refresh from their stored template backup. This wipes the host's sim VMs.</span>
+           </div>`
+        : '';
+
+    csSet(`<div class="space-y-4">${summary}${fleetCards}${bulkBar}${table}</div>`);
     // populate auto-provision status
     csRefreshAutoProvStatus();
 }
+
+window.csFleetSelectAll = function (cb) {
+    document.querySelectorAll('.cs-host-sel').forEach(x => { x.checked = cb.checked; });
+};
+
+// Fleet template refresh — refresh the selected hosts' templates from their
+// stored backups. Destructive: each host's sim VMs + template are wiped and the
+// backup restored (the agent pauses/resumes auto-prov around it).
+window.csFleetRefreshTemplates = async function () {
+    const boxes = Array.from(document.querySelectorAll('.cs-host-sel:checked'));
+    const spokeIds = boxes.map(b => b.getAttribute('data-spoke')).filter(Boolean);
+    const names = boxes.map(b => b.getAttribute('data-name') || b.getAttribute('data-spoke'));
+    if (!spokeIds.length) { if (typeof showToast === 'function') showToast('Select one or more hosts first', 'error'); return; }
+    if (!window.confirm(`Refresh the template on ${spokeIds.length} host(s):\n${names.join(', ')}\n\nThis PAUSES auto-provisioning, DELETES the sim VMs + template on each host, restores the stored backup, then resumes auto-provisioning. Existing sim clients will be wiped.`)) return;
+    try {
+        const r = await fetch('/tenant/templates/refresh-hosts', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_ids: spokeIds })
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { if (typeof showToast === 'function') showToast(d.detail || 'Refresh failed', 'error'); return; }
+        // Surface per-host skips/errors, then a summary.
+        (d.results || []).filter(x => x.status !== 'SUCCESS').forEach(x => {
+            if (typeof showToast === 'function') showToast(`${x.name || x.spoke_id}: ${x.message || x.status}`, 'error');
+        });
+        const ok = d.refreshed || 0, total = d.total || spokeIds.length;
+        if (typeof showToast === 'function') showToast(`Refresh queued on ${ok}/${total} host(s).`, ok ? 'success' : 'error');
+        csRenderVmServer();
+    } catch (e) { if (typeof showToast === 'function') showToast('Refresh failed: ' + (e.message || e), 'error'); }
+};
 
 async function csRefreshAutoProvStatus() {
     const st = csEl('cs-autoprov-status');
