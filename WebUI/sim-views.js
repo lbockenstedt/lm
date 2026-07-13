@@ -5254,8 +5254,25 @@ async function csRenderVmServerQueue(live) {
     // Filter the queue to the selected host(s); empty selection = all hosts.
     const _scope = csVmSelectedHosts();
     const _scopeHosts = new Set(_scope.map(h => h.hostname || h.spoke_hostname || h.spoke_id));
-    const shown = csVmSelectedHostIds.length ? cmds.filter(c => _scopeHosts.has(c.target)) : cmds;
-    const rows = shown.map(c => `<tr>
+    const _filtered = csVmSelectedHostIds.length ? cmds.filter(c => _scopeHosts.has(c.target)) : cmds;
+    // Newest on top: sort by created_at desc (fall back to age_secs asc when
+    // created_at is absent — smaller age = newer). A mass-delete dump is far
+    // easier to triage when the freshest commands (the ones still running /
+    // just failed) sit at the top instead of scrolling past 30 stale rows.
+    const shown = _filtered.slice().sort((a, b) => {
+        const ca = Number(a.created_at || 0), cb = Number(b.created_at || 0);
+        if (ca && cb) return cb - ca;
+        const aa = Number(a.age_secs != null ? a.age_secs : 1e18);
+        const ab = Number(b.age_secs != null ? b.age_secs : 1e18);
+        return aa - ab;
+    });
+    const rows = shown.map(c => {
+        // Second row: the command string (action + args JSON) so an operator
+        // can see WHAT a queued command will do without cross-referencing the
+        // Send form — e.g. `delete_vm {"vmid":90075}`. Collapsed under the row.
+        const _argsStr = (() => { try { return c.args ? JSON.stringify(c.args) : ''; } catch (e) { return ''; } })();
+        const _cmdStr = `${c.action || ''}${_argsStr ? ' ' + _argsStr : ''}`;
+        return `<tr>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(c.id ? c.id.slice(0,8) : '—')}</td>
       <td class="px-3 py-2 text-sm">${csEscape(c.action || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(c.target || '—')}</td>
@@ -5264,7 +5281,10 @@ async function csRenderVmServerQueue(live) {
       <td class="px-3 py-2 text-slate-500 text-xs">${csEscape(c.message || '—')}</td>
       <td class="px-3 py-2"><button data-cs-cmd-id="${csEscape(c.id || '')}" onclick="csCmdDelete(this)"
         class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-[11px] font-bold">Delete</button></td>
-    </tr>`).join('');
+    </tr><tr class="bg-slate-50/60">
+      <td colspan="7" class="px-3 pb-2 pt-0 font-mono text-[11px] text-slate-500 break-all">${csEscape(_cmdStr || '—')}</td>
+    </tr>`;
+    }).join('');
     const sendForm = `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Send Proxmox Command</p>
       <div class="flex flex-wrap gap-2 items-end text-sm">
@@ -5411,6 +5431,54 @@ async function csRenderVmServerApiServer() {
     </div>`);
 }
 
+// ── CS Bridge Status (hub-side relay state per agent) ─────────────────────────
+// Lets an Azure-hub operator diagnose "why isn't svr-02 deleting?" without SSH:
+// per agent, the bridge decision (ACTIVE / SKIP not-enabled / SKIP no-cs-spoke)
+// + relay outcome counters (accepted / re-queued / gave-up / completed / failed)
+// + the last outcome ts. The same data is in the hub log as greppable [cs-bridge]
+// lines; this panel surfaces it structured. Read-only; refreshes on render.
+async function csRenderVmServerBridgeStatus() {
+    csSetToolbar('');
+    let snap = null;
+    try {
+        snap = await csFetch(`/${csTenant()}/cs-bridge-status?tenant_id=${csTenant()}`);
+    } catch (e) { console.error('csRenderVmServerBridgeStatus: load failed', e); csSet(csErrorBox('Could not load CS bridge status', e)); return; }
+    if (!snap || !snap.available) {
+        csSet(`<div>${csVmHostBanner()}
+          <p class="text-sm text-slate-500">CS bridge not started on this hub yet. The bridge poller runs on the hub; status appears here once it completes its first cycle (a few seconds after hub boot).</p>
+        </div>`);
+        return;
+    }
+    const agents = snap.agents || [];
+    const cfg = `<div class="hpe-card rounded-lg p-3 shadow-sm mb-3 text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
+      <span><b class="text-slate-600">max retries:</b> ${csEscape(String(snap.max_retries ?? '—'))}</span>
+      <span><b class="text-slate-600">fast relay:</b> ${csEscape(String(snap.relay_timeout_s ?? '—'))}s</span>
+      <span><b class="text-slate-600">long relay:</b> ${csEscape(String(snap.relay_timeout_long_s ?? '—'))}s</span>
+      <span><b class="text-slate-600">cycle:</b> ${csEscape(snap.cycle || '—')}</span>
+    </div>`;
+    const head = ['Agent', 'Hostname', 'Decision', 'Accepted', 'Re-queued', 'Gave up', 'Completed', 'Failed', 'Last outcome'];
+    const body = agents.map(a => {
+        const _decClass = (a.decision || '').startsWith('ACTIVE') ? 'text-emerald-600' :
+                         (a.decision || '').startsWith('SKIP') ? 'text-amber-600' : 'text-slate-500';
+        return `<tr>
+      <td class="px-3 py-2 font-mono text-xs">${csEscape(a.agent_id || '—')}</td>
+      <td class="px-3 py-2 font-mono text-xs">${csEscape(a.hostname || '—')}</td>
+      <td class="px-3 py-2 text-xs ${_decClass}">${csEscape(a.decision || '—')}</td>
+      <td class="px-3 py-2 text-xs text-emerald-600">${csEscape(String(a.accepted || 0))}</td>
+      <td class="px-3 py-2 text-xs text-amber-600">${csEscape(String(a.requeued || 0))}</td>
+      <td class="px-3 py-2 text-xs text-red-600">${csEscape(String(a.gave_up || 0))}</td>
+      <td class="px-3 py-2 text-xs text-slate-600">${csEscape(String(a.completed || 0))}</td>
+      <td class="px-3 py-2 text-xs text-red-600">${csEscape(String(a.failed || 0))}</td>
+      <td class="px-3 py-2 text-xs text-slate-400">${csEscape(a.last_outcome ? (a.last_outcome + ' @ ' + (a.last_ts_iso || '')) : '—')}</td>
+    </tr>`;
+    }).join('');
+    csSet(`<div>${csVmHostBanner()}${cfg}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">CS Bridge — per-agent relay status (${agents.length})</p>
+      <p class="text-[11px] text-slate-400 mb-3">ACTIVE = the bridge is polling + relaying this agent's queue. SKIP not-enabled = hub's <code>agent_config[agent_id].client_simulation.enabled</code> is off (re-save the agent's CS config in the UI). SKIP no-cs-spoke = no client-sim spoke bound to the tenant. Re-queued climbing = agent too busy to ACK (transient, retried up to max retries). Gave up / Failed = retries exhausted or a genuine rejection.</p>
+      ${agents.length ? csTable(head, body) : '<p class="text-sm text-slate-500">No agents seen yet.</p>'}
+    </div>`);
+}
+
 // ── Register all VM Server children ─────────────────────────────────────────
 window.CS_CHILD_RENDERERS['VM Server::Overview']     = csRenderVmServer;
 window.CS_CHILD_RENDERERS['VM Server::VMs']          = csRenderVmServerVms;
@@ -5420,6 +5488,7 @@ window.CS_CHILD_RENDERERS['VM Server::USB']           = csRenderVmServerUsb;
 window.CS_CHILD_RENDERERS['VM Server::IoT']           = csRenderVmServerIot;
 window.CS_CHILD_RENDERERS['VM Server::VirtualHere']   = csRenderVmServerVh;
 window.CS_CHILD_RENDERERS['VM Server::Command Queue'] = csRenderVmServerQueue;
+window.CS_CHILD_RENDERERS['VM Server::CS Bridge Status'] = csRenderVmServerBridgeStatus;
 window.CS_CHILD_RENDERERS['VM Server::Details']       = csRenderVmServerDetails;
 // VM Server :: Clients / Central / API Server children removed from the nav
 // (those surfaces live in their own top-level Simulations tabs). The render

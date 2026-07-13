@@ -2212,6 +2212,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         return data if isinstance(data, dict) else {"commands": []}
 
+    @app.get("/sim/api/{tenant}/cs-bridge-status")
+    async def cs_bridge_status(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Per-agent CS-bridge state for the WebUI "CS Bridge Status" panel —
+        lets an Azure-hub operator diagnose 'why isn't svr-02 deleting' (is the
+        bridge reaching it? are commands re-queued or failing?) without SSH.
+        Reads the CSBridgePoller instance stored on the hub by
+        run_cs_bridge_loop. Returns {} if the bridge hasn't started yet."""
+        bridge = getattr(hub, "cs_bridge", None)
+        if bridge is None or not hasattr(bridge, "status_snapshot"):
+            return {"agents": [], "available": False}
+        try:
+            snap = bridge.status_snapshot()
+        except Exception as exc:  # noqa: BLE001 — never 500 the panel
+            return {"agents": [], "available": False, "error": str(exc)}
+        snap["available"] = True
+        return snap
+
     # ── VM Server fleet operations + per-spoke actions (Wave 1) ──────────────
     # All forward to the cs spoke via CS_QUEUE_COMMAND (the spoke's CSBridge
     # dispatches fleet types through _apply_relay_command_batch and plain VM

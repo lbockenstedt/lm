@@ -6443,7 +6443,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         raises out of the loop.
         """
         from gateway.cs_bridge import CSBridgePoller
-        await CSBridgePoller(self).run()
+        # Store the instance on the hub so a REST handler (the WebUI "CS Bridge
+        # Status" panel) can read hub.cs_bridge.status_snapshot() without SSH —
+        # the poller takes hub in its constructor, so the back-ref is symmetric.
+        # Guarded so a loop restart doesn't clobber a live instance mid-cycle.
+        if not getattr(self, "cs_bridge", None):
+            self.cs_bridge = CSBridgePoller(self)
+        await self.cs_bridge.run()
 
     async def run_retry_loop(self):
         class ConnectionMap(dict):
