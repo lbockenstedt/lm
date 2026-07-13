@@ -2354,6 +2354,8 @@ const CS_SIM_SECTION_FIELDS = {
         ['allow_offline', 'Allow Offline'], ['ssidpw_fail', 'Ssidpw Fail'],
         ['auth_fail', 'Auth Fail'], ['syslog', 'Syslog'],
         ['web_server', 'Web Server'],
+        ['dns_fail_rate', 'DNS Fail Rate (/min)'],
+        ['dns_fail_duration', 'DNS Fail Duration (s)'],
     ],
     server: [['server_url', 'Server Url']],
     address: [
