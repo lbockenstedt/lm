@@ -2036,7 +2036,7 @@ async function csRenderCentralAlerts() {
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} active alert(s)` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} active showToast(s, 'success')` })}</div></div>`);
 }
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────

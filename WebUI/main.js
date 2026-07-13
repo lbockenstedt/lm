@@ -1755,7 +1755,7 @@ async function editTenant(tenantId) {
         editor.classList.remove('hidden');
         emptyState.classList.add('hidden');
     } catch (err) {
-        alert('Error loading tenant: ' + err.message);
+        showToast('Error loading tenant: ' + err.message, 'error');
     }
 }
 
@@ -1801,21 +1801,21 @@ async function saveTenantConfig() {
             body: JSON.stringify(body)
         });
         if (response.ok) {
-            alert('Tenant configuration saved successfully!');
+            showToast('Tenant configuration saved successfully!', 'success');
             await loadTenantConfig();
         } else {
             const d = await response.json().catch(() => ({}));
-            alert('Failed to save tenant configuration: ' + (d.detail || response.statusText));
+            showToast('Failed to save tenant configuration: ' + (d.detail || response.statusText), 'error');
         }
     } catch (err) {
-        alert('Error saving tenant: ' + err.message);
+        showToast('Error saving tenant: ' + err.message, 'error');
     }
 }
 
 async function addTenant() {
     const tenantId = document.getElementById('new-tenant-id').value.trim();
     if (!tenantId) {
-        alert('Please enter a Tenant ID');
+        showToast('Please enter a Tenant ID', 'error');
         return;
     }
 
@@ -1829,10 +1829,10 @@ async function addTenant() {
             document.getElementById('new-tenant-id').value = '';
             await loadTenantConfig();
         } else {
-            alert('Failed to create tenant.');
+            showToast('Failed to create tenant.', 'error');
         }
     } catch (err) {
-        alert('Error creating tenant: ' + err.message);
+        showToast('Error creating tenant: ' + err.message, 'error');
     }
 }
 
@@ -1847,12 +1847,12 @@ async function syncTenantsFromNetBox() {
         if (resp.ok) {
             await loadTenantConfig();
             const msg = data.message || `Sync complete`;
-            alert(msg);
+            showToast(msg, 'success');
         } else {
-            alert('Sync failed: ' + (data.detail || resp.statusText));
+            showToast('Sync failed: ' + (data.detail || resp.statusText), 'error');
         }
     } catch (err) {
-        alert('Sync error: ' + err.message);
+        showToast('Sync error: ' + err.message, 'error');
     } finally {
         btn.textContent = orig;
         btn.disabled = false;
@@ -1929,7 +1929,7 @@ async function refreshOpnsenseCache() {
     try {
         const firewalls = await _ensureFirewalls();
         if (firewalls.length === 0) {
-            alert('No firewalls configured to refresh.');
+            showToast('No firewalls configured to refresh.', 'success');
             return;
         }
         let ok = 0, fail = 0;
@@ -1937,14 +1937,14 @@ async function refreshOpnsenseCache() {
             const r = await fetch(`/api/firewall/${fw.id}/refresh`);
             if (r.ok) ok++; else fail++;
         }
-        alert(`Refreshed cache for ${ok} firewall(s)${fail ? ` (${fail} failed)` : ''}.`);
+        showToast(`Refreshed cache for ${ok} firewall(s)${fail ? ` (${fail} failed)` : ''}.`, fail ? 'error' : 'success');
         console.log(`Firewall cache refresh: ${ok} ok, ${fail} failed of ${firewalls.length}`);
 
         if (currentView === 'opnsense' && currentSubView !== 'Configuration') {
             loadOpnsenseManagement();
         }
     } catch (err) {
-        alert('Error refreshing firewall cache: ' + err.message);
+        showToast('Error refreshing firewall cache: ' + err.message, 'error');
         console.error('Error refreshing firewall cache:', err);
     }
 }
@@ -2259,7 +2259,7 @@ async function dropHubBacklog() {
         updateStatus();  // refresh the tiles/detail
     } catch (e) {
         if (typeof showToast === 'function') showToast(`Drop backlog failed: ${e.message}`, 'error');
-        else alert(`Drop backlog failed: ${e.message}`);
+        else showToast(`Drop backlog failed: ${e.message}`, 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Drop Backlog'; }
     }
@@ -2398,7 +2398,7 @@ async function saveBackpressureConfig() {
     // Light sanity: soft below hard below the 90% protect line, clear below soft.
     if (!(merged.fleet_cpu_clear < merged.fleet_cpu_soft && merged.fleet_cpu_soft < merged.fleet_cpu_hard)) {
         const m = 'CPU marks must satisfy: release < engage < max (e.g. 40 < 55 < 85).';
-        if (typeof showToast === 'function') showToast(m, 'error'); else alert(m);
+        if (typeof showToast === 'function') showToast(m, 'error'); else showToast(m, 'success');
         return;
     }
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
@@ -2414,7 +2414,7 @@ async function saveBackpressureConfig() {
             showToast('Backpressure tuning saved — applies live on the next tick.', 'success');
     } catch (e) {
         if (typeof showToast === 'function') showToast(`Save failed: ${e.message}`, 'error');
-        else alert(`Save failed: ${e.message}`);
+        else showToast(`Save failed: ${e.message}`, 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
     }
@@ -2428,7 +2428,7 @@ async function saveRateLimit() {
     const fill_rate = Number(rateIn && rateIn.value);
     if (!(capacity >= 1) || !(fill_rate > 0)) {
         const msg = 'Enter a burst ≥ 1 and a refill rate > 0.';
-        if (typeof showToast === 'function') showToast(msg, 'error'); else alert(msg);
+        if (typeof showToast === 'function') showToast(msg, 'error'); else showToast(msg, 'success');
         return;
     }
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
@@ -2444,7 +2444,7 @@ async function saveRateLimit() {
             showToast(`Rate limit saved (burst ${capacity}, ${fill_rate}/s). Applies as spokes reconnect.`, 'success');
     } catch (e) {
         if (typeof showToast === 'function') showToast(`Save rate limit failed: ${e.message}`, 'error');
-        else alert(`Save rate limit failed: ${e.message}`);
+        else showToast(`Save rate limit failed: ${e.message}`, 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
     }
@@ -2877,7 +2877,7 @@ async function setView(viewId) {
         const products = Array.from(window.activeProducts || []).filter(p => MODULE_CLASSES[viewId].includes(p));
 
         if (products.length === 0) {
-            alert('No active products available for this category.');
+            showToast('No active products available for this category.', 'success');
             return;
         }
 
@@ -3757,7 +3757,7 @@ window.purgeLoadtestSpokes = async function () {
         loadSpokesAndAgents();
     } catch (e) {
         if (typeof showToast === 'function') showToast(`Purge failed: ${e.message}`, 'error');
-        else alert(`Purge failed: ${e.message}`);
+        else showToast(`Purge failed: ${e.message}`, 'error');
     }
 };
 
@@ -7010,7 +7010,7 @@ async function deleteFirewallEntry(id) {
         loadFirewallsList();
         loadFirewalls();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showToast('Error: ' + e.message, 'error');
     }
 }
 
@@ -7071,7 +7071,7 @@ async function deleteNwDeviceEntry(id) {
         if (!r.ok) throw new Error(await r.text());
         loadNwDevicesList();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showToast('Error: ' + e.message, 'error');
     }
 }
 
@@ -8312,14 +8312,14 @@ async function deleteUser(userId) {
         const url = base ? `${base}/${encodeURIComponent(userId)}` : `/setup/users/${encodeURIComponent(userId)}`;
         const response = await setupFetch(url, { method: 'DELETE' });
         if (response.ok) {
-            alert(base ? 'User removed from tenant' : 'User deleted');
+            showToast(base ? 'User removed from tenant' : 'User deleted', 'success');
             await loadUsers();
         } else {
             const d = await response.json().catch(() => ({}));
-            alert(d.detail || 'Failed to delete user');
+            showToast(d.detail || 'Failed to delete user', 'error');
         }
     } catch (err) {
-        alert('Error deleting user: ' + err.message);
+        showToast('Error deleting user: ' + err.message, 'error');
     }
 }
 
@@ -8486,7 +8486,7 @@ function closeGroupModal() {
 
 async function saveGroup() {
     const name = document.getElementById('grp-name').value.trim();
-    if (!name) { alert('Please enter a group name'); return; }
+    if (!name) { showToast('Please enter a group name', 'error'); return; }
     const permissions = {};
     Object.keys(_RBAC_RIGHT_LABELS).forEach(key => {
         if (document.getElementById('grp-perm-' + key)?.checked) permissions[key] = true;
@@ -8516,10 +8516,10 @@ async function saveGroup() {
             await loadUsers();  // effective perms may have shifted
         } else {
             const d = await resp.json().catch(() => ({}));
-            alert(d.detail || 'Failed to save group');
+            showToast(d.detail || 'Failed to save group', 'error');
         }
     } catch (err) {
-        alert('Error saving group: ' + err.message);
+        showToast('Error saving group: ' + err.message, 'error');
     }
 }
 
@@ -8535,10 +8535,10 @@ async function deleteGroup(groupId) {
             await loadUsers();
         } else {
             const d = await resp.json().catch(() => ({}));
-            alert(d.detail || 'Failed to delete group');
+            showToast(d.detail || 'Failed to delete group', 'error');
         }
     } catch (err) {
-        alert('Error deleting group: ' + err.message);
+        showToast('Error deleting group: ' + err.message, 'error');
     }
 }
 
@@ -9285,9 +9285,9 @@ async function toggleDebugLogging() {
         const data = await response.json();
 
         updateDebugButtonUI(data.enabled);
-        alert(`Debug logging has been ${data.enabled ? 'ENABLED' : 'DISABLED'} for all systems.`);
+        showToast(`Debug logging has been ${data.enabled ? 'ENABLED' : 'DISABLED'} for all systems.`, 'success');
     } catch (err) {
-        alert('Error toggling debug mode: ' + err.message);
+        showToast('Error toggling debug mode: ' + err.message, 'error');
     }
 }
 
@@ -9614,7 +9614,7 @@ async function executeProbe() {
     const responseEl = document.getElementById('probe-response');
 
     if (!spokeId || !path) {
-        alert('Please select a spoke and enter a path');
+        showToast('Please select a spoke and enter a path', 'error');
         return;
     }
 
@@ -12041,10 +12041,10 @@ async function submitClaimDevice(mac) {
     const site = get('cl-site');
     const device_type = get('cl-type');
     const tenant = get('cl-tenant');
-    if (!name) { alert('Device name is required'); return; }
-    if (!site) { alert('Site is required'); return; }
-    if (!device_type) { alert('Device type is required'); return; }
-    if (!tenant) { alert('Tenant is required'); return; }
+    if (!name) { showToast('Device name is required', 'error'); return; }
+    if (!site) { showToast('Site is required', 'error'); return; }
+    if (!device_type) { showToast('Device type is required', 'error'); return; }
+    if (!tenant) { showToast('Tenant is required', 'error'); return; }
     const dev = (window._cppmDeviceMap || {})[mac] || {};
     const payload = {
         name, site, device_type, tenant,
@@ -12069,11 +12069,11 @@ async function submitClaimDevice(mac) {
             loadCPPMData('Unknown Devices');
         } else {
             if (btn) { btn.disabled = false; btn.textContent = 'Claim Device'; }
-            alert('Claim failed: ' + (d.detail || d.message || `HTTP ${r.status}`));
+            showToast('Claim failed: ' + (d.detail || d.message || `HTTP ${r.status}`), 'error');
         }
     } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = 'Claim Device'; }
-        alert('Claim failed: ' + e.message);
+        showToast('Claim failed: ' + e.message, 'error');
     }
 }
 
@@ -12131,8 +12131,8 @@ async function submitNetboxAddDevice() {
             const r = await fetch(`/api/netbox/devices/${deviceId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             const d = await r.json();
             if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('Devices'); }
-            else alert('Error: ' + (d.message || 'Update failed'));
-        } catch (e) { alert('Error: ' + e.message); }
+            else showToast('Error: ' + (d.message || 'Update failed'), 'error');
+        } catch (e) { showToast('Error: ' + e.message, 'error'); }
         return;
     }
     const payload = {
@@ -12147,9 +12147,9 @@ async function submitNetboxAddDevice() {
             document.getElementById('nb-device-modal')?.remove();
             loadNetboxData('Devices');
         } else {
-            alert('Error: ' + (d.message || 'Unknown error'));
+            showToast('Error: ' + (d.message || 'Unknown error'), 'error');
         }
-    } catch (e) { alert('Error: ' + e.message); }
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function deleteNetboxDevice(deviceId) {
@@ -12158,8 +12158,8 @@ async function deleteNetboxDevice(deviceId) {
         const r = await fetch(`/api/netbox/devices/${deviceId}`, { method: 'DELETE' });
         const d = await r.json();
         if (d.status === 'SUCCESS') loadNetboxData('Devices');
-        else alert('Error: ' + (d.message || 'Delete failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (d.message || 'Delete failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 function editNetboxRack(id) {
@@ -12203,7 +12203,7 @@ async function submitNetboxRack() {
         facility_id: get('nb-r-facility') || undefined,
     };
     if (!payload.name || (!editing && !payload.site)) {
-        alert('Name and Site are required');
+        showToast('Name and Site are required', 'error');
         return;
     }
     try {
@@ -12211,8 +12211,8 @@ async function submitNetboxRack() {
         const r = await fetch(url, { method: editing ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         const d = await r.json();
         if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('Racks'); }
-        else alert('Error: ' + (d.message || 'Operation failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (d.message || 'Operation failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function deleteNetboxRack(rackId) {
@@ -12221,8 +12221,8 @@ async function deleteNetboxRack(rackId) {
         const r = await fetch(`/api/netbox/racks/${rackId}`, { method: 'DELETE' });
         const d = await r.json();
         if (d.status === 'SUCCESS') loadNetboxData('Racks');
-        else alert('Error: ' + (d.message || 'Delete failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (d.message || 'Delete failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 function editNetboxPrefix(id) {
@@ -12301,8 +12301,8 @@ async function submitNetboxAllocatePrefix() {
             const r = await fetch(`/api/netbox/prefixes/${modal.dataset.prefixId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             const d = await r.json();
             if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('Prefixes'); }
-            else alert('Error: ' + (d.message || 'Update failed'));
-        } catch (e) { alert('Error: ' + e.message); }
+            else showToast('Error: ' + (d.message || 'Update failed'), 'error');
+        } catch (e) { showToast('Error: ' + e.message, 'error'); }
         return;
     }
     const payload = {
@@ -12319,12 +12319,12 @@ async function submitNetboxAllocatePrefix() {
         const d = await r.json();
         if (d.status === 'SUCCESS') {
             document.getElementById('nb-prefix-modal')?.remove();
-            alert(`Allocated: ${d.prefix}`);
+            showToast(`Allocated: ${d.prefix}`, 'success');
             loadNetboxData('Prefixes');
         } else {
-            alert('Error: ' + (d.message || 'Allocation failed'));
+            showToast('Error: ' + (d.message || 'Allocation failed'), 'error');
         }
-    } catch (e) { alert('Error: ' + e.message); }
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function deleteNetboxPrefix(prefixId) {
@@ -12333,8 +12333,8 @@ async function deleteNetboxPrefix(prefixId) {
         const r = await fetch(`/api/netbox/prefixes/${prefixId}`, { method: 'DELETE' });
         const d = await r.json();
         if (d.status === 'SUCCESS') loadNetboxData('Prefixes');
-        else alert('Error: ' + (d.message || 'Delete failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (d.message || 'Delete failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 // ─── New Subnet finder + release-to-pool ─────────────────────────────────────
@@ -12464,7 +12464,7 @@ async function searchAvailableSubnets() {
     const near = document.getElementById('nb-f-near')?.value?.trim() || '';
     const typed = document.getElementById('nb-f-typed')?.value?.trim() || '';
     const anchor = near || typed;
-    if (!anchor) { alert('Pick an existing subnet or type one to search near.'); return; }
+    if (!anchor) { showToast('Pick an existing subnet or type one to search near.', 'success'); return; }
     const prefixLength = _findPrefixLength();
     const resultsEl = document.getElementById('nb-f-results');
     const assignBtn = document.getElementById('nb-f-assign-btn');
@@ -12509,7 +12509,7 @@ function _pickFindSubnet(i) {
 
 async function submitFindSubnetAssign() {
     const prefix = window._nbFindSelected;
-    if (!prefix) { alert('Search and pick a subnet first.'); return; }
+    if (!prefix) { showToast('Search and pick a subnet first.', 'success'); return; }
     const desc = document.getElementById('nb-f-desc')?.value?.trim() || '';
     try {
         const r = await fetch('/api/netbox/subnet-assign', {
@@ -12523,9 +12523,9 @@ async function submitFindSubnetAssign() {
             showToast(`Subnet assigned: ${d.prefix}`, 'success');
             loadNetboxData('Prefixes');
         } else {
-            alert('Error: ' + (d.message || 'Assign failed'));
+            showToast('Error: ' + (d.message || 'Assign failed'), 'error');
         }
-    } catch (e) { alert('Error: ' + e.message); }
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function releaseSubnetToPool(prefixId, prefixStr) {
@@ -12543,8 +12543,8 @@ async function releaseSubnetToPool(prefixId, prefixStr) {
         const r = await fetch(`/api/netbox/prefixes/${prefixId}`, { method: 'DELETE' });
         const d = await r.json();
         if (d.status === 'SUCCESS') { showToast('Returned to pool', 'success'); loadNetboxData('Prefixes'); }
-        else alert('Error: ' + (d.message || 'Release failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (d.message || 'Release failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 function editNetboxIP(id) {
@@ -12596,8 +12596,8 @@ async function submitNetboxAllocateIP() {
             const r = await fetch(`/api/netbox/ips/${modal.dataset.ipId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             const d = await r.json();
             if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('IP Addresses'); }
-            else alert('Error: ' + (d.message || 'Update failed'));
-        } catch (e) { alert('Error: ' + e.message); }
+            else showToast('Error: ' + (d.message || 'Update failed'), 'error');
+        } catch (e) { showToast('Error: ' + e.message, 'error'); }
         return;
     }
     const payload = { prefix: get('nb-ip-prefix'), address: get('nb-ip-address') || undefined, dns_name: get('nb-ip-dns'), description: get('nb-ip-desc'), status: 'active' };
@@ -12606,12 +12606,12 @@ async function submitNetboxAllocateIP() {
         const d = await r.json();
         if (d.status === 'SUCCESS') {
             document.getElementById('nb-ip-modal')?.remove();
-            alert(`Allocated: ${d.address}`);
+            showToast(`Allocated: ${d.address}`, 'success');
             loadNetboxData('IP Addresses');
         } else {
-            alert('Error: ' + (d.message || 'Allocation failed'));
+            showToast('Error: ' + (d.message || 'Allocation failed'), 'error');
         }
-    } catch (e) { alert('Error: ' + e.message); }
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function releaseNetboxIP(ipId) {
@@ -12620,8 +12620,8 @@ async function releaseNetboxIP(ipId) {
         const r = await fetch(`/api/netbox/ips/${ipId}`, { method: 'DELETE' });
         const d = await r.json();
         if (d.status === 'SUCCESS') loadNetboxData('IP Addresses');
-        else alert('Error: ' + (d.message || 'Release failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (d.message || 'Release failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 // ─── DNS (Unbound) ───────────────────────────────────────────────────────────
@@ -13241,7 +13241,7 @@ async function saveLeRetryInterval(v) {
 async function leDistributeNow() {
     try {
         const { ok, data, detail } = await _spokeFetch('/api/le/distribute', { method: 'POST' });
-        if (!ok) { alert('Distribute failed: ' + (detail || '')); await loadLEData(); return; }
+        if (!ok) { showToast('Distribute failed: ' + (detail || ''), 'error'); await loadLEData(); return; }
         const inner = (data && data.data) ? data.data : (data || {});
         const dist = inner.distribution || [];
         let msg = '';
@@ -13261,7 +13261,7 @@ async function leDistributeNow() {
         showToast('Distribute complete' + msg, failed ? 'error' : 'success');
         console.info('[le] distribute', dist);
         await loadLEData();
-    } catch (e) { alert('Distribute failed: ' + e.message); }
+    } catch (e) { showToast('Distribute failed: ' + e.message, 'error'); }
 }
 
 async function leDeployTarget(domain, module_type, identifier) {
@@ -13391,7 +13391,7 @@ async function addLeTarget(domain, preset) {
     // target chip; without it we read the manual add form below.
     const mt = preset ? preset.module_type : document.getElementById('le-tgt-mt')?.value;
     const identifier = preset ? (preset.identifier || '') : (document.getElementById('le-tgt-id')?.value?.trim() || '');
-    if (!mt) { alert('Module type required'); return; }
+    if (!mt) { showToast('Module type required', 'error'); return; }
     // Guard the group-vs-individual overlap for agent-hosting types: if adding
     // this target would leave the cert with BOTH a group and an individual
     // target of the same module_type, confirm before proceeding (see
@@ -13414,12 +13414,12 @@ async function addLeTarget(domain, preset) {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ module_type: mt, identifier }),
         });
-        if (!ok) { alert('Add target failed: ' + (detail || '')); return; }
+        if (!ok) { showToast('Add target failed: ' + (detail || ''), 'error'); return; }
         await loadLEData();
         // Re-open the modal only if it's already open (an add from the main
         // screen's click-to-add chip shouldn't pop the modal open).
         if (document.getElementById('le-targets-modal')) showLeTargetsModal(domain);
-    } catch (e) { alert('Add target failed: ' + e.message); }
+    } catch (e) { showToast('Add target failed: ' + e.message, 'error'); }
 }
 
 // Disable distribution to a target by (module_type, identifier) — the first-page
@@ -13440,10 +13440,10 @@ async function removeLeTargetByKey(domain, mt, identifier) {
 async function removeLeTarget(domain, idx) {
     try {
         const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/targets/${idx}`, { method: 'DELETE' });
-        if (!ok) { alert('Remove target failed: ' + (detail || '')); return; }
+        if (!ok) { showToast('Remove target failed: ' + (detail || ''), 'error'); return; }
         await loadLEData();
         if (document.getElementById('le-targets-modal')) showLeTargetsModal(domain);
-    } catch (e) { alert('Remove target failed: ' + e.message); }
+    } catch (e) { showToast('Remove target failed: ' + e.message, 'error'); }
 }
 
 // ── le action UI: issue / renew / revoke ─────────────────────────────────────
@@ -13564,7 +13564,7 @@ function leIssueToggleSavedCred() {
 function leIssueAddTarget() {
     const mt = document.getElementById('le-issue-tgt-mt')?.value;
     const identifier = document.getElementById('le-issue-tgt-id')?.value?.trim() || '';
-    if (!mt) { alert('Pick a module type first'); return; }
+    if (!mt) { showToast('Pick a module type first', 'success'); return; }
     _leIssueTargets.push({ module_type: mt, identifier });
     document.getElementById('le-issue-tgt-id').value = '';
     leIssueRenderTargets();
@@ -13808,16 +13808,16 @@ async function leIssueCert() {
     const staging = !!document.getElementById('le-issue-staging')?.checked;
     const keyType = document.getElementById('le-issue-keytype')?.value || 'rsa';
 
-    if (!domain) { alert('Domain is required'); return; }
-    if (!email) { alert('ACME account email is required'); return; }
-    if (chSel === 'http-webroot' && !webroot) { alert('Webroot path is required for HTTP-01 webroot'); return; }
+    if (!domain) { showToast('Domain is required', 'error'); return; }
+    if (!email) { showToast('ACME account email is required', 'error'); return; }
+    if (chSel === 'http-webroot' && !webroot) { showToast('Webroot path is required for HTTP-01 webroot', 'error'); return; }
     if (challenge === 'dns' && !savedCred) {
-        if (!dnsProvider) { alert('Pick a saved DNS credential or a DNS provider for DNS-01'); return; }
+        if (!dnsProvider) { showToast('Pick a saved DNS credential or a DNS provider for DNS-01', 'success'); return; }
         if (_rfc) {
-            if (!_rfcIni.keyName) { alert('TSIG key name is required'); return; }
-            if (!_rfcIni.keySecret) { alert('TSIG key secret is required'); return; }
+            if (!_rfcIni.keyName) { showToast('TSIG key name is required', 'error'); return; }
+            if (!_rfcIni.keySecret) { showToast('TSIG key secret is required', 'error'); return; }
         } else if (!_heLogin && !dnsCreds.trim()) {
-            alert('DNS credentials INI is required for DNS-01'); return;
+            showToast('DNS credentials INI is required for DNS-01', 'error'); return;
         }
     }
 
@@ -13972,16 +13972,16 @@ async function showHeLoginModal() {
 async function saveHeLogin() {
     const u = document.getElementById('he-cfg-user')?.value?.trim() || '';
     const p = document.getElementById('he-cfg-pass')?.value || '';
-    if (!u || !p) { alert('Both account email and password are required.'); return; }
+    if (!u || !p) { showToast('Both account email and password are required.', 'error'); return; }
     try {
         const r = await _spokeFetch('/api/le/he-config', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ he_username: u, he_password: p }),
         });
-        if (!r.ok) { alert('Save failed: ' + (r.detail || '')); return; }
+        if (!r.ok) { showToast('Save failed: ' + (r.detail || ''), 'error'); return; }
         showToast('Hurricane Electric login saved', 'success');
         document.getElementById('he-login-modal')?.remove();
-    } catch (e) { alert('Save failed: ' + e.message); }
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
 }
 
 // ── Per-tenant DNS-01 credential manager (settings screen) ───────────────────
@@ -14095,7 +14095,7 @@ function dnsCredResetForm() {
 async function saveDnsCredential() {
     const name = document.getElementById('dns-cred-name')?.value?.trim() || '';
     const provider = document.getElementById('dns-cred-provider')?.value || '';
-    if (!name) { alert('Credential name is required.'); return; }
+    if (!name) { showToast('Credential name is required.', 'error'); return; }
     const def = DNS_CRED_PROVIDERS[provider];
     const fields = {};
     def.fields.forEach(f => {
@@ -14108,11 +14108,11 @@ async function saveDnsCredential() {
             body: JSON.stringify({ name, provider, fields }),
         });
         const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
-        if (!r.ok || d.status === 'ERROR') { alert('Save failed: ' + (d.message || r.detail || '')); return; }
+        if (!r.ok || d.status === 'ERROR') { showToast('Save failed: ' + (d.message || r.detail || ''), 'error'); return; }
         showToast('DNS credential saved', 'success');
         dnsCredResetForm();
         await dnsCredReloadList();
-    } catch (e) { alert('Save failed: ' + e.message); }
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
 }
 
 async function deleteDnsCredential(name) {
@@ -14123,10 +14123,10 @@ async function deleteDnsCredential(name) {
             body: JSON.stringify({ name }),
         });
         const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
-        if (!r.ok || d.status === 'ERROR') { alert('Delete failed: ' + (d.message || r.detail || '')); return; }
+        if (!r.ok || d.status === 'ERROR') { showToast('Delete failed: ' + (d.message || r.detail || ''), 'error'); return; }
         showToast('DNS credential deleted', 'success');
         await dnsCredReloadList();
-    } catch (e) { alert('Delete failed: ' + e.message); }
+    } catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
 }
 
 async function leRenewCert(domain) {
@@ -14136,34 +14136,34 @@ async function leRenewCert(domain) {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ domain }),
         });
-        if (!ok) { alert('Renew failed: ' + (detail || '')); return; }
+        if (!ok) { showToast('Renew failed: ' + (detail || ''), 'error'); return; }
         const inner = (data && data.data) ? data.data : (data || {});
         const r = (inner.renewed || [])[0] || {};
-        if (r.renewed) alert(`Renewed ${domain}.` + (r.error ? '' : ''));
-        else alert(`Renewal did not complete for ${domain}: ${r.error || inner.message || 'unknown error'}`);
+        if (r.renewed) showToast(`Renewed ${domain}.` + (r.error ? '' : ''), 'error');
+        else showToast(`Renewal did not complete for ${domain}: ${r.error || inner.message || 'unknown error'}`, 'error');
         await loadLEData();
-    } catch (e) { alert('Renew failed: ' + e.message); }
+    } catch (e) { showToast('Renew failed: ' + e.message, 'error'); }
 }
 
 async function leRenewAll() {
     const cnt = (window._leCerts || []).length;
-    if (cnt === 0) { alert('No managed certificates to renew.'); return; }
+    if (cnt === 0) { showToast('No managed certificates to renew.', 'success'); return; }
     if (!confirm(`Renew all ${cnt} managed certificate(s) now? This runs "certbot renew" for each on the le spoke and re-pushes new material to their targets.`)) return;
     try {
         const { ok, data, detail } = await _spokeFetch('/api/le/renew', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({}),
         });
-        if (!ok) { alert('Renew all failed: ' + (detail || '')); return; }
+        if (!ok) { showToast('Renew all failed: ' + (detail || ''), 'error'); return; }
         const inner = (data && data.data) ? data.data : (data || {});
         const r = inner.renewed || [];
         const okN = r.filter(x => x.renewed).length;
         const failN = r.length - okN;
         let msg = `Renewed ${okN}/${r.length} certificate(s).`;
         if (failN > 0) msg += `\n${failN} failed:\n` + r.filter(x => !x.renewed).map(x => `  ${x.domain}: ${x.error || 'unknown'}`).join('\n');
-        alert(msg);
+        showToast(msg, 'success');
         await loadLEData();
-    } catch (e) { alert('Renew all failed: ' + e.message); }
+    } catch (e) { showToast('Renew all failed: ' + e.message, 'error'); }
 }
 
 async function leRevokeCert(domain) {
@@ -14174,10 +14174,10 @@ async function leRevokeCert(domain) {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ domain, delete: true }),
         });
-        if (!ok) { alert('Revoke failed: ' + (detail || '')); return; }
-        alert(`Revoked ${domain}.`);
+        if (!ok) { showToast('Revoke failed: ' + (detail || ''), 'error'); return; }
+        showToast(`Revoked ${domain}.`, 'success');
         await loadLEData();
-    } catch (e) { alert('Revoke failed: ' + e.message); }
+    } catch (e) { showToast('Revoke failed: ' + e.message, 'error'); }
 }
 
 function editDnsRecord(name, rtype) {
@@ -14223,7 +14223,7 @@ async function saveDnsRecord() {
         value: get('dns-r-value'),
         ttl: parseInt(get('dns-r-ttl')) || 300,
     };
-    if (!payload.name || !payload.value) { alert('Name and Value are required'); return; }
+    if (!payload.name || !payload.value) { showToast('Name and Value are required', 'error'); return; }
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/record' + _taTenantQuery(), {
             method: editing ? 'PUT' : 'POST',
@@ -14231,8 +14231,8 @@ async function saveDnsRecord() {
             body: JSON.stringify(payload),
         });
         if (ok && d.status === 'SUCCESS') { modal.remove(); loadDNSData('Records'); }
-        else alert('Error: ' + (detail || d?.message || 'Operation failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function deleteDnsRecord(name, rtype) {
@@ -14244,8 +14244,8 @@ async function deleteDnsRecord(name, rtype) {
             body: JSON.stringify({ name, type: rtype }),
         });
         if (ok && d.status === 'SUCCESS') loadDNSData('Records');
-        else alert('Error: ' + (detail || d?.message || 'Delete failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (detail || d?.message || 'Delete failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 // ─── DHCP (Kea) ──────────────────────────────────────────────────────────────
@@ -14430,7 +14430,7 @@ async function saveDhcpReservation() {
         hostname: get('dhcp-res-host'),
     };
     if (!payload.subnet_id || !payload.ip || !payload.mac) {
-        alert('Subnet, IP, and MAC are required');
+        showToast('Subnet, IP, and MAC are required', 'error');
         return;
     }
     if (editing) payload.old_ip = modal.dataset.editIp;
@@ -14441,8 +14441,8 @@ async function saveDhcpReservation() {
             body: JSON.stringify(payload),
         });
         if (ok && d.status === 'SUCCESS') { modal.remove(); loadDHCPData('Reservations'); }
-        else alert('Error: ' + (detail || d?.message || 'Operation failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function deleteDhcpReservation(ip) {
@@ -14454,8 +14454,8 @@ async function deleteDhcpReservation(ip) {
             body: JSON.stringify({ ip }),
         });
         if (ok && d.status === 'SUCCESS') loadDHCPData('Reservations');
-        else alert('Error: ' + (detail || d?.message || 'Delete failed'));
-    } catch (e) { alert('Error: ' + e.message); }
+        else showToast('Error: ' + (detail || d?.message || 'Delete failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 // ─── CPPM / NAC ──────────────────────────────────────────────────────────────
@@ -14641,7 +14641,7 @@ async function deleteOpnsenseItem(fwId, subMenu, itemId) {
         if (!r.ok) { const e = await r.json(); throw new Error(e.detail || r.statusText); }
         loadOpnsenseManagement();
     } catch (e) {
-        alert('Error deleting: ' + e.message);
+        showToast('Error deleting: ' + e.message, 'error');
     }
 }
 
@@ -14729,7 +14729,7 @@ async function submitOpnsenseAdd(subMenu) {
     if (btn) { btn.disabled = true; btn.textContent = 'Adding…'; }
     const fwSel = document.getElementById('add-opn-fw');
     const fwId = (fwSel && fwSel.value) || (_opnFirewalls[0] && _opnFirewalls[0].id);
-    if (!fwId) { alert('No firewall selected.'); return; }
+    if (!fwId) { showToast('No firewall selected.', 'success'); return; }
     let url = '', body = {};
 
     try {
@@ -14748,7 +14748,7 @@ async function submitOpnsenseAdd(subMenu) {
         } else if (subMenu === 'Aliases') {
             url = `/api/firewall/${fwId}/aliases`;
             body = { name: g('add-opn-name'), type: g('add-opn-type'), content: g('add-opn-content'), description: g('add-opn-desc'), category: g('add-opn-category') };
-            if (!body.name) { alert('Name is required.'); return; }
+            if (!body.name) { showToast('Name is required.', 'error'); return; }
         } else if (subMenu === 'NAT Policies') {
             url = `/api/firewall/${fwId}/nat`;
             body = {
@@ -14766,7 +14766,7 @@ async function submitOpnsenseAdd(subMenu) {
         } else if (subMenu === 'DNS Records') {
             url = `/api/firewall/${fwId}/dns`;
             body = { hostname: g('add-opn-hostname'), domain: g('add-opn-domain'), ip: g('add-opn-ip'), description: g('add-opn-desc') };
-            if (!body.hostname || !body.ip) { alert('Hostname and IP are required.'); return; }
+            if (!body.hostname || !body.ip) { showToast('Hostname and IP are required.', 'error'); return; }
         } else return;
 
         const r = await fetch(url + _taTenantQuery(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -14774,13 +14774,13 @@ async function submitOpnsenseAdd(subMenu) {
         document.getElementById('opn-add-modal')?.remove();
         loadOpnsenseManagement();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showToast('Error: ' + e.message, 'error');
     }
 }
 
 function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
     const item = _opnCurrentItems[itemIdx];
-    if (!item) { alert('Item data not found — try refreshing the page.'); return; }
+    if (!item) { showToast('Item data not found — try refreshing the page.', 'error'); return; }
     const itemId = item.id || item.uuid || '';
 
     const existing = document.getElementById('opn-add-modal');
@@ -14875,7 +14875,7 @@ async function submitOpnsenseEdit(fwId, subMenu, itemId) {
         } else if (subMenu === 'Aliases') {
             url = `/api/firewall/${fwId}/aliases/${encodedId}`;
             body = { name: g('add-opn-name'), type: g('add-opn-type'), content: g('add-opn-content'), description: g('add-opn-desc'), category: g('add-opn-category') };
-            if (!body.name) { alert('Name is required.'); return; }
+            if (!body.name) { showToast('Name is required.', 'error'); return; }
         } else if (subMenu === 'NAT Policies') {
             url = `/api/firewall/${fwId}/nat/${encodedId}`;
             body = {
@@ -14893,7 +14893,7 @@ async function submitOpnsenseEdit(fwId, subMenu, itemId) {
         } else if (subMenu === 'DNS Records') {
             url = `/api/firewall/${fwId}/dns/${encodedId}`;
             body = { hostname: g('add-opn-hostname'), domain: g('add-opn-domain'), ip: g('add-opn-ip'), description: g('add-opn-desc') };
-            if (!body.hostname || !body.ip) { alert('Hostname and IP are required.'); return; }
+            if (!body.hostname || !body.ip) { showToast('Hostname and IP are required.', 'error'); return; }
         } else return;
 
         const r = await fetch(url + _taTenantQuery(), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -14901,7 +14901,7 @@ async function submitOpnsenseEdit(fwId, subMenu, itemId) {
         document.getElementById('opn-add-modal')?.remove();
         loadOpnsenseManagement();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showToast('Error: ' + e.message, 'error');
     }
 }
 
@@ -15045,7 +15045,7 @@ async function saveLDAPEntity(subMenu) {
     }
 
     if (!body.name && subMenu !== 'Users' && !body.username) {
-        alert('Name is required');
+        showToast('Name is required', 'error');
         return;
     }
 
@@ -15061,18 +15061,18 @@ async function saveLDAPEntity(subMenu) {
         if (response.ok) {
             const result = await response.json();
             if (!editing && result.password) {
-                alert(`User created!\n\nGenerated password: ${result.password}\n\nPlease record this — it will not be shown again.`);
+                showToast(`User created!\n\nGenerated password: ${result.password}\n\nPlease record this — it will not be shown again.`, 'success');
             } else {
-                alert(editing ? 'Entity updated successfully!' : 'Entity created successfully!');
+                showToast(editing ? 'Entity updated successfully!' : 'Entity created successfully!', 'success');
             }
             document.querySelector('.fixed').remove();
             loadLDAPData(subMenu);
         } else {
             const err = await response.json().catch(() => ({}));
-            alert('Error: ' + (err.message || (editing ? 'Failed to update entity' : 'Failed to create entity')));
+            showToast('Error: ' + (err.message || (editing ? 'Failed to update entity' : 'Failed to create entity')), 'error');
         }
     } catch (e) {
-        alert('Request failed: ' + e.message);
+        showToast('Request failed: ' + e.message, 'error');
     }
 }
 
@@ -15085,14 +15085,14 @@ async function deleteLDAPEntity(dn) {
             body: JSON.stringify({ dn: dn })
         });
         if (response.ok) {
-            alert('Entity deleted successfully!');
+            showToast('Entity deleted successfully!', 'success');
             loadLDAPData(currentSubView);
         } else {
             const err = await response.json();
-            alert('Error: ' + (err.message || 'Failed to delete entity'));
+            showToast('Error: ' + (err.message || 'Failed to delete entity'), 'error');
         }
     } catch (e) {
-        alert('Request failed: ' + e.message);
+        showToast('Request failed: ' + e.message, 'error');
     }
 }
 
@@ -15122,8 +15122,8 @@ function showLDAPPasswordModal(userDn) {
 async function changeUserPassword(userDn) {
     const pw = document.getElementById('ldap-new-password')?.value;
     const confirm = document.getElementById('ldap-confirm-password')?.value;
-    if (!pw) { alert('Password cannot be empty'); return; }
-    if (pw !== confirm) { alert('Passwords do not match'); return; }
+    if (!pw) { showToast('Password cannot be empty', 'error'); return; }
+    if (pw !== confirm) { showToast('Passwords do not match', 'success'); return; }
     try {
         const r = await fetch('/api/ldap/users/password', {
             method: 'POST',
@@ -15131,14 +15131,14 @@ async function changeUserPassword(userDn) {
             body: JSON.stringify({ user_dn: userDn, password: pw })
         });
         if (r.ok) {
-            alert('Password changed successfully.');
+            showToast('Password changed successfully.', 'success');
             document.querySelector('.fixed')?.remove();
         } else {
             const err = await r.json();
-            alert('Error: ' + (err.detail || err.message || 'Failed to change password'));
+            showToast('Error: ' + (err.detail || err.message || 'Failed to change password'), 'error');
         }
     } catch (e) {
-        alert('Request failed: ' + e.message);
+        showToast('Request failed: ' + e.message, 'error');
     }
 }
 
@@ -15219,7 +15219,7 @@ function closeAddUserModal() {
 
 async function saveUser() {
     const userId = document.getElementById('new-user-id').value.trim();
-    if (!userId) { alert('Please enter a User ID'); return; }
+    if (!userId) { showToast('Please enter a User ID', 'error'); return; }
 
     const tadm = isTenantAdmin();
     // A tenant Admin may only grant module rights — never an admin tier. The
@@ -15249,7 +15249,7 @@ async function saveUser() {
     const tenants = tadm ? undefined : Array.from(
         document.querySelectorAll('#new-user-tenants input.new-user-tenant:checked')).map(el => el.value);
     if (!tadm && permissions.tenant_admin && (!tenants || tenants.length === 0)) {
-        alert('Tenant Admin requires at least one assigned tenant — select one under "Assigned Tenants".');
+        showToast('Tenant Admin requires at least one assigned tenant — select one under "Assigned Tenants".', 'success');
         return;
     }
     const base = _taUsersBase();
@@ -15263,15 +15263,15 @@ async function saveUser() {
                 : { user_id: userId, permissions, auth_type, password, groups, tenants, create: true })
         });
         if (response.ok) {
-            alert('User created successfully');
+            showToast('User created successfully', 'success');
             closeAddUserModal();
             await loadUsers();
         } else {
             const d = await response.json().catch(() => ({}));
-            alert(d.detail || 'Failed to create user');
+            showToast(d.detail || 'Failed to create user', 'error');
         }
     } catch (err) {
-        alert('Error creating user: ' + err.message);
+        showToast('Error creating user: ' + err.message, 'error');
     }
 }
 
@@ -15297,7 +15297,7 @@ async function editUser(userId) {
         const users = userData.users || {};
         const user = users[userId];
         if (!user) throw new Error('User not found');
-        if (user.protected) { alert('This account is protected and cannot be edited.'); return; }
+        if (user.protected) { showToast('This account is protected and cannot be edited.', 'error'); return; }
 
         const tenants = tenantData.tenants || [];
         const userTenants = user.tenants || [];
@@ -15390,7 +15390,7 @@ async function editUser(userId) {
         `;
         document.body.appendChild(modal);
     } catch (err) {
-        alert('Error opening edit modal: ' + err.message);
+        showToast('Error opening edit modal: ' + err.message, 'error');
     }
 }
 
@@ -15440,7 +15440,7 @@ async function saveUserEdits(userId) {
                 const d = await resp.json().catch(() => ({}));
                 throw new Error(d.detail || 'Failed to update user');
             }
-            alert('User updated successfully');
+            showToast('User updated successfully', 'success');
             closeEditUserModal();
             await loadUsers();
             return;
@@ -15472,11 +15472,11 @@ async function saveUserEdits(userId) {
         }
         await Promise.all(requests);
 
-        alert('User updated successfully');
+        showToast('User updated successfully', 'success');
         closeEditUserModal();
         await loadUsers();
     } catch (err) {
-        alert('Error saving user edits: ' + err.message);
+        showToast('Error saving user edits: ' + err.message, 'error');
     }
 }
 
@@ -15494,13 +15494,13 @@ async function promptSetPassword(userId) {
             body: JSON.stringify({ password: pw }),
         });
         if (resp.ok) {
-            alert('Password updated.');
+            showToast('Password updated.', 'success');
         } else {
             const d = await resp.json().catch(() => ({}));
-            alert('Failed: ' + (d.detail || resp.statusText));
+            showToast('Failed: ' + (d.detail || resp.statusText), 'error');
         }
     } catch (err) {
-        alert('Error: ' + err.message);
+        showToast('Error: ' + err.message, 'error');
     }
 }
 
@@ -15595,15 +15595,15 @@ async function saveFirewall() {
             body: JSON.stringify(payload)
         });
         if (response.ok) {
-            alert(`Firewall ${id ? 'updated' : 'added'} successfully!`);
+            showToast(`Firewall ${id ? 'updated' : 'added'} successfully!`, 'success');
             closeFirewallModal();
             setView(currentView);
         } else {
             const err = await response.json().catch(() => ({}));
-            alert('Failed to save firewall configuration: ' + (err.detail || response.status));
+            showToast('Failed to save firewall configuration: ' + (err.detail || response.status), 'error');
         }
     } catch (err) {
-        alert('Error saving firewall: ' + err.message);
+        showToast('Error saving firewall: ' + err.message, 'error');
     }
 }
 
@@ -15711,7 +15711,7 @@ async function saveNwDevice() {
         snmp_community: document.getElementById('nw-snmp-community').value,
     };
     if (!config.name || !config.object_type) {
-        alert('Device name and object type are required.');
+        showToast('Device name and object type are required.', 'error');
         return;
     }
 
@@ -15725,15 +15725,15 @@ async function saveNwDevice() {
             body: JSON.stringify(payload)
         });
         if (response.ok) {
-            alert(`Network device ${id ? 'updated' : 'added'} successfully!`);
+            showToast(`Network device ${id ? 'updated' : 'added'} successfully!`, 'success');
             closeNwDeviceModal();
             loadNwDevicesList();
         } else {
             const err = await response.json().catch(() => ({}));
-            alert('Failed to save network device: ' + (err.detail || response.status));
+            showToast('Failed to save network device: ' + (err.detail || response.status), 'error');
         }
     } catch (err) {
-        alert('Error saving network device: ' + err.message);
+        showToast('Error saving network device: ' + err.message, 'error');
     }
 }
 
@@ -16001,15 +16001,15 @@ async function saveInstance(productKey) {
             body: JSON.stringify(payload),
         });
         if (r.ok) {
-            alert(`Instance ${id ? 'updated' : 'added'} successfully!`);
+            showToast(`Instance ${id ? 'updated' : 'added'} successfully!`, 'success');
             closeInstanceModal();
             loadInstances(productKey);
         } else {
             const err = await r.json().catch(() => ({}));
-            alert('Failed to save instance: ' + (err.detail || r.status));
+            showToast('Failed to save instance: ' + (err.detail || r.status), 'error');
         }
     } catch (e) {
-        alert('Error saving instance: ' + e.message);
+        showToast('Error saving instance: ' + e.message, 'error');
     }
 }
 
@@ -16022,7 +16022,7 @@ async function deleteInstance(productKey, id) {
         if (!r.ok) throw new Error(await r.text());
         loadInstances(productKey);
     } catch (e) {
-        alert('Error: ' + e.message);
+        showToast('Error: ' + e.message, 'error');
     }
 }
 
@@ -16215,7 +16215,7 @@ async function saveDevice() {
         name: (document.getElementById('dev-name').value || '').trim(),
         spoke_id: document.getElementById('dev-spoke').value,
     };
-    if (!config.name) { alert('Device name is required.'); return; }
+    if (!config.name) { showToast('Device name is required.', 'error'); return; }
     t.fields.forEach(f => {
         const el = document.getElementById('dev-' + f.id);
         let v = el ? el.value : '';
@@ -16256,7 +16256,7 @@ async function deleteDevice(typeKey, id) {
         if (!r.ok) throw new Error(await r.text().catch(() => r.status));
         loadAllDevices();
     } catch (e) {
-        alert('Error: ' + e.message);
+        showToast('Error: ' + e.message, 'error');
     }
 }
 
@@ -16553,7 +16553,7 @@ async function _initApp() {
         console.log("Lab Manager UI: Initialization complete.");
     } catch (err) {
         console.error("Lab Manager UI: Critical initialization error:", err);
-        alert("UI Initialization failed: " + err.message);
+        showToast("UI Initialization failed: " + err.message, 'error');
     }
 }
 
