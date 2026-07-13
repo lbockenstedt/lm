@@ -9399,7 +9399,7 @@ async function showLoadRoleModal(spokeId) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl overflow-hidden border border-slate-200">
             <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
                 <div>
-                    <h3 class="text-lg font-bold text-slate-800">Load Role</h3>
+                    <h3 class="text-lg font-bold text-[#263040]">Load Role</h3>
                     <p class="text-xs text-slate-500 mt-0.5 font-mono">${spokeId}</p>
                 </div>
                 <button onclick="document.getElementById('load-role-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
@@ -9586,7 +9586,7 @@ function showDeployAgentInfo() {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200">
             <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-slate-800">Deploy Generic Agent</h3>
+                <h3 class="text-lg font-bold text-[#263040]">Deploy Generic Agent</h3>
                 <button onclick="document.getElementById('deploy-agent-modal').remove()" class="text-slate-400 hover:text-slate-600">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
@@ -10530,7 +10530,7 @@ async function renderTemplateRepo() {
     host.innerHTML = `
       <div class="flex items-center justify-between">
         <div>
-          <h2 class="text-xl font-bold text-[#263040]">Template Repo</h2>
+          <h2 class="text-lg font-bold text-[#263040]">Template Repo</h2>
           <p class="text-sm text-slate-500">Proxmox template backups (vzdump) stored on the hub. Trigger one with “⬆ Back up to Hub” on a template VM; edit each template’s metadata here.</p>
         </div>
         <button onclick="renderTemplateRepo()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">↻ Refresh</button>
@@ -14928,7 +14928,7 @@ function showLDAPModal(subMenu, editItem) {
     modal.innerHTML = `
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-slate-800">${editing ? 'Edit' : 'Add'} ${label}</h3>
+                <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} ${label}</h3>
                 <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fields}</div>
@@ -15022,7 +15022,7 @@ function showLDAPPasswordModal(userDn) {
     modal.innerHTML = `
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-slate-800">Change Password</h3>
+                <h3 class="text-lg font-bold text-[#263040]">Change Password</h3>
                 <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
             </div>
             <div class="p-6 space-y-4">

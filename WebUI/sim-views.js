@@ -592,7 +592,7 @@ function csChildPlaceholder(primary, child) {
     csSet(`<div class="max-w-2xl mx-auto mt-10">
         <div class="hpe-card rounded-lg p-8 shadow-sm text-center">
             <div class="text-3xl mb-3">🚧</div>
-            <h3 class="text-lg font-bold text-slate-700 mb-1">${csEscape(primary)} · ${csEscape(child)} ${helpIcon('cs', null, 'Simulations help')}</h3>
+            <h3 class="text-lg font-bold text-[#263040] mb-1">${csEscape(primary)} · ${csEscape(child)} ${helpIcon('cs', null, 'Simulations help')}</h3>
             <p class="text-sm text-slate-500">This section is part of the ongoing webui-hub → cs module port and will be populated in a coming wave. The structure is in place so the navigation matches the original.</p>
         </div>
     </div>`);
@@ -5153,7 +5153,7 @@ function csRenderVmServerConsoleStub(label, kind) {
     csSet(`<div>${csVmHostBanner()}
       <div class="hpe-card rounded-lg p-10 shadow-sm text-center">
         <div class="text-3xl mb-3">${kind === 'console' ? '🖥️' : '⌨️'}</div>
-        <h3 class="text-lg font-bold text-slate-700 mb-1">${csEscape(label)} ${helpIcon('cs', null, 'Simulations help')}</h3>
+        <h3 class="text-lg font-bold text-[#263040] mb-1">${csEscape(label)} ${helpIcon('cs', null, 'Simulations help')}</h3>
         <p class="text-sm text-slate-500 max-w-md mx-auto">${csEscape(label)} requires a ${kind === 'console' ? 'noVNC' : 'xterm.js'} WebSocket proxied through the LM hub. This is wired in Phase 5; the rest of the VM Server port is live now.</p>
       </div></div>`);
 }
