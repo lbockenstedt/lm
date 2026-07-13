@@ -709,15 +709,17 @@ class UpdatePipelineMixin:
                 # PROVEN `systemctl restart lm` and clears it. New process boots
                 # current → not stale → no sentinel → no restart loop.
                 #
-                # FORCE: a stale process is an ERROR state (serving old/buggy
-                # code), not planned maintenance. The watchdog's maintenance-window
-                # / idle gate is for PLANNED pull-and-restart only; staleness must
-                # reload ASAP (within one ~60s watchdog cycle), day or night.
-                # Otherwise a fix that lands on disk mid-day sits UNLOADED until
-                # the 02:00 window (the recurring "I keep getting stale hubs"
-                # shape — a FIXED bug kept running for hours because the restart
-                # was gated). force=True bypasses the watchdog gate.
-                self._request_watchdog_restart(f"stale v{run_v}->v{disk_v}", force=True)
+                # NON-force: a stale process is gated by the watchdog's
+                # maintenance-window / idle gate (RESTART_ALLOWED) just like a
+                # routine auto-update — it restarts when nobody is logged in OR
+                # inside the 2am window, with a 1h hard backstop
+                # (LM_WATCHDOG_STALE_BACKOFF_S) so a stale/buggy build still
+                # reloads within 1h even behind a logged-in user. Force would boot
+                # a logged-in operator mid-day on every autobump (the symptom this
+                # change fixes); the backstop preserves the "can't run a broken
+                # build for hours" guarantee. force=True is reserved for the
+                # manual footer "Update now" button (operator asked).
+                self._request_watchdog_restart(f"stale v{run_v}->v{disk_v}", force=False)
 
             helper = "/usr/local/bin/lm-update-restart"
             checks["restart_helper"] = os.path.isfile(helper) and os.access(helper, os.X_OK)
@@ -1501,13 +1503,17 @@ class UpdatePipelineMixin:
             # (update_gate) — the direct lm-update-restart helper runs `systemctl
             # restart lm` immediately and does NOT itself consult the gate, so a
             # routine repo-sync update would restart the hub (logging every active
-            # operator out) even with users connected. Only fire it now when the
-            # gate allows (nobody logged in, or inside the maintenance window), OR
-            # when forced ("Update now" button — operator asked), OR on a
-            # stale-reload (serving stale code, an error state → reload ASAP).
-            # Otherwise DEFER: the non-force watchdog sentinel below still carries
-            # the request and the external lm-watchdog fires it once idle/in-window.
-            _restart_now = bool(force) or stale_reload or self._gate_allows_restart_now()
+            # operator out) even with users connected. Fire it now ONLY when the
+            # gate allows (nobody logged in, or inside the maintenance window) OR
+            # when forced ("Update now" button — operator asked). A stale-reload
+            # (serving stale code) is NO LONGER force — it goes through the same
+            # gate + the non-force watchdog sentinel below, whose 1h hard backstop
+            # (LM_WATCHDOG_STALE_BACKOFF_S) guarantees a stale/buggy build still
+            # reloads within 1h even behind a logged-in user (the prior failure
+            # mode that motivated force-on-stale). Otherwise DEFER: the non-force
+            # watchdog sentinel below carries the request and the external
+            # lm-watchdog fires it once idle/in-window.
+            _restart_now = bool(force) or self._gate_allows_restart_now()
             if _restart_now:
                 logger.info("Hub was updated. Scheduling self-restart via transient unit...")
                 # Flush the in-memory session store to disk so any login/logout since the
@@ -1548,16 +1554,17 @@ class UpdatePipelineMixin:
             # The fresh process clears the sentinel on boot, so a successful
             # direct restart above does NOT cause a double-restart.
             #
-            # FORCE when: (a) the caller explicitly forced (manual "Update now"
-            # / "Sync now" button — operator wants it now), or (b) this is a
-            # stale-reload (process behind disk → reload ASAP, error state, NOT
-            # planned maintenance). A routine auto hub_updated stays NON-force
-            # (gated to the maintenance window — that's the only path the gate is
-            # meant to defer). See the staleness-force rationale in
-            # check_update_health above.
+            # FORCE ONLY when the caller explicitly forced (manual "Update now"
+            # / "Sync now" button — operator wants it now). A stale-reload (process
+            # behind disk) is NON-force: the watchdog gates it on RESTART_ALLOWED
+            # (idle / 2am window) with a 1h hard backstop (LM_WATCHDOG_STALE_BACKOFF_S)
+            # so a stale/buggy build still reloads within 1h even behind a logged-in
+            # user, but a routine autobump no longer boots a logged-in operator
+            # mid-day. A routine auto hub_updated is also NON-force. See the
+            # restart-gating rationale in check_update_health above.
             self._request_watchdog_restart(
                 "update->restart" if hub_updated else "stale-reload->restart",
-                force=(stale_reload or bool(force)))
+                force=bool(force))
             if hub_updated:
                 _rmsg = f"Updated Hub to {remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."
             else:

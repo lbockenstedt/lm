@@ -1435,7 +1435,8 @@ fi
 # Health-guarded + 2-min cooldown. KEEP IN SYNC with install-lm-watchdog.sh.
 STALE_SENTINEL=/var/lib/lm/state/stale-restart-requested
 STALE_TS=/var/lib/lm/watchdog-stale-ts
-RESTART_ALLOWED=/var/lib/lm/state/restart-allowed  # hub-computed gate (no longer used to gate STALE-restart — staleness always restarts; kept for a future planned-restart path)
+STALE_SINCE=/var/lib/lm/watchdog-stale-since    # first-deferred ts for the 1h backstop
+RESTART_ALLOWED=/var/lib/lm/state/restart-allowed  # hub-computed gate (1=idle OR in-window)
 is_force=0; stale_reason=""
 if [ -f "$STALE_SENTINEL" ]; then
   body=$(head -c 100 "$STALE_SENTINEL" 2>/dev/null | tr -d '\n')
@@ -1453,23 +1454,48 @@ elif [ -d /opt/lm/.git ]; then
 fi
 if [ -n "$stale_reason" ] && systemctl is-active --quiet lm.service 2>/dev/null && hub_healthy; then
   now=$(date +%s); last=$(cat "$STALE_TS" 2>/dev/null || echo 0)
-  # Staleness is an ERROR state (running process serving old/buggy code), NOT
-  # planned maintenance — restart immediately, day or night. The
-  # maintenance-window/idle gate (RESTART_ALLOWED, hub-computed) is for PLANNED
-  # pull-and-restart only; it does NOT apply here. Before this change a stale hub
-  # sat UNLOADED until the 02:00 window — a fixed bug kept running for hours
-  # because the restart was gated while users were logged in. The 120s cooldown
-  # + hub_healthy + is-active guards prevent a hot-loop; the fresh process boots
-  # current (run_v == disk_v) so neither signal recurs. $is_force only labels the
-  # path (force sentinel from the hub's check_update_health vs the external drift
-  # backstop) — both restart now. KEEP IN SYNC with install-lm-watchdog.sh.
+  # Restart gating (the "don't boot a logged-in user on every update" rule):
+  #   - FORCE (is_force=1): footer "Update now" button / force sentinel — the
+  #     operator asked, restart IMMEDIATELY, bypassing the gate (the hub's
+  #     perform_update drains queues before dropping the sentinel).
+  #   - non-force (auto-update / autonomous drift backstop): consult the hub's
+  #     RESTART_ALLOWED file (1 = nobody logged in OR inside the 2am window, per
+  #     the hub's update_gate config). Restart when allowed; otherwise DEFER —
+  #     but with a 1h hard backstop (LM_WATCHDOG_STALE_BACKOFF_S, default 3600) so
+  #     a stale/buggy build can't run indefinitely behind a logged-in user (the
+  #     prior failure mode that motivated force-on-stale). The 2am window itself
+  #     allows the restart even with users logged in (window mode returns True
+  #     in-window), so the scheduled auto-update still fires.
+  # Missing RESTART_ALLOWED → 1 (fail-open = old behavior, safe). The 120s
+  # cooldown + hub_healthy + is-active guards prevent a hot-loop; the fresh
+  # process boots current (run_v == disk_v) so neither signal recurs.
+  # KEEP IN SYNC with scripts/install-lm-watchdog.sh.
   if [ $(( now - last )) -ge 120 ]; then
-    echo "$now" > "$STALE_TS"
-    [ "$is_force" = 1 ] && fx=" [FORCE]" || fx=""
-    log "STALE hub ($stale_reason)$fx — clean restart to load on-disk code"
-    rm -f "$STALE_SENTINEL"
-    timeout 60 systemctl restart lm.service 2>/dev/null || true
-    log "stale restart issued"
+    if [ "$is_force" = 1 ]; then
+      _do_restart=1; fx=" [FORCE]"
+    else
+      allowed=$(cat "$RESTART_ALLOWED" 2>/dev/null || echo 1)
+      if [ "$allowed" = 1 ]; then
+        _do_restart=1; fx=""
+      else
+        since=$(cat "$STALE_SINCE" 2>/dev/null || echo "$now")
+        echo "$since" > "$STALE_SINCE" 2>/dev/null || true
+        backoff="${LM_WATCHDOG_STALE_BACKOFF_S:-3600}"
+        if [ $(( now - since )) -ge "$backoff" ]; then
+          _do_restart=1; fx=" [BACKSTOP >${backoff}s]"
+        else
+          _do_restart=0
+          log "stale ($stale_reason) but user logged in / outside window — deferring (since ${since}, backstop ${backoff}s)"
+        fi
+      fi
+    fi
+    if [ "$_do_restart" = 1 ]; then
+      echo "$now" > "$STALE_TS"
+      log "STALE hub ($stale_reason)$fx — clean restart to load on-disk code"
+      rm -f "$STALE_SENTINEL" "$STALE_SINCE"
+      timeout 60 systemctl restart lm.service 2>/dev/null || true
+      log "stale restart issued"
+    fi
   fi
 fi
 
