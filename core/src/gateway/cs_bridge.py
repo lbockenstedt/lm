@@ -356,14 +356,21 @@ class CSBridgePoller:
             logger.debug(line)
         # Record the latest decision on the per-agent counter row so the WebUI
         # panel can show "ACTIVE / SKIP not-enabled / SKIP no-cs-spoke" alongside
-        # the relay counters in one place.
+        # the relay counters in one place. Also surface host_spoke (the spoke the
+        # agent is actually connected to / commands are delivered through) — the
+        # decision's cs_spoke is the tenant-canonical queue broker, so without
+        # host_spoke the operator can't see the per-agent delivery path that
+        # diagnoses "ACTIVE but 0 commands relayed" (e.g. svr-02 connected to
+        # cs-svr-02-spoke while cs_spoke=cs-svr-04-spoke).
         row = self._relay_counts.setdefault(
             agent_id,
-            {"hostname": hostname, "decision": "", "accepted": 0, "requeued": 0,
-             "gave_up": 0, "completed": 0, "failed": 0,
-             "last_outcome": None, "last_ts": 0.0},
+            {"hostname": hostname, "host_spoke": "", "decision": "",
+             "accepted": 0, "requeued": 0, "gave_up": 0, "completed": 0,
+             "failed": 0, "last_outcome": None, "last_ts": 0.0,
+             "last_inbox_count": 0},
         )
         row["hostname"] = hostname
+        row["host_spoke"] = host_spoke
         row["decision"] = decision
 
     def _bump(self, agent_id: str, hostname: str, outcome: str) -> None:
@@ -371,9 +378,10 @@ class CSBridgePoller:
         outcome/ts, for the WebUI "CS Bridge Status" panel."""
         row = self._relay_counts.setdefault(
             agent_id,
-            {"hostname": hostname, "decision": "", "accepted": 0, "requeued": 0,
-             "gave_up": 0, "completed": 0, "failed": 0,
-             "last_outcome": None, "last_ts": 0.0},
+            {"hostname": hostname, "host_spoke": "", "decision": "",
+             "accepted": 0, "requeued": 0, "gave_up": 0, "completed": 0,
+             "failed": 0, "last_outcome": None, "last_ts": 0.0,
+             "last_inbox_count": 0},
         )
         row["hostname"] = hostname
         if outcome in row:
@@ -432,6 +440,14 @@ class CSBridgePoller:
                                            {"hostname": hostname}, timeout=5.0)
         data = _unwrap(inbox)
         commands = data.get("commands", []) if isinstance(data, dict) else []
+        # Record the inbox count on the per-agent row so the panel can distinguish
+        # "bridge reached the agent but its inbox on the cs spoke is EMPTY" (no
+        # commands queued / enqueue-side hostname-key mismatch — 0 accepted with
+        # 0 in the inbox) from "inbox had commands but the relay failed/timed
+        # out" (0 accepted with N in the inbox → relay path issue).
+        row = self._relay_counts.get(agent_id)
+        if isinstance(row, dict):
+            row["last_inbox_count"] = len(commands)
         if not commands:
             return
         for cmd in commands:

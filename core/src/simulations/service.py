@@ -14,6 +14,46 @@ _FAIL = {"fail", "failed", "down", "error", "critical"}
 _WARN = {"warning", "warn", "degraded", "unknown", "no_data", "pending"}
 
 
+def _agent_cs_enabled(hub, hostname: str) -> bool:
+    """True if the pxmx agent backing this host has ``client_simulation.enabled``.
+
+    Used to hide a CS-disabled agent's host + VMs from the cs app everywhere
+    (the bridge SKIPs it, so the user can't act on its VMs — showing them is a
+    dead end). The host row carries the pxmx hostname, not an agent_id, so look
+    up the agent_config entry by hostname (entries are keyed by agent_id OR
+    hostname — tolerant, mirroring ``gateway/cs_bridge._agent_config_entry``).
+    Unknown hosts default to True so a freshly-connected agent still shows
+    while its config row is created (don't black-hole a brand-new agent)."""
+    if not hostname:
+        return True
+    try:
+        store = hub.state.system_state.get("agent_config", {}) or {}
+    except Exception:
+        return True
+    entry = store.get(hostname)
+    if not isinstance(entry, dict):
+        hn = str(hostname).strip().lower()
+        for v in store.values():
+            if not isinstance(v, dict):
+                continue
+            alt = str(v.get("hostname") or v.get("display_name") or "").strip().lower()
+            if alt and alt == hn:
+                entry = v
+                break
+    if not isinstance(entry, dict):
+        return True  # unknown → show
+    cs = entry.get("client_simulation") or {}
+    # enabled absent → treat as off ONLY when the entry exists with an explicit
+    # client_simulation block; an entry with no client_simulation at all is an
+    # unconfigured agent → show (matches the bridge's "skip only when an entry
+    # exists and enabled is false" intent). The bridge reads bool(enabled) which
+    # is False when absent, but hiding here is stricter — only hide when the
+    # operator explicitly disabled CS on this agent.
+    if not cs:
+        return True
+    return bool(cs.get("enabled", True))
+
+
 class SimulationsService:
     """Read-only shaper projecting cached cs telemetry into WebUI view shapes.
 
@@ -367,6 +407,18 @@ class SimulationsService:
             elif _host_rank(h) > _host_rank(best[k]):
                 best[k] = h
         hosts = [best[k] for k in order] + extras
+        # Hide hosts whose backing agent has client_simulation.enabled = false.
+        # An agent attached to a cs spoke but with CS disabled must not show its
+        # VMs anywhere in the cs app (the user can't act on them — the bridge
+        # SKIPs them, so delete/start would never reach the agent). The host row
+        # carries the pxmx hostname, not an agent_id, so join against agent_config
+        # by hostname (entries are keyed by agent_id OR hostname — tolerant
+        # lookup, mirroring gateway/cs_bridge._agent_config_entry). Unknown
+        # hosts default to shown so a freshly-connected agent still appears
+        # while its config row is created. Filtering after dedup keeps the
+        # richest-entry pick.
+        hosts = [h for h in hosts
+                 if _agent_cs_enabled(self.hub, h.get("hostname") or h.get("spoke_hostname") or "")]
         return {"tenant_id": tenant_id, "hosts": hosts}
 
     async def get_central_data(self, tenant_id: str) -> Dict[str, Any]:

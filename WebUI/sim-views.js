@@ -5453,6 +5453,13 @@ async function csRenderSetupDiagnostics() {
         return;
     }
     const agents = snap.agents || [];
+    // Collapse CS-disabled (SKIP not-enabled) agents out of the table per the
+    // "hide non-CS everywhere in the cs app" rule — their host + VMs are already
+    // hidden in VM Server; the Diagnostics panel keeps a one-line count so the
+    // "why isn't svr-02 deleting" diagnostic the panel exists for still surfaces
+    // *that* an agent is disabled, without listing the disabled agent/VMs.
+    const _disabled = agents.filter(a => (a.decision || '').startsWith('SKIP not-enabled'));
+    const _shown = agents.filter(a => !(a.decision || '').startsWith('SKIP not-enabled'));
     const _cfgFast = snap.configured_fast_s != null ? `${snap.configured_fast_s}s` : '15s (default)';
     const _cfgLong = snap.configured_long_s != null ? `${snap.configured_long_s}s` : '60s (default)';
     const cfg = `<div class="hpe-card rounded-lg p-3 shadow-sm mb-3 text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
@@ -5462,14 +5469,16 @@ async function csRenderSetupDiagnostics() {
       <span><b class="text-slate-600">cycle:</b> ${csEscape(snap.cycle || '—')}</span>
     </div>
     <p class="text-[11px] text-slate-400 mb-3">Set the spoke→agent windows in <b>Setup → General → Agent Relay Timeouts</b>. The hub→spoke window tracks the configured long/fast value +5s (never below the env default) so the hub doesn't pre-empt the spoke's wait. If hub→spoke shows the env defaults (16s/65s) here after you saved General, the save didn't reach global_config — re-save.</p>`;
-    const head = ['Agent', 'Hostname', 'Decision', 'Accepted', 'Re-queued', 'Gave up', 'Completed', 'Failed', 'Last outcome'];
-    const body = agents.map(a => {
+    const head = ['Agent', 'Hostname', 'Via (host spoke)', 'Decision', 'Inbox', 'Accepted', 'Re-queued', 'Gave up', 'Completed', 'Failed', 'Last outcome'];
+    const body = _shown.map(a => {
         const _decClass = (a.decision || '').startsWith('ACTIVE') ? 'text-emerald-600' :
                          (a.decision || '').startsWith('SKIP') ? 'text-amber-600' : 'text-slate-500';
         return `<tr>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(a.agent_id || '—')}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(a.hostname || '—')}</td>
+      <td class="px-3 py-2 font-mono text-xs text-slate-500">${csEscape(a.host_spoke || '—')}</td>
       <td class="px-3 py-2 text-xs ${_decClass}">${csEscape(a.decision || '—')}</td>
+      <td class="px-3 py-2 text-xs text-slate-400">${csEscape(String(a.last_inbox_count ?? 0))}</td>
       <td class="px-3 py-2 text-xs text-emerald-600">${csEscape(String(a.accepted || 0))}</td>
       <td class="px-3 py-2 text-xs text-amber-600">${csEscape(String(a.requeued || 0))}</td>
       <td class="px-3 py-2 text-xs text-red-600">${csEscape(String(a.gave_up || 0))}</td>
@@ -5478,10 +5487,14 @@ async function csRenderSetupDiagnostics() {
       <td class="px-3 py-2 text-xs text-slate-400">${csEscape(a.last_outcome ? (a.last_outcome + ' @ ' + (a.last_ts_iso || '')) : '—')}</td>
     </tr>`;
     }).join('');
+    const _disabledLine = _disabled.length
+      ? `<p class="text-[11px] text-amber-600 mb-2">${csEscape(String(_disabled.length))} agent(s) hidden (CS disabled) — enable in Agent Config to manage their VMs.</p>`
+      : '';
     csSet(`<div>${cfg}
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">CS Bridge — per-agent relay status (${agents.length})</p>
-      <p class="text-[11px] text-slate-400 mb-3">ACTIVE = the bridge is polling + relaying this agent's queue. SKIP not-enabled = hub's <code>agent_config[agent_id].client_simulation.enabled</code> is off (re-save the agent's CS config in Agent Config). SKIP no-cs-spoke = no client-sim spoke bound to the tenant. Re-queued climbing = agent too busy to ACK (transient, retried up to max retries). Gave up / Failed = retries exhausted or a genuine rejection. The same data streams to <b>WebUI Logs → Simulations</b> as <code>[cs-bridge]</code> lines.</p>
-      ${agents.length ? csTable(head, body) : '<p class="text-sm text-slate-500">No agents seen yet.</p>'}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">CS Bridge — per-agent relay status (${_shown.length} shown${_disabled.length ? ', ' + _disabled.length + ' hidden' : ''})</p>
+      ${_disabledLine}
+      <p class="text-[11px] text-slate-400 mb-3">ACTIVE = the bridge is polling + relaying this agent's queue. <b>Via</b> = the spoke the agent is actually connected to (commands are delivered through it); <b>cs_spoke</b> in the Decision is the tenant's queue broker (one per tenant — every lrb agent shares it). <b>Inbox</b> = commands found in the agent's inbox on the cs spoke last poll (0 with 0 Accepted = nothing queued / hostname-key mismatch; &gt;0 with 0 Accepted = relay path issue). SKIP no-cs-spoke = no client-sim spoke bound to the tenant. Re-queued climbing = agent too busy to ACK (transient, retried up to max retries). Gave up / Failed = retries exhausted or a genuine rejection. The same data streams to <b>WebUI Logs → Simulations</b> as <code>[cs-bridge]</code> lines.</p>
+      ${_shown.length ? csTable(head, body) : '<p class="text-sm text-slate-500">No active agents seen yet.</p>'}
     </div>`);
 }
 
