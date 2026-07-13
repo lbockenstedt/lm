@@ -4396,7 +4396,7 @@ async function csRenderVmServer() {
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex items-center justify-between mb-2">
           <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Auto-Provisioning</p>
-          <button id="cs-autoprov-enable-btn" onclick="csToggleAutoProvision(!csAutoProvOn)" class="px-3 py-1 rounded-md text-xs font-bold border">Enable</button>
+          <button id="cs-autoprov-enable-btn" onclick="csToggleAutoProvision()" class="px-3 py-1 rounded-md text-xs font-bold border">Enable</button>
         </div>
         <div class="flex gap-4">
           <div class="flex-1 min-w-0">
@@ -4641,6 +4641,11 @@ window.csFleetReclone = async function () {
 };
 
 window.csToggleAutoProvision = async function (enabled) {
+    // The ENABLE button calls with no arg (inline onclick can't see the lexical
+    // ``csAutoProvOn`` — ``let`` isn't on window — so it can't pass ``!csAutoProvOn``).
+    // Default to the opposite of the current state, which the function's closure
+    // CAN read.
+    if (enabled === undefined) enabled = !csAutoProvOn;
     try {
         const r = await csFetch(`/${csTenant()}/toggle-auto-provision?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify({ enabled }) });
