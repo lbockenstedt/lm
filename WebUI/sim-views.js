@@ -2699,20 +2699,27 @@ function csLinkSiteOptions(sel, placeholder) {
 // clients to that cell's site AND sets their SSID — so MIA-PSK and MIA-ACD are
 // separate quota targets that can each hold clients.
 function csSsidCellOptions(sel, placeholder) {
-    const links = (window._csSiteLinks || []).filter(l => l && l.wsite);
+    // One combined item per SSID cell, shown as "MIA/PSK" (site/ssid) — the VALUE
+    // stays the cell name the engine keys on. Bare sites aren't listed; a quota
+    // targets a specific cell. Falls back to the site links only when no cells
+    // are defined yet, so the field still works.
     const cells = ((window._csPoolCfg || {}).ssid_matrix || [])
-        .map(c => c.name || `${c.site}-${c.ssid}`).filter(Boolean);
+        .filter(c => c && (c.name || (c.site && c.ssid)));
     let out = `<option value="">${csEscape(placeholder || '— all sites —')}</option>`;
-    if (links.length) {
-        out += '<optgroup label="Sites">' + links.map(l =>
-            `<option value="${csEscape(l.wsite)}" ${l.wsite === sel ? 'selected' : ''}>${csEscape(l.name || l.wsite)}</option>`).join('') + '</optgroup>';
+    const known = [];
+    out += cells.map(c => {
+        const val = c.name || `${c.site}-${c.ssid}`;
+        known.push(val);
+        const label = (c.site && c.ssid) ? `${c.site}/${c.ssid}` : val;
+        return `<option value="${csEscape(val)}" ${val === sel ? 'selected' : ''}>${csEscape(label)}</option>`;
+    }).join('');
+    const links = (window._csSiteLinks || []).filter(l => l && l.wsite);
+    if (!cells.length) {
+        out += links.map(l =>
+            `<option value="${csEscape(l.wsite)}" ${l.wsite === sel ? 'selected' : ''}>${csEscape(l.name || l.wsite)}</option>`).join('');
     }
-    if (cells.length) {
-        out += '<optgroup label="SSIDs">' + cells.map(nm =>
-            `<option value="${csEscape(nm)}" ${nm === sel ? 'selected' : ''}>${csEscape(nm)}</option>`).join('') + '</optgroup>';
-    }
-    if (sel && !links.some(l => l.wsite === sel) && cells.indexOf(sel) < 0) {
-        out += `<option value="${csEscape(sel)}" selected>${csEscape(sel)} (unlinked)</option>`;
+    if (sel && known.indexOf(sel) < 0 && !links.some(l => l.wsite === sel)) {
+        out += `<option value="${csEscape(sel)}" selected>${csEscape(sel)}</option>`;
     }
     return out;
 }
