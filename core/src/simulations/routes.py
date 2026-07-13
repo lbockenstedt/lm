@@ -1330,12 +1330,36 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception:  # noqa: BLE001
             return {}
 
+    async def _pool_config(tenant_id: str) -> dict:
+        """The tenant's pool / SSID config, pulled from central_sites_config and
+        flattened into the CS_CONFIG_UPDATE keys the spoke applies (see
+        docs/simulation-pool-and-quota-design.md). Missing keys are omitted so a
+        tenant that hasn't configured pools pushes nothing extra."""
+        try:
+            csc = await store.get_central_sites_config(tenant_id) or {}
+        except Exception:  # noqa: BLE001
+            csc = {}
+        out: dict = {}
+        if isinstance(csc.get("site_source"), str):
+            out["site_source"] = csc["site_source"]
+        if isinstance(csc.get("randomizable_sims"), list):
+            out["randomizable_sims"] = csc["randomizable_sims"]
+        if isinstance(csc.get("random_pool"), dict):
+            out["random_pool"] = csc["random_pool"]
+        if isinstance(csc.get("ssid_matrix"), list):
+            out["ssid_matrix"] = csc["ssid_matrix"]
+        if isinstance(csc.get("ssid_placement"), dict):
+            out["ssid_placement"] = csc["ssid_placement"]
+        return out
+
     async def _push_sim_quotas(tenant_id: str) -> int:
-        """Push the tenant's effective sim quotas + per-sim shareable overrides to
-        its cs spoke(s) as a CS_CONFIG_UPDATE the SimQuotaEngine reconciles against."""
+        """Push the tenant's effective sim quotas + per-sim shareable overrides +
+        pool/SSID config to its cs spoke(s) as a CS_CONFIG_UPDATE the
+        SimQuotaEngine reconciles against."""
         return await _push_config(tenant_id, {
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
+            **await _pool_config(tenant_id),
         })
 
     async def _push_sim_quotas_all_tenants() -> int:
@@ -2640,6 +2664,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             "central_sites_config": cfg,
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
+            **await _pool_config(tenant_id),
         })
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
