@@ -10551,6 +10551,17 @@ function _tplBytes(n) {
     do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
     return n.toFixed(1) + ' ' + u[i];
 }
+// Legend for the Template Repo Status column (swatches match _tplStatusBadge).
+function _templateRepoLegend() {
+    const item = (cls, label, desc) =>
+        `<span class="inline-flex items-center gap-1.5" title="${escJsAttr(desc)}"><span class="w-2.5 h-2.5 rounded-full ${cls}"></span><span class="text-slate-600">${label}</span> <span class="text-slate-400">— ${desc}</span></span>`;
+    const items = [
+        ['bg-green-500', 'Complete', 'backup stored on the hub, ready to restore'],
+        ['bg-sky-500', 'In progress', 'vzdump running on the node, or uploading to the hub (shows %)'],
+        ['bg-red-500', 'Failed', 'backup did not complete — hover the badge for the error'],
+    ];
+    return `<div class="mt-3 px-1"><p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Status legend</p><div class="flex flex-wrap gap-x-4 gap-y-1 text-[11px]">${items.map(i => item(i[0], i[1], i[2])).join('')}</div></div>`;
+}
 function _tplStatusBadge(t) {
     const s = String(t.status || '').toLowerCase();
     if (s === 'complete') return '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">Complete</span>';
@@ -10612,7 +10623,8 @@ async function renderTemplateRepo() {
           </tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
-      </div>`;
+      </div>
+      ${_templateRepoLegend()}`;
     if (_templateRepoTimer) { clearTimeout(_templateRepoTimer); _templateRepoTimer = null; }
     if (anyBusy && document.getElementById('template-repo-content')) {
         _templateRepoTimer = setTimeout(() => { if (document.getElementById('template-repo-content')) renderTemplateRepo(); }, 5000);
@@ -13147,6 +13159,12 @@ function startLeInflightPollers() {
     _leInflightPoller = setInterval(() => {
         if (window._leLoading) return;  // don't overlap a manual load
         if (!document.getElementById('le-content')) { clearLeInflightPollers(); return; }
+        // Only auto-refresh while a cert distribution is IN FLIGHT (there's a
+        // pending deploy whose result we're waiting on) — no constant reloading
+        // when the page is idle, which re-rendered the whole table every 12s and
+        // felt like a jittery refresh. Idle = the operator refreshes by re-opening
+        // the tab or after an action (issue/renew/distribute already reload).
+        if (!document.querySelector('[data-inflight-since]')) return;
         loadLEData();
     }, 12000);
 }
