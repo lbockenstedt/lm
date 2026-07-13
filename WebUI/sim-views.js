@@ -2618,6 +2618,10 @@ function csSimQuotaRowFromServer(q) {
         enabled: !!q.enabled,
         // A sim quota with no alert_id was saved untethered; presence rows ignore this.
         tied: !!(q.sim_id && q.alert_id),
+        // Adaptive when a max above the min was saved (design §9).
+        adaptive: !!(q.max != null && Number(q.max) > Number(q.min != null ? q.min : q.count)),
+        min: q.min != null ? q.min : undefined,
+        max: q.max != null ? q.max : undefined,
     };
 }
 
@@ -2717,13 +2721,21 @@ function csRenderSimQuotaEditor() {
           <label class="text-xs text-slate-500">Simulation
             <select data-cs-sq="sim_id" onchange="csSimQuotaOnSimChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${simOpts}</select>
           </label>
-          <label class="text-xs text-slate-500">Clients
+          ${(tied && r.adaptive)
+            ? `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = ceiling. The hub ramps between them to keep the alert firing, then holds at the learned floor + 20%.">Min / Max
+            <div class="flex gap-1 mt-1">
+              <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(r.min != null ? r.min : (r.count || 1)))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+              <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(r.max != null ? r.max : (r.count || 1)))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+            </div>
+          </label>`
+            : `<label class="text-xs text-slate-500">Clients
             <input data-cs-sq="count" type="number" min="1" value="${csEscape(String(r.count))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
-          </label>
+          </label>`}
           <label class="text-xs text-slate-500">Site
             <select data-cs-sq="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${siteOpts}</select>
           </label>
           <label class="text-xs text-slate-500 flex flex-col gap-1">
+            ${(!isPresence && tied) ? `<span class="flex items-center gap-1"><input data-cs-sq="adaptive" type="checkbox" onchange="csSimQuotaOnAdaptiveChange(this)" ${r.adaptive ? 'checked' : ''}> Adaptive (keep firing)</span>` : ''}
             <span class="flex items-center gap-1"><input data-cs-sq="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
@@ -2768,18 +2780,30 @@ function csSimQuotaSyncFromDom() {
         // doesn't throw and preserves alert_type/alert_id defaults.
         const sim_id = g('sim_id').value;
         const tied = sim_id ? !!(g('tied') || {}).checked : false;
-        rows.push({
+        const adaptive = (sim_id && tied) ? !!(g('adaptive') || {}).checked : false;
+        const row = {
             alert_type: (g('alert_type') || {}).value || 'alert',
             // An untethered row (not tied) carries no alert_id.
             alert_id: tied ? ((g('alert_id') || {}).value || '').trim() : '',
             sim_id,
-            count: parseInt(g('count').value || '1', 10) || 1,
             site: g('site').value,
             multi_capable: !!g('multi_capable').checked,
             rehome: !!g('rehome').checked,
             enabled: !!g('enabled').checked,
             tied,
-        });
+            adaptive,
+        };
+        if (adaptive) {
+            // Adaptive rows use Min/Max; count is the floor the controller ramps from.
+            const mn = parseInt((g('min') || {}).value || '1', 10) || 1;
+            const mx = parseInt((g('max') || {}).value || String(mn), 10) || mn;
+            row.min = mn;
+            row.max = Math.max(mn, mx);
+            row.count = mn;
+        } else {
+            row.count = parseInt((g('count') || {}).value || '1', 10) || 1;
+        }
+        rows.push(row);
     });
     csSimQuotaRows = rows;
     return rows;
@@ -2796,6 +2820,25 @@ window.csSimQuotaOnTiedChange = function (cb) {
     if (row) {
         const idx = parseInt(row.getAttribute('data-cs-sqrow'), 10);
         if (csSimQuotaRows[idx]) csSimQuotaRows[idx].tied = !!cb.checked;
+    }
+    csRenderSimQuotaEditor();
+};
+
+// Toggling "Adaptive" swaps the Clients field for Min/Max (the hub controller
+// then ramps between them to keep the alert firing). Sync first so nothing is lost.
+window.csSimQuotaOnAdaptiveChange = function (cb) {
+    csSimQuotaSyncFromDom();
+    const row = cb && cb.closest('[data-cs-sqrow]');
+    if (row) {
+        const idx = parseInt(row.getAttribute('data-cs-sqrow'), 10);
+        const r = csSimQuotaRows[idx];
+        if (r) {
+            r.adaptive = !!cb.checked;
+            if (r.adaptive) {  // seed min/max from the current count
+                if (r.min == null) r.min = r.count || 1;
+                if (r.max == null) r.max = Math.max(r.min, (r.count || 1) * 2);
+            }
+        }
     }
     csRenderSimQuotaEditor();
 };
