@@ -2706,7 +2706,7 @@ function csRenderSimQuotaEditor() {
         const na = _naVal(f);
         const def = !!(_metaMap[f] && _metaMap[f].multi_capable);
         const cur = Object.prototype.hasOwnProperty.call(_shareMap, f) ? !!_shareMap[f] : def;
-        return `<label class="flex items-center justify-between gap-2 py-1 border-b border-slate-100 ${na ? 'opacity-60' : ''}">
+        return `<label class="flex items-center gap-3 py-1 border-b border-slate-100 ${na ? 'opacity-60' : ''}">
           <span class="text-xs font-mono text-slate-600 truncate">${csEscape(f)}</span>
           <span class="flex items-center gap-3 text-xs shrink-0">
             <span class="flex items-center gap-1"><input data-cs-share="${csEscape(f)}" type="checkbox" ${cur ? 'checked' : ''} ${na ? 'disabled' : ''}> Share</span>
