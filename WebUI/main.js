@@ -4989,6 +4989,17 @@ function _renderSetupSimulationsTile(content) {
                 </div>
                 <div id="sim-quota-defaults-rows" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
+            <div class="${card}">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Sharing (Stacking)</h3>
+                  <div class="flex items-center gap-3">
+                    <label class="text-[11px] text-slate-500 flex items-center gap-1"><input type="checkbox" onchange="simSharingToggleHide(this)"> Hide N/A</label>
+                    <button onclick="saveSimSharing()" class="${btnCls} text-xs px-3 py-1">Save Sharing</button>
+                  </div>
+                </div>
+                <p class="text-xs text-slate-500 mb-3">Platform-wide (all tenants): which simulations may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — no tenant's Quota Engine will pack it onto a client running other sims (authoritative, overrides a quota's Multi-capable). Mark a sim <b>N/A</b> to hide it via Hide N/A.</p>
+                <div id="sim-sharing-rows" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
             </div>`;
     loadSimAdminOverview();
     loadGlobalTierPci();
@@ -5082,6 +5093,9 @@ function _simQuotaDefaultFromServer(q) {
         multi_capable: !!q.multi_capable,
         rehome: !!q.rehome,
         enabled: !!q.enabled,
+        // A sim quota with no alert_id was saved untethered; presence rows (no
+        // sim_id) are inherently untethered and ignore this flag.
+        tied: !!(q.sim_id && q.alert_id),
     };
 }
 
@@ -5101,6 +5115,31 @@ function _simQuotaDefaultSimOptions(selected, simIds) {
         simIds.map(it => `<option value="${it}" ${it === selected ? 'selected' : ''}>${it}</option>`).join('');
 }
 
+// Alert / Insight ID control for a default-quota row: a dropdown sourced from
+// the SHARED alert/insight history (catalog.alerts / catalog.insights — every
+// alert any tenant has ever seen) that fills the adjacent free-text input, plus
+// the free-text input itself so an admin can still type a brand-new alert ID
+// before it has ever fired (the chicken/egg the history solves once it has).
+function _simQuotaDefaultIdControl(r, ctlCls) {
+    const cat = _simQuotaDefaultsCatalog || {};
+    const list = (r.alert_type === 'insight' ? cat.insights : cat.alerts) || [];
+    const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    const opts = ['<option value="">— pick from history —</option>'].concat(
+        list.map(it => {
+            const id = it.id || it.name || '';
+            const label = (it.name && it.name !== id) ? `${it.name} — ${id}` : id;
+            return `<option value="${esc(id)}">${esc(label)}</option>`;
+        })).join('');
+    return `<select data-sqd-idpick onchange="_simQuotaDefaultPickId(this)" class="${ctlCls}">${opts}</select>
+            <input data-sqd="alert_id" value="${esc(r.alert_id || '')}" placeholder="type or pick — e.g. CLIENT_DHCP_FAILURE" class="${ctlCls}">`;
+}
+window._simQuotaDefaultPickId = function (sel) {
+    const wrap = sel.closest('[data-sqd-row]');
+    if (!wrap) return;
+    const inp = wrap.querySelector('[data-sqd="alert_id"]');
+    if (inp && sel.value) inp.value = sel.value;
+};
+
 function _renderSimQuotaDefaultsEditor() {
     const cat = _simQuotaDefaultsCatalog || { sims: [], sites: [], suggested: {}, meta: {} };
     const simIds = (cat.sims || []).map(s => s.sim_id);
@@ -5114,6 +5153,10 @@ function _renderSimQuotaDefaultsEditor() {
     if (!rowsEl) return;
     const rowHtml = _simQuotaDefaults.map((r, i) => {
         const isPresence = !r.sim_id;
+        // A non-presence quota may be UNTETHERED (not tied to an alert/insight):
+        // then it needs no alert ID — it just keeps N clients on the sim at the
+        // site, much like a presence row. tied defaults on for backward compat.
+        const tied = !isPresence && r.tied !== false;
         const simOpts = _simQuotaDefaultSimOptions(r.sim_id, simIds);
         // Site is a dropdown sourced from simulation.conf (platform-wide union).
         // Fall back to a free-text input when no conf has been seen yet so an
@@ -5125,19 +5168,27 @@ function _renderSimQuotaDefaultsEditor() {
             ? `<label class="${lblCls}">Presence
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
               </label>`
-            : `<label class="${lblCls}">Type
+            : (!tied
+              ? `<label class="${lblCls}">Type
+                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— not tied to an alert/insight —</div>
+              </label>`
+              : `<label class="${lblCls}">Type
                 <select data-sqd="alert_type" class="${ctlCls}">
                   <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
                   <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
                 </select>
-              </label>`;
+              </label>`);
         const idCell = isPresence
             ? `<label class="${lblCls}">Alert / Insight ID
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— none (presence) —</div>
               </label>`
-            : `<label class="${lblCls}">Alert / Insight ID
-                <input data-sqd="alert_id" value="${r.alert_id.replace(/"/g, '&quot;')}" placeholder="CLIENT_DHCP_FAILURE" class="${ctlCls}">
-              </label>`;
+            : (!tied
+              ? `<label class="${lblCls}">Alert / Insight ID
+                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— not required —</div>
+              </label>`
+              : `<label class="${lblCls}">Alert / Insight ID
+                ${_simQuotaDefaultIdControl(r, ctlCls)}
+              </label>`);
         return `<div class="grid grid-cols-1 md:grid-cols-7 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-sqd-row="${i}">
           ${typeCell}
           ${idCell}
@@ -5151,6 +5202,7 @@ function _renderSimQuotaDefaultsEditor() {
             ${siteCtl}
           </label>
           <label class="${lblCls} flex flex-col gap-1">
+            ${isPresence ? '' : `<span class="flex items-center gap-1"><input data-sqd="tied" type="checkbox" onchange="_simQuotaDefaultOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</span>`}
             <span class="flex items-center gap-1"><input data-sqd="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-sqd="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-sqd="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
@@ -5174,15 +5226,20 @@ function _simQuotaDefaultsSyncFromDom() {
         const g = (k) => el.querySelector(`[data-sqd="${k}"]`);
         // A presence row (Clients Associated) has no Type / Alert ID controls
         // — nullish-guard so the sync doesn't throw and preserves defaults.
+        const sim_id = g('sim_id').value;
+        const tied = sim_id ? !!(g('tied') || {}).checked : false;
         rows.push({
             alert_type: (g('alert_type') || {}).value || 'alert',
-            alert_id: ((g('alert_id') || {}).value || '').trim(),
-            sim_id: g('sim_id').value,
+            // An untethered row (not tied) carries no alert_id regardless of any
+            // stale value hidden in the DOM.
+            alert_id: tied ? ((g('alert_id') || {}).value || '').trim() : '',
+            sim_id,
             count: parseInt(g('count').value || '1', 10) || 1,
             site: g('site').value.trim(),
             multi_capable: !!g('multi_capable').checked,
             rehome: !!g('rehome').checked,
             enabled: !!g('enabled').checked,
+            tied,
         });
     });
     _simQuotaDefaults = rows;
@@ -5229,12 +5286,74 @@ async function loadSimQuotaDefaults() {
         const data = await r.json();
         _simQuotaDefaultsCatalog = data.catalog || { sims: [], sites: [], suggested: {}, meta: {} };
         _simQuotaDefaults = (data.defaults || []).map(_simQuotaDefaultFromServer);
+        const cat = _simQuotaDefaultsCatalog;
+        _simSharing = (cat.sim_shareable && typeof cat.sim_shareable === 'object') ? { ...cat.sim_shareable } : {};
+        _simSharingNA = (cat.sim_na && typeof cat.sim_na === 'object') ? { ...cat.sim_na } : {};
         _renderSimQuotaDefaultsEditor();
+        _renderSimSharing();
     } catch (e) {
         rowsEl.innerHTML = '<p class="text-xs text-red-400 italic">Failed to load sim quota defaults</p>';
         console.error('loadSimQuotaDefaults failed', e);
     }
 }
+
+// ── Simulation Sharing (Stacking) — GLOBAL, Setup → Simulations → Sim Quotas ──
+// Platform-wide authoritative per-sim shareable map + a UI-only N/A hide map.
+// Saved via the sim-quota-defaults PUT (which also carries the current defaults
+// so they aren't wiped). Checkboxes are laid out on a fixed grid so Share / N/A
+// line up down every column.
+let _simSharing = {};
+let _simSharingNA = {};
+let _simSharingHideNA = false;
+
+function _simSharingSyncFromDom() {
+    document.querySelectorAll('[data-simshare]').forEach(el => { _simSharing[el.getAttribute('data-simshare')] = !!el.checked; });
+    document.querySelectorAll('[data-simna]').forEach(el => { _simSharingNA[el.getAttribute('data-simna')] = !!el.checked; });
+}
+
+function _renderSimSharing() {
+    const el = document.getElementById('sim-sharing-rows');
+    if (!el) return;
+    const cat = _simQuotaDefaultsCatalog || {};
+    const meta = cat.meta || {};
+    const sims = (cat.sims || []).map(s => s.sim_id).filter(Boolean);
+    Object.keys(_simSharing).forEach(k => { if (sims.indexOf(k) < 0) sims.push(k); });
+    Object.keys(_simSharingNA).forEach(k => { if (sims.indexOf(k) < 0) sims.push(k); });
+    sims.sort();
+    const naVal = f => Object.prototype.hasOwnProperty.call(_simSharingNA, f) ? !!_simSharingNA[f] : false;
+    const list = sims.filter(f => !_simSharingHideNA || !naVal(f));
+    if (!list.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No simulations found.</p>'; return; }
+    const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    el.innerHTML = list.map(f => {
+        const na = naVal(f);
+        const def = !!(meta[f] && meta[f].multi_capable);
+        const cur = Object.prototype.hasOwnProperty.call(_simSharing, f) ? !!_simSharing[f] : def;
+        return `<label class="grid grid-cols-[minmax(0,1fr)_5rem_3.5rem] items-center gap-2 py-1 border-b border-slate-100 ${na ? 'opacity-60' : ''}">
+          <span class="text-xs font-mono text-slate-600 truncate">${esc(f)}</span>
+          <span class="flex items-center gap-1 text-xs"><input data-simshare="${esc(f)}" type="checkbox" ${cur ? 'checked' : ''} ${na ? 'disabled' : ''}> Share</span>
+          <span class="flex items-center gap-1 text-xs text-slate-400"><input data-simna="${esc(f)}" type="checkbox" onchange="simSharingOnNA()" ${na ? 'checked' : ''}> N/A</span>
+        </label>`;
+    }).join('');
+}
+
+window.simSharingOnNA = function () { _simSharingSyncFromDom(); _renderSimSharing(); };
+window.simSharingToggleHide = function (cb) { _simSharingSyncFromDom(); _simSharingHideNA = !!(cb && cb.checked); _renderSimSharing(); };
+
+window.saveSimSharing = async function () {
+    _simSharingSyncFromDom();
+    try {
+        const r = await fetch(SIM_QUOTA_DEFAULTS_URL, {
+            method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            // Include current defaults so the shared PUT doesn't wipe them.
+            body: JSON.stringify({ defaults: _simQuotaDefaultsSyncFromDom(), sim_shareable: _simSharing, sim_na: _simSharingNA }),
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        if (typeof showToast === 'function') showToast('Simulation sharing saved.', 'success');
+    } catch (e) {
+        if (typeof showToast === 'function') showToast((e && e.message) || 'Save failed', 'error');
+        console.error('saveSimSharing failed', e);
+    }
+};
 
 function addSimQuotaDefault(preset) {
     _simQuotaDefaultsSyncFromDom();
@@ -5248,9 +5367,23 @@ function addSimQuotaDefault(preset) {
         multi_capable: p.multi_capable != null ? !!p.multi_capable : false,
         rehome: p.rehome != null ? !!p.rehome : false,
         enabled: p.enabled != null ? !!p.enabled : false,
+        tied: p.tied != null ? !!p.tied : true,
     });
     _renderSimQuotaDefaultsEditor();
 }
+
+// Toggling a row's "Tied to alert/insight" flips whether the Type / Alert ID
+// controls show (an untethered quota needs no alert). Sync current edits from
+// the DOM first so nothing is lost on the re-render.
+window._simQuotaDefaultOnTiedChange = function (cb) {
+    _simQuotaDefaultsSyncFromDom();
+    const row = cb && cb.closest('[data-sqd-row]');
+    if (row) {
+        const idx = parseInt(row.getAttribute('data-sqd-row'), 10);
+        if (_simQuotaDefaults[idx]) _simQuotaDefaults[idx].tied = !!cb.checked;
+    }
+    _renderSimQuotaDefaultsEditor();
+};
 
 function addSimQuotaDefaultSuggested(alertId, simId) {
     addSimQuotaDefault({ alert_id: alertId, sim_id: simId, count: 10 });

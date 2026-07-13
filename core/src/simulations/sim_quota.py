@@ -100,9 +100,13 @@ def quota_dedup_key(q: Dict[str, Any]) -> str:
     A sim quota is keyed by ``alert_type:alert_id:site``. A presence quota
     (``sim_id`` empty — "Clients Associated") has no alert, so it's keyed by
     site alone — one presence count per site, independent of the sim-quota
-    namespace. The engine's ``_quota_key`` mirrors this."""
+    namespace. An UNTETHERED sim quota (``sim_id`` set but no ``alert_id`` — the
+    row's "Tied to alert/insight" box is off) has no alert to key on, so it's
+    keyed by ``sim:{sim_id}:{site}``. The engine's ``_quota_key`` mirrors this."""
     if not q.get("sim_id"):
         return f"presence::{q.get('site', '')}"
+    if not q.get("alert_id"):
+        return f"sim:{q.get('sim_id', '')}:{q.get('site', '')}"
     return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
 
 
@@ -111,9 +115,11 @@ def validate_sim_quotas(
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Normalize + validate a ``sim_quotas`` list.
 
-    A SIM quota (``sim_id`` set) requires an ``alert_id`` and its ``sim_id``
-    must be in *available_sims* (when provided). A PRESENCE quota (``sim_id``
-    empty — "Clients Associated") requires a ``site`` and NO ``alert_id``.
+    A SIM quota (``sim_id`` set) whose ``sim_id`` must be in *available_sims*
+    (when provided). An alert/insight linkage is OPTIONAL: a tethered sim quota
+    carries an ``alert_id``; an UNTETHERED one (the row's "Tied to alert/insight"
+    box off) has no ``alert_id`` and just keeps N clients running the sim at the
+    site — like a PRESENCE quota, which needs a ``site`` and NO sim/alert.
     Duplicate keys (``quota_dedup_key``) collapse last-wins."""
     clean: List[Dict[str, Any]] = []
     errors: List[str] = []
@@ -127,9 +133,7 @@ def validate_sim_quotas(
                               f"requires a site — dropped")
                 continue
         else:
-            if not q["alert_id"]:
-                errors.append(f"quota #{i}: missing alert_id — dropped")
-                continue
+            # alert_id is optional now (untethered quota) — no error when blank.
             if sim_set and q["sim_id"] not in sim_set:
                 errors.append(
                     f"quota #{i} ({q['alert_id']}): sim_id '{q['sim_id']}' "
@@ -182,9 +186,13 @@ def merge_effective_quotas(
         logger.warning("merge_effective_quotas: tenant quota errors: %s", t_errs)
 
     def _grp_sim(qs: List[Dict[str, Any]]) -> Dict[tuple, List[Dict[str, Any]]]:
+        # Tethered quotas own their (alert_type, alert_id) across sites; an
+        # untethered quota (no alert_id) owns its (sim_id, site) instead.
         m: Dict[tuple, List[Dict[str, Any]]] = {}
         for q in qs:
-            m.setdefault((q["alert_type"], q["alert_id"]), []).append(q)
+            key = ((q["alert_type"], q["alert_id"]) if q.get("alert_id")
+                   else ("__sim__", q["sim_id"], q["site"]))
+            m.setdefault(key, []).append(q)
         return m
     def _grp_site(qs: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         m: Dict[str, List[Dict[str, Any]]] = {}

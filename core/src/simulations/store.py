@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import threading
+import time
 from typing import Any, Dict, List
 
 from security.encryption import hub_encryption
@@ -378,6 +379,66 @@ class SimulationsStore:
             self._tenant(tenant_id)["central_sites_config"] = cfg or {}
             await self._asave()
 
+    # ── shared alert/insight history (GLOBAL — all tenants + system defaults) ──
+    # A single hub-wide catalog of every Central alert/insight NAME ever observed,
+    # so the Sim-Quota "Alert / Insight ID" picker can offer them BEFORE they fire
+    # again — a quota has to be set while the alert is quiet (chicken/egg). Stored
+    # under a reserved top-level key (NOT tenant-scoped: tenant ids never take this
+    # form), so it is shared by every tenant's Config → Sim Quotas AND the
+    # superadmin Setup → Simulations defaults. Keyed "{type}:{id}".
+    _AIH_KEY = "__alert_insight_history__"
+
+    async def get_alert_insight_history(self) -> List[Dict[str, Any]]:
+        """Return the shared alert/insight history as a list of
+        {type, id, name, site, first_seen, last_seen}."""
+        hist = self._data.get(self._AIH_KEY)
+        if not isinstance(hist, dict):
+            return []
+        return [dict(v) for v in hist.values() if isinstance(v, dict)]
+
+    async def record_alert_insight_seen(self, items: List[Dict[str, Any]]) -> int:
+        """Upsert observed alerts/insights into the shared history. Each item:
+        {type: 'alert'|'insight', id|name, site?}. Returns the count of NEW entries.
+        Persists only when a new entry is added or a name changes (last_seen alone
+        updates in memory), so routine browse polls don't rewrite the store."""
+        if not items:
+            return 0
+        now = time.time()
+        added = 0
+        with self._lock:
+            hist = self._data.get(self._AIH_KEY)
+            if not isinstance(hist, dict):
+                hist = {}
+                self._data[self._AIH_KEY] = hist
+            changed = False
+            for it in items:
+                try:
+                    typ = str((it or {}).get("type") or "alert").strip().lower()
+                    if typ not in ("alert", "insight"):
+                        typ = "alert"
+                    ident = str((it or {}).get("id") or (it or {}).get("name") or "").strip()
+                    if not ident:
+                        continue
+                    name = str((it or {}).get("name") or ident).strip()
+                    site = str((it or {}).get("site") or "").strip()
+                    key = f"{typ}:{ident}"
+                    entry = hist.get(key)
+                    if entry is None:
+                        hist[key] = {"type": typ, "id": ident, "name": name,
+                                     "site": site, "first_seen": now, "last_seen": now}
+                        added += 1
+                        changed = True
+                    else:
+                        entry["last_seen"] = now  # in-memory; not worth a write alone
+                        if name and entry.get("name") != name:
+                            entry["name"] = name
+                            changed = True
+                except Exception:  # noqa: BLE001 — never let telemetry recording throw
+                    continue
+            if changed:
+                await self._asave()
+        return added
+
     # ── github config (Setup → GitHub: per-spoke repo + token) ───────────────
     async def get_github_config(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's GitHub config (per-spoke repo + token)."""
@@ -651,6 +712,29 @@ class SimulationsStore:
         with self._lock:
             self._global()["sim_quota_defaults"] = [
                 dict(d) for d in (quotas or []) if isinstance(d, dict)]
+            await self._asave()
+
+    # ── GLOBAL simulation sharing (stacking) + N/A hide (Setup → Simulations) ──
+    # Platform-wide (all tenants) authoritative per-sim shareable/stackable map
+    # and the UI-only N/A hide map. A non-shareable sim can NEVER be stacked by
+    # any tenant's SimQuotaEngine. Lives under ``__global__`` and is pushed to
+    # every tenant's spoke as CS_CONFIG_UPDATE.sim_shareable.
+    async def get_sim_shareable_global(self) -> Dict[str, Any]:
+        v = self._global().get("sim_shareable")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_sim_shareable_global(self, mapping: Dict[str, Any]) -> None:
+        with self._lock:
+            self._global()["sim_shareable"] = dict(mapping) if isinstance(mapping, dict) else {}
+            await self._asave()
+
+    async def get_sim_na_global(self) -> Dict[str, Any]:
+        v = self._global().get("sim_na")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_sim_na_global(self, mapping: Dict[str, Any]) -> None:
+        with self._lock:
+            self._global()["sim_na"] = dict(mapping) if isinstance(mapping, dict) else {}
             await self._asave()
 
     async def get_global_usb_vidpids(self) -> List[Dict[str, Any]]:

@@ -2578,12 +2578,14 @@ async function csRenderConfigSimQuotas() {
             const id = String((i.name || i.category) || '').trim();
             if (id) _av.push({ type: 'insight', id, name: i.name || i.category || id, site: (i.site && i.site !== '—' && i.site !== 'All Sites') ? i.site : '', status: i.status || 'active' });
         });
+        // Also fold in the SHARED alert/insight history (catalog.alerts/insights —
+        // every alert any tenant has ever seen) so the ID picker works even when
+        // this alert isn't firing right now (dedup happens in the options builder).
+        ((cat && cat.alerts) || []).forEach(a => { if (a && a.id) _av.push({ type: 'alert', id: a.id, name: a.name || a.id, site: a.site || '' }); });
+        ((cat && cat.insights) || []).forEach(i => { if (i && i.id) _av.push({ type: 'insight', id: i.id, name: i.name || i.id, site: i.site || '' }); });
         csSimQuotaAvailable = _av;
         csSimQuotaCatalog = cat || { sims: [], sites: [], suggested: {}, meta: {} };
         // Per-sim shareable/stackable overrides (Simulation Sharing tile).
-        window._csSimShareable = (cat && cat.sim_shareable && typeof cat.sim_shareable === 'object') ? { ...cat.sim_shareable } : {};
-        window._csSimNA = (cat && cat.sim_na && typeof cat.sim_na === 'object') ? { ...cat.sim_na } : {};
-        window._csSimCfgOther = { site_mappings: (cfg && cfg.site_mappings) || {}, hardware_checks: Array.isArray(cfg && cfg.hardware_checks) ? cfg.hardware_checks : [] };
         // Monitored alerts/insights (Central → Alerts/Insights → Monitor) are the
         // source for the row's Alert / Insight ID dropdown — a quota is linked to
         // an alert/insight the tenant actually monitors.
@@ -2611,6 +2613,8 @@ function csSimQuotaRowFromServer(q) {
         multi_capable: !!q.multi_capable,
         rehome: !!q.rehome,
         enabled: !!q.enabled,
+        // A sim quota with no alert_id was saved untethered; presence rows ignore this.
+        tied: !!(q.sim_id && q.alert_id),
     };
 }
 
@@ -2670,6 +2674,10 @@ function csRenderSimQuotaEditor() {
     const suggested = cat.suggested || {};
     const rowHtml = csSimQuotaRows.map((r, i) => {
         const isPresence = !r.sim_id;
+        // A non-presence quota may be UNTETHERED (not tied to an alert/insight):
+        // then no alert ID is needed — it just keeps N clients on the sim at the
+        // site, like a presence row. tied defaults on for backward compat.
+        const tied = !isPresence && r.tied !== false;
         const simOpts = csSimQuotaSimOptions(r.sim_id, simIds);
         const siteOpts = csSimQuotaSelect(r.site, sites, '— all sites —');
         const idOpts = csSimQuotaAlertIdOptions(r.alert_type, r.alert_id);
@@ -2677,19 +2685,27 @@ function csRenderSimQuotaEditor() {
             ? `<label class="text-xs text-slate-500" data-cs-sq-presence-note>Presence
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
               </label>`
-            : `<label class="text-xs text-slate-500">Type
+            : (!tied
+              ? `<label class="text-xs text-slate-500">Type
+                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— not tied to an alert/insight —</div>
+              </label>`
+              : `<label class="text-xs text-slate-500">Type
                 <select data-cs-sq="alert_type" onchange="csSimQuotaOnTypeChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
                   <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
                   <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
                 </select>
-              </label>`;
+              </label>`);
         const idCell = isPresence
             ? `<label class="text-xs text-slate-500">Alert / Insight ID
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— none (presence) —</div>
               </label>`
-            : `<label class="text-xs text-slate-500">Alert / Insight ID
+            : (!tied
+              ? `<label class="text-xs text-slate-500">Alert / Insight ID
+                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— not required —</div>
+              </label>`
+              : `<label class="text-xs text-slate-500">Alert / Insight ID
                 <select data-cs-sq="alert_id" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${idOpts}</select>
-              </label>`;
+              </label>`);
         return `<div class="grid grid-cols-1 md:grid-cols-7 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-sqrow="${i}">
           ${alertCell}
           ${idCell}
@@ -2703,6 +2719,7 @@ function csRenderSimQuotaEditor() {
             <select data-cs-sq="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${siteOpts}</select>
           </label>
           <label class="text-xs text-slate-500 flex flex-col gap-1">
+            ${isPresence ? '' : `<span class="flex items-center gap-1"><input data-cs-sq="tied" type="checkbox" onchange="csSimQuotaOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</span>`}
             <span class="flex items-center gap-1"><input data-cs-sq="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
@@ -2717,44 +2734,6 @@ function csRenderSimQuotaEditor() {
             ${Object.entries(suggested).map(([a, s]) => `<li><span class="font-mono">${csEscape(a)}</span> → <span class="font-mono">${csEscape(s)}</span> <button onclick="csSimQuotaAddSuggested('${csEscape(a)}','${csEscape(s)}')" class="text-[#01A982] hover:underline ml-1">add</button></li>`).join('')}
           </ul>
         </details>` : '';
-    // ── Simulation Sharing (stacking) tile ──────────────────────────────────
-    // All on/off sims from simulation.conf with per-sim Shareable + N/A toggles.
-    // Authoritative: a non-shareable sim can NEVER be stacked by the quota engine
-    // (overrides the per-row Multi-capable). N/A marks a sim as not-applicable so
-    // the "Hide N/A" toggle removes it from view (persisted per tenant).
-    const _metaMap = meta || {};
-    const _applicable = new Set((cat.sims || []).map(s => s.sim_id));
-    Object.keys(_metaMap).forEach(k => _applicable.add(k));
-    const _shareMap = window._csSimShareable || {};
-    const _naMap = window._csSimNA || {};
-    const _naVal = (f) => Object.prototype.hasOwnProperty.call(_naMap, f)
-        ? !!_naMap[f] : !_applicable.has(f);
-    const _hideNA = !!window._csSimHideNA;
-    const _simList = (typeof CS_CONTROL_FLAGS !== 'undefined' ? CS_CONTROL_FLAGS : [])
-        .filter(f => !_hideNA || !_naVal(f));
-    const _shareRows = _simList.map(f => {
-        const na = _naVal(f);
-        const def = !!(_metaMap[f] && _metaMap[f].multi_capable);
-        const cur = Object.prototype.hasOwnProperty.call(_shareMap, f) ? !!_shareMap[f] : def;
-        return `<label class="flex items-center gap-3 py-1 border-b border-slate-100 ${na ? 'opacity-60' : ''}">
-          <span class="text-xs font-mono text-slate-600 truncate">${csEscape(f)}</span>
-          <span class="flex items-center gap-3 text-xs shrink-0">
-            <span class="flex items-center gap-1"><input data-cs-share="${csEscape(f)}" type="checkbox" ${cur ? 'checked' : ''} ${na ? 'disabled' : ''}> Share</span>
-            <span class="flex items-center gap-1 text-slate-400"><input data-cs-na="${csEscape(f)}" type="checkbox" onchange="csSimSharingOnNA()" ${na ? 'checked' : ''}> N/A</span>
-          </span>
-        </label>`;
-    }).join('');
-    const sharingCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-        <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Sharing (Stacking)</h3>
-          <div class="flex items-center gap-3">
-            <label class="text-[11px] text-slate-500 flex items-center gap-1"><input type="checkbox" onchange="csSimSharingToggleHide(this)" ${_hideNA ? 'checked' : ''}> Hide N/A</label>
-            <button onclick="csSimSharingSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Sharing</button>
-          </div>
-        </div>
-        <p class="text-xs text-slate-500 mb-2">Which simulations (from <span class="font-semibold">simulation.conf</span>) may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — the Quota Engine never packs it onto a client running other sims (overrides per-quota Multi-capable). Mark a sim <b>N/A</b> to hide it via <span class="font-semibold">Hide N/A</span>.</p>
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-0">${_shareRows}</div>
-      </div>`;
     csSet(`<div class="space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -2768,7 +2747,6 @@ function csRenderSimQuotaEditor() {
         ${suggestHtml}
         <div class="space-y-2 mt-2" id="cs-sq-rows">${rowHtml || '<div class="text-xs text-slate-400 italic">No quotas defined. Add one or pick a suggested linkage above.</div>'}</div>
       </div>
-      ${sharingCard}
     </div>`);
 }
 
@@ -2781,66 +2759,38 @@ function csSimQuotaSyncFromDom() {
         // A presence row (Clients Associated) has no Type / Alert ID controls
         // (they're replaced by static labels) — nullish-guard so the sync
         // doesn't throw and preserves alert_type/alert_id defaults.
+        const sim_id = g('sim_id').value;
+        const tied = sim_id ? !!(g('tied') || {}).checked : false;
         rows.push({
             alert_type: (g('alert_type') || {}).value || 'alert',
-            alert_id: ((g('alert_id') || {}).value || '').trim(),
-            sim_id: g('sim_id').value,
+            // An untethered row (not tied) carries no alert_id.
+            alert_id: tied ? ((g('alert_id') || {}).value || '').trim() : '',
+            sim_id,
             count: parseInt(g('count').value || '1', 10) || 1,
             site: g('site').value,
             multi_capable: !!g('multi_capable').checked,
             rehome: !!g('rehome').checked,
             enabled: !!g('enabled').checked,
+            tied,
         });
     });
     csSimQuotaRows = rows;
     return rows;
 }
 
-// Simulation Sharing (stacking) tile — Shareable + N/A toggles, hide + save.
-// Read both maps back from the DOM (merged over the loaded maps so hidden rows
-// survive a re-render) so live edits persist across N/A / hide toggles.
-function csSimSharingSyncFromDom() {
-    const sh = { ...(window._csSimShareable || {}) };
-    const na = { ...(window._csSimNA || {}) };
-    document.querySelectorAll('[data-cs-share]').forEach(el => { sh[el.getAttribute('data-cs-share')] = !!el.checked; });
-    document.querySelectorAll('[data-cs-na]').forEach(el => { na[el.getAttribute('data-cs-na')] = !!el.checked; });
-    window._csSimShareable = sh;
-    window._csSimNA = na;
-}
+// Simulation Sharing (Stacking) moved to Setup → Simulations → Sim Quotas
+// (main.js) as a GLOBAL, all-tenant authoritative map — no longer edited here.
 
-window.csSimSharingOnNA = function () {
-    csSimSharingSyncFromDom();
-    csRenderSimQuotaEditor();
-};
-
-window.csSimSharingToggleHide = function (cb) {
-    csSimSharingSyncFromDom();
-    window._csSimHideNA = !!(cb && cb.checked);
-    csRenderSimQuotaEditor();
-};
-
-window.csSimSharingSave = async function () {
-    csSimSharingSyncFromDom();
-    const merged = window._csSimShareable || {};
-    const mergedNA = window._csSimNA || {};
-    try {
-        // Preserve every other central-sites-config field; only replace sim_shareable.
-        const cfg = (await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`)) || {};
-        const body = {
-            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
-            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
-            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
-            sim_quotas: Array.isArray(cfg.sim_quotas) ? cfg.sim_quotas : [],
-            sim_shareable: merged,
-            sim_na: mergedNA,
-        };
-        await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, {
-            method: 'POST', body: JSON.stringify(body),
-        });
-        showToast('Simulation sharing saved.', 'success');
-    } catch (e) {
-        showToast((e && e.message) || 'Save failed', 'error');
+// Toggling a row's "Tied to alert/insight" flips whether the Type / Alert ID
+// controls show; sync current edits first so nothing is lost on re-render.
+window.csSimQuotaOnTiedChange = function (cb) {
+    csSimQuotaSyncFromDom();
+    const row = cb && cb.closest('[data-cs-sqrow]');
+    if (row) {
+        const idx = parseInt(row.getAttribute('data-cs-sqrow'), 10);
+        if (csSimQuotaRows[idx]) csSimQuotaRows[idx].tied = !!cb.checked;
     }
+    csRenderSimQuotaEditor();
 };
 
 window.csSimQuotaAdd = function (preset) {
@@ -2855,6 +2805,7 @@ window.csSimQuotaAdd = function (preset) {
         multi_capable: p.multi_capable != null ? !!p.multi_capable : false,
         rehome: p.rehome != null ? !!p.rehome : false,
         enabled: p.enabled != null ? !!p.enabled : false,
+        tied: p.tied != null ? !!p.tied : true,
     });
     csRenderSimQuotaEditor();
 };

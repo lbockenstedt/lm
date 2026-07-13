@@ -1266,27 +1266,65 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             t_csc = {}
         return merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
 
-    async def _sim_shareable(tenant_id: str) -> dict:
-        """The tenant's per-simulation shareable/stackable overrides (authoritative
-        — a sim set non-shareable can NEVER be stacked by the quota engine).
-        Stored in central_sites_config.sim_shareable = {sim_id: bool}."""
+    async def _sim_shareable(tenant_id: str = "") -> dict:
+        """The GLOBAL (all-tenant) per-simulation shareable/stackable overrides
+        (authoritative — a sim set non-shareable can NEVER be stacked by any
+        tenant's quota engine). Edited on Setup → Simulations → Sim Quotas and
+        stored under the store's ``__global__`` key. The ``tenant_id`` arg is
+        accepted (call sites pass it) but ignored — sharing is platform-wide."""
         try:
-            csc = await store.get_central_sites_config(tenant_id) or {}
+            return await store.get_sim_shareable_global()
         except Exception:  # noqa: BLE001
-            csc = {}
-        v = csc.get("sim_shareable")
-        return v if isinstance(v, dict) else {}
+            return {}
 
-    async def _sim_na(tenant_id: str) -> dict:
-        """The tenant's per-simulation N/A (does-not-apply) UI overrides — used only
-        to hide sims from the Sim Sharing tile. Stored in
-        central_sites_config.sim_na = {sim_id: bool}."""
+    async def _record_alert_insight_history(browse: dict) -> None:
+        """Upsert the alerts/insights from a browse result into the shared history.
+        Best-effort: swallows everything so recording can never break a browse."""
         try:
-            csc = await store.get_central_sites_config(tenant_id) or {}
+            if not isinstance(browse, dict):
+                return
+            items: list = []
+            for a in (browse.get("alerts") or []):
+                ident = str((a.get("name") or a.get("category") or "")).strip()
+                if ident:
+                    items.append({"type": "alert", "id": ident, "name": a.get("name") or ident,
+                                  "site": a.get("site") or ""})
+            for i in (browse.get("insights") or []):
+                ident = str((i.get("name") or i.get("category") or "")).strip()
+                if ident:
+                    items.append({"type": "insight", "id": ident, "name": i.get("name") or ident,
+                                  "site": i.get("site") or ""})
+            if items:
+                await store.record_alert_insight_seen(items)
         except Exception:  # noqa: BLE001
-            csc = {}
-        v = csc.get("sim_na")
-        return v if isinstance(v, dict) else {}
+            pass
+
+    async def _alert_insight_catalog() -> tuple[list, list]:
+        """The shared alert/insight history split into (alerts, insights), each a
+        list of {id, name, site} sorted by display name — the option source for
+        every Sim-Quota "Alert / Insight ID" picker (tenant + system defaults)."""
+        try:
+            hist = await store.get_alert_insight_history()
+        except Exception:  # noqa: BLE001
+            hist = []
+        def _sort(rows):
+            return sorted(
+                [{"id": h.get("id"), "name": h.get("name") or h.get("id"), "site": h.get("site") or ""}
+                 for h in rows if h.get("id")],
+                key=lambda r: str(r.get("name") or r.get("id") or "").lower(),
+            )
+        alerts = _sort([h for h in hist if h.get("type") == "alert"])
+        insights = _sort([h for h in hist if h.get("type") == "insight"])
+        return alerts, insights
+
+    async def _sim_na(tenant_id: str = "") -> dict:
+        """The GLOBAL per-simulation N/A (does-not-apply) UI hide map — used only
+        to hide sims from the Setup → Simulations Sharing tile. Stored under the
+        store's ``__global__`` key. ``tenant_id`` accepted but ignored."""
+        try:
+            return await store.get_sim_na_global()
+        except Exception:  # noqa: BLE001
+            return {}
 
     async def _push_sim_quotas(tenant_id: str) -> int:
         """Push the tenant's effective sim quotas + per-sim shareable overrides to
@@ -1401,13 +1439,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         modes = await store.get_processing_modes(tenant_id)
         if modes.get("central_api") == "centralized":
             cc = await store.get_central_config(tenant_id)
-            return await browse_all_from_config(cc or {})
-        try:
-            return await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=30.0)
-        except HTTPException as exc:
-            return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
-                    "clients": [], "devices_by_site": {}, "clients_by_site": {},
-                    "warning": f"Central browse unavailable: {exc.detail}"}
+            result = await browse_all_from_config(cc or {})
+        else:
+            try:
+                result = await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=30.0)
+            except HTTPException as exc:
+                return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
+                        "clients": [], "devices_by_site": {}, "clients_by_site": {},
+                        "warning": f"Central browse unavailable: {exc.detail}"}
+        # Record every alert/insight name we just saw into the SHARED (all-tenant +
+        # system-defaults) history so the Sim-Quota ID picker can offer it later,
+        # even after it clears. Best-effort — never let it break the browse.
+        await _record_alert_insight_history(result)
+        return result
 
     @app.get("/sim/api/aggregate/api-server")
     async def get_api_server(tenant_id: str = Depends(get_tenant_id)):
@@ -2618,6 +2662,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if isinstance(cat, dict):
             cat["sim_shareable"] = await _sim_shareable(tenant_id)
             cat["sim_na"] = await _sim_na(tenant_id)
+            cat["alerts"], cat["insights"] = await _alert_insight_catalog()
         return cat
 
     # ── PXMX server → site assignments (Config → PXMX Sites) ──────────────────
@@ -2694,6 +2739,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # simulation.conf may offer a subset); sites are pulled from the confs so
         # the editor offers a dropdown instead of free-text.
         catalog["sites"] = await _platform_wide_sim_quota_sites()
+        # Shared alert/insight history (all tenants) so the Defaults editor's
+        # Alert / Insight ID can be a dropdown of every alert ever seen — same
+        # source the per-tenant Config → Sim Quotas picker uses.
+        catalog["alerts"], catalog["insights"] = await _alert_insight_catalog()
+        # Global Simulation Sharing (stacking) + N/A hide maps live here now.
+        catalog["sim_shareable"] = await _sim_shareable()
+        catalog["sim_na"] = await _sim_na()
         return {"defaults": await store.get_sim_quota_defaults(),
                 "catalog": catalog}
 
@@ -2743,8 +2795,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if errs:
             logger.warning("set_sim_quota_defaults: errors: %s", errs)
         await store.set_sim_quota_defaults(clean)
-        # A global-defaults change can shift every tenant's effective quotas —
-        # re-push so each cs spoke's SimQuotaEngine reconciles to the new set.
+        # GLOBAL Simulation Sharing (stacking) + N/A hide maps, if present.
+        if isinstance((body or {}).get("sim_shareable"), dict):
+            await store.set_sim_shareable_global(
+                {str(k): bool(v) for k, v in body["sim_shareable"].items()})
+        if isinstance((body or {}).get("sim_na"), dict):
+            await store.set_sim_na_global(
+                {str(k): bool(v) for k, v in body["sim_na"].items()})
+        # A global-defaults / sharing change can shift every tenant's effective
+        # quotas — re-push so each cs spoke's SimQuotaEngine reconciles (the push
+        # carries the new global sim_shareable too).
         pushed = await _push_sim_quotas_all_tenants()
         return {"status": "saved", "defaults": clean, "errors": errs,
                 "pushed_to_spokes": pushed}
