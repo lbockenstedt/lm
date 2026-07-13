@@ -7758,7 +7758,7 @@ async function openAgentConfigModal(agentId, currentLabel) {
     const safeCron = (managedCrontab || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden max-h-[90vh] overflow-y-auto">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">Agent Configuration</h3>
                 <button onclick="this.closest('#agent-config-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
