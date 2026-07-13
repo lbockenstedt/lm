@@ -3045,7 +3045,7 @@ function renderView(viewId) {
 }
 
 function _viewTemplate(viewId) {
-    const card = 'hpe-card rounded-lg p-6 shadow-sm';
+    const card = 'hpe-card rounded-lg p-5 shadow-sm';
     const input = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800';
     const btn = 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm';
 
@@ -3229,7 +3229,7 @@ function _viewTemplate(viewId) {
 </div>`;
 
         default:
-            return `<div class="hpe-card rounded-lg p-6 shadow-sm"><p class="text-sm text-slate-500 italic">Loading…</p></div>`;
+            return `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500 italic">Loading…</p></div>`;
     }
 }
 
@@ -3656,11 +3656,11 @@ function _renderSettingsSection(subMenu) {
                 </div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="${card} p-6">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Spokes (<span id="spoke-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Spokes (<span id="spoke-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div id="spoke-list" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                     </div>
                     <div class="${card} p-6">
-                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-4">Agents (<span id="agent-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Agents (<span id="agent-count">0</span>) ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div id="agent-list" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                     </div>
                 </div>
@@ -3729,7 +3729,7 @@ function _renderSettingsSection(subMenu) {
 // (`card`, `inputCls`, `labelCls`, `btnCls`, `btnSecCls`) that the original
 // monolithic _renderSetupSection used — keeping every template byte-identical.
 const _SETUP_CLS = {
-    card: 'hpe-card rounded-lg p-6 shadow-sm space-y-4',
+    card: 'hpe-card rounded-lg p-5 shadow-sm space-y-4',
     inputCls: 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800',
     labelCls: 'text-xs text-slate-500 uppercase font-bold',
     btnCls: 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm',
@@ -3767,7 +3767,7 @@ function _renderSetupSpokesTile(content) {
     // p-6/space-y-4 which is generous for forms but wastes vertical space here
     // where each row is already a dense mgmt card. Don't change the shared
     // constant (it drives Tenant/User/Firewalls tiles too).
-    const saCard = 'hpe-card rounded-lg p-4 shadow-sm space-y-3';
+    const saCard = 'hpe-card rounded-lg p-5 shadow-sm space-y-3';
     // Spokes + Agents side-by-side on wide screens (xl:grid-cols-2) so the page
     // height tracks the taller column instead of stacking both fully — halves
     // the scrolling for fleets with many spokes and agents. Stacks on narrower
@@ -4301,7 +4301,7 @@ function _renderSetupSelfBackupTile(content) {
                 </div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Status &amp; Archives</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Status &amp; Archives</h3>
                 <div id="sb-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Local archives</div>
@@ -4913,12 +4913,12 @@ function _renderSetupSimulationsTile(content) {
             </div>
             <div id="simtab-usb" class="space-y-4">
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Discovered USB Devices ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Discovered USB Devices ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Every USB VID:PID seen across all tenants' spokes (plus tenant-certified/ignored entries not yet in telemetry). Approve or ignore a device type globally — applies to every tenant.</p>
                 <div id="global-usb-discovered" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Global USB Approvals ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global USB Approvals ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide USB dongle approvals — applies to every tenant (merged with each tenant's own list).</p>
                 <div class="space-y-6">
                     <div>
@@ -4942,14 +4942,14 @@ function _renderSetupSimulationsTile(content) {
                 </div>
             </div>
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Per-Tenant USB ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Per-Tenant USB ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Each tenant's own certified/ignored VID:PIDs (merged with the global list when pushed to their spoke). Approve/ignore per tenant below.</p>
                 <div id="tenant-usb-list" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             </div>
             <div id="simtab-pci" class="space-y-4 hidden">
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Global Tier PCI VID:PIDs ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global Tier PCI VID:PIDs ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide PCI-passthrough device IDs that classify a VM's tier — applies to every tenant (merged with each tenant's own list). <b>T1</b> = physical / base PCI (e.g. <span class="font-mono">1912:0015</span>); <b>T3</b> = the IoT adapter (e.g. <span class="font-mono">168c:0034</span>). T2 = USB dongle (above). Only T2 is ever auto-deleted under resource pressure; T1/T3 are never torn down.</p>
                 <div class="grid grid-cols-2 gap-6">
                     <div>
@@ -4973,14 +4973,14 @@ function _renderSetupSimulationsTile(content) {
             </div>
             <div id="simtab-dhcp" class="space-y-4 hidden">
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">DHCP Server (Kea) ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">DHCP Server (Kea) ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Isolated sim-client DHCP (Kea <span class="font-mono">kea-dhcp4-sim</span>) on each cs spoke's second NIC (provisioned by install_cs.sh). Shows whether Kea is running and how full the lease pool is. A spoke without Kea shows "Not configured".</p>
                 <div id="cs-dhcp-server-status" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             </div>
             <div id="simtab-simq" class="space-y-4 hidden">
             <div class="${card}">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Sim Quota Defaults ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sim Quota Defaults ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide default templates a tenant inherits unless it overrides per alert/insight + site in Config → Sim Quotas. Site blank = "all sites". The engine (Chunk 2) merges these with each tenant's overrides. Sims come from the full primitive catalog; a tenant's simulation.conf may offer a subset.</p>
                 <div class="flex flex-wrap gap-2 mb-3">
                     <button onclick="addSimQuotaDefault()" class="${btnCls} text-xs px-3 py-1">+ Add Default</button>
@@ -5294,7 +5294,7 @@ function _renderSetupGeneralTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     const subnetFilterCard = currentView === 'settings' ? `
         <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Tenant Subnet Filtering ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Tenant Subnet Filtering ${helpIcon('lm-hub', null, 'Hub help')}</h3>
             <p class="text-xs text-slate-500 mb-3">Filter each module's data by the tenant's NetBox prefixes, enforced server-side (a tenant cannot see another tenant's subnet data even via the API). Disable for modules that are scoped by tenant ID instead of subnet (e.g. Simulations).</p>
             <div id="subnet-filter-toggles" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
         </div>` : '';
@@ -6005,11 +6005,11 @@ async function loadRepoSyncStatus() {
         </div>
         ${hub.message ? `<p class="text-xs text-slate-400 mt-1">${esc(hub.message)}</p>` : ''}
         <div class="mt-3">
-            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Module updates <span class="text-slate-400 font-normal normal-case">(spokes — pxmx / opnsense / cs / cppm / netbox / ldap / nw / le / roles)</span></div>
+            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Module updates <span class="text-slate-400 font-normal normal-case">(spokes — pxmx / opnsense / cs / cppm / netbox / ldap / nw / le / roles)</span></div>
             <div class="space-y-1">${spokeRows}</div>
         </div>
         <div class="mt-3 pt-2 border-t border-slate-100">
-            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Provisioning source repos <span class="text-slate-400 font-normal normal-case">(auxiliary services on the hub — not LM modules)</span></div>
+            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-2">Provisioning source repos <span class="text-slate-400 font-normal normal-case">(auxiliary services on the hub — not LM modules)</span></div>
             <p class="text-xs text-slate-500">${okN} ok · ${errN} error · ${skipN} skipped <span class="text-slate-400">· last ${fmtDate(data.last_sync_ts)}</span></p>
             ${changed.length ? `<p class="text-xs text-slate-500 mt-1">changed: ${esc(changed.join(', '))}</p>` : ''}
             <div class="mt-1 space-y-1">${provRows}</div>
@@ -10339,7 +10339,7 @@ async function renderPxmxSettings(container) {
         </tr>`;
     }).join('') || `<tr><td colspan="4" class="px-3 py-3 text-xs text-slate-400 italic">No hosts reporting storages yet (agents fan PXMX_LIST_STORAGE on connect).</td></tr>`;
     const inp = 'border border-slate-200 rounded-md px-3 py-1.5 text-sm w-full';
-    const lbl = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
+    const lbl = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2';
     container.innerHTML = `
       <div class="space-y-5 max-w-3xl">
         <div class="hpe-card rounded-lg p-5 shadow-sm">
@@ -10505,7 +10505,7 @@ async function renderTemplateRepo() {
         const d = await r.json().catch(() => ({}));
         templates = (d && d.templates) || [];
     } catch (e) {
-        host.innerHTML = `<div class="hpe-card rounded-lg p-6 text-red-600">Could not load templates: ${escapeHtml(e.message || String(e))}</div>`;
+        host.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load templates: ${escapeHtml(e.message || String(e))}</div>`;
         return;
     }
     window._templateRepo = templates;

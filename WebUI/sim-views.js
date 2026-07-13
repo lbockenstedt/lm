@@ -1617,7 +1617,7 @@ async function csDemoCard() {
       <button data-cs-demo-host="${csEscape(a.hostname)}" onclick="csDemoClear(this)"
         class="bg-red-100 hover:bg-red-200 text-red-700 px-2 py-1 rounded-md text-[11px] font-bold">Clear</button>
     </div>`).join('');
-    return `<div class="hpe-card rounded-lg p-4 shadow-sm">
+    return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Active Demo Scenarios (${active.length})</p>
       ${rows}
     </div>`;
@@ -1969,7 +1969,7 @@ async function csRenderCentral() {
         { label: 'Insights', render: r => `<span class="${r.insights ? 'text-slate-600' : 'text-slate-400'}">${r.insights}</span>`, sort: r => r.insights },
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-sites', siteCols, rows, { monitorOf: r => r.monitored, caption: `${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-sites', siteCols, rows, { monitorOf: r => r.monitored, caption: `${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard` })}</div></div>`);
 }
 
 // Enroll / un-enroll a Central site for client-count monitoring by toggling it in
@@ -2036,7 +2036,7 @@ async function csRenderCentralAlerts() {
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} active alert(s)` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} active alert(s)` })}</div></div>`);
 }
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
@@ -2073,7 +2073,7 @@ async function csRenderCentralInsights() {
         { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
 }
 
 // Toggle an insight (or alert) TYPE in central_sites_config.monitored_checks
@@ -2129,7 +2129,7 @@ async function csRenderCentralClients() {
         { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
         { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
 }
 
 // ── Central → Hardware (device-down check types) ─────────────────────────────
@@ -2182,7 +2182,7 @@ async function csRenderCentralHardware() {
         { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
         { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-4 shadow-sm">${csCentralTable('central-hardware', hwCols, rows, { monitorOf: r => r.monitored, caption: `${devices.length} device(s) — Monitor a switch / AP / gateway to track it on the dashboard` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-hardware', hwCols, rows, { monitorOf: r => r.monitored, caption: `${devices.length} device(s) — Monitor a switch / AP / gateway to track it on the dashboard` })}</div></div>`);
 }
 
 // Toggle a hardware check in central_sites_config.hardware_checks (keyed by id),
@@ -2831,7 +2831,7 @@ async function csRenderSimQuotaState() {
         const orphans = Object.entries(ledger).filter(([k]) => !effKeys.has(k));
         const orphanHtml = orphans.length ? `
             <div class="mt-4">
-              <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Releasing (no longer effective)</p>
+              <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Releasing (no longer effective)</p>
               ${orphans.map(([k, e]) => {
                   const parts = k.split(':');
                   const on = nameOf(parts[0], parts[1]);
@@ -3441,7 +3441,7 @@ async function csHubConfigCard(path) {
         return `${label}${input}</label>`;
     }).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Changes save automatically — a select/checkbox saves on change, a text/number field saves when you click or tab away from it.</p>
       <label class="flex items-center gap-2 text-xs text-slate-600 mb-3"><input id="cs-hc-enabled" type="checkbox" ${enabled ? 'checked' : ''} onchange="csHcToggleEnabled(this.checked)"> Enable hub as source of truth</label>
       <div id="cs-hc-fields" class="${enabled ? '' : 'hidden'} grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -3568,7 +3568,7 @@ async function csSetupAutoProvConfigCard() {
     const note = enabled ? '<span class="text-slate-400">Hub-owned knobs; saved automatically as you edit (a select/checkbox on change, a text/number field when you click or tab away). Turning Auto-Provision VMs On also enables hub config (mirrors the Overview/USB toggle).</span>'
         : '<span class="text-amber-600">Hub config is not enabled — auto-save pushes to spokes only when Auto-Provision VMs is On (which enables hub config) or after you enable it in the Hub Config card below.</span>';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">VM Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">VM Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-3">${note}</p>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${rows}</div>
     </div>`;
@@ -3641,7 +3641,7 @@ async function csProcessingModesCard() {
       <select id="cs-pm-${k}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">${opts(modes[k])}</select>
     </label>`).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Processing Modes ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Processing Modes ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-1 md:grid-cols-3 gap-3">${fields}</div>
       <div class="flex justify-end mt-4"><button onclick="csSaveProcessingModes()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Modes</button></div>
     </div>`;
@@ -3665,7 +3665,7 @@ async function csNotificationsCard() {
       <input id="${id}" ${type === 'checkbox' ? 'type="checkbox" ' + (val ? 'checked' : '') : `value="${csEscape(val != null ? val : '')}"`} class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
     </label>`;
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Notifications ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Notifications ${helpIcon('cs', null, 'Simulations help')}</h3>
       <label class="flex items-center gap-2 text-xs text-slate-600 mb-3"><input id="cs-notif-enabled" type="checkbox" ${n.enabled ? 'checked' : ''}> Notifications enabled</label>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         ${f('cs-notif-host', 'SMTP Host', n.smtp_host)}${f('cs-notif-port', 'SMTP Port', n.smtp_port, 'number')}
@@ -3718,7 +3718,7 @@ async function csSetupAutoProvCard() {
         unknown = (hosts || []).reduce((n, h) => n + csUnknownUsbCount(h), 0);
     } catch (e) { console.error('csSetupAutoProvCard: vm load for USB counts failed, defaulting to 0', e); }
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Dongle / Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Dongle / Auto-Provisioning ${helpIcon('cs', null, 'Simulations help')}</h3>
       <div class="grid grid-cols-3 gap-3 mb-3">${csStat('Auto-Provision', on ? 'On' : 'Off')}${csStat('Present USB', present)}${csStat('Unknown USB', unknown)}</div>
       <label class="flex items-center gap-2 text-sm text-slate-600">
         <input id="cs-setup-autoprov" type="checkbox" ${on ? 'checked' : ''} onchange="csToggleAutoProvision(this.checked)"/>
@@ -3789,7 +3789,7 @@ async function csRenderSetupCentralApi() {
     </label>`;
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Central API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Central API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Aruba Central cluster credentials. Pushed to the spoke as <code>central_config</code>; the spoke sentinel-merges them — secrets only overwrite when non-empty.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="text-xs text-slate-500">Mode${modeSel}</label>
@@ -3813,7 +3813,7 @@ async function csRenderSetupCentralApi() {
         : '<p class="text-xs text-slate-400 italic">None configured. Load the available-checks catalog to pick Aruba Central alerts/insights.</p>';
 
     const sitesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Sites &amp; Checks ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Hub-owned site mappings + Aruba Central sim/hardware monitors. Pushed to the spoke as <code>central_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
@@ -4022,12 +4022,12 @@ async function csRenderSetupProxmox() {
         let autoProv = '';
         try { autoProv = await csSetupAutoProvConfigCard(); } catch (e) { console.error('csRenderSetupProxmox: auto-prov card load failed', e); autoProv = `<div class="hpe-card rounded-lg p-5 shadow-sm">${csErrorBox('VM Auto-Provisioning', e).replace('py-10', 'py-6')}</div>`; }
         const card = await csHubConfigCard('/tenant/' + csTenant() + '/hub-config');
-        const resetBar = `<div class="hpe-card rounded-lg p-4 shadow-sm flex items-center justify-between gap-3">
+        const resetBar = `<div class="hpe-card rounded-lg p-5 shadow-sm flex items-center justify-between gap-3">
           <p class="text-xs text-slate-500">Reset every knob on this page to factory defaults. Certified/ignored USB devices + ignored hostnames are preserved (manage those on the USB page).</p>
           <button onclick="csResetHubConfig()" class="shrink-0 bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-md text-sm font-bold">Reset to Default</button>
         </div>`;
         csSet(`<div class="space-y-4">${autoProv}<div class="hpe-card rounded-lg p-5 shadow-sm">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Hub Config ${helpIcon('cs', null, 'Simulations help')}</h3>
           <p class="text-xs text-slate-400 mb-3">Remaining hub-owned knobs (reclone schedule, VMID range, VLANs, USB VID/PID lists, watchdog group). Pushed to the spoke on save.</p>
         </div>${card}${resetBar}</div>`);
     } catch (e) { console.error('csRenderSetupProxmox: proxmox config load failed', e); csSet(csErrorBox('Could not load Proxmox config', e)); }
@@ -4064,7 +4064,7 @@ async function csRenderSetupGithub() {
         _csBranchSelect('cs-gh-branch', cfg.repo_branch, branches, null)}</label>`;
     csSet(`<div class="max-w-2xl space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">GitHub ${helpIcon('cs', null, 'Simulations help')}</h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">GitHub ${helpIcon('cs', null, 'Simulations help')}</h3>
         <div class="grid grid-cols-1 gap-3">
           ${f('cs-gh-url', 'Repo URL', cfg.repo_url)}${branchField}
           ${f('cs-gh-token', 'GitHub Token ' + (cfg.has_token ? '(set — leave blank to keep)' : '(new)'), '', 'password')}
@@ -4107,7 +4107,7 @@ async function csRenderSetupSecurity() {
       <input id="${id}" value="${csEscape(val != null ? val : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
     csSet(`<div class="max-w-2xl space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Security ${helpIcon('cs', null, 'Simulations help')}</h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Security ${helpIcon('cs', null, 'Simulations help')}</h3>
         <p class="text-xs text-slate-400 mb-3">Governs the spoke's local dashboard auth. LM hub auth is managed separately in LM settings.</p>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           ${f('cs-sec-timeout', 'Session Timeout (minutes)', cfg.session_timeout_minutes)}
@@ -4384,7 +4384,7 @@ async function csRenderVmServer() {
     </div>`;
 
     const fleetCards = `<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
-      <div class="hpe-card rounded-lg p-4 shadow-sm">
+      <div class="hpe-card rounded-lg p-5 shadow-sm">
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Fleet Reclone</p>
         <div class="flex items-center gap-2">
           <input id="cs-fleet-conc" type="number" min="1" value="1" class="w-16 border border-slate-200 rounded-md px-2 py-1 text-sm"/>
@@ -4393,7 +4393,7 @@ async function csRenderVmServer() {
         <p class="text-[10px] text-slate-400 mt-2">Concurrency controls how many guests reclone in parallel.</p>
         <div id="cs-fleet-reclone-progress" class="mt-2 text-[11px] text-slate-500 space-y-1">No reclone in progress.</div>
       </div>
-      <div class="hpe-card rounded-lg p-4 shadow-sm">
+      <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex items-center justify-between mb-2">
           <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Auto-Provisioning</p>
           <button id="cs-autoprov-enable-btn" onclick="csToggleAutoProvision(!csAutoProvOn)" class="px-3 py-1 rounded-md text-xs font-bold border">Enable</button>
@@ -4969,7 +4969,7 @@ function csAutoProvPanel(h) {
     // Idle + nothing deleting → compact pill + last-pass reason only.
     if (!active && !deleting.length) {
         const reason = prov.reason ? `<span class="text-xs text-slate-400 truncate">${csEscape(prov.reason)}</span>` : '';
-        return `<div class="hpe-card rounded-lg p-3 mb-3 flex items-center justify-between gap-3">${pill}${reason}</div>`;
+        return `<div class="hpe-card rounded-lg p-5 mb-3 flex items-center justify-between gap-3">${pill}${reason}</div>`;
     }
 
     const pct = run.total > 0 ? Math.round((Math.min(run.completed, run.total) / run.total) * 100) : 0;
@@ -4992,7 +4992,7 @@ function csAutoProvPanel(h) {
         ? `<div class="text-[11px] text-amber-600 mt-2">⏸ Paused — ${csEscape(halt.reason)} (CPU ${halt.cpu_pct}% ≥ ${halt.cpu_threshold}%, Mem ${halt.mem_pct}% ≥ ${halt.mem_threshold}%)</div>`
         : '';
 
-    return `<div class="hpe-card rounded-lg p-4 mb-3">
+    return `<div class="hpe-card rounded-lg p-5 mb-3">
         <div class="flex items-center justify-between gap-3 mb-2">
             <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">VM Auto-Provisioning</h3>
             ${pill}
@@ -5151,7 +5151,7 @@ function csVmFlash(msg) {
 function csRenderVmServerConsoleStub(label, kind) {
     csSetToolbar('');
     csSet(`<div>${csVmHostBanner()}
-      <div class="hpe-card rounded-lg p-10 shadow-sm text-center">
+      <div class="hpe-card rounded-lg p-8 shadow-sm text-center">
         <div class="text-3xl mb-3">${kind === 'console' ? '🖥️' : '⌨️'}</div>
         <h3 class="text-lg font-bold text-[#263040] mb-1">${csEscape(label)} ${helpIcon('cs', null, 'Simulations help')}</h3>
         <p class="text-sm text-slate-500 max-w-md mx-auto">${csEscape(label)} requires a ${kind === 'console' ? 'noVNC' : 'xterm.js'} WebSocket proxied through the LM hub. This is wired in Phase 5; the rest of the VM Server port is live now.</p>
@@ -5429,7 +5429,7 @@ async function csRenderVmServerQueue(live) {
       <td colspan="7" class="px-3 pb-2 pt-0 font-mono text-[11px] text-slate-500 break-all">${csEscape(_cmdStr || '—')}</td>
     </tr>`;
     }).join('');
-    const sendForm = `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
+    const sendForm = `<div class="hpe-card rounded-lg p-5 shadow-sm mb-4">
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Send Proxmox Command</p>
       <div class="flex flex-wrap gap-2 items-end text-sm">
         <div><label class="text-xs text-slate-400">Action</label>
@@ -5605,7 +5605,7 @@ async function csRenderSetupDiagnostics() {
     const _shown = agents.filter(a => !(a.decision || '').startsWith('SKIP not-enabled'));
     const _cfgFast = snap.configured_fast_s != null ? `${snap.configured_fast_s}s` : '15s (default)';
     const _cfgLong = snap.configured_long_s != null ? `${snap.configured_long_s}s` : '60s (default)';
-    const cfg = `<div class="hpe-card rounded-lg p-3 shadow-sm mb-3 text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
+    const cfg = `<div class="hpe-card rounded-lg p-5 shadow-sm mb-3 text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
       <span><b class="text-slate-600">max retries:</b> ${csEscape(String(snap.max_retries ?? '—'))}</span>
       <span><b class="text-slate-600">spoke→agent (configured):</b> fast ${csEscape(_cfgFast)} / long ${csEscape(_cfgLong)}</span>
       <span><b class="text-slate-600">hub→spoke (actual):</b> fast ${csEscape(String(snap.relay_timeout_s ?? '—'))}s / long ${csEscape(String(snap.relay_timeout_long_s ?? '—'))}s</span>
@@ -5701,7 +5701,7 @@ async function csRenderSpokeManagement() {
       <button onclick="csRenderSpokeManagement()" class="ml-2 text-xs text-[#01A982] font-bold hover:underline">Refresh</button>`);
 
     const banner = (admin && (pending || unbound))
-        ? `<div class="hpe-card rounded-lg p-4 shadow-sm border-l-4 border-amber-400 bg-amber-50">
+        ? `<div class="hpe-card rounded-lg p-5 shadow-sm border-l-4 border-amber-400 bg-amber-50">
              <p class="text-sm text-amber-700"><b>${pending}</b> pending, <b>${unbound}</b> unbound — assign/approve below so their telemetry reaches a tenant's VM Server.</p>
            </div>`
         : '';
