@@ -149,3 +149,40 @@ def test_max_retries_zero_is_fail_fast():
     assert "CS_REQUEUE_COMMAND" not in cmd_types
     ack = next(c for c in hub.calls if c[1] == "CS_ACK_COMMAND")
     assert ack[2]["status"] == "failed"
+
+
+def test_spoke_agent_response_timeout_requeues_not_fails():
+    """The spoke's send_to_agent returns ``"Agent response timeout"`` (NOT the
+    hub's "Timed out waiting for spoke response" string) when a CPU-pegged
+    agent can't ACK within the spoke's 60s window. This is a transient relay
+    timeout, not a genuine rejection — it must requeue (retry), NOT ack failed.
+    Regression for the mass-delete symptom on a saturated host (svr-02): the
+    command FAILED on the first attempt with no retry even though the op often
+    still ran on the agent."""
+    reply = {"payload": {"data": {
+        "status": "ERROR", "message": "Agent response timeout"}}}
+    poller, hub = _make_poller(reply)
+    _run(poller._tick())
+    cmd_types = [c[1] for c in hub.calls]
+    assert "SPOKE_RELAY" in cmd_types
+    assert "CS_REQUEUE_COMMAND" in cmd_types
+    assert "CS_ACK_COMMAND" not in cmd_types, (
+        "spoke 'Agent response timeout' acked failed instead of re-queuing")
+    rq = next(c for c in hub.calls if c[1] == "CS_REQUEUE_COMMAND")
+    assert rq[2]["max_retries"] == 5
+    assert rq[2]["message"] == "Agent response timeout"
+
+
+def test_genuine_error_with_no_timeout_marker_still_fails():
+    """An ERROR whose message has no timeout marker (e.g. 'no such vmid') is a
+    genuine rejection — ack failed, don't retry. Guards the timeout-match
+    helper against false positives."""
+    reply = {"payload": {"data": {"status": "ERROR",
+                                   "message": "no such vmid 90075"}}}
+    poller, hub = _make_poller(reply)
+    _run(poller._tick())
+    cmd_types = [c[1] for c in hub.calls]
+    assert "CS_ACK_COMMAND" in cmd_types
+    assert "CS_REQUEUE_COMMAND" not in cmd_types
+    ack = next(c for c in hub.calls if c[1] == "CS_ACK_COMMAND")
+    assert ack[2]["status"] == "failed"

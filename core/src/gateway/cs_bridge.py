@@ -65,6 +65,25 @@ def _unwrap(result: Any) -> Dict[str, Any]:
     if isinstance(result, dict):
         data = result.get("payload", {}).get("data", result)
         return data if isinstance(data, dict) else (result if isinstance(result, dict) else {})
+
+
+def _is_timeout_message(message: Any) -> bool:
+    """True if a spoke/agent ERROR message reads as a transient relay TIMEOUT
+    (retryable) rather than a genuine op rejection (don't retry). Matches the
+    hub's ``"Timed out waiting for spoke response"`` and the spoke
+    send_to_agent's ``"Agent response timeout"`` plus the common phrasings an
+    agent/OS surfaces when a host is too saturated to ACK in time. A genuine
+    agent ERROR (``"VM not found"``, ``"already deleted"``, ``"no such vmid"``)
+    contains none of these markers and correctly returns False."""
+    if not message:
+        return False
+    msg = str(message).strip().lower()
+    if not msg:
+        return False
+    return any(m in msg for m in (
+        "timed out", "timeout", "time-out", "timed-out",
+        "did not respond", "didn't respond", "no response",
+    ))
     return {}
 
 
@@ -352,14 +371,18 @@ class CSBridgePoller:
             # Distinguish a relay TIMEOUT (the agent was too busy to ACCEPT —
             # transient; retry up to max_retries via requeue) from a genuine
             # agent ERROR/FAILED (the op ran and the agent rejected it — don't
-            # retry, that just repeats the same rejection forever). The hub's
-            # request_response returns the exact "Timed out waiting for spoke
-            # response" string on its own timeout; an agent returning TIMEOUT
-            # is also a transient "couldn't complete now" → retry.
-            is_relay_timeout = (
-                status == "ERROR"
-                and str(message).strip() == "Timed out waiting for spoke response"
-            ) or status == "TIMEOUT"
+            # retry, that just repeats the same rejection forever). Three legs
+            # can produce a timeout-shaped ERROR, all retryable:
+            #   - the HUB's request_response: "Timed out waiting for spoke response"
+            #   - the spoke's send_to_agent: "Agent response timeout" (the agent
+            #     was too busy/CPU-pegged to ACK within its relay window — note
+            #     the spoke widens long ops to 60s but a saturated host can still
+            #     slip past it; without this branch the command FAILED on the
+            #     FIRST attempt with no retry even though the op often runs)
+            #   - an agent returning TIMEOUT (transient "couldn't complete now")
+            # A genuine agent ERROR ("VM not found", "already deleted") does NOT
+            # contain a timeout marker, so it correctly falls through to fail.
+            is_relay_timeout = status == "TIMEOUT" or _is_timeout_message(message)
             if is_relay_timeout:
                 await self._requeue_or_fail(cs_spoke, cmd_id, action,
                                            message or "relay timed out")
