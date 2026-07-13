@@ -1255,15 +1255,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         enabled-only (per-alert: tenant wins if it declares any enabled row for
         that alert, else the global default applies). The cs spoke's
         SimQuotaEngine consumes this list. Pure merge in sim_quota.merge_effective_quotas."""
-        from .sim_quota import merge_effective_quotas
-        try:
-            g_defaults = await store.get_sim_quota_defaults()
-        except Exception:  # noqa: BLE001
-            g_defaults = []
+        from .sim_quota import merge_effective_quotas, resolve_effective_quotas, SIM_META
         try:
             t_csc = await store.get_central_sites_config(tenant_id) or {}
         except Exception:  # noqa: BLE001
             t_csc = {}
+        # A tenant may opt OUT of the platform-wide quota defaults (Config → Sim
+        # Quotas → "Ignore global quotas"): then only its own enabled rows apply.
+        if t_csc.get("ignore_global_quotas"):
+            return resolve_effective_quotas(t_csc.get("sim_quotas"), list(SIM_META.keys()))
+        try:
+            g_defaults = await store.get_sim_quota_defaults()
+        except Exception:  # noqa: BLE001
+            g_defaults = []
         return merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
 
     async def _sim_shareable(tenant_id: str = "") -> dict:

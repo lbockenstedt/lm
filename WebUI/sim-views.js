@@ -2594,6 +2594,7 @@ async function csRenderConfigSimQuotas() {
                   type: c.type || 'alert', id: String(c.id),
                   name: c.name || c.id, site: c.site || '',
               })) : [];
+        window._csIgnoreGlobalQuotas = !!(cfg && cfg.ignore_global_quotas);
         const quotas = Array.isArray(cfg && cfg.sim_quotas) ? cfg.sim_quotas : [];
         csSimQuotaRows = quotas.map(csSimQuotaRowFromServer);
         csRenderSimQuotaEditor();
@@ -2695,7 +2696,7 @@ function csRenderSimQuotaEditor() {
                        <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
                        <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
                      </select>`
-                  : `<div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— untethered: no alert/insight needed —</div>`}
+                  : `<div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Presence — no alert/insight (keeps N clients on the sim)</div>`}
               </div>`;
         const idCell = isPresence
             ? `<label class="text-xs text-slate-500">Alert / Insight ID
@@ -2740,6 +2741,9 @@ function csRenderSimQuotaEditor() {
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Sim Quotas ${helpIcon('cs', null, 'Simulations help')}</h3>
           <div class="flex justify-end gap-2">
+            ${window._csIgnoreGlobalQuotas
+              ? `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant ignores the platform-wide Sim Quota defaults — only its own rows apply. Click to use global defaults again." class="bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-300 px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: Ignored</button>`
+              : `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant inherits the platform-wide Sim Quota defaults, merged with its own rows. Click to ignore them." class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: On</button>`}
             <button onclick="csSimQuotaAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Quota</button>
             <button onclick="csSimQuotaSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Quotas</button>
           </div>
@@ -2842,6 +2846,30 @@ window.csSimQuotaDel = function (i) {
     csRenderSimQuotaEditor();
 };
 
+// Toggle whether this tenant IGNORES the platform-wide Sim Quota defaults.
+// Persists ignore_global_quotas on central-sites-config (preserving the other
+// fields + current row edits) and re-renders so the button + engine reflect it.
+window.csToggleIgnoreGlobalQuotas = async function () {
+    const rows = csSimQuotaSyncFromDom();
+    const next = !window._csIgnoreGlobalQuotas;
+    try {
+        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+            sim_quotas: rows,
+            ignore_global_quotas: next,
+        };
+        await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        window._csIgnoreGlobalQuotas = next;
+        csRenderSimQuotaEditor();
+        showToast(next ? 'Now ignoring global quota defaults.' : 'Now using global quota defaults.', 'success');
+    } catch (e) {
+        showToast((e && e.message) || 'Save failed', 'error');
+    }
+};
+
 window.csSimQuotaSave = async function () {
     const rows = csSimQuotaSyncFromDom();
     try {
@@ -2851,6 +2879,7 @@ window.csSimQuotaSave = async function () {
             monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
             hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
             sim_quotas: rows,
+            ignore_global_quotas: !!cfg.ignore_global_quotas,
         };
         const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         // Server re-validates + dedups; adopt its cleaned rows so the UI matches.
@@ -2909,12 +2938,17 @@ async function csRenderSimQuotaState() {
                 : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
             const fname = nameOf(q.alert_type, q.alert_id);
             const isPresence = !q.sim_id;
+            // A sim quota with no alert/insight is untethered — shown as Presence
+            // (it just keeps N clients on the sim, no alert trigger).
+            const untethered = !isPresence && !q.alert_id;
             const idCell = isPresence
                 ? `<span class="text-slate-700 italic">Clients Associated</span>`
-                : (fname
-                    ? `<span class="text-slate-700">${csEscape(fname)}</span> <span class="font-mono text-slate-400 text-[11px]">${csEscape(q.alert_id || '')}</span>`
-                    : `<span class="font-mono">${csEscape(q.alert_id || '')}</span>`);
-            const typeCell = isPresence ? 'presence' : (q.alert_type || 'alert');
+                : untethered
+                    ? `<span class="italic text-slate-400">— none —</span>`
+                    : (fname
+                        ? `<span class="text-slate-700">${csEscape(fname)}</span> <span class="font-mono text-slate-400 text-[11px]">${csEscape(q.alert_id || '')}</span>`
+                        : `<span class="font-mono">${csEscape(q.alert_id || '')}</span>`);
+            const typeCell = (isPresence || untethered) ? 'presence' : (q.alert_type || 'alert');
             const simCell = isPresence
                 ? `<span class="italic text-slate-400">— none —</span>`
                 : `<span class="font-mono">${csEscape(q.sim_id || '')}</span>`;

@@ -5178,7 +5178,7 @@ function _renderSimQuotaDefaultsEditor() {
                        <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
                        <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
                      </select>`
-                  : `<div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— untethered: no alert/insight needed —</div>`}
+                  : `<div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Presence — no alert/insight (keeps N clients on the sim)</div>`}
               </div>`;
         const idCell = isPresence
             ? `<label class="${lblCls}">Alert / Insight ID
