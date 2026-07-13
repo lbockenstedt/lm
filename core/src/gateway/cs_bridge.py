@@ -132,6 +132,12 @@ class CSBridgePoller:
         self._last_actual_push: Dict[str, float] = {}  # agent_id -> ts (last SEND)
         self._last_diag: Dict[str, str] = {}  # agent_id -> last [cs-bridge] decision (throttle)
         self._last_cycle_diag: str = ""  # last [cs-bridge] cycle summary (throttle)
+        # Per-agent relay outcome counters (for the WebUI "CS Bridge Status"
+        # panel — lets an Azure-hub operator see, per agent, whether commands
+        # are being accepted / re-queued / failing, without SSH). agent_id ->
+        # {hostname, decision, accepted, requeued, gave_up, completed, failed,
+        #  last_outcome, last_ts}. Bumped in _relay_one/_requeue_or_fail/_ack.
+        self._relay_counts: Dict[str, Dict[str, Any]] = {}
 
     # ── main loop ──────────────────────────────────────────────────────────
 
@@ -302,6 +308,61 @@ class CSBridgePoller:
             logger.info(line)
         else:
             logger.debug(line)
+        # Record the latest decision on the per-agent counter row so the WebUI
+        # panel can show "ACTIVE / SKIP not-enabled / SKIP no-cs-spoke" alongside
+        # the relay counters in one place.
+        row = self._relay_counts.setdefault(
+            agent_id,
+            {"hostname": hostname, "decision": "", "accepted": 0, "requeued": 0,
+             "gave_up": 0, "completed": 0, "failed": 0,
+             "last_outcome": None, "last_ts": 0.0},
+        )
+        row["hostname"] = hostname
+        row["decision"] = decision
+
+    def _bump(self, agent_id: str, hostname: str, outcome: str) -> None:
+        """Increment a per-agent relay-outcome counter and stamp the last
+        outcome/ts, for the WebUI "CS Bridge Status" panel."""
+        row = self._relay_counts.setdefault(
+            agent_id,
+            {"hostname": hostname, "decision": "", "accepted": 0, "requeued": 0,
+             "gave_up": 0, "completed": 0, "failed": 0,
+             "last_outcome": None, "last_ts": 0.0},
+        )
+        row["hostname"] = hostname
+        if outcome in row:
+            row[outcome] = int(row[outcome]) + 1
+        row["last_outcome"] = outcome
+        row["last_ts"] = time.time()
+
+    def status_snapshot(self) -> Dict[str, Any]:
+        """Snapshot of the bridge's per-agent state for the WebUI "CS Bridge
+        Status" panel — the decision (ACTIVE / SKIP reason) plus relay outcome
+        counters per agent, so an Azure-hub operator can diagnose "why isn't
+        svr-02 deleting" (bridge reaching it? commands re-queued? failing?)
+        without SSH. Returns a JSON-serializable dict."""
+        # Prune agents we haven't seen in a while (gone offline) so the panel
+        # reflects the live fleet — keep the last row for a recent window so a
+        # transient drop doesn't erase the counters mid-diagnosis.
+        now = time.time()
+        agents = []
+        for aid, row in self._relay_counts.items():
+            r = dict(row)
+            r["agent_id"] = aid
+            r["last_ts_iso"] = (
+                time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r.get("last_ts", 0.0)))
+                if r.get("last_ts") else ""
+            )
+            agents.append(r)
+        agents.sort(key=lambda r: (r.get("hostname") or r.get("agent_id") or ""))
+        return {
+            "agents": agents,
+            "cycle": self._last_cycle_diag,
+            "max_retries": self.max_retries,
+            "relay_timeout_s": self.relay_timeout,
+            "relay_timeout_long_s": self.relay_timeout_long,
+            "now": now,
+        }
 
     def _spoke_tenant(self, spoke_id: str) -> Optional[str]:
         try:
@@ -321,10 +382,10 @@ class CSBridgePoller:
         for cmd in commands:
             if not isinstance(cmd, dict):
                 continue
-            await self._relay_one(host_spoke, cs_spoke, agent_id, cmd)
+            await self._relay_one(host_spoke, cs_spoke, agent_id, hostname, cmd)
 
     async def _relay_one(self, host_spoke: str, cs_spoke: str,
-                         agent_id: str, cmd: Dict[str, Any]) -> None:
+                         agent_id: str, hostname: str, cmd: Dict[str, Any]) -> None:
         hub = self.hub
         cmd_id = cmd.get("id")
         action = cmd.get("action")
@@ -351,7 +412,8 @@ class CSBridgePoller:
                 timeout=timeout,
             )
         except Exception as exc:  # noqa: BLE001 — spoke mid-reconnect: retry, don't fail.
-            await self._requeue_or_fail(cs_spoke, cmd_id, action, f"relay error: {exc}")
+            await self._requeue_or_fail(cs_spoke, agent_id, hostname, cmd_id, action,
+                                        f"relay error: {exc}")
             return
 
         data = _unwrap(raw)
@@ -361,6 +423,7 @@ class CSBridgePoller:
         # Long ops acknowledge "accepted" and stream progress + a terminal
         # CS_COMMAND_RESULT later (Phase E). Leave delivered; do not ack now.
         if status in ("ACCEPTED", "PENDING", "QUEUED"):
+            self._bump(agent_id, hostname, "accepted")
             logger.debug("CS bridge: %s %s accepted by %s (long-op; ack deferred)",
                          cmd_id, action, agent_id)
             return
@@ -384,21 +447,21 @@ class CSBridgePoller:
             # contain a timeout marker, so it correctly falls through to fail.
             is_relay_timeout = status == "TIMEOUT" or _is_timeout_message(message)
             if is_relay_timeout:
-                await self._requeue_or_fail(cs_spoke, cmd_id, action,
-                                           message or "relay timed out")
+                await self._requeue_or_fail(cs_spoke, agent_id, hostname, cmd_id,
+                                           action, message or "relay timed out")
                 return
             ack_status, ack_msg = "failed", message or f"agent returned {status}"
         else:
             # Unknown / empty (e.g. a timed-out request_response that lost the
             # race before the timeout string was set) → treat as retryable.
-            await self._requeue_or_fail(cs_spoke, cmd_id, action,
+            await self._requeue_or_fail(cs_spoke, agent_id, hostname, cmd_id, action,
                                         message or "agent command did not complete")
             return
 
-        await self._ack(cs_spoke, cmd_id, ack_status, ack_msg)
+        await self._ack(cs_spoke, agent_id, hostname, cmd_id, action, ack_status, ack_msg)
 
-    async def _requeue_or_fail(self, cs_spoke: str, cmd_id: str, action: str,
-                               message: str) -> None:
+    async def _requeue_or_fail(self, cs_spoke: str, agent_id: str, hostname: str,
+                               cmd_id: str, action: str, message: str) -> None:
         """Re-queue a command whose relay TIMED OUT (agent too busy to ACCEPT,
         or the owning spoke was mid-reconnect) for the next poll tick, up to
         ``max_retries``. Once exhausted, the cs spoke's ``requeue_command``
@@ -406,7 +469,7 @@ class CSBridgePoller:
         short-circuit a later, legitimate retry. ``max_retries <= 0`` (or a
         non-positive env) falls back to the old fail-fast behavior."""
         if self.max_retries <= 0:
-            await self._ack(cs_spoke, cmd_id, "failed", message)
+            await self._ack(cs_spoke, agent_id, hostname, cmd_id, action, "failed", message)
             return
         try:
             raw = await self.hub.request_response(
@@ -419,14 +482,18 @@ class CSBridgePoller:
             return
         data = _unwrap(raw)
         if data.get("requeued"):
-            logger.info("[cs-bridge] %s %s relay timed out — re-queued (attempt %s/%s)",
-                        cmd_id, action, data.get("attempts"), data.get("max_retries"))
+            self._bump(agent_id, hostname, "requeued")
+            logger.info("[cs-bridge] %s %s %s relay timed out — re-queued (attempt %s/%s): %s",
+                        agent_id, hostname, action, data.get("attempts"),
+                        data.get("max_retries"), message)
         else:
             # Exhausted retries → the queue already marked it failed.
-            logger.warning("[cs-bridge] %s %s gave up after %s relay attempt(s): %s",
-                            cmd_id, action, data.get("attempts"), message)
+            self._bump(agent_id, hostname, "gave_up")
+            logger.warning("[cs-bridge] %s %s %s gave up after %s relay attempt(s): %s",
+                            agent_id, hostname, action, data.get("attempts"), message)
 
-    async def _ack(self, cs_spoke: str, cmd_id: str, status: str, message: str) -> None:
+    async def _ack(self, cs_spoke: str, agent_id: str, hostname: str,
+                   cmd_id: str, action: str, status: str, message: str) -> None:
         try:
             await self.hub.request_response(
                 cs_spoke, "CS_ACK_COMMAND",
@@ -435,6 +502,19 @@ class CSBridgePoller:
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("CS bridge: ack %s (%s) failed: %s", cmd_id, status, exc)
+            return
+        # Genuine terminal outcome (completed | failed). A "failed" here is a
+        # genuine agent rejection (the op ran), NOT a relay timeout (those
+        # requeue above). Log at INFO so an Azure-hub operator can grep the
+        # agent hostname in WebUI Logs and see exactly what happened to each
+        # command without SSH — the per-agent decision line alone doesn't show
+        # outcomes.
+        if status == "completed":
+            self._bump(agent_id, hostname, "completed")
+        else:
+            self._bump(agent_id, hostname, "failed")
+            logger.info("[cs-bridge] %s %s %s acked failed: %s",
+                        agent_id, hostname, action, message)
 
     async def _sync_usb_config(self, host_spoke: str, cs_spoke: str,
                                agent_id: str, hostname: str, now: float) -> None:

@@ -102,7 +102,7 @@ def test_long_op_uses_long_relay_timeout():
             seen["timeout"] = timeout
         return _TIMEOUT_REPLY
     hub.request_response = _capture
-    _run(poller._relay_one("host-spoke", "cs-spoke", "ag-1",
+    _run(poller._relay_one("host-spoke", "cs-spoke", "ag-1", "pxmx-cs-svr-04",
                           {"id": "cmd-x", "action": "delete_vm", "args": {}}))
     assert seen["timeout"] == 65.0
 
@@ -119,7 +119,7 @@ def test_fast_op_uses_fast_relay_timeout():
             seen["timeout"] = timeout
         return {"payload": {"data": {"status": "SUCCESS", "message": "ok"}}}
     hub.request_response = _capture
-    _run(poller._relay_one("host-spoke", "cs-spoke", "ag-1",
+    _run(poller._relay_one("host-spoke", "cs-spoke", "ag-1", "pxmx-cs-svr-04",
                           {"id": "cmd-y", "action": "start_vm", "args": {}}))
     assert seen["timeout"] == 16.0
 
@@ -186,3 +186,34 @@ def test_genuine_error_with_no_timeout_marker_still_fails():
     assert "CS_REQUEUE_COMMAND" not in cmd_types
     ack = next(c for c in hub.calls if c[1] == "CS_ACK_COMMAND")
     assert ack[2]["status"] == "failed"
+
+
+def test_status_snapshot_records_decision_and_counters(caplog):
+    """The WebUI 'CS Bridge Status' panel reads status_snapshot(): per agent it
+    shows the ACTIVE/SKIP decision + relay counters (accepted/requeued/
+    gave_up/completed/failed) so an Azure-hub operator can diagnose svr-02
+    (is the bridge reaching it? are commands re-queued or failing?) without SSH.
+    Also asserts the requeue log line carries the agent hostname so grepping
+    the agent name in WebUI Logs surfaces the outcome."""
+    import logging
+    poller, hub = _make_poller(_TIMEOUT_REPLY)
+    with caplog.at_level(logging.INFO, logger="CSBridge"):
+        _run(poller._tick())
+    snap = poller.status_snapshot()
+    assert snap["max_retries"] == 5
+    assert snap["relay_timeout_long_s"] == 65
+    # The agent ran through the relay path → it has a counter row + decision.
+    rows = {r["agent_id"]: r for r in snap["agents"]}
+    assert "ag-1" in rows
+    row = rows["ag-1"]
+    assert row["hostname"] == "pxmx-cs-svr-04"
+    assert "ACTIVE" in row["decision"]
+    # A relay timeout → requeued counter incremented.
+    assert row["requeued"] >= 1
+    assert row["last_outcome"] == "requeued"
+    # The requeue INFO line names the hostname (one-grep diagnosis in WebUI Logs).
+    requeue_lines = [r.getMessage() for r in caplog.records
+                     if "re-queued" in r.getMessage()]
+    assert requeue_lines, "no requeue INFO line emitted"
+    assert any("pxmx-cs-svr-04" in ln for ln in requeue_lines), (
+        "requeue log line missing the agent hostname — can't grep by agent")
