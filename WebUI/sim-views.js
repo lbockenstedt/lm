@@ -2681,20 +2681,22 @@ function csRenderSimQuotaEditor() {
         const simOpts = csSimQuotaSimOptions(r.sim_id, simIds);
         const siteOpts = csSimQuotaSelect(r.site, sites, '— all sites —');
         const idOpts = csSimQuotaAlertIdOptions(r.alert_type, r.alert_id);
+        // The "Tied to alert/insight" toggle leads the alert section of every sim
+        // row so it's obvious it governs the Type / Alert ID fields. Off =
+        // untethered (no alert needed). Presence rows have no alert at all.
         const alertCell = isPresence
             ? `<label class="text-xs text-slate-500" data-cs-sq-presence-note>Presence
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
               </label>`
-            : (!tied
-              ? `<label class="text-xs text-slate-500">Type
-                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— not tied to an alert/insight —</div>
-              </label>`
-              : `<label class="text-xs text-slate-500">Type
-                <select data-cs-sq="alert_type" onchange="csSimQuotaOnTypeChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
-                  <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
-                  <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
-                </select>
-              </label>`);
+            : `<div class="text-xs text-slate-500">
+                <label class="flex items-center gap-1 cursor-pointer font-semibold text-slate-600"><input data-cs-sq="tied" type="checkbox" onchange="csSimQuotaOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</label>
+                ${tied
+                  ? `<select data-cs-sq="alert_type" onchange="csSimQuotaOnTypeChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
+                       <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
+                       <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
+                     </select>`
+                  : `<div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— untethered: no alert/insight needed —</div>`}
+              </div>`;
         const idCell = isPresence
             ? `<label class="text-xs text-slate-500">Alert / Insight ID
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— none (presence) —</div>
@@ -2719,7 +2721,6 @@ function csRenderSimQuotaEditor() {
             <select data-cs-sq="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${siteOpts}</select>
           </label>
           <label class="text-xs text-slate-500 flex flex-col gap-1">
-            ${isPresence ? '' : `<span class="flex items-center gap-1"><input data-cs-sq="tied" type="checkbox" onchange="csSimQuotaOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</span>`}
             <span class="flex items-center gap-1"><input data-cs-sq="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>

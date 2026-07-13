@@ -5164,20 +5164,22 @@ function _renderSimQuotaDefaultsEditor() {
         const siteCtl = sites.length
             ? `<select data-sqd="site" class="${ctlCls}">${_simQuotaDefaultSelect(r.site, sites, '— all sites —')}</select>`
             : `<input data-sqd="site" value="${r.site.replace(/"/g, '&quot;')}" placeholder="all sites" class="${ctlCls}">`;
+        // The "Tied to alert/insight" toggle leads the alert section of every
+        // sim row so it's obvious it governs the Type / Alert ID fields. Off =
+        // untethered (no alert needed). Presence rows have no alert at all.
         const typeCell = isPresence
             ? `<label class="${lblCls}">Presence
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
               </label>`
-            : (!tied
-              ? `<label class="${lblCls}">Type
-                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— not tied to an alert/insight —</div>
-              </label>`
-              : `<label class="${lblCls}">Type
-                <select data-sqd="alert_type" class="${ctlCls}">
-                  <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
-                  <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
-                </select>
-              </label>`);
+            : `<div class="${lblCls}">
+                <label class="flex items-center gap-1 cursor-pointer font-semibold text-slate-700"><input data-sqd="tied" type="checkbox" onchange="_simQuotaDefaultOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</label>
+                ${tied
+                  ? `<select data-sqd="alert_type" class="${ctlCls}">
+                       <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
+                       <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
+                     </select>`
+                  : `<div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— untethered: no alert/insight needed —</div>`}
+              </div>`;
         const idCell = isPresence
             ? `<label class="${lblCls}">Alert / Insight ID
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— none (presence) —</div>
@@ -5202,7 +5204,6 @@ function _renderSimQuotaDefaultsEditor() {
             ${siteCtl}
           </label>
           <label class="${lblCls} flex flex-col gap-1">
-            ${isPresence ? '' : `<span class="flex items-center gap-1"><input data-sqd="tied" type="checkbox" onchange="_simQuotaDefaultOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</span>`}
             <span class="flex items-center gap-1"><input data-sqd="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-sqd="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-sqd="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
