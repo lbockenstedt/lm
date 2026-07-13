@@ -5109,10 +5109,11 @@ async function csRefreshAutoProvStatus() {
         const s = await csFetch(`/${csTenant()}/usb-provisioning-status?tenant_id=${csTenant()}`);
         const on = String(s.usb_auto_provision || 'off').toLowerCase() === 'on';
         csAutoProvOn = on;
-        // ENABLE button reflects on/off (green when enabled, grey when disabled).
+        // Button reflects STATE (green "Enabled" when on, grey "Disabled" when
+        // off); still clickable when off to enable.
         const btn = csEl('cs-autoprov-enable-btn');
         if (btn) {
-            btn.textContent = on ? 'Enabled' : 'Enable';
+            btn.textContent = on ? 'Enabled' : 'Disabled';
             btn.className = on
                 ? 'px-3 py-1 rounded-md text-xs font-bold border bg-[#01A982]/10 text-[#01A982] border-[#01A982]'
                 : 'px-3 py-1 rounded-md text-xs font-bold border bg-slate-100 text-slate-500 border-slate-300';
