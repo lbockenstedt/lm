@@ -3210,9 +3210,15 @@ async function csRenderSimQuotaState() {
         // presence quota (sim_id empty — "Clients Associated") is keyed by site
         // alone (presence::MIA), not alert_type:alert_id:site, so it joins the
         // ledger's presence entry instead of a phantom alert row.
+        // Mirror the engine's _quota_key EXACTLY, including the UNTETHERED sim
+        // case (sim set, no alert → sim:<sim>:<site>). Missing that made every
+        // untethered sim quota key to alert::<site>, so its row showed 0/N and
+        // its real ledger entry landed in "RELEASING" as a phantom.
         const keyOf = (q) => !q.sim_id
             ? `presence::${q.site || ''}`
-            : `${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`;
+            : (!q.alert_id
+                ? `sim:${q.sim_id}:${q.site || ''}`
+                : `${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`);
         // Join alert/insight IDs to their friendly names via the monitored_checks
         // slice the spoke returns alongside the ledger (a quota row stores only
         // the bare id). Falls back to the id when no monitored check matches.

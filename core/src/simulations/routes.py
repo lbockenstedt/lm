@@ -1472,12 +1472,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if sites is None:
             return False
         site = str(q.get("site") or "").strip()
-        # Map the quota's wsite (SSID site, e.g. MIA) to its CENTRAL site name
-        # (e.g. Miami) via the tenant's site_links, so the firing check compares
-        # against where the alert actually fires in Central.
+        # Resolve the quota's site to the CENTRAL site name Central reports the
+        # alert under. Two hops: (1) if `site` names an SSID cell (e.g. MIA-ACD),
+        # map it to its physical wsite (MIA) via the ssid_matrix; (2) map that
+        # wsite to the Central site (e.g. Miami) via site_links. Without hop (1)
+        # a cell-scoped adaptive quota never matched a firing site and ramped to
+        # max forever ("at max, not firing").
         if site:
             try:
                 csc = await store.get_central_sites_config(tenant_id) or {}
+                for cd in (csc.get("ssid_matrix") or []):
+                    if str(cd.get("name") or "").strip() == site and cd.get("site"):
+                        site = str(cd.get("site")).strip()
+                        break
                 for lk in (csc.get("site_links") or []):
                     if str(lk.get("wsite") or "").strip() == site and lk.get("central_site"):
                         site = str(lk.get("central_site")).strip()
