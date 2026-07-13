@@ -4165,6 +4165,10 @@ window.CS_CHILD_RENDERERS['Setup::Diagnostics']    = csRenderSetupDiagnostics;
  * ========================================================================= */
 
 let csVmHosts = [];
+// Auto-Provisioning on/off mirror of the hub flag (set by
+// csRefreshAutoProvStatus from usb-provisioning-status). Drives the ENABLE
+// button label/state on the Auto-Provisioning tile.
+let csAutoProvOn = false;
 let csVmSelectedSpoke = '';       // spoke_id of the FIRST in-scope host (single-host children)
 let csVmSelectedHostId = '';      // FIRST in-scope host id (single-host children)
 // Multi-host selection for VMS + Command Queue. Empty array = ALL hosts. The
@@ -4387,14 +4391,22 @@ async function csRenderVmServer() {
           <button onclick="csFleetReclone()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Reclone All</button>
         </div>
         <p class="text-[10px] text-slate-400 mt-2">Concurrency controls how many guests reclone in parallel.</p>
+        <div id="cs-fleet-reclone-progress" class="mt-2 text-[11px] text-slate-500 space-y-1">No reclone in progress.</div>
       </div>
       <div class="hpe-card rounded-lg p-4 shadow-sm">
-        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Auto-Provisioning</p>
-        <label class="flex items-center gap-2 text-sm text-slate-600">
-          <input id="cs-autoprov-toggle" type="checkbox" onchange="csToggleAutoProvision(this.checked)" class="rounded"/>
-          Provision unassigned dongles automatically
-        </label>
-        <div id="cs-autoprov-status" class="mt-2 text-[10px] text-slate-500 space-y-1">Status: loading…</div>
+        <div class="flex items-center justify-between mb-2">
+          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Auto-Provisioning</p>
+          <button id="cs-autoprov-enable-btn" onclick="csToggleAutoProvision(!csAutoProvOn)" class="px-3 py-1 rounded-md text-xs font-bold border">Enable</button>
+        </div>
+        <div class="flex gap-4">
+          <div class="flex-1 min-w-0">
+            <div id="cs-autoprov-status" class="text-[10px] text-slate-500 space-y-1">Status: loading…</div>
+          </div>
+          <div class="flex-1 min-w-0 border-l border-slate-100 pl-3">
+            <div class="text-[9px] font-bold text-slate-400 uppercase tracking-wider mb-1">Provisioning now</div>
+            <div id="cs-autoprov-live" class="text-[11px] text-slate-500 space-y-1">loading…</div>
+          </div>
+        </div>
       </div>
     </div>`;
 
@@ -4441,6 +4453,7 @@ async function csRenderVmServer() {
       <tbody>${rows}</tbody>
     </table></div>`;
 
+<<<<<<< Updated upstream
     // Fleet template refresh — pick one/some/all hosts and refresh each host's
     // template from its stored backup. Tenant-admin (own hosts) + Global Admin.
     const _canRefresh = (typeof isAdmin === 'function' && isAdmin())
@@ -4454,7 +4467,88 @@ async function csRenderVmServer() {
 
     csSet(`<div class="space-y-4">${summary}${fleetCards}${bulkBar}${table}</div>`);
     // populate auto-provision status
+=======
+    csSet(`<div class="space-y-4">${summary}${fleetCards}${table}</div>`);
+    // populate auto-provision status + the live panels (host data from csVmLoad).
+>>>>>>> Stashed changes
     csRefreshAutoProvStatus();
+    csAutoProvLivePanel();
+    csFleetRecloneProgress();
+}
+
+// ── Fleet Reclone / Auto-Provisioning live progress panels ───────────────────
+// Modeled on the first-version webui-spoke ``renderRecloneStatus`` +
+// ``renderAutoProvisionStatus``: a per-host progress bar (done/total VMs) for an
+// active fleet reclone, and an in-flight VM list for auto-provisioning. Both
+// read data that already rides the per-host relay payload (reclone_state /
+// usb_devices[].prov_status), so they refresh with the VM Server auto-refresh.
+
+function csFleetRecloneProgress() {
+    const el = csEl('cs-fleet-reclone-progress');
+    if (!el) return;
+    // Per-host reclone_state; only hosts with a non-idle/non-empty state are "running".
+    const active = (csVmHosts || []).map(h => ({ h, rs: h.reclone_state || {} }))
+        .filter(x => x.rs.status === 'running' || (x.rs.status && x.rs.status !== 'idle' && Object.keys(x.rs).length));
+    if (!active.length) { el.textContent = 'No reclone in progress.'; return; }
+    el.innerHTML = active.map(({ h, rs }) => {
+        const total = Number(rs.total || 0);
+        const done = Number(rs.completed || 0) + Number(rs.failed || 0);
+        const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+        const host = csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id || '');
+        const cur = rs.current_vm ? ` · recloning VM ${csEscape(String(rs.current_vm))}` : '';
+        const ph = rs.phase ? ` (${csEscape(rs.phase)})` : '';
+        const bar = total
+            ? `<div class="w-full bg-slate-100 rounded-full h-1.5 my-1"><div class="bg-[#01A982] h-1.5 rounded-full" style="width:${pct}%"></div></div>
+               <div class="text-[10px] text-slate-400">${done} / ${total} VMs (${pct}%)${cur}${ph}</div>`
+            : `<div class="text-[10px] text-slate-400">starting${cur}${ph}</div>`;
+        const log = (rs.log || []).slice(-4).reverse().map(e => {
+            const ic = e.status === 'completed' ? '✅' : e.status === 'failed' ? '❌'
+                : e.status === 'in_progress' ? '⏳' : '🕐';
+            return `<div class="text-[10px] text-slate-400">${ic} VM ${csEscape(String(e.vmid ?? '—'))} · ${csEscape(e.status || '')}</div>`;
+        }).join('');
+        return `<div class="border-t border-slate-100 pt-1 first:border-0 first:pt-0">
+            <div class="text-[10px] font-bold text-slate-600">${host}</div>${bar}${log}</div>`;
+    }).join('');
+}
+
+function csAutoProvLivePanel() {
+    const el = csEl('cs-autoprov-live');
+    if (!el) return;
+    // Aggregate in-flight USB entries across hosts (the per-VM "provisioning /
+    // tearing_down / missing / starting-up" states that already ride usb_devices).
+    // Mirrors renderAutoProvisionStatus: a present-but-VM-not-running dongle is
+    // "starting up". Cross-reference each host's proxmox_vms running set.
+    const flight = [];
+    (csVmHosts || []).forEach(h => {
+        const runningVmids = new Set((h.proxmox_vms || [])
+            .filter(v => String(v.status || '').toLowerCase() === 'running')
+            .map(v => Number(v.vmid)));
+        (h.usb_devices || []).forEach(u => {
+            const ps = String(u.prov_status || '').toLowerCase();
+            if (ps === 'provisioning' || ps === 'tearing_down' || ps === 'missing'
+                || (ps === 'active' && u.vmid != null && !runningVmids.has(Number(u.vmid)))) {
+                flight.push({ host: h.spoke_name || h.spoke_hostname || h.spoke_id || '', u });
+            }
+        });
+    });
+    if (!csAutoProvOn) {
+        el.innerHTML = `<div class="text-slate-400">Auto-Provisioning is off.</div>`;
+        return;
+    }
+    if (!flight.length) {
+        el.innerHTML = `<div class="text-slate-400">No active provisioning work.</div>`;
+        return;
+    }
+    el.innerHTML = flight.map(({ host, u }) => {
+        const ps = String(u.prov_status || '').toLowerCase();
+        const ic = ps === 'provisioning' ? '⏳' : ps === 'tearing_down' ? '🗑️'
+            : ps === 'missing' ? '⚠️' : '🔄';
+        const lbl = ps === 'provisioning' ? 'Cloning' : ps === 'tearing_down' ? 'Tearing Down'
+            : ps === 'missing' ? 'USB Missing' : 'Starting Up';
+        return `<div><span>${ic}</span> <b>VM ${csEscape(String(u.vmid ?? '—'))}</b>
+            <span class="text-slate-400">${csEscape(lbl)}</span>
+            <span class="text-slate-300">${csEscape(host)}</span></div>`;
+    }).join('');
 }
 
 window.csFleetSelectAll = function (cb) {
@@ -4493,7 +4587,15 @@ async function csRefreshAutoProvStatus() {
     try {
         const s = await csFetch(`/${csTenant()}/usb-provisioning-status?tenant_id=${csTenant()}`);
         const on = String(s.usb_auto_provision || 'off').toLowerCase() === 'on';
-        const el = csEl('cs-autoprov-toggle'); if (el) el.checked = on;
+        csAutoProvOn = on;
+        // ENABLE button reflects on/off (green when enabled, grey when disabled).
+        const btn = csEl('cs-autoprov-enable-btn');
+        if (btn) {
+            btn.textContent = on ? 'Enabled' : 'Enable';
+            btn.className = on
+                ? 'px-3 py-1 rounded-md text-xs font-bold border bg-[#01A982]/10 text-[#01A982] border-[#01A982]'
+                : 'px-3 py-1 rounded-md text-xs font-bold border bg-slate-100 text-slate-500 border-slate-300';
+        }
         if (!st) return;
         const csCount = Number(s.cs_enabled_agent_count || 0);
         // Primary (freshest host) provision diagnostic — WHY the last pass
@@ -4514,6 +4616,8 @@ async function csRefreshAutoProvStatus() {
         }
         html += `<div><b>Last pass:</b> ${reason}${loopOn ? '' : ' <span class="text-amber-600">(provision loop not running — check the pxmx agent log)</span>'}</div>`;
         st.innerHTML = html;
+        // csAutoProvOn is now fresh → re-render the live in-flight panel.
+        csAutoProvLivePanel();
     } catch (e) {
         console.error('csRefreshAutoProvStatus: usb-provisioning-status fetch failed (best-effort)', e);
         if (st) st.textContent = 'Status: unavailable';
