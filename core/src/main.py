@@ -564,6 +564,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # alongside the le spoke's own relayed logs. See CertDistLogHandler below
         # + setup_admin.get_module_logs.
         self.cert_dist_logs = deque(maxlen=500)
+        # Hub-side CS-bridge activity (the "CSBridge" logger in
+        # gateway/cs_bridge.py — per-agent ACTIVE/SKIP decisions, relay
+        # re-queue / give-up / ack-failed outcomes, cycle heartbeat). The bridge
+        # runs ON THE HUB, so without this its [cs-bridge] lines only land in the
+        # "Hub" log view; merge them into the "Simulations" (cs) view too so an
+        # Azure-hub operator sees cs-spoke relay logs + bridge decisions in one
+        # place. Mirrors cert_dist_logs → Certificates. See CSBridgeLogHandler
+        # below + setup_admin.get_module_logs (module == "cs").
+        self.cs_bridge_logs = deque(maxlen=500)
         self.max_log_size = 1000
         # Per-agent index populated from AGENT_RELAY_UP: agent_id →
         # {spoke_id, hostname, last_seen}. Lets the hub route a command to the
@@ -676,6 +685,32 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         _le_dist_log = logging.getLogger("le.distribution")
         _le_dist_log.setLevel(logging.INFO)
         _le_dist_log.addHandler(cert_dist_handler)
+
+        # Route hub-side CS-bridge activity (the "CSBridge" logger) into a
+        # dedicated buffer merged into GET /setup/logs/cs so it surfaces under
+        # WebUI Logs → Simulations alongside the cs spoke's own relayed logs.
+        # The bridge poller runs on the hub; without this its per-agent
+        # ACTIVE/SKIP decision + re-queue/give-up/ack-failed lines land ONLY in
+        # the "Hub" view, invisible to an operator triaging a stuck agent from
+        # the Simulations tab. Same canonical format as HubLogHandler. Pin the
+        # logger to INFO so decisions/outcomes are ALWAYS captured regardless of
+        # the root level (mirrors the le.distribution pin above).
+        class CSBridgeLogHandler(logging.Handler):
+            def __init__(self, hub):
+                super().__init__()
+                self.hub = hub
+            def emit(self, record):
+                try:
+                    self.hub.cs_bridge_logs.append(self.format(record))
+                except Exception:  # noqa: BLE001 — never block a log emit
+                    pass
+        cs_bridge_handler = CSBridgeLogHandler(self)
+        cs_bridge_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'))
+        _cs_bridge_log = logging.getLogger("CSBridge")
+        _cs_bridge_log.setLevel(logging.INFO)
+        _cs_bridge_log.addHandler(cs_bridge_handler)
 
         # Route uncaught SYNC exceptions through the "Hub" logger so they land in
         # self.logs → Error Log tab (collect_error_logs) + BugFixer, instead of
@@ -2456,6 +2491,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.logs.clear()
         cert_dist_lines = len(self.cert_dist_logs)
         self.cert_dist_logs.clear()
+        cs_bridge_lines = len(self.cs_bridge_logs)
+        self.cs_bridge_logs.clear()
         agent_counts = {}
         for aid, dq in list(self.agent_logs.items()):
             agent_counts[aid] = len(dq)
@@ -2472,15 +2509,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         await self.broadcast_clear_logs()
 
         logger.warning(
-            "[diag] Clear Logs: hub deque %d + cert-dist %d + agent/spoke %d lines "
-            "across %d buffer(s); truncated %d on-disk file(s) on hub; broadcast "
-            "to %d connected spoke(s)",
-            hub_lines, cert_dist_lines, agent_lines, len(agent_counts),
-            len(files), spoke_count)
+            "[diag] Clear Logs: hub deque %d + cert-dist %d + cs-bridge %d + "
+            "agent/spoke %d lines across %d buffer(s); truncated %d on-disk "
+            "file(s) on hub; broadcast to %d connected spoke(s)",
+            hub_lines, cert_dist_lines, cs_bridge_lines, agent_lines,
+            len(agent_counts), len(files), spoke_count)
         return {
             "status": "ok",
             "hub_lines": hub_lines,
             "cert_dist_lines": cert_dist_lines,
+            "cs_bridge_lines": cs_bridge_lines,
             "agent_buffers": len(agent_counts),
             "agent_lines": agent_lines,
             "disk_files_truncated": files,

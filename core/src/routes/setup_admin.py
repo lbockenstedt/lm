@@ -280,6 +280,14 @@ def register(app, hub, ctx):
                 # operator sees issue + distribution + install in one place.
                 if module == "le":
                     flat.extend(hub.cert_dist_logs)
+                # Hub-side CS-bridge activity (the "CSBridge" logger — per-agent
+                # ACTIVE/SKIP decisions, relay re-queue/give-up/ack-failed
+                # outcomes, cycle heartbeat) runs ON THE HUB, so it isn't in
+                # agent_logs; merge it into the same Simulations view so an
+                # operator sees the cs spoke's relayed logs + the bridge's
+                # per-agent decisions in one place (mirrors le/cert above).
+                if module == "cs":
+                    flat.extend(hub.cs_bridge_logs)
                 if flat:
                     return {"logs": flat[-500:]}
 
@@ -287,6 +295,13 @@ def register(app, hub, ctx):
             # distribution buffer (issue/distribute outcomes) under Certificates.
             if module == "le" and hub.cert_dist_logs:
                 return {"logs": list(hub.cert_dist_logs)[-500:]}
+
+            # No connected cs spoke right now — still surface the hub-side
+            # CS-bridge buffer (per-agent decisions + relay outcomes) under
+            # Simulations so the bridge's view is never empty just because the
+            # cs spoke momentarily disconnected.
+            if module == "cs" and hub.cs_bridge_logs:
+                return {"logs": list(hub.cs_bridge_logs)[-500:]}
 
             # Map WebUI module keys → actual log filenames under /var/log/lm/
             log_name_map = {
