@@ -1616,6 +1616,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             out["ssid_matrix"] = csc["ssid_matrix"]
         if isinstance(csc.get("ssid_placement"), dict):
             out["ssid_placement"] = csc["ssid_placement"]
+        if isinstance(csc.get("ssid_weights"), list):
+            out["ssid_weights"] = csc["ssid_weights"]
         return out
 
     async def _push_sim_quotas(tenant_id: str) -> int:

@@ -2645,6 +2645,7 @@ async function csRenderConfigSimQuotas() {
             random_pool: (cfg && cfg.random_pool && typeof cfg.random_pool === 'object') ? { ...cfg.random_pool } : {},
             ssid_matrix: Array.isArray(cfg && cfg.ssid_matrix) ? cfg.ssid_matrix.map(c => ({ ...c })) : [],
             ssid_placement: (cfg && cfg.ssid_placement && typeof cfg.ssid_placement === 'object') ? JSON.parse(JSON.stringify(cfg.ssid_placement)) : {},
+            ssid_weights: Array.isArray(cfg && cfg.ssid_weights) ? cfg.ssid_weights.map(w => ({ ...w })) : [],
         };
         const quotas = Array.isArray(cfg && cfg.sim_quotas) ? cfg.sim_quotas : [];
         csSimQuotaRows = quotas.map(csSimQuotaRowFromServer);
@@ -2688,6 +2689,29 @@ function csLinkSiteOptions(sel, placeholder) {
     let out = `<option value="">${csEscape(placeholder || '— all sites —')}</option>`;
     out += links.map(l => `<option value="${csEscape(l.wsite)}" ${l.wsite === sel ? 'selected' : ''}>${csEscape(l.name || l.wsite)}</option>`).join('');
     if (sel && !links.some(l => l.wsite === sel)) {
+        out += `<option value="${csEscape(sel)}" selected>${csEscape(sel)} (unlinked)</option>`;
+    }
+    return out;
+}
+
+// Options for a QUOTA's target: a whole Site (from the links) OR a specific SSID
+// cell (from the Pool & SSID matrix, e.g. MIA-PSK). A cell-scoped quota homes its
+// clients to that cell's site AND sets their SSID — so MIA-PSK and MIA-ACD are
+// separate quota targets that can each hold clients.
+function csSsidCellOptions(sel, placeholder) {
+    const links = (window._csSiteLinks || []).filter(l => l && l.wsite);
+    const cells = ((window._csPoolCfg || {}).ssid_matrix || [])
+        .map(c => c.name || `${c.site}-${c.ssid}`).filter(Boolean);
+    let out = `<option value="">${csEscape(placeholder || '— all sites —')}</option>`;
+    if (links.length) {
+        out += '<optgroup label="Sites">' + links.map(l =>
+            `<option value="${csEscape(l.wsite)}" ${l.wsite === sel ? 'selected' : ''}>${csEscape(l.name || l.wsite)}</option>`).join('') + '</optgroup>';
+    }
+    if (cells.length) {
+        out += '<optgroup label="SSIDs">' + cells.map(nm =>
+            `<option value="${csEscape(nm)}" ${nm === sel ? 'selected' : ''}>${csEscape(nm)}</option>`).join('') + '</optgroup>';
+    }
+    if (sel && !links.some(l => l.wsite === sel) && cells.indexOf(sel) < 0) {
         out += `<option value="${csEscape(sel)}" selected>${csEscape(sel)} (unlinked)</option>`;
     }
     return out;
@@ -2749,7 +2773,7 @@ function csRenderSimQuotaEditor() {
         // site, like a presence row. tied defaults on for backward compat.
         const tied = !isPresence && r.tied !== false;
         const simOpts = csSimQuotaSimOptions(r.sim_id, simIds);
-        const siteOpts = csLinkSiteOptions(r.site, '— all sites —');
+        const siteOpts = csSsidCellOptions(r.site, '— all sites —');
         const idOpts = csSimQuotaAlertIdOptions(r.alert_type, r.alert_id);
         // The "Tied to alert/insight" toggle leads the alert section of every sim
         // row so it's obvious it governs the Type / Alert ID fields. Off =
@@ -2848,28 +2872,28 @@ function csPoolConfigCardHtml() {
     const esc = s => csEscape(String(s == null ? '' : s));
     const simChecks = flags.map(f =>
         `<label class="flex items-center gap-1 text-xs"><input type="checkbox" data-cs-rand="${esc(f)}" ${rsims.indexOf(f) >= 0 ? 'checked' : ''}> ${esc(f)}</label>`).join('');
+    // SSID matrix = cell DEFINITIONS only: Site, SSID/Auth, Password.
     const matrixRows = matrix.map((c, i) => {
-        const name = c.name || `${c.site || ''}-${c.ssid || ''}`;
-        const hold = ((placement[c.site] || {}).targets || {})[name];
-        return `<div class="grid grid-cols-2 sm:grid-cols-6 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-cell="${i}">
+        return `<div class="grid grid-cols-2 sm:grid-cols-4 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-cell="${i}">
           <label class="text-xs text-slate-500">Site<select data-cs-cell-k="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${csLinkSiteOptions(c.site, '— site —')}</select></label>
           <label class="text-xs text-slate-500">SSID / Auth<input data-cs-cell-k="ssid" value="${esc(c.ssid)}" placeholder="PSK / 1X" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
           <label class="text-xs text-slate-500">Password<input data-cs-cell-k="ssidpw" value="${esc(c.ssidpw)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
-          <label class="text-xs text-slate-500">Weight<input data-cs-cell-k="weight" type="number" min="0" value="${esc(c.weight != null ? c.weight : 1)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
-          <label class="text-xs text-slate-500">Hold N<input data-cs-cell-k="hold" type="number" min="0" value="${hold != null ? esc(hold) : ''}" placeholder="—" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
           <button onclick="csPoolCellDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
         </div>`;
     }).join('');
-    const sites = matrix.map(c => c.site).filter((s, i, a) => s && a.indexOf(s) === i);
-    const siteRows = sites.map(s => {
-        const cells = matrix.filter(c => c.site === s).map(c => c.name || `${c.site}-${c.ssid}`);
-        const rem = (placement[s] || {}).remainder || '';
-        const remOpts = ['<option value="">— random spread —</option>'].concat(
-            cells.map(cn => `<option value="${esc(cn)}" ${rem === cn ? 'selected' : ''}>${esc(cn)}</option>`)).join('');
-        return `<div class="flex flex-wrap items-center gap-3 text-xs" data-cs-poolsite="${esc(s)}">
-          <span class="font-semibold text-slate-600 w-16">${esc(s)}</span>
-          <label class="flex items-center gap-1"><input type="checkbox" data-cs-pool-on ${randPool[s] ? 'checked' : ''}> Random pool</label>
-          <label class="flex items-center gap-1">Remainder <select data-cs-pool-rem class="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs">${remOpts}</select></label>
+    // Weighted random rules: spread the SPARE (unaccounted) pool across SSID
+    // cells. Each rule picks a cell + weight; weight 0 = none; All = soak the
+    // balance. The cell name (MIA-PSK) carries its site.
+    const cellNames = matrix.map(c => c.name || `${c.site}-${c.ssid}`).filter(Boolean);
+    const cellOpts = (sel) => '<option value="">— SSID —</option>' +
+        cellNames.map(nm => `<option value="${esc(nm)}" ${nm === sel ? 'selected' : ''}>${esc(nm)}</option>`).join('');
+    const weights = pc.ssid_weights || [];
+    const weightRows = weights.map((w, i) => {
+        return `<div class="grid grid-cols-4 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-wt="${i}">
+          <label class="text-xs text-slate-500">SSID<select data-cs-wt-k="ssid" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${cellOpts(w.ssid || w.cell || '')}</select></label>
+          <label class="text-xs text-slate-500">Weight<input data-cs-wt-k="weight" type="number" min="0" value="${esc(w.weight != null ? w.weight : 1)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
+          <label class="flex items-center gap-1 text-xs text-slate-500 pb-2">All<input data-cs-wt-k="all" type="checkbox" ${w.all ? 'checked' : ''}> <span class="text-slate-400">balance</span></label>
+          <button onclick="csPoolWeightDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
         </div>`;
     }).join('');
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
@@ -2880,7 +2904,7 @@ function csPoolConfigCardHtml() {
             <button onclick="csSavePoolConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Pool</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mb-3">Define SSIDs (site × auth), how clients spread across them (weight / hold N), and which sims run as ambient random traffic. Whether a client is physically site-bound (RF chamber) or assignable (site-based SSID) is set <span class="font-semibold">per PXMX server</span> in <span class="font-semibold">Config → PXMX Sites</span> (Site Pool vs Tenant-Wide Pool). Placement below assigns Tenant-Wide-Pool clients to these SSIDs.</p>
+        <p class="text-xs text-slate-500 mb-3">The SSID matrix just <span class="font-semibold">defines</span> your SSIDs (site, auth, password). <span class="font-semibold">Sim Quotas</span> attach an exact (accounted) count of clients to a cell for an alert. The <span class="font-semibold">weighted rules</span> below spread the rest of the pool (random, unaccounted) across a site's SSIDs by weight. Whether a PXMX server is site-bound (RF chamber) or assignable is set in <span class="font-semibold">Config → PXMX Sites</span>.</p>
         <div class="mb-3">
           <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Randomizable (ambient) sims</div>
           <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-1">${simChecks}</div>
@@ -2890,8 +2914,12 @@ function csPoolConfigCardHtml() {
           <div class="space-y-2">${matrixRows || '<div class="text-xs text-slate-400 italic">No SSIDs. Click + Add SSID.</div>'}</div>
         </div>
         <div>
-          <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Per-site pool</div>
-          <div class="space-y-1">${siteRows || '<div class="text-xs text-slate-400 italic">Add SSIDs above to configure the per-site pool.</div>'}</div>
+          <div class="flex items-center justify-between mb-1">
+            <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Weighted random distribution</div>
+            <button onclick="csPoolWeightAdd()" class="text-[#01A982] hover:underline text-xs font-bold">+ Add rule</button>
+          </div>
+          <p class="text-[11px] text-slate-400 mb-1 leading-tight">Spreads the spare pool across a site's SSIDs. Weight 5 vs 1 = 5× the clients; weight 0 = none; <span class="font-semibold">All</span> = balance of the pool goes to that SSID.</p>
+          <div class="space-y-2">${weightRows || '<div class="text-xs text-slate-400 italic">No weighted rules. Click + Add rule.</div>'}</div>
         </div>
       </div>`;
 }
@@ -2903,35 +2931,51 @@ function csPoolSyncFromDom() {
     pc.randomizable_sims = Array.from(document.querySelectorAll('[data-cs-rand]'))
         .filter(el => el.checked).map(el => el.getAttribute('data-cs-rand'));
     const matrix = [];
-    const placement = {};
     document.querySelectorAll('[data-cs-cell]').forEach(el => {
         const get = k => { const i = el.querySelector(`[data-cs-cell-k="${k}"]`); return i ? String(i.value).trim() : ''; };
         const site = get('site'), ssid = get('ssid');
         if (!site && !ssid) return;
-        const name = `${site}-${ssid}`;
-        matrix.push({ name, site, ssid, ssidpw: get('ssidpw'), weight: parseFloat(get('weight')) || 1, enabled: true });
-        const hold = parseInt(get('hold'), 10);
-        if (hold > 0) {
-            placement[site] = placement[site] || { targets: {}, remainder: '' };
-            placement[site].targets[name] = hold;
-        }
+        matrix.push({ name: `${site}-${ssid}`, site, ssid, ssidpw: get('ssidpw'), enabled: true });
     });
     pc.ssid_matrix = matrix;
+    // Weighted random rules → {site, ssid(cell), weight, all}. The cell name
+    // carries its site (derive it from the matrix). weight 0 = that cell takes
+    // none; All = soak the balance. random_pool is derived on for any site with a
+    // rule so its spare clients run ambient (randomizable) sims.
+    const cellSite = {};
+    matrix.forEach(c => { cellSite[c.name] = c.site; });
+    const weights = [];
     const randPool = {};
-    document.querySelectorAll('[data-cs-poolsite]').forEach(el => {
-        const site = el.getAttribute('data-cs-poolsite');
-        const on = el.querySelector('[data-cs-pool-on]');
-        const rem = el.querySelector('[data-cs-pool-rem]');
-        randPool[site] = !!(on && on.checked);
-        if (rem && rem.value) {
-            placement[site] = placement[site] || { targets: {}, remainder: '' };
-            placement[site].remainder = rem.value;
-        }
+    document.querySelectorAll('[data-cs-wt]').forEach(el => {
+        const q = k => el.querySelector(`[data-cs-wt-k="${k}"]`);
+        const cell = q('ssid') ? String(q('ssid').value).trim() : '';
+        if (!cell) return;
+        const site = cellSite[cell] || '';
+        weights.push({
+            site, ssid: cell,
+            weight: parseFloat(q('weight') ? q('weight').value : '1') || 0,
+            all: !!(q('all') && q('all').checked),
+        });
+        if (site) randPool[site] = true;
     });
+    pc.ssid_weights = weights;
     pc.random_pool = randPool;
-    pc.ssid_placement = placement;
+    pc.ssid_placement = {};   // deprecated — weighted rules replace hold-N/remainder
     return pc;
 }
+
+window.csPoolWeightAdd = function () {
+    csSimQuotaSyncFromDom(); csPoolSyncFromDom();
+    (window._csPoolCfg.ssid_weights = window._csPoolCfg.ssid_weights || [])
+        .push({ site: '', ssid: '', weight: 1, all: false });
+    csRenderSimQuotaEditor();
+};
+
+window.csPoolWeightDel = function (i) {
+    csSimQuotaSyncFromDom(); csPoolSyncFromDom();
+    (window._csPoolCfg.ssid_weights || []).splice(i, 1);
+    csRenderSimQuotaEditor();
+};
 
 window.csPoolCellAdd = function () {
     csSimQuotaSyncFromDom(); csPoolSyncFromDom();
@@ -2960,6 +3004,7 @@ window.csSavePoolConfig = async function () {
             random_pool: pc.random_pool || {},
             ssid_matrix: pc.ssid_matrix || [],
             ssid_placement: pc.ssid_placement || {},
+            ssid_weights: pc.ssid_weights || [],
         };
         await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         showToast('Pool & SSID config saved.', 'success');
