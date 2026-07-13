@@ -3046,11 +3046,19 @@ function csSimQuotaSyncFromDom() {
         };
         if (adaptive) {
             // Adaptive rows use Min/Max; count is the floor the controller ramps from.
-            const mn = parseInt((g('min') || {}).value || '1', 10) || 1;
-            const mx = parseInt((g('max') || {}).value || String(mn), 10) || mn;
-            row.min = mn;
-            row.max = Math.max(mn, mx);
-            row.count = mn;
+            // ONLY read min/max when the fields are actually rendered — when the
+            // user just ticked Adaptive they aren't yet, and reading absent fields
+            // as 1/1 would make min==max so the row saves as NON-adaptive (the
+            // "Adaptive unchecks on save" bug). Leave min/max for the toggle
+            // handler's seed (min=count, max=count*2) when the fields are absent.
+            const minEl = g('min'), maxEl = g('max');
+            if (minEl && maxEl) {
+                const mn = parseInt(minEl.value || '1', 10) || 1;
+                const mx = parseInt(maxEl.value || String(mn), 10) || mn;
+                row.min = mn;
+                row.max = Math.max(mn, mx);
+                row.count = mn;
+            }
         } else {
             row.count = parseInt((g('count') || {}).value || '1', 10) || 1;
         }
@@ -3085,9 +3093,9 @@ window.csSimQuotaOnAdaptiveChange = function (cb) {
         const r = csSimQuotaRows[idx];
         if (r) {
             r.adaptive = !!cb.checked;
-            if (r.adaptive) {  // seed min/max from the current count
+            if (r.adaptive) {  // seed min/max so max > min (else it saves non-adaptive)
                 if (r.min == null) r.min = r.count || 1;
-                if (r.max == null) r.max = Math.max(r.min, (r.count || 1) * 2);
+                if (r.max == null || r.max <= r.min) r.max = Math.max(r.min + 1, (r.count || 1) * 2);
             }
         }
     }
