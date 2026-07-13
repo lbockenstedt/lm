@@ -885,6 +885,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Simulations module: tenant-scoped browser broadcast + slim cs-config store.
         self.simulations_broadcaster = SimulationsBroadcaster()
         self.simulations_store = SimulationsStore(self.state.data_dir)
+        # Hub-local Proxmox template-backup repository (vzdump archives + metadata
+        # on the hub's own disk). Populated by a Global-Admin-triggered backup
+        # that the owning node's agent streams up. See routes/templates.py.
+        from template_repo import TemplateRepo
+        self.template_repo = TemplateRepo(self.state.data_dir)
         # Hub-side Aruba Central status for CENTRALIZED processing mode, keyed by
         # tenant_id. Populated by CentralHubPoller (the spoke has no Aruba client
         # in centralized mode); read by SimulationsService as a synthetic "Hub

@@ -1104,6 +1104,13 @@ def create_app(hub):
         if path in _PUBLIC or (request.method == "GET" and path in _PUBLIC_GET):
             return await call_next(request)
 
+        # Agent-facing template-repo upload/progress — the owning node's agent has
+        # no browser session, so these are gated by the per-backup one-time
+        # upload token INSIDE the route (routes/templates.py), not by a session.
+        # Exact shape only: /api/templates/{id}/upload and /{id}/progress.
+        if path.startswith("/api/templates/") and (path.endswith("/upload") or path.endswith("/progress")):
+            return await call_next(request)
+
         sess = _session_user(request)
         if not sess:
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
@@ -1600,7 +1607,7 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates,
     )
     setup.register(app, hub, ctx)
     firewall.register(app, hub, ctx)
@@ -1608,6 +1615,7 @@ def create_app(hub):
     tenant_devices.register(app, hub, ctx)
     cppm.register(app, hub, ctx)
     pxmx.register(app, hub, ctx)
+    templates.register(app, hub, ctx)
     ws_transport.register(app, hub, ctx)
     console.register(app, hub, ctx)
     pxmx_vm.register(app, hub, ctx)
