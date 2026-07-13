@@ -3244,7 +3244,33 @@ async function csRenderSimQuotaState() {
                  <div class="font-bold mb-1">⚠️ ${_warns.length} warning${_warns.length === 1 ? '' : 's'}</div>
                  ${_warns.map(w => `<div>• ${w}</div>`).join('')}
                </div>` : '';
+        // Adaptive Controllers panel (design §9) — prominent per-quota learning
+        // state so it's discoverable even before you look at the row badge.
+        const _adEntries = Object.entries(st.adaptive_state || {});
+        const _adRow = ([k, v]) => {
+            const p = String(k).split(':');  // alert_type:alert_id:site
+            const label = `${p[1] || '(sim)'} @ ${p[2] || 'all sites'}`;
+            const m = (v && v.mode) || 'learning';
+            const badge = m === 'at_max'
+                ? '<span class="text-amber-700">⚠️ At max</span>'
+                : m === 'stable' ? '<span class="text-emerald-700">✅ Stable</span>'
+                : '<span class="text-slate-600">🔄 Learning</span>';
+            return `<div class="flex flex-wrap items-center gap-3 text-xs py-0.5">
+              <span class="w-48 font-mono text-slate-600 truncate">${csEscape(label)}</span>
+              <span class="font-semibold">${badge}</span>
+              ${(v && v.floor != null) ? `<span class="text-slate-400">floor ${csEscape(String(v.floor))}</span>` : ''}
+              <span class="text-slate-400">target ${csEscape(String((v && v.target != null) ? v.target : '—'))}</span>
+            </div>`;
+        };
+        const adaptivePanel = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Adaptive Controllers</h3>
+            ${_adEntries.length
+              ? `<p class="text-xs text-slate-500 mb-2">Each adaptive quota ramps its runner count to keep its alert firing, then settles at the learned floor + 20%. 🔄 learning · ✅ stable · ⚠️ at max.</p>
+                 <div class="space-y-0.5">${_adEntries.map(_adRow).join('')}</div>`
+              : `<p class="text-xs text-slate-400 italic">No adaptive quotas yet. In <span class="font-semibold">Config → Sim Quotas</span>, tie a quota to an alert/insight and check <span class="font-semibold">Adaptive (keep firing)</span> — its Clients field becomes Min/Max and the learning state shows here.</p>`}
+          </div>`;
         csSet(`<div class="space-y-4">
+          ${adaptivePanel}
           <div class="hpe-card rounded-lg p-5 shadow-sm">
             ${warnBanner}
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
