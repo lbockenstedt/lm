@@ -2178,6 +2178,39 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             pass
         return result
 
+    @app.delete("/sim/api/{tenant}/clients/overrides")
+    async def cs_clear_all_client_overrides(tenant: str,
+                                            tenant_id: str = Depends(get_tenant_id)):
+        """Bulk-clear the legacy per-client REGISTRY override layer on the spoke.
+
+        Model A moved per-user overrides to ``user-overrides.conf``, but stale
+        registry overrides (set via the old Control Panel, a prior bulk set, or
+        a since-removed SimQuotaEngine assignment that didn't revert) persist in
+        the spoke's ``clients.json`` and are baked into ``[username]`` by
+        ``/api/config`` (client_api.py:304-313) — invisible in the User
+        Overrides card (which reads user-overrides.conf) and in the Control
+        Panel (cs_get_client_control reads the same). This wipes them for every
+        registered client so the served ``simulation.conf`` drops the stale
+        ``[username]`` sim flags on the next client fetch. Mirrors the per-host
+        CS_CLEAR_CLIENT_OVERRIDES but fan-out to all clients in one shot."""
+        result = await _cs_forward(tenant_id, "CS_CLEAR_ALL_CLIENT_OVERRIDES", {})
+        # Mirror the clear into the hub cache so the Clients tab sim bars drop
+        # the flags before the next ~10s telemetry frame (otherwise a stale
+        # override reappears until the frame lands).
+        try:
+            for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
+                try:
+                    if hub.state.get_spoke_tenant(_sid) != tenant_id:
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                for c in (data.get("clients") or []):
+                    if isinstance(c, dict):
+                        c.pop("overrides", None)
+        except Exception:  # noqa: BLE001
+            pass
+        return result
+
     @app.get("/sim/api/{tenant}/clients/{hostname}/control")
     async def cs_get_client_control(tenant: str, hostname: str,
                                     tenant_id: str = Depends(get_tenant_id)):

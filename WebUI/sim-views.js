@@ -250,6 +250,7 @@ const SIM_ROUTES = {
     csGetClientControl:          { m: 'GET',    p: '/{tenant}/clients/{hostname}/control',        api: 'cs_get_client_control' },
     csSetClientControl:          { m: 'POST',   p: '/{tenant}/clients/{hostname}/control',        api: 'cs_set_client_control' },
     csClearClientControl:        { m: 'DELETE', p: '/{tenant}/clients/{hostname}/control',        api: 'cs_clear_client_control' },
+    csClearAllClientOverrides:   { m: 'DELETE', p: '/{tenant}/clients/overrides',                 api: 'cs_clear_all_client_overrides' },
     csControlAll:                { m: 'POST',   p: '/{tenant}/clients/control-all',               api: 'cs_control_all' },
     csVmAction:                  { m: 'POST',   p: '/{tenant}/spokes/{spoke_id}/proxmox-command',api: 'cs_spoke_proxmox_command' },
     csVmBulk:                    { m: 'POST',   p: '/{tenant}/spokes/{spoke_id}/proxmox-command',api: 'cs_spoke_proxmox_command' },
@@ -1322,7 +1323,8 @@ async function csRenderClients(tier) {
     csSetToolbar(`<input id="cs-client-search" oninput="csClientFilterKey()" placeholder="Search name / IP / MAC…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
       <select id="cs-client-status" onchange="csClientResetPage()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
         <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
-      </select>`);
+      </select>
+      <button id="cs-clear-all-overrides-btn" onclick="csClearAllOverrides(this)" title="Wipe the legacy per-client registry override layer (the hidden [username] sim-flag source /api/config bakes in) for every client" class="ml-auto bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-md px-3 py-1.5 text-sm font-semibold">✕ Clear All Overrides</button>`);
     // Initial load: fan out the clients fetch and the demo card together.
     // /aggregate/clients is a fast hub cache read, but csDemoCard() does two
     // relay round-trips to the spoke (/demo/active + /demo/scenarios) — running
@@ -1401,6 +1403,33 @@ window.csPurgeClients = async function (btn) {
     } catch (e) {
         console.error('csPurgeClients: purge failed', e);
         if (typeof showToast === 'function') showToast('Purge failed: ' + (e.message || e), 'error');
+        btn.disabled = false;
+        btn.textContent = orig;
+    }
+};
+
+// Bulk-clear the legacy per-client REGISTRY override layer (the hidden
+// [username] sim-flag source /api/config bakes in) for every registered client.
+// Model A moved the editor to user-overrides.conf, but stale registry overrides
+// persist in clients.json and are invisible in the User Overrides card / Control
+// Panel — this wipes them in one shot so the served simulation.conf drops the
+// stale [username] sim flags on the next client fetch. Lighter than Purge
+// (keeps the client records; only clears the override dict).
+window.csClearAllOverrides = async function (btn) {
+    if (!confirm('Clear the per-client registry override layer for ALL clients? This removes the hidden [username] sim-flag overrides /api/config bakes in (not user-overrides.conf). Each client re-fetches on its next update_now.'))
+        return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Clearing…';
+    try {
+        const r = await csFetch(`/${csTenant()}/clients/overrides`, { method: 'DELETE' });
+        const n = (r && r.cleared != null) ? r.cleared : '?';
+        if (typeof showToast === 'function') showToast(`Cleared registry overrides on ${n} client(s)`, 'success');
+        await csRenderClients(csClientTier);
+    } catch (e) {
+        console.error('csClearAllOverrides: clear failed', e);
+        if (typeof showToast === 'function') showToast('Clear failed: ' + (e.message || e), 'error');
+    } finally {
         btn.disabled = false;
         btn.textContent = orig;
     }
