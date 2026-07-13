@@ -2664,6 +2664,16 @@ function _rebuildMainNav(allSpokes, connections) {
         ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
     `;
 
+    // Normalize the nav font size across every item. The admin items (Setup/
+    // System/Logs) come from the STATIC index.html (captured via _getNavHtml),
+    // which isn't cache-busted — a stale copy can still carry text-sm while the
+    // JS-injected items are text-xs, making one item (e.g. Logs) look larger.
+    // Force text-xs on all so they always match regardless of the cached HTML.
+    mainNav.querySelectorAll('.nav-item').forEach(el => {
+        el.classList.remove('text-sm');
+        el.classList.add('text-xs');
+    });
+
     // The Logs submenu is dynamic (logsSubmenu gates module tabs on
     // activeProducts), so re-render it when the approved-module set changes
     // while the Logs view is open — otherwise newly-approved modules wouldn't
