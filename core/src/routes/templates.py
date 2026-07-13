@@ -73,6 +73,10 @@ def register(app, hub, ctx):
         vmid = body.get("vmid")
         node = str(body.get("node") or "").strip()
         unique_id = str(body.get("unique_id") or "").strip()
+        # Optional Proxmox storage target for vzdump (file-based only — the
+        # WebUI filters out PBS). When set, the agent uses --storage <X> and
+        # deletes the archive after streaming. Empty → legacy tempdir fallback.
+        storage = str(body.get("storage") or "").strip()
         # The WebUI passes the VM's unique_id ("cluster/node/vmid"); derive vmid +
         # node from it when not given explicitly (mirrors the VM-action routes).
         if unique_id and "/" in unique_id:
@@ -138,7 +142,8 @@ def register(app, hub, ctx):
                 "target_agent_id": agent_id,
                 "command": "START_BACKUP",
                 "data": {"template_id": tid, "vmid": vmid, "node": node,
-                         "upload_url": upload_url, "upload_token": token},
+                         "upload_url": upload_url, "upload_token": token,
+                         "storage": storage},
             })
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             accepted = isinstance(data, dict) and data.get("status") in ("SUCCESS", "ACCEPTED")

@@ -10297,11 +10297,16 @@ function openVmDetail(uniqueId) {
             <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
             <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors">📷 Snapshot</button>
             <button onclick="pxmxVmAction('${uid}','backup')" title="vzdump backup to the storage configured in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-colors">💾 Backup</button>
-            <button onclick="pxmxBackupToHub('${uid}')" title="vzdump this template and store a copy in the hub's Template Repo (Template Repo page)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition-colors">⬆ Back up to Hub</button>
+            <button id="pxmx-backup-hub-btn" onclick="pxmxBackupToHub('${uid}')" title="vzdump this template and store a copy in the hub's Template Repo (Template Repo page). The archive is deleted from the chosen storage after streaming." class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition-colors">⬆ Back up to Hub</button>
+            <select id="pxmx-backup-hub-storage" title="vzdump storage target for THIS backup (file-based only — PBS excluded; vzdump-to-PBS isn't a single streamable file). The archive is deleted from here after it streams to the hub." class="px-2 py-1.5 rounded-md text-xs border border-slate-300 bg-white max-w-[12rem]"><option value="">loading storages…</option></select>
             <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" title="Open VNC console (noVNC)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors">🖥 Console</button>
             ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>` : ''; })()}
             <span id="pxmx-vm-action-status" class="text-xs text-slate-400"></span>
         </div>`;
+    // Populate the "Back up to Hub" storage dropdown with this host's
+    // file-based backup storages (PBS excluded). Default = the host's
+    // configured backup_storage (per-host override, else global).
+    pxmxPopulateBackupHubStorage(vm.node || '');
 }
 
 // Hypervisor → Settings tab: backup (storage/mode/keep) + snapshot (keep/prefix)
@@ -10453,20 +10458,78 @@ async function pxmxVmAction(uniqueId, action) {
     }
 }
 
+// Populate the "Back up to Hub" storage dropdown for the open VM's node.
+// Lists the host's backup-capable storages EXCEPT PBS (vzdump-to-PBS pushes
+// dedup chunks, not a single streamable .vma.zst we can PUT to the hub).
+// Defaults to the host's configured backup_storage (per-host override, else
+// the global default from Hypervisors → Settings). When no file-based storage
+// is available, disables the ⬆ button so the admin can't queue a dump that
+// would fall back to the node's root-disk temp dir (the space concern this
+// feature exists to avoid).
+let _pxmxBackupHubStorageCache = {};
+async function pxmxPopulateBackupHubStorage(node) {
+    const sel = document.getElementById('pxmx-backup-hub-storage');
+    const btn = document.getElementById('pxmx-backup-hub-btn');
+    if (!sel) return;
+    if (!node) {
+        sel.innerHTML = '<option value="">(no node)</option>';
+        if (btn) { btn.disabled = true; btn.title = 'No node for this VM — cannot pick a storage.'; }
+        return;
+    }
+    try {
+        const [sR, cR] = await Promise.all([
+            setupFetch(`/sim/api/tenant/${currentTenant}/hypervisor-storages?tenant_id=${encodeURIComponent(currentTenant)}`),
+            setupFetch(`/sim/api/tenant/${currentTenant}/hypervisors-config?tenant_id=${encodeURIComponent(currentTenant)}`),
+        ]);
+        const sdata = await sR.json() || { hosts: [] };
+        const cdata = await cR.json().catch(() => ({}));
+        const cfg = (cdata && cdata.hypervisors_config) || {};
+        const host = (sdata.hosts || []).find(h =>
+            String(h.hostname || '').toLowerCase() === String(node).toLowerCase());
+        const types = (host && host.storage_types) || {};
+        const all = (host && host.storages) || [];
+        const fileBased = all.filter(s => types[s] !== 'pbs');
+        const def = (cfg.per_host && cfg.per_host[node] && cfg.per_host[node].backup_storage)
+            || cfg.backup_storage || '';
+        _pxmxBackupHubStorageCache[node] = { storages: fileBased, default: def };
+        if (!fileBased.length) {
+            sel.innerHTML = '<option value="">no file-based storage</option>';
+            sel.disabled = true;
+            if (btn) { btn.disabled = true; btn.title = `No file-based backup storage on ${node} (only PBS / none). Configure one in Setup → Hypervisors first.`; }
+            return;
+        }
+        sel.disabled = false;
+        if (btn) { btn.disabled = false; btn.title = "vzdump this template and store a copy in the hub's Template Repo (Template Repo page). The archive is deleted from the chosen storage after streaming."; }
+        const opts = fileBased.map(s => `<option value="${escapeHtml(s)}"${s === def ? ' selected' : ''}>${escapeHtml(s)}${types[s] ? ' (' + escapeHtml(types[s]) + ')' : ''}</option>`).join('');
+        sel.innerHTML = `<option value="">— select storage —</option>${opts}`;
+        if (def && fileBased.includes(def)) sel.value = def;
+    } catch (e) {
+        sel.innerHTML = '<option value="">(load failed)</option>';
+        if (btn) btn.title = `Could not load storages: ${escapeHtml(String(e.message || e))}`;
+    }
+}
+
 // Back up a Proxmox template to the hub's Template Repo. Sends the VM's unique_id
-// (the hub resolves the owning agent + vmid + node); the agent runs vzdump and
-// streams the archive up. Long-running — the trigger just queues it.
+// (the hub resolves the owning agent + vmid + node) + the chosen vzdump storage
+// target; the agent runs vzdump --storage <X> and streams the archive up, then
+// deletes it from the storage. Long-running — the trigger just queues it.
 async function pxmxBackupToHub(uniqueId) {
     const vms = window._pxmxVms || [];
     const vm = vms.find(v => v.unique_id === uniqueId);
     if (!vm) { showToast('VM not found in cache', 'error'); return; }
-    if (!window.confirm(`Run vzdump on "${vm.name || vm.vmid}" and stream a copy to the hub Template Repo?\n\nThis can take several minutes for a large template.`)) return;
+    const sel = document.getElementById('pxmx-backup-hub-storage');
+    const storage = sel ? String(sel.value || '').trim() : '';
+    if (!storage) {
+        showToast('Pick a vzdump storage target for this host first (file-based only — PBS excluded).', 'error');
+        return;
+    }
+    if (!window.confirm(`Run vzdump on "${vm.name || vm.vmid}" to storage "${storage}" and stream a copy to the hub Template Repo?\n\nThe archive is deleted from ${storage} after streaming. This can take several minutes for a large template.`)) return;
     const statusEl = document.getElementById('pxmx-vm-action-status');
-    if (statusEl) statusEl.textContent = 'Backing up to hub…';
+    if (statusEl) statusEl.textContent = `Backing up to hub (${storage})…`;
     try {
         const r = await setupFetch('/setup/templates/backup', {
             method: 'POST',
-            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, name: vm.name || '' })
+            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, name: vm.name || '', storage })
         });
         const data = await r.json().catch(() => ({}));
         if (r.ok && data && data.status === 'SUCCESS') {

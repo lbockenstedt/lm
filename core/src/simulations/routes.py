@@ -1581,8 +1581,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 data = r.get("payload", {}).get("data", {}) if isinstance(r, dict) else {}
                 for h in (data.get("hosts") or []):
                     if isinstance(h, dict) and h.get("hostname"):
+                        # Forward storage_types (name→type, e.g. pbs/dir/nfs/zfs)
+                        # so the WebUI can filter non-file storages (PBS excluded
+                        # from "Back up to Hub": vzdump-to-PBS isn't a streamable
+                        # .vma.zst). Older agents without storage_types → {} .
                         out.append({"hostname": h["hostname"],
-                                    "storages": h.get("storages") or []})
+                                    "storages": h.get("storages") or [],
+                                    "storage_types": h.get("storage_types") or {}})
             except Exception as e:  # noqa: BLE001
                 logger.debug("PXMX_LIST_STORAGE %s failed: %s", sid, e)
         return {"hosts": out}
