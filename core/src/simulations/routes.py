@@ -2897,13 +2897,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         which clients are currently assigned to each. Forwards to the cs spoke;
         empty ledger when the spoke is down."""
         try:
-            return await _cs_forward(tenant_id, "CS_GET_SIM_QUOTA_STATE", {}, timeout=15.0)
+            result = await _cs_forward(tenant_id, "CS_GET_SIM_QUOTA_STATE", {}, timeout=15.0)
         except HTTPException as he:
             if he.status_code == 503:
-                return {"status": "SUCCESS", "effective": [], "ledger": {},
-                        "monitored_checks": [],
-                        "warning": "Client-Sim spoke not connected."}
-            raise
+                result = {"status": "SUCCESS", "effective": [], "ledger": {},
+                          "monitored_checks": [], "warning": "Client-Sim spoke not connected."}
+            else:
+                raise
+        # Attach the adaptive controller state so Quota State can show the
+        # learning indicator + learned floor per adaptive quota (design §9).
+        try:
+            if isinstance(result, dict):
+                result["adaptive_state"] = await store.get_adaptive_state(tenant_id)
+        except Exception:  # noqa: BLE001
+            pass
+        return result
 
     # ── Sim-Quota global defaults (Setup → Simulations, superadmin) ──────────
     # Platform-wide default templates a tenant inherits unless it overrides per

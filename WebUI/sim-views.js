@@ -3131,9 +3131,19 @@ async function csRenderSimQuotaState() {
             const e = ledger[k] || {};
             const clients = Array.isArray(e.clients) ? e.clients : [];
             const target = q.count != null ? q.count : 0;
-            const fill = clients.length >= target
+            let fill = clients.length >= target
                 ? `<span class="text-[#01A982] font-semibold">${clients.length}/${target}</span>`
                 : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
+            // Adaptive controller indicator (design §9): 🔄 Learning / ✅ Stable · floor N / ⚠️ At max.
+            const _as = (st.adaptive_state || {})[`${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`];
+            if (_as) {
+                const _m = _as.mode || 'learning', _fl = _as.floor;
+                fill += ' ' + (_m === 'at_max'
+                    ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="At max, alert not firing">⚠️ At max</span>`
+                    : _m === 'stable'
+                    ? `<span class="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">✅ Stable${_fl != null ? ' · floor ' + _fl : ''}</span>`
+                    : `<span class="text-[10px] font-semibold text-slate-600 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-full">🔄 Learning</span>`);
+            }
             const fname = nameOf(q.alert_type, q.alert_id);
             const isPresence = !q.sim_id;
             // A sim quota with no alert/insight is untethered — shown as Presence
