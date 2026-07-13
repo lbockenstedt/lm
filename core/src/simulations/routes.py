@@ -884,6 +884,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # and small spokes aren't over-asked; falls back to even when telemetry is
         # absent. Each spoke fills its share from its own clients; Quota State sums
         # the ledgers back to N.
+        #
+        # ANTI-AFFINITY (design §0): a quota TIED TO AN ALERT is split EVENLY
+        # (round-robin), NOT by pool size — 10 clients across 3 servers → 4/3/3.
+        # That way losing one server still leaves the alert firing from the others,
+        # instead of a big spoke holding all of an alert's traffic. The +1
+        # remainder rotates per-quota (by a stable checksum of its key) so it's not
+        # always the same spoke carrying the extra across many alerts.
         _k = len(spoke_ids)
         _idx_of = {sid: i for i, sid in enumerate(spoke_ids)}
 
@@ -896,15 +903,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if sum(_weights) <= 0:
             _weights = [1] * _k
 
-        def _apportion(total, idx: int) -> int:
+        def _apportion(total, idx: int, even: bool = False, rotate: int = 0) -> int:
             total = int(total or 0)
-            tw = sum(_weights) or 1
-            raw = [total * w / tw for w in _weights]
+            weights = [1] * _k if even else _weights
+            tw = sum(weights) or 1
+            raw = [total * w / tw for w in weights]
             shares = [int(x) for x in raw]
             rem = total - sum(shares)
-            for i in sorted(range(_k), key=lambda j: raw[j] - shares[j], reverse=True)[:max(0, rem)]:
+            # Primary: largest fractional remainder. Secondary tie-break: spokes
+            # starting at `rotate` (round-robin), so an even split's extra client
+            # lands on a different server for each alert.
+            order = sorted(range(_k),
+                           key=lambda j: (raw[j] - shares[j], -((j - rotate) % _k)),
+                           reverse=True)
+            for i in order[:max(0, rem)]:
                 shares[i] += 1
             return shares[idx]
+
+        def _quota_rotate(q: dict) -> int:
+            key = f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
+            return sum(key.encode()) % _k if _k else 0
 
         def _payload_for(sid: str) -> dict:
             if _k <= 1:
@@ -912,8 +930,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             idx = _idx_of.get(sid, 0)
             p = dict(payload)
             if isinstance(p.get("effective_sim_quotas"), list):
+                # Alert-tied quotas spread evenly (fault tolerance); presence and
+                # untethered sim quotas stay proportional to pool size.
                 p["effective_sim_quotas"] = [
-                    {**q, "count": _apportion(q.get("count") or 0, idx)}
+                    {**q, "count": _apportion(q.get("count") or 0, idx,
+                                              even=bool(q.get("alert_id")),
+                                              rotate=_quota_rotate(q))}
                     for q in p["effective_sim_quotas"]]
             if isinstance(p.get("ssid_placement"), dict):
                 p["ssid_placement"] = {
