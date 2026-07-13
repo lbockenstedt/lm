@@ -2633,6 +2633,9 @@ async function csRenderConfigSimQuotas() {
                   name: c.name || c.id, site: c.site || '',
               })) : [];
         window._csIgnoreGlobalQuotas = !!(cfg && cfg.ignore_global_quotas);
+        // Site Links (name↔wsite) — the site selectors below route on the wsite
+        // (the value), shown by the link Name, so every site field lines up.
+        window._csSiteLinks = Array.isArray(cfg && cfg.site_links) ? cfg.site_links : [];
         // Pool / SSID config (design doc §4-5) — edited by the Pool & SSID card.
         window._csPoolCfg = {
             site_source: (cfg && cfg.site_source) || 'pxmx',
@@ -2673,6 +2676,20 @@ function csSimQuotaRowFromServer(q) {
 function csSimQuotaSelect(selected, items, placeholder) {
     return `<option value="">${csEscape(placeholder)}</option>` +
         items.map(it => `<option value="${csEscape(it)}" ${it === selected ? 'selected' : ''}>${csEscape(it)}</option>`).join('');
+}
+
+// Site options driven by the Site Links (Config → PXMX Sites): each option shows
+// the link NAME but its VALUE is the link's wsite — the single key the engine
+// routes on (pxmx server assignment, SSID cell, quota site all match on it). A
+// currently-saved site with no matching link is still shown so it isn't lost.
+function csLinkSiteOptions(sel, placeholder) {
+    const links = (window._csSiteLinks || []).filter(l => l && l.wsite);
+    let out = `<option value="">${csEscape(placeholder || '— all sites —')}</option>`;
+    out += links.map(l => `<option value="${csEscape(l.wsite)}" ${l.wsite === sel ? 'selected' : ''}>${csEscape(l.name || l.wsite)}</option>`).join('');
+    if (sel && !links.some(l => l.wsite === sel)) {
+        out += `<option value="${csEscape(sel)}" selected>${csEscape(sel)} (unlinked)</option>`;
+    }
+    return out;
 }
 
 // Simulation dropdown options for a quota row: a leading "(Clients Associated)"
@@ -2731,7 +2748,7 @@ function csRenderSimQuotaEditor() {
         // site, like a presence row. tied defaults on for backward compat.
         const tied = !isPresence && r.tied !== false;
         const simOpts = csSimQuotaSimOptions(r.sim_id, simIds);
-        const siteOpts = csSimQuotaSelect(r.site, sites, '— all sites —');
+        const siteOpts = csLinkSiteOptions(r.site, '— all sites —');
         const idOpts = csSimQuotaAlertIdOptions(r.alert_type, r.alert_id);
         // The "Tied to alert/insight" toggle leads the alert section of every sim
         // row so it's obvious it governs the Type / Alert ID fields. Off =
@@ -2834,7 +2851,7 @@ function csPoolConfigCardHtml() {
         const name = c.name || `${c.site || ''}-${c.ssid || ''}`;
         const hold = ((placement[c.site] || {}).targets || {})[name];
         return `<div class="grid grid-cols-2 sm:grid-cols-6 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-cell="${i}">
-          <label class="text-xs text-slate-500">Site<input data-cs-cell-k="site" value="${esc(c.site)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
+          <label class="text-xs text-slate-500">Site<select data-cs-cell-k="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${csLinkSiteOptions(c.site, '— site —')}</select></label>
           <label class="text-xs text-slate-500">SSID / Auth<input data-cs-cell-k="ssid" value="${esc(c.ssid)}" placeholder="PSK / 1X" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
           <label class="text-xs text-slate-500">Password<input data-cs-cell-k="ssidpw" value="${esc(c.ssidpw)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
           <label class="text-xs text-slate-500">Weight<input data-cs-cell-k="weight" type="number" min="0" value="${esc(c.weight != null ? c.weight : 1)}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
