@@ -1409,7 +1409,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         mn = int(q.get("min") or 1)
         mx = max(mn, int(q.get("max") or mn))
         step = max(1, int(q.get("step") or 1))
-        settle = float(q.get("settle") or 120)
+        # Central reports alerts with LATENCY — often 30+ min. The controller must
+        # not change the target (up OR down) faster than that, or it ramps to max
+        # long before Central ever confirms firing (the "at max, not firing" false
+        # alarm). Floor the settle window at 30 min regardless of the config.
+        settle = max(1800.0, float(q.get("settle") or 1800.0))
         buffer = float(q.get("buffer") if q.get("buffer") is not None else 0.20)
         target = st.get("target")
         floor = st.get("floor")
@@ -1421,6 +1425,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 mode = "stable"
             else:
                 target, mode = mn, "learning"
+            # Start the settle clock now so even the FIRST change waits a full
+            # 30-min window (give Central time to confirm firing at the start level).
+            last = now
         target = max(mn, min(mx, int(target)))
         if (now - last) >= settle:
             if firing is False:
