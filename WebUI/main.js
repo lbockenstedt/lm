@@ -2976,7 +2976,7 @@ function renderTopNav(viewId) {
     // the strip — give it tighter horizontal padding + normal letter-spacing so
     // the tabs fit, without changing the other (few-tab) views.
     const _tabCls = (viewId === 'logs')
-        ? 'px-1.5 py-1 text-[11px] uppercase tracking-normal'
+        ? 'px-1.5 py-1 text-xs uppercase tracking-normal'
         : 'px-2 py-1 text-xs uppercase tracking-widest';
     topNav.innerHTML = subMenus.map((menu, i) => {
         const label = SUBMENU_LABELS[menu] || menu;
