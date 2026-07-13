@@ -3288,15 +3288,21 @@ async function csRenderSimQuotaState() {
             const simCell = isPresence
                 ? `<span class="italic text-slate-400">— none —</span>`
                 : `<span class="font-mono">${csEscape(q.sim_id || '')}</span>`;
+            // Two rows per quota: the data row, then the clients wrapped full-width
+            // underneath (the chips can be long, so they get their own line).
             return `<tr class="border-t border-slate-100">
-              <td class="px-2 py-1.5 text-xs capitalize">${csEscape(typeCell)}</td>
-              <td class="px-2 py-1.5 text-xs">${idCell}</td>
-              <td class="px-2 py-1.5 text-xs">${simCell}</td>
-              <td class="px-2 py-1.5 text-xs">${csEscape(q.site || '<all>')}</td>
-              <td class="px-2 py-1.5 text-xs text-center">${fill}</td>
-              <td class="px-2 py-1.5 text-xs text-center">${q.multi_capable ? '✓' : '—'}</td>
-              <td class="px-2 py-1.5 text-xs text-center">${q.rehome ? '✓' : '—'}</td>
-              <td class="px-2 py-1.5 text-xs">${chips(clients) || '<span class="text-slate-400 italic">none</span>'}</td>
+              <td class="px-2 pt-1.5 pb-0.5 text-xs capitalize">${csEscape(typeCell)}</td>
+              <td class="px-2 pt-1.5 pb-0.5 text-xs">${idCell}</td>
+              <td class="px-2 pt-1.5 pb-0.5 text-xs">${simCell}</td>
+              <td class="px-2 pt-1.5 pb-0.5 text-xs">${csEscape(q.site || '<all>')}</td>
+              <td class="px-2 pt-1.5 pb-0.5 text-xs text-center">${fill}</td>
+              <td class="px-2 pt-1.5 pb-0.5 text-xs text-center">${q.multi_capable ? '✓' : '—'}</td>
+              <td class="px-2 pt-1.5 pb-0.5 text-xs text-center">${q.rehome ? '✓' : '—'}</td>
+            </tr>
+            <tr>
+              <td class="px-2 pt-0 pb-2 text-xs align-top" colspan="7">
+                <span class="text-[10px] text-slate-400 uppercase tracking-wider mr-1.5">Clients</span>${chips(clients) || '<span class="text-slate-400 italic">none</span>'}
+              </td>
             </tr>`;
         }).join('');
         // Ledger entries no longer in the effective set (quota removed but
@@ -3380,7 +3386,7 @@ async function csRenderSimQuotaState() {
                 <th class="px-2 py-1">Type</th><th class="px-2 py-1">Alert / Insight ID</th>
                 <th class="px-2 py-1">Sim</th><th class="px-2 py-1">Site</th>
                 <th class="px-2 py-1 text-center">Assigned</th><th class="px-2 py-1 text-center">Multi</th>
-                <th class="px-2 py-1 text-center">Re-home</th><th class="px-2 py-1">Clients</th>
+                <th class="px-2 py-1 text-center">Re-home</th>
               </tr></thead>
               <tbody>${rows}</tbody>
             </table>` : '<p class="text-xs text-slate-400 italic">No effective sim quotas. Define some in Config → Sim Quotas.</p>'}
