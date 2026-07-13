@@ -3155,6 +3155,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             pass
         return result
 
+    @app.post("/sim/api/{tenant}/sim-quota-reset")
+    async def reset_sim_quota_state(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Clear the engine ledger + engine-set overrides on EVERY bound spoke and
+        reconcile fresh — a clean re-shuffle. Use to flush stale assignments (a
+        client stuck in two quotas, or an ignored host lingering) after config or
+        engine-model changes."""
+        results = await _cs_forward_all(tenant_id, "CS_RESET_SIM_QUOTA", {}, timeout=30.0)
+        return {"reset_spokes": sum(1 for _s, d in results
+                                    if isinstance(d, dict) and d.get("status") != "ERROR"),
+                "spokes": len(results)}
+
     # ── Sim-Quota global defaults (Setup → Simulations, superadmin) ──────────
     # Platform-wide default templates a tenant inherits unless it overrides per
     # alert_type:alert_id:site in Config → Sim Quotas. Validates against the full

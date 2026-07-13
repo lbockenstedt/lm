@@ -3191,6 +3191,22 @@ window.csSimQuotaSave = async function () {
     }
 };
 
+// Reset & Reshuffle: clear the engine ledger + engine-set overrides on every
+// bound spoke and reconcile fresh — flushes stale assignments (a client stuck in
+// two quotas, an ignored host lingering) after config/engine changes.
+window.csResetSimQuota = async function () {
+    if (typeof confirm === 'function' &&
+        !confirm('Clear ALL engine assignments and re-shuffle every client from scratch?')) return;
+    try {
+        const r = await csFetch(`/${csTenant()}/sim-quota-reset?tenant_id=${csTenant()}`, { method: 'POST' });
+        if (typeof showToast === 'function') showToast(`Reset ${(r && r.reset_spokes) || 0} spoke(s) — reshuffling…`, 'success');
+        setTimeout(csRenderSimQuotaState, 2000);
+    } catch (e) {
+        console.error('csResetSimQuota: reset failed', e);
+        if (typeof showToast === 'function') showToast('Reset failed: ' + (e.message || e), 'error');
+    }
+};
+
 // ── Quota State: live SimQuotaEngine ledger (Config → Quota State) ──────────
 // Read-only view of which clients the engine currently has assigned to each
 // effective quota, the target vs. assigned count, and the multi_capable /
@@ -3344,7 +3360,10 @@ async function csRenderSimQuotaState() {
             ${warnBanner}
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
               <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Quota State ${helpIcon('cs', null, 'Simulations help')}</h3>
-              <button onclick="csRenderSimQuotaState()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
+              <div class="flex gap-2">
+                <button onclick="csResetSimQuota()" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-sm font-bold shadow-sm" title="Clear ALL engine assignments and re-shuffle every client from scratch">↻ Reset &amp; Reshuffle</button>
+                <button onclick="csRenderSimQuotaState()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
+              </div>
             </div>
             <p class="text-xs text-slate-500 mb-3">Live SimQuotaEngine ledger — which clients are currently assigned to each effective quota. The engine tops up to the target count from the online pool each 60s sweep; amber = under-filled.</p>
             ${poolLine}
