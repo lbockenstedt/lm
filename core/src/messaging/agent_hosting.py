@@ -605,7 +605,8 @@ class AgentHostingControlPlane(BaseControlPlane):
         corr_id = str(uuid.uuid4())
         msg = {
             "header": {
-                "message_id": corr_id, "timestamp": time.time(),
+                "message_id": corr_id, "correlation_id": corr_id,
+                "timestamp": time.time(),
                 "sender_id": self.spoke_id, "destination_id": agent_id or "pxmx-agent",
             },
             "payload": {"type": cmd_type, "data": data},
