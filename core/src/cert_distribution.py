@@ -460,10 +460,21 @@ def build_available_targets(spoke_module_types: Dict[str, str],
     (``{agent_id, spoke_id, display_name?, hostname?}``); may be empty/None.
 
     Returns a list of ``{module_type, identifier, label, ...}`` (``spoke_id`` on
-    spoke-level entries, ``agent_id`` on per-node entries)."""
+    spoke-level entries, ``agent_id`` on per-node entries). A connected
+    agent-hosting spoke with ZERO agents emits NO entry (it has no device to
+    install a cert on — the "no device added" case). The hub itself is always
+    installed, so a ``hub`` self-install entry is always present."""
     agent_hosting = {"hypervisor", "simulation"}
     names = module_names if isinstance(module_names, dict) else {}
     targets: List[Dict[str, Any]] = []
+    # The hub is always installed — its self-install target (install_on_hub in
+    # distribute_cert_to_targets) is always selectable. No spoke advertises
+    # module_type "hub", so without this it wouldn't appear in the live registry.
+    targets.append({"module_type": "hub", "identifier": "",
+                    "label": "hub (LM WebUI)"})
+    # Connected agent-hosting spokes that actually have ≥1 agent (used to gate
+    # the "all nodes" broadcast below — a spoke with zero agents has no device).
+    agent_spoke_ids = {a.get("spoke_id") for a in (agents or []) if a.get("spoke_id")}
     # Non-agent-hosting cert-capable connected spokes: one entry each.
     for sid, mt in spoke_module_types.items():
         if sid not in active_connections:
@@ -490,7 +501,10 @@ def build_available_targets(spoke_module_types: Dict[str, str],
     # name is appended only when there is more than one spoke of this type.
     _by_type = {}
     for _sid, _mt in spoke_module_types.items():
-        if _sid in active_connections and _mt in capable and _mt in agent_hosting:
+        # A connected agent-hosting spoke with ZERO agents (no device added) is
+        # omitted entirely — skip it so it can't be selected as a target.
+        if (_sid in active_connections and _mt in capable and _mt in agent_hosting
+                and _sid in agent_spoke_ids):
             _by_type.setdefault(_mt, []).append(_sid)
     for mt, sids in _by_type.items():
         multi = len(sids) > 1

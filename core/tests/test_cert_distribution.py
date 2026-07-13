@@ -622,8 +622,9 @@ def test_available_targets_lists_cert_capable_connected_spokes():
     names = {"opn-1": "edge-fw", "netbox-1": "netbox", "nac-1": "clearpass"}
     out = cd.build_available_targets(smt, active, names, cd.CERT_CAPABLE_MODULES, [])
     by_mt = {t["module_type"]: t for t in out if not t["identifier"]}
-    # cert-capable + connected: firewall, ipam, directory, nw, nac.
-    assert set(by_mt) == {"firewall", "ipam", "directory", "nw", "nac"}
+    # cert-capable + connected: firewall, ipam, directory, nw, nac — PLUS the
+    # always-present hub self-install entry.
+    assert set(by_mt) == {"firewall", "ipam", "directory", "nw", "nac", "hub"}
     # Offline spokes (dns-1, pxmx-1) absent; non-capable dns absent.
     assert "dns" not in by_mt and "hypervisor" not in by_mt
     assert by_mt["firewall"]["label"] == "firewall — edge-fw"
@@ -665,4 +666,32 @@ def test_available_targets_omits_agents_whose_parent_spoke_not_cert_capable():
     active = {"foo-1"}
     agents = [{"agent_id": "x-1", "spoke_id": "foo-1", "hostname": "x"}]
     out = cd.build_available_targets(smt, active, {}, cd.CERT_CAPABLE_MODULES, agents)
-    assert out == []
+    # No foo entry (non-capable); only the always-present hub self-install entry.
+    assert [t for t in out if t["module_type"] != "hub"] == []
+
+
+def test_available_targets_omits_agent_hosting_spoke_with_zero_agents():
+    """A CONNECTED agent-hosting spoke (hypervisor/simulation) that has NO agents
+    added emits NO entry — neither per-node nor the 'all nodes' broadcast — so
+    it can't be selected as a cert target (the 'module has no device added' case).
+    """
+    smt = {"pxmx-1": "hypervisor", "cs-1": "simulation", "opn-1": "firewall"}
+    active = {"pxmx-1", "cs-1", "opn-1"}  # both agent-hosting spokes connected
+    agents = []  # but ZERO agents under any of them
+    out = cd.build_available_targets(smt, active, {}, cd.CERT_CAPABLE_MODULES, agents)
+    non_hub = [t for t in out if t["module_type"] != "hub"]
+    # firewall (a real device — the spoke itself) is still selectable; the two
+    # agent-hosting spokes have no devices, so they're gone entirely.
+    assert {t["module_type"] for t in non_hub} == {"firewall"}
+    assert not any(t["module_type"] in ("hypervisor", "simulation") for t in out)
+    assert not any("all nodes" in t["label"] for t in out)
+
+
+def test_available_targets_always_includes_hub_self_install():
+    """The hub is always installed, so its self-install target is always
+    selectable — even with an empty spoke registry and no agents."""
+    out = cd.build_available_targets({}, set(), {}, cd.CERT_CAPABLE_MODULES, [])
+    hub_entries = [t for t in out if t["module_type"] == "hub"]
+    assert len(hub_entries) == 1
+    assert hub_entries[0]["identifier"] == ""
+    assert hub_entries[0]["label"] == "hub (LM WebUI)"

@@ -422,7 +422,24 @@ def register(app, hub, ctx):
         body = await request.json()
         if not isinstance(body, dict) or not body.get("module_type"):
             raise HTTPException(status_code=400, detail="module_type required")
-        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_ADD_TARGET",
+        hub = app.state.hub
+        mt = str(body.get("module_type") or "").strip()
+        # Defense-in-depth: reject a target the UI would never offer. The UI
+        # dropdown is fed by /api/le/targets/available (installed + has-device),
+        # but the API is open — enforce at least "cert-capable + installed" here
+        # so a stale UI / direct API call can't store a target that can only
+        # ERROR at distribute time. The hub self-install target ("hub") is always
+        # allowed (the hub is always installed). The "has a device" half for
+        # agent-hosting types is enforced by the UI (live agents list).
+        if mt not in hub.CERT_CAPABLE_MODULES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"module type '{mt}' does not support cert install")
+        if mt != "hub" and not hub.get_spoke_by_type(mt):
+            raise HTTPException(
+                status_code=400,
+                detail=f"no connected '{mt}' spoke — install/connect it first")
+        return await _relay_spoke(_get_le_spoke(hub), "LE_ADD_TARGET",
                                   {"domain": domain, "target": body},
                                   log_name="le_add_target")
 

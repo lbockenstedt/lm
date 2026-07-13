@@ -13433,19 +13433,81 @@ async function leDeployTarget(domain, module_type, identifier) {
 // name) + directory (OpenLDAP — spoke writes PEM to /etc/ldap/tls, points
 // slapd's olcTLS* via ldapmodify -Y EXTERNAL over ldapi, restarts slapd). Other
 // module types record an ERROR ("does not support cert install yet") until wired.
-const LE_MODULE_TYPES = [
-    ['hub', 'hub (LM WebUI)'],
-    ['firewall', 'firewall (OPNsense)'],
-    ['ipam', 'ipam (NetBox)'],
-    ['hypervisor', 'hypervisor (Proxmox)'],
-    ['nac', 'nac (ClearPass)'],
-    ['directory', 'directory (LDAP)'],
-    ['simulation', 'simulation (Client Sim)'],
-    ['nw', 'nw (Network Devices)'],
-    ['dns', 'dns'], ['dhcp', 'dhcp'],
-];
+// Friendly label for a cert-capable module_type — used ONLY for the option text
+// of the module <select>. Which module_types are OFFERED is driven by the live
+// /api/le/targets/available list (installed + has a device), NOT this map, so a
+// module that isn't installed (or has no device) can never be selected. dns/dhcp
+// are intentionally absent — they aren't cert-capable.
+const LE_MODULE_LABELS = {
+    hub: 'hub (LM WebUI)', firewall: 'firewall (OPNsense)',
+    ipam: 'ipam (NetBox)', hypervisor: 'hypervisor (Proxmox)',
+    nac: 'nac (ClearPass)', directory: 'directory (LDAP)',
+    simulation: 'simulation (Client Sim)', nw: 'nw (Network Devices)',
+    statuspage: 'statuspage',
+};
+
+// ── LE target picker: drive both dropdowns from the live available list ──
+// The module <select> lists only module_types present in window._leAvailableTargets
+// (installed + cert-capable + has ≥1 device); the identifier <select> lists only
+// the REAL devices/targets for the chosen module. Both come from the same
+// /api/le/targets/available payload the chips use, so the picker can never offer
+// a module that isn't installed or a device that doesn't exist.
+function _leTargetsByModule() {
+    const out = {};
+    for (const t of (window._leAvailableTargets || [])) {
+        (out[t.module_type] = out[t.module_type] || []).push(t);
+    }
+    return out;
+}
+// <option>s for the module dropdown — one per installed-and-has-device module.
+function leModuleOptions() {
+    const mods = Object.keys(_leTargetsByModule());
+    if (!mods.length) {
+        return '<option value="" disabled selected>No installed modules with devices</option>';
+    }
+    return mods.map(mt => `<option value="${mt}">${LE_MODULE_LABELS[mt] || mt}</option>`).join('');
+}
+// <option>s for the identifier dropdown of one module — the real devices/targets
+// (deduped by identifier; e.g. hypervisor → 'all nodes' + each Proxmox node).
+function leIdentifierOptions(mt) {
+    const byMod = _leTargetsByModule();
+    const list = byMod[mt] || [];
+    const seen = new Set();
+    const opts = [];
+    for (const t of list) {
+        const id = String(t.identifier || '');
+        if (seen.has(id)) continue;  // collapse duplicate broadcast/spoke entries
+        seen.add(id);
+        opts.push(`<option value="${escapeHtml(id)}">${escapeHtml(t.label || (id || '(default)'))}</option>`);
+    }
+    if (!opts.length) return '<option value="" disabled selected>No devices</option>';
+    return opts.join('');
+}
+// onchange for the module <select> — repopulate the identifier <select> for the
+// newly chosen module and preselect the first device.
+function leTgtMtChange(mtSelId, idSelId) {
+    const mtSel = document.getElementById(mtSelId);
+    const idSel = document.getElementById(idSelId);
+    if (!mtSel || !idSel) return;
+    idSel.innerHTML = leIdentifierOptions(mtSel.value);
+    if (idSel.options.length) idSel.selectedIndex = 0;
+}
+// Ensure window._leAvailableTargets is fresh before opening a modal — a module
+// installed since the last LE load should be selectable without a full reload.
+async function _leRefreshAvailableTargets() {
+    try {
+        const r = await _spokeFetch('/api/le/targets/available');
+        const b = (r && r.ok) ? inner(r.data) : null;
+        window._leAvailableTargets = (b && Array.isArray(b.targets)) ? b.targets : (window._leAvailableTargets || []);
+    } catch (e) { /* keep whatever we have */ }
+}
 
 async function showLeTargetsModal(domain) {
+    // Refresh the live available-target list if we don't have one yet so a
+    // freshly-installed module is selectable without a full LE reload.
+    if (!window._leAvailableTargets || !window._leAvailableTargets.length) {
+        await _leRefreshAvailableTargets();
+    }
     const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
     const tgts = cert.targets || [];
     const esc = s => String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
@@ -13460,13 +13522,13 @@ async function showLeTargetsModal(domain) {
             <td class="px-3 py-2"><button onclick="removeLeTarget('${esc(domain)}', ${i})" class="text-xs text-red-600 hover:text-red-700 font-medium">remove</button></td>
         </tr>`;
     };
-    const mtOpts = LE_MODULE_TYPES.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('');
+    const mtOpts = leModuleOptions();
     const modal = document.createElement('div');
     modal.id = 'le-targets-modal';
     modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
     modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6">
         <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
-        <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device.</p>
+        <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device. Only installed modules with at least one device are listed.</p>
         <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
             <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
                 <th class="px-3 py-2 text-left font-medium">Target</th>
@@ -13480,11 +13542,11 @@ async function showLeTargetsModal(domain) {
         <div class="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-4">
             <div class="flex flex-col">
                 <label class="text-xs text-slate-500 mb-1">Module type</label>
-                <select id="le-tgt-mt" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
+                <select id="le-tgt-mt" onchange="leTgtMtChange('le-tgt-mt','le-tgt-id')" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
             </div>
             <div class="flex flex-col flex-1 min-w-[180px]">
-                <label class="text-xs text-slate-500 mb-1">Identifier (optional)</label>
-                <input id="le-tgt-id" type="text" placeholder="e.g. edge-1" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                <label class="text-xs text-slate-500 mb-1">Device</label>
+                <select id="le-tgt-id" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
             </div>
             <button onclick="addLeTarget('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
             <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Distribute now</button>
@@ -13492,6 +13554,7 @@ async function showLeTargetsModal(domain) {
         </div>
     </div>`;
     document.body.appendChild(modal);
+    leTgtMtChange('le-tgt-mt', 'le-tgt-id');  // seed the device list for the first module
 }
 
 // Agent-hosting cert targets (simulation/hypervisor) can be added as a GROUP
@@ -13701,7 +13764,8 @@ function leIssueAddTarget() {
     const identifier = document.getElementById('le-issue-tgt-id')?.value?.trim() || '';
     if (!mt) { showToast('Pick a module type first', 'success'); return; }
     _leIssueTargets.push({ module_type: mt, identifier });
-    document.getElementById('le-issue-tgt-id').value = '';
+    // Reset the device dropdown back to the first device for the chosen module.
+    leTgtMtChange('le-issue-tgt-mt', 'le-issue-tgt-id');
     leIssueRenderTargets();
 }
 
@@ -13722,9 +13786,12 @@ function leIssueRenderTargets() {
             </span>`).join('')}</div>`;
 }
 
-function showLeIssueModal() {
+async function showLeIssueModal() {
     _leIssueTargets = [];
-    const mtOpts = LE_MODULE_TYPES.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('');
+    if (!window._leAvailableTargets || !window._leAvailableTargets.length) {
+        await _leRefreshAvailableTargets();
+    }
+    const mtOpts = leModuleOptions();
     const dnsOpts = LE_DNS_PROVIDERS.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('');
     // Remove any prior modal (e.g. left over from a previous open).
     document.getElementById('le-issue-modal')?.remove();
@@ -13854,11 +13921,11 @@ function showLeIssueModal() {
                 <div class="flex flex-wrap items-end gap-2">
                     <div class="flex flex-col">
                         <label class="text-[11px] text-slate-400 mb-0.5">Module type</label>
-                        <select id="le-issue-tgt-mt" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
+                        <select id="le-issue-tgt-mt" onchange="leTgtMtChange('le-issue-tgt-mt','le-issue-tgt-id')" class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
                     </div>
                     <div class="flex flex-col flex-1 min-w-[160px]">
-                        <label class="text-[11px] text-slate-400 mb-0.5">Identifier (optional)</label>
-                        <input id="le-issue-tgt-id" type="text" placeholder="e.g. edge-1" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" onkeydown="if(event.key==='Enter'){event.preventDefault();leIssueAddTarget();}" />
+                        <label class="text-[11px] text-slate-400 mb-0.5">Device</label>
+                        <select id="le-issue-tgt-id" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
                     </div>
                     <button onclick="leIssueAddTarget()" type="button" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-2 rounded-md text-sm font-medium">Add</button>
                 </div>
@@ -13872,6 +13939,7 @@ function showLeIssueModal() {
     document.body.appendChild(modal);
     leIssueRenderTargets();
     leIssueUpdateDnsFields();
+    leTgtMtChange('le-issue-tgt-mt', 'le-issue-tgt-id');  // seed device list for the first module
 }
 
 // Toggle the DNS-01 input shape for the selected provider. RFC 2136 family
