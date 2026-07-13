@@ -3328,6 +3328,16 @@ async function csRenderSimQuotaState() {
                  <div class="space-y-0.5">${_adEntries.map(_adRow).join('')}</div>`
               : `<p class="text-xs text-slate-400 italic">No adaptive quotas yet. In <span class="font-semibold">Config → Sim Quotas</span>, tie a quota to an alert/insight and check <span class="font-semibold">Adaptive (keep firing)</span> — its Clients field becomes Min/Max and the learning state shows here.</p>`}
           </div>`;
+        // Cheap pool count (no accounting): total harvestable clients, tenant-pool
+        // assignable, and per physical site — so you can see the pool size at a glance.
+        const _pool = st.pool || {};
+        const _bysite = Object.entries(_pool.by_site || {})
+            .map(([s, n]) => `${csEscape(s)} ${n}`).join(' · ');
+        const poolLine = (_pool.online != null) ? `<div class="text-xs text-slate-600 mb-3 flex flex-wrap gap-x-4 gap-y-1">
+              <span><span class="font-semibold text-slate-500">Pool:</span> <b>${_pool.online || 0}</b> online</span>
+              ${_pool.tenant_pool ? `<span><b>${_pool.tenant_pool}</b> assignable</span>` : ''}
+              ${_bysite ? `<span class="text-slate-400">site-bound: ${_bysite}</span>` : ''}
+            </div>` : '';
         csSet(`<div class="space-y-4">
           ${adaptivePanel}
           <div class="hpe-card rounded-lg p-5 shadow-sm">
@@ -3337,6 +3347,7 @@ async function csRenderSimQuotaState() {
               <button onclick="csRenderSimQuotaState()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
             </div>
             <p class="text-xs text-slate-500 mb-3">Live SimQuotaEngine ledger — which clients are currently assigned to each effective quota. The engine tops up to the target count from the online pool each 60s sweep; amber = under-filled.</p>
+            ${poolLine}
             ${eff.length ? `<table class="w-full text-left">
               <thead><tr class="text-[11px] text-slate-400 uppercase tracking-wider">
                 <th class="px-2 py-1">Type</th><th class="px-2 py-1">Alert / Insight ID</th>

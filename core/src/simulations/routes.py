@@ -3105,6 +3105,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         results = await _cs_forward_all(tenant_id, "CS_GET_SIM_QUOTA_STATE", {}, timeout=15.0)
         merged_ledger: dict = {}
         monitored: list = []
+        pool = {"online": 0, "by_site": {}, "tenant_pool": 0}   # cheap tenant-wide sum
         for _sid, data in results:
             if not isinstance(data, dict):
                 continue
@@ -3112,6 +3113,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 m = merged_ledger.setdefault(
                     k, {"sim_id": e.get("sim_id"), "site": e.get("site"), "clients": []})
                 m["clients"].extend(e.get("clients") or [])
+            p = data.get("pool") or {}
+            pool["online"] += int(p.get("online") or 0)
+            pool["tenant_pool"] += int(p.get("tenant_pool") or 0)
+            for _s, _n in (p.get("by_site") or {}).items():
+                pool["by_site"][_s] = pool["by_site"].get(_s, 0) + int(_n or 0)
             if not monitored:
                 monitored = data.get("monitored_checks") or []
         for m in merged_ledger.values():  # dedupe (a hostname is unique per tenant)
@@ -3135,7 +3141,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         result = {"status": "SUCCESS",
                   "effective": await _effective_sim_quotas(tenant_id),
                   "ledger": merged_ledger, "monitored_checks": monitored,
-                  "placement_warnings": placement_warnings}
+                  "placement_warnings": placement_warnings, "pool": pool}
         try:
             result["adaptive_state"] = await store.get_adaptive_state(tenant_id)
         except Exception:  # noqa: BLE001
