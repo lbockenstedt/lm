@@ -2972,9 +2972,15 @@ function renderTopNav(viewId) {
     const helpBtn = (helpDoc && subMenus.length)
         ? `<button type="button" class="lm-help-icon ml-1" title="Open documentation" aria-label="Open documentation" onclick="helpForCurrentView()">i</button>`
         : '';
+    // Logs has many tabs (hub + every module + recovery + bugs) and overflowed
+    // the strip — give it tighter horizontal padding + normal letter-spacing so
+    // the tabs fit, without changing the other (few-tab) views.
+    const _tabCls = (viewId === 'logs')
+        ? 'px-1.5 py-1 text-[11px] uppercase tracking-normal'
+        : 'px-2 py-1 text-xs uppercase tracking-widest';
     topNav.innerHTML = subMenus.map((menu, i) => {
         const label = SUBMENU_LABELS[menu] || menu;
-        return `<div class="sub-nav-item ${i === 0 ? 'active' : ''} px-2 py-1 text-xs uppercase tracking-widest cursor-pointer select-none" data-submenu="${menu}" onclick="setSubView('${menu}')">${label}</div>`;
+        return `<div class="sub-nav-item ${i === 0 ? 'active' : ''} ${_tabCls} cursor-pointer select-none" data-submenu="${menu}" onclick="setSubView('${menu}')">${label}</div>`;
     }).join('') + '<div id="top-nav-actions" class="ml-auto flex items-center gap-2"></div>' + helpBtn;
     // Keep the secondary child strip in sync with the active primary.
     renderSecondaryNav(viewId);
