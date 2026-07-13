@@ -2562,6 +2562,7 @@ async function csRenderConfigSimQuotas() {
         csSimQuotaCatalog = cat || { sims: [], sites: [], suggested: {}, meta: {} };
         // Per-sim shareable/stackable overrides (Simulation Sharing tile).
         window._csSimShareable = (cat && cat.sim_shareable && typeof cat.sim_shareable === 'object') ? { ...cat.sim_shareable } : {};
+        window._csSimNA = (cat && cat.sim_na && typeof cat.sim_na === 'object') ? { ...cat.sim_na } : {};
         window._csSimCfgOther = { site_mappings: (cfg && cfg.site_mappings) || {}, hardware_checks: Array.isArray(cfg && cfg.hardware_checks) ? cfg.hardware_checks : [] };
         // Monitored alerts/insights (Central → Alerts/Insights → Monitor) are the
         // source for the row's Alert / Insight ID dropdown — a quota is linked to
@@ -2687,39 +2688,44 @@ function csRenderSimQuotaEditor() {
           </ul>
         </details>` : '';
     // ── Simulation Sharing (stacking) tile ──────────────────────────────────
-    // All on/off sims from simulation.conf with a per-sim Shareable toggle.
+    // All on/off sims from simulation.conf with per-sim Shareable + N/A toggles.
     // Authoritative: a non-shareable sim can NEVER be stacked by the quota engine
-    // (overrides the per-row Multi-capable). "Applicable" = a quota-stackable sim
-    // (in the catalog); non-applicable (e.g. kill_switch) can be hidden.
+    // (overrides the per-row Multi-capable). N/A marks a sim as not-applicable so
+    // the "Hide N/A" toggle removes it from view (persisted per tenant).
     const _metaMap = meta || {};
     const _applicable = new Set((cat.sims || []).map(s => s.sim_id));
     Object.keys(_metaMap).forEach(k => _applicable.add(k));
     const _shareMap = window._csSimShareable || {};
+    const _naMap = window._csSimNA || {};
+    const _naVal = (f) => Object.prototype.hasOwnProperty.call(_naMap, f)
+        ? !!_naMap[f] : !_applicable.has(f);
     const _hideNA = !!window._csSimHideNA;
     const _simList = (typeof CS_CONTROL_FLAGS !== 'undefined' ? CS_CONTROL_FLAGS : [])
-        .filter(f => !_hideNA || _applicable.has(f));
+        .filter(f => !_hideNA || !_naVal(f));
     const _shareRows = _simList.map(f => {
-        const ap = _applicable.has(f);
+        const na = _naVal(f);
         const def = !!(_metaMap[f] && _metaMap[f].multi_capable);
         const cur = Object.prototype.hasOwnProperty.call(_shareMap, f) ? !!_shareMap[f] : def;
-        return `<label class="flex items-center justify-between gap-2 py-1 border-b border-slate-100 last:border-0 ${ap ? '' : 'opacity-50'}">
-          <span class="text-xs font-mono text-slate-600">${csEscape(f)}${ap ? '' : ' <span class="text-[10px] text-slate-400 font-sans">(n/a for stacking)</span>'}</span>
-          <span class="flex items-center gap-1.5 text-xs"><input data-cs-share="${csEscape(f)}" type="checkbox" ${cur ? 'checked' : ''} ${ap ? '' : 'disabled'}> Shareable</span>
+        return `<label class="flex items-center justify-between gap-2 py-1 border-b border-slate-100 ${na ? 'opacity-60' : ''}">
+          <span class="text-xs font-mono text-slate-600 truncate">${csEscape(f)}</span>
+          <span class="flex items-center gap-3 text-xs shrink-0">
+            <span class="flex items-center gap-1"><input data-cs-share="${csEscape(f)}" type="checkbox" ${cur ? 'checked' : ''} ${na ? 'disabled' : ''}> Share</span>
+            <span class="flex items-center gap-1 text-slate-400"><input data-cs-na="${csEscape(f)}" type="checkbox" onchange="csSimSharingOnNA()" ${na ? 'checked' : ''}> N/A</span>
+          </span>
         </label>`;
     }).join('');
     const sharingCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Sharing (Stacking)</h3>
           <div class="flex items-center gap-3">
-            <label class="text-[11px] text-slate-500 flex items-center gap-1"><input type="checkbox" onchange="csSimSharingToggleHide(this)" ${_hideNA ? 'checked' : ''}> Hide ones that don't apply</label>
+            <label class="text-[11px] text-slate-500 flex items-center gap-1"><input type="checkbox" onchange="csSimSharingToggleHide(this)" ${_hideNA ? 'checked' : ''}> Hide N/A</label>
             <button onclick="csSimSharingSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Sharing</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mb-2">Which simulations (from <span class="font-semibold">simulation.conf</span>) may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — the Quota Engine never packs it onto a client running other sims. Authoritative: this overrides the per-quota Multi-capable setting.</p>
-        <div class="space-y-0.5">${_shareRows}</div>
+        <p class="text-xs text-slate-500 mb-2">Which simulations (from <span class="font-semibold">simulation.conf</span>) may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — the Quota Engine never packs it onto a client running other sims (overrides per-quota Multi-capable). Mark a sim <b>N/A</b> to hide it via <span class="font-semibold">Hide N/A</span>.</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-6 gap-y-0">${_shareRows}</div>
       </div>`;
     csSet(`<div class="space-y-4">
-      ${sharingCard}
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Sim Quotas ${helpIcon('cs', null, 'Simulations help')}</h3>
@@ -2732,6 +2738,7 @@ function csRenderSimQuotaEditor() {
         ${suggestHtml}
         <div class="space-y-2 mt-2" id="cs-sq-rows">${rowHtml || '<div class="text-xs text-slate-400 italic">No quotas defined. Add one or pick a suggested linkage above.</div>'}</div>
       </div>
+      ${sharingCard}
     </div>`);
 }
 
@@ -2759,20 +2766,33 @@ function csSimQuotaSyncFromDom() {
     return rows;
 }
 
-// Simulation Sharing (stacking) tile — hide non-applicable + save.
+// Simulation Sharing (stacking) tile — Shareable + N/A toggles, hide + save.
+// Read both maps back from the DOM (merged over the loaded maps so hidden rows
+// survive a re-render) so live edits persist across N/A / hide toggles.
+function csSimSharingSyncFromDom() {
+    const sh = { ...(window._csSimShareable || {}) };
+    const na = { ...(window._csSimNA || {}) };
+    document.querySelectorAll('[data-cs-share]').forEach(el => { sh[el.getAttribute('data-cs-share')] = !!el.checked; });
+    document.querySelectorAll('[data-cs-na]').forEach(el => { na[el.getAttribute('data-cs-na')] = !!el.checked; });
+    window._csSimShareable = sh;
+    window._csSimNA = na;
+}
+
+window.csSimSharingOnNA = function () {
+    csSimSharingSyncFromDom();
+    csRenderSimQuotaEditor();
+};
+
 window.csSimSharingToggleHide = function (cb) {
+    csSimSharingSyncFromDom();
     window._csSimHideNA = !!(cb && cb.checked);
     csRenderSimQuotaEditor();
 };
 
 window.csSimSharingSave = async function () {
-    const map = {};
-    document.querySelectorAll('[data-cs-share]').forEach(el => {
-        map[el.getAttribute('data-cs-share')] = !!el.checked;
-    });
-    // Merge over the loaded map so a hide-filter can't drop hidden entries.
-    const merged = { ...(window._csSimShareable || {}), ...map };
-    window._csSimShareable = merged;
+    csSimSharingSyncFromDom();
+    const merged = window._csSimShareable || {};
+    const mergedNA = window._csSimNA || {};
     try {
         // Preserve every other central-sites-config field; only replace sim_shareable.
         const cfg = (await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`)) || {};
@@ -2782,6 +2802,7 @@ window.csSimSharingSave = async function () {
             hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
             sim_quotas: Array.isArray(cfg.sim_quotas) ? cfg.sim_quotas : [],
             sim_shareable: merged,
+            sim_na: mergedNA,
         };
         await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify(body),

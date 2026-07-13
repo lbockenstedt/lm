@@ -1277,6 +1277,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         v = csc.get("sim_shareable")
         return v if isinstance(v, dict) else {}
 
+    async def _sim_na(tenant_id: str) -> dict:
+        """The tenant's per-simulation N/A (does-not-apply) UI overrides — used only
+        to hide sims from the Sim Sharing tile. Stored in
+        central_sites_config.sim_na = {sim_id: bool}."""
+        try:
+            csc = await store.get_central_sites_config(tenant_id) or {}
+        except Exception:  # noqa: BLE001
+            csc = {}
+        v = csc.get("sim_na")
+        return v if isinstance(v, dict) else {}
+
     async def _push_sim_quotas(tenant_id: str) -> int:
         """Push the tenant's effective sim quotas + per-sim shareable overrides to
         its cs spoke(s) as a CS_CONFIG_UPDATE the SimQuotaEngine reconciles against."""
@@ -2606,6 +2617,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # tile renders current state (authoritative; empty = use the SIM_META default).
         if isinstance(cat, dict):
             cat["sim_shareable"] = await _sim_shareable(tenant_id)
+            cat["sim_na"] = await _sim_na(tenant_id)
         return cat
 
     # ── PXMX server → site assignments (Config → PXMX Sites) ──────────────────
