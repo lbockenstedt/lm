@@ -731,8 +731,9 @@ function _lmToastRegion() {
     return el;
 }
 
-function showToast(message, type = 'info') {
-    const colors = { success: '#01A982', error: '#e53e3e', info: '#4a5568' };
+function showToast(message, type = 'success') {
+    // Green for everything except errors (red) — no grey/info toasts.
+    const colors = { success: '#01A982', error: '#e53e3e', info: '#01A982' };
     const toast = document.createElement('div');
     toast.className = 'lm-toast';
     // Appended to the shared #lm-toast-region flex column — the container
