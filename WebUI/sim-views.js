@@ -3306,15 +3306,18 @@ function csRenderPxmxSiteMapEditor() {
     });
     rows.sort((a, b) => a.host.localeCompare(b.host));
     // Dropdown = the Tenant-Wide Pool + each Site Link (shown by its NAME, value =
-    // its wsite so the engine's site match still works) + any raw sim site not
-    // yet covered by a link.
+    // its wsite so the engine's site match still works). Only the links defined
+    // above are offered — not the raw simulation.conf / Central site lists. A
+    // currently-assigned value with no matching link is still shown so it isn't
+    // silently lost.
+    const linked = new Set(csSiteLinks.filter(l => l.wsite).map(l => l.wsite));
     const siteOpts = (sel) =>
         `<option value="" ${(!sel) ? 'selected' : ''}>— choose a pool —</option>` +
         `<option value="Tenant-Wide Pool" ${sel === 'Tenant-Wide Pool' ? 'selected' : ''}>Tenant-Wide Pool (site-based SSID)</option>` +
         csSiteLinks.filter(l => l.wsite).map(l =>
             `<option value="${csEscape(l.wsite)}" ${l.wsite === sel ? 'selected' : ''}>${csEscape(l.name || l.wsite)} (site pool)</option>`).join('') +
-        csPxmxSites.filter(s => !csSiteLinks.some(l => l.wsite === s)).map(s =>
-            `<option value="${csEscape(s)}" ${s === sel ? 'selected' : ''}>${csEscape(s)} (site pool)</option>`).join('');
+        ((sel && sel !== 'Tenant-Wide Pool' && !linked.has(sel))
+            ? `<option value="${csEscape(sel)}" selected>${csEscape(sel)} (unlinked)</option>` : '');
     const rowHtml = rows.map((r, i) => {
         const sel = csPxmxSiteMap[r.host] || '';
         const badge = r.connected
