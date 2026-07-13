@@ -122,6 +122,21 @@ class CSBridgePoller:
         # failed — "retry 5 then give up" instead of a single timeout killing a
         # mass-delete on a busy agent. 0 = fail-fast (old behavior).
         self.max_retries = _env_int("CS_RELAY_MAX_RETRIES", 5, 0)
+        # The spoke→agent relay timeouts (Setup → General → global_config
+        # ``agent_relay_timeout_long_s`` / ``_fast_s``) ALSO drive the hub→spoke
+        # window: the hub must wait at least as long as the spoke's send_to_agent
+        # window or it pre-empts it (user set long=900s but the hub bridge still
+        # used the 65s env default → the hub re-queued every tick and the spoke's
+        # 900s window never got to complete). _apply_configured_timeouts keeps
+        # the hub window = configured + MARGIN (and never below the env default),
+        # re-read each tick so a General save takes effect within one cycle
+        # without a hub restart. _configured_long/_fast are the spoke's windows
+        # surfaced in the Diagnostics panel for display.
+        self._configured_long: Optional[float] = None
+        self._configured_fast: Optional[float] = None
+        self._env_relay_timeout = self.relay_timeout
+        self._env_relay_timeout_long = self.relay_timeout_long
+        self._apply_configured_timeouts()
         # Long-op actions (mirror cs_spoke._LONG so the bridge picks the long
         # relay window without a round-trip). Keep in sync with the spoke set.
         self._long_actions = {"delete_vm", "reclone_vm", "snapshot_vm", "clone_lxc",
@@ -148,12 +163,43 @@ class CSBridgePoller:
                     self.poll_interval, self.usb_interval)
         while True:
             try:
+                self._apply_configured_timeouts()
                 await self._tick()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("CS bridge tick error: %s", exc)
             await asyncio.sleep(self.poll_interval)
+
+    def _apply_configured_timeouts(self) -> None:
+        """Re-read the spoke→agent relay timeouts from the hub's global_config
+        (Setup → General) and keep the hub→spoke relay window above them, so a
+        configured long-op window of (say) 900s actually lets the spoke's
+        send_to_agent 900s window complete instead of the hub pre-empting at the
+        65s env default and re-queuing every tick. Idempotent + cheap (one dict
+        lookup), called once per poll cycle so a General save takes effect
+        within one cycle — no hub restart needed.
+
+        The hub window = configured + MARGIN (5s) so the spoke's reply lands
+        before the hub gives up; never below the env default (CS_RELAY_TIMEOUT_S
+        / CS_RELAY_TIMEOUT_LONG_S). Unconfigured → env defaults (old behavior).
+        """
+        margin = 5.0
+        try:
+            gc = (self.hub.state.get_global_config() or {}) if getattr(
+                self.hub, "state", None) else {}
+        except Exception:  # noqa: BLE001 — best-effort; fall back to env
+            gc = {}
+        cl = gc.get("agent_relay_timeout_long_s")
+        cf = gc.get("agent_relay_timeout_fast_s")
+        self._configured_long = float(cl) if cl is not None else None
+        self._configured_fast = float(cf) if cf is not None else None
+        if self._configured_long is not None:
+            self.relay_timeout_long = max(self._env_relay_timeout_long,
+                                          self._configured_long + margin)
+        if self._configured_fast is not None:
+            self.relay_timeout = max(self._env_relay_timeout,
+                                      self._configured_fast + margin)
 
     async def _tick(self) -> None:
         hub = self.hub
@@ -359,8 +405,17 @@ class CSBridgePoller:
             "agents": agents,
             "cycle": self._last_cycle_diag,
             "max_retries": self.max_retries,
+            # Hub→spoke relay windows (what the bridge actually waits). After
+            # _apply_configured_timeouts these track the General setting + margin
+            # (so a 900s long-op setting → ~905s here), never below the env
+            # default. Shown in the Diagnostics panel.
             "relay_timeout_s": self.relay_timeout,
             "relay_timeout_long_s": self.relay_timeout_long,
+            # The spoke→agent windows the operator configured in Setup → General
+            # (agent_relay_timeout_long_s / _fast_s), surfaced so the panel can
+            # show both legs side by side. None when unconfigured (env defaults).
+            "configured_long_s": self._configured_long,
+            "configured_fast_s": self._configured_fast,
             "now": now,
         }
 

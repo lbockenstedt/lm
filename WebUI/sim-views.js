@@ -4156,6 +4156,7 @@ window.CS_CHILD_RENDERERS['Setup::Proxmox']        = csRenderSetupProxmox;
 window.CS_CHILD_RENDERERS['Setup::GitHub']         = csRenderSetupGithub;
 window.CS_CHILD_RENDERERS['Setup::Security']       = csRenderSetupSecurity;
 window.CS_CHILD_RENDERERS['Setup::Notifications']  = csRenderSetupNotifications;
+window.CS_CHILD_RENDERERS['Setup::Diagnostics']    = csRenderSetupDiagnostics;
 
 /* ===========================================================================
  * 1. VM Server — fleet overview + per-spoke drill-in children
@@ -5431,31 +5432,36 @@ async function csRenderVmServerApiServer() {
     </div>`);
 }
 
-// ── CS Bridge Status (hub-side relay state per agent) ─────────────────────────
+// ── Setup → Diagnostics: CS Bridge Status (hub-side relay state per agent) ───
 // Lets an Azure-hub operator diagnose "why isn't svr-02 deleting?" without SSH:
 // per agent, the bridge decision (ACTIVE / SKIP not-enabled / SKIP no-cs-spoke)
 // + relay outcome counters (accepted / re-queued / gave-up / completed / failed)
-// + the last outcome ts. The same data is in the hub log as greppable [cs-bridge]
-// lines; this panel surfaces it structured. Read-only; refreshes on render.
-async function csRenderVmServerBridgeStatus() {
+// + the last outcome ts. The same data is in the hub log (WebUI Logs →
+// Simulations) as greppable [cs-bridge] lines; this panel surfaces it structured.
+// Read-only; refreshes on render. Global across the tenant's agents — that's
+// why it lives under Setup/Diagnostics, not under a host-scoped VM Server tab.
+async function csRenderSetupDiagnostics() {
     csSetToolbar('');
     let snap = null;
     try {
         snap = await csFetch(`/${csTenant()}/cs-bridge-status?tenant_id=${csTenant()}`);
-    } catch (e) { console.error('csRenderVmServerBridgeStatus: load failed', e); csSet(csErrorBox('Could not load CS bridge status', e)); return; }
+    } catch (e) { console.error('csRenderSetupDiagnostics: load failed', e); csSet(csErrorBox('Could not load CS bridge status', e)); return; }
     if (!snap || !snap.available) {
-        csSet(`<div>${csVmHostBanner()}
+        csSet(`<div>
           <p class="text-sm text-slate-500">CS bridge not started on this hub yet. The bridge poller runs on the hub; status appears here once it completes its first cycle (a few seconds after hub boot).</p>
         </div>`);
         return;
     }
     const agents = snap.agents || [];
+    const _cfgFast = snap.configured_fast_s != null ? `${snap.configured_fast_s}s` : '15s (default)';
+    const _cfgLong = snap.configured_long_s != null ? `${snap.configured_long_s}s` : '60s (default)';
     const cfg = `<div class="hpe-card rounded-lg p-3 shadow-sm mb-3 text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
       <span><b class="text-slate-600">max retries:</b> ${csEscape(String(snap.max_retries ?? '—'))}</span>
-      <span><b class="text-slate-600">fast relay:</b> ${csEscape(String(snap.relay_timeout_s ?? '—'))}s</span>
-      <span><b class="text-slate-600">long relay:</b> ${csEscape(String(snap.relay_timeout_long_s ?? '—'))}s</span>
+      <span><b class="text-slate-600">spoke→agent (configured):</b> fast ${csEscape(_cfgFast)} / long ${csEscape(_cfgLong)}</span>
+      <span><b class="text-slate-600">hub→spoke (actual):</b> fast ${csEscape(String(snap.relay_timeout_s ?? '—'))}s / long ${csEscape(String(snap.relay_timeout_long_s ?? '—'))}s</span>
       <span><b class="text-slate-600">cycle:</b> ${csEscape(snap.cycle || '—')}</span>
-    </div>`;
+    </div>
+    <p class="text-[11px] text-slate-400 mb-3">Set the spoke→agent windows in <b>Setup → General → Agent Relay Timeouts</b>. The hub→spoke window tracks the configured long/fast value +5s (never below the env default) so the hub doesn't pre-empt the spoke's wait. If hub→spoke shows the env defaults (16s/65s) here after you saved General, the save didn't reach global_config — re-save.</p>`;
     const head = ['Agent', 'Hostname', 'Decision', 'Accepted', 'Re-queued', 'Gave up', 'Completed', 'Failed', 'Last outcome'];
     const body = agents.map(a => {
         const _decClass = (a.decision || '').startsWith('ACTIVE') ? 'text-emerald-600' :
@@ -5472,9 +5478,9 @@ async function csRenderVmServerBridgeStatus() {
       <td class="px-3 py-2 text-xs text-slate-400">${csEscape(a.last_outcome ? (a.last_outcome + ' @ ' + (a.last_ts_iso || '')) : '—')}</td>
     </tr>`;
     }).join('');
-    csSet(`<div>${csVmHostBanner()}${cfg}
+    csSet(`<div>${cfg}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">CS Bridge — per-agent relay status (${agents.length})</p>
-      <p class="text-[11px] text-slate-400 mb-3">ACTIVE = the bridge is polling + relaying this agent's queue. SKIP not-enabled = hub's <code>agent_config[agent_id].client_simulation.enabled</code> is off (re-save the agent's CS config in the UI). SKIP no-cs-spoke = no client-sim spoke bound to the tenant. Re-queued climbing = agent too busy to ACK (transient, retried up to max retries). Gave up / Failed = retries exhausted or a genuine rejection.</p>
+      <p class="text-[11px] text-slate-400 mb-3">ACTIVE = the bridge is polling + relaying this agent's queue. SKIP not-enabled = hub's <code>agent_config[agent_id].client_simulation.enabled</code> is off (re-save the agent's CS config in Agent Config). SKIP no-cs-spoke = no client-sim spoke bound to the tenant. Re-queued climbing = agent too busy to ACK (transient, retried up to max retries). Gave up / Failed = retries exhausted or a genuine rejection. The same data streams to <b>WebUI Logs → Simulations</b> as <code>[cs-bridge]</code> lines.</p>
       ${agents.length ? csTable(head, body) : '<p class="text-sm text-slate-500">No agents seen yet.</p>'}
     </div>`);
 }
@@ -5488,7 +5494,6 @@ window.CS_CHILD_RENDERERS['VM Server::USB']           = csRenderVmServerUsb;
 window.CS_CHILD_RENDERERS['VM Server::IoT']           = csRenderVmServerIot;
 window.CS_CHILD_RENDERERS['VM Server::VirtualHere']   = csRenderVmServerVh;
 window.CS_CHILD_RENDERERS['VM Server::Command Queue'] = csRenderVmServerQueue;
-window.CS_CHILD_RENDERERS['VM Server::CS Bridge Status'] = csRenderVmServerBridgeStatus;
 window.CS_CHILD_RENDERERS['VM Server::Details']       = csRenderVmServerDetails;
 // VM Server :: Clients / Central / API Server children removed from the nav
 // (those surfaces live in their own top-level Simulations tabs). The render

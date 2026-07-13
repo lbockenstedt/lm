@@ -24,10 +24,10 @@ class _FakeHub:
     test can assert re-queue vs ack-failed."""
 
     def __init__(self, relay_reply, agent_config, tenant_to_cs_spoke,
-                 spoke_tenants):
+                 spoke_tenants, global_config=None):
         self._relay_reply = relay_reply
         self.calls = []
-        self.state = _FakeState(agent_config, spoke_tenants)
+        self.state = _FakeState(agent_config, spoke_tenants, global_config)
         self._tenant_to_cs_spoke = tenant_to_cs_spoke
 
     def get_all_spokes_by_type(self, module_type):
@@ -53,23 +53,29 @@ class _FakeHub:
 
 
 class _FakeState:
-    def __init__(self, agent_config, spoke_tenants):
+    def __init__(self, agent_config, spoke_tenants, global_config=None):
         self.system_state = {"agent_config": agent_config}
         self._spoke_tenants = spoke_tenants
+        self._global_config = global_config or {}
 
     def get_spoke_tenant(self, spoke_id):
         return self._spoke_tenants.get(spoke_id)
+
+    def get_global_config(self):
+        return self._global_config
 
 
 def _run(coro):
     return asyncio.new_event_loop().run_until_complete(coro)
 
 
-def _make_poller(relay_reply):
+def _make_poller(relay_reply, global_config=None):
     hub = _FakeHub(relay_reply,
                   agent_config={"ag-1": {"client_simulation": {"enabled": True}}},
                   tenant_to_cs_spoke={"default": "cs-spoke"},
                   spoke_tenants={"host-spoke": "default"})
+    if global_config is not None:
+        hub.state._global_config = global_config
     poller = CSBridgePoller(hub)
     poller.max_retries = 5
     return poller, hub
@@ -217,3 +223,42 @@ def test_status_snapshot_records_decision_and_counters(caplog):
     assert requeue_lines, "no requeue INFO line emitted"
     assert any("pxmx-cs-svr-04" in ln for ln in requeue_lines), (
         "requeue log line missing the agent hostname — can't grep by agent")
+
+
+def test_configured_timeouts_raise_hub_window_above_spoke():
+    """Setup → General sets the spoke→agent windows (agent_relay_timeout_long_s
+    / _fast_s). The hub→spoke relay window must track them + margin so the hub
+    doesn't pre-empt the spoke's wait — the user set long=900s but the bridge
+    showed 65s (env default) and re-queued every tick. After the fix a 900s
+    configured long → hub relay_timeout_long >= 905s, and the snapshot surfaces
+    the configured value for the Diagnostics panel. Re-read each tick (no
+    restart)."""
+    poller, hub = _make_poller(
+        {"payload": {"data": {"status": "ACCEPTED"}}},
+        global_config={"agent_relay_timeout_long_s": 900,
+                       "agent_relay_timeout_fast_s": 300})
+    # __init__ already applied once; assert the env default (65) was raised.
+    assert poller.relay_timeout_long >= 905.0, (
+        f"hub long window not raised above configured 900s+margin: {poller.relay_timeout_long}")
+    assert poller.relay_timeout >= 305.0, (
+        f"hub fast window not raised above configured 300s+margin: {poller.relay_timeout}")
+    assert poller._configured_long == 900.0
+    assert poller._configured_fast == 300.0
+    snap = poller.status_snapshot()
+    assert snap["configured_long_s"] == 900.0
+    assert snap["configured_fast_s"] == 300.0
+    assert snap["relay_timeout_long_s"] == poller.relay_timeout_long
+
+
+def test_unconfigured_timeouts_keep_env_defaults():
+    """No global_config relay keys → hub windows stay at the env defaults (old
+    behavior). Guards against the wiring accidentally forcing a change when
+    nothing was configured."""
+    poller, hub = _make_poller({"payload": {"data": {"status": "ACCEPTED"}}})
+    assert poller.relay_timeout_long == 65.0
+    assert poller.relay_timeout == 16.0
+    assert poller._configured_long is None
+    assert poller._configured_fast is None
+    snap = poller.status_snapshot()
+    assert snap["configured_long_s"] is None
+    assert snap["relay_timeout_long_s"] == 65.0
