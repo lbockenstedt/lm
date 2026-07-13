@@ -5115,7 +5115,7 @@ function _renderSimQuotaDefaultsEditor() {
           ${typeCell}
           ${idCell}
           <label class="${lblCls}">Simulation
-            <select data-sqd="sim_id" onchange="_simQuotaDefaultOnSimChange()" class="${ctlCls}">${simOpts}</select>
+            <select data-sqd="sim_id" onchange="_simQuotaDefaultOnSimChange(this)" class="${ctlCls}">${simOpts}</select>
           </label>
           <label class="${lblCls}">Clients
             <input data-sqd="count" type="number" min="1" value="${r.count}" class="${ctlCls}">
@@ -5164,10 +5164,32 @@ function _simQuotaDefaultsSyncFromDom() {
 
 // Toggling a default row's Simulation between a real sim and "(Clients
 // Associated)" (presence) flips the row's Type / Alert ID visibility and
-// forces multi-capable for presence. Re-renders the editor after syncing
-// current edits from the DOM so nothing is lost.
-function _simQuotaDefaultOnSimChange() {
+// forces multi-capable for presence. When a real sim with a suggested alert
+// linkage is picked, the Alert / Insight ID is AUTO-POPULATED from the
+// reverse suggested map (sim → alert) so the admin doesn't have to type the
+// canonical alert ID by hand (e.g. picking dhcp_fail fills
+// CLIENT_DHCP_FAILURE). The admin can still edit it after. Re-renders the
+// editor after syncing current edits from the DOM so nothing is lost.
+function _simQuotaDefaultOnSimChange(selectEl) {
     _simQuotaDefaultsSyncFromDom();
+    // Reverse the suggested alert→sim map to sim→first alert (the canonical
+    // alert for that sim). The catalog ships SUGGESTED_ALERT_SIM as `suggested`.
+    const suggested = ((_simQuotaDefaultsCatalog || {}).suggested) || {};
+    const bySim = {};
+    for (const [alertId, simId] of Object.entries(suggested)) {
+        if (!(simId in bySim)) bySim[simId] = alertId;   // first alert wins
+    }
+    const row = selectEl && selectEl.closest('[data-sqd-row]');
+    if (row) {
+        const idx = parseInt(row.getAttribute('data-sqd-row'), 10);
+        const r = _simQuotaDefaults[idx];
+        // Only auto-fill for a real sim with a known suggestion — leave a
+        // presence row (sim_id empty) and an unknown sim alone.
+        if (r && r.sim_id && bySim[r.sim_id]) {
+            r.alert_id = bySim[r.sim_id];
+            r.alert_type = 'alert';
+        }
+    }
     _renderSimQuotaDefaultsEditor();
 }
 
