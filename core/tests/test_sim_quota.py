@@ -190,3 +190,68 @@ async def test_global_sim_quota_defaults_roundtrip_and_isolation(tmp_path):
     # central_sites_config.sim_quotas (tenant isolation).
     csc = await s.get_central_sites_config("acme")
     assert csc.get("sim_quotas") in (None, [], {})
+
+# ── presence quotas (Clients Associated — sim_id empty) ────────────────────
+def test_normalize_presence_quota_forces_multi_capable():
+    q = sim_quota.normalize_quota({"sim_id": "", "count": 17, "site": "MIA"})
+    assert q["sim_id"] == "" and q["site"] == "MIA" and q["count"] == 17
+    assert q["multi_capable"] is True
+    assert sim_quota.normalize_quota(
+        {"sim_id": "", "count": 17, "site": "MIA", "multi_capable": False}
+    )["multi_capable"] is True
+
+
+def test_validate_presence_quota_needs_site_not_alert_id():
+    clean, errs = sim_quota.validate_sim_quotas(
+        [{"sim_id": "", "count": 17, "site": "MIA", "enabled": True}], ["dns_fail"])
+    assert errs == [] and len(clean) == 1
+    clean, errs = sim_quota.validate_sim_quotas(
+        [{"sim_id": "", "count": 17, "enabled": True}], ["dns_fail"])
+    assert clean == [] and any("requires a site" in e for e in errs)
+
+
+def test_validate_presence_dedup_by_site_last_wins():
+    clean, _ = sim_quota.validate_sim_quotas(
+        [{"sim_id": "", "count": 17, "site": "MIA", "enabled": True},
+         {"sim_id": "", "count": 10, "site": "MIA", "enabled": True},
+         {"sim_id": "", "count": 5, "site": "DFW", "enabled": True}])
+    assert len(clean) == 2
+    assert [c for c in clean if c["site"] == "MIA"][0]["count"] == 10
+
+
+def test_merge_presence_per_site_tenant_overrides_global():
+    # Global presence at MIA + DFW; tenant presence at MIA only → tenant owns
+    # MIA (its count wins), DFW inherits global.
+    g = [{"sim_id": "", "count": 17, "site": "MIA", "enabled": True},
+         {"sim_id": "", "count": 5, "site": "DFW", "enabled": True}]
+    t = [{"sim_id": "", "count": 10, "site": "MIA", "enabled": True}]
+    eff = sim_quota.merge_effective_quotas(g, t)
+    by = {q["site"]: q for q in eff if not q["sim_id"]}
+    assert by["MIA"]["count"] == 10          # tenant override wins
+    assert by["DFW"]["count"] == 5           # inherited global
+
+
+def test_merge_presence_tenant_disabled_suppresses_global():
+    # A tenant disabled presence row for MIA suppresses the global MIA presence
+    # (tenant owns the site; contributes no enabled row) — mirrors sim-quota
+    # alert-disable semantics. DFW still inherits.
+    g = [{"sim_id": "", "count": 17, "site": "MIA", "enabled": True},
+         {"sim_id": "", "count": 5, "site": "DFW", "enabled": True}]
+    t = [{"sim_id": "", "count": 99, "site": "MIA", "enabled": False}]
+    eff = sim_quota.merge_effective_quotas(g, t)
+    sites = {q["site"] for q in eff if not q["sim_id"]}
+    assert "MIA" not in sites                 # suppressed by the tenant disable
+    assert "DFW" in sites
+
+
+def test_merge_presence_and_sim_quotas_coexist():
+    # Presence (per-site) and sim (per-alert) merge independently without
+    # colliding on the (alert_type, alert_id) grouping.
+    g = [{"sim_id": "", "count": 17, "site": "MIA", "enabled": True},
+         {"alert_id": "A", "sim_id": "dns_fail", "count": 8, "site": "MIA",
+          "enabled": True}]
+    eff = sim_quota.merge_effective_quotas(g, [])
+    pres = [q for q in eff if not q["sim_id"]]
+    sim = [q for q in eff if q["sim_id"]]
+    assert len(pres) == 1 and pres[0]["site"] == "MIA"
+    assert len(sim) == 1 and sim[0]["alert_id"] == "A"

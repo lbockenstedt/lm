@@ -2563,6 +2563,18 @@ function csSimQuotaSelect(selected, items, placeholder) {
         items.map(it => `<option value="${csEscape(it)}" ${it === selected ? 'selected' : ''}>${csEscape(it)}</option>`).join('');
 }
 
+// Simulation dropdown options for a quota row: a leading "(Clients Associated)"
+// PRESENCE option (value "") — homes N clients to the site, runs no sim — then
+// the runnable sim primitives. Selecting presence hides the row's Type / Alert
+// ID (a presence quota has no alert) and forces multi-capable (a homed-but-
+// sim-less client is still a free runner other sims may stack onto).
+function csSimQuotaSimOptions(selected, simIds) {
+    const pres = '<option value=""' + (selected === '' ? ' selected' : '') +
+        '>Clients Associated (no sim)</option>';
+    return pres + simIds.map(it =>
+        `<option value="${csEscape(it)}" ${it === selected ? 'selected' : ''}>${csEscape(it)}</option>`).join('');
+}
+
 // Alert / Insight ID dropdown options for a row: the monitored checks matching
 // the row's alert_type (alert vs insight), labeled "name — id". A saved
 // alert_id that's no longer monitored is kept as a trailing option so it isn't
@@ -2591,21 +2603,32 @@ function csRenderSimQuotaEditor() {
     const meta = cat.meta || {};
     const suggested = cat.suggested || {};
     const rowHtml = csSimQuotaRows.map((r, i) => {
-        const simOpts = csSimQuotaSelect(r.sim_id, simIds, '— select sim —');
+        const isPresence = !r.sim_id;
+        const simOpts = csSimQuotaSimOptions(r.sim_id, simIds);
         const siteOpts = csSimQuotaSelect(r.site, sites, '— all sites —');
         const idOpts = csSimQuotaAlertIdOptions(r.alert_type, r.alert_id);
+        const alertCell = isPresence
+            ? `<label class="text-xs text-slate-500" data-cs-sq-presence-note>Presence
+                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
+              </label>`
+            : `<label class="text-xs text-slate-500">Type
+                <select data-cs-sq="alert_type" onchange="csSimQuotaOnTypeChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
+                  <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
+                  <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
+                </select>
+              </label>`;
+        const idCell = isPresence
+            ? `<label class="text-xs text-slate-500">Alert / Insight ID
+                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— none (presence) —</div>
+              </label>`
+            : `<label class="text-xs text-slate-500">Alert / Insight ID
+                <select data-cs-sq="alert_id" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${idOpts}</select>
+              </label>`;
         return `<div class="grid grid-cols-1 md:grid-cols-7 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-sqrow="${i}">
-          <label class="text-xs text-slate-500">Type
-            <select data-cs-sq="alert_type" onchange="csSimQuotaOnTypeChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
-              <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
-              <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
-            </select>
-          </label>
-          <label class="text-xs text-slate-500">Alert / Insight ID
-            <select data-cs-sq="alert_id" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${idOpts}</select>
-          </label>
+          ${alertCell}
+          ${idCell}
           <label class="text-xs text-slate-500">Simulation
-            <select data-cs-sq="sim_id" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${simOpts}</select>
+            <select data-cs-sq="sim_id" onchange="csSimQuotaOnSimChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${simOpts}</select>
           </label>
           <label class="text-xs text-slate-500">Clients
             <input data-cs-sq="count" type="number" min="1" value="${csEscape(String(r.count))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
@@ -2614,7 +2637,7 @@ function csRenderSimQuotaEditor() {
             <select data-cs-sq="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${siteOpts}</select>
           </label>
           <label class="text-xs text-slate-500 flex flex-col gap-1">
-            <span class="flex items-center gap-1"><input data-cs-sq="multi_capable" type="checkbox" ${r.multi_capable ? 'checked' : ''}> Multi-capable</span>
+            <span class="flex items-center gap-1"><input data-cs-sq="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
           </label>
@@ -2650,9 +2673,12 @@ function csSimQuotaSyncFromDom() {
     const rows = [];
     document.querySelectorAll('[data-cs-sqrow]').forEach(el => {
         const g = (k) => el.querySelector(`[data-cs-sq="${k}"]`);
+        // A presence row (Clients Associated) has no Type / Alert ID controls
+        // (they're replaced by static labels) — nullish-guard so the sync
+        // doesn't throw and preserves alert_type/alert_id defaults.
         rows.push({
-            alert_type: g('alert_type').value,
-            alert_id: g('alert_id').value.trim(),
+            alert_type: (g('alert_type') || {}).value || 'alert',
+            alert_id: ((g('alert_id') || {}).value || '').trim(),
             sim_id: g('sim_id').value,
             count: parseInt(g('count').value || '1', 10) || 1,
             site: g('site').value,
@@ -2691,6 +2717,15 @@ window.csSimQuotaOnTypeChange = function (typeSel) {
     if (!idSel) return;
     const cur = idSel.value;
     idSel.innerHTML = csSimQuotaAlertIdOptions(typeSel.value, cur);
+};
+
+// Toggling the Simulation dropdown between a real sim and "(Clients
+// Associated)" (presence) flips the row's Type / Alert ID visibility and
+// forces multi-capable for presence. Re-renders the editor (current edits are
+// synced from the DOM first so nothing is lost).
+window.csSimQuotaOnSimChange = function (simSel) {
+    csSimQuotaSyncFromDom();
+    csRenderSimQuotaEditor();
 };
 
 window.csSimQuotaAddSuggested = function (alertId, simId) {
@@ -2742,7 +2777,13 @@ async function csRenderSimQuotaState() {
         }
         const eff = Array.isArray(st.effective) ? st.effective : [];
         const ledger = (st.ledger && typeof st.ledger === 'object') ? st.ledger : {};
-        const keyOf = (q) => `${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`;
+        // Mirrors the engine's _quota_key / sim_quota.quota_dedup_key: a
+        // presence quota (sim_id empty — "Clients Associated") is keyed by site
+        // alone (presence::MIA), not alert_type:alert_id:site, so it joins the
+        // ledger's presence entry instead of a phantom alert row.
+        const keyOf = (q) => !q.sim_id
+            ? `presence::${q.site || ''}`
+            : `${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`;
         // Join alert/insight IDs to their friendly names via the monitored_checks
         // slice the spoke returns alongside the ledger (a quota row stores only
         // the bare id). Falls back to the id when no monitored check matches.
@@ -2763,13 +2804,20 @@ async function csRenderSimQuotaState() {
                 ? `<span class="text-[#01A982] font-semibold">${clients.length}/${target}</span>`
                 : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
             const fname = nameOf(q.alert_type, q.alert_id);
-            const idCell = fname
-                ? `<span class="text-slate-700">${csEscape(fname)}</span> <span class="font-mono text-slate-400 text-[11px]">${csEscape(q.alert_id || '')}</span>`
-                : `<span class="font-mono">${csEscape(q.alert_id || '')}</span>`;
+            const isPresence = !q.sim_id;
+            const idCell = isPresence
+                ? `<span class="text-slate-700 italic">Clients Associated</span>`
+                : (fname
+                    ? `<span class="text-slate-700">${csEscape(fname)}</span> <span class="font-mono text-slate-400 text-[11px]">${csEscape(q.alert_id || '')}</span>`
+                    : `<span class="font-mono">${csEscape(q.alert_id || '')}</span>`);
+            const typeCell = isPresence ? 'presence' : (q.alert_type || 'alert');
+            const simCell = isPresence
+                ? `<span class="italic text-slate-400">— none —</span>`
+                : `<span class="font-mono">${csEscape(q.sim_id || '')}</span>`;
             return `<tr class="border-t border-slate-100">
-              <td class="px-2 py-1.5 text-xs capitalize">${csEscape(q.alert_type || 'alert')}</td>
+              <td class="px-2 py-1.5 text-xs capitalize">${csEscape(typeCell)}</td>
               <td class="px-2 py-1.5 text-xs">${idCell}</td>
-              <td class="px-2 py-1.5 text-xs font-mono">${csEscape(q.sim_id || '')}</td>
+              <td class="px-2 py-1.5 text-xs">${simCell}</td>
               <td class="px-2 py-1.5 text-xs">${csEscape(q.site || '<all>')}</td>
               <td class="px-2 py-1.5 text-xs text-center">${fill}</td>
               <td class="px-2 py-1.5 text-xs text-center">${q.multi_capable ? '✓' : '—'}</td>

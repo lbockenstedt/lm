@@ -66,6 +66,13 @@ def _as_int(v: Any, default: int = 1) -> int:
 
 
 def normalize_quota(raw: Any) -> Dict[str, Any]:
+    """Coerce a raw quota dict to the canonical shape; drop unknown keys.
+
+    A PRESENCE quota (``sim_id`` empty, "Clients Associated") homes N clients
+    to a site and runs NO sim — it only guarantees N clients are associated to
+    the site (re-homing ``wsite`` if ``rehome``). Presence quotas are ALWAYS
+    multi-capable (they don't consume the client for sim purposes; other
+    stackable sims may pack onto a presence-homed client)."""
     if not isinstance(raw, dict):
         return {}
     sim_id = str(raw.get("sim_id") or "").strip()
@@ -73,36 +80,62 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
     alert_type = str(raw.get("alert_type") or "alert").strip().lower()
     if alert_type not in ALERT_TYPES:
         alert_type = "alert"
+    is_presence = not sim_id
     return {
         "alert_id": str(raw.get("alert_id") or "").strip(),
         "alert_type": alert_type,
         "sim_id": sim_id,
         "count": _as_int(raw.get("count"), 1),
         "site": str(raw.get("site") or "").strip(),
-        "multi_capable": _as_bool(raw.get("multi_capable"), bool(meta.get("multi_capable", False))),
+        "multi_capable": True if is_presence
+        else _as_bool(raw.get("multi_capable"), bool(meta.get("multi_capable", False))),
         "rehome": _as_bool(raw.get("rehome"), False),
         "enabled": _as_bool(raw.get("enabled"), False),
     }
 
 
+def quota_dedup_key(q: Dict[str, Any]) -> str:
+    """The dedup/identity key for a normalized quota.
+
+    A sim quota is keyed by ``alert_type:alert_id:site``. A presence quota
+    (``sim_id`` empty — "Clients Associated") has no alert, so it's keyed by
+    site alone — one presence count per site, independent of the sim-quota
+    namespace. The engine's ``_quota_key`` mirrors this."""
+    if not q.get("sim_id"):
+        return f"presence::{q.get('site', '')}"
+    return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
+
+
 def validate_sim_quotas(
     quotas: Any, available_sims: List[str] | None = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Normalize + validate a ``sim_quotas`` list.
+
+    A SIM quota (``sim_id`` set) requires an ``alert_id`` and its ``sim_id``
+    must be in *available_sims* (when provided). A PRESENCE quota (``sim_id``
+    empty — "Clients Associated") requires a ``site`` and NO ``alert_id``.
+    Duplicate keys (``quota_dedup_key``) collapse last-wins."""
     clean: List[Dict[str, Any]] = []
     errors: List[str] = []
     seen: Dict[str, Dict[str, Any]] = {}
     sim_set = set(available_sims or [])
     for i, raw in enumerate(quotas or []):
         q = normalize_quota(raw)
-        if not q["alert_id"] or not q["sim_id"]:
-            errors.append(f"quota #{i}: missing alert_id or sim_id — dropped")
-            continue
-        if sim_set and q["sim_id"] not in sim_set:
-            errors.append(
-                f"quota #{i} ({q['alert_id']}): sim_id '{q['sim_id']}' "
-                f"not in available sims — dropped")
-            continue
-        seen[f"{q['alert_type']}:{q['alert_id']}:{q['site']}"] = q
+        if not q["sim_id"]:
+            if not q["site"]:
+                errors.append(f"quota #{i}: presence quota (Clients Associated) "
+                              f"requires a site — dropped")
+                continue
+        else:
+            if not q["alert_id"]:
+                errors.append(f"quota #{i}: missing alert_id — dropped")
+                continue
+            if sim_set and q["sim_id"] not in sim_set:
+                errors.append(
+                    f"quota #{i} ({q['alert_id']}): sim_id '{q['sim_id']}' "
+                    f"not in available sims — dropped")
+                continue
+        seen[quota_dedup_key(q)] = q
     clean = list(seen.values())
     return clean, errors
 
@@ -119,12 +152,22 @@ def merge_effective_quotas(
 ) -> List[Dict[str, Any]]:
     """Merge platform-wide default quotas with a tenant's overrides.
 
-    Per ``(alert_type, alert_id)``: if the tenant declares ANY quota row for
-    that alert (enabled OR disabled), the tenant OWNS that alert — its enabled
-    rows are used and the global default for that alert is suppressed (so a
-    tenant can explicitly turn an alert OFF by adding a disabled row). Alerts
-    the tenant hasn't touched inherit the global default's enabled rows. Both
-    sides are validated + deduped (last-wins per ``alert_type:alert_id:site``)
+    SIM quotas merge per ``(alert_type, alert_id)``: if the tenant declares ANY
+    quota row for that alert (enabled OR disabled), the tenant OWNS that alert —
+    its enabled rows are used and the global default for that alert is
+    suppressed (so a tenant can explicitly turn an alert OFF by adding a
+    disabled row). Alerts the tenant hasn't touched inherit the global
+    default's enabled rows.
+
+    PRESENCE quotas (``sim_id`` empty — "Clients Associated", N clients homed
+    to a site, no sim) merge per SITE: a tenant presence row for a site (enabled
+    OR disabled) makes the tenant own that site's presence — its enabled row is
+    used and the global presence for that site is suppressed; sites the tenant
+    hasn't touched inherit the global presence. So a tenant can "17 on MIA"
+    globally and "10 on DFW" locally, or disable MIA to drop the global MIA
+    presence.
+
+    Both sides are validated + deduped (last-wins per ``quota_dedup_key``)
     before the merge; the result is enabled-only. The cs spoke's SimQuotaEngine
     consumes the resulting list.
     """
@@ -138,19 +181,38 @@ def merge_effective_quotas(
     if t_errs:
         logger.warning("merge_effective_quotas: tenant quota errors: %s", t_errs)
 
-    def _grp(qs: List[Dict[str, Any]]) -> Dict[tuple, List[Dict[str, Any]]]:
+    def _grp_sim(qs: List[Dict[str, Any]]) -> Dict[tuple, List[Dict[str, Any]]]:
         m: Dict[tuple, List[Dict[str, Any]]] = {}
         for q in qs:
             m.setdefault((q["alert_type"], q["alert_id"]), []).append(q)
         return m
-    # Ownership is keyed on ALL rows (enabled+disabled) so a tenant's disabled
-    # row suppresses the global default for that alert; output is enabled-only.
-    gmap_all, tmap_all = _grp(g_clean), _grp(t_clean)
+    def _grp_site(qs: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        m: Dict[str, List[Dict[str, Any]]] = {}
+        for q in qs:
+            m.setdefault(q["site"], []).append(q)
+        return m
+
+    g_sim = [q for q in g_clean if q["sim_id"]]
+    g_pres = [q for q in g_clean if not q["sim_id"]]
+    t_sim = [q for q in t_clean if q["sim_id"]]
+    t_pres = [q for q in t_clean if not q["sim_id"]]
+
     out: List[Dict[str, Any]] = []
+    # SIM quotas — ownership keyed on ALL rows (enabled+disabled) so a tenant's
+    # disabled row suppresses the global default for that alert; enabled-only out.
+    gmap_all, tmap_all = _grp_sim(g_sim), _grp_sim(t_sim)
     for key, rows in tmap_all.items():
         out.extend(r for r in rows if r.get("enabled"))
     for key, rows in gmap_all.items():
         if key not in tmap_all:
+            out.extend(r for r in rows if r.get("enabled"))
+    # PRESENCE quotas — ownership per site (a tenant presence row for a site,
+    # enabled or disabled, suppresses the global presence for that site).
+    gsite, tsite = _grp_site(g_pres), _grp_site(t_pres)
+    for site, rows in tsite.items():
+        out.extend(r for r in rows if r.get("enabled"))
+    for site, rows in gsite.items():
+        if site not in tsite:
             out.extend(r for r in rows if r.get("enabled"))
     return out
 

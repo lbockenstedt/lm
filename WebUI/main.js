@@ -5063,6 +5063,17 @@ function _simQuotaDefaultSelect(selected, items, placeholder) {
         items.map(it => `<option value="${it}" ${it === selected ? 'selected' : ''}>${it}</option>`).join('');
 }
 
+// Simulation dropdown options for a default-quota row: a leading "(Clients
+// Associated)" PRESENCE option (value "") — homes N clients to the site, runs
+// no sim — then the runnable sim primitives. Selecting presence hides the
+// row's Type / Alert ID and forces multi-capable. Mirrors the tenant editor's
+// csSimQuotaSimOptions (sim-views.js, both copies).
+function _simQuotaDefaultSimOptions(selected, simIds) {
+    return '<option value=""' + (selected === '' ? ' selected' : '') +
+        '>Clients Associated (no sim)</option>' +
+        simIds.map(it => `<option value="${it}" ${it === selected ? 'selected' : ''}>${it}</option>`).join('');
+}
+
 function _renderSimQuotaDefaultsEditor() {
     const cat = _simQuotaDefaultsCatalog || { sims: [], sites: [], suggested: {}, meta: {} };
     const simIds = (cat.sims || []).map(s => s.sim_id);
@@ -5075,25 +5086,36 @@ function _renderSimQuotaDefaultsEditor() {
     const rowsEl = document.getElementById('sim-quota-defaults-rows');
     if (!rowsEl) return;
     const rowHtml = _simQuotaDefaults.map((r, i) => {
-        const simOpts = _simQuotaDefaultSelect(r.sim_id, simIds, '— select sim —');
+        const isPresence = !r.sim_id;
+        const simOpts = _simQuotaDefaultSimOptions(r.sim_id, simIds);
         // Site is a dropdown sourced from simulation.conf (platform-wide union).
         // Fall back to a free-text input when no conf has been seen yet so an
         // admin can still type a site before any spoke reports in.
         const siteCtl = sites.length
             ? `<select data-sqd="site" class="${ctlCls}">${_simQuotaDefaultSelect(r.site, sites, '— all sites —')}</select>`
             : `<input data-sqd="site" value="${r.site.replace(/"/g, '&quot;')}" placeholder="all sites" class="${ctlCls}">`;
+        const typeCell = isPresence
+            ? `<label class="${lblCls}">Presence
+                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
+              </label>`
+            : `<label class="${lblCls}">Type
+                <select data-sqd="alert_type" class="${ctlCls}">
+                  <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
+                  <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
+                </select>
+              </label>`;
+        const idCell = isPresence
+            ? `<label class="${lblCls}">Alert / Insight ID
+                <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— none (presence) —</div>
+              </label>`
+            : `<label class="${lblCls}">Alert / Insight ID
+                <input data-sqd="alert_id" value="${r.alert_id.replace(/"/g, '&quot;')}" placeholder="CLIENT_DHCP_FAILURE" class="${ctlCls}">
+              </label>`;
         return `<div class="grid grid-cols-1 md:grid-cols-7 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-sqd-row="${i}">
-          <label class="${lblCls}">Type
-            <select data-sqd="alert_type" class="${ctlCls}">
-              <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
-              <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
-            </select>
-          </label>
-          <label class="${lblCls}">Alert / Insight ID
-            <input data-sqd="alert_id" value="${r.alert_id.replace(/"/g, '&quot;')}" placeholder="CLIENT_DHCP_FAILURE" class="${ctlCls}">
-          </label>
+          ${typeCell}
+          ${idCell}
           <label class="${lblCls}">Simulation
-            <select data-sqd="sim_id" class="${ctlCls}">${simOpts}</select>
+            <select data-sqd="sim_id" onchange="_simQuotaDefaultOnSimChange()" class="${ctlCls}">${simOpts}</select>
           </label>
           <label class="${lblCls}">Clients
             <input data-sqd="count" type="number" min="1" value="${r.count}" class="${ctlCls}">
@@ -5102,7 +5124,7 @@ function _renderSimQuotaDefaultsEditor() {
             ${siteCtl}
           </label>
           <label class="${lblCls} flex flex-col gap-1">
-            <span class="flex items-center gap-1"><input data-sqd="multi_capable" type="checkbox" ${r.multi_capable ? 'checked' : ''}> Multi-capable</span>
+            <span class="flex items-center gap-1"><input data-sqd="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-sqd="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-sqd="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
           </label>
@@ -5123,9 +5145,11 @@ function _simQuotaDefaultsSyncFromDom() {
     const rows = [];
     document.querySelectorAll('[data-sqd-row]').forEach(el => {
         const g = (k) => el.querySelector(`[data-sqd="${k}"]`);
+        // A presence row (Clients Associated) has no Type / Alert ID controls
+        // — nullish-guard so the sync doesn't throw and preserves defaults.
         rows.push({
-            alert_type: g('alert_type').value,
-            alert_id: g('alert_id').value.trim(),
+            alert_type: (g('alert_type') || {}).value || 'alert',
+            alert_id: ((g('alert_id') || {}).value || '').trim(),
             sim_id: g('sim_id').value,
             count: parseInt(g('count').value || '1', 10) || 1,
             site: g('site').value.trim(),
@@ -5136,6 +5160,15 @@ function _simQuotaDefaultsSyncFromDom() {
     });
     _simQuotaDefaults = rows;
     return rows;
+}
+
+// Toggling a default row's Simulation between a real sim and "(Clients
+// Associated)" (presence) flips the row's Type / Alert ID visibility and
+// forces multi-capable for presence. Re-renders the editor after syncing
+// current edits from the DOM so nothing is lost.
+function _simQuotaDefaultOnSimChange() {
+    _simQuotaDefaultsSyncFromDom();
+    _renderSimQuotaDefaultsEditor();
 }
 
 async function loadSimQuotaDefaults() {
