@@ -29,8 +29,10 @@ from typing import Any, Dict, List, Optional
 
 # Keys never exposed in the public (WebUI/API) view of a record.
 _PRIVATE_KEYS = {"_upload_token"}
-# Metadata fields an operator may edit after upload.
-_EDITABLE = {"version", "os", "purpose", "tenant", "name"}
+# Metadata fields an operator may edit after upload. ``tenant`` is NOT here — it
+# is DERIVED from the source PXMX host's tenant binding at backup time and is
+# authoritative (the repo is tenant-driven, per host), so it can't be re-typed.
+_EDITABLE = {"version", "os", "purpose", "name"}
 
 
 def _now() -> str:
@@ -95,8 +97,8 @@ class TemplateRepo:
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def create_pending(self, *, name: str, source_vmid: Any, source_node: str,
-                        source_agent: str, source_spoke: str,
-                        created_by: str) -> Dict[str, Any]:
+                        source_agent: str, source_spoke: str, created_by: str,
+                        tenant: str = "", tenant_id: str = "") -> Dict[str, Any]:
         """Register a pending template + one-time upload token. Returns the FULL
         record (including the token) so the caller can hand it to the agent."""
         with self._lock:
@@ -121,7 +123,10 @@ class TemplateRepo:
                 "version": "",
                 "os": "",
                 "purpose": "",
-                "tenant": "",
+                # tenant — DERIVED from the source PXMX host (authoritative, not
+                # editable). tenant = display name, tenant_id = stable id.
+                "tenant": str(tenant or ""),
+                "tenant_id": str(tenant_id or ""),
                 # private
                 "_upload_token": uuid.uuid4().hex,
             }

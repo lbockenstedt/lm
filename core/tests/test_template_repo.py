@@ -35,11 +35,14 @@ def test_token_verify_and_consume_on_finalize(tmp_path):
 def test_update_meta_only_allows_editable_fields(tmp_path):
     r = TemplateRepo(str(tmp_path))
     tid = r.create_pending(name="t", source_vmid=1, source_node="n", source_agent="a",
-                           source_spoke="s", created_by="admin")["id"]
+                           source_spoke="s", created_by="admin",
+                           tenant="Acme Corp", tenant_id="acme")["id"]
     r.update_meta(tid, {"version": "v3", "os": "Debian 12", "purpose": "golden",
-                        "tenant": "acme", "status": "HACK", "sha256": "HACK", "id": "HACK"})
+                        "tenant": "HACK", "status": "HACK", "sha256": "HACK", "id": "HACK"})
     g = r.get(tid)
-    assert g["version"] == "v3" and g["os"] == "Debian 12" and g["purpose"] == "golden" and g["tenant"] == "acme"
+    assert g["version"] == "v3" and g["os"] == "Debian 12" and g["purpose"] == "golden"
+    # tenant is DERIVED from the host — authoritative, not editable
+    assert g["tenant"] == "Acme Corp" and g["tenant_id"] == "acme"
     assert g["status"] == "pending" and g["sha256"] == "" and g["id"] == tid  # protected fields untouched
 
 

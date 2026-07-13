@@ -10496,9 +10496,23 @@ async function renderTemplateRepo() {
     }
     window._templateRepo = templates;
     const anyBusy = templates.some(t => !['complete', 'failed'].includes(String(t.status || '').toLowerCase()));
-    const rows = templates.length
-        ? templates.map(_templateRepoRow).join('')
-        : `<tr><td colspan="9" class="px-4 py-6 text-center text-sm text-slate-400 italic">No templates yet — use “⬆ Back up to Hub” on a Proxmox template VM (Hypervisors → open a template).</td></tr>`;
+    // The repo is tenant-driven, per PXMX host: group by the tenant derived from
+    // the source host, and order within a tenant by host (source_node) then name
+    // so a host's templates cluster together.
+    let rows;
+    if (!templates.length) {
+        rows = `<tr><td colspan="8" class="px-4 py-6 text-center text-sm text-slate-400 italic">No templates yet — use “⬆ Back up to Hub” on a Proxmox template VM (Hypervisors → open a template).</td></tr>`;
+    } else {
+        const groups = {};
+        templates.forEach(t => { const k = t.tenant || '— Unassigned —'; (groups[k] = groups[k] || []).push(t); });
+        rows = Object.keys(groups).sort((a, b) => a.localeCompare(b)).map(tenant => {
+            const items = groups[tenant].sort((a, b) =>
+                String(a.source_node || '').localeCompare(String(b.source_node || '')) ||
+                String(a.name || '').localeCompare(String(b.name || '')));
+            const hdr = `<tr class="bg-slate-100"><td colspan="8" class="px-4 py-1.5 text-xs font-bold text-slate-500 uppercase tracking-wider">Tenant: ${escapeHtml(tenant)} <span class="text-slate-400 font-normal normal-case">(${items.length})</span></td></tr>`;
+            return hdr + items.map(_templateRepoRow).join('');
+        }).join('');
+    }
     host.innerHTML = `
       <div class="flex items-center justify-between">
         <div>
@@ -10514,8 +10528,7 @@ async function renderTemplateRepo() {
             <th class="px-4 py-2 text-left font-medium">OS</th>
             <th class="px-4 py-2 text-left font-medium">Version</th>
             <th class="px-4 py-2 text-left font-medium">Purpose</th>
-            <th class="px-4 py-2 text-left font-medium">Tenant</th>
-            <th class="px-4 py-2 text-left font-medium">Source</th>
+            <th class="px-4 py-2 text-left font-medium">Source (host · vmid)</th>
             <th class="px-4 py-2 text-right font-medium">Size</th>
             <th class="px-4 py-2 text-left font-medium">Status</th>
             <th class="px-4 py-2 text-right font-medium">Actions</th>
@@ -10537,7 +10550,6 @@ function _templateRepoRow(t) {
       <td class="px-4 py-2 text-slate-600">${escapeHtml(t.os || '—')}</td>
       <td class="px-4 py-2 text-slate-600">${escapeHtml(t.version || '—')}</td>
       <td class="px-4 py-2 text-slate-600">${escapeHtml(t.purpose || '—')}</td>
-      <td class="px-4 py-2 text-slate-600">${escapeHtml(t.tenant || '—')}</td>
       <td class="px-4 py-2 text-xs text-slate-500">${src}</td>
       <td class="px-4 py-2 text-right text-slate-600">${t.size ? _tplBytes(t.size) : '—'}</td>
       <td class="px-4 py-2">${_tplStatusBadge(t)}</td>
@@ -10562,11 +10574,11 @@ function templateRepoEdit(id) {
         </div>
         <div class="p-6 space-y-3">
           <div class="text-[11px] text-slate-400 font-mono">${esc(t.source_node)}/vmid ${esc(t.source_vmid)} · sha256 ${esc((t.sha256 || '').slice(0, 12))} · ${t.size ? _tplBytes(t.size) : '—'}</div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Tenant</label><div class="w-full bg-slate-50 border border-slate-200 rounded-md px-3 py-2 text-sm text-slate-500">${esc(t.tenant) || '— Unassigned —'} <span class="text-[11px] text-slate-400">(derived from the PXMX host — not editable)</span></div></div>
           <div><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input id="tpl-edit-name" value="${esc(t.name)}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
           <div><label class="text-xs text-slate-500 uppercase font-bold">OS</label><input id="tpl-edit-os" value="${esc(t.os)}" placeholder="Debian 12, Windows 11…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
           <div><label class="text-xs text-slate-500 uppercase font-bold">Version</label><input id="tpl-edit-version" value="${esc(t.version)}" placeholder="v3, 2026-07 golden…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
           <div><label class="text-xs text-slate-500 uppercase font-bold">Purpose</label><textarea id="tpl-edit-purpose" rows="2" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm">${esc(t.purpose)}</textarea></div>
-          <div><label class="text-xs text-slate-500 uppercase font-bold">Tenant / owner</label><input id="tpl-edit-tenant" value="${esc(t.tenant)}" placeholder="(blank = shared)" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#template-edit-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
             <button onclick="templateRepoSaveMeta('${escJsAttr(id)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
@@ -10580,7 +10592,7 @@ async function templateRepoSaveMeta(id) {
     try {
         const r = await setupFetch(`/setup/templates/${encodeURIComponent(id)}`, {
             method: 'PATCH',
-            body: JSON.stringify({ name: g('tpl-edit-name'), os: g('tpl-edit-os'), version: g('tpl-edit-version'), purpose: g('tpl-edit-purpose'), tenant: g('tpl-edit-tenant') })
+            body: JSON.stringify({ name: g('tpl-edit-name'), os: g('tpl-edit-os'), version: g('tpl-edit-version'), purpose: g('tpl-edit-purpose') })
         });
         const d = await r.json().catch(() => ({}));
         if (r.ok && d.status === 'SUCCESS') { showToast('Template metadata saved', 'success'); document.getElementById('template-edit-modal')?.remove(); renderTemplateRepo(); }

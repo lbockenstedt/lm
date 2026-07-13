@@ -101,10 +101,30 @@ def register(app, hub, ctx):
         if not owning_spoke:
             raise HTTPException(status_code=503, detail="no connected spoke owns this agent")
 
+        # Tenant is DRIVEN by the PXMX host, per host: prefer the agent's own
+        # tenant binding (Agent Config → Client Simulation tenant_id), else the
+        # owning spoke's tenant. Resolve a display name so the repo stays readable
+        # even if the tenant is later renamed/removed.
+        agent_cfg = (hub.state.system_state.get("agent_config", {}) or {}).get(agent_id, {})
+        tenant_id = str((agent_cfg.get("client_simulation") or {}).get("tenant_id") or "").strip()
+        if not tenant_id:
+            try:
+                tenant_id = str(hub.state.get_spoke_tenant(owning_spoke) or "").strip()
+            except Exception:  # noqa: BLE001
+                tenant_id = ""
+        tenant_name = tenant_id
+        if tenant_id:
+            try:
+                trec = hub.state.get_tenant(tenant_id) if hasattr(hub.state, "get_tenant") else None
+                if trec:
+                    tenant_name = trec.get("name") or tenant_id
+            except Exception:  # noqa: BLE001
+                pass
+
         rec = _repo().create_pending(
             name=name, source_vmid=vmid, source_node=node,
             source_agent=agent_id, source_spoke=owning_spoke,
-            created_by=_username(sess))
+            created_by=_username(sess), tenant=tenant_name, tenant_id=tenant_id)
         tid, token = rec["id"], rec["_upload_token"]
 
         # The agent streams straight to the hub's HTTPS endpoint. Prefer an
