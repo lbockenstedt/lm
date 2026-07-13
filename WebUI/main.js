@@ -3613,7 +3613,7 @@ function _renderSettingsSection(subMenu) {
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-1">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Backpressure Tuning ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                        <div class="flex items-center gap-2">
+                        <div class="flex justify-end items-center gap-2">
                             <button onclick="resetBackpressureConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore recommended defaults (not yet saved)">Reset Defaults</button>
                             <button onclick="saveBackpressureConfig()" id="bp-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
                         </div>
@@ -3637,7 +3637,7 @@ function _renderSettingsSection(subMenu) {
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-1">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">Update / Maintenance Window ${helpIcon('lm-hub', null, 'Hub help')}<span id="ug-watchdog-pill" class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-500 normal-case">watchdog …</span></h3>
-                        <div class="flex items-center gap-2">
+                        <div class="flex justify-end items-center gap-2">
                             <button onclick="resetUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore defaults (02:00 window)">Reset Defaults</button>
                             <button onclick="saveUpdateGateConfig()" id="ug-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
                         </div>
@@ -4120,7 +4120,7 @@ function _renderSetupTenantTile(content) {
                             <p class="text-[10px] text-slate-400">Scopes LDAP user/group queries to this OU.</p>
                         </div>
                     </div>
-                    <div class="flex gap-2"><button onclick="saveTenantConfig()" class="${btnCls}">Save</button><button onclick="closeTenantEditor()" class="${btnSecCls}">Cancel</button></div>
+                    <div class="flex justify-end gap-2"><button onclick="saveTenantConfig()" class="${btnCls}">Save</button><button onclick="closeTenantEditor()" class="${btnSecCls}">Cancel</button></div>
                 </div>
             </div>`;
     loadTenantConfig();
@@ -4478,7 +4478,7 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Interval (minutes)</label>
                         <input type="number" id="repo-sync-interval" min="1" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveRepoSyncConfig()" class="${btnCls} ml-auto">Save</button>
+                    <div class="mt-4 flex justify-end"><button onclick="saveRepoSyncConfig()" class="${btnCls} ml-auto">Save</button></div>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync</div>
@@ -4982,7 +4982,7 @@ function _renderSetupSimulationsTile(content) {
             <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sim Quota Defaults ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide default templates a tenant inherits unless it overrides per alert/insight + site in Config → Sim Quotas. Site blank = "all sites". The engine (Chunk 2) merges these with each tenant's overrides. Sims come from the full primitive catalog; a tenant's simulation.conf may offer a subset.</p>
-                <div class="flex flex-wrap gap-2 mb-3">
+                <div class="flex justify-end flex-wrap gap-2 mb-3">
                     <button onclick="addSimQuotaDefault()" class="${btnCls} text-xs px-3 py-1">+ Add Default</button>
                     <button onclick="saveSimQuotaDefaults()" class="${btnCls} text-xs px-3 py-1">Save Defaults</button>
                 </div>
@@ -5337,7 +5337,7 @@ function _renderSetupGeneralTile(content) {
             <div class="flex items-center gap-4 pt-2">
                 <span id="last-update-ts" class="text-xs text-slate-400"></span>
             </div>
-            <div class="flex gap-2 pt-2">
+            <div class="flex justify-end gap-2 pt-2">
                 <button onclick="saveUpdateSources()" class="${btnCls}">Save Sources</button>
             </div>
             <div class="border-t border-slate-200 mt-4 pt-4">
@@ -5348,7 +5348,7 @@ function _renderSetupGeneralTile(content) {
                         <label class="${labelCls}">Check every (minutes)</label>
                         <input type="number" id="repo-sync-interval" min="1" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button>
+                    <div class="mt-4 flex justify-end"><button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button></div>
                 </div>
             </div>
         </div>
@@ -5386,7 +5386,7 @@ function _renderSetupGeneralTile(content) {
                 <input id="appearance-show-logo" type="checkbox" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
                 <label for="appearance-show-logo" class="text-sm text-slate-600">Show header logo</label>
             </div>
-            <div class="flex items-center gap-3">
+            <div class="flex justify-end items-center gap-3">
                 <button onclick="saveAppearance()" class="${btnCls}">Save</button>
                 <span id="appearance-status" class="text-xs text-slate-400"></span>
             </div>
@@ -10368,7 +10368,7 @@ async function renderPxmxSettings(container) {
         <div class="hpe-card rounded-lg p-5 shadow-sm">
           <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded"/> Confirm before destructive VM actions (stop / restart / backup)</label>
         </div>
-        <div class="flex items-center gap-3">
+        <div class="flex justify-end items-center gap-3">
           <button onclick="savePxmxSettings()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold">Save</button>
           <span id="pxmx-settings-status" class="text-xs text-slate-400"></span>
         </div>
@@ -11950,7 +11950,7 @@ async function showClaimDeviceModal(mac) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="cl-status" class="${selCls}"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
             <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="cl-desc" class="${inputCls}" placeholder="optional"></div>
         </div>
-        <div class="flex gap-2 pt-2">
+        <div class="flex justify-end gap-2 pt-2">
             <button id="cl-submit" onclick="submitClaimDevice('${encodeURIComponent(mac)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Claim Device</button>
             <button onclick="document.getElementById('nb-claim-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>
@@ -12028,7 +12028,7 @@ function showNetboxAddDeviceModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Role Slug</label><input id="nb-d-role" class="${inputCls}" placeholder="access-switch" ${editing ? 'readonly' : ''}></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-d-status" class="${inputCls}"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
         </div>
-        <div class="flex gap-2 pt-2">
+        <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAddDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Device'}</button>
             <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>
@@ -12109,7 +12109,7 @@ function showNetboxRackModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Height (U)</label><input id="nb-r-uheight" type="number" min="1" value="${val(editItem?.u_height) || 42}" class="${inputCls}" placeholder="42"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Facility ID (optional)</label><input id="nb-r-facility" value="${val(editItem?.facility_id)}" class="${inputCls}" placeholder="A1"></div>
         </div>
-        <div class="flex gap-2 pt-2">
+        <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxRack()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Rack'}</button>
             <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>
@@ -12182,7 +12182,7 @@ async function showNetboxAllocatePrefixModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site Slug (optional)</label><input id="nb-p-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a"></div>
             ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-p-status" class="${selectCls}">${statusOpts}</select></div>` : ''}
         </div>
-        <div class="flex gap-2 pt-2">
+        <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>
@@ -12321,7 +12321,7 @@ async function showFindSubnetModal() {
             <button onclick="searchAvailableSubnets()" class="bg-slate-700 hover:bg-slate-800 text-white px-4 py-2 rounded-md text-sm font-bold w-full">Search</button>
             <div id="nb-f-results" class="space-y-1"></div>
         </div>
-        <div class="flex gap-2 pt-2">
+        <div class="flex justify-end gap-2 pt-2">
             <button id="nb-f-assign-btn" onclick="submitFindSubnetAssign()" disabled class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">Assign</button>
             <button onclick="document.getElementById('nb-find-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>
@@ -12499,7 +12499,7 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label><input id="nb-ip-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Gateway VM"></div>
             ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
         </div>
-        <div class="flex gap-2 pt-2">
+        <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>
@@ -14124,7 +14124,7 @@ function showDnsRecordModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value</label><input id="dns-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="10.0.1.5"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="dns-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
         </div>
-        <div class="flex gap-2 pt-2">
+        <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveDnsRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
             <button onclick="document.getElementById('dns-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>
@@ -14324,7 +14324,7 @@ function showDhcpReservationModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">MAC Address</label><input id="dhcp-res-mac" value="${val(editItem?.mac)}" class="${inputCls}" placeholder="aa:bb:cc:dd:ee:ff"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01"></div>
         </div>
-        <div class="flex gap-2 pt-2">
+        <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Reservation'}</button>
             <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>
@@ -15300,7 +15300,7 @@ async function editUser(userId) {
                 </div>
                 <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-between items-center gap-3">
                     <button onclick="promptSetPassword('${userId}')" class="text-xs text-slate-500 hover:text-blue-600 transition-colors">Set Password</button>
-                    <div class="flex gap-3">
+                    <div class="flex justify-end gap-3">
                         <button onclick="closeEditUserModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
                         <button onclick="saveUserEdits('${userId}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Changes</button>
                     </div>

@@ -2226,7 +2226,7 @@ async function csRenderConfig() {
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">API Config Push ${helpIcon('cs', null, 'Simulations help')}</h3>
       <p class="text-xs text-slate-400 mb-2">Paste a JSON config object to push to all spokes (unwrapped at the spoke's <code>_apply_hub_config</code>).</p>
       <textarea id="cs-configpush" rows="10" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-xs font-mono outline-none focus:ring-2 focus:ring-green-500" placeholder='{ "key": "value" }'></textarea>
-      <button onclick="csSaveConfigPush()" class="mt-3 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button>
+      <div class="mt-3 flex justify-end"><button onclick="csSaveConfigPush()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Push Config</button></div>
     </div>`;
 
     // per-spoke config state (desired vs applied) — best-effort read from cache.
@@ -2655,7 +2655,7 @@ function csRenderSimQuotaEditor() {
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Sim Quotas ${helpIcon('cs', null, 'Simulations help')}</h3>
-          <div class="flex gap-2">
+          <div class="flex justify-end gap-2">
             <button onclick="csSimQuotaAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Quota</button>
             <button onclick="csSimQuotaSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Quotas</button>
           </div>
@@ -3154,7 +3154,7 @@ function csRenderUserOverridesCard(uo, uoErr) {
         <span class="text-[10px] text-slate-400">Last fetched: ${csEscape(csUserOverridesFetched)}</span>
       </div>
       <p class="text-xs text-slate-400 mb-3">Per-user simulation overrides — pin a hostname to specific sim settings (a <code>[username]</code> section overrides the simulation profile for that user).</p>
-      <div class="flex items-center gap-3 mb-3">
+      <div class="flex justify-end items-center gap-3 mb-3">
         <button onclick="csUOAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">＋ Add User</button>
         <button onclick="csUOSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save</button>
       </div>
@@ -3673,7 +3673,7 @@ async function csNotificationsCard() {
         ${f('cs-notif-teams', 'Teams Webhook URL (new)', '', 'password')}
         ${f('cs-notif-emails', 'To Emails (comma-separated)', Array.isArray(n.to_emails) ? n.to_emails.join(', ') : (n.to_emails || ''))}
       </div>
-      <button onclick="csSaveNotifications()" class="mt-4 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button>
+      <div class="mt-4 flex justify-end"><button onclick="csSaveNotifications()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button></div>
     </div>`;
 }
 
@@ -4113,7 +4113,7 @@ async function csRenderSetupSecurity() {
           ${f('cs-sec-timeout', 'Session Timeout (minutes)', cfg.session_timeout_minutes)}
           ${f('cs-sec-provider', 'Auth Provider', cfg.auth_provider)}
         </div>
-        <button onclick="csSaveSecurity()" class="mt-4 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save</button>
+        <div class="mt-4 flex justify-end"><button onclick="csSaveSecurity()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save</button></div>
       </div></div>`);
 }
 

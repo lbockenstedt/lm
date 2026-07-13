@@ -47,6 +47,10 @@ normal page titles, `tracking-widest` on tab strips (overflows many-tab views).
   - small (inline row action): `px-2 py-1 rounded text-xs font-bold`
 - Destructive: `bg-red-100 hover:bg-red-200 text-red-700` (light) or `bg-red-600 text-white` (solid CTA).
 - Neutral: `bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200`.
+- **Save / action buttons are right-pinned**: put them in a `flex justify-end`
+  row (a modal/form footer, settings-card action row, Save+Cancel). Exceptions
+  that stay inline (NOT right-pinned): an inline field+Save row (`<input> <Save>`),
+  a `w-full` full-width action, and a Save with adjacent helper-text explaining it.
 
 ## Normalized (2026-07 consistency pass)
 
