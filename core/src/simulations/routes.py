@@ -950,6 +950,35 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             raise HTTPException(status_code=code, detail=msg)
         return data if isinstance(data, dict) else {"status": "SUCCESS", "result": data}
 
+    async def _cs_forward_all(tenant_id: str, cmd_type: str, payload: dict,
+                              timeout: float = 15.0) -> list:
+        """Forward a CS_* command to EVERY Client-Sim spoke bound to the tenant,
+        concurrently. Returns ``[(spoke_id, data|None)]`` — a failed/absent spoke
+        yields None so callers merge what they got (tenant-wide aggregation for a
+        multi-spoke tenant, e.g. cs-svr-02/03/04). Empty list = no spokes."""
+        sids: list = []
+        get_spokes = getattr(hub, "get_client_sim_spokes", None)
+        if callable(get_spokes):
+            try:
+                sids = list(get_spokes(tenant_id) or [])
+            except Exception:  # noqa: BLE001
+                sids = []
+        if not sids:
+            sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
+            sids = [sid] if sid else []
+
+        async def _one(sid: str):
+            try:
+                result = await hub.request_response(sid, cmd_type, payload, timeout=timeout)
+                data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+                return (sid, data if isinstance(data, dict) else None)
+            except Exception as exc:  # noqa: BLE001
+                logger.info("_cs_forward_all(%s): %s failed on %s: %s", tenant_id, cmd_type, sid, exc)
+                return (sid, None)
+        if not sids:
+            return []
+        return list(await asyncio.gather(*[_one(s) for s in sids]))
+
     def _tenant_cache(tenant_id: str) -> dict:
         """The merged CS_TELEMETRY cache for the tenant's spokes (read-only)."""
         out = {}
@@ -2890,13 +2919,27 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # agents + the map); 503 when no spoke is connected so the UI can say so.
     @app.get("/sim/api/{tenant}/pxmx-site-map")
     async def get_pxmx_site_map(tenant: str, tenant_id: str = Depends(get_tenant_id)):
-        try:
-            return await _cs_forward(tenant_id, "CS_GET_PXMX_SITE_MAP", {}, timeout=15.0)
-        except HTTPException as he:
-            if he.status_code == 503:
-                return {"status": "SUCCESS", "pxmx_site_map": {}, "agents": [],
-                        "warning": "Client-Sim spoke not connected."}
-            raise
+        # Tenant-wide: merge the pxmx agents + site maps from ALL of the tenant's
+        # Client-Sim spokes (cs-svr-02/03/04) so every pxmx server shows and can
+        # be assigned, not just bound[0]'s.
+        results = await _cs_forward_all(tenant_id, "CS_GET_PXMX_SITE_MAP", {}, timeout=15.0)
+        merged_map: dict = {}
+        agents: list = []
+        seen_agents: set = set()
+        for _sid, data in results:
+            if not isinstance(data, dict):
+                continue
+            for h, s in (data.get("pxmx_site_map") or {}).items():
+                merged_map[str(h)] = s
+            for a in (data.get("agents") or []):
+                key = a.get("agent_id") or a.get("hostname")
+                if key and key not in seen_agents:
+                    seen_agents.add(key)
+                    agents.append(a)
+        if not results:
+            return {"status": "SUCCESS", "pxmx_site_map": {}, "agents": [],
+                    "warning": "Client-Sim spoke not connected."}
+        return {"status": "SUCCESS", "pxmx_site_map": merged_map, "agents": agents}
 
     @app.post("/sim/api/{tenant}/pxmx-site-map")
     async def set_pxmx_site_map(tenant: str, request: Request,
@@ -2908,10 +2951,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         payload = body if isinstance(body, dict) else {}
         if "pxmx_site_map" not in payload and isinstance(body, dict):
             payload = {"pxmx_site_map": body}
-        res = await _cs_forward(tenant_id, "CS_SET_PXMX_SITE_MAP", payload, timeout=20.0)
-        return {"saved": res.get("status") == "SUCCESS",
-                "pxmx_site_map": res.get("pxmx_site_map", {}),
-                "errors": res.get("errors", [])}
+        # Fan the FULL map out to every cs spoke — each keeps only its own agents'
+        # entries but a shared map is harmless (a spoke ignores hosts it doesn't
+        # host). Returns the merged saved map.
+        results = await _cs_forward_all(tenant_id, "CS_SET_PXMX_SITE_MAP", payload, timeout=20.0)
+        merged: dict = {}
+        errors: list = []
+        saved_any = False
+        for _sid, data in results:
+            if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                saved_any = True
+                merged.update(data.get("pxmx_site_map") or {})
+                errors.extend(data.get("errors") or [])
+        return {"saved": saved_any, "pxmx_site_map": merged, "errors": errors}
 
     @app.get("/sim/api/{tenant}/cs-agents")
     async def get_cs_agents(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -2929,19 +2981,46 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Live SimQuotaEngine ledger for Config → Quota State: effective quotas +
         which clients are currently assigned to each. Forwards to the cs spoke;
         empty ledger when the spoke is down."""
+        # Tenant-wide: merge the ledgers from ALL of the tenant's Client-Sim
+        # spokes so the counts are tenant totals (cs-svr-02/03/04 together), not
+        # bound[0]'s slice. The effective target comes from the hub (the tenant
+        # config); each spoke fills its split share and we sum the assignments.
+        results = await _cs_forward_all(tenant_id, "CS_GET_SIM_QUOTA_STATE", {}, timeout=15.0)
+        merged_ledger: dict = {}
+        monitored: list = []
+        for _sid, data in results:
+            if not isinstance(data, dict):
+                continue
+            for k, e in (data.get("ledger") or {}).items():
+                m = merged_ledger.setdefault(
+                    k, {"sim_id": e.get("sim_id"), "site": e.get("site"), "clients": []})
+                m["clients"].extend(e.get("clients") or [])
+            if not monitored:
+                monitored = data.get("monitored_checks") or []
+        for m in merged_ledger.values():  # dedupe (a hostname is unique per tenant)
+            m["clients"] = list(dict.fromkeys(m["clients"]))
+        if not results:
+            return {"status": "SUCCESS", "effective": [], "ledger": {},
+                    "monitored_checks": [], "warning": "Client-Sim spoke not connected."}
+        # Tenant-wide placement warnings: compare the merged fill to the tenant's
+        # configured hold-N per cell (not each spoke's split share).
+        placement_warnings: list = []
         try:
-            result = await _cs_forward(tenant_id, "CS_GET_SIM_QUOTA_STATE", {}, timeout=15.0)
-        except HTTPException as he:
-            if he.status_code == 503:
-                result = {"status": "SUCCESS", "effective": [], "ledger": {},
-                          "monitored_checks": [], "warning": "Client-Sim spoke not connected."}
-            else:
-                raise
-        # Attach the adaptive controller state so Quota State can show the
-        # learning indicator + learned floor per adaptive quota (design §9).
+            csc = await store.get_central_sites_config(tenant_id) or {}
+            for site, pcfg in (csc.get("ssid_placement") or {}).items():
+                for cell, want in ((pcfg or {}).get("targets") or {}).items():
+                    have = len((merged_ledger.get(f"placement:{site}:{cell}") or {}).get("clients") or [])
+                    if have < int(want or 0):
+                        placement_warnings.append(
+                            {"site": site, "cell": cell, "have": have, "want": int(want or 0)})
+        except Exception:  # noqa: BLE001
+            pass
+        result = {"status": "SUCCESS",
+                  "effective": await _effective_sim_quotas(tenant_id),
+                  "ledger": merged_ledger, "monitored_checks": monitored,
+                  "placement_warnings": placement_warnings}
         try:
-            if isinstance(result, dict):
-                result["adaptive_state"] = await store.get_adaptive_state(tenant_id)
+            result["adaptive_state"] = await store.get_adaptive_state(tenant_id)
         except Exception:  # noqa: BLE001
             pass
         return result
