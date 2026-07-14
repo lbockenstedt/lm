@@ -225,15 +225,28 @@ def register(app, hub, ctx):
         cfg = get_oidc_config(hub)
         if not (cfg.tenant_id and cfg.client_id):
             return {"groups": [], "warning": "Set the tenant + client ID (and generate the certificate) first."}
+        def _friendly(msg: str) -> str:
+            # Translate the common Graph failures into an actionable fix.
+            low = msg.lower()
+            if "authorization_requestdenied" in low or "insufficient privileges" in low \
+                    or " 403" in low:
+                return ("The app registration is missing the Microsoft Graph "
+                        "**Group.Read.All (Application)** permission with admin "
+                        "consent — add it under API permissions → Grant admin "
+                        "consent, then retry. (raw: " + msg[:160] + ")")
+            if " 401" in low or "invalid_client" in low:
+                return ("Entra rejected the app token — check the certificate is "
+                        "uploaded and its thumbprint matches. (raw: " + msg[:160] + ")")
+            return msg
         try:
             groups = await fetch_directory_groups(cfg)
             groups.sort(key=lambda g: (g.get("displayName") or "").lower())
             return {"groups": groups}
         except OidcError as e:
-            return {"groups": [], "warning": str(e)}
+            return {"groups": [], "warning": _friendly(str(e))}
         except Exception as e:  # noqa: BLE001
             logger.exception("list_oidc_groups failed")
-            return {"groups": [], "warning": str(e)}
+            return {"groups": [], "warning": _friendly(str(e))}
 
     @app.post("/setup/oidc-config")
     async def update_oidc_config(request: Request):
