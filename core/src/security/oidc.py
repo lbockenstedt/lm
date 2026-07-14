@@ -479,8 +479,11 @@ def verify_id_token(cfg: OidcConfig, id_token: str, nonce: str,
         if not isinstance(amr, list):
             amr = [amr]
         if "mfa" not in amr:
-            raise OidcError("MFA required — Entra did not report multi-factor "
-                            "authentication for this login")
+            raise OidcError(
+                "MFA required — Entra did not report multi-factor authentication "
+                "for this login (amr had no 'mfa'). Either require MFA in Entra "
+                "(Conditional Access / security defaults) so it actually performs "
+                "it, or turn off 'Require MFA' in Setup → SSO.")
     return claims
 
 
