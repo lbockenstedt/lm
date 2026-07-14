@@ -5191,7 +5191,7 @@ async function csRenderVmServer() {
         const qtPill = qtList.length ? `<span class="ml-1 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[9px] font-bold uppercase tracking-wider" title="${csEscape(qtList.map(q => q.bus_path + ': ' + (q.reason || '')).join('; '))}">🚫 ${qtList.length} QT</span>` : '';
         const selCls = csVmHostId(h) === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
         return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(csVmHostId(h))}','VMs')">
-          <td class="px-4 py-2 text-center" onclick="event.stopPropagation()"><input type="checkbox" class="cs-host-sel" data-host="${csEscape(csVmHostId(h))}" data-spoke="${csEscape(h.spoke_id || '')}" data-name="${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id || '')}"></td>
+          <td class="px-4 py-2 text-center" onclick="event.stopPropagation()"><input type="checkbox" class="cs-host-sel" data-host="${csEscape((px.node && px.node.hostname) || csVmHostId(h))}" data-spoke="${csEscape(h.spoke_id || '')}" data-name="${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id || '')}"></td>
           <td class="px-4 py-2"><span class="font-medium text-slate-700">${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id)}</span></td>
           <td class="px-4 py-2 text-center">${csOnlineBadge(h.spoke_online)}</td>
           <td class="px-4 py-2 text-center">${vmN}</td>
