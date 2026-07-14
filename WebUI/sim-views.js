@@ -5213,14 +5213,15 @@ async function csRenderVmServer() {
       <tbody>${rows}</tbody>
     </table></div>`;
 
-    // Fleet template refresh — pick one/some/all hosts and refresh each host's
-    // template from its stored backup. Tenant-admin (own hosts) + Global Admin.
+    // Fleet template refresh — SEED-AND-DISTRIBUTE: push a hub Template Repo
+    // backup (the seed) onto the selected target hosts. Tenant-admin (own
+    // hosts) + Global Admin.
     const _canRefresh = (typeof isAdmin === 'function' && isAdmin())
         || (typeof isTenantAdmin === 'function' && isTenantAdmin());
     const bulkBar = _canRefresh
         ? `<div class="flex items-center gap-2 flex-wrap">
-             <button onclick="csFleetRefreshTemplates()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Refresh the template on the selected host(s): pause auto-provisioning, delete the sim VMs + template, restore the stored backup, then resume auto-provisioning.">↻ Refresh Template(s)</button>
-             <span class="text-[11px] text-slate-400">Select host(s) above, then refresh from their stored template backup. This wipes the host's sim VMs.</span>
+             <button onclick="csFleetRefreshTemplates()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Distribute a seed template backup from the hub onto the selected host(s): pause auto-provisioning, delete each host's sim VMs + template, qmrestore the seed backup, then resume auto-provisioning.">↻ Refresh Template(s)</button>
+             <span class="text-[11px] text-slate-400">Select target host(s), then push a seed template backup from the hub onto them. This wipes each target's sim VMs.</span>
            </div>`
         : '';
 
@@ -5314,34 +5315,113 @@ window.csFleetSelectAll = function (cb) {
     document.querySelectorAll('.cs-host-sel').forEach(x => { x.checked = cb.checked; });
 };
 
-// Fleet template refresh — refresh the selected hosts' templates from their
-// stored backups. Destructive: each host's sim VMs + template are wiped and the
-// backup restored (the agent pauses/resumes auto-prov around it).
+// Fleet template refresh — SEED-AND-DISTRIBUTE. One PXMX host is the seed (its
+// template is prepped + backed up to the hub Template Repo); the operator selects
+// the OTHER target hosts here and a seed backup is pushed onto each: pause
+// auto-prov → wipe the target's sim VMs + template → qmrestore the seed backup at
+// the target's VMID → re-mark template → resume auto-prov. Destructive.
 window.csFleetRefreshTemplates = async function () {
     const boxes = Array.from(document.querySelectorAll('.cs-host-sel:checked'));
-    // Key on the per-HOST id (agent hostname/node), NOT the shared spoke_id —
-    // several pxmx hosts share one cs spoke, so spoke_id would refresh the wrong
-    // host's template (the newest on that spoke).
+    // Key on the per-HOST id (agent OS hostname), NOT the shared spoke_id —
+    // several pxmx hosts share one cs spoke.
     const hostIds = boxes.map(b => b.getAttribute('data-host')).filter(Boolean);
     const names = boxes.map(b => b.getAttribute('data-name') || b.getAttribute('data-host'));
     if (!hostIds.length) { if (typeof showToast === 'function') showToast('Select one or more hosts first', 'error'); return; }
-    if (!window.confirm(`Refresh the template on ${hostIds.length} host(s):\n${names.join(', ')}\n\nThis PAUSES auto-provisioning, DELETES the sim VMs + template on each host, restores the stored backup, then resumes auto-provisioning. Existing sim clients will be wiped.`)) return;
+
+    // One modal at a time.
+    const existing = document.getElementById('cs-refresh-tpl-modal');
+    if (existing) { existing.remove(); return; }
+
+    // Load the caller's COMPLETE template backups (the seed candidates).
+    let templates = [];
     try {
-        const r = await fetch('/tenant/templates/refresh-hosts', {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ host_ids: hostIds })
-        });
+        const r = await fetch('/tenant/templates', { credentials: 'same-origin' });
         const d = await r.json().catch(() => ({}));
-        if (!r.ok) { if (typeof showToast === 'function') showToast(d.detail || 'Refresh failed', 'error'); return; }
-        // Surface per-host skips/errors, then a summary.
-        (d.results || []).filter(x => x.status !== 'SUCCESS').forEach(x => {
-            if (typeof showToast === 'function') showToast(`${x.name || x.spoke_id}: ${x.message || x.status}`, 'error');
-        });
-        const ok = d.refreshed || 0, total = d.total || hostIds.length;
-        if (typeof showToast === 'function') showToast(`Refresh queued on ${ok}/${total} host(s).`, ok ? 'success' : 'error');
-        csRenderVmServer();
-    } catch (e) { if (typeof showToast === 'function') showToast('Refresh failed: ' + (e.message || e), 'error'); }
+        templates = (d.templates || []).filter(t => (t.status || '').toLowerCase() === 'complete')
+            .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    } catch (e) { /* leave empty; modal explains */ }
+
+    const esc = s => (s == null ? '' : String(s)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const fmtWhen = s => s ? new Date(s).toLocaleString() : '';
+    const srcOpt = t => `<option value="${esc(t.id)}">${esc(t.name || t.id)} · ${esc(t.source_node || '—')} · vmid ${esc(String(t.source_vmid == null ? '—' : t.source_vmid))} · ${esc(fmtWhen(t.created_at))}</option>`;
+    const none = !templates.length;
+    const srcOpts = none ? `<option value="" disabled>(no completed backups — back one up first)</option>` : templates.map(srcOpt).join('');
+
+    const modal = document.createElement('div');
+    modal.id = 'cs-refresh-tpl-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">↻ Refresh Template(s) — distribute seed</h3>
+                <button onclick="this.closest('#cs-refresh-tpl-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Seed backup (from Template Repo)</label>
+                    <select id="cs-refresh-src" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${srcOpts}</select>
+                    <p class="text-[11px] text-slate-400 leading-relaxed">The selected backup is restored onto every target host below. Default = newest completed backup.</p>
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Target VMID <span class="font-normal normal-case text-slate-400">(optional)</span></label>
+                    <input id="cs-refresh-vmid" type="number" min="1" placeholder="blank = each host's configured template VMID (VM Image 1)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <p class="text-[11px] text-slate-400 leading-relaxed">Override the VMID the backup is restored to on each host (e.g. backup is vmid 100, restore to 200). Leave blank to use each host's own configured template VMID.</p>
+                </div>
+                <div class="space-y-1">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Target host(s) — ${hostIds.length}</label>
+                    <div class="bg-slate-50 border border-slate-200 rounded-md p-2 text-xs text-slate-600 max-h-24 overflow-y-auto">${esc(names.join(', '))}</div>
+                </div>
+                <p class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 leading-relaxed">⚠ Destructive: this PAUSES auto-provisioning, DELETES each target host's sim VMs + template, restores the seed backup, then resumes. Existing sim clients on the targets are wiped.</p>
+                <div id="cs-refresh-status" class="text-xs text-slate-500 hidden"></div>
+                <div class="pt-2 flex justify-end gap-3">
+                    <button onclick="this.closest('#cs-refresh-tpl-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                    <button id="cs-refresh-go" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ${none ? 'opacity-50 cursor-not-allowed' : ''}" ${none ? 'disabled' : ''}>Refresh</button>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+
+    if (none) {
+        if (typeof showToast === 'function') showToast('No completed backups in the Template Repo — back one up first (Setup → Hypervisors → ⬆ Back up to Hub)', 'error');
+        return;
+    }
+
+    modal.querySelector('#cs-refresh-go').addEventListener('click', async () => {
+        const template_id = (document.getElementById('cs-refresh-src') || {}).value || '';
+        const rawVmid = ((document.getElementById('cs-refresh-vmid') || {}).value || '').trim();
+        const target_vmid = rawVmid ? parseInt(rawVmid, 10) : null;
+        if (rawVmid && (!Number.isFinite(target_vmid) || target_vmid <= 0)) { if (typeof showToast === 'function') showToast('Target VMID must be a positive integer', 'error'); return; }
+        if (!template_id) { if (typeof showToast === 'function') showToast('Pick a seed backup first', 'error'); return; }
+        const goBtn = document.getElementById('cs-refresh-go');
+        const statusEl = document.getElementById('cs-refresh-status');
+        if (goBtn) { goBtn.disabled = true; goBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+        if (statusEl) { statusEl.textContent = 'Queuing refresh…'; statusEl.classList.remove('hidden'); }
+        try {
+            const body = { host_ids: hostIds, template_id };
+            if (target_vmid != null) body.target_vmid = target_vmid;
+            const r = await fetch('/tenant/templates/refresh-hosts', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) { if (typeof showToast === 'function') showToast(d.detail || 'Refresh failed', 'error'); if (goBtn) { goBtn.disabled = false; goBtn.classList.remove('opacity-50', 'cursor-not-allowed'); } if (statusEl) statusEl.classList.add('hidden'); return; }
+            // Surface per-host skips/errors, then a summary.
+            (d.results || []).filter(x => x.status !== 'SUCCESS').forEach(x => {
+                if (typeof showToast === 'function') showToast(`${x.host || x.name || x.spoke_id}: ${x.message || x.status}`, 'error');
+            });
+            const ok = d.refreshed || 0, total = d.total || hostIds.length;
+            if (typeof showToast === 'function') showToast(`Refresh queued on ${ok}/${total} host(s).`, ok ? 'success' : 'error');
+            modal.remove();
+            if (typeof csRenderVmServer === 'function') csRenderVmServer();
+        } catch (e) {
+            if (typeof showToast === 'function') showToast('Refresh failed: ' + (e.message || e), 'error');
+            if (goBtn) { goBtn.disabled = false; goBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+            if (statusEl) statusEl.classList.add('hidden');
+        }
+    });
 };
 
 async function csRefreshAutoProvStatus() {

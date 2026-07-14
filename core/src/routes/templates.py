@@ -274,19 +274,31 @@ def register(app, hub, ctx):
             return True
         return bool(tenant_id) and tenant_id in _acting_tenants(sess)
 
-    async def _orchestrate_refresh(tid: str, request: Request):
+    async def _orchestrate_refresh(tid, request, target_agent_id=None, target_vmid=None):
+        """Queue a REFRESH_TEMPLATE on the owning agent. By default this is a
+        self-restore — the backup goes back to its own ``source_agent`` at the
+        original ``source_vmid`` (used by the per-template Refresh buttons on the
+        Template Repo page). The fleet seed-distribute path passes an explicit
+        ``target_agent_id`` + ``target_vmid`` so the seed backup is restored onto
+        a DIFFERENT host at that host's VMID (the agent restores to whatever
+        ``template_vmid`` it is given)."""
         rec = _repo().get(tid, public=False)
         if rec is None:
             raise HTTPException(status_code=404, detail="template not found")
         if rec.get("status") != "complete":
             raise HTTPException(status_code=409, detail="template backup is not complete")
-        agent_id = str(rec.get("source_agent") or "")
+        agent_id = str(target_agent_id or rec.get("source_agent") or "")
         if not agent_id:
             raise HTTPException(status_code=409, detail="template has no recorded source host")
         owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
             or hub.get_hypervisor_spoke()
         if not owning_spoke:
-            raise HTTPException(status_code=503, detail="the source host's spoke is not connected")
+            raise HTTPException(status_code=503, detail="the target host's spoke is not connected")
+
+        # The VMID to restore onto on the target host. For self-restore this is
+        # the backup's source_vmid; for seed-distribute it is the target host's
+        # own template VMID (the qmrestore --force destination).
+        template_vmid = target_vmid if target_vmid is not None else rec.get("source_vmid")
 
         dl_token = _repo().mint_refresh_token(tid)
         base = (os.environ.get("LM_HUB_PUBLIC_URL") or str(request.base_url)).rstrip("/")
@@ -296,7 +308,7 @@ def register(app, hub, ctx):
             result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
                 "target_agent_id": agent_id,
                 "command": "REFRESH_TEMPLATE",
-                "data": {"template_id": tid, "template_vmid": rec.get("source_vmid"),
+                "data": {"template_id": tid, "template_vmid": template_vmid,
                          "download_url": download_url, "refresh_token": dl_token},
             })
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
@@ -308,7 +320,7 @@ def register(app, hub, ctx):
             _repo().set_refresh_status(tid, "failed", error=f"relay failed: {e}")
             raise HTTPException(status_code=502, detail=f"REFRESH_TEMPLATE relay failed: {e}")
         logger.info("[template-repo] refresh queued %s → agent %s (vmid %s)",
-                    tid, agent_id, rec.get("source_vmid"))
+                    tid, agent_id, template_vmid)
         return {"status": "SUCCESS",
                 "message": "Refresh queued — pausing auto-provisioning, clearing the host's sim VMs + template, restoring the backup, then resuming auto-provisioning."}
 
@@ -337,15 +349,73 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404, detail="template not found")
         return await _orchestrate_refresh(tid, request)
 
+    def _resolve_target_agent(host_id):
+        """Reverse-lookup ``hub.agent_info`` for the connected agent whose
+        hostname matches ``host_id`` (case-insensitive, short-name tolerant —
+        same shape as ``template_repo.latest_complete_for_host``). Returns the
+        ``agent_id`` (key into agent_info / agent_config) or None. The fleet rows
+        key on the agent's reported OS hostname, which can differ from the
+        Proxmox cluster node name recorded on a backup — so we resolve via the
+        live agent index, not the backup's source_node."""
+        hid = str(host_id or "").strip()
+        if not hid:
+            return None
+        hid_l = hid.lower()
+        hid_short = hid_l.split(".", 1)[0]
+
+        def _match(val):
+            v = str(val or "").strip().lower()
+            if not v:
+                return False
+            return v == hid_l or v.split(".", 1)[0] == hid_short
+
+        for aid, info in (getattr(hub, "agent_info", {}) or {}).items():
+            info = info or {}
+            if _match(info.get("hostname")) and info.get("spoke_id") in hub.active_connections:
+                return aid
+        return None
+
+    def _host_template_vmid(agent_id):
+        """The host's configured clone-source template VMID (``image1_template_id``
+        — a number), from ``agent_config[agent_id].client_simulation.usb_config``.
+        This is the default qmrestore destination when the caller does not pass an
+        explicit ``target_vmid``. Returns an int or None."""
+        ac = (getattr(hub, "state", None) and hub.state.system_state.get("agent_config", {}) or {}) \
+            .get(agent_id, {})
+        usb = (ac.get("client_simulation") or {}).get("usb_config") or {}
+        v = usb.get("image1_template_id")
+        try:
+            return int(v) if v is not None and str(v).strip() != "" else None
+        except (TypeError, ValueError):
+            return None
+
+    def _agent_tenant_id(agent_id):
+        ac = (getattr(hub, "state", None) and hub.state.system_state.get("agent_config", {}) or {}) \
+            .get(agent_id, {})
+        return str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
+
     @app.post("/tenant/templates/refresh-hosts")
     async def refresh_templates_by_host(request: Request):
-        """Fleet multi-select refresh (VM Server / VMs): refresh the template on
-        each selected PXMX host. Body: ``{host_ids: [...]}`` (the agent hostname /
-        node — unique per host); ``{spoke_ids: [...]}`` still accepted for older
-        clients. For each host we resolve its latest complete template by
-        ``source_agent``/``source_node`` (NOT source_spoke — several hosts share
-        one cs spoke, so a spoke-scoped lookup would refresh the wrong host),
-        enforce tenant ownership, and orchestrate the destructive refresh."""
+        """Fleet multi-select refresh (VM Server / VMs) — SEED-AND-DISTRIBUTE.
+
+        One PXMX host is the seed: its template is prepped + backed up to the hub
+        (Template Repo). The operator selects the OTHER target hosts here and
+        this endpoint pushes that seed backup onto each target: pause auto-prov →
+        wipe the target's sim VMs + template → qmrestore the seed backup onto the
+        target at the target's VMID → re-mark template → resume auto-prov.
+
+        Body:
+          * ``host_ids: [...]`` — target hosts (agent OS hostname; unique per
+            host). ``{spoke_ids: [...]}`` still accepted for older clients (the
+            host is resolved per the spoke's owning agent).
+          * ``template_id`` (opt) — the seed backup to distribute. Default: the
+            newest COMPLETE template in a tenant the caller owns.
+          * ``target_vmid`` (opt int) — override the restore VMID on every
+            target. Default: each target host's configured ``image1_template_id``.
+
+        Tenant isolation: the seed backup AND every target host must be in a
+        tenant the caller owns (admin = any). Anti-IDOR: an un-ownable seed
+        reads as not-found; an un-ownable target is SKIPPED (not revealed)."""
         sess = _session_user(request)
         try:
             body = await request.json()
@@ -356,36 +426,89 @@ def register(app, hub, ctx):
         ids = host_ids if by_host else (body.get("spoke_ids") or [])
         if not isinstance(ids, list) or not ids:
             raise HTTPException(status_code=400, detail="host_ids (non-empty list) required")
+
+        # ── resolve the seed backup ──────────────────────────────────────────
+        template_id = str(body.get("template_id") or "").strip()
+        if template_id:
+            rec = _repo().get(template_id, public=False)
+            if rec is None:
+                raise HTTPException(status_code=404, detail="template not found")
+        else:
+            # Default: newest COMPLETE template in a tenant the caller owns.
+            mine = set(_acting_tenants(sess))
+            cands = [t for t in _repo().list()
+                     if t.get("status") == "complete"
+                     and (_is_admin(sess) or (t.get("tenant_id") or "") in mine)]
+            if not cands:
+                raise HTTPException(status_code=404,
+                                     detail="no completed template backup in your tenant — "
+                                            "back one up first (Setup → Hypervisors → ⬆ Back up to Hub)")
+            rec = dict(cands[0])  # list() is sorted newest-first
+            template_id = rec["id"]
+        if rec.get("status") != "complete":
+            raise HTTPException(status_code=409, detail="template backup is not complete")
+        if not _owns_tenant(sess, rec.get("tenant_id")):
+            # Anti-IDOR: a seed the caller can't own reads as not-found.
+            raise HTTPException(status_code=404, detail="template not found")
+
+        # ── target VMID override ─────────────────────────────────────────────
+        target_vmid = body.get("target_vmid")
+        if target_vmid is not None and str(target_vmid).strip() != "":
+            try:
+                target_vmid = int(target_vmid)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="target_vmid must be an integer")
+            if target_vmid <= 0:
+                raise HTTPException(status_code=400, detail="target_vmid must be a positive integer")
+        else:
+            target_vmid = None
+
         results = []
         for sid in ids:
             sid = str(sid or "")
-            rec = (_repo().latest_complete_for_host(sid) if by_host
-                   else _repo().latest_complete_for_spoke(sid))
-            if rec is None:
-                # Diagnostic: show what host identifiers ARE stored so a mismatch
-                # (selected 'pxmx-cs-svr-02' vs a template recorded under a
-                # different node/agent) is visible instead of a bare skip.
-                avail = _repo().complete_source_summary()
-                hint = ("; complete templates exist for: " +
-                        ", ".join(f"{a.get('name')}[node={a.get('source_node')!r} "
-                                  f"agent={a.get('source_agent')!r}]" for a in avail)) if avail \
-                       else "; no complete templates on the hub at all"
+            # Resolve the target host → its owning agent (live agent index).
+            agent_id = _resolve_target_agent(sid) if by_host else None
+            if by_host and agent_id is None:
                 results.append({"spoke_id": sid, "status": "SKIPPED",
-                                "message": f"no completed template backup for '{sid}'{hint}",
-                                "available": avail})
+                                "message": f"host '{sid}' not connected / no owning agent"})
                 continue
-            if not _owns_tenant(sess, rec.get("tenant_id")):
-                # Anti-IDOR: don't reveal a template the caller can't own.
+            if not by_host:
+                # Legacy spoke_ids path: resolve via the spoke's owning agent.
+                # Pick any agent indexed under this spoke.
+                agent_id = None
+                for aid, info in (getattr(hub, "agent_info", {}) or {}).items():
+                    if (info or {}).get("spoke_id") == sid and aid:
+                        agent_id = aid
+                        break
+                if agent_id is None:
+                    results.append({"spoke_id": sid, "status": "SKIPPED",
+                                    "message": "no agent connected for this spoke"})
+                    continue
+
+            # Tenant-own the target host (anti-IDOR / tenant isolation).
+            host_tenant = _agent_tenant_id(agent_id)
+            if not _owns_tenant(sess, host_tenant):
                 results.append({"spoke_id": sid, "status": "SKIPPED",
                                 "message": "not permitted for this host's tenant"})
                 continue
+
+            # Resolve the restore VMID: override → host's image1_template_id.
+            vmid = target_vmid if target_vmid is not None else _host_template_vmid(agent_id)
+            if vmid is None:
+                results.append({"spoke_id": sid, "status": "SKIPPED",
+                                "message": "no target VMID for this host — pass target_vmid or "
+                                            "configure the host's VM Image 1 Template VMID"})
+                continue
+
             try:
-                r = await _orchestrate_refresh(rec["id"], request)
-                results.append({"spoke_id": sid, "template_id": rec["id"],
-                                "name": rec.get("name"),
+                r = await _orchestrate_refresh(template_id, request,
+                                               target_agent_id=agent_id, target_vmid=vmid)
+                results.append({"spoke_id": sid, "host": sid, "template_id": template_id,
+                                "name": rec.get("name"), "target_vmid": vmid,
                                 "status": r.get("status"), "message": r.get("message")})
             except HTTPException as e:
-                results.append({"spoke_id": sid, "template_id": rec.get("id"),
+                results.append({"spoke_id": sid, "host": sid, "template_id": template_id,
+                                "target_vmid": vmid,
                                 "status": "ERROR", "message": str(e.detail)})
         ok = sum(1 for r in results if r.get("status") == "SUCCESS")
         return {"status": "SUCCESS" if ok else "ERROR",
