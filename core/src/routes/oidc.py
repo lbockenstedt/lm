@@ -341,7 +341,6 @@ def register(app, hub, ctx):
                 "client_id": str(config.get("client_id") or "").strip(),
                 "redirect_uri": str(config.get("redirect_uri") or "").strip(),
                 "allowed_group": str(config.get("allowed_group") or "").strip(),
-                "require_mfa": bool(config.get("require_mfa", True)),
             }
             global_config = hub.state.system_state.get("global_config", {})
             global_config["oidc"] = clean

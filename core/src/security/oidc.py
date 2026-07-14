@@ -107,8 +107,6 @@ class OidcConfig:
         self.key_path = (env.get("LM_OIDC_CLIENT_KEY") or stored.get("key_path")
                          or "").strip() or _def_key
         self.allowed_group = (env.get("LM_OIDC_ALLOWED_GROUP") or stored.get("allowed_group") or "").strip()
-        self.require_mfa = _bool_env(env.get("LM_OIDC_REQUIRE_MFA"),
-                                     stored.get("require_mfa", True))
         self.enabled = _bool_env(env.get("LM_OIDC_ENABLED"), stored.get("enabled", False))
 
     @property
@@ -250,14 +248,6 @@ def authorize_url(cfg: OidcConfig, discovery_doc: dict,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
-    # When MFA is enforced, force a FRESH interactive sign-in (``prompt=login``).
-    # Entra only stamps the ``amr`` claim (incl. "mfa") when it actually performs
-    # the auth this request — a token minted from an existing SSO session comes
-    # back with an EMPTY ``amr`` and the MFA check then (wrongly) rejects it. This
-    # makes Entra re-authenticate so amr reflects THIS sign-in. (Still needs a CA
-    # policy / security defaults to REQUIRE mfa for the app so it's actually done.)
-    if cfg.require_mfa:
-        params["prompt"] = "login"
     return endpoint + "?" + "&".join(f"{k}={_url_quote(str(v), safe='')}"
                                      for k, v in params.items())
 
@@ -451,10 +441,10 @@ def verify_id_token(cfg: OidcConfig, id_token: str, nonce: str,
     Validates the signature against the JWKS, the issuer (Entra v2.0 endpoint
     for the configured tenant), the audience (this app's ``client_id``), and
     the ``nonce`` (binds the token to this browser round-trip — replay to a
-    different session fails). **MFA is hard-enforced**: when ``require_mfa``
-    is set (default), the ``amr`` claim MUST contain ``mfa`` or login is
-    refused — Entra conditional access enforces it at the IdP, but the hub does
-    not trust the network path to have done so."""
+    different session fails). MFA is NOT checked here — it's enforced by a
+    Conditional Access policy in Entra (see docs/entra-sso.md); Entra omits the
+    ``amr`` claim when MFA is session-satisfied, so an in-token check would falsely
+    reject valid logins."""
     try:
         unverified_header = jwt.get_unverified_header(id_token)
     except jwt.PyJWTError as e:
@@ -481,43 +471,13 @@ def verify_id_token(cfg: OidcConfig, id_token: str, nonce: str,
     # Nonce binds the token to this round-trip.
     if claims.get("nonce") != nonce:
         raise OidcError("nonce mismatch — id_token replay suspected")
-    # MFA hard-enforcement. Entra reports the auth methods in ``amr`` (e.g.
-    # ["pwd","mfa"]). "mfa" is the classic value, but phishing-resistant /
-    # passwordless factors — which ARE multi-factor — surface under different
-    # amr values: "ngcmfa" (Windows Hello / passkey), "fido" (FIDO2 key), "otp"
-    # (TOTP / one-time passcode). Accept any of those so a stronger sign-in isn't
-    # rejected as "no MFA". "pwd" alone never counts.
-    if cfg.require_mfa:
-        amr = claims.get("amr") or []
-        if not isinstance(amr, list):
-            amr = [amr]
-        amr_l = {str(a).strip().lower() for a in amr}
-        if not (amr_l & _MFA_AMR_VALUES):
-            # Surface the other auth signals Entra DID send so a misconfig is
-            # diagnosable: acr/acrs (auth-context), and auth_time≈iat proves the
-            # sign-in was FRESH (prompt=login worked) vs a reused silent session.
-            now = int(time.time())
-            at = claims.get("auth_time")
-            fresh = "fresh" if (isinstance(at, int) and now - at < 300) else "reused-session"
-            diag = (f"amr={sorted(amr_l) or '[]'}, acr={claims.get('acr')!r}, "
-                    f"acrs={claims.get('acrs')}, auth={fresh}")
-            raise OidcError(
-                "MFA required — this sign-in did not report multi-factor "
-                f"authentication ({diag}). Having MFA on the account isn't enough; "
-                "a Conditional Access policy (or security defaults) must FORCE MFA "
-                "for THIS app so Entra actually challenges it. If auth=reused-session "
-                "the hub isn't sending prompt=login yet (restart it). If auth=fresh "
-                "but amr is still empty, Entra isn't stamping amr for this app — "
-                "either use an Authentication Context (acrs), or turn off 'Require "
-                "MFA' in Setup → SSO and rely on Conditional Access to enforce it.")
+    # NOTE: MFA is NOT verified here. Entra only stamps the ``amr`` claim when MFA
+    # is FRESHLY performed — when it's satisfied from an existing session it issues
+    # a valid token with amr=[], so any in-token check produces false rejections.
+    # MFA is enforced where it belongs: a Conditional Access policy in Entra (see
+    # docs/entra-sso.md). The hub trusts that a token it received means Entra let
+    # the user through, MFA included.
     return claims
-
-
-# amr values that indicate a genuine second / phishing-resistant factor was used:
-# "mfa" (classic multi-factor), "ngcmfa" (Windows Hello / passkey), "fido" (FIDO2
-# key), "otp" (one-time passcode). "pwd"/"wia" (password / Kerberos) are
-# single-factor and deliberately EXCLUDED so they never satisfy the requirement.
-_MFA_AMR_VALUES = {"mfa", "ngcmfa", "fido", "otp"}
 
 
 def extract_member_groups(claims: dict) -> list:

@@ -219,27 +219,14 @@ def test_client_assertion_is_valid_rs256_jwt(rsa_key, rsa_cert, tmp_path):
     assert "exp" in decoded and "jti" in decoded
 
 
-def test_verify_id_token_mfa_enforced_passes_with_mfa(rsa_key, jwks):
-    cfg = oidc.OidcConfig({"tenant_id": "tid", "client_id": "cid",
-                          "key_path": "/k", "require_mfa": True})
-    tok = _make_id_token(rsa_key, aud="cid", nonce="n1", amr=["mfa", "pwd"])
-    claims = oidc.verify_id_token(cfg, tok, "n1", jwks)
-    assert claims["oid"] == "user-oid-1"
-
-
-def test_verify_id_token_refuses_without_mfa(rsa_key, jwks):
-    cfg = oidc.OidcConfig({"tenant_id": "tid", "client_id": "cid",
-                           "key_path": "/k", "require_mfa": True})
-    tok = _make_id_token(rsa_key, aud="cid", nonce="n1", amr=["pwd"])  # no mfa
-    with pytest.raises(oidc.OidcError, match="MFA required"):
-        oidc.verify_id_token(cfg, tok, "n1", jwks)
-
-
-def test_verify_id_token_mfa_off_allows_no_mfa(rsa_key, jwks):
-    cfg = oidc.OidcConfig({"tenant_id": "tid", "client_id": "cid",
-                           "key_path": "/k", "require_mfa": False})
-    tok = _make_id_token(rsa_key, aud="cid", nonce="n1", amr=["pwd"])
-    assert oidc.verify_id_token(cfg, tok, "n1", jwks)["oid"] == "user-oid-1"
+def test_verify_id_token_does_not_check_mfa(rsa_key, jwks):
+    # MFA is enforced by Entra Conditional Access, not in-token — a token with no
+    # mfa amr (or empty amr) is accepted; Entra having issued it means it let the
+    # user through.
+    cfg = oidc.OidcConfig({"tenant_id": "tid", "client_id": "cid", "key_path": "/k"})
+    for amr in (["pwd"], [], ["mfa", "pwd"]):
+        tok = _make_id_token(rsa_key, aud="cid", nonce="n1", amr=amr)
+        assert oidc.verify_id_token(cfg, tok, "n1", jwks)["oid"] == "user-oid-1"
 
 
 def test_verify_id_token_rejects_nonce_mismatch(rsa_key, jwks):
@@ -422,7 +409,9 @@ def test_callback_happy_path_provisions_and_sets_cookie(rsa_key, rsa_cert, jwks,
     assert body["permissions"].get("nw")
 
 
-def test_callback_refuses_when_mfa_missing(rsa_key, rsa_cert, jwks, tmp_path, monkeypatch):
+def test_callback_succeeds_without_mfa_claim(rsa_key, rsa_cert, jwks, tmp_path, monkeypatch):
+    # MFA is enforced by Entra CA, not in-token — a token with amr=["pwd"] (or
+    # empty) must NOT be refused by the hub.
     key_path, cert_path = _write_keypair(tmp_path, rsa_key, rsa_cert)
     client, hub = _build({"permission_groups": _groups_state()})
     _mount_oidc_config(hub, key_path=key_path, cert_path=cert_path)
@@ -443,8 +432,8 @@ def test_callback_refuses_when_mfa_missing(rsa_key, rsa_cert, jwks, tmp_path, mo
     holder["nonce"] = nonce
     r2 = client.get("/auth/oidc/callback", params={"code": "ac", "state": st},
                     cookies={"lm_oidc_state": state_cookie}, follow_redirects=False)
-    assert r2.status_code == 401
-    assert "MFA" in r2.text
+    assert r2.status_code == 302, r2.text
+    assert r2.cookies.get("lm_session")
 
 
 def test_callback_rejects_state_mismatch(rsa_key, jwks, tmp_path, monkeypatch):

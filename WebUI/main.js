@@ -5898,7 +5898,7 @@ function _renderSettingsSsoTile(content) {
             <p class="text-xs text-slate-400 mb-3">Users sign in with Microsoft Entra ID. On callback the hub verifies the id_token against Entra's JWKS, maps Entra <strong>group membership</strong> to LM RBAC + tenant scope, and (when required) <strong>hard-enforces MFA</strong> via the <code>amr</code> claim. Auth uses a <strong>client certificate</strong> (cert + key paths on the hub), not a client secret. Enabling this shows the <em>Sign in with Microsoft</em> button on the login page. <strong>Global Admin only.</strong> Environment overrides (<code>LM_OIDC_*</code>) win over these stored values.</p>
             <div class="flex flex-wrap items-center gap-6 mb-3">
                 <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="oidc-enabled" class="w-4 h-4 text-green-600 rounded">Enable Entra ID SSO</label>
-                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="oidc-mfa" class="w-4 h-4 text-green-600 rounded" checked>Require MFA (reject logins without <code>amr=mfa</code>)</label>
+                <span class="text-[11px] text-slate-400">MFA is enforced in Entra via Conditional Access — see the SSO setup doc.</span>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-1"><label class="${labelCls}">Directory (tenant) ID</label><input id="oidc-tenant" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
@@ -5939,7 +5939,6 @@ async function loadOidcConfig() {
         const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
         const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
         chk('oidc-enabled', cfg.enabled);
-        chk('oidc-mfa', cfg.require_mfa !== false);
         set('oidc-tenant', cfg.tenant_id); set('oidc-client', cfg.client_id);
         set('oidc-redirect', cfg.redirect_uri); set('oidc-group', cfg.allowed_group);
         const pill = document.getElementById('oidc-state-pill');
@@ -6021,7 +6020,6 @@ async function saveOidcConfig() {
     const v = id => (document.getElementById(id)?.value || '').trim();
     const config = {
         enabled: !!document.getElementById('oidc-enabled')?.checked,
-        require_mfa: !!document.getElementById('oidc-mfa')?.checked,
         tenant_id: v('oidc-tenant'), client_id: v('oidc-client'),
         redirect_uri: v('oidc-redirect'), allowed_group: v('oidc-group'),
         // cert/key paths are auto-managed (hub default dir); not editable here.
