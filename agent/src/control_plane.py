@@ -36,6 +36,12 @@ except ImportError:
 import agent_spoke
 from agent_spoke import GenericAgent, _ROLE_MAP, _ROLE_LOG_PREFIXES
 
+# Root nginx cert-install helper dropped by netbox/install.sh --infra-only (the
+# netbox-server deploy role). Its presence = this host runs the NetBox web
+# server, so the agent advertises the "netbox_server" cert-target capability and
+# handles INSTALL_CERT by invoking it (see GenericAgent.handle_command).
+_NETBOX_INSTALL_CERT_HELPER = "/usr/local/bin/lm-netbox-install-cert"
+
 try:
     from logging_setup import configure_logging
 except ImportError:
@@ -436,6 +442,19 @@ agent_spoke.RoleConnection = RoleConnection
 class AgentControlPlane(BaseControlPlane):
     def get_service_name(self) -> str:
         return "lm-agent"
+
+    def _extra_auth_fields(self) -> dict:
+        """Advertise cert-target capabilities in the WS auth frame. A host that
+        ran the netbox-server deploy role has the root nginx cert helper, so the
+        hub can route the NetBox cert here (Settings → Certificates target
+        "netbox-server") instead of to the API-only IPAM spoke."""
+        fields = {}
+        try:
+            if os.path.exists(_NETBOX_INSTALL_CERT_HELPER):
+                fields["netbox_server"] = True
+        except Exception:  # noqa: BLE001
+            pass
+        return fields
 
     def __init__(self, spoke_id, secret, hub_secret="", hub_url="",
                  startup_roles: List[str] = None, startup_role: str = ""):

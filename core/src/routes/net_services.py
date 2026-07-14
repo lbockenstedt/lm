@@ -401,7 +401,8 @@ def register(app, hub, ctx):
         module_names = hub.state.system_state.get("module_names", {}) or {}
         return {"targets": build_available_targets(
             dict(hub.spoke_module_types), hub.active_connections,
-            module_names, hub.CERT_CAPABLE_MODULES, agents)}
+            module_names, hub.CERT_CAPABLE_MODULES, agents,
+            netbox_server_agents=set(getattr(hub, "netbox_server_agents", set())))}
 
     # ── per-cert distribution targets ──────────────────────────────────────────
     # Each target = {module_type, identifier?} describing which spoke/device a

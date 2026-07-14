@@ -44,7 +44,7 @@ logger = logging.getLogger("le.distribution")
 # other nw families (aos_switch/ex_switch/gateway) return a clear ERROR from
 # the spoke (external-key / SSH-SFTP plumbing not yet built). Both are fast
 # REST targets → 120s install tier (no pvenode wait).
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation", "nac", "nw"}
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation", "nac", "nw", "netbox-server"}
 
 
 def _unwrap(result: Any) -> Dict[str, Any]:
@@ -441,7 +441,8 @@ async def distribute_wildcard_to_all_spokes(
 def build_available_targets(spoke_module_types: Dict[str, str],
                             active_connections, module_names: Dict[str, str],
                             capable: Set[str],
-                            agents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                            agents: List[Dict[str, Any]],
+                            netbox_server_agents=None) -> List[Dict[str, Any]]:
     """Build the click-to-add list of cert distribution targets from live hub
     state — the ``GET /api/le/targets/available`` payload. One entry per
     cert-capable CONNECTED spoke (by ``module_type``), EXCEPT agent-hosting
@@ -513,4 +514,14 @@ def build_available_targets(spoke_module_types: Dict[str, str],
             label = f"{mt} — all nodes ({nm})" if multi else f"{mt} — all nodes"
             targets.append({"module_type": mt, "identifier": "",
                             "label": label, "spoke_id": sid})
+    # NetBox web server: a generic agent that ran the netbox-server deploy role
+    # (module_type "agent", so not in the loops above). It has the local nginx
+    # cert helper, so it — not the API-only IPAM spoke — is the correct cert
+    # target for the NetBox HTTPS endpoint. identifier = the agent's spoke_id.
+    for sid in (netbox_server_agents or []):
+        if sid not in active_connections:
+            continue
+        nm = names.get(sid, sid) or sid
+        targets.append({"module_type": "netbox-server", "identifier": sid,
+                        "label": f"netbox-server — {nm}", "spoke_id": sid})
     return targets

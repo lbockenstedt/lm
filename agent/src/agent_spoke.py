@@ -3,10 +3,17 @@ import importlib.util
 import logging
 import os
 import shlex
+import ssl
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional
+
+# Root nginx cert-install helper dropped by netbox/install.sh --infra-only. Its
+# presence marks this host as the NetBox web server (see the INSTALL_CERT handler
+# + AgentControlPlane._extra_auth_fields).
+_NETBOX_INSTALL_CERT_HELPER = "/usr/local/bin/lm-netbox-install-cert"
 
 try:
     from base_spoke import BaseSpoke
@@ -440,11 +447,76 @@ class GenericAgent(BaseSpoke):
 
     # ── Command dispatch ──────────────────────────────────────────────────────
 
+    async def _install_netbox_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Install an LE cert onto this host's NetBox nginx via the root helper.
+        Mirrors netbox_spoke's INSTALL_CERT: validate the fullchain+privkey pair
+        in-process, then run /usr/local/bin/lm-netbox-install-cert <crt> <key>."""
+        domain = data.get("domain", "") or ""
+        fullchain = data.get("fullchain", "") or ""
+        privkey = data.get("privkey", "") or ""
+        if not os.path.exists(_NETBOX_INSTALL_CERT_HELPER):
+            logger.warning("[cert] %s → netbox-server: FAILED — helper %s missing "
+                           "(is this the netbox-server host?)", domain, _NETBOX_INSTALL_CERT_HELPER)
+            return {"status": "ERROR",
+                    "message": f"cert helper {_NETBOX_INSTALL_CERT_HELPER} not present on this host"}
+        if not fullchain or not privkey:
+            return {"status": "ERROR", "message": "missing cert material"}
+        if "BEGIN CERTIFICATE" not in fullchain or "PRIVATE KEY" not in privkey:
+            return {"status": "ERROR", "message": "fullchain/privkey not PEM"}
+        crt_tmp = key_tmp = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".crt.pem", delete=False) as cf:
+                cf.write(fullchain); crt_tmp = cf.name
+            with tempfile.NamedTemporaryFile("w", suffix=".key.pem", delete=False) as kf:
+                kf.write(privkey); key_tmp = kf.name
+            os.chmod(crt_tmp, 0o600); os.chmod(key_tmp, 0o600)
+            try:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(crt_tmp, key_tmp)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[cert] %s → netbox-server: FAILED — validation: %s", domain, e)
+                return {"status": "ERROR", "message": f"cert validation failed (helper not called): {e}"}
+            # sudo -n works whether the agent runs as root or an unprivileged
+            # user with the netbox sudoers grant; the helper re-validates + swaps.
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "sudo", "-n", _NETBOX_INSTALL_CERT_HELPER, crt_tmp, key_tmp,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+            except asyncio.TimeoutError:
+                try: proc.kill()
+                except (ProcessLookupError, UnboundLocalError): pass
+                return {"status": "ERROR", "message": "cert-install helper timed out"}
+            except Exception as e:  # noqa: BLE001
+                return {"status": "ERROR", "message": f"cert-install helper invocation failed: {e}"}
+            out = (out_b or b"").decode(errors="replace").strip()
+            err = (err_b or b"").decode(errors="replace").strip()
+            if proc.returncode == 0 and out.startswith("OK"):
+                logger.info("[cert] %s → netbox-server: installed — %s", domain, out[2:].strip() or out)
+                return {"status": "SUCCESS", "message": out[2:].strip() or out or "installed on netbox-server"}
+            msg = err or out or f"helper exit {proc.returncode}"
+            logger.warning("[cert] %s → netbox-server: FAILED — %s", domain, msg)
+            return {"status": "ERROR", "message": msg}
+        finally:
+            for p in (crt_tmp, key_tmp):
+                if p:
+                    try: os.unlink(p)
+                    except OSError: pass
+
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         cmd = command_type.upper()
 
         if cmd == "GET_VERSION":
             return {"status": "SUCCESS", "version": self.get_version()}
+
+        if cmd == "INSTALL_CERT":
+            # This host ran the netbox-server deploy role, so it has the NetBox
+            # nginx + the root cert helper. LE distribution (hub-brokered) routes
+            # the NetBox cert HERE (target "netbox-server") instead of the API-
+            # only IPAM spoke. Validate the pair in-process, write 0600 temp
+            # files, and hand them to the root helper (same contract as the
+            # netbox spoke) which atomically swaps + reloads nginx.
+            return await self._install_netbox_cert(data)
 
         if cmd == "GET_AVAILABLE_ROLES":
             return {"status": "SUCCESS",

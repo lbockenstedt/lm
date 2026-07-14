@@ -557,6 +557,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # one base-agent approval.
         self.spoke_parent_map: Dict[str, str] = {}
 
+        # Generic-agent hosts that ran the "netbox-server" deploy role (they have
+        # nginx + the /usr/local/bin/lm-netbox-install-cert helper and run as
+        # root). Advertised in the agent's WS auth frame ("netbox_server": true);
+        # used to offer + resolve a "netbox-server" cert-distribution target so LE
+        # certs land on the actual NetBox web server, not the API-only IPAM spoke.
+        self.netbox_server_agents: set = set()
+
         # --- System Diagnostics ---
         self.logs = deque(maxlen=500)
         self.agent_logs = {} # { agent_id: deque(logs) }
@@ -1755,6 +1762,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     return sid
             return (self.get_spoke_by_type("simulation")
                     or self.get_spoke_by_type("hypervisor"))
+        if module_type == "netbox-server":
+            # The cert target is a generic agent that ran the netbox-server
+            # deploy (has the local nginx cert helper + root). A specific
+            # identifier picks that agent; empty picks any connected one.
+            if identifier and identifier in self.netbox_server_agents \
+                    and identifier in self.active_connections:
+                return identifier
+            return next((sid for sid in self.netbox_server_agents
+                         if sid in self.active_connections), None)
         return self.get_spoke_by_type(module_type)
 
     def get_hypervisor_spoke(self) -> Optional[str]:
@@ -3454,6 +3470,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # claims its base agent as parent so the hub can auto-approve it via
             # the parent. Absent on every other spoke (no behavior change).
             parent_spoke_id = (auth_data.get("parent_spoke_id") or "").strip()
+            # Cert-target capability: a generic agent that deployed netbox-server
+            # (has the local nginx cert helper) advertises this so the hub can
+            # route the NetBox cert to it. Recorded post-auth below.
+            netbox_server_cap = bool(auth_data.get("netbox_server"))
 
             # DEBUG-only + length-only: a 64-char session key's 4+4 prefix/suffix
             # is a 12.5% entropy reduction, and this fires on EVERY connect
@@ -3655,6 +3675,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # pending admin approval as today. Record the parent claim either way
             # so a later base-agent approval can sweep up waiting sub-spokes
             # (_auto_approve_pending_subspokes covers the sub-before-parent order).
+            if netbox_server_cap:
+                self.netbox_server_agents.add(spoke_id)
+            else:
+                self.netbox_server_agents.discard(spoke_id)
             if parent_spoke_id:
                 self.spoke_parent_map[spoke_id] = parent_spoke_id
                 if (not self.approved_modules.get(spoke_id, False)
@@ -4169,6 +4193,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.active_connection_key_ids.pop(spoke_id, None)
                 self.spoke_module_types.pop(spoke_id, None)
                 self.spoke_parent_map.pop(spoke_id, None)
+                self.netbox_server_agents.discard(spoke_id)
                 self.spoke_authenticated.pop(spoke_id, None)
                 # Drop the per-connection "never authenticated" diagnosis state
                 # so a reconnect that's still broken re-emits the ERROR once
