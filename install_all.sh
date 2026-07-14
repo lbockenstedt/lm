@@ -1435,7 +1435,8 @@ fi
 # Health-guarded + 2-min cooldown. KEEP IN SYNC with install-lm-watchdog.sh.
 STALE_SENTINEL=/var/lib/lm/state/stale-restart-requested
 STALE_TS=/var/lib/lm/watchdog-stale-ts
-STALE_SINCE=/var/lib/lm/watchdog-stale-since    # first-deferred ts for the 1h backstop
+# (The prior STALE_SINCE 1h force-over backstop is gone — a stale build now
+#  waits for idle / the 2am window instead of booting a logged-in user.)
 RESTART_ALLOWED=/var/lib/lm/state/restart-allowed  # hub-computed gate (1=idle OR in-window)
 is_force=0; stale_reason=""
 if [ -f "$STALE_SENTINEL" ]; then
@@ -1458,15 +1459,16 @@ if [ -n "$stale_reason" ] && systemctl is-active --quiet lm.service 2>/dev/null 
   #   - FORCE (is_force=1): footer "Update now" button / force sentinel — the
   #     operator asked, restart IMMEDIATELY, bypassing the gate (the hub's
   #     perform_update drains queues before dropping the sentinel).
-  #   - non-force (auto-update / autonomous drift backstop): consult the hub's
-  #     RESTART_ALLOWED file (1 = nobody logged in OR inside the 2am window, per
-  #     the hub's update_gate config). Restart when allowed; otherwise DEFER —
-  #     but with a 1h hard backstop (LM_WATCHDOG_STALE_BACKOFF_S, default 3600) so
-  #     a stale/buggy build can't run indefinitely behind a logged-in user (the
-  #     prior failure mode that motivated force-on-stale). The 2am window itself
-  #     allows the restart even with users logged in (window mode returns True
-  #     in-window), so the scheduled auto-update still fires.
-  # Missing RESTART_ALLOWED → 1 (fail-open = old behavior, safe). The 120s
+  #   - non-force (auto-update / version drift): consult the hub's RESTART_ALLOWED
+  #     file (1 = nobody logged in OR inside the 2am maintenance window, per the
+  #     hub's update_gate config). Restart when allowed; otherwise DEFER. There
+  #     is NO force-over backstop: the prior 1h hard backstop booted a logged-in
+  #     operator mid-day on every autobump push. Now a stale build waits until
+  #     the user logs out (RESTART_ALLOWED flips to 1) OR the 2am window opens
+  #     (window mode returns True in-window even with a user logged in, so the
+  #     scheduled auto-update still fires overnight). The yellow footer dot is
+  #     the only signal while a user stays connected outside the window.
+  # Missing RESTART_ALLOWED → 1 (fail-open = nobody-logged-in, safe). The 120s
   # cooldown + hub_healthy + is-active guards prevent a hot-loop; the fresh
   # process boots current (run_v == disk_v) so neither signal recurs.
   # KEEP IN SYNC with scripts/install-lm-watchdog.sh.
@@ -1478,21 +1480,19 @@ if [ -n "$stale_reason" ] && systemctl is-active --quiet lm.service 2>/dev/null 
       if [ "$allowed" = 1 ]; then
         _do_restart=1; fx=""
       else
-        since=$(cat "$STALE_SINCE" 2>/dev/null || echo "$now")
-        echo "$since" > "$STALE_SINCE" 2>/dev/null || true
-        backoff="${LM_WATCHDOG_STALE_BACKOFF_S:-3600}"
-        if [ $(( now - since )) -ge "$backoff" ]; then
-          _do_restart=1; fx=" [BACKSTOP >${backoff}s]"
-        else
-          _do_restart=0
-          log "stale ($stale_reason) but user logged in / outside window — deferring (since ${since}, backstop ${backoff}s)"
-        fi
+        # Deferred — a user is logged in and we're outside the maintenance
+        # window. Do NOT force over them (the prior 1h backstop booted a
+        # logged-in operator mid-day on every autobump push). The yellow footer
+        # dot already says "new version available"; the restart waits until the
+        # hub is idle (RESTART_ALLOWED flips to 1) or the 2am window opens.
+        _do_restart=0
+        log "stale ($stale_reason) but a user is logged in / outside window — deferring until idle or in-window (no force-over backstop)"
       fi
     fi
     if [ "$_do_restart" = 1 ]; then
       echo "$now" > "$STALE_TS"
       log "STALE hub ($stale_reason)$fx — clean restart to load on-disk code"
-      rm -f "$STALE_SENTINEL" "$STALE_SINCE"
+      rm -f "$STALE_SENTINEL"
       timeout 60 systemctl restart lm.service 2>/dev/null || true
       log "stale restart issued"
     fi
