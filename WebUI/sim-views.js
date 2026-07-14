@@ -5995,9 +5995,10 @@ function csVmActionLabel(a) { return CS_VM_ACTION_LABEL[a] || a; }
 
 // Operation-gated fast refresh. After a VM op (clone / delete / restart / …) the
 // table should visibly update as the VMs change or disappear, instead of waiting
-// for the ~15s telemetry cadence. This bursts loadCSData('VM Server') every few
-// seconds for a bounded window, extended while operations are still in flight
-// (window._csLiveOps has entries). It fires REGARDLESS of the Auto-refresh
+// for the ~15s telemetry cadence. This bursts loadCSData('VM Server') every 15s
+// (matching the telemetry cadence — a faster tick just re-renders stale data
+// between pulses) for a bounded window, extended while operations are still in
+// flight (window._csLiveOps has entries). It fires REGARDLESS of the Auto-refresh
 // setting — so an operator who sets Auto-refresh = Off gets a stable table that
 // only refreshes right after they act (refresh gated on an operation).
 // Idempotent: a second op just extends the window, it never stacks tickers.
@@ -6014,7 +6015,7 @@ function csVmOpFastRefresh(windowMs) {
         const opsActive = !!(window._csLiveOps && Object.keys(window._csLiveOps).length);
         if (Date.now() > window._csVmOpUntil && !opsActive) stop();  // settled → stop
     };
-    window._csVmOpTicker = setInterval(tick, 3000);
+    window._csVmOpTicker = setInterval(tick, 15000);
     tick();   // fire immediately so the first update is prompt
 }
 
