@@ -3380,6 +3380,7 @@ async function csRenderSimQuotaState() {
               </div>
             </div>
             <p class="text-xs text-slate-500 mb-3">Live SimQuotaEngine ledger — which clients are currently assigned to each effective quota. The engine tops up to the target count from the online pool each 60s sweep; amber = under-filled.</p>
+            <div class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md p-2 mb-3">⏱ <b>Changes take ≥30 minutes to fully propagate.</b> This ledger shows engine <i>intent</i> within ~60s, but clients poll their config on a cycle and Central reports alerts with ~30-min latency — so a new quota, assignment, or reset won't actually run on the client or fire an alert in Central for up to half an hour. Don't judge a change as broken before then.</div>
             ${poolLine}
             ${eff.length ? `<table class="w-full text-left">
               <thead><tr class="text-[11px] text-slate-400 uppercase tracking-wider">
