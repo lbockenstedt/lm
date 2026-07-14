@@ -4763,9 +4763,8 @@ function _renderSetupSyncTile(content) {
                         <input id="nw-sync-site" placeholder="" class="${inputCls}">
                     </div>
                 </div>
-                <div class="mt-4 flex items-center gap-3">
-                    <button onclick="saveNwDiscoveryConfig()" class="${btnCls} ml-auto">Save</button>
-                    <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
+                <div class="mt-4 flex items-center justify-end gap-3">
+                    <button onclick="saveNwDiscoveryConfig()" class="${btnCls}">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
