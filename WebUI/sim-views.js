@@ -5846,6 +5846,31 @@ const CS_VM_ACTION_LABEL = {
 };
 function csVmActionLabel(a) { return CS_VM_ACTION_LABEL[a] || a; }
 
+// Operation-gated fast refresh. After a VM op (clone / delete / restart / …) the
+// table should visibly update as the VMs change or disappear, instead of waiting
+// for the ~15s telemetry cadence. This bursts loadCSData('VM Server') every few
+// seconds for a bounded window, extended while operations are still in flight
+// (window._csLiveOps has entries). It fires REGARDLESS of the Auto-refresh
+// setting — so an operator who sets Auto-refresh = Off gets a stable table that
+// only refreshes right after they act (refresh gated on an operation).
+// Idempotent: a second op just extends the window, it never stacks tickers.
+window._csVmOpUntil = 0;
+function csVmOpFastRefresh(windowMs) {
+    window._csVmOpUntil = Date.now() + (windowMs || 60000);
+    if (window._csVmOpTicker) return;   // already bursting — window extended above
+    const stop = () => {
+        if (window._csVmOpTicker) { clearInterval(window._csVmOpTicker); window._csVmOpTicker = null; }
+    };
+    const tick = async () => {
+        if (currentSubView !== 'VM Server') { stop(); return; }   // operator left the page
+        try { await loadCSData('VM Server', currentSubChild, true); } catch (e) { /* keep bursting */ }
+        const opsActive = !!(window._csLiveOps && Object.keys(window._csLiveOps).length);
+        if (Date.now() > window._csVmOpUntil && !opsActive) stop();  // settled → stop
+    };
+    window._csVmOpTicker = setInterval(tick, 3000);
+    tick();   // fire immediately so the first update is prompt
+}
+
 window.csVmAction = async function (key, action) {
     // key is the composite spoke|host|vmid (routes to the VM's OWN host); tolerate
     // a bare vmid for any legacy caller.
@@ -5862,7 +5887,7 @@ window.csVmAction = async function (key, action) {
         await csFetch(`/${csTenant()}/spokes/${sid}/proxmox-command?tenant_id=${csTenant()}`,
             { method: 'POST', body: JSON.stringify({ action, args, target }) });
         csVmFlash(action + ' queued');
-        setTimeout(() => loadCSData('VM Server', currentSubChild, true), 800);
+        csVmOpFastRefresh();   // burst-refresh so the VM's state visibly updates
     } catch (e) { console.error('csVmAction: ' + action + ' failed', e); if (typeof showToast === 'function') showToast(action + ' failed: ' + (e.message || e), 'error'); }
 };
 
@@ -5900,7 +5925,10 @@ window.csVmBulk = async function (action) {
                 { method: 'POST', body: JSON.stringify({ action, args, target: v._host }) });
             ok++;
         } catch (e) { console.error('csVmBulk item ' + (v && v.vmid) + ' failed', e); fail++; }
-        if (typeof showToast === 'function' && items.length > 4 && (i + 1) % 5 === 0)
+        // Bulk DELETE gets a single acknowledgement (the initial + final toasts),
+        // not per-group progress chatter. Other bulk actions still show progress.
+        if (typeof showToast === 'function' && action !== 'delete_vm'
+                && items.length > 4 && (i + 1) % 5 === 0)
             showToast(`${csVmActionLabel(action)}… ${i + 1}/${items.length}`, 'info');
         await new Promise(r => setTimeout(r, 250));
     }
@@ -5908,7 +5936,10 @@ window.csVmBulk = async function (action) {
         if (fail) showToast(`${action}: ${ok} queued, ${fail} failed`, 'error');
         else csVmFlash(`${action} queued for ${ok} VM(s)`);
     }
-    setTimeout(() => loadCSData('VM Server', currentSubChild, true), 1000);
+    // Burst-refresh so the batch visibly drains. Scale the window to the batch
+    // size (a 48-VM delete takes a while), capped at 5min; live-op events extend
+    // it further while any teardown is still running.
+    csVmOpFastRefresh(Math.min(300000, 45000 + items.length * 4000));
 };
 
 // Best-effort expiry of in-flight commands for the selected proxmox host before
