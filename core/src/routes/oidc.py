@@ -21,11 +21,32 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 import html as _html
 
 
-def _sso_error_page(message: str, status: int = 401) -> HTMLResponse:
+def _friendly_title(detail: str) -> str:
+    """Map an OIDC error to a plain-language headline (the technical detail is
+    shown below it)."""
+    d = (detail or "").lower()
+    if "mfa" in d or "multi-factor" in d:
+        return "MFA misconfigured"
+    if "allowed group" in d or "not a member" in d:
+        return "Access denied"
+    if "certificate" in d or "private key" in d or "x5t" in d:
+        return "SSO certificate error"
+    if "token exchange" in d or "aadsts" in d or "rejected" in d:
+        return "Microsoft rejected the sign-in"
+    if "state" in d or "expired" in d or "verified" in d:
+        return "Sign-in session expired"
+    if "not configured" in d or "no id_token" in d or "oid claim" in d:
+        return "SSO configuration error"
+    return "Sign-in couldn’t complete"
+
+
+def _sso_error_page(detail: str, status: int = 401, title: str | None = None) -> HTMLResponse:
     """A styled sign-in-error page (matches the LM look: HPE-green accent, card,
     light/dark aware) instead of a raw JSON ``{detail}`` — the OIDC callback is a
-    browser navigation, so an error would otherwise dump JSON at the user."""
-    msg = _html.escape(str(message or "Sign-in could not be completed."))
+    browser navigation, so an error would otherwise dump JSON at the user. Shows a
+    plain-language ``title`` headline with the actual error ``detail`` beneath."""
+    heading = _html.escape(title or _friendly_title(detail))
+    msg = _html.escape(str(detail or "Sign-in could not be completed."))
     page = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sign-in error</title><style>
@@ -39,8 +60,9 @@ body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Hel
 .body{padding:2rem}
 .icon{width:52px;height:52px;border-radius:50%;background:#fef2f2;color:#dc2626;display:flex;align-items:center;
  justify-content:center;font-size:28px;font-weight:700;margin:0 auto 1.1rem}
-h1{font-size:1.15rem;font-weight:700;color:#263040;text-align:center;margin:0 0 .6rem}
-p{font-size:.9rem;line-height:1.55;text-align:center;color:#475569;margin:0 0 1.5rem;white-space:pre-line}
+h1{font-size:1.2rem;font-weight:700;color:#263040;text-align:center;margin:0 0 1rem}
+.detail{font-size:.82rem;line-height:1.55;color:#475569;background:#f8fafc;border:1px solid #e2e8f0;
+ border-radius:8px;padding:.75rem .9rem;margin:0 0 1.5rem;white-space:pre-line;word-break:break-word}
 a.btn{display:block;text-align:center;background:#01A982;color:#fff;text-decoration:none;font-weight:700;
  padding:.75rem 1rem;border-radius:8px;font-size:.9rem}
 a.btn:hover{background:#018f6f}
@@ -48,17 +70,18 @@ a.btn:hover{background:#018f6f}
 @media (prefers-color-scheme:dark){
  body{background:#0f172a;color:#cbd5e1}
  .card{background:#1e293b;border-color:#334155}
- h1{color:#f1f5f9}p{color:#94a3b8}
+ h1{color:#f1f5f9}
+ .detail{color:#cbd5e1;background:#0f172a;border-color:#334155}
  .icon{background:#3f1d1d;color:#f87171}
 }
 </style></head><body>
 <div class="card"><div class="bar"></div><div class="body">
 <div class="icon">!</div>
-<h1>Sign-in couldn&rsquo;t complete</h1>
-<p>__MSG__</p>
+<h1>__TITLE__</h1>
+<div class="detail">__MSG__</div>
 <a class="btn" href="/">Return to login</a>
 <div class="tag">Microsoft Entra SSO</div>
-</div></div></body></html>""".replace("__MSG__", msg)
+</div></div></body></html>""".replace("__TITLE__", heading).replace("__MSG__", msg)
     return HTMLResponse(content=page, status_code=status)
 
 from api import (
