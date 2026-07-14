@@ -5595,10 +5595,12 @@ function _renderSettingsAzureNsgTile(content) {
                 </div>
                 <div id="nsg-entries" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto"></div>
             </div>
-            <div class="mt-4 flex items-center gap-3">
-                <button onclick="saveAzureNsg()" id="nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
-                <button onclick="testAzureNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+            <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="nsg-msg" class="text-xs text-slate-400"></span>
+                <div class="flex items-center gap-3">
+                    <button onclick="testAzureNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="saveAzureNsg()" id="nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
+                </div>
             </div>
         </div>`;
     loadAzureNsg();
