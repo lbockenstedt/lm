@@ -5570,8 +5570,6 @@ function _renderSettingsSsoTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Application (client) ID</label><input id="oidc-client" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Redirect URI</label><input id="oidc-redirect" type="text" placeholder="https://your-hub/auth/oidc/callback" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Allowed group (object ID, optional)</label><input id="oidc-group" type="text" placeholder="Entra group object ID — gate access" class="${inputCls}"></div>
-                <div class="space-y-1"><label class="${labelCls}">Client certificate path (on hub)</label><input id="oidc-cert" type="text" placeholder="blank = hub default (writable state dir)" class="${inputCls}"></div>
-                <div class="space-y-1"><label class="${labelCls}">Client private-key path (on hub)</label><input id="oidc-key" type="text" placeholder="blank = hub default (writable state dir)" class="${inputCls}"></div>
             </div>
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
                 <div class="flex items-center justify-between gap-2 flex-wrap">
@@ -5589,7 +5587,7 @@ function _renderSettingsSsoTile(content) {
                 <button onclick="saveOidcConfig()" id="oidc-save-btn" class="${btnCls}">Save SSO Config</button>
                 <span id="oidc-save-msg" class="text-xs text-slate-400"></span>
             </div>
-            <p class="text-[11px] text-slate-400 mt-2">The private key is referenced by <em>path</em> only — key material is never stored or read by the WebUI. In Entra: register the app, add the redirect URI above, upload the certificate, and grant Graph <code>GroupMember.Read.All</code> for the &gt;200-group fallback.</p>
+            <p class="text-[11px] text-slate-400 mt-2">The certificate + key are <em>auto-managed on the hub</em> (Generate above) — the WebUI never sees the key material. In Entra: register the app, add the redirect URI above, upload the generated certificate, and grant Graph <code>Group.Read.All</code> (app) for the group picker + the <code>GroupMember.Read.All</code> &gt;200-group fallback. Advanced: override the location with <code>LM_OIDC_DIR</code> / <code>LM_OIDC_CLIENT_KEY</code>.</p>
         </div>`;
     loadOidcConfig();
 }
@@ -5606,7 +5604,6 @@ async function loadOidcConfig() {
         chk('oidc-mfa', cfg.require_mfa !== false);
         set('oidc-tenant', cfg.tenant_id); set('oidc-client', cfg.client_id);
         set('oidc-redirect', cfg.redirect_uri); set('oidc-group', cfg.allowed_group);
-        set('oidc-cert', cfg.cert_path); set('oidc-key', cfg.key_path);
         const pill = document.getElementById('oidc-state-pill');
         if (pill) {
             pill.textContent = cfg.enabled ? 'ENABLED' : 'DISABLED';
@@ -5669,7 +5666,7 @@ async function saveOidcConfig() {
         require_mfa: !!document.getElementById('oidc-mfa')?.checked,
         tenant_id: v('oidc-tenant'), client_id: v('oidc-client'),
         redirect_uri: v('oidc-redirect'), allowed_group: v('oidc-group'),
-        cert_path: v('oidc-cert'), key_path: v('oidc-key'),
+        // cert/key paths are auto-managed (hub default dir); not editable here.
     };
     if (config.enabled && (!config.tenant_id || !config.client_id)) {
         if (typeof showToast === 'function') showToast('Tenant ID and Client ID are required to enable SSO', 'error');

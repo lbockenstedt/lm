@@ -233,15 +233,17 @@ def register(app, hub, ctx):
         try:
             data = await request.json()
             config = data.get("config", {}) or {}
-            # Whitelist stored fields — the private key is a PATH/ref only, never
-            # the key material itself (Phase 3 routes this through Key Vault).
+            # Whitelist stored fields. cert_path/key_path are intentionally NOT
+            # stored from the UI — they're auto-managed at the hub default dir
+            # (default_oidc_dir → <data_dir>/oidc, LM_OIDC_DIR/LM_OIDC_CLIENT_* env
+            # still override). Omitting them here also CLEARS any stale stored path
+            # (this dict replaces the whole oidc config), so a value left over from
+            # the old /etc/lm default can't linger and break generation.
             clean = {
                 "enabled": bool(config.get("enabled", False)),
                 "tenant_id": str(config.get("tenant_id") or "").strip(),
                 "client_id": str(config.get("client_id") or "").strip(),
                 "redirect_uri": str(config.get("redirect_uri") or "").strip(),
-                "cert_path": str(config.get("cert_path") or "").strip(),
-                "key_path": str(config.get("key_path") or "").strip(),
                 "allowed_group": str(config.get("allowed_group") or "").strip(),
                 "require_mfa": bool(config.get("require_mfa", True)),
             }
