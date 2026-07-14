@@ -1109,9 +1109,14 @@ def create_app(hub):
         # (routes/templates.py), not by a session: the backup upload/progress
         # (upload token) and the refresh download/refresh-progress (refresh token).
         # Exact shape only: /api/templates/{id}/{upload,progress,download,refresh-progress}.
+        # NOTE: "/refresh-progress" must be listed explicitly — it does NOT match
+        # endswith("/progress") (it ends with "-progress"), so without this the
+        # agent's refresh status/success reports get 401'd by this middleware and
+        # the hub never learns the pull finished → the WebUI shows a generic fail
+        # even when the restore actually succeeded.
         if path.startswith("/api/templates/") and (
                 path.endswith("/upload") or path.endswith("/progress")
-                or path.endswith("/download")):
+                or path.endswith("/download") or path.endswith("/refresh-progress")):
             return await call_next(request)
 
         sess = _session_user(request)
