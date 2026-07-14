@@ -1615,7 +1615,7 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates, azure_nsg,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes,
     )
     setup.register(app, hub, ctx)
     firewall.register(app, hub, ctx)
@@ -1635,6 +1635,7 @@ def create_app(hub):
     auth.register(app, hub, ctx)
     oidc.register(app, hub, ctx)
     azure_nsg.register(app, hub, ctx)
+    cloud_nac_routes.register(app, hub, ctx)
     setup_misc.register(app, hub, ctx)
     agents.register(app, hub, ctx)
     net_services.register(app, hub, ctx)
