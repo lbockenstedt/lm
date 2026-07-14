@@ -38,6 +38,37 @@ def rsa_key():
 
 
 @pytest.fixture(scope="module")
+def rsa_cert(rsa_key):
+    """Self-signed cert PEM for rsa_key — build_client_assertion needs it to set
+    the Entra x5t header."""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes
+    import datetime as _dt
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "lm-hub-oidc-test")])
+    now = _dt.datetime.now(_dt.timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(rsa_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - _dt.timedelta(minutes=5))
+            .not_valid_after(now + _dt.timedelta(days=365))
+            .sign(rsa_key, hashes.SHA256()))
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
+def _write_keypair(tmp_path, rsa_key, rsa_cert):
+    """Write key + cert to tmp_path, return (key_path, cert_path) as strings."""
+    key_path = tmp_path / "client.key"
+    key_path.write_bytes(rsa_key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption()))
+    cert_path = tmp_path / "client.crt"
+    cert_path.write_bytes(rsa_cert)
+    return str(key_path), str(cert_path)
+
+
+@pytest.fixture(scope="module")
 def jwks(rsa_key):
     pub = rsa_key.public_key().public_numbers()
     def _b64u(n):
@@ -172,14 +203,15 @@ def test_state_cookie_accepts_rotation_history(monkeypatch):
     assert oidc.verify_state_cookie(hub, f"{old_payload}.{sig}") == ("st", "nc", "cv")
 
 
-def test_client_assertion_is_valid_rs256_jwt(rsa_key, tmp_path):
-    key_path = tmp_path / "client.key"
-    key_path.write_bytes(rsa_key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
-        serialization.NoEncryption()))
-    cfg = oidc.OidcConfig({"tenant_id": "tid", "client_id": "cid", "key_path": str(key_path)})
+def test_client_assertion_is_valid_rs256_jwt(rsa_key, rsa_cert, tmp_path):
+    key_path, cert_path = _write_keypair(tmp_path, rsa_key, rsa_cert)
+    cfg = oidc.OidcConfig({"tenant_id": "tid", "client_id": "cid",
+                           "key_path": key_path, "cert_path": cert_path})
     tok_endpoint = "https://login.microsoftonline.com/tid/oauth2/v2.0/token"
     assertion = oidc.build_client_assertion(cfg, tok_endpoint)
+    # Entra requires the cert thumbprint in the header.
+    assert jwt.get_unverified_header(assertion).get("x5t") == \
+        oidc.cert_thumbprint_x5t(rsa_cert)
     decoded = jwt.decode(assertion, rsa_key.public_key(), algorithms=["RS256"],
                           audience=tok_endpoint)
     assert decoded["iss"] == "cid" and decoded["sub"] == "cid"
@@ -301,7 +333,8 @@ def _mount_oidc_config(hub, **kw):
     hub.state.system_state.setdefault("global_config", {})["oidc"] = {
         "enabled": True, "tenant_id": "tid", "client_id": "cid",
         "redirect_uri": "https://hub.example/auth/oidc/callback",
-        "key_path": kw["key_path"], "allowed_group": kw.get("allowed_group", ""),
+        "key_path": kw["key_path"], "cert_path": kw.get("cert_path", ""),
+        "allowed_group": kw.get("allowed_group", ""),
         "require_mfa": kw.get("require_mfa", True),
     }
 
@@ -339,14 +372,11 @@ def _parse_nonce_from_redirect(location: str) -> str:
     return parse_qs(urlparse(location).query)["nonce"][0]
 
 
-def test_callback_happy_path_provisions_and_sets_cookie(rsa_key, jwks, tmp_path, monkeypatch):
-    key_path = tmp_path / "client.key"
-    key_path.write_bytes(rsa_key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
-        serialization.NoEncryption()))
+def test_callback_happy_path_provisions_and_sets_cookie(rsa_key, rsa_cert, jwks, tmp_path, monkeypatch):
+    key_path, cert_path = _write_keypair(tmp_path, rsa_key, rsa_cert)
     system_state = {"permission_groups": _groups_state()}
     client, hub = _build(system_state)
-    _mount_oidc_config(hub, key_path=str(key_path))
+    _mount_oidc_config(hub, key_path=key_path, cert_path=cert_path)
 
     # Stub the module-level httpx clients the routes use to hit the MockTransport.
     holder = {"nonce": None}
@@ -392,13 +422,10 @@ def test_callback_happy_path_provisions_and_sets_cookie(rsa_key, jwks, tmp_path,
     assert body["permissions"].get("nw")
 
 
-def test_callback_refuses_when_mfa_missing(rsa_key, jwks, tmp_path, monkeypatch):
-    key_path = tmp_path / "client.key"
-    key_path.write_bytes(rsa_key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
-        serialization.NoEncryption()))
+def test_callback_refuses_when_mfa_missing(rsa_key, rsa_cert, jwks, tmp_path, monkeypatch):
+    key_path, cert_path = _write_keypair(tmp_path, rsa_key, rsa_cert)
     client, hub = _build({"permission_groups": _groups_state()})
-    _mount_oidc_config(hub, key_path=str(key_path))
+    _mount_oidc_config(hub, key_path=key_path, cert_path=cert_path)
     holder = {"nonce": None}
     transport = _mock_transport(rsa_key, jwks,
         id_token_factory=lambda: _make_id_token(
@@ -468,7 +495,13 @@ def test_setup_oidc_config_admin_only_and_persists(tmp_path):
     assert r.status_code == 200
     ck = r.cookies.get("lm_session")
     got = client.get("/setup/oidc-config", cookies={"lm_session": ck})
-    assert got.status_code == 200 and got.json() == {"config": {}}
+    assert got.status_code == 200
+    gj = got.json()
+    assert gj["config"] == {}
+    # New: the GET also reports cert/key presence so the form can prompt to
+    # generate. Nothing on disk here → both absent.
+    assert gj["cert_status"]["key_present"] is False
+    assert gj["cert_status"]["cert_present"] is False
     r2 = client.post("/setup/oidc-config", cookies={"lm_session": ck},
                      json={"config": {"enabled": True, "tenant_id": "tid",
                                       "client_id": "cid", "redirect_uri": "u",
@@ -479,3 +512,35 @@ def test_setup_oidc_config_admin_only_and_persists(tmp_path):
     # The key material itself is never stored (only the path ref — and not echoed
     # as a secret): confirm no surprise secret fields appear.
     assert "client_secret" not in hub.state.system_state["global_config"]["oidc"]
+
+def test_default_oidc_dir_uses_hub_data_dir(monkeypatch, tmp_path):
+    """Default cert dir derives from the hub's WRITABLE state data_dir (not the
+    non-writable /etc/lm), with LM_OIDC_DIR overriding."""
+    monkeypatch.delenv("LM_OIDC_DIR", raising=False)
+
+    class _S:
+        data_dir = str(tmp_path / "state")
+
+    class _H:
+        state = _S()
+
+    assert oidc.default_oidc_dir(_H()) == str(tmp_path / "state" / "oidc")
+    monkeypatch.setenv("LM_OIDC_DIR", "/custom/oidc")
+    assert oidc.default_oidc_dir(_H()) == "/custom/oidc"
+
+
+def test_generate_client_cert_writes_and_refuses_overwrite(tmp_path, monkeypatch):
+    monkeypatch.delenv("LM_OIDC_DIR", raising=False)
+    kp = tmp_path / "d" / "key.pem"
+    cp = tmp_path / "d" / "cert.pem"
+    res = oidc.generate_client_cert(key_path=str(kp), cert_path=str(cp))
+    assert kp.exists() and cp.exists()
+    assert res["key_path"] == str(kp) and res["cert_path"] == str(cp)
+    assert res["thumbprint"] == oidc.cert_thumbprint_x5t(cp.read_bytes())
+    # 0600 on the key.
+    assert (kp.stat().st_mode & 0o777) == 0o600
+    # Refuses to clobber an existing key without force.
+    with pytest.raises(oidc.OidcError):
+        oidc.generate_client_cert(key_path=str(kp), cert_path=str(cp))
+    # force overwrites.
+    oidc.generate_client_cert(key_path=str(kp), cert_path=str(cp), force=True)

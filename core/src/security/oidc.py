@@ -48,13 +48,32 @@ logger = logging.getLogger("Hub")
 _DEFAULT_SCOPE = "openid profile email offline_access"
 _STATE_TTL_S = 300  # the OIDC round-trip must complete within 5 minutes
 
-# Conventional on-host location for the Entra client cert + key. Used as the
-# DEFAULT for key_path/cert_path when the admin hasn't set one (auto-detect), and
-# as the target of the "Generate certificate" action (auto-create). Override the
-# directory with LM_OIDC_DIR.
-_OIDC_DIR = (os.environ.get("LM_OIDC_DIR") or "/etc/lm/oidc").strip() or "/etc/lm/oidc"
-_DEFAULT_KEY_PATH = os.path.join(_OIDC_DIR, "client-key.pem")
-_DEFAULT_CERT_PATH = os.path.join(_OIDC_DIR, "client-cert.pem")
+# Default on-host location for the Entra client cert + key — used when the admin
+# hasn't set a path (auto-detect) and as the target of "Generate certificate"
+# (auto-create). It MUST be writable by the hub's service user, which does NOT
+# own /etc/lm, so the default is derived from the hub's own (write-tested) state
+# data_dir — see ``default_oidc_dir``. LM_OIDC_DIR overrides everything. The
+# module-level ``_OIDC_DIR`` is only the no-hub fallback (tests / bare imports).
+_OIDC_DIR = (os.environ.get("LM_OIDC_DIR") or "/var/lib/lm/oidc").strip() or "/var/lib/lm/oidc"
+
+
+def default_oidc_dir(hub=None) -> str:
+    """Resolve the writable directory for the OIDC cert/key.
+
+    Precedence: ``LM_OIDC_DIR`` env → ``<hub state data_dir>/oidc`` (guaranteed
+    writable — the state manager write-tests it with a home-dir fallback) →
+    ``_OIDC_DIR``. Deriving from ``data_dir`` is what keeps "Generate certificate"
+    from hitting EACCES on ``/etc/lm`` for a non-root hub."""
+    env = (os.environ.get("LM_OIDC_DIR") or "").strip()
+    if env:
+        return env
+    try:
+        dd = getattr(getattr(hub, "state", None), "data_dir", "") or ""
+        if dd:
+            return os.path.join(dd, "oidc")
+    except Exception:  # noqa: BLE001
+        pass
+    return _OIDC_DIR
 
 
 class OidcError(Exception):
@@ -71,9 +90,12 @@ class OidcConfig:
     re-point the hub at a different tenant without the WebUI. ``enabled``
     requires ``tenant_id`` + ``client_id`` + ``key_path`` to be truthy."""
 
-    def __init__(self, stored: dict | None = None):
+    def __init__(self, stored: dict | None = None, default_dir: str | None = None):
         stored = stored or {}
         env = os.environ
+        _dir = (default_dir or _OIDC_DIR)
+        _def_key = os.path.join(_dir, "client-key.pem")
+        _def_cert = os.path.join(_dir, "client-cert.pem")
         self.tenant_id = (env.get("LM_OIDC_TENANT_ID") or stored.get("tenant_id") or "").strip()
         self.client_id = (env.get("LM_OIDC_CLIENT_ID") or stored.get("client_id") or "").strip()
         self.redirect_uri = (env.get("LM_OIDC_REDIRECT_URI") or stored.get("redirect_uri") or "").strip()
@@ -81,9 +103,9 @@ class OidcConfig:
         # runs "Generate certificate" (or drops the files there) never has to type
         # a path — auto-detected. An explicit env/stored value still wins.
         self.cert_path = (env.get("LM_OIDC_CLIENT_CERT") or stored.get("cert_path")
-                          or "").strip() or _DEFAULT_CERT_PATH
+                          or "").strip() or _def_cert
         self.key_path = (env.get("LM_OIDC_CLIENT_KEY") or stored.get("key_path")
-                         or "").strip() or _DEFAULT_KEY_PATH
+                         or "").strip() or _def_key
         self.allowed_group = (env.get("LM_OIDC_ALLOWED_GROUP") or stored.get("allowed_group") or "").strip()
         self.require_mfa = _bool_env(env.get("LM_OIDC_REQUIRE_MFA"),
                                      stored.get("require_mfa", True))
@@ -116,7 +138,7 @@ def get_oidc_config(hub) -> OidcConfig:
         stored = hub.state.system_state.get("global_config", {}).get("oidc", {}) or {}
     except Exception:  # noqa: BLE001 — hub without state (tests)
         stored = {}
-    return OidcConfig(stored)
+    return OidcConfig(stored, default_dir=default_oidc_dir(hub))
 
 
 # ── PKCE + state cookie ─────────────────────────────────────────────────────
@@ -271,8 +293,8 @@ def generate_client_cert(key_path: str | None = None, cert_path: str | None = No
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import rsa
     import datetime as _dt
-    key_path = key_path or _DEFAULT_KEY_PATH
-    cert_path = cert_path or _DEFAULT_CERT_PATH
+    key_path = key_path or os.path.join(_OIDC_DIR, "client-key.pem")
+    cert_path = cert_path or os.path.join(_OIDC_DIR, "client-cert.pem")
     if os.path.exists(key_path) and not force:
         raise OidcError(f"a private key already exists at {key_path}; "
                         f"pass force=true to overwrite it")

@@ -5570,15 +5570,15 @@ function _renderSettingsSsoTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Application (client) ID</label><input id="oidc-client" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Redirect URI</label><input id="oidc-redirect" type="text" placeholder="https://your-hub/auth/oidc/callback" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Allowed group (object ID, optional)</label><input id="oidc-group" type="text" placeholder="Entra group object ID — gate access" class="${inputCls}"></div>
-                <div class="space-y-1"><label class="${labelCls}">Client certificate path (on hub)</label><input id="oidc-cert" type="text" placeholder="/etc/lm/oidc/client-cert.pem" class="${inputCls}"></div>
-                <div class="space-y-1"><label class="${labelCls}">Client private-key path (on hub)</label><input id="oidc-key" type="text" placeholder="/etc/lm/oidc/client-key.pem" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Client certificate path (on hub)</label><input id="oidc-cert" type="text" placeholder="blank = hub default (writable state dir)" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Client private-key path (on hub)</label><input id="oidc-key" type="text" placeholder="blank = hub default (writable state dir)" class="${inputCls}"></div>
             </div>
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
                 <div class="flex items-center justify-between gap-2 flex-wrap">
                     <div class="text-xs text-slate-600"><span class="font-bold">Client certificate</span> <span id="oidc-cert-status" class="text-slate-400">checking…</span></div>
                     <button onclick="generateOidcCert()" id="oidc-gen-btn" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Generate certificate</button>
                 </div>
-                <p class="text-[11px] text-slate-400 mt-1">Auto-creates a self-signed keypair on the hub (default <code>/etc/lm/oidc</code>). This is a client credential Entra matches by thumbprint — it is <em>not</em> a TLS/LE cert. Upload the generated certificate below to the Entra app registration → Certificates &amp; secrets → Certificates.</p>
+                <p class="text-[11px] text-slate-400 mt-1">Auto-creates a self-signed keypair on the hub (in the hub's writable state directory by default — no root/<code>/etc</code> access needed). This is a client credential Entra matches by thumbprint — it is <em>not</em> a TLS/LE cert. Upload the generated certificate below to the Entra app registration → Certificates &amp; secrets → Certificates.</p>
                 <div id="oidc-cert-output" class="hidden mt-2">
                     <div class="text-[11px] text-slate-500 mb-1">Thumbprint (x5t): <code id="oidc-cert-thumb" class="text-slate-700"></code></div>
                     <label class="text-[11px] text-slate-500">Certificate to upload to Entra (public — safe to copy):</label>
@@ -5622,7 +5622,7 @@ async function loadOidcConfig() {
             } else if (st.key_present && !st.cert_present) {
                 cs.innerHTML = `<span class="text-amber-600 font-semibold">key present, cert missing</span> — regenerate to produce both (${escapeHtml(st.cert_path || '')})`;
             } else {
-                cs.innerHTML = `<span class="text-red-600 font-semibold">not found</span> at ${escapeHtml(st.key_path || '/etc/lm/oidc/client-key.pem')} — click Generate certificate`;
+                cs.innerHTML = `<span class="text-red-600 font-semibold">not found</span> at ${escapeHtml(st.key_path || '(hub default)')} — click Generate certificate`;
             }
         }
         const gen = document.getElementById('oidc-gen-btn');
