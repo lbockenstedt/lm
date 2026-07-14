@@ -493,14 +493,23 @@ def verify_id_token(cfg: OidcConfig, id_token: str, nonce: str,
             amr = [amr]
         amr_l = {str(a).strip().lower() for a in amr}
         if not (amr_l & _MFA_AMR_VALUES):
+            # Surface the other auth signals Entra DID send so a misconfig is
+            # diagnosable: acr/acrs (auth-context), and auth_time≈iat proves the
+            # sign-in was FRESH (prompt=login worked) vs a reused silent session.
+            now = int(time.time())
+            at = claims.get("auth_time")
+            fresh = "fresh" if (isinstance(at, int) and now - at < 300) else "reused-session"
+            diag = (f"amr={sorted(amr_l) or '[]'}, acr={claims.get('acr')!r}, "
+                    f"acrs={claims.get('acrs')}, auth={fresh}")
             raise OidcError(
-                "MFA required — this sign-in did not perform multi-factor "
-                f"authentication (amr={sorted(amr_l) or '[]'}). Having MFA on the "
-                "account isn't enough; a Conditional Access policy (or security "
-                "defaults) must FORCE MFA for this app so Entra actually challenges "
-                "it. Check the Entra sign-in log's 'Authentication requirement', or "
-                "turn off 'Require MFA' in Setup → SSO if you rely on Entra to "
-                "enforce it.")
+                "MFA required — this sign-in did not report multi-factor "
+                f"authentication ({diag}). Having MFA on the account isn't enough; "
+                "a Conditional Access policy (or security defaults) must FORCE MFA "
+                "for THIS app so Entra actually challenges it. If auth=reused-session "
+                "the hub isn't sending prompt=login yet (restart it). If auth=fresh "
+                "but amr is still empty, Entra isn't stamping amr for this app — "
+                "either use an Authentication Context (acrs), or turn off 'Require "
+                "MFA' in Setup → SSO and rely on Conditional Access to enforce it.")
     return claims
 
 
