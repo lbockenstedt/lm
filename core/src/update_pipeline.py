@@ -556,14 +556,40 @@ class UpdatePipelineMixin:
         ``force`` marks a user-initiated restart (the footer Update button): the
         watchdog restarts IMMEDIATELY, bypassing the logged-in-users idle guard.
         A non-force (auto-update / stale-recovery) sentinel is deferred by the
-        watchdog while users are actively logged in (up to its max-defer).
-        Best-effort; never raises. Overridable via LM_STALE_RESTART_SENTINEL."""
+        watchdog while users are actively logged in.
+        Best-effort; never raises. Overridable via LM_STALE_RESTART_SENTINEL.
+
+        Never DOWNGRADE a pending force sentinel: ``check_update_health`` runs in
+        the SAME repo_sync cycle right after ``perform_update`` and would
+        otherwise overwrite the footer-Update ``force update->restart`` sentinel
+        with a non-force ``stale vX->vY`` — the watchdog then never sees the
+        force and defers while a user is logged in, so the Update button
+        silently fails to restart. The in-process ``lm-update-restart`` helper is
+        also unreliable here (killed before it can systemd-run the restart), so
+        the watchdog sentinel is the path that actually has to fire. Log every
+        write/preserve at INFO so the restart decision is visible in the hub
+        log / WebUI Logs view (an Update click that didn't restart is otherwise
+        invisible — only the watchdog's deferred-non-force line shows)."""
         try:
             path = os.environ.get("LM_STALE_RESTART_SENTINEL",
                                   self._STALE_RESTART_SENTINEL)
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            if not force:
+                try:
+                    with open(path, "r") as f:
+                        if f.read().startswith("force "):
+                            logger.info(
+                                "[update-restart] keeping pending FORCE sentinel "
+                                "(non-force %r would downgrade it) — watchdog will "
+                                "force-restart regardless of logged-in users", reason)
+                            return
+                except FileNotFoundError:
+                    pass
+            body = f"{'force ' if force else ''}{reason}\n"
             with open(path, "w") as f:
-                f.write(f"{'force ' if force else ''}{reason}\n")
+                f.write(body)
+            logger.info("[update-restart] watchdog sentinel written: %s%s",
+                        "FORCE " if force else "", reason)
         except Exception as e:  # noqa: BLE001 — signalling is best-effort
             logger.debug("watchdog-restart sentinel write failed: %s", e)
 
@@ -1507,12 +1533,12 @@ class UpdatePipelineMixin:
             # gate allows (nobody logged in, or inside the maintenance window) OR
             # when forced ("Update now" button — operator asked). A stale-reload
             # (serving stale code) is NO LONGER force — it goes through the same
-            # gate + the non-force watchdog sentinel below, whose 1h hard backstop
-            # (LM_WATCHDOG_STALE_BACKOFF_S) guarantees a stale/buggy build still
-            # reloads within 1h even behind a logged-in user (the prior failure
-            # mode that motivated force-on-stale). Otherwise DEFER: the non-force
-            # watchdog sentinel below carries the request and the external
-            # lm-watchdog fires it once idle/in-window.
+            # gate + the non-force watchdog sentinel below, which the watchdog
+            # fires once the hub is idle or the 2am window opens (there is NO
+            # force-over backstop — a stale build waits rather than booting a
+            # logged-in operator mid-day; the yellow footer dot is the signal).
+            # Otherwise DEFER: the non-force watchdog sentinel below carries the
+            # request and the external lm-watchdog fires it once idle/in-window.
             _restart_now = bool(force) or self._gate_allows_restart_now()
             if _restart_now:
                 logger.info("Hub was updated. Scheduling self-restart via transient unit...")
@@ -1557,11 +1583,13 @@ class UpdatePipelineMixin:
             # FORCE ONLY when the caller explicitly forced (manual "Update now"
             # / "Sync now" button — operator wants it now). A stale-reload (process
             # behind disk) is NON-force: the watchdog gates it on RESTART_ALLOWED
-            # (idle / 2am window) with a 1h hard backstop (LM_WATCHDOG_STALE_BACKOFF_S)
-            # so a stale/buggy build still reloads within 1h even behind a logged-in
-            # user, but a routine autobump no longer boots a logged-in operator
-            # mid-day. A routine auto hub_updated is also NON-force. See the
-            # restart-gating rationale in check_update_health above.
+            # (idle / 2am window) with NO force-over backstop, so a stale/buggy
+            # build waits until the hub is idle or the 2am window opens rather than
+            # booting a logged-in operator mid-day. A routine auto hub_updated is
+            # also NON-force. _request_watchdog_restart preserves a pending force
+            # so check_update_health's later non-force stale sentinel can't clobber
+            # a footer-Update force (the bug that made Update silently not restart).
+            # See the restart-gating rationale in check_update_health above.
             self._request_watchdog_restart(
                 "update->restart" if hub_updated else "stale-reload->restart",
                 force=bool(force))

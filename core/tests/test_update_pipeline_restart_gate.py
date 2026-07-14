@@ -75,6 +75,27 @@ def test_non_force_sentinel_has_no_force_prefix():
     assert "update->restart" in body
 
 
+def test_non_force_does_not_downgrade_existing_force_sentinel():
+    """check_update_health runs in the SAME repo_sync cycle right after
+    perform_update and would overwrite the footer-Update ``force update->restart``
+    sentinel with a non-force ``stale vX->vY`` — the watchdog then sees non-force
+    and DEFERS while a user is logged in, so the Update button silently fails to
+    restart (the in-process lm-update-restart is also unreliable). A non-force
+    write MUST preserve an existing force sentinel rather than downgrade it."""
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "stale-sentinel")
+        os.environ["LM_STALE_RESTART_SENTINEL"] = path
+        try:
+            _mixin()._request_watchdog_restart("update->restart", force=True)
+            _mixin()._request_watchdog_restart("stale v1->v2", force=False)
+            body = open(path).read()
+        finally:
+            os.environ.pop("LM_STALE_RESTART_SENTINEL", None)
+    assert body.startswith("force "), body
+    assert "update->restart" in body
+    assert "stale v1->v2" not in body
+
+
 # ── force= call-site invariants (regression guards) ─────────────────────────
 
 def test_check_update_health_stale_sentinel_is_non_force():
