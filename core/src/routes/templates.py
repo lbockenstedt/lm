@@ -340,22 +340,27 @@ def register(app, hub, ctx):
     @app.post("/tenant/templates/refresh-hosts")
     async def refresh_templates_by_host(request: Request):
         """Fleet multi-select refresh (VM Server / VMs): refresh the template on
-        each selected PXMX host. Body: ``{spoke_ids: [...]}``. For each host we
-        resolve its latest complete template (by source_spoke), enforce tenant
-        ownership, and orchestrate the destructive refresh. Returns a per-host
-        result so the UI can toast successes + skips."""
+        each selected PXMX host. Body: ``{host_ids: [...]}`` (the agent hostname /
+        node — unique per host); ``{spoke_ids: [...]}`` still accepted for older
+        clients. For each host we resolve its latest complete template by
+        ``source_agent``/``source_node`` (NOT source_spoke — several hosts share
+        one cs spoke, so a spoke-scoped lookup would refresh the wrong host),
+        enforce tenant ownership, and orchestrate the destructive refresh."""
         sess = _session_user(request)
         try:
             body = await request.json()
         except Exception:
             body = {}
-        spoke_ids = body.get("spoke_ids") or []
-        if not isinstance(spoke_ids, list) or not spoke_ids:
-            raise HTTPException(status_code=400, detail="spoke_ids (non-empty list) required")
+        host_ids = body.get("host_ids") or []
+        by_host = bool(host_ids)
+        ids = host_ids if by_host else (body.get("spoke_ids") or [])
+        if not isinstance(ids, list) or not ids:
+            raise HTTPException(status_code=400, detail="host_ids (non-empty list) required")
         results = []
-        for sid in spoke_ids:
+        for sid in ids:
             sid = str(sid or "")
-            rec = _repo().latest_complete_for_spoke(sid)
+            rec = (_repo().latest_complete_for_host(sid) if by_host
+                   else _repo().latest_complete_for_spoke(sid))
             if rec is None:
                 results.append({"spoke_id": sid, "status": "SKIPPED",
                                 "message": "no completed template backup for this host"})
