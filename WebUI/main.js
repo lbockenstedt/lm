@@ -16344,16 +16344,16 @@ function showAddDeviceModal(editTypeKey, editItem) {
     modal.id = 'device-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
                 <h3 class="text-lg font-bold text-[#263040]">${editItem ? 'Edit' : 'Add'} Managed Device</h3>
                 <button onclick="closeDeviceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
-            <div class="p-6 space-y-4">
+            <div class="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Device Name</label><input type="text" id="dev-name" placeholder="e.g. Core Firewall" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Module Type</label><select id="dev-type" ${editItem ? 'disabled' : ''} onchange="_onDeviceTypeChange()" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${typeKeys.map(k => `<option value="${k}"${k === editTypeKey ? ' selected' : ''}>${DEVICE_TYPES[k].title}</option>`).join('')}</select></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="dev-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
-                <div id="dev-fields" class="space-y-4"></div>
+                <div class="space-y-2 md:col-span-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="dev-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                <div id="dev-fields" class="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4"></div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
