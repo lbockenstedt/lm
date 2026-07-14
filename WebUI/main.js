@@ -5578,8 +5578,11 @@ function _renderSettingsSsoTile(content) {
                 </div>
                 <p class="text-[11px] text-slate-400 mt-1">Auto-creates a self-signed keypair on the hub (in the hub's writable state directory by default — no root/<code>/etc</code> access needed). This is a client credential Entra matches by thumbprint — it is <em>not</em> a TLS/LE cert. Upload the generated certificate below to the Entra app registration → Certificates &amp; secrets → Certificates.</p>
                 <div id="oidc-cert-output" class="hidden mt-2">
-                    <div class="text-[11px] text-slate-500 mb-1">Thumbprint (x5t): <code id="oidc-cert-thumb" class="text-slate-700"></code></div>
-                    <label class="text-[11px] text-slate-500">Certificate to upload to Entra (public — safe to copy):</label>
+                    <div class="flex items-center justify-between gap-2 mb-1">
+                        <div class="text-[11px] text-slate-500">Thumbprint (x5t): <code id="oidc-cert-thumb" class="text-slate-700"></code></div>
+                        <button type="button" onclick="downloadOidcCert()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-[11px] font-bold">Download .cer</button>
+                    </div>
+                    <label class="text-[11px] text-slate-500"><span class="font-semibold">Download</span> the certificate above and upload the <em>file</em> to Entra → App registration → Certificates &amp; secrets → Certificates (Entra takes a file, not pasted text). This is the <em>public</em> cert — never upload the private key.</label>
                     <textarea id="oidc-cert-pem" readonly rows="6" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-2 py-1 text-[11px] font-mono"></textarea>
                 </div>
             </div>
@@ -5625,6 +5628,26 @@ async function loadOidcConfig() {
         const gen = document.getElementById('oidc-gen-btn');
         if (gen) gen.textContent = (st.key_present) ? 'Regenerate certificate' : 'Generate certificate';
     } catch (e) { console.error('loadOidcConfig failed', e); }
+}
+
+// Entra's "Upload certificate" takes a FILE (.cer/.pem/.crt), not pasted text —
+// download the public cert as a file so it uploads cleanly (and there's no chance
+// of grabbing the private key by mistake).
+function downloadOidcCert() {
+    const pem = (document.getElementById('oidc-cert-pem')?.value || '').trim();
+    if (!pem || pem.indexOf('BEGIN CERTIFICATE') < 0) {
+        showToast('Generate the certificate first', 'info');
+        return;
+    }
+    const blob = new Blob([pem + '\n'], { type: 'application/x-x509-ca-cert' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'lm-oidc-cert.cer';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 async function generateOidcCert() {
