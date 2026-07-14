@@ -5573,6 +5573,18 @@ function _renderSettingsSsoTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Client certificate path (on hub)</label><input id="oidc-cert" type="text" placeholder="/etc/lm/oidc/client-cert.pem" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Client private-key path (on hub)</label><input id="oidc-key" type="text" placeholder="/etc/lm/oidc/client-key.pem" class="${inputCls}"></div>
             </div>
+            <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+                <div class="flex items-center justify-between gap-2 flex-wrap">
+                    <div class="text-xs text-slate-600"><span class="font-bold">Client certificate</span> <span id="oidc-cert-status" class="text-slate-400">checking…</span></div>
+                    <button onclick="generateOidcCert()" id="oidc-gen-btn" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Generate certificate</button>
+                </div>
+                <p class="text-[11px] text-slate-400 mt-1">Auto-creates a self-signed keypair on the hub (default <code>/etc/lm/oidc</code>). This is a client credential Entra matches by thumbprint — it is <em>not</em> a TLS/LE cert. Upload the generated certificate below to the Entra app registration → Certificates &amp; secrets → Certificates.</p>
+                <div id="oidc-cert-output" class="hidden mt-2">
+                    <div class="text-[11px] text-slate-500 mb-1">Thumbprint (x5t): <code id="oidc-cert-thumb" class="text-slate-700"></code></div>
+                    <label class="text-[11px] text-slate-500">Certificate to upload to Entra (public — safe to copy):</label>
+                    <textarea id="oidc-cert-pem" readonly rows="6" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-2 py-1 text-[11px] font-mono"></textarea>
+                </div>
+            </div>
             <div class="mt-4 flex items-center gap-3">
                 <button onclick="saveOidcConfig()" id="oidc-save-btn" class="${btnCls}">Save SSO Config</button>
                 <span id="oidc-save-msg" class="text-xs text-slate-400"></span>
@@ -5601,7 +5613,51 @@ async function loadOidcConfig() {
             pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' +
                 (cfg.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500');
         }
+        // Cert status: whether the key/cert files exist on the hub + thumbprint.
+        const st = data.cert_status || {};
+        const cs = document.getElementById('oidc-cert-status');
+        if (cs) {
+            if (st.key_present && st.cert_present) {
+                cs.innerHTML = `<span class="text-green-600 font-semibold">ready</span> — ${st.cert_path || ''} · x5t <code>${escapeHtml(st.thumbprint || '')}</code>`;
+            } else if (st.key_present && !st.cert_present) {
+                cs.innerHTML = `<span class="text-amber-600 font-semibold">key present, cert missing</span> — regenerate to produce both (${escapeHtml(st.cert_path || '')})`;
+            } else {
+                cs.innerHTML = `<span class="text-red-600 font-semibold">not found</span> at ${escapeHtml(st.key_path || '/etc/lm/oidc/client-key.pem')} — click Generate certificate`;
+            }
+        }
+        const gen = document.getElementById('oidc-gen-btn');
+        if (gen) gen.textContent = (st.key_present) ? 'Regenerate certificate' : 'Generate certificate';
     } catch (e) { console.error('loadOidcConfig failed', e); }
+}
+
+async function generateOidcCert() {
+    const btn = document.getElementById('oidc-gen-btn');
+    const regenerating = btn && /regenerate/i.test(btn.textContent || '');
+    if (regenerating && !window.confirm('Overwrite the existing OIDC private key? Any cert already uploaded to Entra will stop working until you upload the new one.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+    try {
+        const res = await setupFetch('/setup/oidc-config/generate-cert', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ force: !!regenerating }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(d.detail || ('HTTP ' + res.status));
+        // Reveal the cert to upload + thumbprint; refresh paths in the form.
+        const out = document.getElementById('oidc-cert-output');
+        if (out) out.classList.remove('hidden');
+        const thumb = document.getElementById('oidc-cert-thumb');
+        if (thumb) thumb.textContent = d.thumbprint || '';
+        const pem = document.getElementById('oidc-cert-pem');
+        if (pem) pem.value = d.cert_pem || '';
+        const setV = (id, v) => { const el = document.getElementById(id); if (el && v) el.value = v; };
+        setV('oidc-cert', d.cert_path); setV('oidc-key', d.key_path);
+        showToast('Certificate generated — upload it to Entra (Certificates & secrets → Certificates).', 'success');
+        loadOidcConfig();
+    } catch (e) {
+        showToast('Generate certificate failed: ' + (e.message || e), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; loadOidcConfig(); }
+    }
 }
 
 async function saveOidcConfig() {

@@ -48,6 +48,14 @@ logger = logging.getLogger("Hub")
 _DEFAULT_SCOPE = "openid profile email offline_access"
 _STATE_TTL_S = 300  # the OIDC round-trip must complete within 5 minutes
 
+# Conventional on-host location for the Entra client cert + key. Used as the
+# DEFAULT for key_path/cert_path when the admin hasn't set one (auto-detect), and
+# as the target of the "Generate certificate" action (auto-create). Override the
+# directory with LM_OIDC_DIR.
+_OIDC_DIR = (os.environ.get("LM_OIDC_DIR") or "/etc/lm/oidc").strip() or "/etc/lm/oidc"
+_DEFAULT_KEY_PATH = os.path.join(_OIDC_DIR, "client-key.pem")
+_DEFAULT_CERT_PATH = os.path.join(_OIDC_DIR, "client-cert.pem")
+
 
 class OidcError(Exception):
     """Raised for any OIDC-flow failure the callback should surface as 401/400.
@@ -69,8 +77,13 @@ class OidcConfig:
         self.tenant_id = (env.get("LM_OIDC_TENANT_ID") or stored.get("tenant_id") or "").strip()
         self.client_id = (env.get("LM_OIDC_CLIENT_ID") or stored.get("client_id") or "").strip()
         self.redirect_uri = (env.get("LM_OIDC_REDIRECT_URI") or stored.get("redirect_uri") or "").strip()
-        self.cert_path = (env.get("LM_OIDC_CLIENT_CERT") or stored.get("cert_path") or "").strip()
-        self.key_path = (env.get("LM_OIDC_CLIENT_KEY") or stored.get("key_path") or "").strip()
+        # Paths default to the conventional /etc/lm/oidc location so an admin who
+        # runs "Generate certificate" (or drops the files there) never has to type
+        # a path — auto-detected. An explicit env/stored value still wins.
+        self.cert_path = (env.get("LM_OIDC_CLIENT_CERT") or stored.get("cert_path")
+                          or "").strip() or _DEFAULT_CERT_PATH
+        self.key_path = (env.get("LM_OIDC_CLIENT_KEY") or stored.get("key_path")
+                         or "").strip() or _DEFAULT_KEY_PATH
         self.allowed_group = (env.get("LM_OIDC_ALLOWED_GROUP") or stored.get("allowed_group") or "").strip()
         self.require_mfa = _bool_env(env.get("LM_OIDC_REQUIRE_MFA"),
                                      stored.get("require_mfa", True))
@@ -221,6 +234,70 @@ def authorize_url(cfg: OidcConfig, discovery_doc: dict,
 
 # ── client assertion (cert-based confidential client) ───────────────────────
 
+def cert_thumbprint_x5t(cert_pem: bytes) -> str:
+    """``x5t`` header value Entra requires: base64url( SHA-1( DER(cert) ) ).
+
+    Entra maps a ``client_assertion`` to the uploaded certificate by this
+    thumbprint; omit it and Entra rejects the assertion (AADSTS700027)."""
+    from cryptography import x509
+    cert = x509.load_pem_x509_certificate(cert_pem)
+    der = cert.public_bytes(serialization.Encoding.DER)
+    return base64.urlsafe_b64encode(hashlib.sha1(der).digest()).rstrip(b"=").decode()
+
+
+def _write_file(path: str, data: bytes, mode: int) -> None:
+    """Write ``data`` to ``path`` with ``mode`` perms, creating parent dirs."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    os.chmod(path, mode)
+
+
+def generate_client_cert(key_path: str | None = None, cert_path: str | None = None,
+                         subject: str = "lm-hub-oidc", days: int = 730,
+                         force: bool = False) -> dict:
+    """Auto-create the Entra client cert: a fresh RSA-2048 keypair + self-signed
+    certificate written to ``key_path`` (unencrypted PEM, 0600) and ``cert_path``
+    (public PEM, 0644). Returns ``{key_path, cert_path, cert_pem, thumbprint}`` —
+    the caller uploads ``cert_pem`` to the Entra app registration (Certificates &
+    secrets → Certificates). Refuses to clobber an existing key unless ``force``
+    (so a live credential isn't silently replaced)."""
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    import datetime as _dt
+    key_path = key_path or _DEFAULT_KEY_PATH
+    cert_path = cert_path or _DEFAULT_CERT_PATH
+    if os.path.exists(key_path) and not force:
+        raise OidcError(f"a private key already exists at {key_path}; "
+                        f"pass force=true to overwrite it")
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject)])
+    now = _dt.datetime.now(_dt.timezone.utc)
+    cert = (x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - _dt.timedelta(minutes=5))
+            .not_valid_after(now + _dt.timedelta(days=days))
+            .sign(key, hashes.SHA256()))
+    key_pem = key.private_bytes(serialization.Encoding.PEM,
+                                serialization.PrivateFormat.TraditionalOpenSSL,
+                                serialization.NoEncryption())
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    _write_file(key_path, key_pem, 0o600)
+    _write_file(cert_path, cert_pem, 0o644)
+    logger.info("generated OIDC client cert: key=%s cert=%s (valid %dd)",
+                key_path, cert_path, days)
+    return {"key_path": key_path, "cert_path": cert_path,
+            "cert_pem": cert_pem.decode(), "thumbprint": cert_thumbprint_x5t(cert_pem)}
+
+
 def _load_private_key(key_path: str):
     """Load the PEM-encoded RSA/EC private key used to sign the client
     assertion. Accepts an unencrypted PEM (the key file's perms / Key Vault
@@ -255,8 +332,19 @@ def build_client_assertion(cfg: OidcConfig, token_endpoint: str) -> str:
         "exp": now + 300,
         "nbf": now,
     }
+    # Entra REQUIRES the cert thumbprint in the JWT header (``x5t``) so it can map
+    # this assertion to the uploaded certificate — without it the token request is
+    # rejected (AADSTS700027). Load the public cert (path or Key Vault ref) to
+    # compute it. Fail loudly if we can't: a silently-omitted x5t is a confusing
+    # server-side reject.
+    from .credential_store import resolve_private_key_material
+    cert_pem = resolve_private_key_material(cfg.cert_path) if cfg.cert_path else None
+    if not cert_pem:
+        raise OidcError("could not load OIDC client certificate from %r "
+                        "(needed for the Entra x5t header)" % cfg.cert_path)
+    headers = {"x5t": cert_thumbprint_x5t(cert_pem)}
     # PyJWT picks RS256 from a cryptography RSA/EC private key automatically.
-    return jwt.encode(payload, key, algorithm="RS256")
+    return jwt.encode(payload, key, algorithm="RS256", headers=headers)
 
 
 # ── code exchange ───────────────────────────────────────────────────────────

@@ -28,7 +28,9 @@ from security.oidc import (
     fetch_jwks, fetch_member_groups_via_graph, get_oidc_config,
     provision_or_sync_entra_user, sign_state_cookie, verify_id_token,
     verify_state_cookie, authorize_url, build_user_data,
+    generate_client_cert, cert_thumbprint_x5t,
 )
+from security.credential_store import resolve_private_key_material
 
 _STATE_COOKIE = "lm_oidc_state"
 _STATE_TTL_S = 300
@@ -145,10 +147,63 @@ def register(app, hub, ctx):
     async def get_oidc_config_route():
         hub = app.state.hub
         config = hub.state.system_state.get("global_config", {}).get("oidc", {})
-        # Never echo the private-key path? It's a path, not the key material —
-        # safe to return so the admin form can show the current value. The key
-        # itself is never stored here.
-        return {"config": config}
+        # The stored config holds PATHS only (never key material). Resolve the
+        # EFFECTIVE key/cert paths (with the /etc/lm/oidc auto-detect defaults) and
+        # report whether each file is present + the cert thumbprint, so the form
+        # can show "cert ready / generate needed" and the value to upload to Entra.
+        cfg = get_oidc_config(hub)
+        status = {"key_path": cfg.key_path, "cert_path": cfg.cert_path,
+                  "key_present": False, "cert_present": False, "thumbprint": ""}
+        try:
+            status["key_present"] = bool(resolve_private_key_material(cfg.key_path))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            cert_pem = resolve_private_key_material(cfg.cert_path) if cfg.cert_path else None
+            if cert_pem:
+                status["cert_present"] = True
+                status["thumbprint"] = cert_thumbprint_x5t(cert_pem)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"config": config, "cert_status": status}
+
+    @app.post("/setup/oidc-config/generate-cert")
+    async def generate_oidc_cert(request: Request):
+        """Auto-create the Entra client cert (self-signed RSA-2048) at the
+        configured/effective key+cert paths, and persist those paths. Returns the
+        public ``cert_pem`` + ``thumbprint`` to upload to the Entra app
+        registration. Refuses to overwrite an existing key unless ``{force:true}``.
+        Admin-gated via the ``/setup/`` middleware."""
+        hub = app.state.hub
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        force = bool((data or {}).get("force"))
+        cfg = get_oidc_config(hub)
+        try:
+            res = generate_client_cert(key_path=cfg.key_path, cert_path=cfg.cert_path,
+                                       force=force)
+        except OidcError as e:
+            # Existing key without force → 409 so the UI can prompt "overwrite?".
+            raise HTTPException(status_code=409, detail=str(e))
+        except PermissionError as e:
+            raise HTTPException(status_code=500,
+                detail=(f"cannot write to {cfg.key_path} — the hub process needs "
+                        f"write access to that directory: {e}"))
+        except Exception as e:  # noqa: BLE001
+            logger.exception("generate_oidc_cert failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        # Persist the resolved paths so the stored config reflects what's on disk.
+        gc = hub.state.system_state.get("global_config", {})
+        oidc = dict(gc.get("oidc", {}) or {})
+        oidc["key_path"] = res["key_path"]
+        oidc["cert_path"] = res["cert_path"]
+        gc["oidc"] = oidc
+        hub.state.system_state["global_config"] = gc
+        hub.state.save_state()
+        return {"status": "ok", "key_path": res["key_path"], "cert_path": res["cert_path"],
+                "thumbprint": res["thumbprint"], "cert_pem": res["cert_pem"]}
 
     @app.post("/setup/oidc-config")
     async def update_oidc_config(request: Request):
