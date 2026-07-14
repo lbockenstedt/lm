@@ -8656,16 +8656,18 @@ async function showGroupModal(groupId) {
     modal.id = 'group-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
             <div class="shrink-0 px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">${groupId ? 'Edit' : 'New'} Permission Group</h3>
                 <button onclick="closeGroupModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4 overflow-y-auto flex-1 min-h-0">
                 <input type="hidden" id="grp-id" value="${groupId || ''}">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name</label><input type="text" id="grp-name" value="${g.name || ''}" placeholder="e.g. NOC Operators" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Description</label><input type="text" id="grp-desc" value="${g.description || ''}" placeholder="Optional" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Directory Group <span class="text-slate-400 normal-case font-normal">(optional — Entra group object ID or LDAP DN; maps a directory group to this bundle + its tenant scope)</span></label>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Group Name</label><input type="text" id="grp-name" value="${g.name || ''}" placeholder="e.g. NOC Operators" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
+                    <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Description</label><input type="text" id="grp-desc" value="${g.description || ''}" placeholder="Optional" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
+                </div>
+                <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Directory Group <span class="text-slate-400 normal-case font-normal">(optional — Entra group object ID or LDAP DN; maps a directory group to this bundle + its tenant scope)</span></label>
                     <div class="flex gap-2">
                         <input type="text" id="grp-ldap" value="${g.ldap_group || ''}" placeholder="Entra object ID or cn=noc,ou=groups,dc=example,dc=com" class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 font-mono">
                         <button type="button" onclick="loadEntraGroupPicker()" id="grp-entra-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">Pick from Entra</button>
@@ -8673,8 +8675,10 @@ async function showGroupModal(groupId) {
                     <select id="grp-entra-select" onchange="onEntraGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
                     <p id="grp-entra-msg" class="text-[11px] text-amber-600 hidden"></p>
                 </div>
-                <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Tenant Scope <span class="text-slate-400 normal-case font-normal">(optional — grants tenant access to members; pairs with Entra/LDAP group login)</span></label><div class="grid grid-cols-2 gap-1 mt-2 max-h-36 overflow-y-auto pr-1">${tenantRows}</div></div>
-                <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Permissions</label><div class="grid grid-cols-4 gap-x-4 gap-y-1 mt-2">${rightRows}</div></div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 border-t border-slate-200 pt-3">
+                    <div><label class="text-xs text-slate-500 uppercase font-bold">Tenant Scope <span class="text-slate-400 normal-case font-normal">(optional — grants tenant access to members)</span></label><div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 mt-2 max-h-56 overflow-y-auto pr-1">${tenantRows}</div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold">Permissions</label><div class="grid grid-cols-2 gap-x-4 gap-y-1 mt-2">${rightRows}</div></div>
+                </div>
             </div>
             <div class="shrink-0 px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="closeGroupModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
