@@ -17,7 +17,49 @@ Plus ``/setup/oidc-config`` (admin-only via the ``/setup/`` gate) mirroring
 """
 from __future__ import annotations
 
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
+import html as _html
+
+
+def _sso_error_page(message: str, status: int = 401) -> HTMLResponse:
+    """A styled sign-in-error page (matches the LM look: HPE-green accent, card,
+    light/dark aware) instead of a raw JSON ``{detail}`` — the OIDC callback is a
+    browser navigation, so an error would otherwise dump JSON at the user."""
+    msg = _html.escape(str(message or "Sign-in could not be completed."))
+    page = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign-in error</title><style>
+:root{color-scheme:light dark}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+ background:#f1f5f9;color:#334155;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:1rem}
+.card{background:#fff;border:1px solid #e2e8f0;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.08);
+ max-width:460px;width:100%;overflow:hidden}
+.bar{height:4px;background:#01A982}
+.body{padding:2rem}
+.icon{width:52px;height:52px;border-radius:50%;background:#fef2f2;color:#dc2626;display:flex;align-items:center;
+ justify-content:center;font-size:28px;font-weight:700;margin:0 auto 1.1rem}
+h1{font-size:1.15rem;font-weight:700;color:#263040;text-align:center;margin:0 0 .6rem}
+p{font-size:.9rem;line-height:1.55;text-align:center;color:#475569;margin:0 0 1.5rem;white-space:pre-line}
+a.btn{display:block;text-align:center;background:#01A982;color:#fff;text-decoration:none;font-weight:700;
+ padding:.75rem 1rem;border-radius:8px;font-size:.9rem}
+a.btn:hover{background:#018f6f}
+.tag{font-size:.72rem;color:#94a3b8;text-align:center;margin-top:1.1rem;letter-spacing:.04em;text-transform:uppercase}
+@media (prefers-color-scheme:dark){
+ body{background:#0f172a;color:#cbd5e1}
+ .card{background:#1e293b;border-color:#334155}
+ h1{color:#f1f5f9}p{color:#94a3b8}
+ .icon{background:#3f1d1d;color:#f87171}
+}
+</style></head><body>
+<div class="card"><div class="bar"></div><div class="body">
+<div class="icon">!</div>
+<h1>Sign-in couldn&rsquo;t complete</h1>
+<p>__MSG__</p>
+<a class="btn" href="/">Return to login</a>
+<div class="tag">Microsoft Entra SSO</div>
+</div></div></body></html>""".replace("__MSG__", msg)
+    return HTMLResponse(content=page, status_code=status)
 
 from api import (
     HTTPException, Request, _SESSION_TTL, _cookie_secure, _record_session,
@@ -81,24 +123,24 @@ def register(app, hub, ctx):
         hub = app.state.hub
         cfg = get_oidc_config(hub)
         if not cfg.enabled or not cfg.ready:
-            raise HTTPException(status_code=404, detail="OIDC not configured")
+            return _sso_error_page("Single sign-on is not configured on this hub.", 404)
         # Entra surfaces auth errors as ?error=… on the redirect.
         err = request.query_params.get("error")
         if err:
-            raise HTTPException(
-                status_code=401,
-                detail=f"Entra denied login: {err} ({request.query_params.get('error_description', '')})")
+            desc = request.query_params.get("error_description", "")
+            return _sso_error_page(f"Microsoft rejected the sign-in.\n{err}"
+                                   + (f" — {desc}" if desc else ""), 401)
         code = request.query_params.get("code", "")
         qstate = request.query_params.get("state", "")
         if not code or not qstate:
-            raise HTTPException(status_code=400, detail="missing code/state")
+            return _sso_error_page("The sign-in response was incomplete — please try again.", 400)
         cookie = request.cookies.get(_STATE_COOKIE, "")
         triple = verify_state_cookie(hub, cookie)
         if not triple:
-            raise HTTPException(status_code=400, detail="invalid or expired OIDC state")
+            return _sso_error_page("Your sign-in session expired. Please start again.", 400)
         c_state, nonce, code_verifier = triple
         if not hmac_eq(c_state, qstate):
-            raise HTTPException(status_code=400, detail="state mismatch")
+            return _sso_error_page("The sign-in request could not be verified. Please try again.", 400)
         try:
             discovery = await discover(cfg)
             tokens = await exchange_code(cfg, discovery, code, code_verifier)
@@ -146,12 +188,12 @@ def register(app, hub, ctx):
             return resp
         except OidcError as e:
             logger.warning("OIDC callback refused: %s", e)
-            raise HTTPException(status_code=401, detail=str(e))
-        except HTTPException:
-            raise
+            return _sso_error_page(str(e), 401)
+        except HTTPException as he:
+            return _sso_error_page(str(he.detail), he.status_code)
         except Exception as e:  # noqa: BLE001
             logger.exception("OIDC callback failed")
-            raise HTTPException(status_code=500, detail=f"OIDC login failed: {e}")
+            return _sso_error_page(f"Sign-in failed: {e}", 500)
 
     # ── Admin: OIDC configuration (mirror /setup/ldap-config) ────────────────
     # /setup/* is admin-only via the access-control middleware; no extra gate.
