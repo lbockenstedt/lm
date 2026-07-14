@@ -1214,7 +1214,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'SSO', 'Azure NSG', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
+    settings: ['General', 'User Access', 'SSO', 'Azure NSG', 'Cloud NAC', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3593,6 +3593,14 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
+    // Cloud NAC — JIT Entra account provisioning for sim 1X clients (reuses the
+    // SSO app cert). Config + manual provision/sweep here; the engine drives the
+    // automatic path. Admin-only.
+    if (subMenu === 'Cloud NAC') {
+        _renderSettingsCloudNacTile(content);
+        return;
+    }
+
     if (subMenu === 'Hub Status') {
         content.innerHTML = `
             <div class="space-y-4">
@@ -5560,6 +5568,128 @@ function _renderSetupGeneralTile(content) {
 // Admin config for Entra ID SSO — enable it, set tenant/client/cert/group/MFA.
 // Reads/writes /setup/oidc-config (core/src/routes/oidc.py); env LM_OIDC_* wins
 // over stored values. Enabling shows the "Sign in with Microsoft" login button.
+// ── Settings → Cloud NAC (JIT Entra provisioning for sim 1X clients) ────────
+function _renderSettingsCloudNacTile(content) {
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Cloud NAC — JIT Entra accounts</h3>
+                <span id="cn-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">When the engine moves a sim client onto a <b>1X SSID</b>, the hub creates an Entra account for that user, sets a random password, and delivers it to the client as its 802.1X password. Idle accounts (no sign-in for <b>Idle days</b>) are swept + deleted. Reuses the <b>SSO Entra app</b> cert — the app needs Graph <b>User.ReadWrite.All</b> + <b>AuditLog.Read.All</b> (Application) consented, and Entra ID P1 for the sign-in-activity sweep.</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="cn-enabled" class="w-4 h-4 text-green-600 rounded">Enable Cloud NAC provisioning</label>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">UPN domain</label><input id="cn-domain" type="text" placeholder="ssplm.onmicrosoft.com" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Idle days (delete after)</label><input id="cn-idle" type="number" placeholder="7" class="${inputCls}"></div>
+            </div>
+            <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Test provision</div>
+                <div class="flex gap-2">
+                    <input id="cn-test-user" type="text" placeholder="username (e.g. cschmidt)" class="${inputCls} font-mono text-xs flex-1">
+                    <button type="button" onclick="provisionCloudNac()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Provision</button>
+                </div>
+                <p id="cn-test-out" class="text-[11px] font-mono text-slate-600 mt-1 break-all"></p>
+            </div>
+            <div class="mt-4">
+                <div class="flex items-center justify-between mb-1">
+                    <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Provisioned accounts <span id="cn-count" class="text-slate-400 font-normal"></span></div>
+                    <button type="button" onclick="sweepCloudNac()" class="text-[#01A982] hover:underline text-xs font-bold">Sweep idle now</button>
+                </div>
+                <div id="cn-accounts" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto text-xs"></div>
+            </div>
+            <div class="mt-4 flex items-center justify-between gap-3">
+                <span id="cn-msg" class="text-xs text-slate-400"></span>
+                <button onclick="saveCloudNac()" id="cn-save-btn" class="${btnCls}">Save</button>
+            </div>
+        </div>`;
+    loadCloudNac();
+}
+
+async function loadCloudNac() {
+    try {
+        const r = await setupFetch('/setup/cloud-nac');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
+        const el = document.getElementById('cn-enabled'); if (el) el.checked = !!c.enabled;
+        set('cn-domain', c.domain); set('cn-idle', c.idle_days || 7);
+        const pill = document.getElementById('cn-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        const cnt = document.getElementById('cn-count'); if (cnt) cnt.textContent = `(${d.count || 0})`;
+        const box = document.getElementById('cn-accounts');
+        if (box) {
+            const accts = d.accounts || [];
+            box.innerHTML = accts.length ? accts.map(a => `
+              <div class="flex items-center gap-2 px-2 py-1">
+                <span class="font-mono text-slate-700 w-40 shrink-0 truncate" title="${escapeHtml(a.upn || a.username)}">${escapeHtml(a.username)}</span>
+                <span class="text-slate-400 flex-1 truncate" title="provisioned ${escapeHtml(a.provisioned_at || '')}">${escapeHtml(a.upn || '')}</span>
+                <button type="button" onclick="deprovisionCloudNac('${escapeHtml(a.username)}')" title="Delete Entra account" class="text-red-500 hover:text-red-700 font-bold px-1">✕</button>
+              </div>`).join('')
+              : '<div class="text-slate-400 italic px-2 py-2">No accounts provisioned yet.</div>';
+        }
+    } catch (e) { console.error('loadCloudNac failed', e); }
+}
+
+function _cloudNacFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    return {
+        enabled: !!document.getElementById('cn-enabled')?.checked,
+        domain: v('cn-domain'), idle_days: parseInt(v('cn-idle'), 10) || 7,
+    };
+}
+
+async function saveCloudNac() {
+    const btn = document.getElementById('cn-save-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const r = await setupFetch('/setup/cloud-nac', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _cloudNacFormConfig() }) });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || ('HTTP ' + r.status)); }
+        showToast('Cloud NAC config saved.', 'success');
+        loadCloudNac();
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
+}
+
+async function provisionCloudNac() {
+    const user = (document.getElementById('cn-test-user')?.value || '').trim().toLowerCase();
+    const out = document.getElementById('cn-test-out');
+    if (!user) { showToast('Enter a username', 'info'); return; }
+    if (out) out.textContent = 'Provisioning…';
+    try {
+        const r = await setupFetch('/setup/cloud-nac/provision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        if (out) out.textContent = `${d.created ? 'Created' : 'Reset'} ${d.upn} — password: ${d.password}  (shown once)`;
+        showToast(`${d.created ? 'Created' : 'Reset'} ${d.upn}`, 'success');
+        loadCloudNac();
+    } catch (e) { if (out) out.textContent = ''; showToast('Provision failed: ' + (e.message || e), 'error'); }
+}
+
+async function deprovisionCloudNac(username) {
+    if (!window.confirm(`Delete the Entra account for ${username}?`)) return;
+    try {
+        const r = await setupFetch('/setup/cloud-nac/deprovision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        showToast(`Deleted ${username}`, 'success');
+        loadCloudNac();
+    } catch (e) { showToast('Delete failed: ' + (e.message || e), 'error'); }
+}
+
+async function sweepCloudNac() {
+    const msg = document.getElementById('cn-msg');
+    if (msg) msg.textContent = 'Sweeping…';
+    try {
+        const r = await setupFetch('/setup/cloud-nac/sweep', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        showToast(`Sweep: ${d.deleted || 0} idle account(s) deleted.`, 'success');
+        if (msg) msg.textContent = `Swept — ${d.deleted || 0} deleted of ${(d.results || []).length}`;
+        loadCloudNac();
+    } catch (e) { showToast('Sweep failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = ''; }
+}
+
 // ── Settings → Azure NSG (alias-style allow-list) ───────────────────────────
 // Manage one allow rule in an Azure NSG as an IP allow-list. Reuses the SSO
 // Entra app's cert for ARM auth (Network Contributor role required). Admin-only.
