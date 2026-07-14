@@ -57,16 +57,19 @@ def register(app, hub, ctx):
         all_vms  = vms_r.get("vms", [])
         sessions_list = sessions_r.get("sessions", sessions_r.get("data", []))
         # Scope the VM + active-session counts by the tenant's subnets so the
-        # dashboard matches the (tenant-scoped) hypervisor + Access Tracker
-        # views, not the global totals. No prefixes (unbound tenant) or the
-        # module's subnet-filter toggle off → global count. VMs filter on their
-        # ``ips`` list (a VM with no concrete IPs, e.g. stopped, is shown — can't
-        # filter, err on showing).
+        # dashboard matches the (tenant-scoped) hypervisor + Access Tracker views,
+        # not the global totals. VMs filter on their ``ips`` list (a VM with no
+        # concrete IPs, e.g. stopped, is shown — can't filter, err on showing).
         sess_prefixes = await _resolve_prefixes_for_tenant(hub, scoping.get("tenant_id"))
         if sess_prefixes and _filter_enabled(hub, "hypervisor"):
             all_vms = filter_items_by_prefixes(all_vms, sess_prefixes, ["ips"])
-        if sess_prefixes:
-            sessions_list = filter_items_by_prefixes(sessions_list, sess_prefixes, ["ip"])
+        # NAC sessions come from the SHARED (global) nac spoke — CPPM_GET_ACCESS_TRACKER
+        # returns every tenant's sessions, so subnet scoping is the ONLY isolation.
+        # A tenant with no bound prefixes must therefore show 0, NOT the global list
+        # (else every unbound tenant shows the same cross-tenant total). Strict,
+        # matching the tenant-bound hypervisor VM isolation.
+        sessions_list = (filter_items_by_prefixes(sessions_list, sess_prefixes, ["ip"])
+                         if sess_prefixes else [])
         vms      = sum(1 for v in all_vms if v.get("status") == "running")
         sessions = len(sessions_list)
 
