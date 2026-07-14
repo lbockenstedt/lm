@@ -250,6 +250,14 @@ def authorize_url(cfg: OidcConfig, discovery_doc: dict,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
+    # When MFA is enforced, force a FRESH interactive sign-in (``prompt=login``).
+    # Entra only stamps the ``amr`` claim (incl. "mfa") when it actually performs
+    # the auth this request — a token minted from an existing SSO session comes
+    # back with an EMPTY ``amr`` and the MFA check then (wrongly) rejects it. This
+    # makes Entra re-authenticate so amr reflects THIS sign-in. (Still needs a CA
+    # policy / security defaults to REQUIRE mfa for the app so it's actually done.)
+    if cfg.require_mfa:
+        params["prompt"] = "login"
     return endpoint + "?" + "&".join(f"{k}={_url_quote(str(v), safe='')}"
                                      for k, v in params.items())
 
