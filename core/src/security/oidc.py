@@ -473,18 +473,34 @@ def verify_id_token(cfg: OidcConfig, id_token: str, nonce: str,
     # Nonce binds the token to this round-trip.
     if claims.get("nonce") != nonce:
         raise OidcError("nonce mismatch — id_token replay suspected")
-    # MFA hard-enforcement. Entra emits ``amr`` as a list (e.g. ["pwd","mfa"]).
+    # MFA hard-enforcement. Entra reports the auth methods in ``amr`` (e.g.
+    # ["pwd","mfa"]). "mfa" is the classic value, but phishing-resistant /
+    # passwordless factors — which ARE multi-factor — surface under different
+    # amr values: "ngcmfa" (Windows Hello / passkey), "fido" (FIDO2 key), "otp"
+    # (TOTP / one-time passcode). Accept any of those so a stronger sign-in isn't
+    # rejected as "no MFA". "pwd" alone never counts.
     if cfg.require_mfa:
         amr = claims.get("amr") or []
         if not isinstance(amr, list):
             amr = [amr]
-        if "mfa" not in amr:
+        amr_l = {str(a).strip().lower() for a in amr}
+        if not (amr_l & _MFA_AMR_VALUES):
             raise OidcError(
-                "MFA required — Entra did not report multi-factor authentication "
-                "for this login (amr had no 'mfa'). Either require MFA in Entra "
-                "(Conditional Access / security defaults) so it actually performs "
-                "it, or turn off 'Require MFA' in Setup → SSO.")
+                "MFA required — this sign-in did not perform multi-factor "
+                f"authentication (amr={sorted(amr_l) or '[]'}). Having MFA on the "
+                "account isn't enough; a Conditional Access policy (or security "
+                "defaults) must FORCE MFA for this app so Entra actually challenges "
+                "it. Check the Entra sign-in log's 'Authentication requirement', or "
+                "turn off 'Require MFA' in Setup → SSO if you rely on Entra to "
+                "enforce it.")
     return claims
+
+
+# amr values that indicate a genuine second / phishing-resistant factor was used:
+# "mfa" (classic multi-factor), "ngcmfa" (Windows Hello / passkey), "fido" (FIDO2
+# key), "otp" (one-time passcode). "pwd"/"wia" (password / Kerberos) are
+# single-factor and deliberately EXCLUDED so they never satisfy the requirement.
+_MFA_AMR_VALUES = {"mfa", "ngcmfa", "fido", "otp"}
 
 
 def extract_member_groups(claims: dict) -> list:
