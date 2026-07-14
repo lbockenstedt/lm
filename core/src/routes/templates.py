@@ -17,6 +17,7 @@ endpoint → the hub writes it to disk, verifies size/sha256, and marks it compl
 import hashlib
 import os
 import shutil
+import time
 
 from api import HTTPException, Request, logger
 
@@ -520,6 +521,16 @@ def register(app, hub, ctx):
         if not _repo().verify_refresh_token(tid, token):
             raise HTTPException(status_code=403, detail="invalid refresh token")
 
+    def _refresh_hosts_registry():
+        """In-memory per-host refresh state, keyed ``"<tid>|<agent_id>"``. The
+        agent's progress posts carry host/agent_id/vmid/bytes/total so the fleet
+        UI can show WHICH host is at WHICH step (+ download progress) instead of
+        the single template-scoped ``refresh_status`` shared across concurrent
+        target hosts. Lost on hub restart (refreshes are short-lived)."""
+        if not getattr(hub, "template_refresh_hosts", None):
+            hub.template_refresh_hosts = {}
+        return hub.template_refresh_hosts
+
     @app.get("/api/templates/{tid}/download")
     async def download_template(tid: str, request: Request):
         """Stream a stored archive to the target agent during a refresh
@@ -543,6 +554,42 @@ def register(app, hub, ctx):
         except Exception:
             body = {}
         status = str(body.get("status") or "restoring")
-        _repo().set_refresh_status(tid, status, step=str(body.get("step") or ""),
-                                   error=str(body.get("error") or ""))
+        step = str(body.get("step") or "")
+        error = str(body.get("error") or "")
+        _repo().set_refresh_status(tid, status, step=step, error=error)
+        # Per-host registry: the agent sends host/agent_id/vmid/bytes/total so the
+        # fleet UI shows which host is at which step (+ download progress).
+        agent_id = str(body.get("agent_id") or "")
+        host = str(body.get("host") or "")
+        key_agent = agent_id or host
+        if key_agent:
+            reg = _refresh_hosts_registry()
+            key = f"{tid}|{key_agent}"
+            reg[key] = {
+                "tid": tid, "agent_id": agent_id, "host": host,
+                "vmid": body.get("vmid"), "status": status, "step": step,
+                "error": error, "bytes": body.get("bytes"),
+                "total": body.get("total"),
+                "tenant_id": (_agent_tenant_id(agent_id) if agent_id else ""),
+                "updated_at": time.time(),
+            }
         return {"status": "SUCCESS"}
+
+    @app.get("/tenant/templates/refresh-status")
+    async def refresh_status(request: Request):
+        """Live per-host template-refresh state for the VM Server status chip.
+        Returns entries updated within the last 10 min (terminal complete/failed
+        states linger briefly so the UI can show the outcome before they clear).
+        Tenant-admin sees only their tenants; admin sees all."""
+        sess = _session_user(request)
+        reg = _refresh_hosts_registry()
+        now = time.time()
+        # Prune stale entries (>10 min) so the registry can't grow unbounded.
+        for k in [k for k, v in reg.items() if now - (v.get("updated_at") or 0) > 600]:
+            reg.pop(k, None)
+        entries = list(reg.values())
+        if not _is_admin(sess):
+            mine = set(_acting_tenants(sess))
+            entries = [e for e in entries if (e.get("tenant_id") or "") in mine]
+        entries.sort(key=lambda e: e.get("updated_at") or 0, reverse=True)
+        return {"hosts": entries}
