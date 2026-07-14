@@ -362,8 +362,17 @@ def register(app, hub, ctx):
             rec = (_repo().latest_complete_for_host(sid) if by_host
                    else _repo().latest_complete_for_spoke(sid))
             if rec is None:
+                # Diagnostic: show what host identifiers ARE stored so a mismatch
+                # (selected 'pxmx-cs-svr-02' vs a template recorded under a
+                # different node/agent) is visible instead of a bare skip.
+                avail = _repo().complete_source_summary()
+                hint = ("; complete templates exist for: " +
+                        ", ".join(f"{a.get('name')}[node={a.get('source_node')!r} "
+                                  f"agent={a.get('source_agent')!r}]" for a in avail)) if avail \
+                       else "; no complete templates on the hub at all"
                 results.append({"spoke_id": sid, "status": "SKIPPED",
-                                "message": "no completed template backup for this host"})
+                                "message": f"no completed template backup for '{sid}'{hint}",
+                                "available": avail})
                 continue
             if not _owns_tenant(sess, rec.get("tenant_id")):
                 # Anti-IDOR: don't reveal a template the caller can't own.
