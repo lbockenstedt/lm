@@ -653,6 +653,14 @@ $SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-self-restart
 $SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-update-restart
 $SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-spoke-recover *
 $SvcUser ALL=(ALL) NOPASSWD: /usr/local/bin/lm-fix-perms
+# Reinstall the hub auto-heal watchdog from the WebUI Remote Console (shell
+# mode): `sudo -n /opt/lm/scripts/install-lm-watchdog.sh`. The script lives in
+# /opt/lm (svc_lm-writable, so this IS a svc_lm->root path — acceptable in a
+# single-admin lab; the watchdog body it writes is root-owned in /usr/local/bin
+# so svc_lm can't tamper with the RUNNING watchdog). The script self-pulls
+# /opt/lm first, so it deploys the latest committed watchdog body. Exact path,
+# no args (the script takes none; run it via its shebang, not `bash <script>`).
+$SvcUser ALL=(ALL) NOPASSWD: /opt/lm/scripts/install-lm-watchdog.sh
 SUDOERS
 chmod 440 /etc/sudoers.d/lm
 
