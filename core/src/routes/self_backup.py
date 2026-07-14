@@ -13,7 +13,13 @@ through the existing ``POST /setup/config`` route in ``setup_misc.py`` (also
 admin-gated), so this module only exposes the action + status endpoints — no
 new persistence path.
 """
+import os
+
+from fastapi import Response
+
 from api import HTTPException, Request, logger
+
+_MAX_UPLOAD_BYTES = 512 * 1024 * 1024  # 512 MB cap on an uploaded restore archive
 
 
 def register(app, hub, ctx):
@@ -58,6 +64,59 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001
             logger.warning("[sync-error] /setup/backup/test-copy failed: %s", e)
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/setup/backup/download")
+    async def backup_download(request: Request, name: str):
+        """Stream one on-disk backup archive to the admin for off-box keeping
+        (manual/system-recovery). ``name`` is a basename in the backup dir;
+        traversal + non-archive names are rejected."""
+        _require_admin(request)
+        path = hub._sb_resolve_archive(name)
+        if not path:
+            raise HTTPException(status_code=404, detail="backup not found")
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return Response(content=data, media_type="application/octet-stream", headers={
+            "Content-Disposition": f'attachment; filename="{os.path.basename(path)}"'})
+
+    @app.post("/setup/backup/upload")
+    async def backup_upload(request: Request):
+        """Accept an operator-uploaded backup archive (system-recovery) and drop
+        it into the backup dir so it lists + can be restored on-box. Multipart
+        form field ``file``; falls back to a raw body with ?name=."""
+        _require_admin(request)
+        filename = request.query_params.get("name", "")
+        data = b""
+        ctype = (request.headers.get("content-type") or "").lower()
+        try:
+            if "multipart/form-data" in ctype:
+                form = await request.form()
+                up = form.get("file")
+                if up is None:
+                    raise HTTPException(status_code=400, detail="no 'file' field in the upload")
+                filename = filename or getattr(up, "filename", "") or ""
+                data = await up.read()
+            else:
+                data = await request.body()
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"could not read upload: {e}")
+        if not data:
+            raise HTTPException(status_code=400, detail="empty upload")
+        if len(data) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="upload exceeds 512 MB limit")
+        try:
+            res = hub.sb_save_uploaded_archive(filename, data)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[sync-error] /setup/backup/upload failed: %s", e)
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "ok", **res}
 
     @app.get("/setup/backup/status")
     async def backup_status(request: Request):

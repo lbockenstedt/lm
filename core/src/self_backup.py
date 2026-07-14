@@ -149,6 +149,34 @@ class SelfBackupMixin:
     def _sb_backup_root(self) -> str:
         return os.path.join(self.state.data_dir, _SELF_BACKUP_DIR)
 
+    def _sb_resolve_archive(self, name: str) -> Optional[str]:
+        """Resolve a backup archive filename to a safe absolute path inside the
+        backup root. Rejects path traversal and any non-archive name — returns
+        None if it doesn't resolve to a real file directly under the root."""
+        base = os.path.basename(str(name or ""))
+        if not base or not (base.endswith(".tar.gz") or base.endswith(".tgz.enc")):
+            return None
+        root = os.path.realpath(self._sb_backup_root())
+        p = os.path.realpath(os.path.join(root, base))
+        if os.path.dirname(p) != root or not os.path.isfile(p):
+            return None
+        return p
+
+    def sb_save_uploaded_archive(self, filename: str, data: bytes) -> Dict[str, Any]:
+        """Store an operator-uploaded backup archive into the backup dir so it
+        appears in the list and can be restored on-box (system-recovery). The
+        name is sanitised to a basename and must be a real archive extension."""
+        base = os.path.basename(str(filename or "")).replace("\x00", "")
+        if not (base.endswith(".tar.gz") or base.endswith(".tgz.enc")):
+            raise ValueError("upload must be a .tar.gz or .tgz.enc backup archive")
+        root = self._sb_backup_root()
+        os.makedirs(root, exist_ok=True)
+        dest = os.path.join(root, base)
+        with open(dest, "wb") as f:
+            f.write(data)
+        logger.info("self-backup: uploaded archive stored (%s, %d bytes)", base, len(data))
+        return {"name": base, "size": len(data)}
+
     def _sb_sources(self) -> List[Tuple[str, str]]:
         """(label, dir) pairs to archive. label becomes the top-level dir
         inside the tarball so a restore operator knows where each file came

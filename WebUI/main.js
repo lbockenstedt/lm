@@ -4328,7 +4328,14 @@ function _renderSetupSelfBackupTile(content) {
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Status &amp; Archives</h3>
                 <div id="sb-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                 <div class="mt-4">
-                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Local archives</div>
+                    <div class="flex items-center justify-between mb-2">
+                        <div class="text-xs font-bold text-slate-500 uppercase tracking-wider">Local archives</div>
+                        <div class="flex items-center gap-2">
+                            <input type="file" id="sb-upload-file" accept=".tar.gz,.tgz.enc,application/gzip,application/octet-stream" class="hidden" onchange="uploadSelfBackup(this)">
+                            <button type="button" onclick="document.getElementById('sb-upload-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1 rounded-md text-xs font-bold">Upload archive…</button>
+                        </div>
+                    </div>
+                    <p class="text-[11px] text-slate-400 mb-2">Download an archive to keep off-box, or upload one back onto this hub for a system-recovery restore.</p>
                     <div id="sb-archives" class="space-y-1"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                 </div>
             </div>
@@ -4408,12 +4415,47 @@ async function loadSelfBackupStatus() {
                 const when = (() => { try { return new Date((f.mtime || 0) * 1000).toLocaleString(); } catch (e) { return '—'; } })();
                 return `<div class="flex items-center justify-between text-xs text-slate-600 py-1 border-b border-slate-100 last:border-0">
                     <code class="break-all">${escapeHtml(f.name)}</code>
-                    <span class="text-slate-400 ml-3 whitespace-nowrap">${_sbFmtBytes(f.size)} · ${when}</span>
+                    <span class="ml-3 whitespace-nowrap flex items-center gap-3">
+                        <span class="text-slate-400">${_sbFmtBytes(f.size)} · ${when}</span>
+                        <button type="button" onclick="downloadSelfBackup('${escapeHtml(f.name).replace(/'/g, "\\'")}')" class="text-[#01A982] hover:underline font-bold">Download</button>
+                    </span>
                 </div>`;
             }).join('');
         }
     }
 }
+
+async function downloadSelfBackup(name) {
+    try {
+        const r = await setupFetch('/setup/backup/download?name=' + encodeURIComponent(name));
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || ('HTTP ' + r.status)); }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+    } catch (e) { showToast('Download failed: ' + (e.message || e), 'error'); }
+}
+
+async function uploadSelfBackup(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    if (!/\.(tar\.gz|tgz\.enc)$/i.test(file.name)) {
+        showToast('Pick a .tar.gz or .tgz.enc backup archive.', 'error'); input.value = ''; return;
+    }
+    try {
+        const fd = new FormData();
+        fd.append('file', file, file.name);
+        const r = await setupFetch('/setup/backup/upload', { method: 'POST', body: fd });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        showToast(`Uploaded ${d.name} (${_sbFmtBytes(d.size)}). It now lists as a local archive.`, 'success');
+        loadSelfBackupStatus();
+    } catch (e) { showToast('Upload failed: ' + (e.message || e), 'error'); }
+    finally { input.value = ''; }
+}
+window.downloadSelfBackup = downloadSelfBackup; window.uploadSelfBackup = uploadSelfBackup;
 
 // Read the form fields, merge over the cached full config, and POST. Sending
 // the whole subtree (not just changed fields) because /setup/config replaces
