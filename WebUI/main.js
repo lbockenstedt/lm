@@ -5584,9 +5584,16 @@ function _renderSettingsAzureNsgTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Destination Port(s)</label><input id="nsg-dport" type="text" placeholder="* or 443,22" class="${inputCls}"></div>
             </div>
             <div class="mt-3 space-y-1">
-                <label class="${labelCls}">Allow-list IPs / CIDRs (one per line)</label>
-                <textarea id="nsg-ips" rows="6" placeholder="1.2.3.4&#10;10.0.0.0/24" class="${inputCls} font-mono text-xs"></textarea>
-                <p id="nsg-drift" class="text-[11px] text-slate-400"></p>
+                <div class="flex items-center justify-between">
+                    <label class="${labelCls}">Allow-list — IP / CIDR + description <span class="text-slate-400 normal-case font-normal">(descriptions are kept in LM only — Azure has no per-IP note)</span></label>
+                    <span id="nsg-drift" class="text-[11px] text-slate-400"></span>
+                </div>
+                <div class="flex gap-2 mb-2">
+                    <input id="nsg-add-ip" type="text" placeholder="1.2.3.4 or 10.0.0.0/24" class="${inputCls} font-mono text-xs flex-1">
+                    <input id="nsg-add-desc" type="text" placeholder="description (optional)" class="${inputCls} text-xs flex-1">
+                    <button type="button" onclick="addNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">+ Add</button>
+                </div>
+                <div id="nsg-entries" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto"></div>
             </div>
             <div class="mt-4 flex items-center gap-3">
                 <button onclick="saveAzureNsg()" id="nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
@@ -5597,8 +5604,46 @@ function _renderSettingsAzureNsgTile(content) {
     loadAzureNsg();
 }
 
+// Local allow-list DB: [{ip, description}]. IPs go to Azure; descriptions stay
+// in LM. renderNsgEntries paints the rows; _syncNsgEntriesFromDom reads inline
+// description edits back before add/remove/save.
+function renderNsgEntries() {
+    const box = document.getElementById('nsg-entries');
+    if (!box) return;
+    const es = window._nsgEntries || [];
+    box.innerHTML = es.length ? es.map((e, i) => `
+      <div class="flex items-center gap-2 px-2 py-1">
+        <span class="font-mono text-xs text-slate-700 w-44 shrink-0 truncate" title="${escapeHtml(e.ip)}">${escapeHtml(e.ip)}</span>
+        <input data-nsg-desc="${i}" value="${escapeHtml(e.description || '')}" placeholder="description" class="flex-1 bg-white border border-slate-200 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-green-400">
+        <button type="button" onclick="removeNsgEntry(${i})" title="Remove" class="text-red-500 hover:text-red-700 text-xs font-bold px-1">✕</button>
+      </div>`).join('')
+      : '<div class="text-xs text-slate-400 italic px-2 py-2">No IPs yet. Add one above, or hit Test/Save to import what\'s already on the NSG.</div>';
+}
+function _syncNsgEntriesFromDom() {
+    (window._nsgEntries || []).forEach((e, i) => {
+        const el = document.querySelector(`[data-nsg-desc="${i}"]`);
+        if (el) e.description = el.value;
+    });
+}
+window.addNsgEntry = function () {
+    _syncNsgEntriesFromDom();
+    const ipEl = document.getElementById('nsg-add-ip'), dEl = document.getElementById('nsg-add-desc');
+    const ip = (ipEl?.value || '').trim();
+    if (!ip) { if (typeof showToast === 'function') showToast('Enter an IP or CIDR', 'info'); return; }
+    window._nsgEntries = window._nsgEntries || [];
+    window._nsgEntries.push({ ip, description: (dEl?.value || '').trim() });
+    if (ipEl) ipEl.value = ''; if (dEl) dEl.value = '';
+    renderNsgEntries();
+};
+window.removeNsgEntry = function (i) {
+    _syncNsgEntriesFromDom();
+    (window._nsgEntries || []).splice(i, 1);
+    renderNsgEntries();
+};
+
 function _azureNsgFormConfig() {
     const v = id => (document.getElementById(id)?.value || '').trim();
+    _syncNsgEntriesFromDom();
     return {
         enabled: !!document.getElementById('nsg-enabled')?.checked,
         subscription_id: v('nsg-sub'), resource_group: v('nsg-rg'),
@@ -5606,7 +5651,7 @@ function _azureNsgFormConfig() {
         priority: parseInt(v('nsg-prio'), 10) || 300,
         direction: v('nsg-dir') || 'Inbound', protocol: v('nsg-proto') || '*',
         dest_port: v('nsg-dport') || '*',
-        ips: (document.getElementById('nsg-ips')?.value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+        entries: (window._nsgEntries || []).map(e => ({ ip: e.ip, description: e.description || '' })),
     };
 }
 
@@ -5621,15 +5666,17 @@ async function loadAzureNsg() {
         set('nsg-sub', c.subscription_id); set('nsg-rg', c.resource_group); set('nsg-name', c.nsg_name);
         set('nsg-rule', c.rule_name || 'lm-allowlist'); set('nsg-prio', c.priority || 300);
         set('nsg-dir', c.direction || 'Inbound'); set('nsg-proto', c.protocol || '*'); set('nsg-dport', c.dest_port || '*');
-        set('nsg-ips', (c.ips || []).join('\n'));
+        window._nsgEntries = (c.entries || []).map(e => ({ ip: e.ip, description: e.description || '' }));
+        renderNsgEntries();
         const pill = document.getElementById('nsg-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const drift = document.getElementById('nsg-drift');
         if (drift) {
             if (d.warning) drift.textContent = 'Live read failed: ' + d.warning;
             else if (Array.isArray(d.live_prefixes)) {
-                const same = JSON.stringify(d.live_prefixes.slice().sort()) === JSON.stringify((c.ips || []).slice().sort());
-                drift.textContent = `Live in Azure: ${d.live_prefixes.length} IP(s)` + (same ? ' — in sync' : ' — differs from saved (Save & Apply to sync)');
+                const localIps = (c.entries || []).map(e => e.ip);
+                const same = JSON.stringify(d.live_prefixes.slice().sort()) === JSON.stringify(localIps.slice().sort());
+                drift.textContent = `Live in Azure: ${d.live_prefixes.length} IP(s)` + (same ? ' — in sync' : ' — differs from local (Save & Apply to sync)');
             } else drift.textContent = 'Rule not present in Azure yet — Save & Apply to create it.';
         }
     } catch (e) { console.error('loadAzureNsg failed', e); }

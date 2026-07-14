@@ -36,6 +36,60 @@ class AzureNsgError(Exception):
     """Raised for any NSG/ARM failure; message is safe to surface to the admin."""
 
 
+def normalize_entries(entries) -> List[Dict[str, str]]:
+    """Validate + normalize the local allow-list DB: a list of ``{ip, description}``
+    (bare strings accepted too). ip → CIDR (bare IP gets /32 · /128), deduped by
+    ip (a later non-empty description wins). Descriptions are hub-local — Azure NSG
+    rules have no per-IP description, so they never leave here. Raises on a bad ip."""
+    out: List[Dict[str, str]] = []
+    idx: Dict[str, int] = {}
+    for e in (entries or []):
+        if isinstance(e, str):
+            ip, desc = e, ""
+        elif isinstance(e, dict):
+            ip = str(e.get("ip") or e.get("address") or "").strip()
+            desc = str(e.get("description") or "").strip()
+        else:
+            continue
+        if not ip:
+            continue
+        try:
+            cidr = str(ipaddress.ip_network(ip, strict=False))
+        except ValueError as ex:
+            raise AzureNsgError(f"invalid IP/CIDR {ip!r}: {ex}")
+        if cidr in idx:
+            if desc:
+                out[idx[cidr]]["description"] = desc
+        else:
+            idx[cidr] = len(out)
+            out.append({"ip": cidr, "description": desc})
+    return out
+
+
+def entries_to_ips(entries) -> List[str]:
+    """The CIDR list to push to Azure (the ip of each local entry)."""
+    return [e["ip"] for e in (entries or []) if isinstance(e, dict) and e.get("ip")]
+
+
+def merge_live_prefixes(entries: List[Dict[str, str]], live_prefixes) -> tuple:
+    """Fold the prefixes CURRENTLY on the Azure rule into the local DB: any live
+    IP not already tracked is added with an empty description (so existing NSG
+    entries are captured and can be annotated). Returns ``(merged, added_count)``."""
+    have = {e["ip"] for e in entries if e.get("ip")}
+    merged = list(entries)
+    added = 0
+    for p in (live_prefixes or []):
+        try:
+            cidr = str(ipaddress.ip_network(str(p).strip(), strict=False))
+        except ValueError:
+            continue
+        if cidr and cidr not in have:
+            have.add(cidr)
+            merged.append({"ip": cidr, "description": ""})
+            added += 1
+    return merged, added
+
+
 def normalize_prefixes(ips) -> List[str]:
     """Validate + normalize a list of IPs/CIDRs to CIDR strings (bare IP → /32,
     /128 for v6). Drops blanks/dupes; raises on a genuinely invalid entry so a

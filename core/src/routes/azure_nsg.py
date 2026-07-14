@@ -15,14 +15,20 @@ from security.oidc import get_oidc_config
 import azure_nsg as _nsg
 
 # Whitelisted, persisted config fields (never any secret — auth is the OIDC cert).
+# ``entries`` is the local allow-list DB: [{ip, description}].
 _FIELDS = ("enabled", "subscription_id", "resource_group", "nsg_name",
            "rule_name", "priority", "direction", "access", "protocol",
-           "dest_port", "ips")
+           "dest_port", "entries")
 
 
 def register(app, hub, ctx):
     def _cfg() -> dict:
-        return dict(hub.state.system_state.get("global_config", {}).get("azure_nsg", {}) or {})
+        cfg = dict(hub.state.system_state.get("global_config", {}).get("azure_nsg", {}) or {})
+        # Migrate the legacy bare-IP list to {ip, description} entries.
+        if "entries" not in cfg and cfg.get("ips"):
+            cfg["entries"] = [{"ip": ip, "description": ""} for ip in cfg.get("ips") or []]
+            cfg.pop("ips", None)
+        return cfg
 
     def _save(cfg: dict) -> None:
         gc = hub.state.system_state.get("global_config", {})
@@ -33,13 +39,19 @@ def register(app, hub, ctx):
     @app.get("/setup/azure-nsg")
     async def get_azure_nsg():
         cfg = _cfg()
-        # Best-effort live read of what's currently on the NSG rule, so the UI can
-        # show drift between the hub's stored list and Azure. Never fatal.
+        cfg["entries"] = _nsg.normalize_entries(cfg.get("entries") or [])
+        # Read the prefixes CURRENTLY on the Azure rule and IMPORT any we don't
+        # track yet into the local DB (empty description), so existing NSG entries
+        # are captured and can be annotated. Persist when something new was found.
         live = None
         warning = ""
         if cfg.get("subscription_id") and cfg.get("nsg_name"):
             try:
                 live = await _nsg.get_allowlist(get_oidc_config(hub), cfg)
+                merged, added = _nsg.merge_live_prefixes(cfg["entries"], live)
+                if added:
+                    cfg["entries"] = merged
+                    _save(cfg)
             except Exception as e:  # noqa: BLE001
                 warning = str(e)
         return {"config": cfg, "live_prefixes": live, "warning": warning}
@@ -57,9 +69,13 @@ def register(app, hub, ctx):
         for k in _FIELDS:
             if k in incoming:
                 clean[k] = incoming[k]
-        # Normalize the IP list early so a typo is rejected before we persist.
+        # Accept legacy bare-IP `ips` too; validate/normalize the entries early so
+        # a typo is rejected before we persist.
+        raw = clean.get("entries")
+        if raw is None and isinstance(incoming.get("ips"), list):
+            raw = incoming["ips"]
         try:
-            clean["ips"] = _nsg.normalize_prefixes(clean.get("ips") or [])
+            clean["entries"] = _nsg.normalize_entries(raw or [])
         except _nsg.AzureNsgError as e:
             raise HTTPException(status_code=400, detail=str(e))
         clean["enabled"] = bool(clean.get("enabled", False))
@@ -70,7 +86,8 @@ def register(app, hub, ctx):
         warning = ""
         if clean["enabled"] and clean.get("subscription_id") and clean.get("nsg_name"):
             try:
-                applied = await _nsg.reconcile_allowlist(get_oidc_config(hub), clean, clean["ips"])
+                applied = await _nsg.reconcile_allowlist(
+                    get_oidc_config(hub), clean, _nsg.entries_to_ips(clean["entries"]))
             except Exception as e:  # noqa: BLE001
                 logger.warning("azure-nsg reconcile failed: %s", e)
                 warning = str(e)
