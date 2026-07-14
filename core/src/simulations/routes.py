@@ -44,6 +44,19 @@ def _invalidate_sim_quota_catalog(tenant_id: str) -> None:
     _sim_quota_catalog_cache.pop(tenant_id, None)
 
 
+# PXMX site-map cache (Config → Sites). GET fans out to ALL of the tenant's cs
+# spokes (CS_GET_PXMX_SITE_MAP, 15s each) to merge agents + assignments — the
+# dominant latency on that page. The map changes only when an operator saves it,
+# so cache the merged response per tenant for a short TTL and invalidate on save.
+_PXMX_SITE_MAP_TTL_S = 60.0
+_pxmx_site_map_cache: Dict[str, tuple] = {}  # tenant_id -> (monotonic_deadline, result)
+
+
+def _invalidate_pxmx_site_map(tenant_id: str) -> None:
+    """Drop the cached PXMX site-map for a tenant after a save."""
+    _pxmx_site_map_cache.pop(tenant_id, None)
+
+
 def _parse_ini_sections(text: str) -> Dict[str, Dict[str, str]]:
     """Parse raw INI ``text`` into ``{section: {key: value}}`` (case-preserving).
 
@@ -3101,6 +3114,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # agents + the map); 503 when no spoke is connected so the UI can say so.
     @app.get("/sim/api/{tenant}/pxmx-site-map")
     async def get_pxmx_site_map(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        # Cached per tenant for _PXMX_SITE_MAP_TTL_S (60s), invalidated on save.
+        # Only a real (spoke-connected) merge is cached; the "not connected"
+        # fallback is not, so a reconnecting spoke refreshes immediately.
+        import time as _t
+        now = _t.monotonic()
+        hit = _pxmx_site_map_cache.get(tenant_id)
+        if hit and hit[0] > now:
+            return hit[1]
         # Tenant-wide: merge the pxmx agents + site maps from ALL of the tenant's
         # Client-Sim spokes (cs-svr-02/03/04) so every pxmx server shows and can
         # be assigned, not just bound[0]'s.
@@ -3121,7 +3142,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not results:
             return {"status": "SUCCESS", "pxmx_site_map": {}, "agents": [],
                     "warning": "Client-Sim spoke not connected."}
-        return {"status": "SUCCESS", "pxmx_site_map": merged_map, "agents": agents}
+        out = {"status": "SUCCESS", "pxmx_site_map": merged_map, "agents": agents}
+        _pxmx_site_map_cache[tenant_id] = (now + _PXMX_SITE_MAP_TTL_S, out)
+        return out
 
     @app.post("/sim/api/{tenant}/pxmx-site-map")
     async def set_pxmx_site_map(tenant: str, request: Request,
@@ -3145,6 +3168,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 saved_any = True
                 merged.update(data.get("pxmx_site_map") or {})
                 errors.extend(data.get("errors") or [])
+        _invalidate_pxmx_site_map(tenant_id)  # next GET re-fans-out the fresh map
         return {"saved": saved_any, "pxmx_site_map": merged, "errors": errors}
 
     @app.get("/sim/api/{tenant}/cs-agents")
