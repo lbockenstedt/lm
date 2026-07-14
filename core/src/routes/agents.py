@@ -155,6 +155,36 @@ def register(app, hub, ctx):
             )
         try:
             data   = await request.json()
+            # Batch path: a ``roles`` list loads several roles on the SAME agent in
+            # one call. Loaded SEQUENTIALLY — LOAD_ROLE shallow-clones sibling repos
+            # + installs packages, which must not run concurrently on one host. The
+            # spoke-level auth/connected checks above ran once for the whole batch.
+            roles = data.get("roles")
+            if isinstance(roles, list) and roles:
+                results = []
+                for r in roles:
+                    rname = (r.get("role") if isinstance(r, dict) else r)
+                    rcfg = (r.get("config", {}) if isinstance(r, dict) else {})
+                    if not rname:
+                        results.append({"role": None, "status": "ERROR",
+                                        "message": "role is required"})
+                        continue
+                    try:
+                        res = await hub.request_response(spoke_id, "LOAD_ROLE",
+                                                         {"role": rname, "config": rcfg},
+                                                         timeout=120.0)
+                        pl = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+                        if isinstance(pl, dict) and pl.get("status") == "SUCCESS" \
+                                and pl.get("morph") is True and pl.get("module_type"):
+                            hub.spoke_module_types[spoke_id] = pl["module_type"]
+                            logger.info("Agent %s morphed to module_type %s",
+                                        spoke_id, pl["module_type"])
+                        results.append({"role": rname,
+                                        **(pl if isinstance(pl, dict) else {"result": pl})})
+                    except Exception as e:  # noqa: BLE001 — one role's failure ≠ batch fail
+                        logger.exception("load_agent_role[%s] failed", rname)
+                        results.append({"role": rname, "status": "ERROR", "message": str(e)})
+                return {"status": "SUCCESS", "results": results}
             role   = data.get("role")
             config = data.get("config", {})
             if not role:

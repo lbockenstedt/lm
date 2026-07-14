@@ -113,6 +113,37 @@ def register(app, hub, ctx):
 
         return {"status": "ok", "message": f"Cache for firewall {firewall_id} refreshed successfully!"}
 
+    @app.post("/api/firewall/refresh")
+    async def refresh_firewalls_bulk(request: Request):
+        """Batch cache-refresh: refresh many firewalls in ONE call (the UI's
+        "Refresh cache" across all configured firewalls) instead of one GET per
+        firewall. Each is authorized + refreshed independently and concurrently;
+        returns a per-firewall ok list so one failure doesn't sink the rest."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        ids = (body or {}).get("firewall_ids") or []
+        if not isinstance(ids, list) or not ids:
+            raise HTTPException(status_code=400, detail="firewall_ids must be a non-empty list")
+        import asyncio as _asyncio
+
+        async def _one(fid):
+            try:
+                _authz_firewall(request, fid)
+                ok = await hub.poll_opnsense_rules(firewall_id=fid)
+                return {"id": fid, "ok": bool(ok)}
+            except HTTPException as he:
+                return {"id": fid, "ok": False, "error": str(he.detail)}
+            except Exception as e:  # noqa: BLE001
+                return {"id": fid, "ok": False, "error": str(e)}
+
+        results = await _asyncio.gather(*[_one(fid) for fid in ids])
+        return {"results": results,
+                "ok": sum(1 for r in results if r.get("ok")),
+                "total": len(results)}
+
     @app.get("/api/firewall/{firewall_id}/{endpoint}")
     # ── Firewall: data + CRUD (/api/firewall/*) ──────────────────────────────
     # get_firewall_data serves from tenant cache (non-admin) / offline cache /

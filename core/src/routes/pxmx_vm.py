@@ -129,6 +129,89 @@ def register(app, hub, ctx):
             logger.exception("pxmx_vm_action failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/api/pxmx/vm-action-bulk")
+    async def pxmx_vm_action_bulk(request: Request):
+        """Bulk VM lifecycle: apply ONE action to many VMs in a single request
+        (the Hypervisors view's bulk start/stop/reboot/snapshot/backup) instead of
+        one POST per VM. Each item is authorized independently; the PXMX_VM_ACTION
+        relays run bounded-concurrent against the hypervisor spoke, and the NetBox
+        VM-sync + tenant cache refresh happen ONCE for the whole batch. Body:
+        ``{action, items:[{unique_id, vmid, node, type, snapshot_name?}]}``.
+        Returns ``{results:[{vmid, ok, error?}], ok, total}`` — one item's failure
+        never sinks the rest."""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        action = str((body or {}).get("action", "")).lower()
+        if action not in ("start", "stop", "reboot", "restart", "snapshot", "backup"):
+            raise HTTPException(status_code=400, detail=f"unknown action: {action}")
+        items = (body or {}).get("items") or []
+        if not isinstance(items, list) or not items:
+            raise HTTPException(status_code=400, detail="items must be a non-empty list")
+        hub = app.state.hub
+        pxmx_spoke = hub.get_hypervisor_spoke()
+        if not pxmx_spoke:
+            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        tenant_id = sess.get("tenant_id") or ""
+        # Backup/snapshot config is per-host but read from ONE tenant config.
+        hv = None
+        if action in ("backup", "snapshot"):
+            hv = await hub.simulations_store.get_hypervisors_config(tenant_id)
+        import asyncio as _asyncio, time as _time
+        sem = _asyncio.Semaphore(6)
+
+        async def _one(it):
+            vmid = it.get("vmid")
+            node = str(it.get("node", "") or "")
+            try:
+                await _assert_vm_control(request, vmid=vmid, node=node,
+                                         unique_id=it.get("unique_id"))
+                payload = {
+                    "unique_id": it.get("unique_id", ""),
+                    "vmid": vmid,
+                    "node": node,
+                    "type": it.get("type", "qemu"),
+                    "action": action,
+                    "snapshot_name": it.get("snapshot_name"),
+                }
+                if action == "backup":
+                    ph = (hv.get("per_host") or {}).get(node) or {}
+                    keep = ph.get("backup_keep")
+                    if keep is None:
+                        keep = hv.get("backup_keep")
+                    storage = ph.get("backup_storage") or hv.get("backup_storage") or ""
+                    if not storage:
+                        return {"vmid": vmid, "ok": False,
+                                "error": f"No backup storage configured for host '{node or '?'}'"}
+                    payload["backup"] = {
+                        "storage": storage,
+                        "mode": ph.get("backup_mode") or hv.get("backup_mode") or "snapshot",
+                        "keep": keep or 0,
+                    }
+                elif action == "snapshot" and not payload.get("snapshot_name"):
+                    prefix = str((hv or {}).get("snapshot_prefix") or "lm").strip() or "lm"
+                    payload["snapshot_name"] = f"{prefix}-{int(_time.time())}"
+                async with sem:
+                    await hub.request_response(pxmx_spoke, "PXMX_VM_ACTION", payload, timeout=35.0)
+                return {"vmid": vmid, "ok": True}
+            except HTTPException as he:
+                return {"vmid": vmid, "ok": False, "error": str(he.detail)}
+            except Exception as e:  # noqa: BLE001
+                logger.exception("pxmx_vm_action_bulk item %s failed", vmid)
+                return {"vmid": vmid, "ok": False, "error": str(e)}
+
+        results = await _asyncio.gather(*[_one(it) for it in items if isinstance(it, dict)])
+        # One VM-sync + one cache refresh for the whole batch (not per VM).
+        _trigger_vm_sync_after_pxmx_edit(hub, request, body)
+        _refresh_module_all_tenants(hub, "pxmx_vms")
+        return {"results": results,
+                "ok": sum(1 for r in results if r.get("ok")),
+                "total": len(results)}
+
     @app.get("/api/pxmx/pools")
     async def get_pxmx_pools(request: Request):
         """Proxmox resource pool list for the clone/create-VM UI's pool dropdown.

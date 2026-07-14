@@ -401,6 +401,45 @@ def register(app, hub, ctx):
             logger.exception("remove_user_tenant failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/setup/users/set-tenants")
+    async def set_user_tenants(request: Request):
+        """Batch tenant-membership change for ONE user in a single call. The User
+        edit form sends its full add/remove delta here instead of one
+        assign-tenant / remove-tenant POST per changed tenant. Adds + removes are
+        applied, then the user's sessions are invalidated ONCE."""
+        hub = app.state.hub
+        try:
+            data = await request.json()
+            user_id = data.get("user_id")
+            add = data.get("add") or []
+            remove = data.get("remove") or []
+            if not user_id:
+                raise HTTPException(status_code=400, detail="Missing user_id")
+            if not isinstance(add, list) or not isinstance(remove, list):
+                raise HTTPException(status_code=400, detail="add/remove must be lists")
+            users = hub.state.system_state.get("users", {})
+            if users.get(user_id, {}).get("protected") and add:
+                raise HTTPException(status_code=403,
+                    detail="The protected admin account cannot be assigned to a tenant")
+            assigned, removed, errors = [], [], []
+            for tid in add:
+                if not hub.state.get_tenant(tid):
+                    errors.append(f"tenant {tid} not found")
+                    continue
+                hub.state.assign_user_to_tenant(user_id, tid)
+                assigned.append(tid)
+            for tid in remove:
+                hub.state.remove_user_from_tenant(user_id, tid)
+                removed.append(tid)
+            if assigned or removed:
+                _invalidate_user_sessions(hub, user_id)
+            return {"status": "ok", "assigned": assigned, "removed": removed, "errors": errors}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("set_user_tenants failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/users")
     async def get_users():
         hub = app.state.hub

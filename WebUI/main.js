@@ -1933,11 +1933,21 @@ async function refreshOpnsenseCache() {
             showToast('No firewalls configured to refresh.', 'success');
             return;
         }
+        // One batched call refreshes every firewall server-side (concurrently)
+        // instead of one GET per firewall from the browser.
         let ok = 0, fail = 0;
-        for (const fw of firewalls) {
-            const r = await fetch(`/api/firewall/${fw.id}/refresh`);
-            if (r.ok) ok++; else fail++;
-        }
+        try {
+            const r = await fetch('/api/firewall/refresh', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ firewall_ids: firewalls.map(fw => fw.id) }),
+            });
+            const d = await r.json().catch(() => ({}));
+            if (r.ok && Array.isArray(d.results)) {
+                ok = d.results.filter(x => x && x.ok).length;
+                fail = d.results.filter(x => x && !x.ok).length;
+            } else { fail = firewalls.length; }
+        } catch (e) { fail = firewalls.length; }
         showToast(`Refreshed cache for ${ok} firewall(s)${fail ? ` (${fail} failed)` : ''}.`, fail ? 'error' : 'success');
         console.log(`Firewall cache refresh: ${ok} ok, ${fail} failed of ${firewalls.length}`);
 
@@ -9635,35 +9645,44 @@ async function loadRole(spokeId) {
         if (p) netboxCfg.admin_password = p;
     }
 
+    // One batched request — the backend loads the roles SEQUENTIALLY on the agent
+    // (each is a git clone + package install, can't run concurrently) and returns
+    // a per-role results[]. Replaces the old one-POST-per-role loop.
+    const rolesPayload = checked.map(roleId => {
+        const r = { role: roleId };
+        if (roleId === 'netbox-server' && netboxCfg && Object.keys(netboxCfg).length) r.config = netboxCfg;
+        return r;
+    });
     const results = [];
-    for (const roleId of checked) {
-        try {
-            const body = { role: roleId };
-            if (roleId === 'netbox-server' && netboxCfg && Object.keys(netboxCfg).length) {
-                body.config = netboxCfg;
-            }
-            const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/load-role`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
-            const data = await res.json();
-            const name = AGENT_ROLES[roleId]?.name || roleId;
-            if (res.ok && data.status === 'SUCCESS') {
-                if (data.deploy) {
-                    results.push(`✓ ${name}: deployment started (watch Spokes & Agents)`);
+    try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/load-role`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ roles: rolesPayload }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && Array.isArray(data.results)) {
+            for (const item of data.results) {
+                const roleId = item.role;
+                const name = AGENT_ROLES[roleId]?.name || roleId || '?';
+                if (item.status === 'SUCCESS') {
+                    if (item.deploy) {
+                        results.push(`✓ ${name}: deployment started (watch Spokes & Agents)`);
+                    } else {
+                        results.push(`✓ ${name}: sub-spoke ${item.sub_spoke_id || spokeId + '-' + roleId} connecting (auto-approved)`);
+                    }
                 } else {
-                    results.push(`✓ ${name}: sub-spoke ${data.sub_spoke_id || spokeId + '-' + roleId} connecting (auto-approved)`);
+                    results.push(`✗ ${name}: ${item.message || item.detail || 'failed'}`);
                 }
-            } else {
-                const msg = res.status === 503
-                    ? 'agent not connected — reconnect it to manage roles'
-                    : (data.detail || data.message || JSON.stringify(data));
-                results.push(`✗ ${name}: ${msg}`);
             }
-        } catch (err) {
-            results.push(`✗ ${AGENT_ROLES[roleId]?.name || roleId}: ${err.message}`);
+        } else {
+            const msg = res.status === 503
+                ? 'agent not connected — reconnect it to manage roles'
+                : (data.detail || data.message || JSON.stringify(data));
+            results.push(`✗ ${msg}`);
         }
+    } catch (err) {
+        results.push(`✗ ${err.message}`);
     }
     document.getElementById('load-role-modal')?.remove();
     const anyFailed = results.some(r => r.startsWith('✗'));
@@ -10376,20 +10395,26 @@ window.pxmxBulkAction = async function (action) {
             !window.confirm(`${action.toUpperCase()} ${sel.length} selected VM(s)?`)) return;
     }
     const statusEl = document.getElementById('pxmx-bulk-status');
-    let ok = 0, fail = 0;
-    for (const uid of sel) {
-        const vm = (window._pxmxVms || []).find(v => v.unique_id === uid);
-        if (!vm) { fail++; continue; }
-        if (statusEl) statusEl.textContent = `${action}… ${ok + fail + 1}/${sel.length}`;
-        try {
-            const r = await setupFetch('/api/pxmx/vm-action', {
-                method: 'POST',
-                body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type, action }),
-            });
-            const d = await r.json().catch(() => ({}));
-            if (r.ok && d && d.status === 'SUCCESS') ok++; else fail++;
-        } catch (e) { fail++; }
-    }
+    // One batched request — the hub authorizes + relays each VM server-side
+    // (bounded-concurrent) instead of the browser firing one POST per VM. Each
+    // item keeps its own node so VMs route to their own host.
+    const items = sel.map(uid => (window._pxmxVms || []).find(v => v.unique_id === uid))
+                     .filter(Boolean)
+                     .map(vm => ({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type }));
+    const missing = sel.length - items.length;
+    if (statusEl) statusEl.textContent = `${action}… ${items.length} VM(s)`;
+    let ok = 0, fail = missing;
+    try {
+        const r = await setupFetch('/api/pxmx/vm-action-bulk', {
+            method: 'POST',
+            body: JSON.stringify({ action, items }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d && Array.isArray(d.results)) {
+            ok = d.results.filter(x => x && x.ok).length;
+            fail += d.results.filter(x => x && !x.ok).length;
+        } else { fail += items.length; }
+    } catch (e) { fail += items.length; }
     showToast(`Bulk ${action}: ${ok} ok${fail ? `, ${fail} failed` : ''}`, fail ? 'error' : 'success');
     if (statusEl) statusEl.textContent = `${ok} ok${fail ? `, ${fail} failed` : ''}`;
     setTimeout(() => loadPxmxData('Virtual Machines'), 1500);
@@ -15666,14 +15691,15 @@ async function saveUserEdits(userId) {
         const tenantsToAssign = selectedTenants.filter(t => !currentTenants.includes(t));
         const tenantsToRemove = currentTenants.filter(t => !selectedTenants.includes(t));
 
-        const requests = [];
-        for (const tId of tenantsToAssign) {
-            requests.push(setupFetch('/setup/users/assign-tenant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, tenant_id: tId }) }));
+        // One batched call applies the whole add/remove delta (was one POST per
+        // changed tenant) — a single session invalidation server-side.
+        if (tenantsToAssign.length || tenantsToRemove.length) {
+            await setupFetch('/setup/users/set-tenants', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, add: tenantsToAssign, remove: tenantsToRemove }),
+            });
         }
-        for (const tId of tenantsToRemove) {
-            requests.push(setupFetch('/setup/users/remove-tenant', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, tenant_id: tId }) }));
-        }
-        await Promise.all(requests);
 
         showToast('User updated successfully', 'success');
         closeEditUserModal();
