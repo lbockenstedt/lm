@@ -800,13 +800,12 @@ window.csSimChecksFilter = function () {
     const body = csEl('cs-sim-checks-body');
     if (!rows.length) { body.innerHTML = csEmpty('No checks match.', 'Adjust the filter above.'); return; }
     const rh = rows.map(r => `<tr>
-      <td class="px-3 py-2 text-sm">${csEscape(r.spoke)}</td>
       <td class="px-3 py-2 font-mono text-xs text-slate-600">${csEscape(r.site)}</td>
       <td class="px-3 py-2 font-mono text-xs">${csEscape(r.check)}</td>
       <td class="px-3 py-2">${csStatusBadge(r.status)}</td>
       <td class="px-3 py-2 text-xs text-slate-400">${csEscape((r.detail && (r.detail.message || r.detail.last_error)) || '—')}</td>
     </tr>`).join('');
-    body.innerHTML = csTable(['Spoke', 'Site', 'Check', 'Status', 'Detail'], rh);
+    body.innerHTML = csTable(['Site', 'Check', 'Status', 'Detail'], rh);
 };
 
 // Keystroke-debounced entry point for the free-text filter input (the bucket
