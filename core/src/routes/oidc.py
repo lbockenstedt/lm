@@ -29,7 +29,7 @@ from security.oidc import (
     provision_or_sync_entra_user, sign_state_cookie, verify_id_token,
     verify_state_cookie, authorize_url, build_user_data,
     generate_client_cert, cert_thumbprint_x5t, fetch_directory_groups,
-    default_oidc_dir,
+    fetch_user_groups_via_app, default_oidc_dir,
 )
 from security.credential_store import resolve_private_key_material
 import os as _os
@@ -107,15 +107,25 @@ def register(app, hub, ctx):
                 raise OidcError("token endpoint returned no id_token")
             jwks = await fetch_jwks(discovery.get("jwks_uri"))
             claims = verify_id_token(cfg, id_token, nonce, jwks)
+            oid = claims.get("oid")
+            if not oid:
+                raise OidcError("id_token missing oid claim")
             member_of = extract_member_groups(claims)
-            # Entra groups-claim overflow (>200 groups) → Graph fallback.
+            # Entra groups-claim overflow (>200 groups) → user-token Graph fallback.
             if not member_of and "groups" in (claims.get("_claim_names") or {}):
                 at = tokens.get("access_token")
                 if at:
                     member_of = await fetch_member_groups_via_graph(at)
-            oid = claims.get("oid")
-            if not oid:
-                raise OidcError("id_token missing oid claim")
+            # No `groups` claim in the token at all (Entra's DEFAULT until Token
+            # Configuration adds it) → fetch the user's groups with the hub's APP
+            # token (Group.Read.All application). Best-effort: if that permission
+            # isn't granted this stays empty and the allowed_group gate refuses.
+            if not member_of:
+                try:
+                    member_of = await fetch_user_groups_via_app(cfg, oid)
+                except Exception as _e:  # noqa: BLE001
+                    logger.info("OIDC: app-token group fetch failed for %s "
+                                "(membership stays empty): %s", oid, _e)
             email = claims.get("email") or claims.get("preferred_username") or ""
             name = claims.get("name") or ""
             user_record = provision_or_sync_entra_user(

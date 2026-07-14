@@ -566,6 +566,31 @@ async def fetch_directory_groups(cfg: OidcConfig,
     return out
 
 
+async def fetch_user_groups_via_app(cfg: OidcConfig, oid: str,
+                                    http: httpx.AsyncClient | None = None) -> list:
+    """A user's transitive group object IDs via the hub's APP token
+    (``Group.Read.All``/``GroupMember.Read.All`` application permission).
+
+    This is the reliable membership source when the id_token carries NO ``groups``
+    claim — which is Entra's DEFAULT until an admin adds the groups claim in the
+    app's Token Configuration. Unlike ``/me/transitiveMemberOf`` it doesn't depend
+    on the user's token holding a group scope. Pages ``@odata.nextLink``."""
+    token = await fetch_app_graph_token(cfg, http=http)
+    out: list = []
+    url = (f"https://graph.microsoft.com/v1.0/users/{oid}"
+           f"/transitiveMemberOf/microsoft.graph.group?$select=id&$top=999")
+    async with (http or httpx.AsyncClient(timeout=15.0)) as client:
+        while url:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code != 200:
+                raise OidcError(f"Graph user-groups fetch failed: HTTP {resp.status_code} — "
+                                f"{resp.text[:200]}")
+            body = resp.json()
+            out.extend(str(v["id"]) for v in body.get("value", []) if v.get("id"))
+            url = body.get("@odata.nextLink")
+    return out
+
+
 # ── user provisioning + re-sync ─────────────────────────────────────────────
 
 def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,
