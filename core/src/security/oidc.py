@@ -528,30 +528,38 @@ async def fetch_member_groups_via_graph(access_token: str,
         return [v["id"] for v in resp.json().get("value", []) if "id" in v]
 
 
-async def fetch_app_graph_token(cfg: OidcConfig,
-                                http: httpx.AsyncClient | None = None) -> str:
-    """Mint a Microsoft Graph token for the HUB'S OWN APP (client-credentials
-    grant, not a user), signed with the cert ``client_assertion``. Used for
-    directory-wide reads like enumerating groups. Requires the app registration
-    to hold the Graph **application** permission (e.g. ``Group.Read.All``) with
-    admin consent — a delegated/user token can't list the whole directory."""
+async def fetch_app_token(cfg: OidcConfig, scope: str,
+                          http: httpx.AsyncClient | None = None) -> str:
+    """Mint an app-only (client-credentials) token for the HUB'S OWN APP, signed
+    with the cert ``client_assertion`` — for ANY resource the app has rights to.
+    ``scope`` is the resource's ``.default`` scope, e.g.
+    ``https://graph.microsoft.com/.default`` (directory reads) or
+    ``https://management.azure.com/.default`` (Azure Resource Manager / NSG).
+    The app registration must hold the matching permission/RBAC role."""
     token_endpoint = f"https://login.microsoftonline.com/{cfg.tenant_id}/oauth2/v2.0/token"
     data = {
         "grant_type": "client_credentials",
         "client_id": cfg.client_id,
-        "scope": "https://graph.microsoft.com/.default",
+        "scope": scope,
         "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         "client_assertion": build_client_assertion(cfg, token_endpoint),
     }
     async with (http or httpx.AsyncClient(timeout=15.0)) as client:
         resp = await client.post(token_endpoint, data=data)
     if resp.status_code != 200:
-        raise OidcError(f"Graph app-token failed: HTTP {resp.status_code} — "
+        raise OidcError(f"app-token failed ({scope}): HTTP {resp.status_code} — "
                         f"{resp.text[:200]}")
     tok = resp.json().get("access_token")
     if not tok:
-        raise OidcError("Graph app-token response had no access_token")
+        raise OidcError("app-token response had no access_token")
     return tok
+
+
+async def fetch_app_graph_token(cfg: OidcConfig,
+                                http: httpx.AsyncClient | None = None) -> str:
+    """Microsoft Graph app-only token (see :func:`fetch_app_token`). Requires the
+    app to hold a Graph **application** permission (e.g. ``Group.Read.All``)."""
+    return await fetch_app_token(cfg, "https://graph.microsoft.com/.default", http=http)
 
 
 async def fetch_directory_groups(cfg: OidcConfig,

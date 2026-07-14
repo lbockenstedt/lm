@@ -1214,7 +1214,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'SSO', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
+    settings: ['General', 'User Access', 'SSO', 'Azure NSG', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3585,6 +3585,14 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
+    // Azure NSG — manage a single 'alias-style' allow rule in an Azure Network
+    // Security Group (add/remove IPs). Reuses the Entra SSO app's certificate for
+    // ARM auth; needs a Network Contributor role on the NSG. Admin-only.
+    if (subMenu === 'Azure NSG') {
+        _renderSettingsAzureNsgTile(content);
+        return;
+    }
+
     if (subMenu === 'Hub Status') {
         content.innerHTML = `
             <div class="space-y-4">
@@ -5552,6 +5560,110 @@ function _renderSetupGeneralTile(content) {
 // Admin config for Entra ID SSO — enable it, set tenant/client/cert/group/MFA.
 // Reads/writes /setup/oidc-config (core/src/routes/oidc.py); env LM_OIDC_* wins
 // over stored values. Enabling shows the "Sign in with Microsoft" login button.
+// ── Settings → Azure NSG (alias-style allow-list) ───────────────────────────
+// Manage one allow rule in an Azure NSG as an IP allow-list. Reuses the SSO
+// Entra app's cert for ARM auth (Network Contributor role required). Admin-only.
+function _renderSettingsAzureNsgTile(content) {
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Azure NSG — IP allow-list</h3>
+                <span id="nsg-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">Manages one <b>allow rule</b> in an Azure Network Security Group as an IP allow-list (one rule, many IPs — add/remove below). Auth <b>reuses the SSO Entra app's certificate</b>, so set that up first in <b>Settings → SSO</b>. In Azure, grant that app the <b>Network Contributor</b> role on the NSG (or its resource group) — <b>Access control (IAM) → Add role assignment → Network Contributor → assign to the app</b>.</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="nsg-enabled" class="w-4 h-4 text-green-600 rounded">Enable NSG management (Save applies the IP list to Azure)</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Subscription ID</label><input id="nsg-sub" type="text" placeholder="xxxxxxxx-xxxx-…" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Resource Group</label><input id="nsg-rg" type="text" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">NSG Name</label><input id="nsg-name" type="text" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Rule Name</label><input id="nsg-rule" type="text" placeholder="lm-allowlist" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Priority (100–4096)</label><input id="nsg-prio" type="number" placeholder="300" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Direction</label><select id="nsg-dir" class="${inputCls}"><option>Inbound</option><option>Outbound</option></select></div>
+                <div class="space-y-1"><label class="${labelCls}">Protocol</label><select id="nsg-proto" class="${inputCls}"><option value="*">Any</option><option value="Tcp">Tcp</option><option value="Udp">Udp</option></select></div>
+                <div class="space-y-1"><label class="${labelCls}">Destination Port(s)</label><input id="nsg-dport" type="text" placeholder="* or 443,22" class="${inputCls}"></div>
+            </div>
+            <div class="mt-3 space-y-1">
+                <label class="${labelCls}">Allow-list IPs / CIDRs (one per line)</label>
+                <textarea id="nsg-ips" rows="6" placeholder="1.2.3.4&#10;10.0.0.0/24" class="${inputCls} font-mono text-xs"></textarea>
+                <p id="nsg-drift" class="text-[11px] text-slate-400"></p>
+            </div>
+            <div class="mt-4 flex items-center gap-3">
+                <button onclick="saveAzureNsg()" id="nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
+                <button onclick="testAzureNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                <span id="nsg-msg" class="text-xs text-slate-400"></span>
+            </div>
+        </div>`;
+    loadAzureNsg();
+}
+
+function _azureNsgFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    return {
+        enabled: !!document.getElementById('nsg-enabled')?.checked,
+        subscription_id: v('nsg-sub'), resource_group: v('nsg-rg'),
+        nsg_name: v('nsg-name'), rule_name: v('nsg-rule') || 'lm-allowlist',
+        priority: parseInt(v('nsg-prio'), 10) || 300,
+        direction: v('nsg-dir') || 'Inbound', protocol: v('nsg-proto') || '*',
+        dest_port: v('nsg-dport') || '*',
+        ips: (document.getElementById('nsg-ips')?.value || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+    };
+}
+
+async function loadAzureNsg() {
+    try {
+        const r = await setupFetch('/setup/azure-nsg');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val == null ? '' : val; };
+        const chk = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+        chk('nsg-enabled', c.enabled);
+        set('nsg-sub', c.subscription_id); set('nsg-rg', c.resource_group); set('nsg-name', c.nsg_name);
+        set('nsg-rule', c.rule_name || 'lm-allowlist'); set('nsg-prio', c.priority || 300);
+        set('nsg-dir', c.direction || 'Inbound'); set('nsg-proto', c.protocol || '*'); set('nsg-dport', c.dest_port || '*');
+        set('nsg-ips', (c.ips || []).join('\n'));
+        const pill = document.getElementById('nsg-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        const drift = document.getElementById('nsg-drift');
+        if (drift) {
+            if (d.warning) drift.textContent = 'Live read failed: ' + d.warning;
+            else if (Array.isArray(d.live_prefixes)) {
+                const same = JSON.stringify(d.live_prefixes.slice().sort()) === JSON.stringify((c.ips || []).slice().sort());
+                drift.textContent = `Live in Azure: ${d.live_prefixes.length} IP(s)` + (same ? ' — in sync' : ' — differs from saved (Save & Apply to sync)');
+            } else drift.textContent = 'Rule not present in Azure yet — Save & Apply to create it.';
+        }
+    } catch (e) { console.error('loadAzureNsg failed', e); }
+}
+
+async function saveAzureNsg() {
+    const btn = document.getElementById('nsg-save-btn'); const msg = document.getElementById('nsg-msg');
+    if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+    try {
+        const r = await setupFetch('/setup/azure-nsg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _azureNsgFormConfig() }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        if (d.warning) { showToast('Saved, but Azure apply failed: ' + d.warning, 'error'); if (msg) msg.textContent = d.warning; }
+        else {
+            const a = d.applied;
+            const detail = a ? (a.deleted ? 'rule cleared' : `${(a.prefixes || []).length} IP(s) applied`) : 'saved (not applied)';
+            showToast('Azure NSG: ' + detail, 'success'); if (msg) msg.textContent = detail;
+        }
+        loadAzureNsg();
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save & Apply'; } }
+}
+
+async function testAzureNsg() {
+    const msg = document.getElementById('nsg-msg');
+    if (msg) msg.textContent = 'Testing…';
+    try {
+        const r = await setupFetch('/setup/azure-nsg/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _azureNsgFormConfig() }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { showToast(`Connected — NSG has ${d.rules} rule(s).`, 'success'); if (msg) msg.textContent = `OK: ${d.location || ''}, ${d.rules} rules`; }
+        else { showToast('Test failed: ' + (d.message || 'error'), 'error'); if (msg) msg.textContent = d.message || 'failed'; }
+    } catch (e) { showToast('Test failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = String(e.message || e); }
+}
+
 function _renderSettingsSsoTile(content) {
     const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
     content.innerHTML = `
