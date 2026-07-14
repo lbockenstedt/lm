@@ -10310,7 +10310,7 @@ async function showLoadRoleModal(spokeId) {
     modal.id = 'load-role-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4';
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl overflow-hidden border border-slate-200">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden border border-slate-200">
             <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
                 <div>
                     <h3 class="text-lg font-bold text-[#263040]">Load Role</h3>
@@ -10322,7 +10322,7 @@ async function showLoadRoleModal(spokeId) {
             </div>
             <div class="p-6 space-y-4">
                 <p class="text-xs text-slate-500">A generic agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">${spokeId}-&lt;role&gt;</code>) that auto-approves via this agent.</p>
-                <div id="role-list" class="grid grid-cols-2 gap-2 max-h-60 overflow-y-auto pr-1">
+                <div id="role-list" class="grid grid-cols-3 gap-2 max-h-52 overflow-y-auto pr-1">
                     <p class="text-xs text-slate-400 italic col-span-2">Loading roles…</p>
                 </div>
                 <div id="netbox-admin-creds" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
