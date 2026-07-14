@@ -29,6 +29,20 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger("SimRoutes")
 
+# Sim-Quota catalog cache. The catalog (Config → Sim Quotas) is derived from the
+# tenant's simulation.conf via a LIVE round-trip to the cs spoke (15s timeout) —
+# the dominant, variable latency on that page. It changes only when the sim
+# config / sharing / site mappings change, so cache the assembled response per
+# tenant for a short TTL and invalidate on those saves. Repeat opens then serve
+# from memory; only the first open (or one right after an edit) pays the spoke.
+_SIM_QUOTA_CATALOG_TTL_S = 60.0
+_sim_quota_catalog_cache: Dict[str, tuple] = {}  # tenant_id -> (monotonic_deadline, catalog)
+
+
+def _invalidate_sim_quota_catalog(tenant_id: str) -> None:
+    """Drop the cached Sim-Quota catalog for a tenant after a config change."""
+    _sim_quota_catalog_cache.pop(tenant_id, None)
+
 
 def _parse_ini_sections(text: str) -> Dict[str, Dict[str, str]]:
     """Parse raw INI ``text`` into ``{section: {key: value}}`` (case-preserving).
@@ -1632,9 +1646,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             out["ssid_placement"] = csc["ssid_placement"]
         if isinstance(csc.get("ssid_weights"), list):
             out["ssid_weights"] = csc["ssid_weights"]
-        # Ambient distribution (HUB mode): ambient_pct is the automatic uniform
-        # weight each randomizable sim rolls against; ambient_control=on hands the
-        # operator per-sim weights (ambient_weights) to bias the fleet split.
+        # Ambient distribution (HUB mode): ambient_pct is the LEVEL (% of fleet
+        # ambient-active); ambient_control=on adds relative per-sim weights
+        # (ambient_weights) that split the active clients and per-site load weights
+        # (ambient_site_weights) that scale a site's level.
         if csc.get("ambient_pct") is not None:
             try:
                 out["ambient_pct"] = max(0, min(100, int(csc["ambient_pct"])))
@@ -1644,6 +1659,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             out["ambient_control"] = bool(csc.get("ambient_control"))
         if isinstance(csc.get("ambient_weights"), dict):
             out["ambient_weights"] = csc["ambient_weights"]
+        # Per-site load weight (relative, default 1) — folded into the served
+        # ambient level on the spoke so a site weighted 3 gets 3x the load of one
+        # weighted 1.
+        if isinstance(csc.get("ambient_site_weights"), dict):
+            out["ambient_site_weights"] = csc["ambient_site_weights"]
         # ignored_hostnames lives in the Hub Config card (tenant hub_config), but
         # the spoke's _apply_hub_config drops that copy — ride it on the pool push
         # (always applied) so the quota engine's exclude list reaches the spoke
@@ -2452,6 +2472,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         content = body.get("content", "") if isinstance(body, dict) else ""
         source = await _require_config_writable(tenant_id)  # 403 if github + no key
         await store.set_sim_conf_content(tenant_id, content)
+        _invalidate_sim_quota_catalog(tenant_id)  # sims/sites derive from this
         pushed = await _push_config(tenant_id, {"sim_conf_override": content,
                                                 "config_source": source})
         # Re-merge + re-push effective quotas so a config change that removes a
@@ -3025,6 +3046,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception as exc:  # noqa: BLE001 — never block the save
             logger.warning("set_central_sites(%s): sim_quotas validate failed: %s", tenant_id, exc)
         await store.set_central_sites_config(tenant_id, cfg)
+        _invalidate_sim_quota_catalog(tenant_id)  # site_mappings feed the catalog
         pushed = await _push_config(tenant_id, {
             "central_sites_config": cfg,
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
@@ -3043,7 +3065,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         suggested alert→sim linkage + per-sim metadata. Forwards to the cs
         spoke (which reads ``simulation.conf`` directly — the source of truth);
         falls back to parsing the hub's cached ``sim_conf_content`` when no
-        spoke is connected so the editor still works offline."""
+        spoke is connected so the editor still works offline.
+
+        Cached per tenant for ``_SIM_QUOTA_CATALOG_TTL_S`` (60s) — see the cache
+        note above. A live spoke result is cached; the offline fallback (with a
+        ``warning``) is NOT, so a reconnecting spoke refreshes immediately."""
+        import time as _t
+        now = _t.monotonic()
+        hit = _sim_quota_catalog_cache.get(tenant_id)
+        if hit and hit[0] > now:
+            return hit[1]
+        cached_ok = True
         try:
             cat = await _cs_forward(tenant_id, "CS_GET_SIM_QUOTA_CATALOG", {}, timeout=15.0)
         except HTTPException:
@@ -3051,12 +3083,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             csc0 = await store.get_central_sites_config(tenant_id) or {}
             cat = sim_quota_catalog_from_ini(sim_txt, csc0.get("site_mappings"))
             cat["warning"] = "Client-Sim spoke not connected — catalog from cached config."
+            cached_ok = False  # don't cache a degraded/offline result
         # Attach the tenant's saved per-sim shareable overrides so the Sim Sharing
         # tile renders current state (authoritative; empty = use the SIM_META default).
         if isinstance(cat, dict):
             cat["sim_shareable"] = await _sim_shareable(tenant_id)
             cat["sim_na"] = await _sim_na(tenant_id)
             cat["alerts"], cat["insights"] = await _alert_insight_catalog()
+        if cached_ok and isinstance(cat, dict) and not cat.get("warning"):
+            _sim_quota_catalog_cache[tenant_id] = (now + _SIM_QUOTA_CATALOG_TTL_S, cat)
         return cat
 
     # ── PXMX server → site assignments (Config → PXMX Sites) ──────────────────
@@ -3271,6 +3306,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if isinstance((body or {}).get("sim_na"), dict):
             await store.set_sim_na_global(
                 {str(k): bool(v) for k, v in body["sim_na"].items()})
+        # Global sharing/N-A feed every tenant's catalog — clear the whole cache.
+        _sim_quota_catalog_cache.clear()
         # A global-defaults / sharing change can shift every tenant's effective
         # quotas — re-push so each cs spoke's SimQuotaEngine reconciles (the push
         # carries the new global sim_shareable too).

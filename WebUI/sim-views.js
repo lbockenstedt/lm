@@ -2659,6 +2659,8 @@ async function csRenderConfigSimQuotas() {
             ambient_pct: (cfg && cfg.ambient_pct != null) ? Number(cfg.ambient_pct) : 50,
             ambient_control: !!(cfg && cfg.ambient_control),
             ambient_weights: (cfg && cfg.ambient_weights && typeof cfg.ambient_weights === 'object') ? { ...cfg.ambient_weights } : {},
+            // Per-site load multiplier (100 = normal). Higher = more random load.
+            ambient_site_weights: (cfg && cfg.ambient_site_weights && typeof cfg.ambient_site_weights === 'object') ? { ...cfg.ambient_site_weights } : {},
         };
         const quotas = Array.isArray(cfg && cfg.sim_quotas) ? cfg.sim_quotas : [];
         csSimQuotaRows = quotas.map(csSimQuotaRowFromServer);
@@ -2881,11 +2883,16 @@ function csRenderSimQuotaEditor() {
 // Site source, randomizable-sim set, the SSID matrix (site × auth cells with
 // weight + hold-N placement) and per-site random-pool/remainder. Saved into
 // central_sites_config alongside the quotas.
-// Simulation Distribution (Auto / hub mode). Each randomizable sim runs on a
-// share of the fleet equal to its WEIGHT (0-100%). Automatic (default): every
-// sim uses the same base % and the fleet self-balances. Weight control: the
-// operator opts in and sets a per-sim weight — higher weight, more clients get
-// that sim. Only the currently-checked randomizable sims get a weight row.
+// Simulation Distribution (Auto / hub mode). TWO-STEP model:
+//  1. LEVEL — "Ambient level" is a true PERCENT: the share of the fleet that is
+//     ambient-active (doing benign traffic) at any time. 40 ≈ 40% of clients.
+//  2. SPLIT — relative WEIGHTS divide those active clients across sims/sites.
+//     A weight of 3 gets 3× the clients of a weight of 1 (same rule as the SSID
+//     placement weights). An active client runs exactly ONE randomizable sim,
+//     chosen by weighted random pick; a site's weight scales its level.
+// Automatic (default): every sim/site weight is 1 → active clients split evenly.
+// Weight control: the operator opts in and the per-sim + per-site weight inputs
+// appear (weights are relative integers, default 1).
 function csAmbientDistHtml() {
     const pc = window._csPoolCfg || {};
     const esc = s => csEscape(String(s == null ? '' : s));
@@ -2893,23 +2900,49 @@ function csAmbientDistHtml() {
     const control = !!pc.ambient_control;
     const rsims = pc.randomizable_sims || [];
     const w = pc.ambient_weights || {};
-    // Per-sim weight inputs only appear once the operator opts into control.
-    const weightGrid = !control ? '' : `
-          <div class="mt-2 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+    const sw = pc.ambient_site_weights || {};
+    // Distinct sites to weight: the sites defined in the SSID matrix (fall back to
+    // the Site Links). Only these get a load-weight row.
+    const matrix = pc.ssid_matrix || [];
+    let sites = matrix.map(c => (c.site || '')).filter(Boolean);
+    if (!sites.length) sites = (window._csSiteLinks || []).map(l => (l.wsite || l.site || '')).filter(Boolean);
+    sites = Array.from(new Set(sites));
+    // Show a site by its Site-Link display name when it has one, else the raw wsite.
+    const siteLabel = st => {
+        const link = (window._csSiteLinks || []).find(l => l && l.wsite === st);
+        return (link && link.name) ? link.name : st;
+    };
+    // Per-sim weight inputs (relative split — which sims the active clients run).
+    const simGrid = !control ? '' : `
+          <div class="text-[11px] font-semibold text-slate-500 mt-2 mb-1">Per-sim — weight <span class="font-normal text-slate-400">(relative · 3 = 3× the clients of 1)</span></div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
             ${rsims.length ? rsims.map(s => `
               <label class="text-xs text-slate-500 flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-md px-2 py-1">
                 <span class="truncate">${esc(s)}</span>
-                <input data-cs-ambient-w="${esc(s)}" type="number" min="0" max="100"
-                       value="${esc(w[s] != null ? w[s] : pct)}"
+                <input data-cs-ambient-w="${esc(s)}" type="number" min="0"
+                       value="${esc(w[s] != null ? w[s] : 1)}"
                        class="w-16 bg-white border border-slate-300 rounded-md px-1 py-0.5 text-sm text-right">
               </label>`).join('')
               : '<div class="text-xs text-slate-400 italic">Select randomizable sims above to weight them.</div>'}
           </div>`;
+    // Per-site load-weight inputs (relative — how much of the level each site gets).
+    const siteGrid = !control ? '' : `
+          <div class="text-[11px] font-semibold text-slate-500 mt-3 mb-1">Per-site — load weight <span class="font-normal text-slate-400">(relative · 3 = 3× the random load of 1)</span></div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            ${sites.length ? sites.map(st => `
+              <label class="text-xs text-slate-500 flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-md px-2 py-1">
+                <span class="truncate">${esc(siteLabel(st))}</span>
+                <input data-cs-ambient-site="${esc(st)}" type="number" min="0"
+                       value="${esc(sw[st] != null ? sw[st] : 1)}"
+                       class="w-16 bg-white border border-slate-300 rounded-md px-1 py-0.5 text-sm text-right">
+              </label>`).join('')
+              : '<div class="text-xs text-slate-400 italic">Define SSIDs (with sites) above to weight sites.</div>'}
+          </div>`;
     return `<div class="mb-3">
           <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Simulation distribution <span class="text-slate-400 normal-case font-normal">(engine / Auto mode)</span></div>
-          <p class="text-[11px] text-slate-400 mb-1 leading-tight">Each randomizable sim runs on a share of the fleet. By default every sim gets the same base share and the fleet self-balances. Turn on <span class="font-semibold">weight control</span> to steer specific sims — a higher weight hands that sim more clients.</p>
+          <p class="text-[11px] text-slate-400 mb-1 leading-tight"><span class="font-semibold">Ambient level</span> is the % of the fleet doing benign traffic at once (<code>40</code> ≈ 40% of clients). Those active clients are split by relative <span class="font-semibold">weights</span> — a sim or site weighted <code>3</code> gets 3× the clients of one weighted <code>1</code>. By default every weight is 1 (even split). Turn on <span class="font-semibold">weight control</span> to steer the per-sim and per-site split.</p>
           <div class="flex flex-wrap items-center gap-4">
-            <label class="text-xs text-slate-500 flex items-center gap-2">Base ambient %
+            <label class="text-xs text-slate-500 flex items-center gap-2">Ambient level % <span class="text-slate-400">(of fleet active)</span>
               <input data-cs-ambient="pct" type="number" min="0" max="100" value="${esc(pct)}"
                      class="w-16 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm text-right">
             </label>
@@ -2918,7 +2951,8 @@ function csAmbientDistHtml() {
               Control distribution by weight
             </label>
           </div>
-          ${weightGrid}
+          ${simGrid}
+          ${siteGrid}
         </div>`;
 }
 
@@ -3043,15 +3077,28 @@ function csPoolSyncFromDom() {
     const ctrlEl = document.querySelector('[data-cs-ambient="control"]');
     if (ctrlEl) pc.ambient_control = !!ctrlEl.checked;
     if (pc.ambient_control) {
+        // Per-sim relative weights (default 1). Keep only non-default entries so a
+        // config with an even split stays clean.
         const aw = {};
         (pc.randomizable_sims || []).forEach(s => {
             const el = document.querySelector(`[data-cs-ambient-w="${s}"]`);
             if (!el) return;
             let v = parseInt(el.value, 10);
-            if (isNaN(v)) v = (pc.ambient_pct != null ? pc.ambient_pct : 50);
-            aw[s] = Math.max(0, Math.min(100, v));
+            if (isNaN(v)) v = 1;
+            v = Math.max(0, v);
+            if (v !== 1) aw[s] = v;
         });
         pc.ambient_weights = aw;
+        // Per-site relative load weights (default 1). Keep only non-default entries.
+        const asw = {};
+        document.querySelectorAll('[data-cs-ambient-site]').forEach(el => {
+            const st = el.getAttribute('data-cs-ambient-site');
+            let v = parseInt(el.value, 10);
+            if (isNaN(v)) v = 1;
+            v = Math.max(0, v);
+            if (st && v !== 1) asw[st] = v;
+        });
+        pc.ambient_site_weights = asw;
     }
     return pc;
 }
@@ -3100,6 +3147,7 @@ window.csSavePoolConfig = async function () {
             ambient_pct: (pc.ambient_pct != null ? pc.ambient_pct : 50),
             ambient_control: !!pc.ambient_control,
             ambient_weights: pc.ambient_control ? (pc.ambient_weights || {}) : {},
+            ambient_site_weights: pc.ambient_control ? (pc.ambient_site_weights || {}) : {},
         };
         await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         showToast('Pool & SSID config saved.', 'success');
