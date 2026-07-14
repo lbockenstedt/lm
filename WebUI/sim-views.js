@@ -439,7 +439,7 @@ const CS_NO_REFRESH = new Set([
     // would stomp a half-edited form). Listed per child so Config::Quota State
     // — a live ledger view, not a form — is NOT here and auto-refreshes.
     'Config::Sim Quotas',    // Sim Quotas editor — manual Refresh only
-    'Config::PXMX Sites',    // PXMX site assignments — manual Refresh only
+    'Config::Sites',         // PXMX site assignments — manual Refresh only
     'Config::Config Editor', // raw config editor — manual Refresh only
     'VM Server::Command Queue', // loads serve from the cached CS_TELEMETRY
                                 // command_queue (instant); kept manual-refresh so
@@ -2693,7 +2693,7 @@ function csSimQuotaSelect(selected, items, placeholder) {
         items.map(it => `<option value="${csEscape(it)}" ${it === selected ? 'selected' : ''}>${csEscape(it)}</option>`).join('');
 }
 
-// Site options driven by the Site Links (Config → PXMX Sites): each option shows
+// Site options driven by the Site Links (Config → Sites): each option shows
 // the link NAME but its VALUE is the link's wsite — the single key the engine
 // routes on (pxmx server assignment, SSID cell, quota site all match on it). A
 // currently-saved site with no matching link is still shown so it isn't lost.
@@ -2973,7 +2973,7 @@ function csPoolConfigCardHtml() {
             <button onclick="csSavePoolConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Pool</button>
           </div>
         </div>
-        <p class="text-xs text-slate-500 mb-3">The SSID matrix just <span class="font-semibold">defines</span> your SSIDs (site, auth, password). <span class="font-semibold">Sim Quotas</span> attach an exact (accounted) count of clients to a cell for an alert. The <span class="font-semibold">weighted rules</span> below spread the rest of the pool (random, unaccounted) across a site's SSIDs by weight. Whether a PXMX server is site-bound (RF chamber) or assignable is set in <span class="font-semibold">Config → PXMX Sites</span>.</p>
+        <p class="text-xs text-slate-500 mb-3">The SSID matrix just <span class="font-semibold">defines</span> your SSIDs (site, auth, password). <span class="font-semibold">Sim Quotas</span> attach an exact (accounted) count of clients to a cell for an alert. The <span class="font-semibold">weighted rules</span> below spread the rest of the pool (random, unaccounted) across a site's SSIDs by weight. Whether a PXMX server is site-bound (RF chamber) or assignable is set in <span class="font-semibold">Config → Sites</span>.</p>
         <div class="mb-3">
           <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Randomizable (ambient) sims</div>
           <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-1">${simChecks}</div>
@@ -3487,7 +3487,7 @@ async function csRenderSimQuotaState() {
     }
 }
 
-// ── PXMX Sites: assign each connected pxmx server (agent host) to a site ──────
+// ── Sites: assign each connected pxmx server (agent host) to a site ───────────
 // The SimQuotaEngine resolves a client's site via its hosting server's entry
 // here (after a per-client wsite override, before the bucket-default wsite), so
 // a site-specific quota ("10 DNS-fail in MIA") fills from clients whose hosting
@@ -3567,7 +3567,7 @@ function csRenderPxmxSiteMapEditor() {
       ${csSiteLinksCardHtml()}
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">PXMX Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Server to Site Assignments ${helpIcon('cs', null, 'Simulations help')}</h3>
           <button onclick="csPxmxSiteSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Assignments</button>
         </div>
         <p class="text-xs text-slate-500 mb-2">Assign <span class="font-semibold">every</span> pxmx server to a pool: a <span class="font-semibold">Site Pool</span> (RF chamber — its clients are physically at that site and only run that site's SSID) or the <span class="font-semibold">Tenant-Wide Pool</span> (site-based SSID — its clients are assignable to any site/SSID by the Pool &amp; SSID placement). A deployment can mix both. Pools are always per-tenant. A client's own wsite override still wins; the bucket-default wsite is the fallback.</p>
@@ -3576,7 +3576,7 @@ function csRenderPxmxSiteMapEditor() {
     </div>`);
 }
 
-// ── Site Links (wsite ↔ Central site) — Config → PXMX Sites ──────────────────
+// ── Site Links (wsite ↔ Central site) — Config → Sites ───────────────────────
 // Tie a simulation wsite (the SSID prefix, e.g. MIA) to its Central site name
 // (e.g. Miami). The link's Name shows in the PXMX assignment dropdown; the link
 // lets alert-driven quotas match where the alert actually fires in Central.
@@ -4853,7 +4853,7 @@ async function csRenderSetupNotifications() {
 // config). VIEW_CHILDREN.cs.Config (main.js) lists both; the existing
 // case 'Config' dispatch is the no-children fallback and stays as a safety net.
 window.CS_CHILD_RENDERERS['Config::Sim Quotas']    = csRenderConfigSimQuotas;
-window.CS_CHILD_RENDERERS['Config::PXMX Sites']    = csRenderPxmxSiteMap;
+window.CS_CHILD_RENDERERS['Config::Sites']         = csRenderPxmxSiteMap;
 window.CS_CHILD_RENDERERS['Config::Quota State']   = csRenderSimQuotaState;
 window.CS_CHILD_RENDERERS['Config::Config Editor']    = csRenderConfigSimulation;
 
