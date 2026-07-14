@@ -1214,7 +1214,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'SSO', 'Azure NSG', 'Cloud NAC', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
+    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3577,27 +3577,11 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
-    // SSO — Microsoft Entra ID (OIDC) config: enable it, set tenant/client/cert/
-    // group/MFA. Drives /setup/oidc-config and the login "Sign in with Microsoft"
-    // button. Global-Admin only (route is admin-gated server-side).
-    if (subMenu === 'SSO') {
-        _renderSettingsSsoTile(content);
-        return;
-    }
-
-    // Azure NSG — manage a single 'alias-style' allow rule in an Azure Network
-    // Security Group (add/remove IPs). Reuses the Entra SSO app's certificate for
-    // ARM auth; needs a Network Contributor role on the NSG. Admin-only.
-    if (subMenu === 'Azure NSG') {
-        _renderSettingsAzureNsgTile(content);
-        return;
-    }
-
-    // Cloud NAC — JIT Entra account provisioning for sim 1X clients (reuses the
-    // SSO app cert). Config + manual provision/sweep here; the engine drives the
-    // automatic path. Admin-only.
-    if (subMenu === 'Cloud NAC') {
-        _renderSettingsCloudNacTile(content);
+    // Azure — one tab collapsing SSO (Entra OIDC login), Azure NSG (allow-list),
+    // and Cloud NAC (JIT Entra provisioning), all of which share the SSO app
+    // registration + cert. A pill sub-nav switches between the three tiles.
+    if (subMenu === 'Azure') {
+        _renderSettingsAzureTile(content);
         return;
     }
 
@@ -5568,6 +5552,34 @@ function _renderSetupGeneralTile(content) {
 // Admin config for Entra ID SSO — enable it, set tenant/client/cert/group/MFA.
 // Reads/writes /setup/oidc-config (core/src/routes/oidc.py); env LM_OIDC_* wins
 // over stored values. Enabling shows the "Sign in with Microsoft" login button.
+// ── Settings → Azure (SSO / Azure NSG / Cloud NAC under one tab) ────────────
+// These three all share the SSO Entra app registration + cert, so they live
+// together under Azure with a pill sub-nav. Each tile renderer takes a container.
+const _AZURE_SUBTABS = ['SSO', 'Azure NSG', 'Cloud NAC'];
+function _renderSettingsAzureTile(content) {
+    const sub = _AZURE_SUBTABS.includes(window._azureSubTab) ? window._azureSubTab : 'SSO';
+    const pill = t => `<button onclick="azureSubTab('${t}')" data-azsub="${t}" class="px-3 py-1.5 rounded-md text-xs font-bold border ${t === sub ? 'bg-[#01A982]/10 text-[#01A982] border-[#01A982]' : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-50'}">${t}</button>`;
+    content.innerHTML = `
+        <div class="space-y-4">
+            <div class="flex items-center gap-2 flex-wrap">${_AZURE_SUBTABS.map(pill).join('')}</div>
+            <div id="azure-subcontent"></div>
+        </div>`;
+    azureSubTab(sub);
+}
+window.azureSubTab = function (which) {
+    if (!_AZURE_SUBTABS.includes(which)) which = 'SSO';
+    window._azureSubTab = which;
+    document.querySelectorAll('[data-azsub]').forEach(b => {
+        const on = b.getAttribute('data-azsub') === which;
+        b.className = `px-3 py-1.5 rounded-md text-xs font-bold border ${on ? 'bg-[#01A982]/10 text-[#01A982] border-[#01A982]' : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-50'}`;
+    });
+    const el = document.getElementById('azure-subcontent');
+    if (!el) return;
+    if (which === 'Azure NSG') _renderSettingsAzureNsgTile(el);
+    else if (which === 'Cloud NAC') _renderSettingsCloudNacTile(el);
+    else _renderSettingsSsoTile(el);
+};
+
 // ── Settings → Cloud NAC (JIT Entra provisioning for sim 1X clients) ────────
 function _renderSettingsCloudNacTile(content) {
     const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
