@@ -29,8 +29,10 @@ from security.oidc import (
     provision_or_sync_entra_user, sign_state_cookie, verify_id_token,
     verify_state_cookie, authorize_url, build_user_data,
     generate_client_cert, cert_thumbprint_x5t, fetch_directory_groups,
+    default_oidc_dir,
 )
 from security.credential_store import resolve_private_key_material
+import os as _os
 
 _STATE_COOKIE = "lm_oidc_state"
 _STATE_TTL_S = 300
@@ -180,9 +182,15 @@ def register(app, hub, ctx):
         except Exception:
             data = {}
         force = bool((data or {}).get("force"))
-        cfg = get_oidc_config(hub)
+        # ALWAYS generate into the hub's writable default dir (default_oidc_dir →
+        # <data_dir>/oidc, LM_OIDC_DIR overrides) — NOT any stored path, which may
+        # be a stale /etc/lm value from the old default that the hub can't write.
+        # We then persist these paths, self-healing the stored config.
+        oidc_dir = default_oidc_dir(hub)
+        key_path = _os.path.join(oidc_dir, "client-key.pem")
+        cert_path = _os.path.join(oidc_dir, "client-cert.pem")
         try:
-            res = generate_client_cert(key_path=cfg.key_path, cert_path=cfg.cert_path,
+            res = generate_client_cert(key_path=key_path, cert_path=cert_path,
                                        force=force)
         except OidcError as e:
             # Existing key without force → 409 so the UI can prompt "overwrite?".
