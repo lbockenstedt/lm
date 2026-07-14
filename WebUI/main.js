@@ -1248,9 +1248,9 @@ const VIEW_CHILDREN = {
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],
     },
     settings: {
-        // Azure gets a second-tier strip (SSO / NSG / Cloud NAC) — they share the
-        // one Entra app registration + cert.
-        'Azure': ['SSO', 'NSG', 'Cloud NAC'],
+        // Azure gets a second-tier strip (SSO / NSG / Cloud NAC / Key Vault) —
+        // they share the one Entra app registration + cert.
+        'Azure': ['SSO', 'NSG', 'Cloud NAC', 'Key Vault'],
     },
 };
 
@@ -3590,9 +3590,10 @@ function _renderSettingsSection(subMenu) {
     // provides SSO / NSG / Cloud NAC, which share the SSO app registration + cert.
     // Render the active child's tile (currentSubChild) into the settings content.
     if (subMenu === 'Azure') {
-        const child = ['SSO', 'NSG', 'Cloud NAC'].includes(currentSubChild) ? currentSubChild : 'SSO';
+        const child = ['SSO', 'NSG', 'Cloud NAC', 'Key Vault'].includes(currentSubChild) ? currentSubChild : 'SSO';
         if (child === 'NSG') _renderSettingsAzureNsgTile(content);
         else if (child === 'Cloud NAC') _renderSettingsCloudNacTile(content);
+        else if (child === 'Key Vault') _renderSettingsKeyVaultTile(content);
         else _renderSettingsSsoTile(content);
         return;
     }
@@ -5733,6 +5734,130 @@ async function sweepCloudNac() {
         loadCloudNac();
     } catch (e) { showToast('Sweep failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = ''; }
 }
+
+// ── Settings → Azure Key Vault (DR: admin rotation + min bootstrap backup) ──
+// Break-glass admin-password rotation, Fernet-key escrow, and a rolling min
+// bootstrap backup stored in Azure Key Vault. Reuses the SSO Entra app cert
+// (vault.azure.net token; app needs Key Vault Secrets Officer). Admin-only.
+function _renderSettingsKeyVaultTile(content) {
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Key Vault — DR &amp; break-glass</h3>
+                <span id="kv-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">Stores disaster-recovery material in <b>Azure Key Vault</b> using the <b>SSO Entra app</b> cert — the app needs the <b>Key Vault Secrets Officer</b> role on the vault. On a schedule the hub rotates the local admin password (<b>break-glass</b> — afterwards it lives only in the vault), and pushes a <b>min bootstrap backup</b>: users/logins + the Azure connection + the Fernet key + a pointer to your real backup source. Restore that on a fresh hub → it can call home to Azure and let admins in → then pull the full backup from source.</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="kv-enabled" class="w-4 h-4 text-green-600 rounded">Enable Key Vault DR automation</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Vault URL</label><input id="kv-url" type="text" placeholder="https://my-vault.vault.azure.net" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Rotate admin every (days)</label><input id="kv-rotate" type="number" placeholder="7" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Keep backups (days)</label><input id="kv-retain" type="number" placeholder="7" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Admin-password secret name</label><input id="kv-admin-secret" type="text" placeholder="lm-admin-password" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Fernet-key secret name</label><input id="kv-fernet-secret" type="text" placeholder="lm-fernet-key" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Backup secret prefix <span class="text-slate-400 normal-case font-normal">(daily: prefix + YYYYMMDD)</span></label><input id="kv-prefix" type="text" placeholder="lm-min-backup-" class="${inputCls} font-mono text-xs"></div>
+            </div>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+                <button type="button" onclick="testKeyVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test connection</button>
+                <button type="button" onclick="rotateKeyVaultAdmin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Rotate admin now</button>
+                <button type="button" onclick="pushKeyVaultFernet()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push Fernet key</button>
+                <button type="button" onclick="backupKeyVaultNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Backup now</button>
+                <span id="kv-action-out" class="text-[11px] font-mono text-slate-600 break-all"></span>
+            </div>
+            <div class="mt-4">
+                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Backups in vault <span id="kv-bk-count" class="text-slate-400 font-normal"></span></div>
+                <div id="kv-backups" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-56 overflow-y-auto text-xs"></div>
+            </div>
+            <div class="mt-4 flex items-center justify-between gap-3">
+                <span id="kv-msg" class="text-xs text-slate-400"></span>
+                <button onclick="saveKeyVault()" id="kv-save-btn" class="${btnCls}">Save</button>
+            </div>
+        </div>`;
+    loadKeyVault();
+}
+
+async function loadKeyVault() {
+    try {
+        const r = await setupFetch('/setup/key-vault');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
+        const en = document.getElementById('kv-enabled'); if (en) en.checked = !!c.enabled;
+        set('kv-url', c.vault_url); set('kv-rotate', c.rotate_days || 7); set('kv-retain', c.retain || 7);
+        set('kv-admin-secret', c.admin_secret || 'lm-admin-password');
+        set('kv-fernet-secret', c.fernet_secret || 'lm-fernet-key');
+        set('kv-prefix', c.backup_prefix || 'lm-min-backup-');
+        const pill = document.getElementById('kv-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        const st = d.status || {};
+        const cnt = document.getElementById('kv-bk-count'); if (cnt) cnt.textContent = `(${(st.backups || []).length})`;
+        const box = document.getElementById('kv-backups');
+        if (box) {
+            const bks = st.backups || [];
+            box.innerHTML = bks.length ? bks.map(n => `<div class="px-2 py-1 font-mono text-slate-700">${escapeHtml(n)}</div>`).join('')
+                : `<div class="text-slate-400 italic px-2 py-2">${st.warning ? escapeHtml(st.warning) : 'No backups in the vault yet.'}</div>`;
+        }
+        const msg = document.getElementById('kv-msg');
+        if (msg) msg.textContent = [c.last_rotate ? 'rotated ' + c.last_rotate.slice(0, 10) : '', c.last_backup ? 'backup ' + c.last_backup.slice(0, 10) : ''].filter(Boolean).join(' · ');
+    } catch (e) { console.error('loadKeyVault failed', e); }
+}
+
+function _keyVaultFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    return {
+        enabled: !!document.getElementById('kv-enabled')?.checked,
+        vault_url: v('kv-url'),
+        rotate_days: parseInt(v('kv-rotate'), 10) || 7,
+        retain: parseInt(v('kv-retain'), 10) || 7,
+        admin_secret: v('kv-admin-secret') || 'lm-admin-password',
+        fernet_secret: v('kv-fernet-secret') || 'lm-fernet-key',
+        backup_prefix: v('kv-prefix') || 'lm-min-backup-',
+    };
+}
+
+async function saveKeyVault() {
+    const btn = document.getElementById('kv-save-btn');
+    if (btn) btn.disabled = true;
+    try {
+        const r = await setupFetch('/setup/key-vault', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _keyVaultFormConfig() }) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        showToast('Key Vault settings saved.', 'success');
+        loadKeyVault();
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) btn.disabled = false; }
+}
+
+async function testKeyVault() {
+    const out = document.getElementById('kv-action-out');
+    if (out) out.textContent = 'Testing…';
+    try {
+        const r = await setupFetch('/setup/key-vault/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _keyVaultFormConfig() }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { if (out) out.textContent = `OK — ${d.secret_count} secret(s) visible`; showToast('Key Vault connection OK.', 'success'); }
+        else { if (out) out.textContent = d.message || 'failed'; showToast('Test failed: ' + (d.message || ''), 'error'); }
+    } catch (e) { if (out) out.textContent = ''; showToast('Test failed: ' + (e.message || e), 'error'); }
+}
+
+async function _kvAction(path, label, confirmMsg) {
+    if (confirmMsg && !confirm(confirmMsg)) return;
+    const out = document.getElementById('kv-action-out');
+    if (out) out.textContent = label + '…';
+    try {
+        const r = await setupFetch(path, { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        if (out) out.textContent = `${label}: ${d.secret || 'ok'}${d.size ? ' (' + d.size + 'b)' : ''}`;
+        showToast(`${label} — done.`, 'success');
+        loadKeyVault();
+    } catch (e) { if (out) out.textContent = ''; showToast(`${label} failed: ` + (e.message || e), 'error'); }
+}
+
+function rotateKeyVaultAdmin() { _kvAction('/setup/key-vault/rotate-admin', 'Rotate admin', 'Rotate the local admin password now?\n\nThe new password is stored ONLY in Key Vault (break-glass) and all of that admin’s sessions are logged out. Retrieve it from the vault to log back in.'); }
+function pushKeyVaultFernet() { _kvAction('/setup/key-vault/push-fernet', 'Push Fernet'); }
+function backupKeyVaultNow() { _kvAction('/setup/key-vault/backup', 'Backup'); }
+window.testKeyVault = testKeyVault; window.saveKeyVault = saveKeyVault;
+window.rotateKeyVaultAdmin = rotateKeyVaultAdmin; window.pushKeyVaultFernet = pushKeyVaultFernet;
+window.backupKeyVaultNow = backupKeyVaultNow;
 
 // ── Settings → Azure NSG (alias-style allow-list) ───────────────────────────
 // Manage one allow rule in an Azure NSG as an IP allow-list. Reuses the SSO
