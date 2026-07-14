@@ -394,8 +394,25 @@ async def exchange_code(cfg: OidcConfig, discovery_doc: dict,
     async with (http or httpx.AsyncClient(timeout=15.0)) as client:
         resp = await client.post(token_endpoint, data=data)
     if resp.status_code != 200:
-        raise OidcError(f"token exchange failed: HTTP {resp.status_code}")
+        raise OidcError(f"token exchange failed: HTTP {resp.status_code}"
+                        f"{_entra_error_detail(resp)}")
     return resp.json()
+
+
+def _entra_error_detail(resp) -> str:
+    """Extract Entra's ``error`` / ``error_description`` (the AADSTS code) from a
+    failed token response so the callback surfaces WHY instead of a bare status.
+    The AADSTS text is Entra's own diagnostic (no secret material) — safe to show.
+    Returns ``" — <detail>"`` or ``""``."""
+    try:
+        j = resp.json()
+        detail = j.get("error_description") or j.get("error") or ""
+        # AADSTS descriptions are multi-line (code, then a stack); keep line 1.
+        detail = str(detail).replace("\r", "\n").split("\n")[0].strip()[:300]
+        return f" — {detail}" if detail else ""
+    except Exception:  # noqa: BLE001
+        txt = (getattr(resp, "text", "") or "")[:200].strip()
+        return f" — {txt}" if txt else ""
 
 
 # ── id-token verification + MFA enforcement ─────────────────────────────────
