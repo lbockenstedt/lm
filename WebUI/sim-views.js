@@ -5911,27 +5911,26 @@ window.csVmBulk = async function (action) {
     if (action === 'delete_vm') {
         for (const hh of new Set(items.map(v => v._host))) { await csExpirePendingForTarget(hh); }
     }
-    // Sequential paced enqueue — a burst floods the cs spoke's queue/WS
-    // ("connection closed mid-send"); the 250ms gap paces the ENQUEUE while the
-    // agent's own 2-slot semaphore bounds execution. Per-item errors tolerated
-    // so one failure doesn't abort the batch. Each VM routes to its own spoke.
+    // Bulk enqueue — group the selected VMs by their OWNING spoke and send ONE
+    // request per spoke carrying the whole item list, instead of one request (and
+    // one hub→spoke WS round-trip) per VM. Each item keeps its own target so VMs
+    // route to their own host. The spoke enqueues them locally in a single handler
+    // call, so there's no WS flood (the reason the old path paced sends at 250ms).
+    const bySpoke = {};
+    items.forEach(v => {
+        const sp = v._spoke || csVmSelectedSpoke;
+        const args = { vmid: Number(v.vmid) };
+        if (v.type) args.vm_type = v.type;
+        (bySpoke[sp] = bySpoke[sp] || []).push({ action, args, target: v._host, type: v.type });
+    });
     let ok = 0, fail = 0;
-    for (let i = 0; i < items.length; i++) {
-        const v = items[i];
+    await Promise.all(Object.entries(bySpoke).map(async ([sp, list]) => {
         try {
-            const args = { vmid: Number(v.vmid) };
-            if (v.type) args.vm_type = v.type;
-            await csFetch(`/${csTenant()}/spokes/${encodeURIComponent(v._spoke)}/proxmox-command?tenant_id=${csTenant()}`,
-                { method: 'POST', body: JSON.stringify({ action, args, target: v._host }) });
-            ok++;
-        } catch (e) { console.error('csVmBulk item ' + (v && v.vmid) + ' failed', e); fail++; }
-        // Bulk DELETE gets a single acknowledgement (the initial + final toasts),
-        // not per-group progress chatter. Other bulk actions still show progress.
-        if (typeof showToast === 'function' && action !== 'delete_vm'
-                && items.length > 4 && (i + 1) % 5 === 0)
-            showToast(`${csVmActionLabel(action)}… ${i + 1}/${items.length}`, 'info');
-        await new Promise(r => setTimeout(r, 250));
-    }
+            const r = await csFetch(`/${csTenant()}/spokes/${encodeURIComponent(sp)}/proxmox-command?tenant_id=${csTenant()}`,
+                { method: 'POST', body: JSON.stringify({ action, items: list }) });
+            ok += (r && typeof r.queued === 'number') ? r.queued : list.length;
+        } catch (e) { console.error('csVmBulk spoke ' + sp + ' failed', e); fail += list.length; }
+    }));
     if (typeof showToast === 'function') {
         if (fail) showToast(`${action}: ${ok} queued, ${fail} failed`, 'error');
         else csVmFlash(`${action} queued for ${ok} VM(s)`);

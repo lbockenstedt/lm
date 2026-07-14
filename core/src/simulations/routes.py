@@ -2717,17 +2717,40 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception:
             body = {}
         body = body if isinstance(body, dict) else {}
+        # Default host for items that don't specify their own target.
+        def _default_target():
+            cache = _tenant_cache(tenant_id).get(spoke_id, {})
+            px = cache.get("proxmox") or {}
+            node = (px.get("node") or {}) if isinstance(px, dict) else {}
+            return (node.get("hostname") or "proxmox") if isinstance(node, dict) else "proxmox"
+        # Bulk path: an ``items`` list queues MANY VM commands in ONE forward to the
+        # spoke (the UI groups a multi-VM action by spoke and sends one call each),
+        # instead of one WS round-trip per VM. Each item keeps its own target so
+        # VMs route to their own host.
+        items = body.get("items")
+        if isinstance(items, list) and items:
+            norm = []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                iact = str(it.get("action") or "").strip()
+                if not iact:
+                    continue
+                norm.append({
+                    "target": it.get("target") or _default_target(),
+                    "action": iact,
+                    "args": it.get("args") if isinstance(it.get("args"), dict) else {},
+                    "type": it.get("type"),
+                })
+            if not norm:
+                raise HTTPException(status_code=400, detail="no valid items")
+            return await _cs_forward(tenant_id, "CS_QUEUE_COMMAND", {"items": norm})
         action = str(body.get("action") or "").strip()
         if not action:
             raise HTTPException(status_code=400, detail="missing 'action'")
         args = body.get("args") if isinstance(body.get("args"), dict) else \
             {k: v for k, v in body.items() if k not in ("action", "target", "type")}
-        target = body.get("target")
-        if not target:
-            cache = _tenant_cache(tenant_id).get(spoke_id, {})
-            px = cache.get("proxmox") or {}
-            node = (px.get("node") or {}) if isinstance(px, dict) else {}
-            target = (node.get("hostname") or "proxmox") if isinstance(node, dict) else "proxmox"
+        target = body.get("target") or _default_target()
         payload = {"target": target, "action": action, "args": args, "type": body.get("type")}
         return await _cs_forward(tenant_id, "CS_QUEUE_COMMAND", payload)
 
