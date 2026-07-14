@@ -12,7 +12,7 @@ from api import HTTPException, Request, logger
 from security.oidc import get_oidc_config
 import cloud_nac as _cn
 
-_CFG_FIELDS = ("enabled", "domain", "idle_days")
+_CFG_FIELDS = ("enabled", "domain", "idle_days", "group_id", "group_name")
 
 
 def register(app, hub, ctx):
@@ -50,6 +50,8 @@ def register(app, hub, ctx):
         except (TypeError, ValueError):
             cur["idle_days"] = 7
         cur["domain"] = str(cur.get("domain") or "").strip()
+        cur["group_id"] = str(cur.get("group_id") or "").strip()
+        cur["group_name"] = str(cur.get("group_name") or "").strip()
         gc = hub.state.system_state.get("global_config", {})
         gc["cloud_nac"] = {k: cur[k] for k in _CFG_FIELDS}
         hub.state.system_state["global_config"] = gc
@@ -77,8 +79,18 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=502, detail=str(e))
         _cn.record_account(hub.state.system_state, res)
         hub.state.save_state()
+        # Auto-add to the configured Entra group (best-effort — surfaced as a
+        # warning so the account+password still succeed if group-add is misconfig).
+        group_warn = ""
+        added = False
+        if cfg.get("group_id") and res.get("oid"):
+            try:
+                added = await _cn.add_user_to_group(get_oidc_config(hub), cfg["group_id"], res["oid"])
+            except _cn.CloudNacError as e:
+                group_warn = str(e)
         return {"status": "ok", "username": res["username"], "upn": res["upn"],
-                "created": res["created"], "password": res["password"]}
+                "created": res["created"], "password": res["password"],
+                "group_added": added, "group_warning": group_warn}
 
     @app.post("/setup/cloud-nac/deprovision")
     async def deprovision_cloud_nac(request: Request):

@@ -147,6 +147,24 @@ async def provision_user(cfg: OidcConfig, domain: str, username: str,
     return {"username": username, "upn": upn, "oid": oid, "password": password, "created": True}
 
 
+async def add_user_to_group(cfg: OidcConfig, group_id: str, oid: str,
+                            http: Optional[httpx.AsyncClient] = None) -> bool:
+    """Add the user (objectId) to an Entra group. Idempotent — an already-member
+    400 is treated as success. Needs Graph ``GroupMember.ReadWrite.All`` (App).
+    Used so JIT'd Cloud NAC accounts land in a group you can target with a CA
+    MFA-exclusion / Cloud Auth policy (and the LM group→tenant mapping)."""
+    if not group_id or not oid:
+        return False
+    token = await fetch_app_token(cfg, _GRAPH_SCOPE, http=http)
+    body = {"@odata.id": f"{_GRAPH}/directoryObjects/{oid}"}
+    resp = await _graph("POST", f"/groups/{group_id}/members/$ref", token, json=body, http=http)
+    if resp.status_code in (200, 201, 204):
+        return True
+    if resp.status_code == 400 and "already exist" in (resp.text or "").lower():
+        return True  # already a member
+    raise CloudNacError(f"Graph add-to-group failed: HTTP {resp.status_code} — {resp.text[:200]}")
+
+
 async def delete_user(cfg: OidcConfig, ident: str,
                       http: Optional[httpx.AsyncClient] = None) -> bool:
     """Delete the Entra account (by UPN or oid). 404 is treated as success."""

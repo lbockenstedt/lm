@@ -5583,6 +5583,16 @@ function _renderSettingsCloudNacTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">UPN domain</label><input id="cn-domain" type="text" placeholder="ssplm.onmicrosoft.com" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Idle days (delete after)</label><input id="cn-idle" type="number" placeholder="7" class="${inputCls}"></div>
             </div>
+            <div class="mt-3 space-y-1">
+                <label class="${labelCls}">Add provisioned users to Entra group <span class="text-slate-400 normal-case font-normal">(optional — target this group with a CA MFA-exclusion / Cloud Auth policy)</span></label>
+                <div class="flex gap-2">
+                    <input id="cn-group-id" type="text" placeholder="group object ID" class="${inputCls} font-mono text-xs flex-1">
+                    <input id="cn-group-name" type="text" placeholder="(name)" readonly class="${inputCls} text-xs flex-1 bg-slate-50">
+                    <button type="button" onclick="loadCloudNacGroupPicker()" id="cn-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">Pick from Entra</button>
+                </div>
+                <select id="cn-group-select" onchange="onCloudNacGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
+                <p id="cn-group-msg" class="text-[11px] text-amber-600 hidden"></p>
+            </div>
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
                 <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Test provision</div>
                 <div class="flex gap-2">
@@ -5614,6 +5624,7 @@ async function loadCloudNac() {
         const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
         const el = document.getElementById('cn-enabled'); if (el) el.checked = !!c.enabled;
         set('cn-domain', c.domain); set('cn-idle', c.idle_days || 7);
+        set('cn-group-id', c.group_id); set('cn-group-name', c.group_name);
         const pill = document.getElementById('cn-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const cnt = document.getElementById('cn-count'); if (cnt) cnt.textContent = `(${d.count || 0})`;
@@ -5636,7 +5647,43 @@ function _cloudNacFormConfig() {
     return {
         enabled: !!document.getElementById('cn-enabled')?.checked,
         domain: v('cn-domain'), idle_days: parseInt(v('cn-idle'), 10) || 7,
+        group_id: v('cn-group-id'), group_name: v('cn-group-name'),
     };
+}
+
+// Reuse the Entra group list (/setup/oidc/groups) to pick the target group by
+// name — fills the object ID the provisioning adds users to.
+async function loadCloudNacGroupPicker() {
+    const btn = document.getElementById('cn-group-btn');
+    const sel = document.getElementById('cn-group-select');
+    const msg = document.getElementById('cn-group-msg');
+    if (!sel) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+    try {
+        const res = await setupFetch('/setup/oidc/groups');
+        const d = await res.json().catch(() => ({}));
+        const groups = (d && d.groups) || [];
+        if (!groups.length) {
+            if (msg) { msg.textContent = (d && d.warning) || 'No Entra groups returned (needs Graph Group.Read.All + a generated cert).'; msg.classList.remove('hidden'); }
+            sel.classList.add('hidden');
+        } else {
+            sel.innerHTML = '<option value="">— select an Entra group —</option>' +
+                groups.map(g => `<option value="${escapeHtml(g.id)}" data-name="${escapeHtml(g.displayName)}">${escapeHtml(g.displayName)} — ${escapeHtml(g.id)}</option>`).join('');
+            sel.classList.remove('hidden');
+            if (msg) msg.classList.add('hidden');
+        }
+    } catch (e) {
+        if (msg) { msg.textContent = 'Failed to load Entra groups: ' + (e.message || e); msg.classList.remove('hidden'); }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Pick from Entra'; }
+    }
+}
+function onCloudNacGroupPick(sel) {
+    const id = sel.value;
+    if (!id) return;
+    const opt = sel.options[sel.selectedIndex];
+    const idEl = document.getElementById('cn-group-id'); if (idEl) idEl.value = id;
+    const nameEl = document.getElementById('cn-group-name'); if (nameEl) nameEl.value = (opt && opt.getAttribute('data-name')) || '';
 }
 
 async function saveCloudNac() {
@@ -5660,8 +5707,9 @@ async function provisionCloudNac() {
         const r = await setupFetch('/setup/cloud-nac/provision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user }) });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
-        if (out) out.textContent = `${d.created ? 'Created' : 'Reset'} ${d.upn} — password: ${d.password}  (shown once)`;
-        showToast(`${d.created ? 'Created' : 'Reset'} ${d.upn}`, 'success');
+        const grp = d.group_warning ? `  ⚠ group: ${d.group_warning}` : (d.group_added ? '  ✓ added to group' : '');
+        if (out) out.textContent = `${d.created ? 'Created' : 'Reset'} ${d.upn} — password: ${d.password}  (shown once)${grp}`;
+        showToast(`${d.created ? 'Created' : 'Reset'} ${d.upn}${d.group_added ? ' (+group)' : ''}`, 'success');
         loadCloudNac();
     } catch (e) { if (out) out.textContent = ''; showToast('Provision failed: ' + (e.message || e), 'error'); }
 }
