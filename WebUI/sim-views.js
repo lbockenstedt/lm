@@ -5222,6 +5222,7 @@ async function csRenderVmServer() {
         ? `<div class="flex items-center gap-2 flex-wrap">
              <button onclick="csFleetRefreshTemplates()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Distribute a seed template backup from the hub onto the selected host(s): pause auto-provisioning, delete each host's sim VMs + template, qmrestore the seed backup, then resume auto-provisioning.">↻ Refresh Template(s)</button>
              <span class="text-[11px] text-slate-400">Select target host(s), then push a seed template backup from the hub onto them. This wipes each target's sim VMs.</span>
+             <span id="cs-refresh-status-chip" class="hidden text-[11px] font-bold px-2 py-1 rounded-full border"></span>
            </div>`
         : '';
 
@@ -5231,6 +5232,7 @@ async function csRenderVmServer() {
     csRefreshAutoProvStatus();
     csAutoProvLivePanel();
     csFleetRecloneProgress();
+    csRefreshStatusTick();   // template-refresh status chip (polls refresh_status)
 }
 
 // ── Fleet Reclone / Auto-Provisioning live progress panels ───────────────────
@@ -5239,6 +5241,56 @@ async function csRenderVmServer() {
 // active fleet reclone, and an in-flight VM list for auto-provisioning. Both
 // read data that already rides the per-host relay payload (reclone_state /
 // usb_devices[].prov_status), so they refresh with the VM Server auto-refresh.
+
+// Template-refresh status chip — polls the seed backup's ``refresh_status``
+// (set by the agent during REFRESH_TEMPLATE: pausing/killing/downloading/
+// restoring/resuming → complete/failed) and shows a live indicator next to the
+// Refresh button so the operator can see a refresh is running + its current
+// step. refresh_status is keyed by the seed template id (shared across
+// concurrent target hosts — the chip reflects the most recent step reported),
+// reusing the existing /tenant/templates data; no new endpoint.
+let _csRefreshStatusTimer = null;
+const _CS_REFRESH_ACTIVE = new Set(['pending', 'pausing', 'killing', 'downloading', 'restoring', 'resuming']);
+const _CS_REFRESH_LABEL = {
+    pending: 'Queued', pausing: 'Pausing auto-prov', killing: 'Wiping sim VMs',
+    downloading: 'Downloading backup', restoring: 'Restoring template',
+    resuming: 'Resuming auto-prov', complete: 'Complete', failed: 'Failed'
+};
+async function csRefreshStatusTick() {
+    if (_csRefreshStatusTimer) { clearTimeout(_csRefreshStatusTimer); _csRefreshStatusTimer = null; }
+    const chip = document.getElementById('cs-refresh-status-chip');
+    if (!chip) { return; }
+    let active = null, failed = null;
+    try {
+        const r = await fetch('/tenant/templates', { credentials: 'same-origin' });
+        const d = await r.json().catch(() => ({}));
+        const all = (d && d.templates) || [];
+        active = all.find(t => _CS_REFRESH_ACTIVE.has(String(t.refresh_status || '').toLowerCase())) || null;
+        if (!active) failed = all.find(t => String(t.refresh_status || '').toLowerCase() === 'failed') || null;
+    } catch (e) { /* keep last chip state; retry next tick */ }
+
+    if (active) {
+        const st = String(active.refresh_status || '').toLowerCase();
+        const label = _CS_REFRESH_LABEL[st] || st;
+        const when = active.refresh_updated_at ? new Date(active.refresh_updated_at).toLocaleTimeString() : '';
+        chip.className = 'text-[11px] font-bold px-2 py-1 rounded-full border bg-amber-50 text-amber-700 border-amber-300';
+        chip.innerHTML = `<span class="animate-spin inline-block w-3 h-3 rounded-full border-2 border-amber-500 border-t-transparent align-middle mr-1"></span>${csEscape(label)}${active.name ? ' · ' + csEscape(active.name) : ''}${when ? ' · ' + csEscape(when) : ''}`;
+        chip.classList.remove('hidden');
+    } else if (failed) {
+        chip.className = 'text-[11px] font-bold px-2 py-1 rounded-full border bg-red-50 text-red-700 border-red-300';
+        chip.title = String(failed.refresh_error || 'refresh failed');
+        chip.textContent = '↻ Refresh failed — see Template Repo';
+        chip.classList.remove('hidden');
+    } else {
+        chip.classList.add('hidden');
+        chip.innerHTML = '';
+    }
+    // Keep polling while the chip is on screen + something is active (or we just
+    // started). Back off to 15s when idle so a refresh started elsewhere still
+    // shows up. Stop entirely if the chip element left the DOM (view changed).
+    const stillActive = !!(active || failed);
+    _csRefreshStatusTimer = setTimeout(csRefreshStatusTick, stillActive ? 4000 : 15000);
+}
 
 function csFleetRecloneProgress() {
     const el = csEl('cs-fleet-reclone-progress');
