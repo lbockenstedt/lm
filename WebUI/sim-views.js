@@ -436,9 +436,9 @@ function csAutoRefreshControl() {
 const CS_NO_REFRESH = new Set([
     'Setup::Proxmox',   // Proxmox hypervisor config — manual Refresh only
     // Config form editors are manual-refresh only (a telemetry-driven rebuild
-    // would stomp a half-edited form). Listed per child so Config::Quota State
+    // would stomp a half-edited form). Listed per child so Config::Engine State
     // — a live ledger view, not a form — is NOT here and auto-refreshes.
-    'Config::Sim Quotas',    // Sim Quotas editor — manual Refresh only
+    'Config::Engine Config', // Engine Config (sim quotas) editor — manual Refresh only
     'Config::Sites',         // PXMX site assignments — manual Refresh only
     'Config::Config Editor', // raw config editor — manual Refresh only
     'VM Server::Command Queue', // loads serve from the cached CS_TELEMETRY
@@ -2544,7 +2544,7 @@ async function csRenderConfigSimulation() {
           ${webServerOn
             ? `<div class="border border-slate-200 rounded-lg p-3 bg-slate-50/60">
                  <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Per-simulation profiles [s0]–[s9]</p>
-                 <p class="text-xs text-slate-500 leading-snug">This deployment runs in <span class="font-semibold">hub / engine mode</span> (<code>web_server=on</code>), so the engine drives placement and ambient distribution and the <span class="font-semibold">s0–s9 buckets are ignored</span>. Configure how sims spread across the fleet in <span class="font-semibold">Config → Sim Quotas → Pool &amp; SSID → Simulation distribution</span>. The buckets only apply to standalone (GitHub-synced) deployments with <code>web_server=off</code>.</p>
+                 <p class="text-xs text-slate-500 leading-snug">This deployment runs in <span class="font-semibold">hub / engine mode</span> (<code>web_server=on</code>), so the engine drives placement and ambient distribution and the <span class="font-semibold">s0–s9 buckets are ignored</span>. Configure how sims spread across the fleet in <span class="font-semibold">Config → Engine Config → Pool &amp; SSID → Simulation distribution</span>. The buckets only apply to standalone (GitHub-synced) deployments with <code>web_server=off</code>.</p>
                </div>`
             : `<p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Per-simulation profiles [s0]–[s9]</p>
           ${bucketCards}`}
@@ -2591,7 +2591,7 @@ async function csRenderConfigSimulation() {
     csSet(`<div class="space-y-4">${sotCard}${roBanner}<div class="${roWrap} space-y-4">${simCard}${uoCard}</div>${hubCard}</div>`);
 }
 
-// ── Config → Sim Quotas sub-tab ────────────────────────────────────────────
+// ── Config → Engine Config sub-tab (sim quotas + pool/SSID) ─────────────────
 // Declares alert/insight → simulation linkage + the per-site client quota
 // the SimQuotaEngine (Chunk 2) keeps filled from the online pool. Renders
 // against the cs spoke's /sim-quota-catalog (sims + sites derived from this
@@ -2667,7 +2667,7 @@ async function csRenderConfigSimQuotas() {
         csRenderSimQuotaEditor();
     } catch (e) {
         console.error('csRenderConfigSimQuotas: load failed', e);
-        csSet(csErrorBox('Could not load Sim Quotas', e));
+        csSet(csErrorBox('Could not load Engine Config', e));
     }
 }
 
@@ -2862,7 +2862,7 @@ function csRenderSimQuotaEditor() {
     csSet(`<div class="space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Sim Quotas ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine Config ${helpIcon('cs', null, 'Simulations help')}</h3>
           <div class="flex justify-end gap-2">
             ${window._csIgnoreGlobalQuotas
               ? `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant ignores the platform-wide Sim Quota defaults — only its own rows apply. Click to use global defaults again." class="bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-300 px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: Ignored</button>`
@@ -3351,7 +3351,7 @@ window.csResetSimQuota = async function () {
     }
 };
 
-// ── Quota State: live SimQuotaEngine ledger (Config → Quota State) ──────────
+// ── Engine State: live SimQuotaEngine ledger (Config → Engine State) ────────
 // Read-only view of which clients the engine currently has assigned to each
 // effective quota, the target vs. assigned count, and the multi_capable /
 // rehome flags. Manual-refresh under Config (shares the Config primary's
@@ -3492,7 +3492,7 @@ async function csRenderSimQuotaState() {
             ${_adEntries.length
               ? `<p class="text-xs text-slate-500 mb-2">Each adaptive quota ramps its runner count to keep its alert firing, then settles at the learned floor + 20%. 🔄 learning · ✅ stable · ⚠️ at max.</p>
                  <div class="space-y-0.5">${_adEntries.map(_adRow).join('')}</div>`
-              : `<p class="text-xs text-slate-400 italic">No adaptive quotas yet. In <span class="font-semibold">Config → Sim Quotas</span>, tie a quota to an alert/insight and check <span class="font-semibold">Adaptive (keep firing)</span> — its Clients field becomes Min/Max and the learning state shows here.</p>`}
+              : `<p class="text-xs text-slate-400 italic">No adaptive quotas yet. In <span class="font-semibold">Config → Engine Config</span>, tie a quota to an alert/insight and check <span class="font-semibold">Adaptive (keep firing)</span> — its Clients field becomes Min/Max and the learning state shows here.</p>`}
           </div>`;
         // Cheap pool count (no accounting): total harvestable clients, tenant-pool
         // assignable, and per physical site — so you can see the pool size at a glance.
@@ -3509,7 +3509,7 @@ async function csRenderSimQuotaState() {
           <div class="hpe-card rounded-lg p-5 shadow-sm">
             ${warnBanner}
             <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-              <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Quota State ${helpIcon('cs', null, 'Simulations help')}</h3>
+              <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine State ${helpIcon('cs', null, 'Simulations help')}</h3>
               <div class="flex gap-2">
                 <button onclick="csResetSimQuota()" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-sm font-bold shadow-sm" title="Clear ALL engine assignments and re-shuffle every client from scratch">↻ Reset &amp; Reshuffle</button>
                 <button onclick="csRenderSimQuotaState()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
@@ -3525,13 +3525,13 @@ async function csRenderSimQuotaState() {
                 <th class="px-2 py-1 text-center">Re-home</th>
               </tr></thead>
               <tbody>${rows}</tbody>
-            </table>` : '<p class="text-xs text-slate-400 italic">No effective sim quotas. Define some in Config → Sim Quotas.</p>'}
+            </table>` : '<p class="text-xs text-slate-400 italic">No effective sim quotas. Define some in Config → Engine Config.</p>'}
             ${orphanHtml}
           </div>
         </div>`);
     } catch (e) {
         console.error('csRenderSimQuotaState: load failed', e);
-        csSet(csErrorBox('Could not load Quota State', e));
+        csSet(csErrorBox('Could not load Engine State', e));
     }
 }
 
@@ -4900,9 +4900,9 @@ async function csRenderSetupNotifications() {
 // Config view — Source of Truth + simulation.conf + user-overrides + hub
 // config). VIEW_CHILDREN.cs.Config (main.js) lists both; the existing
 // case 'Config' dispatch is the no-children fallback and stays as a safety net.
-window.CS_CHILD_RENDERERS['Config::Sim Quotas']    = csRenderConfigSimQuotas;
+window.CS_CHILD_RENDERERS['Config::Engine Config'] = csRenderConfigSimQuotas;
 window.CS_CHILD_RENDERERS['Config::Sites']         = csRenderPxmxSiteMap;
-window.CS_CHILD_RENDERERS['Config::Quota State']   = csRenderSimQuotaState;
+window.CS_CHILD_RENDERERS['Config::Engine State']  = csRenderSimQuotaState;
 window.CS_CHILD_RENDERERS['Config::Config Editor']    = csRenderConfigSimulation;
 
 // ── Register Setup children ────────────────────────────────────────────────
