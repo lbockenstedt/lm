@@ -75,6 +75,7 @@ from dns_dhcp_sync import DnsDhcpSyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 from staleness_sweep import StalenessSweepMixin
 from self_backup import SelfBackupMixin
+from key_vault import KeyVaultSchedulerMixin
 from spoke_alert_sync import SpokeAlertMixin
 from repo_sync import RepoSyncMixin
 from hub_vnc_console import HubVncConsoleMixin
@@ -475,7 +476,7 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     return props
 
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, SpokeAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -6418,6 +6419,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # disabled by default — opt-in. See run_self_backup_loop.
         self.seed_self_backup_defaults()
         self_backup_task = asyncio.create_task(self.run_self_backup_loop())
+        # Azure Key Vault DR (KeyVaultSchedulerMixin): rotate the local admin
+        # password every rotate_days (break-glass → vault-only) and push a daily
+        # min bootstrap backup, keeping `retain` days. Off until configured in
+        # Setup → Azure → Key Vault. See run_key_vault_loop.
+        key_vault_task = asyncio.create_task(self.run_key_vault_loop())
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable
         # [heartbeat] line into self.logs (module="hub" in collect_all_logs)
