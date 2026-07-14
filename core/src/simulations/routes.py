@@ -1632,6 +1632,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             out["ssid_placement"] = csc["ssid_placement"]
         if isinstance(csc.get("ssid_weights"), list):
             out["ssid_weights"] = csc["ssid_weights"]
+        # Ambient distribution (HUB mode): ambient_pct is the automatic uniform
+        # weight each randomizable sim rolls against; ambient_control=on hands the
+        # operator per-sim weights (ambient_weights) to bias the fleet split.
+        if csc.get("ambient_pct") is not None:
+            try:
+                out["ambient_pct"] = max(0, min(100, int(csc["ambient_pct"])))
+            except (TypeError, ValueError):
+                pass
+        if csc.get("ambient_control") is not None:
+            out["ambient_control"] = bool(csc.get("ambient_control"))
+        if isinstance(csc.get("ambient_weights"), dict):
+            out["ambient_weights"] = csc["ambient_weights"]
         # ignored_hostnames lives in the Hub Config card (tenant hub_config), but
         # the spoke's _apply_hub_config drops that copy — ride it on the pool push
         # (always applied) so the quota engine's exclude list reaches the spoke

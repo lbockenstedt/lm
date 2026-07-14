@@ -2506,6 +2506,9 @@ async function csRenderConfigSimulation() {
     } else {
         // Known sections rendered as labeled field grids; unknown sections fall
         // back to raw textareas so a fork's extra sections aren't dropped.
+        // Hub / engine mode: web_server=on means the engine drives placement and
+        // the s0–s9 buckets are dead config, so the bucket editor is hidden below.
+        const webServerOn = String((sections.simulation || {}).web_server || '').trim().toLowerCase() === 'on';
         const simFields = csSimSectionFields('simulation', CS_SIM_SECTION_FIELDS.simulation, sections.simulation);
         const serverFields = csSimSectionFields('server', CS_SIM_SECTION_FIELDS.server, sections.server);
         const addressFields = csSimSectionFields('address', CS_SIM_SECTION_FIELDS.address, sections.address);
@@ -2538,8 +2541,13 @@ async function csRenderConfigSimulation() {
               <div class="grid grid-cols-1 md:grid-cols-2 gap-3">${serverFields}${addressFields}</div>
             </div>
           </div>
-          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Per-simulation profiles [s0]–[s9]</p>
-          ${bucketCards}
+          ${webServerOn
+            ? `<div class="border border-slate-200 rounded-lg p-3 bg-slate-50/60">
+                 <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Per-simulation profiles [s0]–[s9]</p>
+                 <p class="text-xs text-slate-500 leading-snug">This deployment runs in <span class="font-semibold">hub / engine mode</span> (<code>web_server=on</code>), so the engine drives placement and ambient distribution and the <span class="font-semibold">s0–s9 buckets are ignored</span>. Configure how sims spread across the fleet in <span class="font-semibold">Config → Sim Quotas → Pool &amp; SSID → Simulation distribution</span>. The buckets only apply to standalone (GitHub-synced) deployments with <code>web_server=off</code>.</p>
+               </div>`
+            : `<p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Per-simulation profiles [s0]–[s9]</p>
+          ${bucketCards}`}
           ${extras.length ? `<p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-3 mb-2">Extra sections</p>${extraBlocks}` : ''}
           <details class="mt-3 text-xs"><summary class="cursor-pointer text-slate-400">Raw merged simulation.conf</summary><pre class="mt-2 p-2 bg-slate-50 rounded font-mono text-[11px] whitespace-pre-wrap break-all">${csEscape(raw)}</pre></details>`;
     }
@@ -2645,6 +2653,12 @@ async function csRenderConfigSimQuotas() {
             ssid_matrix: Array.isArray(cfg && cfg.ssid_matrix) ? cfg.ssid_matrix.map(c => ({ ...c })) : [],
             ssid_placement: (cfg && cfg.ssid_placement && typeof cfg.ssid_placement === 'object') ? JSON.parse(JSON.stringify(cfg.ssid_placement)) : {},
             ssid_weights: Array.isArray(cfg && cfg.ssid_weights) ? cfg.ssid_weights.map(w => ({ ...w })) : [],
+            // Ambient distribution (HUB mode). ambient_pct = the automatic uniform
+            // weight; ambient_control=on unlocks per-sim ambient_weights so the
+            // operator can hand some sims a bigger share of the fleet.
+            ambient_pct: (cfg && cfg.ambient_pct != null) ? Number(cfg.ambient_pct) : 50,
+            ambient_control: !!(cfg && cfg.ambient_control),
+            ambient_weights: (cfg && cfg.ambient_weights && typeof cfg.ambient_weights === 'object') ? { ...cfg.ambient_weights } : {},
         };
         const quotas = Array.isArray(cfg && cfg.sim_quotas) ? cfg.sim_quotas : [];
         csSimQuotaRows = quotas.map(csSimQuotaRowFromServer);
@@ -2867,6 +2881,55 @@ function csRenderSimQuotaEditor() {
 // Site source, randomizable-sim set, the SSID matrix (site × auth cells with
 // weight + hold-N placement) and per-site random-pool/remainder. Saved into
 // central_sites_config alongside the quotas.
+// Simulation Distribution (Auto / hub mode). Each randomizable sim runs on a
+// share of the fleet equal to its WEIGHT (0-100%). Automatic (default): every
+// sim uses the same base % and the fleet self-balances. Weight control: the
+// operator opts in and sets a per-sim weight — higher weight, more clients get
+// that sim. Only the currently-checked randomizable sims get a weight row.
+function csAmbientDistHtml() {
+    const pc = window._csPoolCfg || {};
+    const esc = s => csEscape(String(s == null ? '' : s));
+    const pct = (pc.ambient_pct != null) ? pc.ambient_pct : 50;
+    const control = !!pc.ambient_control;
+    const rsims = pc.randomizable_sims || [];
+    const w = pc.ambient_weights || {};
+    // Per-sim weight inputs only appear once the operator opts into control.
+    const weightGrid = !control ? '' : `
+          <div class="mt-2 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+            ${rsims.length ? rsims.map(s => `
+              <label class="text-xs text-slate-500 flex items-center justify-between gap-2 bg-white border border-slate-200 rounded-md px-2 py-1">
+                <span class="truncate">${esc(s)}</span>
+                <input data-cs-ambient-w="${esc(s)}" type="number" min="0" max="100"
+                       value="${esc(w[s] != null ? w[s] : pct)}"
+                       class="w-16 bg-white border border-slate-300 rounded-md px-1 py-0.5 text-sm text-right">
+              </label>`).join('')
+              : '<div class="text-xs text-slate-400 italic">Select randomizable sims above to weight them.</div>'}
+          </div>`;
+    return `<div class="mb-3">
+          <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Simulation distribution <span class="text-slate-400 normal-case font-normal">(engine / Auto mode)</span></div>
+          <p class="text-[11px] text-slate-400 mb-1 leading-tight">Each randomizable sim runs on a share of the fleet. By default every sim gets the same base share and the fleet self-balances. Turn on <span class="font-semibold">weight control</span> to steer specific sims — a higher weight hands that sim more clients.</p>
+          <div class="flex flex-wrap items-center gap-4">
+            <label class="text-xs text-slate-500 flex items-center gap-2">Base ambient %
+              <input data-cs-ambient="pct" type="number" min="0" max="100" value="${esc(pct)}"
+                     class="w-16 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm text-right">
+            </label>
+            <label class="text-xs text-slate-500 flex items-center gap-2">
+              <input data-cs-ambient="control" type="checkbox" ${control ? 'checked' : ''} onchange="csAmbientControlToggle()">
+              Control distribution by weight
+            </label>
+          </div>
+          ${weightGrid}
+        </div>`;
+}
+
+// Toggling weight control re-renders the card so the per-sim weight inputs
+// appear/disappear. Sync current edits first so nothing is lost on re-render.
+window.csAmbientControlToggle = function () {
+    csSimQuotaSyncFromDom();
+    csPoolSyncFromDom();
+    csRenderSimQuotaEditor();
+};
+
 function csPoolConfigCardHtml() {
     const pc = window._csPoolCfg || {};
     const src = pc.site_source || 'pxmx';
@@ -2915,6 +2978,7 @@ function csPoolConfigCardHtml() {
           <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Randomizable (ambient) sims</div>
           <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-x-4 gap-y-1">${simChecks}</div>
         </div>
+        ${csAmbientDistHtml()}
         <div class="mb-3">
           <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">SSID matrix</div>
           <div class="space-y-2">${matrixRows || '<div class="text-xs text-slate-400 italic">No SSIDs. Click + Add SSID.</div>'}</div>
@@ -2967,6 +3031,28 @@ function csPoolSyncFromDom() {
     pc.ssid_weights = weights;
     pc.random_pool = randPool;
     pc.ssid_placement = {};   // deprecated — weighted rules replace hold-N/remainder
+    // Ambient distribution: base %, control toggle, and (when control is on) the
+    // per-sim weights. Weights are only collected for sims still checked as
+    // randomizable so a de-selected sim doesn't leave a stale weight behind.
+    const pctEl = document.querySelector('[data-cs-ambient="pct"]');
+    if (pctEl) {
+        let p = parseInt(pctEl.value, 10);
+        if (isNaN(p)) p = 50;
+        pc.ambient_pct = Math.max(0, Math.min(100, p));
+    }
+    const ctrlEl = document.querySelector('[data-cs-ambient="control"]');
+    if (ctrlEl) pc.ambient_control = !!ctrlEl.checked;
+    if (pc.ambient_control) {
+        const aw = {};
+        (pc.randomizable_sims || []).forEach(s => {
+            const el = document.querySelector(`[data-cs-ambient-w="${s}"]`);
+            if (!el) return;
+            let v = parseInt(el.value, 10);
+            if (isNaN(v)) v = (pc.ambient_pct != null ? pc.ambient_pct : 50);
+            aw[s] = Math.max(0, Math.min(100, v));
+        });
+        pc.ambient_weights = aw;
+    }
     return pc;
 }
 
@@ -3011,6 +3097,9 @@ window.csSavePoolConfig = async function () {
             ssid_matrix: pc.ssid_matrix || [],
             ssid_placement: pc.ssid_placement || {},
             ssid_weights: pc.ssid_weights || [],
+            ambient_pct: (pc.ambient_pct != null ? pc.ambient_pct : 50),
+            ambient_control: !!pc.ambient_control,
+            ambient_weights: pc.ambient_control ? (pc.ambient_weights || {}) : {},
         };
         await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         showToast('Pool & SSID config saved.', 'success');
