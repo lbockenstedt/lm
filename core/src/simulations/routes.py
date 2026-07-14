@@ -1632,6 +1632,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             out["ssid_placement"] = csc["ssid_placement"]
         if isinstance(csc.get("ssid_weights"), list):
             out["ssid_weights"] = csc["ssid_weights"]
+        # ignored_hostnames lives in the Hub Config card (tenant hub_config), but
+        # the spoke's _apply_hub_config drops that copy — ride it on the pool push
+        # (always applied) so the quota engine's exclude list reaches the spoke
+        # regardless of the hub-source-of-truth toggle.
+        try:
+            hc = await store.get_hub_config(tenant_id) or {}
+            ih = hc.get("ignored_hostnames")
+            if isinstance(ih, list) and ih:
+                out["ignored_hostnames"] = ih
+        except Exception:  # noqa: BLE001
+            pass
         return out
 
     async def _push_sim_quotas(tenant_id: str) -> int:
