@@ -28,7 +28,7 @@ from security.oidc import (
     fetch_jwks, fetch_member_groups_via_graph, get_oidc_config,
     provision_or_sync_entra_user, sign_state_cookie, verify_id_token,
     verify_state_cookie, authorize_url, build_user_data,
-    generate_client_cert, cert_thumbprint_x5t,
+    generate_client_cert, cert_thumbprint_x5t, fetch_directory_groups,
 )
 from security.credential_store import resolve_private_key_material
 
@@ -204,6 +204,28 @@ def register(app, hub, ctx):
         hub.state.save_state()
         return {"status": "ok", "key_path": res["key_path"], "cert_path": res["cert_path"],
                 "thumbprint": res["thumbprint"], "cert_pem": res["cert_pem"]}
+
+    @app.get("/setup/oidc/groups")
+    async def list_oidc_groups():
+        """List the tenant's Entra groups (id + displayName) so the admin can map
+        an Entra group → a permission group / tenant by NAME instead of pasting a
+        GUID. Uses an app-level Graph read (client-credentials, cert-signed) — the
+        app registration needs Graph ``Group.Read.All`` (application) with admin
+        consent. Degrades to ``{groups:[], warning}`` instead of erroring so the
+        UI can fall back to manual entry. Admin-gated via the ``/setup/`` gate."""
+        hub = app.state.hub
+        cfg = get_oidc_config(hub)
+        if not (cfg.tenant_id and cfg.client_id):
+            return {"groups": [], "warning": "Set the tenant + client ID (and generate the certificate) first."}
+        try:
+            groups = await fetch_directory_groups(cfg)
+            groups.sort(key=lambda g: (g.get("displayName") or "").lower())
+            return {"groups": groups}
+        except OidcError as e:
+            return {"groups": [], "warning": str(e)}
+        except Exception as e:  # noqa: BLE001
+            logger.exception("list_oidc_groups failed")
+            return {"groups": [], "warning": str(e)}
 
     @app.post("/setup/oidc-config")
     async def update_oidc_config(request: Request):

@@ -470,6 +470,60 @@ async def fetch_member_groups_via_graph(access_token: str,
         return [v["id"] for v in resp.json().get("value", []) if "id" in v]
 
 
+async def fetch_app_graph_token(cfg: OidcConfig,
+                                http: httpx.AsyncClient | None = None) -> str:
+    """Mint a Microsoft Graph token for the HUB'S OWN APP (client-credentials
+    grant, not a user), signed with the cert ``client_assertion``. Used for
+    directory-wide reads like enumerating groups. Requires the app registration
+    to hold the Graph **application** permission (e.g. ``Group.Read.All``) with
+    admin consent — a delegated/user token can't list the whole directory."""
+    token_endpoint = f"https://login.microsoftonline.com/{cfg.tenant_id}/oauth2/v2.0/token"
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": cfg.client_id,
+        "scope": "https://graph.microsoft.com/.default",
+        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+        "client_assertion": build_client_assertion(cfg, token_endpoint),
+    }
+    async with (http or httpx.AsyncClient(timeout=15.0)) as client:
+        resp = await client.post(token_endpoint, data=data)
+    if resp.status_code != 200:
+        raise OidcError(f"Graph app-token failed: HTTP {resp.status_code} — "
+                        f"{resp.text[:200]}")
+    tok = resp.json().get("access_token")
+    if not tok:
+        raise OidcError("Graph app-token response had no access_token")
+    return tok
+
+
+async def fetch_directory_groups(cfg: OidcConfig,
+                                 http: httpx.AsyncClient | None = None,
+                                 limit: int = 2000) -> list:
+    """List the tenant's Entra groups as ``[{id, displayName}]`` for the admin
+    group→tenant mapping picker. Uses an app token (see
+    :func:`fetch_app_graph_token`) and pages through ``@odata.nextLink`` up to
+    ``limit``. Object IDs here are exactly what a permission group's
+    ``ldap_group`` field matches at login."""
+    token = await fetch_app_graph_token(cfg, http=http)
+    out: list = []
+    url = "https://graph.microsoft.com/v1.0/groups?$select=id,displayName&$top=999"
+    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+        while url:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code != 200:
+                raise OidcError(f"Graph groups list failed: HTTP {resp.status_code} — "
+                                f"{resp.text[:200]}")
+            body = resp.json()
+            for v in body.get("value", []):
+                gid = v.get("id")
+                if gid:
+                    out.append({"id": gid, "displayName": v.get("displayName") or gid})
+                    if len(out) >= limit:
+                        return out
+            url = body.get("@odata.nextLink")
+    return out
+
+
 # ── user provisioning + re-sync ─────────────────────────────────────────────
 
 def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,

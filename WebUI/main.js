@@ -8668,7 +8668,14 @@ async function showGroupModal(groupId) {
                 <input type="hidden" id="grp-id" value="${groupId || ''}">
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name</label><input type="text" id="grp-name" value="${g.name || ''}" placeholder="e.g. NOC Operators" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Description</label><input type="text" id="grp-desc" value="${g.description || ''}" placeholder="Optional" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">LDAP Group <span class="text-slate-400 normal-case font-normal">(optional — maps a directory group to this bundle)</span></label><input type="text" id="grp-ldap" value="${g.ldap_group || ''}" placeholder="cn=noc,ou=groups,dc=example,dc=com" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 font-mono"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Directory Group <span class="text-slate-400 normal-case font-normal">(optional — Entra group object ID or LDAP DN; maps a directory group to this bundle + its tenant scope)</span></label>
+                    <div class="flex gap-2">
+                        <input type="text" id="grp-ldap" value="${g.ldap_group || ''}" placeholder="Entra object ID or cn=noc,ou=groups,dc=example,dc=com" class="flex-1 bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500 font-mono">
+                        <button type="button" onclick="loadEntraGroupPicker()" id="grp-entra-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">Pick from Entra</button>
+                    </div>
+                    <select id="grp-entra-select" onchange="onEntraGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
+                    <p id="grp-entra-msg" class="text-[11px] text-amber-600 hidden"></p>
+                </div>
                 <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Tenant Scope <span class="text-slate-400 normal-case font-normal">(optional — grants tenant access to members; pairs with Entra/LDAP group login)</span></label><div class="grid grid-cols-2 gap-1 mt-2 max-h-36 overflow-y-auto pr-1">${tenantRows}</div></div>
                 <div class="border-t border-slate-200 pt-3"><label class="text-xs text-slate-500 uppercase font-bold">Permissions</label><div class="grid grid-cols-4 gap-x-4 gap-y-1 mt-2">${rightRows}</div></div>
             </div>
@@ -8683,6 +8690,52 @@ async function showGroupModal(groupId) {
 function closeGroupModal() {
     const modal = document.getElementById('group-modal');
     if (modal) modal.remove();
+}
+
+// Query Entra for its groups (via the hub's app-level Graph read) so the admin
+// can pick a group by NAME to map to this permission group + its tenant scope,
+// instead of pasting the object ID. Lazy — only hits Graph when clicked.
+async function loadEntraGroupPicker() {
+    const btn = document.getElementById('grp-entra-btn');
+    const sel = document.getElementById('grp-entra-select');
+    const msg = document.getElementById('grp-entra-msg');
+    if (!sel) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+    try {
+        const res = await setupFetch('/setup/oidc/groups');
+        const d = await res.json().catch(() => ({}));
+        const groups = (d && d.groups) || [];
+        if (!groups.length) {
+            if (msg) {
+                msg.textContent = (d && d.warning)
+                    || 'No Entra groups returned. The app registration needs Graph Group.Read.All (application) with admin consent, and a generated certificate.';
+                msg.classList.remove('hidden');
+            }
+            sel.classList.add('hidden');
+        } else {
+            sel.innerHTML = '<option value="">— select an Entra group —</option>' +
+                groups.map(gr => `<option value="${escapeHtml(gr.id)}">${escapeHtml(gr.displayName)} — ${escapeHtml(gr.id)}</option>`).join('');
+            sel.classList.remove('hidden');
+            if (msg) msg.classList.add('hidden');
+        }
+    } catch (e) {
+        if (msg) { msg.textContent = 'Failed to load Entra groups: ' + (e.message || e); msg.classList.remove('hidden'); }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Pick from Entra'; }
+    }
+}
+
+// Selecting an Entra group fills the object ID into the directory-group field
+// (what login matches on) and seeds the group name if it's still blank.
+function onEntraGroupPick(sel) {
+    const id = sel.value;
+    if (!id) return;
+    const ldap = document.getElementById('grp-ldap');
+    if (ldap) ldap.value = id;
+    const nameInput = document.getElementById('grp-name');
+    const label = (sel.options[sel.selectedIndex] && sel.options[sel.selectedIndex].textContent) || '';
+    const disp = label.split(' — ')[0].trim();
+    if (nameInput && !nameInput.value.trim() && disp) nameInput.value = disp;
 }
 
 async function saveGroup() {
