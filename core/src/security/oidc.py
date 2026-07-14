@@ -669,9 +669,14 @@ def build_user_data(hub, user_record: dict, user_id: str) -> dict:
     derived set."""
     perms = resolve_effective_permissions(hub, user_record)
     tenants = list(user_record.get("tenants", []) or [])
+    name = str(user_record.get("name") or "")
+    email = str(user_record.get("email") or "")
     return {
-        "user_id": user_id,
+        "user_id": user_id,           # the Entra oid GUID (stable key)
         "auth_type": "entra",
+        "name": name,
+        "email": email,
+        "display_name": name or email or user_id,   # what the UI shows
         "permissions": perms,
         "tenants": tenants,
         "tenant_id": tenants[0] if tenants else None,

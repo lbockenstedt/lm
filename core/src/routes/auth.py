@@ -242,6 +242,11 @@ def register(app, hub, ctx):
         # or group-permission edits take effect without a re-login.
         _eff_perms = (resolve_effective_permissions(hub, live) if live
                       else sess["user"].get("permissions", {}))
+        # Friendly display name — for Entra users user_id is the oid GUID, so
+        # prefer the record's name/email (captured from the id_token) and fall
+        # back to the user_id (which IS the username for local accounts).
+        _name = str(live.get("name") or sess["user"].get("name") or "")
+        _email = str(live.get("email") or sess["user"].get("email") or "")
         merged = {
             **sess["user"],
             "permissions": _eff_perms,
@@ -249,6 +254,9 @@ def register(app, hub, ctx):
             "tenant_id":   live.get("tenants", [sess["user"].get("tenant_id")])[0]
                            if live.get("tenants") else None,
             "protected":   live.get("protected", False),
+            "name":        _name,
+            "email":       _email,
+            "display_name": _name or _email or user_id,
         }
         # Keep session in sync so middleware checks stay consistent
         sess["user"] = merged

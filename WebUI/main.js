@@ -16868,7 +16868,10 @@ async function _initApp() {
         const nameEl = document.getElementById('user-chip-name');
         const wrap = document.getElementById('user-chip-tenant-wrap');
         if (chip && currentUser) {
-            if (nameEl) nameEl.textContent = currentUser.user_id;
+            // For Entra users user_id is the oid GUID — show the friendly name/
+            // email instead. Local users have no name, so this falls back to the
+            // user_id (which is their username).
+            if (nameEl) nameEl.textContent = currentUser.display_name || currentUser.name || currentUser.email || currentUser.user_id;
             if (wrap) {
                 const chipLabel = tenantNameMap[currentTenant] || currentTenant;
                 if (pickerTenants.length > 1) {
