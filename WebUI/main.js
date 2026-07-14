@@ -1247,6 +1247,11 @@ const VIEW_CHILDREN = {
         'Config':      ['Engine', 'Engine State', 'Sites', 'Config Editor'],
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],
     },
+    settings: {
+        // Azure gets a second-tier strip (SSO / NSG / Cloud NAC) — they share the
+        // one Entra app registration + cert.
+        'Azure': ['SSO', 'NSG', 'Cloud NAC'],
+    },
 };
 
 // First child of a primary, or '' if the primary/module has no children.
@@ -3044,6 +3049,10 @@ async function setSubChild(child) {
     });
     if (currentView === 'cs') {
         await loadCSData(currentSubView, child);
+    } else if (currentView === 'settings') {
+        // Re-render the current settings primary (e.g. Azure) — it reads
+        // currentSubChild to pick the right tile.
+        _renderSettingsSection(currentSubView);
     }
 }
 window.setSubChild = setSubChild;
@@ -3577,11 +3586,14 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
-    // Azure — one tab collapsing SSO (Entra OIDC login), Azure NSG (allow-list),
-    // and Cloud NAC (JIT Entra provisioning), all of which share the SSO app
-    // registration + cert. A pill sub-nav switches between the three tiles.
+    // Azure — one primary tab; the second-tier strip (VIEW_CHILDREN.settings.Azure)
+    // provides SSO / NSG / Cloud NAC, which share the SSO app registration + cert.
+    // Render the active child's tile (currentSubChild) into the settings content.
     if (subMenu === 'Azure') {
-        _renderSettingsAzureTile(content);
+        const child = ['SSO', 'NSG', 'Cloud NAC'].includes(currentSubChild) ? currentSubChild : 'SSO';
+        if (child === 'NSG') _renderSettingsAzureNsgTile(content);
+        else if (child === 'Cloud NAC') _renderSettingsCloudNacTile(content);
+        else _renderSettingsSsoTile(content);
         return;
     }
 
@@ -5552,34 +5564,6 @@ function _renderSetupGeneralTile(content) {
 // Admin config for Entra ID SSO — enable it, set tenant/client/cert/group/MFA.
 // Reads/writes /setup/oidc-config (core/src/routes/oidc.py); env LM_OIDC_* wins
 // over stored values. Enabling shows the "Sign in with Microsoft" login button.
-// ── Settings → Azure (SSO / Azure NSG / Cloud NAC under one tab) ────────────
-// These three all share the SSO Entra app registration + cert, so they live
-// together under Azure with a pill sub-nav. Each tile renderer takes a container.
-const _AZURE_SUBTABS = ['SSO', 'Azure NSG', 'Cloud NAC'];
-function _renderSettingsAzureTile(content) {
-    const sub = _AZURE_SUBTABS.includes(window._azureSubTab) ? window._azureSubTab : 'SSO';
-    const pill = t => `<button onclick="azureSubTab('${t}')" data-azsub="${t}" class="px-3 py-1.5 rounded-md text-xs font-bold border ${t === sub ? 'bg-[#01A982]/10 text-[#01A982] border-[#01A982]' : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-50'}">${t}</button>`;
-    content.innerHTML = `
-        <div class="space-y-4">
-            <div class="flex items-center gap-2 flex-wrap">${_AZURE_SUBTABS.map(pill).join('')}</div>
-            <div id="azure-subcontent"></div>
-        </div>`;
-    azureSubTab(sub);
-}
-window.azureSubTab = function (which) {
-    if (!_AZURE_SUBTABS.includes(which)) which = 'SSO';
-    window._azureSubTab = which;
-    document.querySelectorAll('[data-azsub]').forEach(b => {
-        const on = b.getAttribute('data-azsub') === which;
-        b.className = `px-3 py-1.5 rounded-md text-xs font-bold border ${on ? 'bg-[#01A982]/10 text-[#01A982] border-[#01A982]' : 'bg-white text-slate-500 border-slate-300 hover:bg-slate-50'}`;
-    });
-    const el = document.getElementById('azure-subcontent');
-    if (!el) return;
-    if (which === 'Azure NSG') _renderSettingsAzureNsgTile(el);
-    else if (which === 'Cloud NAC') _renderSettingsCloudNacTile(el);
-    else _renderSettingsSsoTile(el);
-};
-
 // ── Settings → Cloud NAC (JIT Entra provisioning for sim 1X clients) ────────
 function _renderSettingsCloudNacTile(content) {
     const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
@@ -5758,7 +5742,7 @@ function _renderSettingsAzureNsgTile(content) {
     content.innerHTML = `
         <div class="${card}">
             <div class="flex items-center justify-between mb-2">
-                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Azure NSG — IP allow-list</h3>
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NSG — IP allow-list</h3>
                 <span id="nsg-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
             </div>
             <p class="text-xs text-slate-400 mb-3">Manages one <b>allow rule</b> in an Azure Network Security Group as an IP allow-list (one rule, many IPs — add/remove below). Auth <b>reuses the SSO Entra app's certificate</b>, so set that up first in <b>Settings → SSO</b>. In Azure, grant that app the <b>Network Contributor</b> role on the NSG (or its resource group) — <b>Access control (IAM) → Add role assignment → Network Contributor → assign to the app</b>.</p>
