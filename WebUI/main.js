@@ -5921,9 +5921,9 @@ function _renderSettingsSsoTile(content) {
                     <textarea id="oidc-cert-pem" readonly rows="6" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-2 py-1 text-[11px] font-mono"></textarea>
                 </div>
             </div>
-            <div class="mt-4 flex items-center gap-3">
-                <button onclick="saveOidcConfig()" id="oidc-save-btn" class="${btnCls}">Save SSO Config</button>
+            <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="oidc-save-msg" class="text-xs text-slate-400"></span>
+                <button onclick="saveOidcConfig()" id="oidc-save-btn" class="${btnCls}">Save</button>
             </div>
             <p class="text-[11px] text-slate-400 mt-2">The certificate + key are <em>auto-managed on the hub</em> (Generate above) — the WebUI never sees the key material. In Entra: register the app, add the redirect URI above, upload the generated certificate, and grant Graph <code>Group.Read.All</code> (app) for the group picker + the <code>GroupMember.Read.All</code> &gt;200-group fallback. Advanced: override the location with <code>LM_OIDC_DIR</code> / <code>LM_OIDC_CLIENT_KEY</code>.</p>
         </div>`;
@@ -6042,7 +6042,7 @@ async function saveOidcConfig() {
         console.error('saveOidcConfig failed', e);
         if (typeof showToast === 'function') showToast('Save failed: ' + e.message, 'error');
     } finally {
-        if (btn) { btn.disabled = false; btn.textContent = 'Save SSO Config'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
     }
 }
 
