@@ -4823,6 +4823,33 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub-Contact Watchdog ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <button onclick="saveHubWatchdog()" id="hcw-save-btn" class="${btnCls}">Save</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Fleet-wide self-recovery for spokes &amp; agents that lose the hub. When a node can't reach the hub it escalates: <strong>restart the service</strong> after the first threshold, <strong>reboot the host</strong> after the second, then <strong>sleep</strong> and retry; after <em>max runs</em> it gives up and stays offline. The setting is pushed to every node and stored locally, so it still fires when the hub is unreachable. <strong class="text-amber-600">Caution:</strong> the reboot stage restarts the whole machine — on a Proxmox host agent that cycles every VM on it. Off by default.</p>
+                <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="hcw-enabled" class="w-4 h-4 text-green-600 rounded">Enable hub-contact watchdog (fleet-wide)</label>
+                <div class="flex flex-wrap items-end gap-4">
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Restart service after (min)</label>
+                        <input type="number" id="hcw-service-min" min="1" value="5" class="w-28 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Reboot host after (min)</label>
+                        <input type="number" id="hcw-reboot-min" min="2" value="15" class="w-28 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Sleep between runs (min)</label>
+                        <input type="number" id="hcw-sleep-min" min="1" value="60" class="w-28 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Max runs (then give up)</label>
+                        <input type="number" id="hcw-max-runs" min="1" value="3" class="w-28 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                </div>
+                <p id="hcw-msg" class="text-xs text-slate-400 mt-3"></p>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button onclick="saveSourceOfTruthConfig()" class="${btnCls}">Save</button>
                 </div>
@@ -4879,6 +4906,7 @@ function _renderSetupSyncTile(content) {
     loadSourceOfTruthConfig();
     loadSpokeAlertConfig();
     loadSpokeAlerts();
+    loadHubWatchdog();
 }
 
 // Setup → IPAM tile. IPAM / NetBox instances only.
@@ -6914,6 +6942,50 @@ async function saveSpokeAlertConfig() {
         showToast('Error saving: ' + e.message, 'error');
     }
 }
+
+// ── Hub-Contact Watchdog (fleet-wide, pushed to spokes) ──────────────────
+async function loadHubWatchdog() {
+    try {
+        const r = await setupFetch('/setup/hub-watchdog');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const en = document.getElementById('hcw-enabled'); if (en) en.checked = !!c.enabled;
+        const setMin = (id, s, def) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = Math.round((Number(s) || def * 60) / 60); };
+        setMin('hcw-service-min', c.service_s, 5);
+        setMin('hcw-reboot-min', c.reboot_s, 15);
+        setMin('hcw-sleep-min', c.sleep_s, 60);
+        const mr = document.getElementById('hcw-max-runs'); if (mr && document.activeElement !== mr) mr.value = c.max_runs || 3;
+    } catch (e) { console.error('loadHubWatchdog failed', e); }
+}
+
+async function saveHubWatchdog() {
+    const btn = document.getElementById('hcw-save-btn');
+    const iv = id => parseInt(document.getElementById(id)?.value, 10);
+    const serviceMin = Math.max(1, iv('hcw-service-min') || 5);
+    const rebootMin = Math.max(2, iv('hcw-reboot-min') || 15);
+    if (rebootMin <= serviceMin) { showToast('Reboot threshold must be greater than the service-restart threshold.', 'error'); return; }
+    const cfg = {
+        enabled: !!document.getElementById('hcw-enabled')?.checked,
+        service_s: serviceMin * 60,
+        reboot_s: rebootMin * 60,
+        sleep_s: Math.max(1, iv('hcw-sleep-min') || 60) * 60,
+        max_runs: Math.max(1, iv('hcw-max-runs') || 3),
+    };
+    if (btn) btn.disabled = true;
+    try {
+        const r = await setupFetch('/setup/hub-watchdog', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const f = d.fanout || {};
+        const msg = document.getElementById('hcw-msg');
+        if (msg) msg.textContent = cfg.enabled
+            ? `Enabled. Pushed to ${(f.pushed || []).length} node(s)${(f.queued || []).length ? ', queued for ' + f.queued.length + ' offline' : ''}.`
+            : `Disabled. Pushed to ${(f.pushed || []).length} node(s)${(f.queued || []).length ? ', queued for ' + f.queued.length + ' offline' : ''}.`;
+        showToast('Hub-contact watchdog saved.', 'success');
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) btn.disabled = false; }
+}
+window.loadHubWatchdog = loadHubWatchdog; window.saveHubWatchdog = saveHubWatchdog;
 
 async function loadSpokeAlerts() {
     const wrap = document.getElementById('spoke-alerts-status');

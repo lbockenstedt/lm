@@ -907,11 +907,13 @@ class BaseControlPlane:
         # Opt out with LM_DISABLE_DRIFT_WATCHDOG=1.
         if os.environ.get("LM_DISABLE_DRIFT_WATCHDOG", "0").lower() not in ("1", "true", "yes"):
             self._drift_task = asyncio.create_task(self._code_drift_watchdog())
-        # Escalating hub-contact watchdog (OPT-IN): restart the service at 5m of no
-        # hub contact, reboot the host at 15m, sleep 1h and retry, give up after 3
-        # runs. Off by default — the reboot stage is drastic (a pxmx agent runs on
-        # the Proxmox HOST). Enable with LM_HUB_CONTACT_WATCHDOG=1.
-        if os.environ.get("LM_HUB_CONTACT_WATCHDOG", "0").lower() in ("1", "true", "yes"):
+        # Escalating hub-contact watchdog: restart the service at 5m of no hub
+        # contact, reboot the host at 15m, sleep 1h and retry, give up after 3
+        # runs. The task always runs but stays a no-op until enabled (WebUI-pushed
+        # SPOKE_SET_WATCHDOG config, persisted locally, or LM_HUB_CONTACT_WATCHDOG=1)
+        # — off by default because the reboot stage is drastic (a pxmx agent runs
+        # on the Proxmox HOST). Hard-disable the task with LM_DISABLE_HUB_CONTACT_WATCHDOG=1.
+        if os.environ.get("LM_DISABLE_HUB_CONTACT_WATCHDOG", "0").lower() not in ("1", "true", "yes"):
             self._hub_contact_task = asyncio.create_task(self._hub_contact_watchdog())
         _delay = 5
         while True:
@@ -1049,6 +1051,60 @@ class BaseControlPlane:
     def _hcw_state_path(self) -> str:
         return os.path.join(self._spoke_state_dir(), "hub_contact_watchdog.json")
 
+    def _hcw_config_path(self) -> str:
+        return os.path.join(self._spoke_state_dir(), "hub_contact_watchdog_config.json")
+
+    def _hcw_config(self) -> dict:
+        """Effective watchdog config, read fresh each tick. Precedence: the
+        hub-pushed config file (SPOKE_SET_WATCHDOG, persisted so it survives a
+        restart/reboot and applies even when the hub is unreachable) OVER env
+        vars OVER defaults. Persisting locally matters: the whole point is to
+        recover when the hub can't be reached, so 'enabled' can't depend on a
+        live push."""
+        def _envf(name, default):
+            try:
+                return max(1.0, float(os.environ.get(name, "").strip() or default))
+            except (TypeError, ValueError):
+                return float(default)
+        cfg = {
+            "enabled": os.environ.get("LM_HUB_CONTACT_WATCHDOG", "0").lower() in ("1", "true", "yes"),
+            "service_s": _envf("LM_HUB_WATCHDOG_SERVICE_S", 300),
+            "reboot_s": _envf("LM_HUB_WATCHDOG_REBOOT_S", 900),
+            "reboot_grace_s": _envf("LM_HUB_WATCHDOG_REBOOT_GRACE_S", 300),
+            "sleep_s": _envf("LM_HUB_WATCHDOG_SLEEP_S", 3600),
+            "max_runs": int(_envf("LM_HUB_WATCHDOG_MAX_RUNS", 3)),
+        }
+        try:
+            with open(self._hcw_config_path()) as f:
+                pushed = json.load(f)
+            if isinstance(pushed, dict):
+                if "enabled" in pushed:
+                    cfg["enabled"] = bool(pushed["enabled"])
+                for k, caster in (("service_s", float), ("reboot_s", float),
+                                  ("reboot_grace_s", float), ("sleep_s", float),
+                                  ("max_runs", int)):
+                    if pushed.get(k) is not None:
+                        try:
+                            cfg[k] = max(1, caster(pushed[k]))
+                        except (TypeError, ValueError):
+                            pass
+        except FileNotFoundError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("hub-contact watchdog: config read failed: %s", e)
+        return cfg
+
+    def _hcw_save_config(self, cfg: dict) -> None:
+        """Persist the hub-pushed watchdog config so it survives restart/reboot."""
+        try:
+            os.makedirs(os.path.dirname(self._hcw_config_path()), exist_ok=True)
+            tmp = self._hcw_config_path() + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cfg, f)
+            os.replace(tmp, self._hcw_config_path())
+        except Exception as e:  # noqa: BLE001
+            logger.debug("hub-contact watchdog: config save failed: %s", e)
+
     def _hcw_load(self) -> dict:
         """Load persisted escalation state (survives restart + reboot). A run =
         one escalation attempt (service restart at t1, reboot at t2); after a
@@ -1107,31 +1163,29 @@ class BaseControlPlane:
           * still down at outage >= T2 (15m default): reboot the host.
           * still down after the reboot grace: the run failed → sleep T_SLEEP
             (1h default), then start the next run.
-        After MAX_RUNS (3 default, ~4h) give up and stay offline. State persists
+        After max_runs (3 default, ~4h) give up and stay offline. State persists
         across the restart/reboot so the ladder is not reset by its own actions.
-        Any successful hub contact clears the state (full recovery)."""
-        def _envf(name, default):
-            try:
-                return max(1.0, float(os.environ.get(name, "").strip() or default))
-            except (TypeError, ValueError):
-                return float(default)
-        T1 = _envf("LM_HUB_WATCHDOG_SERVICE_S", 300)     # 5 min → restart service
-        T2 = _envf("LM_HUB_WATCHDOG_REBOOT_S", 900)      # 15 min → reboot server
-        GRACE = _envf("LM_HUB_WATCHDOG_REBOOT_GRACE_S", 300)  # post-reboot reconnect grace
-        SLEEP = _envf("LM_HUB_WATCHDOG_SLEEP_S", 3600)   # 1 h cool-down between runs
-        MAX_RUNS = int(_envf("LM_HUB_WATCHDOG_MAX_RUNS", 3))
-
+        Any successful hub contact clears the state (full recovery). Config is
+        read fresh each tick (hub-pushed file → env → defaults) so the WebUI can
+        enable/disable + retune it without a restart; the task always runs and
+        no-ops while disabled."""
         # Reload the outage clock from disk so a reboot/restart doesn't reset it.
         st = self._hcw_load()
         if st.get("last_contact_at"):
             # Keep the OLDER of (seeded now, persisted) so an ongoing outage keeps
             # counting; a genuine fresh boot after real contact just uses now.
             self._last_hub_contact = min(self._last_hub_contact, float(st["last_contact_at"]))
-        logger.info("hub-contact watchdog armed: service@%.0fs reboot@%.0fs sleep@%.0fs max_runs=%d",
-                    T1, T2, SLEEP, MAX_RUNS)
+        logger.info("hub-contact watchdog running (enabled=%s).", self._hcw_config()["enabled"])
         while True:
             try:
                 await asyncio.sleep(30)
+                cfg = self._hcw_config()
+                if not cfg["enabled"]:
+                    if self._hcw_load():  # was armed, now disabled → wipe ladder
+                        self._hcw_clear()
+                    continue
+                T1, T2 = cfg["service_s"], cfg["reboot_s"]
+                GRACE, SLEEP, MAX_RUNS = cfg["reboot_grace_s"], cfg["sleep_s"], cfg["max_runs"]
                 now = time.time()
                 connected = self._hub_ws is not None
                 outage = now - self._last_hub_contact
@@ -2269,6 +2323,24 @@ class BaseControlPlane:
                 logger.info(f"Hub secret updated for {self.spoke_id}. Current window size: {len(self.hub_secrets)}")
                 return {"status": "SUCCESS", "message": "Hub secret updated successfully"}
             return {"status": "ERROR", "message": "Missing hub_secret in data"}
+
+        if cmd_type == "SPOKE_SET_WATCHDOG":
+            # Fleet-wide hub-contact watchdog config, pushed by the hub on every
+            # (re)connect and on each WebUI save. Persist it locally so it applies
+            # even after a restart/reboot when the hub is unreachable — that's the
+            # scenario the watchdog exists for. The running _hub_contact_watchdog
+            # task re-reads this file each tick, so enable/disable + retune take
+            # effect without a restart.
+            wd = data or {}
+            cfg = {"enabled": bool(wd.get("enabled", False))}
+            for k in ("service_s", "reboot_s", "reboot_grace_s", "sleep_s", "max_runs"):
+                if wd.get(k) is not None:
+                    cfg[k] = wd[k]
+            self._hcw_save_config(cfg)
+            logger.info("SPOKE_SET_WATCHDOG: hub-contact watchdog %s (service@%ss reboot@%ss).",
+                        "ENABLED" if cfg["enabled"] else "disabled",
+                        cfg.get("service_s", "def"), cfg.get("reboot_s", "def"))
+            return {"status": "SUCCESS", "enabled": cfg["enabled"]}
 
         if cmd_type == "SPOKE_SET_HUB_URL":
             # Hub-initiated repoint: the operator changed the hub's external

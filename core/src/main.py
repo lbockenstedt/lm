@@ -2127,6 +2127,27 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             except Exception as e:
                 logger.warning(f"Failed to re-push hub URL to {spoke_id}: {e}")
 
+            # Push the fleet-wide hub-contact watchdog config to EVERY spoke/agent
+            # on (re)connect (before the module_key early-return below, which skips
+            # agents). The spoke persists it locally so it still applies when the
+            # hub is later unreachable — the exact case the watchdog recovers from.
+            try:
+                wd = self.state.get_global_config().get("hub_contact_watchdog")
+                if wd is not None:
+                    wd_msg = Message(
+                        header=MessageHeader(
+                            message_id=str(uuid.uuid4()),
+                            timestamp=time.time(),
+                            sender_id="hub",
+                            destination_id=spoke_id,
+                        ),
+                        payload=MessagePayload(type="SPOKE_SET_WATCHDOG", data=wd),
+                    )
+                    await self.send_to_spoke(wd_msg)
+                    logger.debug(f"Pushed hub-contact watchdog config to {spoke_id}")
+            except Exception as e:
+                logger.warning(f"Failed to push watchdog config to {spoke_id}: {e}")
+
             # Resolve the push_config branch tag from the module_type registry
             # first, then fall back to a spoke_id prefix match for legacy spokes.
             # See _PUSH_CONFIG_MODULE_KEY / _PUSH_CONFIG_PREFIX_MAP (branch-tag
@@ -2715,6 +2736,30 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         failed = [sid for sid, kind in results if kind == "failed"]
         logger.info(f"Hub-URL fan-out: {len(pushed)} pushed, {len(queued)} queued, "
                     f"{len(failed)} failed.")
+        return {"status": "SUCCESS", "pushed": pushed, "queued": queued, "failed": failed}
+
+    async def push_watchdog_to_all_spokes(self, wd_cfg: Dict[str, Any]) -> Dict[str, Any]:
+        """Fan out the hub-contact watchdog config to every approved spoke/agent
+        immediately (the save-time path; ``push_config_to_spoke`` reconciles it on
+        every connect for spokes that connect later). Uses ``push_or_queue_to_spoke``
+        so an offline spoke gets it from the durable mailbox on next connect. The
+        handler is idempotent (just rewrites the local config file), so the fan-out
+        is safe for everyone. Returns ``{"status","pushed","queued","failed"}``."""
+        targets = [sid for sid, ap in self.approved_modules.items() if ap]
+
+        async def _one(sid):
+            try:
+                r = await self.push_or_queue_to_spoke(sid, "SPOKE_SET_WATCHDOG", wd_cfg)
+                return sid, ("queued" if r.get("queued") else "pushed")
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"push-watchdog: failed for {sid}: {e}")
+                return sid, "failed"
+
+        results = await asyncio.gather(*(_one(sid) for sid in targets)) if targets else []
+        pushed = [sid for sid, kind in results if kind == "pushed"]
+        queued = [sid for sid, kind in results if kind == "queued"]
+        failed = [sid for sid, kind in results if kind == "failed"]
+        logger.info(f"Watchdog fan-out: {len(pushed)} pushed, {len(queued)} queued, {len(failed)} failed.")
         return {"status": "SUCCESS", "pushed": pushed, "queued": queued, "failed": failed}
 
     async def revoke_spoke(self, spoke_id: str) -> Dict[str, Any]:
