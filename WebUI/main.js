@@ -5764,6 +5764,18 @@ function _renderSettingsKeyVaultTile(content) {
                 <button type="button" onclick="backupKeyVaultNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Backup now</button>
                 <span id="kv-action-out" class="text-[11px] font-mono text-slate-600 break-all"></span>
             </div>
+            <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Disaster recovery</div>
+                <p class="text-[11px] text-slate-400 mb-2">Download the min bootstrap bundle to keep off-box, or restore one onto this hub (from an uploaded file or a vault secret) to bring logins + Azure back, then pull the full backup from source.</p>
+                <div class="flex flex-wrap items-center gap-2">
+                    <button type="button" onclick="downloadKeyVaultMin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Download min backup</button>
+                    <input type="file" id="kv-restore-file" accept="application/json,.json" class="hidden" onchange="restoreKeyVaultFromFile(this)">
+                    <button type="button" onclick="document.getElementById('kv-restore-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Restore from file…</button>
+                    <input id="kv-restore-secret" type="text" placeholder="or vault secret name" class="${inputCls} font-mono text-xs flex-1 min-w-[10rem]">
+                    <button type="button" onclick="restoreKeyVaultFromVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Restore from vault</button>
+                </div>
+                <p id="kv-restore-out" class="text-[11px] font-mono text-slate-600 mt-1 break-all"></p>
+            </div>
             <div class="mt-4">
                 <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Backups in vault <span id="kv-bk-count" class="text-slate-400 font-normal"></span></div>
                 <div id="kv-backups" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-56 overflow-y-auto text-xs"></div>
@@ -5855,9 +5867,62 @@ async function _kvAction(path, label, confirmMsg) {
 function rotateKeyVaultAdmin() { _kvAction('/setup/key-vault/rotate-admin', 'Rotate admin', 'Rotate the local admin password now?\n\nThe new password is stored ONLY in Key Vault (break-glass) and all of that admin’s sessions are logged out. Retrieve it from the vault to log back in.'); }
 function pushKeyVaultFernet() { _kvAction('/setup/key-vault/push-fernet', 'Push Fernet'); }
 function backupKeyVaultNow() { _kvAction('/setup/key-vault/backup', 'Backup'); }
+
+async function downloadKeyVaultMin() {
+    try {
+        const r = await setupFetch('/setup/key-vault/download-min');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'lm-min-backup.json';
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+    } catch (e) { showToast('Download failed: ' + (e.message || e), 'error'); }
+}
+
+function _kvRestoreReport(d) {
+    const out = document.getElementById('kv-restore-out');
+    const src = d.backup_source || {};
+    const where = src.ssh_host ? `${src.ssh_user ? src.ssh_user + '@' : ''}${src.ssh_host}:${src.ssh_path || ''}` : '(no backup source set)';
+    if (out) out.textContent = `Restored ${d.users || 0} users, ${d.permission_groups || 0} groups, ${d.tenants || 0} tenants · certs: ${(d.cert_files || []).length} · Fernet key ${d.fernet_key_present ? 'present' : 'missing'} · backup source: ${where}`;
+    showToast('Min backup restored. Now pull the full backup from source, then restart the hub.', 'success');
+    loadKeyVault();
+}
+
+async function _kvRestore(bodyObj) {
+    const out = document.getElementById('kv-restore-out');
+    if (out) out.textContent = 'Restoring…';
+    try {
+        const r = await setupFetch('/setup/key-vault/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyObj) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        _kvRestoreReport(d);
+    } catch (e) { if (out) out.textContent = ''; showToast('Restore failed: ' + (e.message || e), 'error'); }
+}
+
+async function restoreKeyVaultFromFile(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    if (!confirm('Restore this min backup onto THIS hub?\n\nIt replaces the local users, permission groups, Azure config and OIDC cert/key. Everyone is logged out.')) { input.value = ''; return; }
+    try {
+        const bundle = JSON.parse(await file.text());
+        await _kvRestore({ bundle });
+    } catch (e) { showToast('Bad backup file: ' + (e.message || e), 'error'); }
+    finally { input.value = ''; }
+}
+
+function restoreKeyVaultFromVault() {
+    const secret = (document.getElementById('kv-restore-secret')?.value || '').trim();
+    if (!secret) { showToast('Enter the vault secret name to restore from.', 'error'); return; }
+    if (!confirm(`Restore min backup from vault secret "${secret}" onto THIS hub?\n\nIt replaces local users, permission groups, Azure config and OIDC cert/key. Everyone is logged out.`)) return;
+    _kvRestore({ from_vault: secret });
+}
+
 window.testKeyVault = testKeyVault; window.saveKeyVault = saveKeyVault;
 window.rotateKeyVaultAdmin = rotateKeyVaultAdmin; window.pushKeyVaultFernet = pushKeyVaultFernet;
-window.backupKeyVaultNow = backupKeyVaultNow;
+window.backupKeyVaultNow = backupKeyVaultNow; window.downloadKeyVaultMin = downloadKeyVaultMin;
+window.restoreKeyVaultFromFile = restoreKeyVaultFromFile; window.restoreKeyVaultFromVault = restoreKeyVaultFromVault;
 
 // ── Settings → Azure NSG (alias-style allow-list) ───────────────────────────
 // Manage one allow rule in an Azure NSG as an IP allow-list. Reuses the SSO

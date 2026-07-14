@@ -279,6 +279,59 @@ async def do_backup_min(hub) -> Dict[str, Any]:
     return {"secret": name, "size": len(blob), "pruned": pruned}
 
 
+def apply_min_backup(hub, bundle: dict) -> Dict[str, Any]:
+    """Restore a min bootstrap bundle onto THIS hub: replace users, permission
+    groups, the bootstrap global_config subset and tenants, and write the OIDC
+    cert/key back to disk so SSO/Azure work again. Returns a summary including
+    the Fernet key + the backup-source pointer so the operator can then pull the
+    full backup. Does NOT swap LM_FERNET_KEY (that's an env var / process-level)."""
+    if not isinstance(bundle, dict) or bundle.get("kind") != "lm-min-backup":
+        raise KeyVaultError("not a Lab Manager min backup (missing kind=lm-min-backup)")
+    from security.oidc import get_oidc_config
+    ss = hub.state.system_state
+    if isinstance(bundle.get("users"), dict):
+        ss["users"] = bundle["users"]
+    if isinstance(bundle.get("permission_groups"), dict):
+        ss["permission_groups"] = bundle["permission_groups"]
+    gc = ss.setdefault("global_config", {})
+    for k, v in (bundle.get("global_config") or {}).items():
+        gc[k] = v
+    if isinstance(bundle.get("tenants"), dict):
+        ts = ss.setdefault("tenant_state", {})
+        ts["tenants"] = bundle["tenants"]
+    wrote = []
+    oidc_cfg = get_oidc_config(hub)
+    for pem_key, path_attr in (("oidc_cert_pem", "cert_path"), ("oidc_key_pem", "key_path")):
+        pem = bundle.get(pem_key)
+        path = getattr(oidc_cfg, path_attr, "")
+        if pem and path:
+            try:
+                _os.makedirs(_os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as f:
+                    f.write(pem)
+                if path_attr == "key_path":
+                    _os.chmod(path, 0o600)
+                wrote.append(path)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Key Vault restore: could not write %s: %s", path, e)
+    hub.state.save_state()
+    logger.info("Key Vault: restored min backup (users=%d, wrote %d cert files)",
+                len(bundle.get("users", {}) or {}), len(wrote))
+    self_backup = (bundle.get("global_config") or {}).get("self_backup") or {}
+    return {
+        "users": len(bundle.get("users", {}) or {}),
+        "permission_groups": len(bundle.get("permission_groups", {}) or {}),
+        "tenants": len(bundle.get("tenants", {}) or {}),
+        "cert_files": wrote,
+        "fernet_key_present": bool(bundle.get("fernet_key")),
+        "fernet_key": bundle.get("fernet_key", ""),
+        "backup_source": {k: self_backup.get(k) for k in
+                          ("ssh_host", "ssh_user", "ssh_path", "ssh_port")
+                          if k in self_backup},
+        "created": bundle.get("created", ""),
+    }
+
+
 def _iso_age_days(iso: str) -> float:
     """Days since an ISO timestamp; a large number if unparseable/empty."""
     if not iso:
