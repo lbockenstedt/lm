@@ -4272,9 +4272,9 @@ function _renderSetupSelfBackupTile(content) {
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-encrypt" class="w-4 h-4 text-green-600 rounded" checked>Encrypt archive (.tgz.enc)</label>
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="sb-include-env" class="w-4 h-4 text-green-600 rounded">Include .env (secrets)</label>
                 </div>
-                <div class="mt-4 flex items-center gap-3">
-                    <button onclick="saveSelfBackupConfig()" id="sb-save-btn" class="${btnCls}">Save Schedule</button>
+                <div class="mt-4 flex items-center justify-between gap-3">
                     <span class="text-xs text-slate-400">Archives are encrypted with the hub Fernet key — restore requires the same <code>LM_FERNET_KEY</code>.</span>
+                    <button onclick="saveSelfBackupConfig()" id="sb-save-btn" class="${btnCls}">Save</button>
                 </div>
             </div>
             <div class="${card}">
@@ -4320,8 +4320,8 @@ function _renderSetupSelfBackupTile(content) {
                         <input type="text" id="sb-ssh-keyfile" placeholder="/root/.ssh/lm_backup_id_ed25519" class="${inputCls}">
                     </div>
                 </div>
-                <div class="mt-4 flex items-center gap-3">
-                    <button onclick="saveSelfBackupConfig()" id="sb-copy-save-btn" class="${btnCls}">Save Copy Config</button>
+                <div class="mt-4 flex justify-end">
+                    <button onclick="saveSelfBackupConfig()" id="sb-copy-save-btn" class="${btnCls}">Save</button>
                 </div>
             </div>
             <div class="${card}">
@@ -4580,7 +4580,7 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Daily time (HH:MM, 24h)</label>
                         <input type="time" id="ep-sync-time" value="02:00" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveEndpointSyncConfig()" class="${btnCls} ml-auto">Save Schedule</button>
+                    <button onclick="saveEndpointSyncConfig()" class="${btnCls} ml-auto">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
@@ -4645,7 +4645,7 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Daily time (HH:MM, 24h)</label>
                         <input type="time" id="vm-sync-time" value="03:00" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveVmSyncConfig()" class="${btnCls} ml-auto">Save Schedule</button>
+                    <button onclick="saveVmSyncConfig()" class="${btnCls} ml-auto">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
@@ -4711,7 +4711,7 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4 flex items-center gap-3">
-                    <button onclick="saveFwDiscoveryConfig()" class="${btnCls} ml-auto">Save Schedule</button>
+                    <button onclick="saveFwDiscoveryConfig()" class="${btnCls} ml-auto">Save</button>
                     <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
                 </div>
                 <div class="mt-4">
@@ -4764,7 +4764,7 @@ function _renderSetupSyncTile(content) {
                     </div>
                 </div>
                 <div class="mt-4 flex items-center gap-3">
-                    <button onclick="saveNwDiscoveryConfig()" class="${btnCls} ml-auto">Save Schedule</button>
+                    <button onclick="saveNwDiscoveryConfig()" class="${btnCls} ml-auto">Save</button>
                     <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
                 </div>
                 <div class="mt-4">
@@ -5538,7 +5538,7 @@ function _renderSetupGeneralTile(content) {
                 <span id="last-update-ts" class="text-xs text-slate-400"></span>
             </div>
             <div class="flex justify-end gap-2 pt-2">
-                <button onclick="saveUpdateSources()" class="${btnCls}">Save Sources</button>
+                <button onclick="saveUpdateSources()" class="${btnCls}">Save</button>
             </div>
             <div class="border-t border-slate-200 mt-4 pt-4">
                 <p class="text-xs text-slate-400 mb-3">How often the hub checks GitHub and syncs: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes an update to every approved spoke. Same schedule as System → Sync's "GitHub Repo Sync" card — either one saves/shows it.</p>
