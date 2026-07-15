@@ -713,10 +713,6 @@ def register(app, hub, ctx):
         if not sess:
             raise HTTPException(status_code=401, detail="Authentication required")
         hub = app.state.hub
-        gc = (hub.state.get_global_config().get("pxmx", {}) or {})
-        if not gc.get("host_shell_enabled", False):
-            raise HTTPException(status_code=403,
-                                detail="Host shell is disabled — enable it in Setup → Hypervisors")
         is_ga = _is_admin(sess)
         if not (is_ga or access.is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="Global or Tenant Admin required for the host shell")
@@ -731,10 +727,18 @@ def register(app, hub, ctx):
         if not pxmx_spoke:
             raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
         tenant_id = sess.get("tenant_id") or ""
-        if not is_ga:
-            spoke_tenant = hub.state.get_spoke_tenant(pxmx_spoke) or ""
-            if spoke_tenant and spoke_tenant != tenant_id:
-                raise HTTPException(status_code=403, detail="not your tenant's hypervisor")
+        spoke_tenant = hub.state.get_spoke_tenant(pxmx_spoke) or ""
+        if not is_ga and spoke_tenant and spoke_tenant != tenant_id:
+            raise HTTPException(status_code=403, detail="not your tenant's hypervisor")
+        # Opt-in gate: the target hypervisor's tenant config must enable the shell
+        # (Setup → Hypervisors → "Enable host terminal"). OFF by default.
+        try:
+            hv = await hub.simulations_store.get_hypervisors_config(spoke_tenant)
+        except Exception:  # noqa: BLE001
+            hv = {}
+        if not (hv or {}).get("host_shell_enabled", False):
+            raise HTTPException(status_code=403,
+                                detail="Host terminal is disabled for this hypervisor — enable it in Setup → Hypervisors")
         session_id = str(uuid.uuid4())
         ws_token = secrets.token_urlsafe(32)
         hub.register_shell_session(session_id, {

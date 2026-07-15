@@ -11573,8 +11573,9 @@ async function renderPxmxSettings(container) {
             <tbody>${hostRows}</tbody>
           </table></div>
         </div>
-        <div class="hpe-card rounded-lg p-5 shadow-sm">
+        <div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
           <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded"/> Confirm before destructive VM actions (stop / restart / backup)</label>
+          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-host-shell" type="checkbox" ${cfg.host_shell_enabled ? 'checked' : ''} class="rounded mt-0.5"/> <span>Enable <b>host terminal</b> (root shell on the Proxmox host via VM Server → Terminal). <span class="text-amber-600">Off by default</span> — a live root shell on this tenant's hypervisor. Global Admin (any host) + Tenant Admin (own tenant). Every session is audited.</span></label>` : ''}
         </div>
         <div class="flex justify-end items-center gap-3">
           <button onclick="savePxmxSettings()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold">Save</button>
@@ -11606,6 +11607,9 @@ async function savePxmxSettings() {
         confirm_destructive: (document.getElementById('hv-confirm') || {}).checked !== false,
         per_host: perHost,
     };
+    const _hostShellEl = document.getElementById('hv-host-shell');
+    if (_hostShellEl) cfg.host_shell_enabled = !!_hostShellEl.checked;
+    else if (window._pxmxHvConfig) cfg.host_shell_enabled = !!window._pxmxHvConfig.host_shell_enabled;  // preserve for non-admins
     const st = document.getElementById('pxmx-settings-status');
     try {
         const r = await setupFetch(`/sim/api/tenant/${currentTenant}/hypervisors-config?tenant_id=${encodeURIComponent(currentTenant)}`, {
