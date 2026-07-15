@@ -124,6 +124,8 @@ def register(app, hub, ctx):
             "macs":       "NW_GET_MAC_TABLE",
             "arp":        "NW_GET_ARP",
             "interfaces": "NW_GET_INTERFACES",
+            "endpoints":  "NW_GET_ENDPOINTS",  # fused ARP+MAC unique IP/MAC list
+            "vlans":      "NW_GET_VLANS",       # per-VLAN rollup
         }
         spoke_cmd = command_map.get(endpoint)
         if not spoke_cmd:

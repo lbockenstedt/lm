@@ -1225,7 +1225,7 @@ const VIEW_SUBMENUS = {
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records', 'Statistics', 'Forwarders'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
-    nw: ['Devices', 'MAC Table', 'ARP', 'Interfaces'],
+    nw: ['Devices', 'IP Addresses', 'VLANs', 'MAC Table', 'ARP', 'Interfaces'],
 };
 
 // Two-tier horizontal nav: child tabs that appear in #top-nav-secondary under
@@ -11481,8 +11481,10 @@ async function loadOpnsenseManagement() {
 }
 
 // Network Devices management view (mirrors loadOpnsenseManagement).
-// Devices → fleet list (/api/nw/devices); MAC Table / ARP / Interfaces →
-// per-device fetch merged across the fleet (/api/nw/{id}/{macs|arp|interfaces}),
+// Devices → fleet list (/api/nw/devices); IP Addresses / VLANs / MAC Table / ARP
+// / Interfaces → per-device fetch merged across the fleet
+// (/api/nw/{id}/{endpoints|vlans|macs|arp|interfaces}); IP Addresses fuses the
+// ARP/user-table with the MAC/bridge table on MAC (unique IP+MAC per client),
 // each row tagged with its source device (_deviceId / device). ?tenant=
 // scopes the server-side subnet filter to the selected tenant (incl. admins
 // via the switcher); without it admins bypass the filter (see access.filter_nw).
@@ -11558,6 +11560,8 @@ async function loadNwData(subMenu) {
             if (sm === 'MAC Table') return 'macs';
             if (sm === 'ARP') return 'arp';
             if (sm === 'Interfaces') return 'interfaces';
+            if (sm === 'IP Addresses') return 'endpoints';  // fused ARP+MAC
+            if (sm === 'VLANs') return 'vlans';
             return null;
         };
         const suffix = suffixFor(subMenu);
@@ -11613,6 +11617,8 @@ async function loadNwData(subMenu) {
         if (subMenu === 'MAC Table') keys = ['device', 'mac', 'vlan', 'interface'];
         else if (subMenu === 'ARP') keys = ['device', 'ip', 'mac', 'interface'];
         else if (subMenu === 'Interfaces') keys = ['device', 'name', 'ip', 'mac', 'vlan', 'status', 'speed'];
+        else if (subMenu === 'IP Addresses') keys = ['device', 'ip', 'mac', 'vlan', 'interface'];
+        else if (subMenu === 'VLANs') keys = ['device', 'vlan', 'endpoints', 'macs', 'ips', 'gateway_ip'];
         else keys = ['device', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && k !== 'device' && !k.startsWith('_'))];
 
         const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');

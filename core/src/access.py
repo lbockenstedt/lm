@@ -106,6 +106,12 @@ _NW_FILTER_SPEC = {
     "macs":      ("fields", ["ip"]),
     "arp":       ("fields", ["ip"]),
     "interfaces": ("fields", ["ip"]),
+    # Fused IP/MAC list — carries an ``ip`` per endpoint; a MAC-only row (no IP)
+    # leaks no cross-tenant IP, so keep it (drop_no_ip handled below like arp).
+    "endpoints": ("fields", ["ip"]),
+    # Per-VLAN summary: gateway_ip is the only concrete IP; drop VLANs with no
+    # in-tenant IP so a non-admin doesn't see other tenants' VLAN rollups.
+    "vlans":     ("fields", ["gateway_ip"]),
 }
 
 
@@ -1245,7 +1251,7 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
         prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
         return data
-    drop_no_ip = endpoint not in ("macs", "arp")
+    drop_no_ip = endpoint not in ("macs", "arp", "endpoints")
     before = _list_len(data)
     out = filter_items_by_prefixes(data, prefixes, fields, drop_no_ip=drop_no_ip)
     logger.debug("DIAG filter_nw[%s] tid=%r prefixes=%d filtered %d -> %d "
