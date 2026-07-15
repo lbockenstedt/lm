@@ -17481,6 +17481,20 @@ function showAddNwDeviceModal() {
                     <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Token</label><input type="password" id="nw-api-token" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 </div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">SNMP Community</label><input type="text" id="nw-snmp-community" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Auto-Poll Interval</label>
+                    <select id="nw-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="0">Off (manual Poll Now only)</option>
+                        <option value="60">Every 1 minute</option>
+                        <option value="300">Every 5 minutes</option>
+                        <option value="900">Every 15 minutes</option>
+                        <option value="1800">Every 30 minutes</option>
+                        <option value="3600">Every hour</option>
+                        <option value="21600">Every 6 hours</option>
+                        <option value="86400">Every day</option>
+                    </select>
+                    <p class="text-[11px] text-slate-400">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces) and pushes the result to the hub, so its sub-views load instantly.</p>
+                </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
                 <button onclick="closeNwDeviceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
@@ -17520,6 +17534,7 @@ async function editNwDevice(id) {
     document.getElementById('nw-enable-secret').value = d.enable_secret || '';
     document.getElementById('nw-api-token').value = d.api_token || '';
     document.getElementById('nw-snmp-community').value = d.snmp_community || '';
+    document.getElementById('nw-poll-interval').value = String(d.poll_interval || 0);
 
     setTimeout(() => {
         const selector = document.getElementById('nw-spoke');
@@ -17544,6 +17559,7 @@ async function saveNwDevice() {
         enable_secret: document.getElementById('nw-enable-secret').value,
         api_token: document.getElementById('nw-api-token').value,
         snmp_community: document.getElementById('nw-snmp-community').value,
+        poll_interval: parseInt(document.getElementById('nw-poll-interval').value, 10) || 0,
     };
     if (!config.name || !config.object_type) {
         showToast('Device name and object type are required.', 'error');

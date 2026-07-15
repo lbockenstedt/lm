@@ -457,6 +457,8 @@ class NwDiscoverySyncMixin:
         interfaces = pdata.get("interfaces") or []
         arp = pdata.get("arp") or []
         mac_table = pdata.get("mac_table") or []
+        endpoints = pdata.get("endpoints") or []
+        vlans = pdata.get("vlans") or []
         poll_errors = poll_res.get("errors") if isinstance(poll_res, dict) else None
         if isinstance(poll_errors, list):
             errors.extend(poll_errors)
@@ -526,6 +528,8 @@ class NwDiscoverySyncMixin:
             "interfaces": interfaces,
             "arp": arp,
             "mac_table": mac_table,
+            "endpoints": endpoints,
+            "vlans": vlans,
             "netbox_push": netbox_push,
             "tenant_slug": tenant_slug,
             "errors": errors,

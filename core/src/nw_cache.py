@@ -52,7 +52,8 @@ class NwCacheMixin:
     """
 
     NW_CACHE_FILE = "nw_data.json"
-    _NW_CACHE_ENDPOINTS = ("info", "macs", "arp", "interfaces")
+    _NW_CACHE_ENDPOINTS = ("info", "macs", "arp", "interfaces",
+                           "endpoints", "vlans")
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -161,6 +162,12 @@ class NwCacheMixin:
         ifaces = poll_result.get("interfaces")
         if isinstance(ifaces, list):
             entry["interfaces"] = {"status": "SUCCESS", "data": ifaces}
+        endpoints = poll_result.get("endpoints")
+        if isinstance(endpoints, list):
+            entry["endpoints"] = {"status": "SUCCESS", "data": endpoints}
+        vlans = poll_result.get("vlans")
+        if isinstance(vlans, list):
+            entry["vlans"] = {"status": "SUCCESS", "data": vlans}
         entry["fetched_at"] = time.time()
         self._nw_cache_schedule_save()
 

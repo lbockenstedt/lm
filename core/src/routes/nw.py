@@ -142,14 +142,32 @@ def register(app, hub, ctx):
                 return filtered
             raise HTTPException(status_code=503,
                                 detail="Network Devices spoke not connected")
+        # endpoints/vlans run three sequential SSH gathers (arp+mac+interfaces)
+        # on the spoke, so the 5s default relay timeout is far too short — give
+        # them room; the single-datum views get a comfortable margin too.
+        timeout = 45.0 if endpoint in ("endpoints", "vlans") else 20.0
         try:
-            result = await hub.request_response(spoke_id, spoke_cmd, {"device_id": device_id})
+            result = await hub.request_response(spoke_id, spoke_cmd,
+                                                {"device_id": device_id},
+                                                timeout=timeout)
             data = access.unwrap_spoke(result)
             await hub.nw_cache_set_device(device_id, endpoint, data)
             return await _filter_nw(request, data, endpoint, tenant)
         except HTTPException:
             raise
         except Exception as e:
+            # A slow/timed-out live fetch shouldn't blank the tab — serve the
+            # last-known cached value (marked stale) if we have one, so a heavy
+            # gateway that occasionally overruns still shows data.
+            cached = hub.nw_cache_get_device(device_id, endpoint)
+            if cached is not None:
+                logger.warning("nw_get_device_data live fetch failed (%s/%s: %s)"
+                               " — serving cached", device_id, endpoint, e)
+                filtered = await _filter_nw(request, cached, endpoint, tenant)
+                if isinstance(filtered, dict):
+                    filtered = dict(filtered)
+                    filtered["stale"] = True
+                return filtered
             logger.exception("nw_get_device_data failed (%s/%s)", device_id, endpoint)
             raise HTTPException(status_code=500, detail=str(e))
 

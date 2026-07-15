@@ -4130,6 +4130,22 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     asyncio.create_task(self._handle_console_probe(spoke_id, payload.get("data", {}) or {}))
                     continue
 
+                # --- NW autonomous per-device poll result (spoke-driven) ---
+                # An nw spoke polled a device on its configured poll_interval and
+                # pushed the fused result. Fold it into the per-device nw cache so
+                # every sub-view (info/arp/macs/interfaces/endpoints/vlans) serves
+                # instantly without a live SSH round-trip. The payload's ``data``
+                # is the flattened poll (device_info/arp/mac_table/interfaces/
+                # endpoints/vlans at top level) — exactly what nw_cache_set_poll
+                # reads. Fire-and-forget (must not block the dispatch loop).
+                if payload.get("type") == "NW_POLL_RESULT":
+                    _nwd = payload.get("data", {}) or {}
+                    _nw_did = _nwd.get("device_id")
+                    _nw_pdata = _nwd.get("data") if isinstance(_nwd.get("data"), dict) else _nwd
+                    if _nw_did and isinstance(_nw_pdata, dict):
+                        asyncio.create_task(self.nw_cache_set_poll(_nw_did, _nw_pdata))
+                    continue
+
                 # --- LE cert renewed (event-driven distribution) ---
                 # A le spoke renewed a cert and emitted LE_CERT_RENEWED so we
                 # re-push the material to its targets now instead of waiting up
