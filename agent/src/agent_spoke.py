@@ -459,6 +459,37 @@ class GenericAgent(BaseSpoke):
 
     # ── Command dispatch ──────────────────────────────────────────────────────
 
+    async def _provision_netbox_cert_helper(self) -> bool:
+        """Self-heal a missing ``/usr/local/bin/lm-netbox-install-cert`` by
+        re-running the netbox installer's ``--provision-cert-helper`` mode
+        (helper + sudoers ONLY — no Postgres/Redis/gunicorn/nginx, no service
+        restart). Reuses the same curl-pipe-bash the netbox-server role deploy
+        uses (``_DEPLOY_ROLES["netbox-server"]``). The generic agent unit is
+        ``User=root`` so this writes ``/usr/local/bin`` + ``/etc/sudoers.d``
+        directly — no sudo. Idempotent. Returns True iff the helper exists
+        afterward. Only called on the rare missing-helper path, not every
+        cert install — so the GitHub-fetch dependency is the same as the
+        initial role deploy, not on the hot path."""
+        cmd = ["bash", "-c",
+               "exec </dev/null; curl -sSL "
+               "https://raw.githubusercontent.com/lbockenstedt/netbox/main/install.sh "
+               "| bash -s -- --provision-cert-helper"]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+            if proc.returncode != 0:
+                logger.warning("[cert] netbox cert helper self-provision failed: %s",
+                               (out or b"").decode(errors="replace")[-500:])
+                return False
+            return os.path.exists(_NETBOX_INSTALL_CERT_HELPER)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[cert] netbox cert helper self-provision exception: %s", e)
+            return False
+
     async def _install_netbox_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Install an LE cert onto this host's NetBox nginx via the root helper.
         Mirrors netbox_spoke's INSTALL_CERT: validate the fullchain+privkey pair
@@ -466,15 +497,26 @@ class GenericAgent(BaseSpoke):
         domain = data.get("domain", "") or ""
         fullchain = data.get("fullchain", "") or ""
         privkey = data.get("privkey", "") or ""
-        if not os.path.exists(_NETBOX_INSTALL_CERT_HELPER):
-            logger.warning("[cert] %s → netbox-server: FAILED — helper %s missing "
-                           "(is this the netbox-server host?)", domain, _NETBOX_INSTALL_CERT_HELPER)
-            return {"status": "ERROR",
-                    "message": f"cert helper {_NETBOX_INSTALL_CERT_HELPER} not present on this host"}
         if not fullchain or not privkey:
             return {"status": "ERROR", "message": "missing cert material"}
         if "BEGIN CERTIFICATE" not in fullchain or "PRIVATE KEY" not in privkey:
             return {"status": "ERROR", "message": "fullchain/privkey not PEM"}
+        # Self-heal: the netbox-server role provisions the cert helper at
+        # install.sh --infra-only time, but if it's missing (deleted / drifted /
+        # role reloaded partially) re-provision it on demand instead of failing
+        # and requiring a manual reinstall. The generic agent unit is User=root
+        # (install_agent.sh:476) so this can write /usr/local/bin + /etc/sudoers.d
+        # directly — no sudo needed. Only hit on the rare missing-helper path.
+        if not os.path.exists(_NETBOX_INSTALL_CERT_HELPER):
+            logger.info("[cert] %s → netbox-server: helper %s missing — "
+                        "self-provisioning…", domain, _NETBOX_INSTALL_CERT_HELPER)
+            ok = await self._provision_netbox_cert_helper()
+            if not ok or not os.path.exists(_NETBOX_INSTALL_CERT_HELPER):
+                logger.warning("[cert] %s → netbox-server: FAILED — helper missing "
+                               "and self-provision failed", domain)
+                return {"status": "ERROR",
+                        "message": ("cert helper missing and self-provision failed "
+                                    "(re-load the netbox-server role)")}
         crt_tmp = key_tmp = None
         try:
             with tempfile.NamedTemporaryFile("w", suffix=".crt.pem", delete=False) as cf:

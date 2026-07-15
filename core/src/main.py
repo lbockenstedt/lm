@@ -4434,6 +4434,40 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 )
                 return {"status": "ok" if ok else "not_found"}
 
+            # NetBox IPAM spoke (API-only, no cert helper) owns the cert-install
+            # KNOWLEDGE and relays the actual install to the netbox-server agent
+            # (the NetBox web host, which has nginx + the root sudoers helper).
+            # The spoke validated the fullchain/privkey pair in-process before
+            # sending; the hub resolves the agent from its netbox_server_agents
+            # registry (no agent_id pushed to the spoke) and runs INSTALL_CERT
+            # there, returning the agent's result. See _cert_target_spoke
+            # (netbox-server branch) + request_response.
+            if req_type == "RELAY_NETBOX_CERT":
+                cert = req.get("cert") or {}
+                agent_sid = self._cert_target_spoke(
+                    "netbox-server", req.get("identifier", "") or "")
+                if not agent_sid or agent_sid not in self.active_connections:
+                    logger.warning(
+                        "[cert] RELAY_NETBOX_CERT from %s: no netbox-server "
+                        "agent connected", spoke_id)
+                    return {"status": "ERROR",
+                            "message": ("no netbox-server agent connected — "
+                                        "load the netbox-server role on the "
+                                        "NetBox host")}
+                try:
+                    return await self.request_response(
+                        agent_sid, "INSTALL_CERT",
+                        {"domain": req.get("domain", "") or "",
+                         "fullchain": cert.get("fullchain", "") or "",
+                         "privkey": cert.get("privkey", "") or ""},
+                        timeout=30.0,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[cert] RELAY_NETBOX_CERT → %s failed: %s",
+                                   agent_sid, e)
+                    return {"status": "ERROR",
+                            "message": f"relay to netbox-server agent failed: {e}"}
+
             logger.warning(f"Unknown HUB_REQUEST type '{req_type}' from {spoke_id}")
             return {"status": "error", "message": f"unknown request type: {req_type}"}
         except Exception as e:

@@ -223,6 +223,13 @@ class BaseControlPlane:
         self._install_uncaught_exception_relay()
         # Active hub websocket — set while connected so subclasses can relay messages up.
         self._hub_ws = None
+        # Pending HUB_REQUEST → HUB_RESPONSE waiters keyed by correlation_id
+        # (header.message_id of the outbound request, which the hub echoes back
+        # as data.correlation_id on the HUB_RESPONSE). A module awaiting a hub
+        # reply (e.g. the netbox IPAM spoke relaying INSTALL_CERT to the
+        # netbox-server agent) registers a Future here via request_to_hub() and
+        # the receive loop resolves it when the matching HUB_RESPONSE lands.
+        self._hub_response_futures: Dict[str, "asyncio.Future"] = {}
         # Wall-clock (epoch) of the last confirmed hub contact — updated on connect
         # and on every received frame. Seeded to "now" so a fresh boot has a grace
         # window before the hub-contact watchdog (below) can escalate, and reloaded
@@ -836,6 +843,60 @@ class BaseControlPlane:
         except Exception as e:  # noqa: BLE001
             logger.warning("send_to_hub(%s) failed: %s", payload_type, e)
             return False
+
+    async def request_to_hub(self, req_type: str, data: Dict[str, Any],
+                             timeout: float = 30.0) -> Dict[str, Any]:
+        """Send a HUB_REQUEST to the hub and await the correlated HUB_RESPONSE.
+
+        The request/reply counterpart of ``send_to_hub`` (which is
+        fire-and-forget). The hub's ``_handle_hub_request`` dispatches the
+        request and replies with a signed HUB_RESPONSE carrying
+        ``data.correlation_id`` = the request's ``header.message_id`` and
+        ``data.result`` = the handler's return dict — exactly what this method
+        awaits and returns.
+
+        Used by spokes that need the hub to do something on their behalf and
+        wait for the answer — e.g. the netbox IPAM spoke (API-only, no cert
+        helper) relays ``RELAY_NETBOX_CERT`` so the hub resolves the
+        netbox-server agent and runs ``INSTALL_CERT`` there, then hands the
+        agent's result back to the spoke. Mirrors the HUB_REQUEST path BugFixer
+        already uses; the only new piece is the spoke-side HUB_RESPONSE waiter.
+
+        Best-effort transport: a missing websocket returns a clean ERROR (the
+        caller surfaces it) and a timeout returns ERROR without leaking the
+        waiter future. The frame is signed via the same path as ``send_to_hub``
+        so the hub's approved-sender check succeeds.
+        """
+        ws = self._hub_ws
+        if ws is None:
+            logger.debug("request_to_hub(%s): not connected; skipping", req_type)
+            return {"status": "ERROR", "message": "not connected to hub"}
+        loop = asyncio.get_event_loop()
+        corr_id = str(uuid.uuid4())
+        fut: "asyncio.Future" = loop.create_future()
+        self._hub_response_futures[corr_id] = fut
+        msg = {
+            "header": {"message_id": corr_id,
+                       "timestamp": round(time.time(), 6),
+                       "sender_id": self.spoke_id, "destination_id": "hub"},
+            "payload": {"type": "HUB_REQUEST", "data": {"type": req_type, **(data or {})}},
+        }
+        try:
+            await ws.send(self._encode_frame(msg))
+        except Exception as e:  # noqa: BLE001 — socket closed mid-send
+            self._hub_response_futures.pop(corr_id, None)
+            logger.warning("request_to_hub(%s) send failed: %s", req_type, e)
+            return {"status": "ERROR", "message": f"hub request send failed: {e}"}
+        try:
+            result = await asyncio.wait_for(fut, timeout)
+            return result if isinstance(result, dict) else {"status": "SUCCESS",
+                                                            "result": result}
+        except asyncio.TimeoutError:
+            logger.warning("request_to_hub(%s) timed out after %ss", req_type, timeout)
+            return {"status": "ERROR",
+                    "message": f"hub request timeout ({req_type})"}
+        finally:
+            self._hub_response_futures.pop(corr_id, None)
 
     def _install_uncaught_exception_relay(self) -> None:
         """Route uncaught SYNC exceptions through the module logger (→ relay
@@ -1676,6 +1737,17 @@ class BaseControlPlane:
                     continue
                 if cmd_type == "APPROVED":
                     logger.info("Spoke '%s' approved by admin. Ready for commands.", self.spoke_id)
+                    continue
+
+                # Reply to a spoke-initiated request_to_hub() call. The hub's
+                # _handle_hub_request echoes the request's header.message_id as
+                # data.correlation_id and the handler return dict as data.result.
+                # Resolve the matching waiter future (no ack, no module dispatch).
+                if cmd_type == "HUB_RESPONSE":
+                    corr = data.get("correlation_id")
+                    fut = self._hub_response_futures.pop(corr, None)
+                    if fut is not None and not fut.done():
+                        fut.set_result(data.get("result") or {})
                     continue
 
                 # Backpressure slow-down signal from the hub — a fire-and-forget
