@@ -440,6 +440,29 @@ def register(app, hub, ctx):
             raise HTTPException(
                 status_code=400,
                 detail=f"no connected '{mt}' spoke — install/connect it first")
+        # One cert per target: a module/agent already assigned to ANOTHER managed
+        # cert is ineligible (a device serves a single TLS cert per endpoint).
+        # Reject naming the owning domain so the operator removes it there first.
+        ident = str(body.get("identifier") or "")
+        try:
+            all_certs = _le_inner(await _relay_spoke(
+                _get_le_spoke(hub), "LE_LIST_CERTS", log_name="le_add_target_conflict")).get("certs") or []
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001 — don't block add if the ledger read fails
+            all_certs = []
+            logger.debug("le_add_target: conflict pre-check skipped: %s", e)
+        for c in all_certs:
+            if c.get("domain") == domain:
+                continue
+            for t in c.get("targets") or []:
+                if str(t.get("module_type") or "") == mt and str(t.get("identifier") or "") == ident:
+                    tgt_label = f"{mt}{('/' + ident) if ident else ''}"
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"{tgt_label} is already assigned to the cert for "
+                               f"'{c.get('domain')}'. A target can host only one cert — "
+                               f"remove it there first.")
         return await _relay_spoke(_get_le_spoke(hub), "LE_ADD_TARGET",
                                   {"domain": domain, "target": body},
                                   log_name="le_add_target")

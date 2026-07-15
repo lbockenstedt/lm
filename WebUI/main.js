@@ -14035,6 +14035,15 @@ async function loadLEData(subMenu) {
         // Already-added targets show as a disabled ✓; a click on a + chip calls
         // addLeTarget(domain, {module_type, identifier}). Returns '' when no
         // connected cert-capable spokes/agents are available.
+        // One cert per target: map each already-assigned target → its owning
+        // domain. A target claimed by ANOTHER cert renders locked (not a
+        // clickable +) — a module/agent serves a single TLS cert per endpoint.
+        // The backend enforces this too (409 on add); this just prevents the click.
+        const _leTargetOwner = {};
+        (certs || []).forEach(c => (c.targets || []).forEach(t => {
+            const k = `${t.module_type}|${t.identifier || ''}`;
+            if (!(k in _leTargetOwner)) _leTargetOwner[k] = c.domain;
+        }));
         const leAvailChips = (domain, tgts) => {
             const avail = window._leAvailableTargets || [];
             if (!avail.length) return '';
@@ -14052,6 +14061,12 @@ async function loadLEData(subMenu) {
                     // hover to signal the click turns distribution off. The
                     // status badge above still owns click-to-deploy.
                     return `<button onclick="removeLeTargetByKey('${dEsc}','${mtE}','${idE}')" class="px-1.5 py-0.5 rounded text-xs bg-[#01A982]/10 text-[#01A982] border border-[#01A982] cursor-pointer hover:bg-red-50 hover:text-red-600 hover:border-red-300 active:scale-95 transition" title="Distribution ENABLED for ${lbl} — click to disable (stop deploying this cert here)">${lblE} ✓</button>`;
+                }
+                // Claimed by another cert → locked (not clickable). A target can
+                // host only one cert; remove it from the owning cert to reassign.
+                const owner = _leTargetOwner[k];
+                if (owner && owner !== domain) {
+                    return `<span class="px-1.5 py-0.5 rounded text-xs bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed select-none" title="Already assigned to the cert for ${escJsAttr(owner)} — a target can host only one cert. Remove it there to reassign.">${lblE} 🔒 ${escapeHtml(owner)}</span>`;
                 }
                 // Agent-hosting chips carry the "pick one granularity" hint so
                 // hovering explains the group-vs-individual rule before a click.
