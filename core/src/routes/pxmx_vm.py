@@ -161,50 +161,67 @@ def register(app, hub, ctx):
         hv = None
         if action in ("backup", "snapshot"):
             hv = await hub.simulations_store.get_hypervisors_config(tenant_id)
-        import asyncio as _asyncio, time as _time
-        sem = _asyncio.Semaphore(6)
-
-        async def _one(it):
+        import time as _time
+        # Authorize each item + build its agent payload (with backup/snapshot
+        # config injected) at the hub, THEN send ONE PXMX_VM_ACTION_BULK to the
+        # spoke — which fans one message per agent, not one per VM. Auth failures
+        # (or missing backup storage) are recorded here and never reach the spoke.
+        payload_items = []
+        results = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
             vmid = it.get("vmid")
             node = str(it.get("node", "") or "")
             try:
                 await _assert_vm_control(request, vmid=vmid, node=node,
                                          unique_id=it.get("unique_id"))
-                payload = {
-                    "unique_id": it.get("unique_id", ""),
-                    "vmid": vmid,
-                    "node": node,
-                    "type": it.get("type", "qemu"),
-                    "action": action,
-                    "snapshot_name": it.get("snapshot_name"),
-                }
-                if action == "backup":
-                    ph = (hv.get("per_host") or {}).get(node) or {}
-                    keep = ph.get("backup_keep")
-                    if keep is None:
-                        keep = hv.get("backup_keep")
-                    storage = ph.get("backup_storage") or hv.get("backup_storage") or ""
-                    if not storage:
-                        return {"vmid": vmid, "ok": False,
-                                "error": f"No backup storage configured for host '{node or '?'}'"}
-                    payload["backup"] = {
-                        "storage": storage,
-                        "mode": ph.get("backup_mode") or hv.get("backup_mode") or "snapshot",
-                        "keep": keep or 0,
-                    }
-                elif action == "snapshot" and not payload.get("snapshot_name"):
-                    prefix = str((hv or {}).get("snapshot_prefix") or "lm").strip() or "lm"
-                    payload["snapshot_name"] = f"{prefix}-{int(_time.time())}"
-                async with sem:
-                    await hub.request_response(pxmx_spoke, "PXMX_VM_ACTION", payload, timeout=35.0)
-                return {"vmid": vmid, "ok": True}
             except HTTPException as he:
-                return {"vmid": vmid, "ok": False, "error": str(he.detail)}
-            except Exception as e:  # noqa: BLE001
-                logger.exception("pxmx_vm_action_bulk item %s failed", vmid)
-                return {"vmid": vmid, "ok": False, "error": str(e)}
+                results.append({"vmid": vmid, "ok": False, "error": str(he.detail)})
+                continue
+            payload = {
+                "unique_id": it.get("unique_id", ""),
+                "vmid": vmid,
+                "node": node,
+                "type": it.get("type", "qemu"),
+                "snapshot_name": it.get("snapshot_name"),
+            }
+            if action == "backup":
+                ph = (hv.get("per_host") or {}).get(node) or {}
+                keep = ph.get("backup_keep")
+                if keep is None:
+                    keep = hv.get("backup_keep")
+                storage = ph.get("backup_storage") or hv.get("backup_storage") or ""
+                if not storage:
+                    results.append({"vmid": vmid, "ok": False,
+                                    "error": f"No backup storage configured for host '{node or '?'}'"})
+                    continue
+                payload["backup"] = {
+                    "storage": storage,
+                    "mode": ph.get("backup_mode") or hv.get("backup_mode") or "snapshot",
+                    "keep": keep or 0,
+                }
+            elif action == "snapshot" and not payload.get("snapshot_name"):
+                prefix = str((hv or {}).get("snapshot_prefix") or "lm").strip() or "lm"
+                payload["snapshot_name"] = f"{prefix}-{int(_time.time())}"
+            payload_items.append(payload)
 
-        results = await _asyncio.gather(*[_one(it) for it in items if isinstance(it, dict)])
+        if payload_items:
+            try:
+                resp = await hub.request_response(
+                    pxmx_spoke, "PXMX_VM_ACTION_BULK",
+                    {"action": action, "items": payload_items},
+                    timeout=max(60.0, 8.0 * len(payload_items)))
+                inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else resp
+                rows = (inner or {}).get("results") if isinstance(inner, dict) else None
+                if rows is not None:
+                    results.extend(rows)
+                else:
+                    err = (inner or {}).get("message", "bulk relay failed") if isinstance(inner, dict) else "bulk relay failed"
+                    results.extend({"vmid": p.get("vmid"), "ok": False, "error": err} for p in payload_items)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("pxmx_vm_action_bulk relay failed")
+                results.extend({"vmid": p.get("vmid"), "ok": False, "error": str(e)} for p in payload_items)
         # One VM-sync + one cache refresh for the whole batch (not per VM).
         _trigger_vm_sync_after_pxmx_edit(hub, request, body)
         _refresh_module_all_tenants(hub, "pxmx_vms")
