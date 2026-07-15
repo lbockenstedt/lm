@@ -120,6 +120,25 @@ class HubCertDistributionMixin:
     def cert_device_report(self, domain: str, module_type: str, identifier: str = "") -> Dict[str, Any]:
         return self._cert_device_reports().get(f"{domain}|{module_type}|{identifier}") or {}
 
+    def update_cert_device_status(self, domain: str, module_type: str, identifier: str,
+                                  device_id: str, result: Dict[str, Any]) -> None:
+        """Merge a SINGLE device's install result into the stashed report (used by
+        the per-device deploy button in the cert drill-down)."""
+        import datetime as _dt
+        store = self._cert_device_reports()
+        rep = store.setdefault(f"{domain}|{module_type}|{identifier}",
+                               {"devices": [], "message": "", "status": "", "at": ""})
+        devs = rep.setdefault("devices", [])
+        st = (result or {}).get("status", "")
+        msg = (result or {}).get("message", "")
+        for d in devs:
+            if str(d.get("device_id")) == str(device_id):
+                d["status"], d["message"] = st, msg
+                break
+        else:
+            devs.append({"device_id": device_id, "status": st, "message": msg})
+        rep["at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
     # ── wildcard-all-spokes toggle (OFF by default; the operator's testing
     # gate). Lives in global_config["certs"]["wildcard_all_spokes"]. When ON, a
     # wildcard cert (``*.domain``) is fanned out to EVERY connected cert-capable

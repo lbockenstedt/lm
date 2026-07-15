@@ -14626,27 +14626,51 @@ function leFleetDetail(domain, tgts) {
 }
 function _leRenderDeviceTable(d) {
     const devs = d.devices || [];
+    const domain = d.domain || '', mt = d.module_type || '', ident = d.identifier || '';
     const when = d.at ? new Date(d.at).toLocaleString() : 'never';
     const pill = s => {
         const map = { SUCCESS: 'bg-green-100 text-green-700', ERROR: 'bg-red-100 text-red-700', PARTIAL: 'bg-amber-100 text-amber-700', SKIPPED: 'bg-slate-100 text-slate-500' };
-        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${map[s] || 'bg-slate-100 text-slate-500'}">${escapeHtml(s || 'pending')}</span>`;
+        const label = s || 'not deployed';
+        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${map[s] || 'bg-slate-100 text-slate-500'}">${escapeHtml(label)}</span>`;
     };
     if (!devs.length) {
-        return '<p class="text-xs text-slate-400 italic py-1">No per-device report yet — deploy this cert to the spoke (click its badge) or wait for the hourly sweep, then reopen.</p>';
+        return '<p class="text-xs text-slate-400 italic py-1">No devices found on this spoke (is it online and are devices configured in Setup → Network Devices?).</p>';
     }
-    const rows = devs.map(v => `<tr class="border-b border-slate-100">
-        <td class="px-3 py-1 text-xs font-mono text-slate-700">${escapeHtml(v.name || v.device_id || '—')}</td>
-        <td class="px-3 py-1 text-xs text-slate-500 font-mono">${escapeHtml(v.ip || '')}</td>
-        <td class="px-3 py-1 text-xs text-slate-500">${escapeHtml(v.object_type || '')}</td>
-        <td class="px-3 py-1">${pill(v.status)}</td>
-        <td class="px-3 py-1 text-xs text-slate-500">${v.message ? `<span title="${escapeHtml(v.message)}">${escapeHtml(v.message)}</span>` : ''}</td></tr>`).join('');
-    return `<div class="text-[11px] text-slate-400 mb-1">${d.message ? `<b>${escapeHtml(d.message)}</b> · ` : ''}last run: ${escapeHtml(when)}</div>
+    const rows = devs.map(v => {
+        const did = String(v.device_id || v.name || '');
+        const capable = v.cert_capable === true || String(v.object_type || '').toLowerCase() === 'cx_switch';
+        const action = capable
+            ? `<button onclick="leDeployDevice('${escJsAttr(domain)}','${escJsAttr(did)}','${escJsAttr(mt)}','${escJsAttr(ident)}',this)" class="text-xs text-[#01A982] hover:underline font-bold">Deploy</button>`
+            : `<span class="text-[10px] text-slate-400" title="${escapeHtml(v.message || 'cert install not supported for this device type')}">unsupported</span>`;
+        return `<tr class="border-b border-slate-100">
+            <td class="px-3 py-1 text-xs font-mono text-slate-700">${escapeHtml(v.name || did || '—')}</td>
+            <td class="px-3 py-1 text-xs text-slate-500 font-mono">${escapeHtml(v.ip || '')}</td>
+            <td class="px-3 py-1 text-xs text-slate-500">${escapeHtml(v.object_type || '')}</td>
+            <td class="px-3 py-1">${pill(v.status)}</td>
+            <td class="px-3 py-1 text-xs text-slate-500">${v.message ? `<span title="${escapeHtml(v.message)}">${escapeHtml(v.message)}</span>` : ''}</td>
+            <td class="px-3 py-1 whitespace-nowrap">${action}</td></tr>`;
+    }).join('');
+    return `<div class="text-[11px] text-slate-400 mb-1">${d.message ? `<b>${escapeHtml(d.message)}</b> · ` : ''}last run: ${escapeHtml(when)}. Deploy the cert to individual devices below, or to the whole fleet via the target badge.</div>
         <div class="overflow-x-auto"><table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr>
         <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Device</th>
         <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">IP</th>
         <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Type</th>
-        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Status</th>
-        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Message</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Cert</th>
+        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Message</th>
+        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400"></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+async function _leLoadDeviceBox(box, domain, mt, identifier) {
+    box.innerHTML = '<p class="text-xs text-slate-400 italic py-1">Loading devices…</p>';
+    try {
+        const q = `module_type=${encodeURIComponent(mt)}&identifier=${encodeURIComponent(identifier || '')}`;
+        const r = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/devices?${q}`);
+        const d = (r && r.ok) ? (r.data && typeof r.data.data === 'object' ? r.data.data : r.data) : null;
+        if (!d) throw new Error((r && r.detail) || 'failed to load');
+        box.innerHTML = _leRenderDeviceTable(d);
+        box.dataset.loaded = '1';
+    } catch (e) {
+        box.innerHTML = `<p class="text-xs text-red-600 py-1">Failed to load devices: ${escapeHtml(e.message || String(e))}</p>`;
+    }
 }
 async function toggleLeFleetDetail(domain, mt, identifier) {
     const cid = _leDevRepId(domain, mt, identifier || '');
@@ -14661,19 +14685,26 @@ async function toggleLeFleetDetail(domain, mt, identifier) {
     box.classList.remove('hidden');            // expand
     if (caret) caret.textContent = '▾';
     if (box.dataset.loaded === '1') return;    // lazy-load only once
-    box.innerHTML = '<p class="text-xs text-slate-400 italic py-1">Loading devices…</p>';
+    await _leLoadDeviceBox(box, domain, mt, identifier);
+}
+async function leDeployDevice(domain, deviceId, mt, identifier, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Deploying…'; }
     try {
-        const q = `module_type=${encodeURIComponent(mt)}&identifier=${encodeURIComponent(identifier || '')}`;
-        const r = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/devices?${q}`);
+        const r = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/devices/${encodeURIComponent(deviceId)}/deploy`, { method: 'POST' });
         const d = (r && r.ok) ? (r.data && typeof r.data.data === 'object' ? r.data.data : r.data) : null;
-        if (!d) throw new Error((r && r.detail) || 'failed to load');
-        box.innerHTML = _leRenderDeviceTable(d);
-        box.dataset.loaded = '1';
+        if (!r || !r.ok) throw new Error((r && r.detail) || (d && d.message) || 'deploy failed');
+        const ok = (d && d.result_status) === 'SUCCESS';
+        showToast(ok ? `Cert deployed to ${deviceId}.` : `Deploy to ${deviceId}: ${(d && d.message) || 'failed'}`, ok ? 'success' : 'error');
+        // Refresh the device box so the new status shows.
+        const box = document.getElementById(_leDevRepId(domain, mt, identifier || ''));
+        if (box) { box.dataset.loaded = ''; await _leLoadDeviceBox(box, domain, mt, identifier); }
     } catch (e) {
-        box.innerHTML = `<p class="text-xs text-red-600 py-1">Failed to load devices: ${escapeHtml(e.message || String(e))}</p>`;
+        showToast('Deploy failed: ' + (e.message || e), 'error');
+        if (btn) { btn.disabled = false; btn.textContent = 'Deploy'; }
     }
 }
 window.leFleetDetail = leFleetDetail; window.toggleLeFleetDetail = toggleLeFleetDetail;
+window.leDeployDevice = leDeployDevice;
 // The one-liner reused by the inline ⚠ note, the chip tooltips, and the add
 // confirm so the guidance reads identically everywhere (and matches the docs
 // "Distribution targets — pick one granularity" warning).

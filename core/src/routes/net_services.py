@@ -511,15 +511,74 @@ def register(app, hub, ctx):
 
     @app.get("/api/le/certs/{domain}/devices")
     async def le_target_devices(domain: str, module_type: str = "", identifier: str = ""):
-        """Per-device cert breakdown for a fleet spoke target (e.g. nw = one
-        spoke-level target that deploys to its whole switch fleet). Drives the
-        drill-down: which devices got the cert, status + message + when. Empty
-        until the next distribution runs (in-memory, repopulated hourly)."""
-        rep = app.state.hub.cert_device_report(domain, module_type, identifier)
+        """Drill-down device list for a fleet spoke target. For nw it pulls the
+        LIVE fleet from the spoke (so every switch/gateway shows even before any
+        distribution) and merges each device's last cert-install status, so the
+        UI can render a per-device Deploy button + status. Falls back to the
+        stashed distribution report if the live fetch fails."""
+        hub = app.state.hub
+        rep = hub.cert_device_report(domain, module_type, identifier)
+        stashed = {}
+        for d in (rep.get("devices") or []):
+            k = str(d.get("device_id") or d.get("name") or "")
+            if k:
+                stashed[k] = d
+        devices = []
+        if module_type == "nw":
+            try:
+                spoke_id = hub.get_spoke_by_type("nw")
+                if spoke_id:
+                    res = await hub.request_response(spoke_id, "NW_LIST_DEVICES", {}, timeout=15.0)
+                    data = access.unwrap_spoke(res) or {}
+                    fleet = data.get("devices") if isinstance(data, dict) else data
+                    for dv in (fleet or []):
+                        did = str(dv.get("id") or dv.get("device_id") or "")
+                        ot = (dv.get("object_type") or "").strip().lower()
+                        st = stashed.get(did) or {}
+                        capable = ot == "cx_switch"
+                        devices.append({
+                            "device_id": did, "name": dv.get("name") or did,
+                            "ip": dv.get("address") or dv.get("ip") or "",
+                            "object_type": ot, "cert_capable": capable,
+                            "status": st.get("status") or ("" if capable else "SKIPPED"),
+                            "message": st.get("message") or ("" if capable
+                                       else f"cert install not supported for '{ot or 'unknown'}'"),
+                        })
+            except Exception as e:  # noqa: BLE001 — fall back to the stash
+                logger.debug("le_target_devices: live nw fleet fetch failed: %s", e)
+        if not devices:
+            devices = rep.get("devices") or []
         return {"status": "SUCCESS", "domain": domain, "module_type": module_type,
-                "identifier": identifier, "devices": rep.get("devices") or [],
+                "identifier": identifier, "devices": devices,
                 "message": rep.get("message", ""), "aggregate_status": rep.get("status", ""),
                 "at": rep.get("at", "")}
+
+    @app.post("/api/le/certs/{domain}/devices/{device_id}/deploy")
+    async def le_deploy_device(domain: str, device_id: str, request: Request):
+        """Deploy a managed cert to ONE nw device (switch/gateway). Pulls the
+        material from le and sends INSTALL_CERT to the nw spoke with the device's
+        id, then records that device's per-device status."""
+        hub = app.state.hub
+        spoke_id = hub.get_spoke_by_type("nw")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="Network Devices spoke not connected")
+        le_spoke = _get_le_spoke(hub)
+        mat = await hub.request_response(le_spoke, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
+        m = access.unwrap_spoke(mat) or {}
+        if not (isinstance(m, dict) and m.get("status") == "SUCCESS"):
+            raise HTTPException(status_code=502, detail=(m or {}).get("message", "LE_GET_CERT failed"))
+        cert = m.get("data") or {}
+        try:
+            res = await hub.request_response(spoke_id, "INSTALL_CERT", {
+                "domain": domain, "fullchain": cert.get("fullchain", ""),
+                "privkey": cert.get("privkey", ""), "chain": cert.get("chain", ""),
+                "identifier": device_id, "module_type": "nw"}, timeout=120.0)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"deploy failed: {e}")
+        r = access.unwrap_spoke(res) or {}
+        hub.update_cert_device_status(domain, "nw", "", device_id, r)
+        return {"status": "ok", "device_id": device_id,
+                "result_status": r.get("status", ""), "message": r.get("message", "")}
 
     @app.delete("/api/le/certs/{domain}/targets/{idx}")
     async def le_remove_target(domain: str, idx: int):
