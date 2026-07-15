@@ -4725,9 +4725,9 @@ function _renderSetupSyncTile(content) {
                         <input id="fw-sync-site" placeholder="" class="${inputCls}">
                     </div>
                 </div>
-                <div class="mt-4 flex items-center gap-3">
-                    <button onclick="saveFwDiscoveryConfig()" class="${btnCls} ml-auto">Save</button>
+                <div class="mt-4 flex items-center justify-end gap-3">
                     <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
+                    <button onclick="saveFwDiscoveryConfig()" class="${btnCls}">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
