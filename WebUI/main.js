@@ -3644,7 +3644,6 @@ function _renderSettingsSection(subMenu) {
                                 <input type="number" id="rl-capacity" min="1" step="1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
                             <label class="text-xs text-slate-500">Refill (msg/s)<br>
                                 <input type="number" id="rl-fillrate" min="0.1" step="0.1" class="mt-1 w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></label>
-                            <button onclick="saveRateLimit()" id="rl-save-btn" class="ml-auto text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
                         </div>
                         <p class="text-[10px] text-slate-400 mt-2">Applies to each spoke on its next (re)connect. Raise both for relay spokes hosting many agents / at scale.</p>
                     </div>
@@ -3654,7 +3653,6 @@ function _renderSettingsSection(subMenu) {
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Backpressure Tuning ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex justify-end items-center gap-2">
                             <button onclick="resetBackpressureConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore recommended defaults (not yet saved)">Reset Defaults</button>
-                            <button onclick="saveBackpressureConfig()" id="bp-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
                         </div>
                     </div>
                     <p class="text-[10px] text-slate-400 mb-3">How hard the hub throttles spokes as it heats up. Applies LIVE (each 1s tick). Lower CPU marks + higher max slow-down = more aggressive (keeps CPU out of protect, telemetry gets staler while throttled).</p>
@@ -3678,7 +3676,6 @@ function _renderSettingsSection(subMenu) {
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">Update / Maintenance Window ${helpIcon('lm-hub', null, 'Hub help')}<span id="ug-watchdog-pill" class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-100 text-slate-500 normal-case">watchdog …</span></h3>
                         <div class="flex justify-end items-center gap-2">
                             <button onclick="resetUpdateGateConfig()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Restore defaults (02:00 window)">Reset Defaults</button>
-                            <button onclick="saveUpdateGateConfig()" id="ug-save-btn" class="text-xs px-3 py-1.5 rounded-md bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-all">Save</button>
                         </div>
                     </div>
                     <p class="text-[10px] text-slate-400 mb-3">When AUTO-updates <b>apply</b>. The hub pulls new code anytime; the restart into it is held for this window so it never interrupts logged-in users. The footer <b>Update</b> button bypasses this and restarts immediately. <span id="ug-watchdog-status" class="font-mono ml-1"></span></p>
@@ -3729,6 +3726,11 @@ function _renderSettingsSection(subMenu) {
         loadBackpressureConfig();
         loadUpdateGateConfig();
         loadActiveSessions();
+        // Auto-save on change (no per-card Save buttons). Note: backpressure
+        // config applies LIVE each 1s tick, so each committed field change takes
+        // effect immediately — `change` fires on commit (blur/Enter), not per
+        // keystroke, so a half-typed value is never applied.
+        _attachAutoSave(content, _settingsSaveFnFor, 'settingsAutoSave');
     } else if (subMenu === 'API Tokens') {
         content.innerHTML = `
             <div class="${card} p-6 space-y-5">
@@ -3761,6 +3763,15 @@ function _renderSettingsSection(subMenu) {
                 <p class="text-xs text-slate-400 italic">Hub is running. See System → Hub Status for metrics and spoke health.</p>
             </div>`;
     }
+}
+
+// Map a Settings (Hub Status) field element → its card's save handler.
+function _settingsSaveFnFor(el) {
+    const id = (el && el.id) || '';
+    if (id.startsWith('rl-'))  return saveRateLimit;
+    if (id.startsWith('bp-'))  return saveBackpressureConfig;
+    if (id.startsWith('ug-'))  return saveUpdateGateConfig;
+    return null;
 }
 
 // Shared Tailwind class strings for every Setup tile. Hoisted to module scope
@@ -4918,12 +4929,12 @@ function _renderSetupSyncTile(content) {
     // model as the Proxmox auto-provisioning card. Programmatic value sets
     // by the load* functions above do NOT emit `change`, so rendering does
     // not trigger saves.
-    _attachSyncTileAutoSave(content);
+    _attachAutoSave(content, _syncSaveFnFor, 'syncAutoSave');
 }
 
-// Map a Sync-tile field id → its card's save handler (auto-save on change).
-function _syncSaveFnForId(id) {
-    if (!id) return null;
+// Map a Sync-tile field element → its card's save handler (auto-save on change).
+function _syncSaveFnFor(el) {
+    const id = (el && el.id) || '';
     if (id.startsWith('repo-sync-'))        return saveRepoSyncConfig;
     if (id.startsWith('rt-nac-sync-'))      return saveRealtimeNacSyncConfig;
     if (id.startsWith('ep-sync-'))          return saveEndpointSyncConfig;
@@ -4937,17 +4948,20 @@ function _syncSaveFnForId(id) {
     return null;
 }
 
-// `change` covers every field type: checkboxes + selects fire on toggle/select;
-// text/number/time inputs fire on commit (blur or Enter). Non-field elements
-// (status divs, "Sync now" buttons, paragraphs) resolve to null → no-op.
-// The dataset flag prevents stacking listeners across re-renders (the `content`
-// node is reused while its innerHTML is replaced).
-function _attachSyncTileAutoSave(root) {
-    if (!root || root.dataset.syncAutoSave === '1') return;
-    root.dataset.syncAutoSave = '1';
+// Generic delegated auto-save: one `change` listener on `root` calls the
+// per-tile mapper (mapFn(element) → save handler or null) for the edited field.
+// `change` covers checkboxes + selects (fire on toggle/select) and
+// text/number/time inputs (fire on commit — blur or Enter); programmatic value
+// sets by the load* functions do NOT emit `change`, so rendering triggers no
+// saves. The `flag` (a dataset key) prevents stacking listeners across
+// re-renders — the container node is reused while its innerHTML is replaced,
+// and several tiles share that container, so each tile uses its own flag.
+function _attachAutoSave(root, mapFn, flag) {
+    if (!root || root.dataset[flag] === '1') return;
+    root.dataset[flag] = '1';
     root.addEventListener('change', (e) => {
-        const fn = _syncSaveFnForId(e.target && e.target.id);
-        if (fn) try { fn(); } catch (err) { console.error('[sync-auto-save]', err); }
+        const fn = mapFn(e.target);
+        if (fn) try { fn(); } catch (err) { console.error('[auto-save]', flag, err); }
     });
 }
 
@@ -5577,7 +5591,6 @@ function _renderSetupGeneralTile(content) {
                     <label class="${labelCls}">Max Concurrent Tenants</label>
                     <input type="number" id="cache-max-concurrent" min="1" max="20" value="3"
                         class="w-16 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                    <button onclick="saveCacheConfig()" class="${btnCls}">Save</button>
                     <button onclick="purgeAllCaches()" class="${btnSecCls}" title="Clear all cached tenant data; the next load re-fetches everything from the spokes">Purge All</button>
                 </div>
             </div>
@@ -5607,9 +5620,6 @@ function _renderSetupGeneralTile(content) {
             <div class="flex items-center gap-4 pt-2">
                 <span id="last-update-ts" class="text-xs text-slate-400"></span>
             </div>
-            <div class="flex justify-end gap-2 pt-2">
-                <button onclick="saveUpdateSources()" class="${btnCls}">Save</button>
-            </div>
             <div class="border-t border-slate-200 mt-4 pt-4">
                 <p class="text-xs text-slate-400 mb-3">How often the hub checks GitHub and syncs: pulls the hub tree + <code>provisioning_repos/*</code> locally and pushes an update to every approved spoke. Same schedule as System → Sync's "GitHub Repo Sync" card — either one saves/shows it.</p>
                 <div class="flex flex-wrap items-end gap-4">
@@ -5619,7 +5629,6 @@ function _renderSetupGeneralTile(content) {
                         <input type="number" id="repo-sync-interval" min="1" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
                 </div>
-                <div class="mt-4 flex justify-end"><button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button></div>
             </div>
         </div>
         <div class="${card}">
@@ -5629,7 +5638,6 @@ function _renderSetupGeneralTile(content) {
                 <label class="${labelCls}">Toast Duration (seconds)</label>
                 <input type="number" id="toast-duration-input" min="1" max="300" value="10"
                     class="w-20 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                <button onclick="saveToastConfig()" class="${btnCls}">Save</button>
                 <span id="toast-duration-status" class="text-xs text-slate-400"></span>
             </div>
         </div>
@@ -5641,7 +5649,6 @@ function _renderSetupGeneralTile(content) {
                     <input type="number" id="relay-timeout-long" min="1" max="600" value="60" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <div class="space-y-1"><label class="${labelCls}">Fast timeout (s)</label>
                     <input type="number" id="relay-timeout-fast" min="1" max="600" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <button onclick="saveRelayTimeouts()" class="${btnCls}">Save</button>
                 <span id="relay-timeout-status" class="text-xs text-slate-400"></span>
             </div>
         </div>
@@ -5657,7 +5664,6 @@ function _renderSetupGeneralTile(content) {
                 <label for="appearance-show-logo" class="text-sm text-slate-600">Show header logo</label>
             </div>
             <div class="flex justify-end items-center gap-3">
-                <button onclick="saveAppearance()" class="${btnCls}">Save</button>
                 <span id="appearance-status" class="text-xs text-slate-400"></span>
             </div>
         </div>`;
@@ -5668,6 +5674,23 @@ function _renderSetupGeneralTile(content) {
     loadRelayTimeoutsForm();
     loadRepoSyncConfig();
     if (currentView === 'settings') loadSubnetFilterToggles();
+    // Auto-save on change (no per-card Save buttons). Cache rows are loaded
+    // dynamically by loadCacheConfig with data-cache-key (no id), so the mapper
+    // keys off both el.id and el.dataset.cacheKey.
+    _attachAutoSave(content, _generalSaveFnFor, 'generalAutoSave');
+}
+
+// Map a General-tile field element → its card's save handler (auto-save on change).
+function _generalSaveFnFor(el) {
+    if (!el) return null;
+    const id = el.id || '';
+    if (id.startsWith('cache-') || el.dataset.cacheKey) return saveCacheConfig;
+    if (id.startsWith('update-source-') || id === 'global-branch') return saveUpdateSources;
+    if (id.startsWith('repo-sync-'))      return saveRepoSyncConfig;
+    if (id.startsWith('toast-'))          return saveToastConfig;
+    if (id.startsWith('relay-timeout-'))  return saveRelayTimeouts;
+    if (id.startsWith('appearance-'))     return saveAppearance;
+    return null;
 }
 
 // Dispatch table: each Setup submenu → its tile renderer. The General tile is
