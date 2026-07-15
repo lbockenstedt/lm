@@ -648,6 +648,13 @@ class BaseControlPlane:
         except Exception as e:
             logger.warning("Self-update check failed: %s", e)
             return False
+        finally:
+            # Non-exit paths (already up to date / fetch or pull error / no
+            # change / known-bad skip / watchdog-prep failure) return without
+            # os._exit, so clear _draining or the code-drift watchdog would
+            # skip every cycle for the rest of this process lifetime. The exit
+            # path os._exit(3)s above, killing the process before this runs.
+            self._draining = False
 
     def updater_worker(self) -> None:
         """Background thread: wait a 120s post-startup grace (so the spoke can
@@ -2382,9 +2389,18 @@ class BaseControlPlane:
                     core_repo_url=core_repo_url, core_branch=core_branch)
             finally:
                 self._spoke_update_in_progress = False
-                # _draining stays True — the process is about to os._exit+relaunch
-                # (or just failed the update); a fresh process starts False and
-                # reports 'draining: false' on its first telemetry frame.
+                # Reaching here means _perform_spoke_update_sync RETURNED without
+                # os._exit(3) — a non-exit path: "already up to date", known-bad
+                # commit skipped, or a git error. The exit path os._exit(3)s from
+                # the worker thread (killing the whole process), so this finally
+                # never runs when an exit is coming. Clear _draining so the
+                # process resumes normal hub request/reply AND the code-drift
+                # watchdog stops skipping (``if self._draining or
+                # _spoke_update_in_progress: continue``). Otherwise a no-op
+                # SPOKE_UPDATE leaves _draining stuck True for the process
+                # lifetime, permanently blinding the drift watchdog to a later
+                # HEAD advance — the pulled-but-not-restarted trap.
+                self._draining = False
 
         if cmd_type == "SPOKE_SET_HUB_SECRET":
             new_secret = data.get("hub_secret")
