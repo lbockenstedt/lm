@@ -623,20 +623,23 @@ def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,
     # can't evaluate without membership. (b) membership was read but the
     # configured allowed_group isn't among it — usually the admin entered the
     # group's display name instead of its object ID, or the wrong group.
-    if allowed_group and allowed_group not in (member_of or []):
+    # allowed_group may be a comma/space-separated LIST of Entra group object IDs;
+    # membership in ANY one of them grants login.
+    import re as _re_grp
+    allowed = [g for g in _re_grp.split(r"[\s,]+", str(allowed_group or "")) if g.strip()]
+    if allowed and not (set(member_of or []) & set(allowed)):
         if not member_of:
             raise OidcError(
-                "Entra user is not a member of the allowed group — the hub read "
+                "Entra user is not a member of the allowed group(s) — the hub read "
                 "0 groups for you (the id_token had no groups claim and the Graph "
                 "app-token lookup returned nothing). Ensure the app registration "
                 "has Group.Read.All (application) granted + admin-consented, then "
                 "retry; the allowed-group gate cannot evaluate without membership."
             )
         raise OidcError(
-            f"Entra user is not a member of the allowed group (read "
-            f"{len(member_of)} group(s); the configured allowed_group is not "
-            "among them). The oidc-group field must be the group's OBJECT ID "
-            "(a UUID), not its display name."
+            f"Entra user is not a member of any of the {len(allowed)} allowed "
+            f"group(s) (read {len(member_of)} group(s) for you). Each allowed-group "
+            "entry must be the group's OBJECT ID (a UUID), not its display name."
         )
 
     group_ids, tenant_ids = groups_and_tenants_for_membership(hub, member_of)

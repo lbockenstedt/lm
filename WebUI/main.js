@@ -5933,7 +5933,14 @@ function onOidcGroupPick(sel) {
     const id = sel.value;
     if (!id) return;
     const idEl = document.getElementById('oidc-group');
-    if (idEl) idEl.value = id;
+    if (idEl) {
+        // APPEND to the allowed-groups list (multiple allowed) rather than
+        // replace — de-duped, comma-separated.
+        const cur = (idEl.value || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+        if (!cur.includes(id)) cur.push(id);
+        idEl.value = cur.join(', ');
+    }
+    sel.value = '';
     // the delegated change listener on oidc-group-select fires saveOidcConfig
 }
 
@@ -6740,10 +6747,10 @@ function _renderSettingsSsoTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Application (client) ID</label><input id="oidc-client" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Redirect URI</label><input id="oidc-redirect" type="text" placeholder="https://your-hub/auth/oidc/callback" class="${inputCls}"></div>
                 <div class="space-y-1">
-                    <label class="${labelCls}">Allowed group (object ID, optional)</label>
+                    <label class="${labelCls}">Allowed groups <span class="text-slate-400 normal-case font-normal">(object IDs, optional — comma/space separated; membership in ANY grants login)</span></label>
                     <div class="flex gap-2">
-                        <input id="oidc-group" type="text" placeholder="Entra group object ID — gate access" class="${inputCls} font-mono text-xs flex-1">
-                        <button type="button" onclick="loadOidcGroupPicker()" id="oidc-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">Pick from Entra</button>
+                        <input id="oidc-group" type="text" placeholder="Entra group object IDs — blank = any user in the tenant" class="${inputCls} font-mono text-xs flex-1">
+                        <button type="button" onclick="loadOidcGroupPicker()" id="oidc-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">＋ Pick from Entra</button>
                     </div>
                     <select id="oidc-group-select" onchange="onOidcGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
                     <p id="oidc-group-msg" class="text-[11px] text-amber-600 hidden"></p>
