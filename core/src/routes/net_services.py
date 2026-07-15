@@ -535,7 +535,9 @@ def register(app, hub, ctx):
                         did = str(dv.get("id") or dv.get("device_id") or "")
                         ot = (dv.get("object_type") or "").strip().lower()
                         st = stashed.get(did) or {}
-                        capable = ot == "cx_switch"
+                        # cx_switch (AOS-CX REST) + gateway (ArubaOS PKCS#12/SCP)
+                        # can import an external LE cert; aos_switch/ex_switch can't.
+                        capable = ot in ("cx_switch", "gateway")
                         devices.append({
                             "device_id": did, "name": dv.get("name") or did,
                             "ip": dv.get("address") or dv.get("ip") or "",
