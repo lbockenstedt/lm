@@ -3902,7 +3902,6 @@ function _renderSetupSpokesTile(content) {
                 <p class="text-xs text-slate-500 mb-2">The wss:// address agents and spokes check in to. Changing it repoints every connected remote agent/spoke to the new address (each restarts once to reconnect). Co-located (loopback) and auto-discovering spokes are left alone. Use when the hub's DNS name/IP changes — e.g. after issuing a new cert for a new name. <b>Set this before retiring the old DNS name</b>, while spokes are still connected via it.</p>
                 <div class="flex items-center gap-2">
                     <input id="sa-hub-url" type="text" placeholder="wss://hub.example.com:443  or  172.16.1.31" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800" />
-                    <button onclick="saveSaHubUrl()" class="${btnCls} whitespace-nowrap">Save</button>
                 </div>
                 <div id="sa-hub-url-note" class="text-[11px] text-slate-400 mt-1"></div>
             </div>
@@ -3910,6 +3909,19 @@ function _renderSetupSpokesTile(content) {
     _populateSaTenantFilter();
     loadSpokesAndAgents();
     loadSaHubUrl();
+    // Auto-save on change — exact-id allowlist so the tenant filter (sa-tenant-
+    // filter, which has its own onchange) never fires a hub-URL repoint. The
+    // hub URL repoints every connected spoke on commit (blur/Enter), same as
+    // the old Save button — type the full URL, then tab away.
+    _attachAutoSave(content, _spokesSaveFnFor, 'spokesAutoSave');
+}
+
+// Map a Spokes & Agents field element → its save handler (exact-id allowlist —
+// the tenant filter shares the sa- prefix but is a view filter, not a save field).
+function _spokesSaveFnFor(el) {
+    const id = (el && el.id) || '';
+    if (id === 'sa-hub-url') return saveSaHubUrl;
+    return null;
 }
 
 // Hub Connection URL (Setup → Spokes & Agents). The operator sets the address
