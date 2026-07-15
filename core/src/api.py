@@ -1615,7 +1615,7 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes, collab,
     hub_watchdog as hub_watchdog_routes, netbox_sso as netbox_sso_routes,
     )
     setup.register(app, hub, ctx)
@@ -1647,6 +1647,7 @@ def create_app(hub):
     help_assistant.register(app, hub, ctx)
     exec_routes.register(app, hub, ctx)
     self_backup.register(app, hub, ctx)
+    collab.register(app, hub, ctx)
 
     # ── H1: scrub internal-exception detail from 5xx for non-Global callers ──
     # Routes raise ``HTTPException(500, detail=str(e))`` in their

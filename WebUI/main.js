@@ -1214,7 +1214,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup'],
+    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3613,6 +3613,15 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
+    // Collab — Teams/Zoom/WebEx traffic-sim management. Hub runs a passive UDP
+    // sink (lm-collab-sink); cs clients send raw UDP to it over the wired/USB
+    // path. This tile manages which apps are enabled + the default bandwidth and
+    // applies the firewall alias/allow rule via the existing firewall endpoints.
+    if (subMenu === 'Collab') {
+        _renderCollabTile(content);
+        return;
+    }
+
     if (subMenu === 'Hub Status') {
         content.innerHTML = `
             <div class="space-y-4">
@@ -5974,6 +5983,203 @@ async function sweepCloudNac() {
 }
 
 // ── Settings → Azure Key Vault (DR: admin rotation + min bootstrap backup) ──
+// ── Collab traffic-sim tile (Setup/Settings → Collab) ─────────────────────────
+// Hub runs a passive UDP sink (lm-collab-sink, collab_sink/sink.py) bound to its
+// LAN IP on the Teams/Zoom/WebEx media ports. cs simulation clients send raw
+// UDP to it over the wired/USB path (cs clients/linux/collab.py) — the media
+// never rides the WS control plane. This tile manages which apps are enabled
+// + the default bandwidth and applies the OPNsense port-alias + allow rule
+// via the EXISTING /api/firewall/{id}/aliases + /rules endpoints (correct
+// tenant-scoped authz lives there). The per-app port sets come from the
+// backend COLLAB_APP_PORTS registry (single source of truth — cs collab.py
+// mirrors them).
+function _renderCollabTile(content) {
+    const { card, inputCls, labelCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Collab Traffic Sim — Teams / Zoom / WebEx</h3>
+                <span id="cb-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">Simulates collaboration-app media by sending raw UDP to a passive hub sink over the wired/USB network path (not the WebSocket). Choose which apps are active — their real media ports drive both the client sender and the firewall alias. The sink (<code>lm-collab-sink</code>) listens on the union of active app ports; verify with <code>systemctl status lm-collab-sink</code> on the hub. Client knobs live in the cs repo (<code>configs/simulation.conf</code>: <code>collab</code>/<code>collab_app</code>/<code>collab_bw</code>/<code>collab_server</code>).</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="cb-enabled" class="w-4 h-4 text-green-600 rounded">Enable collab traffic sim</label>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Default app</label>
+                    <select id="cb-app" class="${inputCls}">
+                        <option value="teams">Microsoft Teams</option>
+                        <option value="zoom">Zoom</option>
+                        <option value="webex">Cisco WebEx</option>
+                    </select>
+                </div>
+                <div class="space-y-1"><label class="${labelCls}">Default bandwidth</label><input id="cb-bw" type="text" placeholder="1M" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Sink / hub LAN IP (clients target)</label><input id="cb-server" type="text" placeholder="172.16.1.31" class="${inputCls} font-mono text-xs"></div>
+            </div>
+            <div class="mt-3">
+                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Active apps <span class="text-slate-400 font-normal">(ports the sink listens on + firewall alias opens)</span></div>
+                <div id="cb-app-toggles" class="grid grid-cols-1 sm:grid-cols-3 gap-2"></div>
+                <p id="cb-ports" class="text-[11px] font-mono text-slate-500 mt-2"></p>
+            </div>
+            <div class="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Apply to firewall</div>
+                <p class="text-[11px] text-slate-500 mb-2">Creates an OPNsense <b>port alias</b> (<code>lm-collab-ports</code>) from the active app ports + a <b>pass</b> rule (UDP, source → hub IP on that alias). Uses the existing firewall endpoints (tenant-scoped). Re-running skips the alias if it already exists; the rule is created each time — delete duplicates in Firewall → Rules.</p>
+                <div class="flex flex-wrap gap-2 items-end">
+                    <div class="space-y-1 flex-1 min-w-[200px]"><label class="${labelCls}">Firewall</label><select id="cb-fw" class="${inputCls}"><option value="">— select a firewall —</option></select></div>
+                    <div class="space-y-1 flex-1 min-w-[180px]"><label class="${labelCls}">Source (any / CIDR / alias)</label><input id="cb-src" type="text" placeholder="any" class="${inputCls} text-xs"></div>
+                    <button type="button" onclick="applyCollabFirewall()" id="cb-apply" class="${btnSecCls} whitespace-nowrap">Create alias + allow rule</button>
+                </div>
+                <p id="cb-apply-msg" class="text-[11px] text-slate-500 mt-2"></p>
+            </div>
+            <div class="mt-4 flex items-center justify-between gap-3">
+                <span id="cb-msg" class="text-xs text-slate-400"></span>
+            </div>
+        </div>`;
+    loadCollab();
+    loadCollabFirewalls();
+    _attachAutoSave(content, _collabSaveFnFor, 'collabAutoSave');
+}
+
+async function loadCollab() {
+    try {
+        const r = await setupFetch('/setup/collab');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const apps = d.apps || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
+        const en = document.getElementById('cb-enabled'); if (en) en.checked = !!c.enabled;
+        set('cb-app', c.default_app || 'teams');
+        set('cb-bw', c.default_bw || '1M');
+        set('cb-server', c.collab_server || '');
+        const pill = document.getElementById('cb-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        // Per-app toggles + the union port readout.
+        const box = document.getElementById('cb-app-toggles');
+        const active = c.apps || {};
+        if (box) {
+            box.innerHTML = Object.entries(apps).map(([k, v]) => `
+                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer border border-slate-200 rounded-md px-3 py-2 bg-white">
+                    <input type="checkbox" id="cb-app-${k}" class="w-4 h-4 text-green-600 rounded" ${active[k] !== false ? 'checked' : ''}>
+                    <span class="font-medium">${escapeHtml(v.label || k)}</span>
+                    <span class="font-mono text-[10px] text-slate-400 ml-auto">${(v.ports || []).join(',')}</span>
+                </label>`).join('');
+        }
+        _updateCollabPorts(apps);
+        // Toggling an app re-renders the port readout (and auto-saves).
+        box?.querySelectorAll('input[type=checkbox]').forEach(el => el.addEventListener('change', () => { _updateCollabPorts(apps); }));
+    } catch (e) { console.error('loadCollab failed', e); }
+}
+
+function _updateCollabPorts(apps) {
+    const active = [];
+    for (const [k, v] of Object.entries(apps || {})) {
+        const el = document.getElementById(`cb-app-${k}`);
+        if (el && el.checked) active.push(...(v.ports || []));
+    }
+    const out = document.getElementById('cb-ports');
+    if (out) out.textContent = active.length ? `Sink listens on: ${active.join(', ')}` : 'No apps active — sink has no ports.';
+}
+
+async function loadCollabFirewalls() {
+    try {
+        const fws = await loadFirewalls();
+        const sel = document.getElementById('cb-fw');
+        if (!sel) return;
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">— select a firewall —</option>' +
+            fws.map(f => `<option value="${escapeHtml(f.id)}">${escapeHtml(f.name || f.id)}</option>`).join('');
+        if (cur) sel.value = cur;
+    } catch (e) { console.error('loadCollabFirewalls failed', e); }
+}
+
+function _collabFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    const apps = {};
+    document.querySelectorAll('[id^="cb-app-"]').forEach(el => {
+        // only the per-app toggles (cb-app-teams/zoom/webex), not cb-app select
+        const m = el.id.match(/^cb-app-(teams|zoom|webex)$/);
+        if (m) apps[m[1]] = el.checked;
+    });
+    return {
+        enabled: !!document.getElementById('cb-enabled')?.checked,
+        default_app: v('cb-app'), default_bw: v('cb-bw'),
+        collab_server: v('cb-server'), apps,
+    };
+}
+
+async function saveCollab() {
+    try {
+        const r = await setupFetch('/setup/collab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _collabFormConfig() }) });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || ('HTTP ' + r.status)); }
+        const d = await r.json().catch(() => ({}));
+        const pill = document.getElementById('cb-state-pill');
+        if (pill && d.config) { pill.textContent = d.config.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (d.config.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        const msg = document.getElementById('cb-msg'); if (msg) { msg.textContent = 'Saved.'; setTimeout(() => { if (msg) msg.textContent = ''; }, 2000); }
+    } catch (e) {
+        const msg = document.getElementById('cb-msg'); if (msg) msg.textContent = 'Error: ' + e.message;
+    }
+}
+
+// Auto-save on change — only the config fields, not the firewall-apply controls.
+function _collabSaveFnFor(el) {
+    const id = el.id || '';
+    const allow = ['cb-enabled', 'cb-app', 'cb-bw', 'cb-server', 'cb-app-teams', 'cb-app-zoom', 'cb-app-webex'];
+    return allow.includes(id) ? saveCollab : null;
+}
+
+// Create the OPNsense port alias (lm-collab-ports) + a pass rule via the
+// existing firewall endpoints. Skips alias creation if it already exists.
+async function applyCollabFirewall() {
+    const fwId = (document.getElementById('cb-fw')?.value || '').trim();
+    const src = (document.getElementById('cb-src')?.value || 'any').trim() || 'any';
+    const hubIp = (document.getElementById('cb-server')?.value || '').trim();
+    const out = document.getElementById('cb-apply-msg');
+    const btn = document.getElementById('cb-apply');
+    if (!fwId) { if (out) out.textContent = 'Select a firewall first.'; return; }
+    // Collect active ports from the toggles.
+    const ports = [];
+    ['teams', 'zoom', 'webex'].forEach(k => {
+        const el = document.getElementById(`cb-app-${k}`);
+        if (el && el.checked) {
+            // Read the port list from the toggle label's data — re-derive from
+            // the known app ports (single source of truth mirror).
+            const known = { teams: [3478, 3481, 3479], zoom: [8801, 8802, 8803], webex: [9000, 5004, 5006] }[k] || [];
+            ports.push(...known);
+        }
+    });
+    if (!ports.length) { if (out) out.textContent = 'No apps active — enable at least one.'; return; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+    const tq = _taTenantQuery();
+    const log = (m) => { if (out) out.textContent = m; };
+    try {
+        // 1. Check for an existing lm-collab-ports alias (skip create if present).
+        let aliasExists = false;
+        try {
+            const gr = await fetch(`/api/firewall/${encodeURIComponent(fwId)}/aliases${tq}`);
+            if (gr.ok) {
+                const gd = await gr.json().catch(() => ({}));
+                const items = (gd && (gd.aliases || gd.data || gd)) || [];
+                aliasExists = Array.isArray(items) && items.some(a => (a.name || '') === 'lm-collab-ports');
+            }
+        } catch (_) { /* ignore — fall through to create */ }
+        if (!aliasExists) {
+            const aliasBody = { name: 'lm-collab-ports', type: 'port', content: ports.join('\n'), description: 'LM collab traffic-sim media ports', category: '' };
+            const ar = await fetch(`/api/firewall/${encodeURIComponent(fwId)}/aliases${tq}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(aliasBody) });
+            if (!ar.ok) { const e = await ar.json().catch(() => ({})); throw new Error('alias: ' + (e.detail || ar.statusText)); }
+            log('Alias lm-collab-ports created. Creating rule…');
+        } else {
+            log('Alias lm-collab-ports exists. Creating rule…');
+        }
+        // 2. Pass rule: UDP, source → hub IP on the port alias.
+        const ruleBody = { rule: { interface: 'lan', action: 'pass', protocol: 'udp', source_net: src, destination_net: hubIp || 'any', destination_port: 'lm-collab-ports', description: 'LM collab traffic sim (Teams/Zoom/WebEx)', enabled: '1' } };
+        const rr = await fetch(`/api/firewall/${encodeURIComponent(fwId)}/rules${tq}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ruleBody) });
+        if (!rr.ok) { const e = await rr.json().catch(() => ({})); throw new Error('rule: ' + (e.detail || rr.statusText)); }
+        log('Done — alias ' + (aliasExists ? 'reused' : 'created') + ' + allow rule added. Verify in Firewall → Rules/Aliases.');
+    } catch (e) {
+        log('Error: ' + e.message);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Create alias + allow rule'; }
+    }
+}
+
 // Break-glass admin-password rotation, Fernet-key escrow, and a rolling min
 // bootstrap backup stored in Azure Key Vault. Reuses the SSO Entra app cert
 // (vault.azure.net token; app needs Key Vault Secrets Officer). Admin-only.
