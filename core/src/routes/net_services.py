@@ -404,6 +404,48 @@ def register(app, hub, ctx):
             module_names, hub.CERT_CAPABLE_MODULES, agents,
             netbox_server_agents=set(getattr(hub, "netbox_server_agents", set())))}
 
+    @app.get("/api/le/wildcard/eligibility")
+    async def le_wildcard_eligibility():
+        """Coverage of the 'Fan wildcard → all spokes' feature: which spokes WOULD
+        receive a wildcard cert (eligible) and which would NOT (ineligible + why),
+        so the operator sees the reach before/while using fan-out. Mirrors exactly
+        what distribute_wildcard_to_all_spokes does: every connected cert-capable
+        spoke (by spoke_id) + the hub; a netbox-server host counts via its
+        capability even though its base module_type is 'agent'."""
+        hub = app.state.hub
+        capable = hub.CERT_CAPABLE_MODULES
+        known = hub.state.system_state.get("known_modules", []) or []
+        module_names = hub.state.system_state.get("module_names", {}) or {}
+        module_metadata = hub.state.system_state.get("module_metadata", {}) or {}
+        nb_servers = set(getattr(hub, "netbox_server_agents", set()))
+
+        def _mt(sid):
+            return (hub.spoke_module_types.get(sid)
+                    or (module_metadata.get(sid, {}) or {}).get("module_type"))
+
+        eligible = [{"spoke_id": "hub", "module_type": "hub",
+                     "label": "hub (LM WebUI)", "connected": True}]
+        ineligible = []
+        for sid in known:
+            mt = _mt(sid)
+            connected = sid in hub.active_connections
+            label = module_names.get(sid, sid) or sid
+            is_nb_server = sid in nb_servers
+            eff_mt = "netbox-server" if (is_nb_server and mt not in capable) else mt
+            eff_capable = (mt in capable) or is_nb_server
+            entry = {"spoke_id": sid, "module_type": eff_mt or mt or "—",
+                     "label": label, "connected": connected}
+            if not connected:
+                ineligible.append({**entry, "reason": "offline (not connected)"})
+            elif not eff_capable:
+                ineligible.append({**entry,
+                                   "reason": f"module type '{mt or '—'}' does not support cert install"})
+            else:
+                eligible.append(entry)
+        return {"enabled": hub._wildcard_all_spokes_enabled(),
+                "eligible": eligible, "ineligible": ineligible,
+                "eligible_count": len(eligible), "ineligible_count": len(ineligible)}
+
     # ── per-cert distribution targets ──────────────────────────────────────────
     # Each target = {module_type, identifier?} describing which spoke/device a
     # cert should be installed on. The hub resolves the spoke by module_type and

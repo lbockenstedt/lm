@@ -1825,6 +1825,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
     def get_all_spokes_by_type(self, module_type: str):
         """Return all connected spoke IDs that advertised the given module_type."""
+        # netbox-server is a capability (advertised in the auth frame), not a
+        # module_type any spoke registers under — so the wildcard fan-out + cert
+        # targeting resolve it from the netbox_server_agents set.
+        if module_type == "netbox-server":
+            return [sid for sid in getattr(self, "netbox_server_agents", set())
+                    if sid in self.active_connections]
         # Legacy fallback: same prefix map as get_spoke_by_type. See
         # _MODULE_TYPE_PREFIX.
         by_registry = [sid for sid, mt in self.spoke_module_types.items()

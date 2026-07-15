@@ -3238,6 +3238,7 @@ function _viewTemplate(viewId) {
       <input type="checkbox" id="le-wildcard-all-spokes" class="w-4 h-4 rounded" onchange="saveLeWildcardAllSpokes(this.checked)">
       Fan wildcard → all spokes
     </label>
+    <button onclick="showLeWildcardCoverage()" class="text-xs text-slate-500 hover:text-slate-700 underline decoration-dotted" title="See which spokes would (eligible) and would not (ineligible + why) receive a wildcard cert via fan-out">Coverage</button>
     <label class="flex items-center gap-1 text-xs text-slate-600 select-none" title="How soon the hub retries a FAILED cert distribution to a target. The hub sweeps on this cadence and re-pushes any target whose last push errored (successful targets are skipped). Default 1 hour. Lower = faster retry but more hub→spoke chatter.">
       Retry failed every
       <input type="number" id="le-distribution-retry-hours" min="1" step="1" value="1" class="w-14 px-1 py-0.5 rounded border border-slate-300 text-xs" onchange="saveLeRetryInterval(this.value)">
@@ -14048,6 +14049,13 @@ async function loadLEData(subMenu) {
             const avail = window._leAvailableTargets || [];
             if (!avail.length) return '';
             const haveKeys = new Set((tgts || []).map(t => `${t.module_type}|${t.identifier || ''}`));
+            // "All nodes" supersedes individual nodes: if a cert has the group
+            // ("all nodes", empty identifier) target for an agent-hosting type,
+            // hide that type's individual per-node chips — the group already
+            // covers every node, so offering the nodes is redundant + confusing.
+            const allNodesTypes = new Set((tgts || [])
+                .filter(t => _LE_AGENT_HOSTING.includes(String(t.module_type || '')) && !(t.identifier || ''))
+                .map(t => String(t.module_type || '')));
             const dEsc = escJsAttr(String(domain || ''));
             const chips = avail.map(t => {
                 const k = `${t.module_type}|${t.identifier || ''}`;
@@ -14062,6 +14070,9 @@ async function loadLEData(subMenu) {
                     // status badge above still owns click-to-deploy.
                     return `<button onclick="removeLeTargetByKey('${dEsc}','${mtE}','${idE}')" class="px-1.5 py-0.5 rounded text-xs bg-[#01A982]/10 text-[#01A982] border border-[#01A982] cursor-pointer hover:bg-red-50 hover:text-red-600 hover:border-red-300 active:scale-95 transition" title="Distribution ENABLED for ${lbl} — click to disable (stop deploying this cert here)">${lblE} ✓</button>`;
                 }
+                // "All nodes" is selected for this agent-hosting type → hide the
+                // addable individual-node chip (the group covers every node).
+                if ((t.identifier || '') && allNodesTypes.has(String(t.module_type || ''))) return '';
                 // Claimed by another cert → locked (not clickable). A target can
                 // host only one cert; remove it from the owning cert to reassign.
                 const owner = _leTargetOwner[k];
@@ -14303,6 +14314,49 @@ async function saveLeWildcardAllSpokes(checked) {
         else showToast('Failed to save wildcard toggle.', 'error');
     } catch (e) { showToast('Error saving wildcard toggle: ' + e.message, 'error'); }
 }
+
+// Wildcard fan-out coverage: which spokes WOULD receive a wildcard cert
+// (eligible) vs would NOT (ineligible + reason). Read-only view so the operator
+// knows the reach of "Fan wildcard → all spokes" before/while using it.
+async function showLeWildcardCoverage() {
+    let d;
+    try {
+        const r = await _spokeFetch('/api/le/wildcard/eligibility');
+        d = (r && r.ok) ? (r.data && typeof r.data.data === 'object' ? r.data.data : r.data) : null;
+        if (!d) throw new Error((r && r.detail) || 'failed to load');
+    } catch (e) { showToast('Coverage failed: ' + (e.message || e), 'error'); return; }
+    const elig = d.eligible || [], inelig = d.ineligible || [];
+    const rowE = t => `<tr class="border-b border-slate-100">
+        <td class="px-3 py-1.5 text-xs font-mono text-slate-700">${escapeHtml(t.label || t.spoke_id)}</td>
+        <td class="px-3 py-1.5 text-xs text-slate-500">${escapeHtml(t.module_type || '—')}</td></tr>`;
+    const rowI = t => `<tr class="border-b border-slate-100">
+        <td class="px-3 py-1.5 text-xs font-mono text-slate-600">${escapeHtml(t.label || t.spoke_id)}</td>
+        <td class="px-3 py-1.5 text-xs text-slate-500">${escapeHtml(t.module_type || '—')}</td>
+        <td class="px-3 py-1.5 text-xs text-amber-700">${escapeHtml(t.reason || '')}</td></tr>`;
+    const modal = document.createElement('div');
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4';
+    modal.onclick = (ev) => { if (ev.target === modal) modal.remove(); };
+    modal.innerHTML = `
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[85vh] overflow-y-auto">
+        <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+          <h3 class="text-sm font-bold text-slate-700">Wildcard fan-out coverage</h3>
+          <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+        </div>
+        <div class="p-5 space-y-5">
+          <p class="text-xs text-slate-500">Fan-out is currently <b class="${d.enabled ? 'text-green-600' : 'text-slate-500'}">${d.enabled ? 'ENABLED' : 'OFF'}</b>. A wildcard cert (<code>*.domain</code>) is pushed to every <b>connected, cert-capable</b> spoke below (plus the hub). Ineligible spokes are skipped — connect them or note that their module type can't host a cert.</p>
+          <div>
+            <div class="text-[11px] font-bold text-green-700 uppercase tracking-wide mb-1">Eligible <span class="text-slate-400 font-normal">(${elig.length})</span></div>
+            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Spoke</th><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Type</th></tr></thead><tbody>${elig.map(rowE).join('') || '<tr><td colspan="2" class="px-3 py-2 text-xs text-slate-400 italic">none</td></tr>'}</tbody></table>
+          </div>
+          <div>
+            <div class="text-[11px] font-bold text-amber-700 uppercase tracking-wide mb-1">Ineligible <span class="text-slate-400 font-normal">(${inelig.length})</span></div>
+            <table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Spoke</th><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Type</th><th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Why not</th></tr></thead><tbody>${inelig.map(rowI).join('') || '<tr><td colspan="3" class="px-3 py-2 text-xs text-slate-400 italic">none — every known spoke is eligible</td></tr>'}</tbody></table>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+}
+window.showLeWildcardCoverage = showLeWildcardCoverage;
 
 // distribution_retry_hours: how soon the hub retries a FAILED cert distribution
 // to a target. The hub's run_cert_distribution_loop sweeps on this cadence and
@@ -14552,21 +14606,25 @@ async function addLeTarget(domain, preset) {
     const mt = preset ? preset.module_type : document.getElementById('le-tgt-mt')?.value;
     const identifier = preset ? (preset.identifier || '') : (document.getElementById('le-tgt-id')?.value?.trim() || '');
     if (!mt) { showToast('Module type required', 'error'); return; }
-    // Guard the group-vs-individual overlap for agent-hosting types: if adding
-    // this target would leave the cert with BOTH a group and an individual
-    // target of the same module_type, confirm before proceeding (see
-    // _LE_TARGET_OVERLAP_HINT / docs "Distribution targets" warning).
+    // "All nodes" supersedes individual nodes for agent-hosting types:
+    //  - adding an INDIVIDUAL node while the group is selected → block (the group
+    //    already covers it; its chip is hidden, this guards manual/stale adds).
+    //  - adding the GROUP ("all nodes") → allowed; existing individual-node
+    //    targets of this type are removed after the add so nothing is redundant.
+    let _supersedeNodes = [];
     if (_LE_AGENT_HOSTING.includes(mt)) {
         const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
-        const projected = [...(cert.targets || []), { module_type: mt, identifier }];
-        if (_leRedundantTargetTypes(projected).includes(mt)) {
-            const adding = String(identifier).trim()
-                ? `the individual node "${mt}/${identifier}"`
-                : `the group "${mt} — all nodes"`;
-            if (!confirm(`${_LE_TARGET_OVERLAP_HINT}\n\nThis cert already has the other `
-                + `kind of "${mt}" target. Add ${adding} anyway?`)) {
-                return;
-            }
+        const existing = cert.targets || [];
+        const addingGroup = !String(identifier).trim();
+        const hasGroup = existing.some(t => String(t.module_type || '') === mt && !(t.identifier || ''));
+        if (!addingGroup && hasGroup) {
+            showToast(`"${mt} — all nodes" is already selected — individual nodes are covered by it.`, 'error');
+            return;
+        }
+        if (addingGroup) {
+            _supersedeNodes = existing
+                .filter(t => String(t.module_type || '') === mt && (t.identifier || ''))
+                .map(t => t.identifier);
         }
     }
     try {
@@ -14575,6 +14633,10 @@ async function addLeTarget(domain, preset) {
             body: JSON.stringify({ module_type: mt, identifier }),
         });
         if (!ok) { showToast('Add target failed: ' + (detail || ''), 'error'); return; }
+        // Remove the now-redundant individual nodes (all-nodes supersedes them).
+        for (const nid of _supersedeNodes) {
+            await removeLeTargetByKey(domain, mt, nid);
+        }
         await loadLEData();
         // Re-open the modal only if it's already open (an add from the main
         // screen's click-to-add chip shouldn't pop the modal open).
