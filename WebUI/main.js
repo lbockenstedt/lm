@@ -4559,8 +4559,8 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Interval (minutes)</label>
                         <input type="number" id="repo-sync-interval" min="1" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <div class="mt-4 flex justify-end"><button onclick="saveRepoSyncConfig()" class="${btnCls} ml-auto">Save</button></div>
                 </div>
+                <div class="mt-4 flex justify-end"><button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button></div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync</div>
                     <div id="repo-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
@@ -5590,8 +5590,8 @@ function _renderSetupGeneralTile(content) {
                         <label class="${labelCls}">Check every (minutes)</label>
                         <input type="number" id="repo-sync-interval" min="1" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <div class="mt-4 flex justify-end"><button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button></div>
                 </div>
+                <div class="mt-4 flex justify-end"><button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button></div>
             </div>
         </div>
         <div class="${card}">
