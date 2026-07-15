@@ -1362,6 +1362,19 @@ systemctl daemon-reload
 systemctl enable lm
 systemctl restart lm
 
+# ── Collab sink (hub-side UDP listener for Teams/Zoom/WebEx traffic sim) ──
+# Passive UDP sink on the platform media ports so sim clients can "call" the
+# hub over the wired/USB path. Hub-native (not an agent role); stdlib-only.
+# Non-fatal: if it can't bind a port (in use, etc.) the sink logs a warning and
+# continues — it must never block the hub install.
+if [[ -f "$BASE_DIR/collab_sink/install_collab_sink.sh" ]]; then
+    if bash "$BASE_DIR/collab_sink/install_collab_sink.sh"; then
+        log_c "  ✅ collab sink installed"
+    else
+        log_w "  ⚠️  collab sink install failed — hub still up; check journalctl -u lm-collab-sink"
+    fi
+fi
+
 # ── Auto-heal watchdog ──────────────────────────────────────────────────────
 # A root-owned supervisor (its OWN unit, outside lm.service's cgroup) that heals
 # two failures lm.service can't fix itself: (1) a WEDGED event loop — the process
