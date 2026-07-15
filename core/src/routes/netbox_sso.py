@@ -109,3 +109,26 @@ def register(app, hub, ctx):
                     "enabled" if cur["enabled"] else "disabled", len(pushed), len(queued), len(failed))
         return {"status": "ok", "pushed": pushed, "queued": queued, "failed": failed,
                 "no_target": not targets}
+
+    @app.post("/setup/netbox-sso/test")
+    async def test_netbox_sso(request: Request):
+        """Ask the netbox-server agent to probe NetBox's OIDC begin URL and
+        confirm it redirects to Entra with the expected tenant/client_id/redirect
+        — a browserless 'test login'."""
+        targets = _netbox_server_agents()
+        if not targets:
+            raise HTTPException(status_code=503, detail="no connected netbox-server host to test against")
+        cfg = _cfg()
+        oidc = get_oidc_config(hub)
+        payload = {"tenant": oidc.tenant_id, "client_id": oidc.client_id,
+                   "redirect_uri": cfg["redirect_uri"]}
+        try:
+            res = await hub.request_response(targets[0], "NETBOX_TEST_SSO", payload, timeout=15.0)
+            data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"test failed: {e}")
+        if not isinstance(data, dict) or data.get("status") != "SUCCESS":
+            raise HTTPException(status_code=502,
+                                detail=(data or {}).get("message", "test failed") if isinstance(data, dict) else "test failed")
+        return {"status": "ok", "host": targets[0], **{k: data[k] for k in
+                ("ok", "redirects_to_entra", "http_code", "found", "matches", "message") if k in data}}

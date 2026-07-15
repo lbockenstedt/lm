@@ -627,6 +627,93 @@ class GenericAgent(BaseSpoke):
                 "message": f"SSO {'enabled' if enabled else 'disabled'} on netbox-server + restarted",
                 "changed": True}
 
+    async def _test_netbox_sso(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Probe NetBox's OIDC begin URL (/oauth/login/oidc/) on localhost and
+        confirm it redirects to Entra with the expected params. No browser / no
+        real auth — just proves the backend is wired and the app values match."""
+        import urllib.parse as _up
+        if not os.path.exists(_NETBOX_CONFIG_PY):
+            return {"status": "ERROR", "message": "not the netbox-server host"}
+        exp_tenant = str(data.get("tenant") or "")
+        exp_client = str(data.get("client_id") or "")
+        exp_redirect = str(data.get("redirect_uri") or "")
+        # Use the configured redirect host as the Host header so ALLOWED_HOSTS +
+        # the generated redirect_uri match what a real login would produce.
+        host_hdr = ""
+        try:
+            if exp_redirect:
+                host_hdr = _up.urlparse(exp_redirect).netloc
+        except Exception:  # noqa: BLE001
+            host_hdr = ""
+
+        def _probe():
+            import ssl as _ssl, urllib.request as _ur, urllib.error as _ue
+            ctx = _ssl._create_unverified_context()
+
+            class _NoRedirect(_ur.HTTPRedirectHandler):
+                def redirect_request(self, *a, **k):  # noqa: ANN001
+                    return None
+            opener = _ur.build_opener(_NoRedirect, _ur.HTTPSHandler(context=ctx))
+            headers = {"Host": host_hdr} if host_hdr else {}
+            for base in ("https://127.0.0.1", "http://127.0.0.1"):
+                url = base + "/oauth/login/oidc/"
+                try:
+                    resp = opener.open(_ur.Request(url, headers=headers), timeout=8)
+                    return {"code": resp.getcode(), "location": resp.headers.get("Location", "")}
+                except _ue.HTTPError as e:
+                    loc = e.headers.get("Location", "") if e.headers else ""
+                    if e.code in (301, 302, 303, 307, 308) and loc:
+                        return {"code": e.code, "location": loc}
+                    # non-redirect HTTP error (e.g. 400 ALLOWED_HOSTS, 404 backend
+                    # not mounted) — report it; try the other scheme first.
+                    last = {"code": e.code, "location": "", "error": f"HTTP {e.code}"}
+                    continue
+                except Exception as ex:  # noqa: BLE001
+                    last = {"code": 0, "location": "", "error": str(ex)}
+                    continue
+            return locals().get("last", {"code": 0, "location": "", "error": "no response"})
+
+        try:
+            r = await asyncio.to_thread(_probe)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"probe failed: {e}"}
+
+        loc = r.get("location") or ""
+        to_entra = "login.microsoftonline.com" in loc
+        found = {"authorize_url": loc.split("?")[0] if loc else "",
+                 "tenant": "", "client_id": "", "redirect_uri": ""}
+        if to_entra:
+            try:
+                parsed = _up.urlparse(loc)
+                found["tenant"] = parsed.path.strip("/").split("/")[0]
+                q = _up.parse_qs(parsed.query)
+                found["client_id"] = (q.get("client_id") or [""])[0]
+                found["redirect_uri"] = (q.get("redirect_uri") or [""])[0]
+            except Exception:  # noqa: BLE001
+                pass
+        matches = {
+            "tenant": bool(exp_tenant) and found["tenant"] == exp_tenant,
+            "client_id": bool(exp_client) and found["client_id"] == exp_client,
+            "redirect_uri": (not exp_redirect) or found["redirect_uri"] == exp_redirect,
+        }
+        ok = to_entra and matches["tenant"] and matches["client_id"] and matches["redirect_uri"]
+        if ok:
+            msg = "OK — NetBox redirects to Entra with the expected tenant, client ID and redirect URI."
+        elif to_entra:
+            bad = [k for k in ("tenant", "client_id", "redirect_uri") if not matches[k]]
+            msg = "Redirects to Entra but mismatched: " + ", ".join(bad) + \
+                  " (check the app registration / redirect URI)."
+        elif r.get("code") in (301, 302, 303, 307, 308):
+            msg = f"Login redirected to {loc[:120] or '(none)'} — not Entra. Is the OIDC backend enabled?"
+        elif r.get("code") == 404:
+            msg = "OIDC begin URL 404 — the social-auth backend isn't mounted (SSO block not applied?)."
+        elif r.get("code") == 400:
+            msg = "HTTP 400 (ALLOWED_HOSTS?) — NetBox rejected the Host; add the redirect host to ALLOWED_HOSTS."
+        else:
+            msg = r.get("error") or f"unexpected response (HTTP {r.get('code')})"
+        return {"status": "SUCCESS", "ok": ok, "redirects_to_entra": to_entra,
+                "http_code": r.get("code"), "found": found, "matches": matches, "message": msg}
+
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         cmd = command_type.upper()
 
@@ -641,6 +728,14 @@ class GenericAgent(BaseSpoke):
             # files, and hand them to the root helper (same contract as the
             # netbox spoke) which atomically swaps + reloads nginx.
             return await self._install_netbox_cert(data)
+
+        if cmd == "NETBOX_TEST_SSO":
+            # Verify the SSO wiring without a browser: hit NetBox's OIDC begin
+            # URL on localhost and confirm it 302s to Entra with the expected
+            # tenant/client_id/redirect_uri. Catches most misconfig (backend not
+            # loaded, wrong tenant, mismatched client_id/redirect) short of a
+            # real user auth.
+            return await self._test_netbox_sso(data)
 
         if cmd == "NETBOX_APPLY_SSO":
             # Apply (or remove) Entra ID OIDC SSO on this host's NetBox live —

@@ -6026,13 +6026,46 @@ function _renderSettingsNetboxSsoTile(content) {
                 <div id="nbsso-map-rows" class="space-y-2"></div>
                 <button type="button" onclick="nbssoAddMapRow()" class="mt-2 text-xs font-bold text-slate-500 hover:text-slate-700">+ Add mapping</button>
             </div>
+            <div id="nbsso-test-out" class="hidden text-xs rounded-md p-2 mt-3 mb-1 border"></div>
             <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="nbsso-msg" class="text-xs text-slate-400"></span>
-                <button onclick="saveNetboxSso()" id="nbsso-save-btn" class="${btnCls}">Save &amp; Apply</button>
+                <div class="flex items-center gap-2">
+                    <button type="button" onclick="testNetboxSso()" id="nbsso-test-btn" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test login</button>
+                    <button onclick="saveNetboxSso()" id="nbsso-save-btn" class="${btnCls}">Save &amp; Apply</button>
+                </div>
             </div>
         </div>`;
     loadNetboxSso();
 }
+
+async function testNetboxSso() {
+    const out = document.getElementById('nbsso-test-out');
+    const btn = document.getElementById('nbsso-test-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
+    if (out) { out.className = 'text-xs rounded-md p-2 mt-3 mb-1 border border-slate-200 bg-slate-50 text-slate-500'; out.classList.remove('hidden'); out.textContent = 'Probing NetBox login → Entra…'; }
+    try {
+        const r = await setupFetch('/setup/netbox-sso/test', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const good = !!d.ok;
+        const f = d.found || {}, m = d.matches || {};
+        const tick = b => b ? '✓' : '✗';
+        const detail = d.redirects_to_entra
+            ? ` — tenant ${tick(m.tenant)}, client ID ${tick(m.client_id)}, redirect URI ${tick(m.redirect_uri)}`
+            : '';
+        if (out) {
+            out.className = 'text-xs rounded-md p-2 mt-3 mb-1 border ' + (good
+                ? 'border-green-200 bg-green-50 text-green-700'
+                : 'border-amber-200 bg-amber-50 text-amber-700');
+            out.textContent = `${good ? '✓ ' : '⚠ '}${d.message || ''}${detail}`;
+        }
+        showToast(good ? 'NetBox SSO wiring looks good.' : 'NetBox SSO test found an issue.', good ? 'success' : 'error');
+    } catch (e) {
+        if (out) { out.className = 'text-xs rounded-md p-2 mt-3 mb-1 border border-red-200 bg-red-50 text-red-600'; out.textContent = '✗ ' + (e.message || e); }
+        showToast('Test failed: ' + (e.message || e), 'error');
+    } finally { if (btn) { btn.disabled = false; btn.textContent = 'Test login'; } }
+}
+window.testNetboxSso = testNetboxSso;
 
 function _nbssoMapRow(k = '', v = '') {
     const { inputCls } = _SETUP_CLS;
