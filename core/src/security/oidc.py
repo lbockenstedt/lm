@@ -614,9 +614,30 @@ def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,
     admin (``ensure_admin_lockout`` keeps it tenantless/local; an Entra user
     can't collide with it because the admin's id is a chosen username, not an
     Entra ``oid``)."""
-    # allowed_group gate — refuse before provisioning.
+    # allowed_group gate — refuse before provisioning. Distinguish the two real
+    # failure modes so the operator can act: (a) the hub read 0 groups for the
+    # user — the id_token carried no `groups` claim (Entra's default until Token
+    # Configuration adds it) AND the Graph app-token fallback
+    # (fetch_user_groups_via_app, Group.Read.All application) came back empty
+    # (permission not granted/consented, or app auth misconfigured); the gate
+    # can't evaluate without membership. (b) membership was read but the
+    # configured allowed_group isn't among it — usually the admin entered the
+    # group's display name instead of its object ID, or the wrong group.
     if allowed_group and allowed_group not in (member_of or []):
-        raise OidcError("Entra user is not a member of the allowed group")
+        if not member_of:
+            raise OidcError(
+                "Entra user is not a member of the allowed group — the hub read "
+                "0 groups for you (the id_token had no groups claim and the Graph "
+                "app-token lookup returned nothing). Ensure the app registration "
+                "has Group.Read.All (application) granted + admin-consented, then "
+                "retry; the allowed-group gate cannot evaluate without membership."
+            )
+        raise OidcError(
+            f"Entra user is not a member of the allowed group (read "
+            f"{len(member_of)} group(s); the configured allowed_group is not "
+            "among them). The oidc-group field must be the group's OBJECT ID "
+            "(a UUID), not its display name."
+        )
 
     group_ids, tenant_ids = groups_and_tenants_for_membership(hub, member_of)
     users = hub.state.system_state.setdefault("users", {})
