@@ -70,7 +70,10 @@ class HubCertDistributionMixin:
                 self._wildcard_push_state(),
                 install_on_hub=self._install_cert_on_hub)
             self._save_wildcard_push_state()
-            return (explicit or []) + (wc or [])
+            combined = (explicit or []) + (wc or [])
+            self._stash_cert_device_reports(combined)
+            return combined
+        self._stash_cert_device_reports(explicit)
         return explicit
 
     async def _distribute_all_certs(self, le_spoke_id: str) -> list:
@@ -87,7 +90,35 @@ class HubCertDistributionMixin:
             get_all_by_type=self.get_all_spokes_by_type,
             push_state=self._wildcard_push_state())
         self._save_wildcard_push_state()
+        self._stash_cert_device_reports(out)
         return out
+
+    # ── per-device cert reports (fleet spokes: nw switch fleet) ──────────────
+    # A fleet spoke (nw) installs the cert on N devices and returns a per-device
+    # breakdown; stash it keyed by domain|module_type|identifier so the WebUI can
+    # drill down from the spoke-level target into which switches got the cert.
+    # In-memory (repopulated by the hourly distribution loop) — the target's
+    # aggregate status/message still lives in the persistent le ledger.
+    def _cert_device_reports(self) -> Dict[str, Dict[str, Any]]:
+        d = getattr(self, "cert_device_reports", None)
+        if d is None:
+            d = {}
+            self.cert_device_reports = d
+        return d
+
+    def _stash_cert_device_reports(self, summary: list) -> None:
+        import datetime as _dt
+        store = self._cert_device_reports()
+        for e in (summary or []):
+            if not isinstance(e, dict) or e.get("devices") is None:
+                continue
+            key = f"{e.get('domain','')}|{e.get('module_type','')}|{e.get('identifier','')}"
+            store[key] = {"devices": e.get("devices"), "message": e.get("message", ""),
+                          "status": e.get("status", ""),
+                          "at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+
+    def cert_device_report(self, domain: str, module_type: str, identifier: str = "") -> Dict[str, Any]:
+        return self._cert_device_reports().get(f"{domain}|{module_type}|{identifier}") or {}
 
     # ── wildcard-all-spokes toggle (OFF by default; the operator's testing
     # gate). Lives in global_config["certs"]["wildcard_all_spokes"]. When ON, a

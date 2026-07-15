@@ -14027,7 +14027,13 @@ async function loadLEData(subMenu) {
             const statusTxt = t.last_status || 'not pushed yet';
             const msgPart = t.last_message ? ` — ${t.last_message}` : '';
             const tip = `${label}: ${statusTxt}${msgPart} (last push: ${when}). Click to deploy now.`;
-            return `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="${escJsAttr(tip)}">${mark} ${label}</button>`;
+            const btn = `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="${escJsAttr(tip)}">${mark} ${label}</button>`;
+            // Fleet spokes (nw) deploy the cert to MANY devices — offer a
+            // drill-down into the per-device breakdown (which switches got it).
+            if (_LE_FLEET_TYPES.includes(String(t.module_type || ''))) {
+                return `<span class="inline-flex items-center gap-1">${btn}<button onclick="showLeDeviceReport('${dEsc}','${mtEsc}','${idEsc}')" class="text-[11px] text-slate-500 hover:text-slate-700 underline decoration-dotted" title="Per-device cert status across the fleet">devices</button></span>`;
+            }
+            return btn;
         };
         // Available connected cert-capable spokes/agents as click-to-add chips,
         // rendered directly on the main Certificates screen beside each cert's
@@ -14580,6 +14586,55 @@ async function showLeTargetsModal(domain) {
 // the cs-owned pxmx agents — which causes pveproxy restart contention (and,
 // before the agent verify-on-disk fix, a re-push loop). Pick one or the other.
 const _LE_AGENT_HOSTING = ['simulation', 'hypervisor'];
+// Fleet spokes: ONE spoke-level cert target deploys to MANY devices. The badge
+// shows the aggregate ("installed on 8/10"); a 'devices' drill-down shows the
+// per-device breakdown (which switches got the cert). nw = the Aruba switch fleet.
+const _LE_FLEET_TYPES = ['nw'];
+
+// Drill-down: per-device cert status for a fleet spoke target (nw switch fleet).
+async function showLeDeviceReport(domain, mt, identifier) {
+    let d;
+    try {
+        const q = `module_type=${encodeURIComponent(mt)}&identifier=${encodeURIComponent(identifier || '')}`;
+        const r = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/devices?${q}`);
+        d = (r && r.ok) ? (r.data && typeof r.data.data === 'object' ? r.data.data : r.data) : null;
+        if (!d) throw new Error((r && r.detail) || 'failed to load');
+    } catch (e) { showToast('Device report failed: ' + (e.message || e), 'error'); return; }
+    const devs = d.devices || [];
+    const pill = s => {
+        const map = { SUCCESS: 'bg-green-100 text-green-700', ERROR: 'bg-red-100 text-red-700', PARTIAL: 'bg-amber-100 text-amber-700', SKIPPED: 'bg-slate-100 text-slate-500' };
+        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${map[s] || 'bg-slate-100 text-slate-500'}">${escapeHtml(s || 'pending')}</span>`;
+    };
+    const rows = devs.map(v => `<tr class="border-b border-slate-100">
+        <td class="px-3 py-1.5 text-xs font-mono text-slate-700">${escapeHtml(v.name || v.device_id || '—')}</td>
+        <td class="px-3 py-1.5 text-xs text-slate-500 font-mono">${escapeHtml(v.ip || '')}</td>
+        <td class="px-3 py-1.5 text-xs text-slate-500">${escapeHtml(v.object_type || '')}</td>
+        <td class="px-3 py-1.5">${pill(v.status)}</td>
+        <td class="px-3 py-1.5 text-xs text-slate-500">${v.message ? `<span title="${escapeHtml(v.message)}">${escapeHtml(v.message)}</span>` : ''}</td></tr>`).join('');
+    const when = d.at ? new Date(d.at).toLocaleString() : 'never';
+    const modal = document.createElement('div');
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4';
+    modal.onclick = (ev) => { if (ev.target === modal) modal.remove(); };
+    modal.innerHTML = `
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[85vh] overflow-y-auto">
+        <div class="flex items-center justify-between px-5 py-3 border-b border-slate-100">
+          <h3 class="text-sm font-bold text-slate-700">${escapeHtml(mt)} device certificates — ${escapeHtml(domain)}</h3>
+          <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+        </div>
+        <div class="p-5 space-y-3">
+          <p class="text-xs text-slate-500">${d.message ? `<b>${escapeHtml(d.message)}</b> · ` : ''}last distribution: ${escapeHtml(when)}. The spoke holds the cert and installs it on each fleet device below.</p>
+          ${devs.length ? `<table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr>
+            <th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Device</th>
+            <th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">IP</th>
+            <th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Type</th>
+            <th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Status</th>
+            <th class="px-3 py-1.5 text-left text-[10px] uppercase text-slate-400">Message</th></tr></thead><tbody>${rows}</tbody></table>`
+            : '<p class="text-xs text-slate-400 italic">No per-device report yet — it populates after the next distribution to this target (deploy now via the target badge, or wait for the hourly sweep).</p>'}
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+}
+window.showLeDeviceReport = showLeDeviceReport;
 // The one-liner reused by the inline ⚠ note, the chip tooltips, and the add
 // confirm so the guidance reads identically everywhere (and matches the docs
 // "Distribution targets — pick one granularity" warning).

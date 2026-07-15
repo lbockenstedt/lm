@@ -102,7 +102,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
     for t in targets:
         mt = t.get("module_type")
         ident = t.get("identifier", "") or ""
-        entry: Dict[str, Any] = {"module_type": mt, "identifier": ident}
+        entry: Dict[str, Any] = {"domain": domain, "module_type": mt, "identifier": ident}
         tgt_label = f"{mt}{('/' + ident) if ident else ''}"
         # Up-to-date target — skip the push (idempotent distribution).
         if (t.get("last_pushed_hash") == material_hash
@@ -176,6 +176,10 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                     "module_type": mt,
                 }, timeout=install_timeout)
                 rret = _unwrap(res)
+                # Fleet spokes (nw) return a per-device breakdown — carry it so the
+                # hub can stash it for the drill-down report.
+                if isinstance(rret, dict) and rret.get("devices") is not None:
+                    entry["devices"] = rret["devices"]
                 if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
                     entry.update(status="SUCCESS",
                                  message=rret.get("message") or "installed")
@@ -383,6 +387,8 @@ async def distribute_wildcard_to_all_spokes(
             "chain": chain, "identifier": sid, "module_type": mt,
         }, timeout=install_timeout)
         rret = _unwrap(res)
+        if isinstance(rret, dict) and rret.get("devices") is not None:
+            entry["devices"] = rret["devices"]
         if isinstance(rret, dict) and rret.get("status") == "SUCCESS":
             entry.update(status="SUCCESS", message=rret.get("message") or "installed")
             if cur_hash:

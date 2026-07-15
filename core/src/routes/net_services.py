@@ -509,6 +509,18 @@ def register(app, hub, ctx):
                                   {"domain": domain, "target": body},
                                   log_name="le_add_target")
 
+    @app.get("/api/le/certs/{domain}/devices")
+    async def le_target_devices(domain: str, module_type: str = "", identifier: str = ""):
+        """Per-device cert breakdown for a fleet spoke target (e.g. nw = one
+        spoke-level target that deploys to its whole switch fleet). Drives the
+        drill-down: which devices got the cert, status + message + when. Empty
+        until the next distribution runs (in-memory, repopulated hourly)."""
+        rep = app.state.hub.cert_device_report(domain, module_type, identifier)
+        return {"status": "SUCCESS", "domain": domain, "module_type": module_type,
+                "identifier": identifier, "devices": rep.get("devices") or [],
+                "message": rep.get("message", ""), "aggregate_status": rep.get("status", ""),
+                "at": rep.get("at", "")}
+
     @app.delete("/api/le/certs/{domain}/targets/{idx}")
     async def le_remove_target(domain: str, idx: int):
         return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REMOVE_TARGET",
