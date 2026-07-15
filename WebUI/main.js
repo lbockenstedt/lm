@@ -4547,6 +4547,10 @@ async function testBackupCopy() {
 function _renderSetupSyncTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
+        <div class="sticky top-0 z-20 mb-4 py-3 bg-white/90 backdrop-blur border-b border-slate-200 flex items-center justify-between">
+            <h2 class="text-base font-bold text-slate-700">Sync settings ${helpIcon('lm-hub', null, 'Hub help')}</h2>
+            <button onclick="saveAllSyncConfig()" id="sync-save-all-btn" class="${btnCls}">Save</button>
+        </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">GitHub Repo Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
@@ -4560,7 +4564,6 @@ function _renderSetupSyncTile(content) {
                         <input type="number" id="repo-sync-interval" min="1" value="15" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
                 </div>
-                <div class="mt-4 flex justify-end"><button onclick="saveRepoSyncConfig()" class="${btnCls}">Save</button></div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync</div>
                     <div id="repo-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
@@ -4595,7 +4598,6 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Daily time (HH:MM, 24h)</label>
                         <input type="time" id="ep-sync-time" value="02:00" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveEndpointSyncConfig()" class="${btnCls} ml-auto">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
@@ -4617,7 +4619,6 @@ function _renderSetupSyncTile(content) {
                             <label class="${labelCls}">Lookback (minutes)</label>
                             <input type="number" id="rt-nac-sync-lookback" min="1" value="2" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         </div>
-                        <button onclick="saveRealtimeNacSyncConfig()" class="${btnCls} ml-auto">Save</button>
                     </div>
                     <div class="mt-4">
                         <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last reverse sync per tenant</div>
@@ -4660,7 +4661,6 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Daily time (HH:MM, 24h)</label>
                         <input type="time" id="vm-sync-time" value="03:00" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveVmSyncConfig()" class="${btnCls} ml-auto">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
@@ -4727,7 +4727,6 @@ function _renderSetupSyncTile(content) {
                 </div>
                 <div class="mt-4 flex items-center justify-end gap-3">
                     <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
-                    <button onclick="saveFwDiscoveryConfig()" class="${btnCls}">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
@@ -4778,9 +4777,6 @@ function _renderSetupSyncTile(content) {
                         <input id="nw-sync-site" placeholder="" class="${inputCls}">
                     </div>
                 </div>
-                <div class="mt-4 flex items-center justify-end gap-3">
-                    <button onclick="saveNwDiscoveryConfig()" class="${btnCls}">Save</button>
-                </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sync per tenant</div>
                     <div id="nw-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
@@ -4806,7 +4802,6 @@ function _renderSetupSyncTile(content) {
                         <label class="${labelCls}">Delete after (days)</label>
                         <input type="number" id="staleness-sweep-delete-days" min="1" value="30" class="w-24 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     </div>
-                    <button onclick="saveStalenessSweepConfig()" class="${btnCls} ml-auto">Save</button>
                 </div>
                 <div class="mt-4">
                     <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Last sweep</div>
@@ -4816,7 +4811,6 @@ function _renderSetupSyncTile(content) {
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Out-of-Contact Alerts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="saveSpokeAlertConfig()" class="${btnCls}">Save</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Forgiving liveness alerting, separate from the realtime heartbeat traffic-light. A spoke that blips for a few seconds (restart, WAN jitter) stays quiet; only once an approved spoke has been <strong>out of contact</strong> for <em>warn minutes</em> does a <strong>warning</strong> fire, and after <em>error minutes</em> it escalates to <strong>error</strong> (which also lands in the Error Log / bugfixer feed). Decoupled from the 300s recovery watchdog — that still restarts stranded spokes on its own schedule.</p>
                 <div class="flex flex-wrap items-end gap-4">
@@ -4838,7 +4832,6 @@ function _renderSetupSyncTile(content) {
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub-Contact Watchdog ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="saveHubWatchdog()" id="hcw-save-btn" class="${btnCls}">Save</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Fleet-wide self-recovery for spokes &amp; agents that lose the hub. When a node can't reach the hub it escalates: <strong>restart the service</strong> after the first threshold, <strong>reboot the host</strong> after the second, then <strong>sleep</strong> and retry; after <em>max runs</em> it gives up and stays offline. The setting is pushed to every node and stored locally, so it still fires when the hub is unreachable. <strong class="text-amber-600">Caution:</strong> the reboot stage restarts the whole machine — on a Proxmox host agent that cycles every VM on it. Off by default.</p>
                 <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="hcw-enabled" class="w-4 h-4 text-green-600 rounded">Enable hub-contact watchdog (fleet-wide)</label>
@@ -4865,7 +4858,6 @@ function _renderSetupSyncTile(content) {
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Source of Truth ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="saveSourceOfTruthConfig()" class="${btnCls}">Save</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Per-module owner: a module's source of truth is never overwritten by a sync that disagrees. <strong>External</strong> = the feed owns the object (the sync overwrites NetBox to match — e.g. Proxmox owns VMs, the discovery feed owns device MAC/IP). <strong>NetBox</strong> = NetBox owns the object (only-add-missing — existing records are refreshed but never clobbered, protecting hand-managed inventory). Defaults: VMs = Proxmox (external), Devices = NetBox, Access Tracker = NetBox, Endpoint sync = NetBox.</p>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -7036,6 +7028,46 @@ async function saveRepoSyncConfig() {
     } catch (e) {
         showToast('Error saving: ' + e.message, 'error');
     }
+}
+
+// ── One Save for the whole System → Sync page ─────────────────────────────
+// The Sync tile has one sticky "Save" at the top instead of a Save per card.
+// This calls every per-card save handler in sequence, suppressing their
+// individual toasts (temporarily intercepts the global showToast) and emits a
+// single summary toast. Each handler still collects its own card's fields and
+// POSTs its own /setup/config slice — no collection logic changed. Per-card
+// "Sync now" action buttons are untouched.
+async function saveAllSyncConfig() {
+    const btn = document.getElementById('sync-save-all-btn');
+    const handlers = [
+        saveRepoSyncConfig,
+        saveEndpointSyncConfig,
+        saveRealtimeNacSyncConfig,
+        saveVmSyncConfig,
+        saveFwDiscoveryConfig,
+        saveNwDiscoveryConfig,
+        saveStalenessSweepConfig,
+        saveSpokeAlertConfig,
+        saveHubWatchdog,
+        saveSourceOfTruthConfig,
+    ];
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    const _origToast = window.showToast;
+    const counts = { ok: 0, err: 0 };
+    // Each handler emits exactly one terminal showToast (success/error); count
+    // them so we can summarize instead of flashing 10 toasts.
+    window.showToast = (_msg, type) => { counts[type === 'error' ? 'err' : 'ok']++; };
+    try {
+        for (const fn of handlers) {
+            try { await fn(); } catch (e) { counts.err++; console.error('[saveAllSyncConfig]', e); }
+        }
+    } finally {
+        window.showToast = _origToast;
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
+    if (counts.err === 0) showToast('Saved all sync settings.', 'success');
+    else if (counts.ok === 0) showToast('Failed to save sync settings.', 'error');
+    else showToast(`Saved ${counts.ok}, failed ${counts.err}.`, 'error');
 }
 
 // ── Source of Truth per module (System → Sync; saved via /setup/config) ──
