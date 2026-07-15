@@ -14617,8 +14617,8 @@ function leFleetDetail(domain, tgts) {
         const cid = _leDevRepId(domain, t.module_type, t.identifier || '');
         const lbl = `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`;
         return `<div class="w-full mt-1.5 basis-full">
-            <button onclick="toggleLeFleetDetail('${escJsAttr(domain)}','${escJsAttr(t.module_type)}','${escJsAttr(t.identifier || '')}')" class="text-[11px] text-slate-500 hover:text-slate-700 flex items-center gap-1" title="Show the devices this spoke manages + their cert status">
-                <span id="${cid}-caret" class="inline-block w-2">▸</span> Devices managed by ${escapeHtml(lbl)}
+            <button onclick="toggleLeFleetDetail('${escJsAttr(domain)}','${escJsAttr(t.module_type)}','${escJsAttr(t.identifier || '')}')" class="text-sm font-medium text-slate-600 hover:text-slate-800 flex items-center gap-1.5" title="Show the devices this spoke manages + their cert status">
+                <span id="${cid}-caret" class="inline-block w-2.5">▸</span> Devices managed by ${escapeHtml(lbl)}
             </button>
             <div id="${cid}" class="hidden mt-1 ml-3 pl-2 border-l-2 border-slate-100"></div>
         </div>`;
@@ -14631,33 +14631,33 @@ function _leRenderDeviceTable(d) {
     const pill = s => {
         const map = { SUCCESS: 'bg-green-100 text-green-700', ERROR: 'bg-red-100 text-red-700', PARTIAL: 'bg-amber-100 text-amber-700', SKIPPED: 'bg-slate-100 text-slate-500' };
         const label = s || 'not deployed';
-        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${map[s] || 'bg-slate-100 text-slate-500'}">${escapeHtml(label)}</span>`;
+        return `<span class="px-2 py-0.5 rounded-full text-sm font-medium ${map[s] || 'bg-slate-100 text-slate-500'}">${escapeHtml(label)}</span>`;
     };
     if (!devs.length) {
-        return '<p class="text-xs text-slate-400 italic py-1">No devices found on this spoke (is it online and are devices configured in Setup → Network Devices?).</p>';
+        return '<p class="text-sm text-slate-400 italic py-1">No devices found on this spoke (is it online and are devices configured in Setup → Network Devices?).</p>';
     }
     const rows = devs.map(v => {
         const did = String(v.device_id || v.name || '');
         const capable = v.cert_capable === true || String(v.object_type || '').toLowerCase() === 'cx_switch';
         const action = capable
-            ? `<button onclick="leDeployDevice('${escJsAttr(domain)}','${escJsAttr(did)}','${escJsAttr(mt)}','${escJsAttr(ident)}',this)" class="text-xs text-[#01A982] hover:underline font-bold">Deploy</button>`
-            : `<span class="text-[10px] text-slate-400" title="${escapeHtml(v.message || 'cert install not supported for this device type')}">unsupported</span>`;
+            ? `<button onclick="leDeployDevice('${escJsAttr(domain)}','${escJsAttr(did)}','${escJsAttr(mt)}','${escJsAttr(ident)}',this)" class="text-sm text-[#01A982] hover:underline font-bold">Deploy</button>`
+            : `<span class="text-xs text-slate-400" title="${escapeHtml(v.message || 'cert install not supported for this device type')}">unsupported</span>`;
         return `<tr class="border-b border-slate-100">
-            <td class="px-3 py-1 text-xs font-mono text-slate-700">${escapeHtml(v.name || did || '—')}</td>
-            <td class="px-3 py-1 text-xs text-slate-500 font-mono">${escapeHtml(v.ip || '')}</td>
-            <td class="px-3 py-1 text-xs text-slate-500">${escapeHtml(v.object_type || '')}</td>
-            <td class="px-3 py-1">${pill(v.status)}</td>
-            <td class="px-3 py-1 text-xs text-slate-500">${v.message ? `<span title="${escapeHtml(v.message)}">${escapeHtml(v.message)}</span>` : ''}</td>
-            <td class="px-3 py-1 whitespace-nowrap">${action}</td></tr>`;
+            <td class="px-3 py-1.5 text-sm font-mono text-slate-700">${escapeHtml(v.name || did || '—')}</td>
+            <td class="px-3 py-1.5 text-sm text-slate-500 font-mono">${escapeHtml(v.ip || '')}</td>
+            <td class="px-3 py-1.5 text-sm text-slate-500">${escapeHtml(v.object_type || '')}</td>
+            <td class="px-3 py-1.5">${pill(v.status)}</td>
+            <td class="px-3 py-1.5 text-sm text-slate-500">${v.message ? `<span title="${escapeHtml(v.message)}">${escapeHtml(v.message)}</span>` : ''}</td>
+            <td class="px-3 py-1.5 whitespace-nowrap">${action}</td></tr>`;
     }).join('');
-    return `<div class="text-[11px] text-slate-400 mb-1">${d.message ? `<b>${escapeHtml(d.message)}</b> · ` : ''}last run: ${escapeHtml(when)}. Deploy the cert to individual devices below, or to the whole fleet via the target badge.</div>
+    return `<div class="text-xs text-slate-400 mb-1.5">${d.message ? `<b>${escapeHtml(d.message)}</b> · ` : ''}last run: ${escapeHtml(when)}. Deploy the cert to individual devices below, or to the whole fleet via the target badge.</div>
         <div class="overflow-x-auto"><table class="w-full border border-slate-200 rounded-md overflow-hidden"><thead class="bg-slate-50"><tr>
-        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Device</th>
-        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">IP</th>
-        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Type</th>
-        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Cert</th>
-        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400">Message</th>
-        <th class="px-3 py-1 text-left text-[10px] uppercase text-slate-400"></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">Device</th>
+        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">IP</th>
+        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">Type</th>
+        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">Cert</th>
+        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400">Message</th>
+        <th class="px-3 py-1.5 text-left text-xs uppercase text-slate-400"></th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 async function _leLoadDeviceBox(box, domain, mt, identifier) {
     box.innerHTML = '<p class="text-xs text-slate-400 italic py-1">Loading devices…</p>';
