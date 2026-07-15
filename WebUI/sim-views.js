@@ -6103,18 +6103,72 @@ function csVmFlash(msg) {
     if (typeof showToast === 'function') showToast(msg, 'success');
 }
 
-// ── Console / Terminal (Phase-5 stubs, faithful to current LM state) ───────
-function csRenderVmServerConsoleStub(label, kind) {
+// ── Terminal — xterm.js root shell on the pxmx host, over the hub relay ─────
+// POST /api/pxmx/shell mints a session; the agent spawns a PTY bash on the host
+// and the browser drives it over /ws/console-shell/{id}. Gated hub-side (opt-in
+// toggle + Global/Tenant admin + audit). xterm is loaded via the shared
+// _consoleLoadXterm() (same CDN import the serial console uses).
+let _csVmShell = null;
+async function csRenderVmServerTerminal() {
     csSetToolbar('');
+    const h = csVmSelectedHost();
+    if (!h) { csSet(csEmpty('No host selected.')); return; }
+    const agentId = h.agent_id || '';
+    const hostLabel = h.hostname || csVmHostId(h) || 'pxmx host';
     csSet(`<div>${csVmHostBanner()}
-      <div class="hpe-card rounded-lg p-8 shadow-sm text-center">
-        <div class="text-3xl mb-3">${kind === 'console' ? '🖥️' : '⌨️'}</div>
-        <h3 class="text-lg font-bold text-[#263040] mb-1">${csEscape(label)} ${helpIcon('cs', null, 'Simulations help')}</h3>
-        <p class="text-sm text-slate-500 max-w-md mx-auto">${csEscape(label)} requires a ${kind === 'console' ? 'noVNC' : 'xterm.js'} WebSocket proxied through the LM hub. This is wired in Phase 5; the rest of the VM Server port is live now.</p>
+      <div class="hpe-card rounded-lg overflow-hidden shadow-sm" style="background:#1e1e1e">
+        <div class="px-4 py-2 flex justify-between items-center bg-[#2d2d2d] text-slate-200">
+          <div class="text-sm font-mono">⌨️ ${csEscape(hostLabel)} — root shell ${helpIcon('cs', null, 'Simulations help')}</div>
+          <button onclick="csVmShellReconnect()" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">↻ Reconnect</button>
+        </div>
+        <div id="cs-vm-term-body" style="height:60vh" class="p-1"></div>
+        <div id="cs-vm-term-status" class="px-4 py-1 text-[11px] text-slate-400 bg-[#2d2d2d] font-mono">Connecting…</div>
       </div></div>`);
+    window.__csVmShellCtx = { agentId };
+    await csVmShellConnect(agentId);
 }
-function csRenderVmServerConsole() { return csRenderVmServerConsoleStub('VM Console (noVNC)', 'console'); }
-function csRenderVmServerTerminal() { return csRenderVmServerConsoleStub('Spoke Shell (xterm)', 'terminal'); }
+
+async function csVmShellConnect(agentId) {
+    csVmShellClose();
+    const statusEl = document.getElementById('cs-vm-term-status');
+    const body = document.getElementById('cs-vm-term-body');
+    if (!body) return;
+    const setStatus = (t) => { if (statusEl) statusEl.textContent = t; };
+    const mod = (typeof _consoleLoadXterm === 'function') ? await _consoleLoadXterm() : null;
+    if (!mod || !mod.Terminal) { setStatus('Failed to load terminal (CDN unreachable).'); return; }
+    let session;
+    try {
+        const res = await fetch('/api/pxmx/shell', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_id: agentId }),
+        });
+        session = await res.json().catch(() => ({}));
+        if (!res.ok) { setStatus(session.detail || 'Failed to open shell'); return; }
+    } catch (e) { setStatus('Failed to open shell: ' + (e.message || e)); return; }
+    const term = new mod.Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
+                                    theme: { background: '#1e1e1e' } });
+    term.open(body); term.focus();
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws/console-shell/${session.session_id}?token=${encodeURIComponent(session.ws_token)}`);
+    ws.binaryType = 'arraybuffer';
+    const sendResize = () => { if (ws.readyState === 1) { try { ws.send(JSON.stringify({ resize: { rows: term.rows, cols: term.cols } })); } catch (e) {} } };
+    ws.onopen = () => { setStatus('Connected — root shell'); sendResize(); };
+    ws.onmessage = (ev) => { if (typeof ev.data === 'string') term.write(ev.data); else term.write(new Uint8Array(ev.data)); };
+    ws.onclose = (ev) => { setStatus('Disconnected' + (ev.reason ? ': ' + ev.reason : '') + ' — click Reconnect'); try { term.write('\r\n\x1b[33m[disconnected]\x1b[0m\r\n'); } catch (e) {} };
+    term.onData(d => { if (ws.readyState === 1) ws.send(d); });
+    if (term.onResize) term.onResize(() => sendResize());
+    _csVmShell = { term, ws };
+}
+
+function csVmShellClose() {
+    if (_csVmShell) {
+        try { _csVmShell.ws.close(); } catch (e) {}
+        try { _csVmShell.term.dispose(); } catch (e) {}
+        _csVmShell = null;
+    }
+}
+function csVmShellReconnect() { csVmShellConnect((window.__csVmShellCtx || {}).agentId); }
 
 // ── USB (certified / uncertified + certify-ignore) ───────────────────────────
 // The cs-spoke relay payload carries each dongle as {vidpid:"vid:pid", name|product,
@@ -6600,7 +6654,6 @@ async function csRenderSetupDiagnostics() {
 // ── Register all VM Server children ─────────────────────────────────────────
 window.CS_CHILD_RENDERERS['VM Server::Overview']     = csRenderVmServer;
 window.CS_CHILD_RENDERERS['VM Server::VMs']          = csRenderVmServerVms;
-window.CS_CHILD_RENDERERS['VM Server::Console']      = csRenderVmServerConsole;
 window.CS_CHILD_RENDERERS['VM Server::Terminal']     = csRenderVmServerTerminal;
 window.CS_CHILD_RENDERERS['VM Server::USB']           = csRenderVmServerUsb;
 window.CS_CHILD_RENDERERS['VM Server::IoT']           = csRenderVmServerIot;
