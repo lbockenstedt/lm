@@ -4547,9 +4547,9 @@ async function testBackupCopy() {
 function _renderSetupSyncTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
-        <div class="sticky top-0 z-20 mb-4 py-3 bg-white/90 backdrop-blur border-b border-slate-200 flex items-center justify-between">
+        <div class="mb-4 flex items-center justify-between">
             <h2 class="text-base font-bold text-slate-700">Sync settings ${helpIcon('lm-hub', null, 'Hub help')}</h2>
-            <button onclick="saveAllSyncConfig()" id="sync-save-all-btn" class="${btnCls}">Save</button>
+            <span class="text-xs text-slate-400 italic">Auto-saves on change — no Save button.</span>
         </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
@@ -4913,6 +4913,42 @@ function _renderSetupSyncTile(content) {
     loadSpokeAlertConfig();
     loadSpokeAlerts();
     loadHubWatchdog();
+    // Auto-save: one delegated `change` listener maps the edited field's id
+    // prefix to its card's save handler and fires it — same no-Save-button
+    // model as the Proxmox auto-provisioning card. Programmatic value sets
+    // by the load* functions above do NOT emit `change`, so rendering does
+    // not trigger saves.
+    _attachSyncTileAutoSave(content);
+}
+
+// Map a Sync-tile field id → its card's save handler (auto-save on change).
+function _syncSaveFnForId(id) {
+    if (!id) return null;
+    if (id.startsWith('repo-sync-'))        return saveRepoSyncConfig;
+    if (id.startsWith('rt-nac-sync-'))      return saveRealtimeNacSyncConfig;
+    if (id.startsWith('ep-sync-'))          return saveEndpointSyncConfig;
+    if (id.startsWith('vm-sync-'))          return saveVmSyncConfig;
+    if (id.startsWith('fw-sync-'))          return saveFwDiscoveryConfig;
+    if (id.startsWith('nw-sync-'))          return saveNwDiscoveryConfig;
+    if (id.startsWith('staleness-sweep-'))  return saveStalenessSweepConfig;
+    if (id.startsWith('spoke-alert-'))      return saveSpokeAlertConfig;
+    if (id.startsWith('hcw-'))              return saveHubWatchdog;
+    if (id.startsWith('sot-'))              return saveSourceOfTruthConfig;
+    return null;
+}
+
+// `change` covers every field type: checkboxes + selects fire on toggle/select;
+// text/number/time inputs fire on commit (blur or Enter). Non-field elements
+// (status divs, "Sync now" buttons, paragraphs) resolve to null → no-op.
+// The dataset flag prevents stacking listeners across re-renders (the `content`
+// node is reused while its innerHTML is replaced).
+function _attachSyncTileAutoSave(root) {
+    if (!root || root.dataset.syncAutoSave === '1') return;
+    root.dataset.syncAutoSave = '1';
+    root.addEventListener('change', (e) => {
+        const fn = _syncSaveFnForId(e.target && e.target.id);
+        if (fn) try { fn(); } catch (err) { console.error('[sync-auto-save]', err); }
+    });
 }
 
 // Setup → IPAM tile. IPAM / NetBox instances only.
@@ -7028,46 +7064,6 @@ async function saveRepoSyncConfig() {
     } catch (e) {
         showToast('Error saving: ' + e.message, 'error');
     }
-}
-
-// ── One Save for the whole System → Sync page ─────────────────────────────
-// The Sync tile has one sticky "Save" at the top instead of a Save per card.
-// This calls every per-card save handler in sequence, suppressing their
-// individual toasts (temporarily intercepts the global showToast) and emits a
-// single summary toast. Each handler still collects its own card's fields and
-// POSTs its own /setup/config slice — no collection logic changed. Per-card
-// "Sync now" action buttons are untouched.
-async function saveAllSyncConfig() {
-    const btn = document.getElementById('sync-save-all-btn');
-    const handlers = [
-        saveRepoSyncConfig,
-        saveEndpointSyncConfig,
-        saveRealtimeNacSyncConfig,
-        saveVmSyncConfig,
-        saveFwDiscoveryConfig,
-        saveNwDiscoveryConfig,
-        saveStalenessSweepConfig,
-        saveSpokeAlertConfig,
-        saveHubWatchdog,
-        saveSourceOfTruthConfig,
-    ];
-    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
-    const _origToast = window.showToast;
-    const counts = { ok: 0, err: 0 };
-    // Each handler emits exactly one terminal showToast (success/error); count
-    // them so we can summarize instead of flashing 10 toasts.
-    window.showToast = (_msg, type) => { counts[type === 'error' ? 'err' : 'ok']++; };
-    try {
-        for (const fn of handlers) {
-            try { await fn(); } catch (e) { counts.err++; console.error('[saveAllSyncConfig]', e); }
-        }
-    } finally {
-        window.showToast = _origToast;
-        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
-    }
-    if (counts.err === 0) showToast('Saved all sync settings.', 'success');
-    else if (counts.ok === 0) showToast('Failed to save sync settings.', 'error');
-    else showToast(`Saved ${counts.ok}, failed ${counts.err}.`, 'error');
 }
 
 // ── Source of Truth per module (System → Sync; saved via /setup/config) ──
