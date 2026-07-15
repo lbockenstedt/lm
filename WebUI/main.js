@@ -3796,7 +3796,8 @@ function _keyVaultSaveFnFor(el) {
 
 function _oidcSaveFnFor(el) {
     const id = (el && el.id) || '';
-    if (['oidc-enabled', 'oidc-tenant', 'oidc-client', 'oidc-redirect', 'oidc-group'].includes(id))
+    if (['oidc-enabled', 'oidc-tenant', 'oidc-client', 'oidc-redirect', 'oidc-group',
+         'oidc-group-select'].includes(id))
         return saveOidcConfig;
     return null;
 }
@@ -4245,7 +4246,7 @@ function _renderSetupUserAccessTile(content) {
                 </div>
                 <div class="overflow-hidden rounded-md border border-slate-200">
                     <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">User ID</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3">Groups</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">HV</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">NAC</th><th class="px-4 py-3 text-center">NW</th><th class="px-4 py-3 text-center">IPAM</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3 text-center">CON</th><th class="px-4 py-3 text-center">CW</th><th class="px-4 py-3"></th></tr></thead>
+                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr><th class="px-4 py-3">User</th><th class="px-4 py-3">Auth</th><th class="px-4 py-3">Tenants</th><th class="px-4 py-3">Groups</th><th class="px-4 py-3 text-center">Admin</th><th class="px-4 py-3 text-center">View</th><th class="px-4 py-3 text-center">Edit</th><th class="px-4 py-3 text-center">HV</th><th class="px-4 py-3 text-center">FW</th><th class="px-4 py-3 text-center">DNS</th><th class="px-4 py-3 text-center">NAC</th><th class="px-4 py-3 text-center">NW</th><th class="px-4 py-3 text-center">IPAM</th><th class="px-4 py-3 text-center">CS</th><th class="px-4 py-3 text-center">CON</th><th class="px-4 py-3 text-center">CW</th><th class="px-4 py-3"></th></tr></thead>
                         <tbody id="user-permissions-body" class="divide-y divide-slate-200"><tr><td colspan="17" class="px-4 py-8 text-center text-slate-400 italic animate-pulse">Loading users…</td></tr></tbody>
                     </table>
                 </div>
@@ -5882,6 +5883,44 @@ function onCloudNacGroupPick(sel) {
     const nameEl = document.getElementById('cn-group-name'); if (nameEl) nameEl.value = (opt && opt.getAttribute('data-name')) || '';
 }
 
+// Allowed-group picker for SSO (Setup → Azure → SSO). Reuses /setup/oidc/groups
+// — the same Entra directory list Cloud NAC's picker uses — so the admin
+// picks a group instead of pasting its object ID. On pick, the object ID is
+// written into the oidc-group input; the delegated change listener on
+// oidc-group-select (in _oidcSaveFnFor) then fires saveOidcConfig.
+async function loadOidcGroupPicker() {
+    const btn = document.getElementById('oidc-group-btn');
+    const sel = document.getElementById('oidc-group-select');
+    const msg = document.getElementById('oidc-group-msg');
+    if (!sel) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+    try {
+        const res = await setupFetch('/setup/oidc/groups');
+        const d = await res.json().catch(() => ({}));
+        const groups = (d && d.groups) || [];
+        if (!groups.length) {
+            if (msg) { msg.textContent = (d && d.warning) || 'No Entra groups returned (needs Graph Group.Read.All + a generated cert).'; msg.classList.remove('hidden'); }
+            sel.classList.add('hidden');
+        } else {
+            sel.innerHTML = '<option value="">— select an Entra group —</option>' +
+                groups.map(g => `<option value="${escapeHtml(g.id)}" data-name="${escapeHtml(g.displayName)}">${escapeHtml(g.displayName)} — ${escapeHtml(g.id)}</option>`).join('');
+            sel.classList.remove('hidden');
+            if (msg) msg.classList.add('hidden');
+        }
+    } catch (e) {
+        if (msg) { msg.textContent = 'Failed to load Entra groups: ' + (e.message || e); msg.classList.remove('hidden'); }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Pick from Entra'; }
+    }
+}
+function onOidcGroupPick(sel) {
+    const id = sel.value;
+    if (!id) return;
+    const idEl = document.getElementById('oidc-group');
+    if (idEl) idEl.value = id;
+    // the delegated change listener on oidc-group-select fires saveOidcConfig
+}
+
 async function saveCloudNac() {
     const btn = document.getElementById('cn-save-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
@@ -6447,7 +6486,15 @@ function _renderSettingsSsoTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Directory (tenant) ID</label><input id="oidc-tenant" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Application (client) ID</label><input id="oidc-client" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Redirect URI</label><input id="oidc-redirect" type="text" placeholder="https://your-hub/auth/oidc/callback" class="${inputCls}"></div>
-                <div class="space-y-1"><label class="${labelCls}">Allowed group (object ID, optional)</label><input id="oidc-group" type="text" placeholder="Entra group object ID — gate access" class="${inputCls}"></div>
+                <div class="space-y-1">
+                    <label class="${labelCls}">Allowed group (object ID, optional)</label>
+                    <div class="flex gap-2">
+                        <input id="oidc-group" type="text" placeholder="Entra group object ID — gate access" class="${inputCls} font-mono text-xs flex-1">
+                        <button type="button" onclick="loadOidcGroupPicker()" id="oidc-group-btn" class="whitespace-nowrap bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold">Pick from Entra</button>
+                    </div>
+                    <select id="oidc-group-select" onchange="onOidcGroupPick(this)" class="hidden w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></select>
+                    <p id="oidc-group-msg" class="text-[11px] text-amber-600 hidden"></p>
+                </div>
             </div>
             <div class="mt-3 rounded-md border border-slate-200 bg-slate-50 p-3">
                 <div class="flex items-center justify-between gap-2 flex-wrap">
@@ -9396,9 +9443,11 @@ async function loadUsers() {
             const check = (key) => perms[key] ?
                 `<svg class="w-4 h-4 text-green-500 mx-auto" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg>` :
                 `<div class="w-4 h-4 rounded-full border-2 border-slate-200 mx-auto"></div>`;
-            const authBadge = (user.auth_type === 'ldap')
-                ? `<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium">LDAP</span>`
-                : `<span class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">Local</span>`;
+            const authBadge = (user.auth_type === 'entra')
+                ? `<span class="text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded font-medium">Entra</span>`
+                : (user.auth_type === 'ldap')
+                    ? `<span class="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium">LDAP</span>`
+                    : `<span class="text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">Local</span>`;
             const tenantBadges = (user.tenants || []).map(t =>
                 `<span class="text-[10px] bg-green-50 text-green-700 border border-green-200 px-1.5 py-0.5 rounded font-mono cursor-pointer hover:bg-green-100" onclick="viewAsTenant('${t}')">${t}</span>`
             ).join(' ') || '<span class="text-[10px] text-slate-300 italic">none</span>';
@@ -9419,9 +9468,19 @@ async function loadUsers() {
                     : `<button onclick="editUser('${userId}')" class="text-blue-400 hover:text-blue-600 text-xs font-bold mr-3">Edit</button>
                        <button onclick="deleteUser('${userId}')" class="text-red-400 hover:text-red-600 text-xs font-bold" title="Permanently delete this user account">Delete</button>`;
 
+            // Resolve a human label for directory (Entra/LDAP) users from the
+            // stored name/email; local users have only their username → show it
+            // prominently as before, with the oid as a small subtitle otherwise.
+            const nameLine = user.name ? `<div class="text-sm text-slate-800">${escapeHtml(user.name)}</div>` : '';
+            const emailLine = (user.email && user.email !== user.name) ? `<div class="text-xs text-slate-500">${escapeHtml(user.email)}</div>` : '';
+            const oidLine = `<div class="font-mono text-[10px] text-slate-400">${userId}${isProtected ? lockIcon : ''}</div>`;
+            const userCell = (nameLine || emailLine)
+                ? `${nameLine}${emailLine}${oidLine}`
+                : `<div class="font-mono text-xs font-medium text-slate-700">${userId}${isProtected ? lockIcon : ''}</div>`;
+
             return `
                 <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-4 py-3 font-mono text-xs font-medium text-slate-700">${userId}${isProtected ? lockIcon : ''}</td>
+                    <td class="px-4 py-3">${userCell}</td>
                     <td class="px-4 py-3">${authBadge}</td>
                     <td class="px-4 py-3 max-w-[140px]"><div class="flex flex-wrap gap-1">${tenantBadges}</div></td>
                     <td class="px-4 py-3 max-w-[140px]"><div class="flex flex-wrap gap-1">${groupBadges}</div></td>
