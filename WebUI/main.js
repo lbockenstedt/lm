@@ -14613,16 +14613,18 @@ function _leDevRepId(domain, mt, id) {
 function leFleetDetail(domain, tgts) {
     const fleet = (tgts || []).filter(t => _LE_FLEET_TYPES.includes(String(t.module_type || '')));
     if (!fleet.length) return '';
-    return fleet.map(t => {
-        const cid = _leDevRepId(domain, t.module_type, t.identifier || '');
-        const lbl = `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`;
-        return `<div class="w-full mt-1.5 basis-full">
-            <button onclick="toggleLeFleetDetail('${escJsAttr(domain)}','${escJsAttr(t.module_type)}','${escJsAttr(t.identifier || '')}')" class="text-sm font-medium text-slate-600 hover:text-slate-800 flex items-center gap-1.5" title="Show the devices this spoke manages + their cert status">
-                <span id="${cid}-caret" class="inline-block w-2.5">▸</span> Devices managed by ${escapeHtml(lbl)}
-            </button>
-            <div id="${cid}" class="hidden mt-1 ml-3 pl-2 border-l-2 border-slate-100"></div>
-        </div>`;
-    }).join('');
+    // ONE consolidated "All devices" section pinned at the bottom — the operator
+    // wants to see + deploy to the individual switches/gateways, not the spokes
+    // that manage them. Uses the (spoke-level) nw target; the backend returns the
+    // whole live fleet regardless of which spoke owns it.
+    const t = fleet[0];
+    const cid = _leDevRepId(domain, t.module_type, t.identifier || '');
+    return `<div class="w-full mt-3 pt-2 basis-full border-t border-slate-200">
+        <button onclick="toggleLeFleetDetail('${escJsAttr(domain)}','${escJsAttr(t.module_type)}','${escJsAttr(t.identifier || '')}')" class="text-sm font-semibold text-slate-600 hover:text-slate-800 flex items-center gap-1.5" title="Show every network device + its cert status; deploy the cert per device">
+            <span id="${cid}-caret" class="inline-block w-2.5">▸</span> All devices
+        </button>
+        <div id="${cid}" class="hidden mt-2 ml-3 pl-2 border-l-2 border-slate-100"></div>
+    </div>`;
 }
 function _leRenderDeviceTable(d) {
     const devs = d.devices || [];
