@@ -865,6 +865,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # control tuples ("ready"/"error"/"disconnect"); VNC_FRAME_DOWN sends
         # the other way via send_to_spoke_command (fire-and-forget). 60s TTL.
         self.vnc_sessions: Dict[str, Dict[str, Any]] = {}
+        # Host-shell (xterm terminal) sessions: session_id → {queue, expires,
+        # connected, ws_token, spoke_id, agent_id, tenant_id}. Fed by SHELL_OUT
+        # via _handle_agent_relay_up; browser keystrokes go down as SHELL_IN.
+        self.shell_sessions: Dict[str, Dict[str, Any]] = {}
         # Console serial sessions (Console role): session_id →
         # {queue, expires, connected, ws_token, spoke_id, tenant_id, port_id}. The
         # browser /ws/console-serial relay reads device→browser bytes off ``queue``
@@ -3283,6 +3287,26 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             elif _orig_type == "VNC_ERROR" and _sess:
                 await _sess["queue"].put(("error", str(_vnc_data.get("error", "vnc error"))[:300]))
             elif _orig_type == "VNC_DISCONNECT" and _sess:
+                await _sess["queue"].put(("disconnect",))
+            return True
+
+        # --- Host-shell (xterm terminal) relay (agent-terminates-PTY) ---
+        # Same shape as VNC: SHELL_OUT (PTY→browser bytes, b64), SHELL_READY
+        # (PTY up), SHELL_ERROR, SHELL_DISCONNECT (bash exited / torn down).
+        if _orig_type and _orig_type.startswith("SHELL_"):
+            _sh_data = original_msg.get("payload", {}).get("data", {}) or {}
+            _sid = _sh_data.get("session_id")
+            _sess = self.get_shell_session(_sid) if _sid else None
+            if _orig_type == "SHELL_OUT" and _sess:
+                try:
+                    await _sess["queue"].put(base64.b64decode(_sh_data.get("data") or ""))
+                except Exception:
+                    pass
+            elif _orig_type == "SHELL_READY" and _sess:
+                await _sess["queue"].put(("ready",))
+            elif _orig_type == "SHELL_ERROR" and _sess:
+                await _sess["queue"].put(("error", str(_sh_data.get("error", "shell error"))[:300]))
+            elif _orig_type == "SHELL_DISCONNECT" and _sess:
                 await _sess["queue"].put(("disconnect",))
             return True
 

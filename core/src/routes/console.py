@@ -110,6 +110,102 @@ def register(app, hub, ctx):
                 except Exception:
                     pass
 
+    @app.websocket("/ws/console-shell/{session_id}")
+    async def pxmx_shell_ws(websocket: WebSocket, session_id: str):
+        """Browser↔host-PTY byte relay (agent-terminates-PTY) — the xterm terminal.
+        Mirrors /ws/console (VNC): browser keystrokes → SHELL_IN; PTY output
+        (SHELL_OUT, queued via _handle_agent_relay_up) → browser bytes. A JSON text
+        frame ``{"resize":{"rows","cols"}}`` becomes SHELL_RESIZE. ws_token gated."""
+        token = websocket.query_params.get("token") or ""
+        hub = app.state.hub
+        sess = hub.get_shell_session(session_id)
+        if not sess or sess.get("ws_token") != token:
+            await websocket.accept()
+            await websocket.close(code=4401, reason="invalid or expired shell session")
+            return
+        spoke_id = sess["spoke_id"]
+        queue = sess["queue"]
+        sess["connected"] = True
+        await websocket.accept()
+        relay_tasks: list = []
+        try:
+            async def browser_to_spoke():
+                while True:
+                    msg = await websocket.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        raise WebSocketDisconnect(code=msg.get("code", 1000))
+                    raw = msg.get("bytes")
+                    if raw is None:
+                        text = msg.get("text")
+                        if not text:
+                            continue
+                        # A JSON control frame carries a window resize; anything
+                        # else is treated as keystroke text.
+                        try:
+                            ctl = json.loads(text)
+                        except Exception:
+                            ctl = None
+                        if isinstance(ctl, dict) and "resize" in ctl:
+                            r = ctl.get("resize") or {}
+                            await hub.send_to_spoke_command(spoke_id, "SHELL_RESIZE", {
+                                "session_id": session_id,
+                                "rows": r.get("rows", 24), "cols": r.get("cols", 80),
+                            })
+                            continue
+                        raw = text.encode()
+                    await hub.send_to_spoke_command(spoke_id, "SHELL_IN", {
+                        "session_id": session_id,
+                        "data": base64.b64encode(raw).decode(),
+                    })
+
+            async def spoke_to_browser():
+                while True:
+                    item = await queue.get()
+                    if isinstance(item, (bytes, bytearray)):
+                        await websocket.send_bytes(bytes(item))
+                    elif isinstance(item, tuple) and item:
+                        kind = item[0]
+                        if kind == "error":
+                            await websocket.close(code=1011, reason=str(item[1]))
+                            return
+                        if kind == "disconnect":
+                            await websocket.close(code=1000, reason="shell closed")
+                            return
+                        continue  # "ready" — keep draining
+                    else:
+                        return
+
+            relay_tasks = [asyncio.create_task(browser_to_spoke()),
+                           asyncio.create_task(spoke_to_browser())]
+            done, pending = await asyncio.wait(relay_tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*relay_tasks, return_exceptions=True)
+            for task in done:
+                exc = task.exception()
+                if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
+                    raise exc
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:
+            logger.warning("shell ws %s relay failed: %s", session_id, exc)
+        finally:
+            hub.unregister_shell_session(session_id)
+            try:
+                await hub.send_to_spoke_command(spoke_id, "SHELL_DISCONNECT", {"session_id": session_id})
+            except Exception:
+                pass
+            for task in relay_tasks:
+                if not task.done():
+                    task.cancel()
+            if relay_tasks:
+                await asyncio.gather(*relay_tasks, return_exceptions=True)
+            if websocket.application_state != WebSocketState.DISCONNECTED:
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+
     # ── Console role: serial console access (/api/console/*, /ws/console-serial) ──
     def _console_unwrap(result):
         """request_response envelope → the spoke's inner data dict."""

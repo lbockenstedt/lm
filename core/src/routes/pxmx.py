@@ -701,6 +701,65 @@ def register(app, hub, ctx):
             logger.exception("get_pxmx_vms failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/api/pxmx/shell")
+    async def pxmx_create_shell(request: Request):
+        """Interactive host shell (xterm terminal) on a Proxmox node — spawns a
+        root PTY bash on the host via the agent. GATED: opt-in toggle
+        (global_config['pxmx']['host_shell_enabled'], OFF by default) + Global
+        Admin (any host) or Tenant Admin (own tenant's hypervisor only) + audit.
+        Mints a session + ws_token; the browser connects to
+        /ws/console-shell/{session_id}?token=."""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        hub = app.state.hub
+        gc = (hub.state.get_global_config().get("pxmx", {}) or {})
+        if not gc.get("host_shell_enabled", False):
+            raise HTTPException(status_code=403,
+                                detail="Host shell is disabled — enable it in Setup → Hypervisors")
+        is_ga = _is_admin(sess)
+        if not (is_ga or access.is_tenant_admin(sess)):
+            raise HTTPException(status_code=403, detail="Global or Tenant Admin required for the host shell")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        agent_id = str((body or {}).get("agent_id") or "").strip()
+        unique_id = str((body or {}).get("unique_id") or "").strip()
+        pxmx_spoke = (hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
+                      if agent_id else None) or hub.get_hypervisor_spoke()
+        if not pxmx_spoke:
+            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        tenant_id = sess.get("tenant_id") or ""
+        if not is_ga:
+            spoke_tenant = hub.state.get_spoke_tenant(pxmx_spoke) or ""
+            if spoke_tenant and spoke_tenant != tenant_id:
+                raise HTTPException(status_code=403, detail="not your tenant's hypervisor")
+        session_id = str(uuid.uuid4())
+        ws_token = secrets.token_urlsafe(32)
+        hub.register_shell_session(session_id, {
+            "spoke_id": pxmx_spoke, "tenant_id": tenant_id,
+            "agent_id": agent_id, "ws_token": ws_token,
+        })
+        logger.info("AUDIT host-shell OPEN user=%s tenant=%s spoke=%s agent=%s session=%s",
+                    sess.get("username") or sess.get("user_id"), tenant_id or "-",
+                    pxmx_spoke, agent_id or "-", session_id)
+        try:
+            res = await hub.request_response(pxmx_spoke, "SHELL_START", {
+                "session_id": session_id, "unique_id": unique_id,
+                "agent_id": agent_id, "target_agent_id": agent_id,
+            }, timeout=30.0)
+        except Exception as e:
+            hub.unregister_shell_session(session_id)
+            logger.exception("pxmx_create_shell SHELL_START failed")
+            raise HTTPException(status_code=502, detail=f"failed to start shell: {e}")
+        data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+        if isinstance(data, dict) and data.get("status") == "ERROR":
+            hub.unregister_shell_session(session_id)
+            raise HTTPException(status_code=502, detail=data.get("message", "agent refused SHELL_START"))
+        return {"session_id": session_id, "ws_token": ws_token,
+                "ws_url": f"/ws/console-shell/{session_id}"}
+
     @app.post("/api/pxmx/console")
     async def pxmx_create_console(request: Request):
         """Hypervisors view VNC console — create a console session for a VM.

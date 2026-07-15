@@ -74,6 +74,32 @@ class HubVncConsoleMixin:
     def unregister_console_session(self, session_id: str) -> None:
         self.console_sessions.pop(session_id, None)
 
+    # ── Host-shell (xterm terminal) sessions — agent-terminates-PTY ───────────
+    # Same shape as the console session: a byte queue fed by SHELL_OUT frames via
+    # _handle_agent_relay_up; browser keystrokes go out as SHELL_IN. TTL applies
+    # only until the browser connects (an idle shell sits at a prompt for ages).
+    SHELL_SESSION_TTL = 60
+
+    def register_shell_session(self, session_id: str, meta: Dict[str, Any]) -> None:
+        self.shell_sessions[session_id] = {
+            "queue": asyncio.Queue(),
+            "expires": time.time() + self.SHELL_SESSION_TTL,
+            "connected": False,
+            **meta,
+        }
+
+    def get_shell_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        sess = self.shell_sessions.get(session_id)
+        if not sess:
+            return None
+        if not sess.get("connected") and sess.get("expires", 0) < time.time():
+            self.shell_sessions.pop(session_id, None)
+            return None
+        return sess
+
+    def unregister_shell_session(self, session_id: str) -> None:
+        self.shell_sessions.pop(session_id, None)
+
     async def _handle_console_probe(self, spoke_id: str, data: Dict[str, Any]) -> None:
         """A console spoke auto-identified a device — match/create a NetBox device
         from the harvested identity (best-effort, event-driven). Uses the port's

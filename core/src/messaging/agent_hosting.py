@@ -507,6 +507,13 @@ class AgentHostingControlPlane(BaseControlPlane):
                     # VNC_FRAME_UP). No Future involved — one-way.
                     await self._relay_agent_msg_up(agent_id, msg_type, data)
 
+                elif msg_type and msg_type.startswith("SHELL_"):
+                    # Host-shell (xterm terminal) frames from the agent (SHELL_OUT
+                    # / SHELL_READY / SHELL_ERROR / SHELL_DISCONNECT) — relayed up
+                    # exactly like VNC_*; the hub routes them to the browser shell
+                    # WS for the session (session_id + b64 bytes on SHELL_OUT).
+                    await self._relay_agent_msg_up(agent_id, msg_type, data)
+
         except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
             # Expected disconnect — the agent rebooted, the network blipped,
             # or the spoke restarted. The finally below removes it from
