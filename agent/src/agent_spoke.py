@@ -15,6 +15,18 @@ from typing import Dict, Any, Optional
 # + AgentControlPlane._extra_auth_fields).
 _NETBOX_INSTALL_CERT_HELPER = "/usr/local/bin/lm-netbox-install-cert"
 
+# NetBox app layout on a netbox-server host (deployed by netbox/install.sh
+# --infra-only). Used by the NETBOX_APPLY_SSO handler to apply Entra SSO live
+# (the agent runs as root here) without a full installer re-run.
+_NETBOX_APP_DIR = "/opt/netbox-app"
+_NETBOX_CONFIG_PY = "/opt/netbox-app/netbox/netbox/configuration.py"
+_NETBOX_SSO_PIPELINE = "/opt/netbox-app/netbox/lm_sso_pipeline.py"
+_NETBOX_VENV_PIP = "/opt/netbox-app/venv/bin/pip"
+# Sentinel delimiters — MUST match netbox/install.sh's LMSSOCFG helper so a later
+# install.sh --netbox-sso-* re-run sees the block as its own and replaces in place.
+_NB_SSO_BEGIN = "# --- BEGIN LM SSO (Entra ID / OIDC) managed by install.sh --netbox-sso-* ---"
+_NB_SSO_END = "# --- END LM SSO ---"
+
 try:
     from base_spoke import BaseSpoke
 except ImportError:
@@ -503,6 +515,118 @@ class GenericAgent(BaseSpoke):
                     try: os.unlink(p)
                     except OSError: pass
 
+    def _render_netbox_sso_block(self, d: Dict[str, Any]) -> str:
+        """Build the sentinel-delimited SSO block for configuration.py, byte-for-
+        byte compatible with netbox/install.sh's LMSSOCFG helper."""
+        import json as _json
+        tenant = str(d.get("tenant") or "")
+        endpoint = "https://login.microsoftonline.com/%s/v2.0" % tenant
+        group_map = d.get("group_map") or {}
+        if not isinstance(group_map, dict):
+            group_map = {}
+        group_map = {str(k): str(v) for k, v in group_map.items()}
+        redirect_uri = str(d.get("redirect_uri") or "")
+        lines = [
+            _NB_SSO_BEGIN,
+            "# Do not edit by hand — re-run install.sh with --netbox-sso-* flags to change.",
+            "REMOTE_AUTH_ENABLED = True",
+            "REMOTE_AUTH_BACKEND = ['social_core.backends.openid_connect.OpenIdConnectAuth']",
+            "REMOTE_AUTH_AUTO_CREATE_USER = True",
+            "REMOTE_AUTH_AUTO_CREATE_GROUPS = True",
+            "SOCIAL_AUTH_OIDC_OIDC_ENDPOINT = %s" % repr(endpoint),
+            "SOCIAL_AUTH_OIDC_KEY = %s" % repr(str(d.get("client_id") or "")),
+            "SOCIAL_AUTH_OIDC_SECRET = %s" % repr(str(d.get("client_secret") or "")),
+            "SOCIAL_AUTH_OIDC_SCOPE = ['openid', 'profile', 'email', 'offline_access']",
+            "SOCIAL_AUTH_OIDC_USERNAME_KEY = 'preferred_username'",
+            "NETBOX_SSO_GROUP_MAP = %s" % _json.dumps(group_map),
+            "NETBOX_SSO_ALLOWED_GROUP = %s" % repr(str(d.get("allowed_group") or "")),
+        ]
+        if redirect_uri:
+            lines.append("# Redirect URI registered in Entra: %s" % redirect_uri)
+        lines += [
+            "SOCIAL_AUTH_PIPELINE = (",
+            "    'social_core.pipeline.social_auth.social_details',",
+            "    'social_core.pipeline.social_auth.social_uid',",
+            "    'social_core.pipeline.social_auth.auth_allowed',",
+            "    'social_core.pipeline.social_auth.social_user',",
+            "    'social_core.pipeline.user.get_username',",
+            "    'social_core.pipeline.user.create_user',",
+            "    'social_core.pipeline.social_auth.associate_user',",
+            "    'social_core.pipeline.social_auth.load_extra_data',",
+            "    'social_core.pipeline.user_details',",
+            "    'lm_sso_pipeline.sync_entra_groups',",
+            ")",
+            _NB_SSO_END,
+        ]
+        return "\n".join(lines) + "\n"
+
+    async def _apply_netbox_sso(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Write/replace/remove the Entra SSO block in NetBox's configuration.py
+        and restart NetBox. Requires this to be a netbox-server host (the app +
+        lm_sso_pipeline.py must exist — deployed via install.sh --infra-only)."""
+        enabled = bool(data.get("enabled", True))
+        if not os.path.exists(_NETBOX_CONFIG_PY):
+            return {"status": "ERROR",
+                    "message": f"{_NETBOX_CONFIG_PY} not found — is this the netbox-server host?"}
+        if enabled:
+            for f in ("tenant", "client_id", "client_secret"):
+                if not str(data.get(f) or "").strip():
+                    return {"status": "ERROR", "message": f"missing {f} (required to enable SSO)"}
+            if not os.path.exists(_NETBOX_SSO_PIPELINE):
+                return {"status": "ERROR",
+                        "message": "lm_sso_pipeline.py missing — re-deploy the netbox-server role first"}
+            # Ensure the OIDC extra is present (idempotent, best-effort — the
+            # backend imports python-jose at load).
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    _NETBOX_VENV_PIP, "install", "social-auth-core[openidconnect]", "--no-cache-dir",
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                await asyncio.wait_for(proc.wait(), timeout=120.0)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("netbox-sso: pip extra install failed (continuing): %s", e)
+        try:
+            with open(_NETBOX_CONFIG_PY, "r") as f:
+                cur = f.read()
+        except OSError as e:
+            return {"status": "ERROR", "message": f"cannot read configuration.py: {e}"}
+        # Splice out any existing sentinel block first.
+        b = cur.find(_NB_SSO_BEGIN)
+        without = cur
+        if b != -1:
+            e = cur.find(_NB_SSO_END, b)
+            if e != -1:
+                e_end = cur.find("\n", e)
+                e_end = len(cur) if e_end == -1 else e_end + 1
+                without = cur[:b] + cur[e_end:]
+        if enabled:
+            new = without.rstrip() + "\n\n" + self._render_netbox_sso_block(data)
+        else:
+            new = without  # disable = remove the block
+        if new == cur:
+            return {"status": "SUCCESS", "message": "SSO config unchanged", "changed": False}
+        try:
+            tmp = _NETBOX_CONFIG_PY + ".lmtmp"
+            with open(tmp, "w") as f:
+                f.write(new)
+            os.replace(tmp, _NETBOX_CONFIG_PY)
+        except OSError as e:
+            return {"status": "ERROR", "message": f"cannot write configuration.py: {e}"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl", "restart", "netbox", "netbox-rq",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, err_b = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            if proc.returncode != 0:
+                return {"status": "ERROR",
+                        "message": f"config written but restart failed: {(err_b or b'').decode(errors='replace')[:200]}"}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"config written but restart failed: {e}"}
+        logger.info("netbox-sso: %s SSO on this NetBox host + restarted.",
+                    "ENABLED" if enabled else "DISABLED")
+        return {"status": "SUCCESS",
+                "message": f"SSO {'enabled' if enabled else 'disabled'} on netbox-server + restarted",
+                "changed": True}
+
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         cmd = command_type.upper()
 
@@ -517,6 +641,15 @@ class GenericAgent(BaseSpoke):
             # files, and hand them to the root helper (same contract as the
             # netbox spoke) which atomically swaps + reloads nginx.
             return await self._install_netbox_cert(data)
+
+        if cmd == "NETBOX_APPLY_SSO":
+            # Apply (or remove) Entra ID OIDC SSO on this host's NetBox live —
+            # the agent is root here and the netbox-server deploy already placed
+            # the app + SSO pipeline. Writes the SAME sentinel block install.sh
+            # --netbox-sso-* writes (so a later installer re-run stays in sync),
+            # then restarts NetBox. Reuses the LM hub's Entra app (tenant +
+            # client_id) with a client secret the hub supplies.
+            return await self._apply_netbox_sso(data)
 
         if cmd == "GET_AVAILABLE_ROLES":
             return {"status": "SUCCESS",

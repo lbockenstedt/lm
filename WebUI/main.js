@@ -1248,9 +1248,9 @@ const VIEW_CHILDREN = {
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],
     },
     settings: {
-        // Azure gets a second-tier strip (SSO / NSG / Cloud NAC / Key Vault) —
-        // they share the one Entra app registration + cert.
-        'Azure': ['SSO', 'NSG', 'Cloud NAC', 'Key Vault'],
+        // Azure gets a second-tier strip (SSO / NSG / Cloud NAC / Key Vault /
+        // NetBox SSO) — they share the one Entra app registration + cert.
+        'Azure': ['SSO', 'NSG', 'Cloud NAC', 'Key Vault', 'NetBox SSO'],
     },
 };
 
@@ -3590,10 +3590,11 @@ function _renderSettingsSection(subMenu) {
     // provides SSO / NSG / Cloud NAC, which share the SSO app registration + cert.
     // Render the active child's tile (currentSubChild) into the settings content.
     if (subMenu === 'Azure') {
-        const child = ['SSO', 'NSG', 'Cloud NAC', 'Key Vault'].includes(currentSubChild) ? currentSubChild : 'SSO';
+        const child = ['SSO', 'NSG', 'Cloud NAC', 'Key Vault', 'NetBox SSO'].includes(currentSubChild) ? currentSubChild : 'SSO';
         if (child === 'NSG') _renderSettingsAzureNsgTile(content);
         else if (child === 'Cloud NAC') _renderSettingsCloudNacTile(content);
         else if (child === 'Key Vault') _renderSettingsKeyVaultTile(content);
+        else if (child === 'NetBox SSO') _renderSettingsNetboxSsoTile(content);
         else _renderSettingsSsoTile(content);
         return;
     }
@@ -5992,6 +5993,125 @@ window.testKeyVault = testKeyVault; window.saveKeyVault = saveKeyVault;
 window.rotateKeyVaultAdmin = rotateKeyVaultAdmin; window.pushKeyVaultFernet = pushKeyVaultFernet;
 window.backupKeyVaultNow = backupKeyVaultNow; window.downloadKeyVaultMin = downloadKeyVaultMin;
 window.restoreKeyVaultFromFile = restoreKeyVaultFromFile; window.restoreKeyVaultFromVault = restoreKeyVaultFromVault;
+
+// ── Settings → Azure → NetBox SSO (reuse the LM Entra app for NetBox) ───────
+// Reuses the hub's Entra tenant/client_id; NetBox needs a client SECRET on that
+// same app (its OIDC backend can't use the cert). Pushes the config to the
+// netbox-server host's agent, which applies it live + restarts NetBox.
+function _renderSettingsNetboxSsoTile(content) {
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NetBox SSO — reuse the LM Entra app</h3>
+                <span id="nbsso-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">Log into <b>NetBox</b> with the <b>same Entra app</b> the LM hub uses (same tenant + client ID — the same accounts). NetBox's OIDC backend can't use the hub's certificate, so on that <b>same app registration</b> in Azure you add: (1) redirect URI <code>https://&lt;netbox-host&gt;/oauth/complete/oidc/</code>, and (2) one <b>client secret</b> (paste it below). LM pushes the config to the netbox-server host's agent, which applies it live and restarts NetBox.</p>
+            <div id="nbsso-oidc-warn" class="hidden text-xs text-amber-600 border border-amber-200 bg-amber-50 rounded-md p-2 mb-3"></div>
+            <div id="nbsso-target-warn" class="hidden text-xs text-amber-600 border border-amber-200 bg-amber-50 rounded-md p-2 mb-3"></div>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="nbsso-enabled" class="w-4 h-4 text-green-600 rounded">Enable Entra SSO on NetBox</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Tenant ID <span class="text-slate-400 normal-case font-normal">(from hub SSO)</span></label><input id="nbsso-tenant" type="text" readonly class="${inputCls} font-mono text-xs bg-slate-50"></div>
+                <div class="space-y-1"><label class="${labelCls}">Client ID <span class="text-slate-400 normal-case font-normal">(from hub SSO)</span></label><input id="nbsso-client" type="text" readonly class="${inputCls} font-mono text-xs bg-slate-50"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Client secret <span class="text-slate-400 normal-case font-normal">(add on the LM app in Azure)</span></label><input id="nbsso-secret" type="password" placeholder="paste the client secret" class="${inputCls} font-mono text-xs" autocomplete="new-password"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Redirect URI</label><input id="nbsso-redirect" type="text" placeholder="https://<netbox-host>/oauth/complete/oidc/" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Restrict login to Entra group <span class="text-slate-400 normal-case font-normal">(optional — object ID)</span></label><input id="nbsso-allowed" type="text" placeholder="group object ID (blank = any user in tenant)" class="${inputCls} font-mono text-xs"></div>
+            </div>
+            <div class="mt-4">
+                <div class="flex items-center justify-between mb-1">
+                    <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider">Entra group → NetBox group map</div>
+                    <button type="button" onclick="nbssoSeedGroupMap()" class="text-[#01A982] hover:underline text-xs font-bold">Seed from Permission Groups</button>
+                </div>
+                <p class="text-[11px] text-slate-400 mb-2">Each login sets the user's NetBox groups to exactly the mapped set. Left = Entra group object ID, right = NetBox group name.</p>
+                <div id="nbsso-map-rows" class="space-y-2"></div>
+                <button type="button" onclick="nbssoAddMapRow()" class="mt-2 text-xs font-bold text-slate-500 hover:text-slate-700">+ Add mapping</button>
+            </div>
+            <div class="mt-4 flex items-center justify-between gap-3">
+                <span id="nbsso-msg" class="text-xs text-slate-400"></span>
+                <button onclick="saveNetboxSso()" id="nbsso-save-btn" class="${btnCls}">Save &amp; Apply</button>
+            </div>
+        </div>`;
+    loadNetboxSso();
+}
+
+function _nbssoMapRow(k = '', v = '') {
+    const { inputCls } = _SETUP_CLS;
+    return `<div class="flex gap-2 nbsso-map-row">
+        <input type="text" value="${escapeHtml(k)}" placeholder="Entra group object ID" class="${inputCls} font-mono text-xs flex-1 nbsso-map-k">
+        <input type="text" value="${escapeHtml(v)}" placeholder="NetBox group name" class="${inputCls} text-xs flex-1 nbsso-map-v">
+        <button type="button" onclick="this.closest('.nbsso-map-row').remove()" class="text-red-500 hover:text-red-700 font-bold px-2">✕</button>
+    </div>`;
+}
+function nbssoAddMapRow() { const box = document.getElementById('nbsso-map-rows'); if (box) box.insertAdjacentHTML('beforeend', _nbssoMapRow()); }
+function _nbssoRenderMap(map) {
+    const box = document.getElementById('nbsso-map-rows'); if (!box) return;
+    const entries = Object.entries(map || {});
+    box.innerHTML = entries.length ? entries.map(([k, v]) => _nbssoMapRow(k, v)).join('') : _nbssoMapRow();
+}
+function _nbssoCollectMap() {
+    const map = {};
+    document.querySelectorAll('#nbsso-map-rows .nbsso-map-row').forEach(row => {
+        const k = (row.querySelector('.nbsso-map-k')?.value || '').trim();
+        const v = (row.querySelector('.nbsso-map-v')?.value || '').trim();
+        if (k && v) map[k] = v;
+    });
+    return map;
+}
+
+async function loadNetboxSso() {
+    try {
+        const r = await setupFetch('/setup/netbox-sso');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {}, oidc = d.oidc || {};
+        window.__nbssoSuggested = d.suggested_group_map || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
+        const en = document.getElementById('nbsso-enabled'); if (en) en.checked = !!c.enabled;
+        set('nbsso-tenant', oidc.tenant_id); set('nbsso-client', oidc.client_id);
+        set('nbsso-redirect', c.redirect_uri); set('nbsso-allowed', c.allowed_group);
+        const secEl = document.getElementById('nbsso-secret');
+        if (secEl) secEl.placeholder = c.secret_set ? '•••••••• (stored — leave blank to keep)' : 'paste the client secret';
+        _nbssoRenderMap(c.group_map);
+        const pill = document.getElementById('nbsso-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        const ow = document.getElementById('nbsso-oidc-warn');
+        if (ow) { if (!oidc.configured) { ow.textContent = 'Hub Entra SSO is not configured yet — set it up in Settings → Azure → SSO first (NetBox reuses its tenant + client ID).'; ow.classList.remove('hidden'); } else ow.classList.add('hidden'); }
+        const tw = document.getElementById('nbsso-target-warn');
+        if (tw) { if (!(d.netbox_server_agents || []).length) { tw.textContent = 'No connected netbox-server host found. The agent that deployed the "NetBox Server" role must be online to receive the SSO config (it will be queued until then).'; tw.classList.remove('hidden'); } else tw.classList.add('hidden'); }
+    } catch (e) { console.error('loadNetboxSso failed', e); }
+}
+
+function nbssoSeedGroupMap() {
+    const sug = window.__nbssoSuggested || {};
+    if (!Object.keys(sug).length) { showToast('No Permission Groups with an Entra Directory Group set.', 'error'); return; }
+    const cur = _nbssoCollectMap();
+    _nbssoRenderMap({ ...sug, ...cur });
+    showToast('Seeded from Permission Groups — edit the NetBox group names as needed.', 'success');
+}
+
+async function saveNetboxSso() {
+    const btn = document.getElementById('nbsso-save-btn');
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    const cfg = {
+        enabled: !!document.getElementById('nbsso-enabled')?.checked,
+        redirect_uri: v('nbsso-redirect'),
+        allowed_group: v('nbsso-allowed'),
+        group_map: _nbssoCollectMap(),
+    };
+    const secret = v('nbsso-secret');
+    if (secret) cfg.client_secret = secret;  // blank = keep stored
+    if (btn) btn.disabled = true;
+    try {
+        const r = await setupFetch('/setup/netbox-sso', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const msg = document.getElementById('nbsso-msg');
+        if (d.no_target) { if (msg) msg.textContent = 'Saved — queued (no netbox-server host online yet).'; showToast('Saved; will apply when the netbox-server host connects.', 'success'); }
+        else { if (msg) msg.textContent = `Applied to ${(d.pushed || []).length} host(s)${(d.queued || []).length ? ', queued ' + d.queued.length : ''}.`; showToast('NetBox SSO pushed to the netbox-server host.', 'success'); }
+        loadNetboxSso();
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) btn.disabled = false; }
+}
+window.nbssoAddMapRow = nbssoAddMapRow; window.nbssoSeedGroupMap = nbssoSeedGroupMap; window.saveNetboxSso = saveNetboxSso;
 
 // ── Settings → Azure NSG (alias-style allow-list) ───────────────────────────
 // Manage one allow rule in an Azure NSG as an IP allow-list. Reuses the SSO
