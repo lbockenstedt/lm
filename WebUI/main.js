@@ -3774,6 +3774,52 @@ function _settingsSaveFnFor(el) {
     return null;
 }
 
+// ── Allowlist mappers for the id-based Setup/Settings tiles ────────────────
+// These tiles share a prefix with non-save fields (test inputs, action buttons,
+// restore/cert controls, status display), so a prefix match would auto-save on
+// the wrong element. Each mapper lists exactly the ids its handler collects.
+
+function _cloudNacSaveFnFor(el) {
+    const id = (el && el.id) || '';
+    if (['cn-enabled', 'cn-domain', 'cn-idle', 'cn-group-id', 'cn-group-name', 'cn-group-select'].includes(id))
+        return saveCloudNac;
+    return null;
+}
+
+function _keyVaultSaveFnFor(el) {
+    const id = (el && el.id) || '';
+    if (['kv-enabled', 'kv-url', 'kv-rotate', 'kv-retain',
+         'kv-admin-secret', 'kv-fernet-secret', 'kv-prefix'].includes(id))
+        return saveKeyVault;
+    return null;
+}
+
+function _oidcSaveFnFor(el) {
+    const id = (el && el.id) || '';
+    if (['oidc-enabled', 'oidc-tenant', 'oidc-client', 'oidc-redirect', 'oidc-group'].includes(id))
+        return saveOidcConfig;
+    return null;
+}
+
+function _selfBackupSaveFnFor(el) {
+    const id = (el && el.id) || '';
+    if (['sb-enabled', 'sb-interval', 'sb-keep', 'sb-encrypt', 'sb-include-env',
+         'sb-copy-enabled', 'sb-copy-mode', 'sb-copy-interval', 'sb-strict-hostkey',
+         'sb-ssh-host', 'sb-ssh-port', 'sb-ssh-user', 'sb-ssh-path', 'sb-ssh-keyfile'].includes(id))
+        return saveSelfBackupConfig;
+    return null;
+}
+
+// Simulations: both cards' fields are dynamic with data-* attributes (no id).
+// Quota defaults → data-sqd (+ data-sqd-idpick picker); Sharing → data-simshare
+// / data-simna. "+ Add Default" and "Hide N/A" carry none of these → no-op.
+function _simSaveFnFor(el) {
+    if (!el || !el.dataset) return null;
+    if (el.dataset.sqd != null || el.dataset.sqdIdpick != null) return saveSimQuotaDefaults;
+    if (el.dataset.simshare != null || el.dataset.simna != null) return saveSimSharing;
+    return null;
+}
+
 // Shared Tailwind class strings for every Setup tile. Hoisted to module scope
 // so each _renderSetup*Tile helper below destructures the same names
 // (`card`, `inputCls`, `labelCls`, `btnCls`, `btnSecCls`) that the original
@@ -4300,7 +4346,6 @@ function _renderSetupSelfBackupTile(content) {
                 </div>
                 <div class="mt-4 flex items-center justify-between gap-3">
                     <span class="text-xs text-slate-400">Archives are encrypted with the hub Fernet key — restore requires the same <code>LM_FERNET_KEY</code>.</span>
-                    <button onclick="saveSelfBackupConfig()" id="sb-save-btn" class="${btnCls}">Save</button>
                 </div>
             </div>
             <div class="${card}">
@@ -4346,9 +4391,6 @@ function _renderSetupSelfBackupTile(content) {
                         <input type="text" id="sb-ssh-keyfile" placeholder="/root/.ssh/lm_backup_id_ed25519" class="${inputCls}">
                     </div>
                 </div>
-                <div class="mt-4 flex justify-end">
-                    <button onclick="saveSelfBackupConfig()" id="sb-copy-save-btn" class="${btnCls}">Save</button>
-                </div>
             </div>
             <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Status &amp; Archives</h3>
@@ -4367,6 +4409,10 @@ function _renderSetupSelfBackupTile(content) {
             </div>
         `;
     loadSelfBackupStatus();
+    // Auto-save on change — one handler merges both the Schedule + SSH Copy
+    // cards, so an edit in either saves the whole self-backup config. The
+    // restore file input + action buttons are excluded by the allowlist mapper.
+    _attachAutoSave(content, _selfBackupSaveFnFor, 'selfBackupAutoSave');
 }
 
 function _sbFmtBytes(n) {
@@ -5134,7 +5180,6 @@ function _renderSetupSimulationsTile(content) {
                 <p class="text-xs text-slate-500 mb-3">Platform-wide default templates a tenant inherits unless it overrides per alert/insight + site in Config → Sim Quotas. Site blank = "all sites". The engine (Chunk 2) merges these with each tenant's overrides. Sims come from the full primitive catalog; a tenant's simulation.conf may offer a subset.</p>
                 <div class="flex justify-end flex-wrap gap-2 mb-3">
                     <button onclick="addSimQuotaDefault()" class="${btnCls} text-xs px-3 py-1">+ Add Default</button>
-                    <button onclick="saveSimQuotaDefaults()" class="${btnCls} text-xs px-3 py-1">Save Defaults</button>
                 </div>
                 <div id="sim-quota-defaults-rows" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
@@ -5143,7 +5188,6 @@ function _renderSetupSimulationsTile(content) {
                   <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Sharing (Stacking)</h3>
                   <div class="flex items-center gap-3">
                     <label class="text-[11px] text-slate-500 flex items-center gap-1"><input type="checkbox" onchange="simSharingToggleHide(this)"> Hide N/A</label>
-                    <button onclick="saveSimSharing()" class="${btnCls} text-xs px-3 py-1">Save Sharing</button>
                   </div>
                 </div>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide (all tenants): which simulations may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — no tenant's Quota Engine will pack it onto a client running other sims (authoritative, overrides a quota's Multi-capable). Mark a sim <b>N/A</b> to hide it via Hide N/A.</p>
@@ -5153,6 +5197,11 @@ function _renderSetupSimulationsTile(content) {
     loadSimAdminOverview();
     loadGlobalTierPci();
     loadSimQuotaDefaults();
+    // Auto-save on change. Both cards' fields are rendered dynamically with
+    // data-* attributes (no id): quota defaults use data-sqd (+ data-sqd-idpick
+    // picker), sharing uses data-simshare / data-simna. The mapper keys off
+    // those datasets; "+ Add Default" and "Hide N/A" are unaffected.
+    _attachAutoSave(content, _simSaveFnFor, 'simAutoSave');
 }
 
 // In-tile sub-tabs for Setup → Simulations: group USB / PCI / DHCP so the tile
@@ -5742,10 +5791,13 @@ function _renderSettingsCloudNacTile(content) {
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="cn-msg" class="text-xs text-slate-400"></span>
-                <button onclick="saveCloudNac()" id="cn-save-btn" class="${btnCls}">Save</button>
             </div>
         </div>`;
     loadCloudNac();
+    // Auto-save on change (allowlist mapper — the test-user field and action /
+    // display ids are excluded). Picking a group in cn-group-select runs its
+    // own onchange (fills cn-group-id/name) then this delegated save fires.
+    _attachAutoSave(content, _cloudNacSaveFnFor, 'cloudNacAutoSave');
 }
 
 async function loadCloudNac() {
@@ -5917,10 +5969,12 @@ function _renderSettingsKeyVaultTile(content) {
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="kv-msg" class="text-xs text-slate-400"></span>
-                <button onclick="saveKeyVault()" id="kv-save-btn" class="${btnCls}">Save</button>
             </div>
         </div>`;
     loadKeyVault();
+    // Auto-save on change (allowlist mapper — restore controls + backup-list
+    // display are excluded).
+    _attachAutoSave(content, _keyVaultSaveFnFor, 'keyVaultAutoSave');
 }
 
 async function loadKeyVault() {
@@ -6400,11 +6454,13 @@ function _renderSettingsSsoTile(content) {
             </div>
             <div class="mt-4 flex items-center justify-between gap-3">
                 <span id="oidc-save-msg" class="text-xs text-slate-400"></span>
-                <button onclick="saveOidcConfig()" id="oidc-save-btn" class="${btnCls}">Save</button>
             </div>
             <p class="text-[11px] text-slate-400 mt-2">The certificate + key are <em>auto-managed on the hub</em> (Generate above) — the WebUI never sees the key material. In Entra: register the app, add the redirect URI above, upload the generated certificate, and grant Graph <code>Group.Read.All</code> (app) for the group picker + the <code>GroupMember.Read.All</code> &gt;200-group fallback. Advanced: override the location with <code>LM_OIDC_DIR</code> / <code>LM_OIDC_CLIENT_KEY</code>.</p>
         </div>`;
     loadOidcConfig();
+    // Auto-save on change (allowlist mapper — cert-management controls are
+    // excluded; only the OIDC config fields auto-save).
+    _attachAutoSave(content, _oidcSaveFnFor, 'oidcAutoSave');
 }
 
 async function loadOidcConfig() {
