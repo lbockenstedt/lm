@@ -2080,11 +2080,24 @@ async function updateStatus() {
     // this tick instead of hammering a saturated loop.
     if (Date.now() < _statusBackoffUntil) return;
     try {
-        const requests = [fetch('/status')];
+        // Each fetch is made non-fatal (.catch → null): a CONNECTION failure
+        // ("Load failed" / "could not connect") on the expensive admin endpoints
+        // (/setup/pending_spokes + /setup/diagnostics iterate every spoke and can
+        // drop under load) must NOT reject Promise.all and abort the whole tick —
+        // that skips _rebuildMainNav, freezing the left nav on stale data (e.g. a
+        // module that connected AFTER the last good poll never gets its nav item).
+        // A null response is then treated exactly like a !ok one below: fall back
+        // to the last-known-good spoke list so the nav stays intact.
+        const requests = [fetch('/status').catch(() => null)];
         if (isAdmin()) {
-            requests.push(setupFetch('/setup/pending_spokes'), setupFetch('/setup/diagnostics'));
+            requests.push(setupFetch('/setup/pending_spokes').catch(() => null),
+                          setupFetch('/setup/diagnostics').catch(() => null));
         }
         const [statusRes, approvalsRes, diagRes] = await Promise.all(requests);
+
+        // /status itself unreachable this tick → keep the current UI, retry next
+        // tick (don't tear down the nav over one dropped poll).
+        if (!statusRes) return;
 
         // 503 + Retry-After = hub in protect mode → back off polling.
         if (statusRes.status === 503) {
