@@ -674,7 +674,7 @@ window.fetch = async function lmFetch(input, init) {
 // granted its explicit right. Today only the Simulations (cs) module is gated
 // this way; other modules remain product-driven (visible when their spoke is
 // connected). Add a key here to gate another module the same way.
-const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'Security/NAC': 'nac', 'DNS': 'dns', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx', 'Directory': 'ldap' };
+const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'Security/NAC': 'nac', 'DNS': 'dns', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx', 'Directory': 'ldap', 'Reports': 'reports' };
 function canSeeModule(className) {
     const right = MODULE_RIGHT[className];
     if (!right) return true;              // no right defined → product-driven
@@ -1214,9 +1214,9 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Icons'],
+    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
-    setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
+    setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Global Learned Values', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['OUs', 'Users', 'Groups'],
@@ -2242,7 +2242,7 @@ function _updateMetrics(statusData) {
             : updateAvail
                 ? `Update available — a newer version is on the remote (running ${running}); click Update to pull`
                 : `Up to date (running ${running})`;
-        versionEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full ${dotTone} align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
+        versionEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full ${dotTone} transition-all align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
         window.__lmHubVersion = m.version;  // for File-a-Bug context (running version)
         window.__lmTargetVersion = target || null;  // on-disk VERSION, for the Update toast
     }
@@ -3000,7 +3000,7 @@ function renderTopNav(viewId) {
     // Logs is dynamic: only show tabs for modules that are actually installed
     // (see logsSubmenu). Every other view uses its fixed VIEW_SUBMENUS list.
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
-    const subMenus = rawSubmenus.filter(m => !(m === 'Simulations' && !isAdmin()));
+    const subMenus = rawSubmenus.filter(m => !((m === 'Simulations' || m === 'Global Learned Values') && !isAdmin()));
     // Trailing help affordance for tabbed module views (esp. the table-tab
     // modules — opnsense/netbox/nw/dns/dhcp/ldap/le — whose pages are just a
     // table with no on-page section header to attach an inline icon to). Placed
@@ -3262,9 +3262,103 @@ function _viewTemplate(viewId) {
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
+        case 'reports':
+            return `<div class="space-y-4">
+  <div>
+    <h2 class="text-xl font-bold text-slate-800">Reports</h2>
+    <p class="text-sm text-slate-500">Tenant-scoped health reports — schedule the Dashboard Checks &amp; Client Count out by email.</p>
+  </div>
+  <div id="reports-content" class="${card}"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
+</div>`;
+
         default:
             return `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500 italic">Loading…</p></div>`;
     }
+}
+
+// ── Reports module (Setup → Reports nav, gated by the ``reports`` right) ──────
+// First report: the Simulations Dashboard → Checks + Client Count, tenant-scoped
+// (a tenant only ever sees its own sites). A Global Admin can switch tenant in the
+// header and manage/run any tenant's report. Config + send: /api/reports/email-report.
+async function loadReportsData() {
+    const el = document.getElementById('reports-content');
+    if (!el) return;
+    el.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    let c = {};
+    try {
+        const res = await setupFetch('/api/reports/email-report?' + tq);
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || ('HTTP ' + res.status));
+        c = (await res.json()) || {};
+    } catch (e) { el.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load report settings: ${escapeHtml(e.message || String(e))}</div>`; return; }
+    const sec = c.sections || {}, sch = c.schedule || {};
+    const toggle = (id, on, label, hint) => `
+      <label class="flex items-center justify-between gap-3 py-2.5 border-t border-slate-100">
+        <span><span class="text-sm font-semibold text-slate-700">${label}</span>${hint ? `<span class="block text-[11px] text-slate-400">${hint}</span>` : ''}</span>
+        <input type="checkbox" id="${id}" ${on ? 'checked' : ''} class="w-5 h-5 accent-[#01A982]"></label>`;
+    const freqSel = ['daily', 'weekly', 'monthly'].map(f => `<option value="${f}" ${sch.freq === f ? 'selected' : ''}>${f[0].toUpperCase() + f.slice(1)}</option>`).join('');
+    const dows = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => `<option value="${i}" ${sch.dow == i ? 'selected' : ''}>${d}</option>`).join('');
+    const hours = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${sch.hour == h ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
+    const inp = 'w-full bg-white border border-slate-300 rounded-md px-2 py-2 text-sm mt-1';
+    el.innerHTML = `<div class="p-5">
+      <p class="text-xs text-slate-400 mb-1">Emails the Dashboard <span class="font-semibold">Checks</span> and <span class="font-semibold">Client Count</span> for
+        <span class="font-semibold text-slate-600">${escapeHtml(currentTenant || 'default')}</span> on a schedule, via the SMTP under Notifications.
+        Each tenant only receives its own sites; a Global Admin can switch tenant in the header to manage any tenant's report.</p>
+      ${toggle('rp-enabled', c.enabled, 'Email this report', 'Master on/off — nothing is sent while off')}
+      ${toggle('rp-checks', sec.checks !== false, 'Include Dashboard Checks')}
+      ${toggle('rp-clients', sec.clients !== false, 'Include Client Count')}
+      <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-3">
+        <label class="text-xs text-slate-500">Frequency<select id="rp-freq" onchange="_reportsToggleWhen()" class="${inp}">${freqSel}</select></label>
+        <label class="text-xs text-slate-500" id="rp-dow-w">Day of week<select id="rp-dow" class="${inp}">${dows}</select></label>
+        <label class="text-xs text-slate-500" id="rp-dom-w" style="display:none">Day of month<input id="rp-dom" type="number" min="1" max="28" value="${escapeHtml(sch.dom || 1)}" class="${inp}"></label>
+        <label class="text-xs text-slate-500">Hour<select id="rp-hour" class="${inp}">${hours}</select></label>
+      </div>
+      <label class="text-xs text-slate-500 block mt-3">Recipients <span class="text-slate-400">(comma-separated)</span>
+        <input id="rp-to" value="${escapeHtml((c.recipients || []).join(', '))}" placeholder="noc@acme.com, ops@acme.com" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="testReportNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Send test now</button>
+        <button onclick="saveReportConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
+      </div>
+    </div>`;
+    _reportsToggleWhen();
+}
+
+function _reportsToggleWhen() {
+    const f = document.getElementById('rp-freq') && document.getElementById('rp-freq').value;
+    const dow = document.getElementById('rp-dow-w'), dom = document.getElementById('rp-dom-w');
+    if (dow) dow.style.display = f === 'weekly' ? '' : 'none';
+    if (dom) dom.style.display = f === 'monthly' ? '' : 'none';
+}
+
+async function saveReportConfig() {
+    const g = id => document.getElementById(id);
+    const body = {
+        enabled: g('rp-enabled').checked,
+        sections: { checks: g('rp-checks').checked, clients: g('rp-clients').checked },
+        schedule: {
+            freq: g('rp-freq').value,
+            dow: parseInt(g('rp-dow').value, 10) || 0,
+            dom: parseInt((g('rp-dom') && g('rp-dom').value) || 1, 10) || 1,
+            hour: parseInt(g('rp-hour').value, 10) || 7,
+        },
+        recipients: g('rp-to').value.split(',').map(s => s.trim()).filter(Boolean),
+    };
+    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try {
+        const res = await setupFetch('/api/reports/email-report?' + tq, { method: 'PUT', body: JSON.stringify(body) });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || ('HTTP ' + res.status));
+        showToast('Report settings saved.', 'success');
+    } catch (e) { console.error('saveReportConfig', e); showToast(e.message || 'Save failed', 'error'); }
+}
+
+async function testReportNow() {
+    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try {
+        const res = await setupFetch('/api/reports/email-report/test?' + tq, { method: 'POST' });
+        const r = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(r.detail || ('HTTP ' + res.status));
+        showToast('Test report sent to ' + ((r.to || []).join(', ') || 'the configured recipients'), 'success');
+    } catch (e) { console.error('testReportNow', e); showToast(e.message || 'Send failed — check SMTP + recipients', 'error'); }
 }
 
 function initView(viewId, subView) {
@@ -3324,6 +3418,9 @@ function initView(viewId, subView) {
             break;
         case 'cs':
             loadCSData(subView || 'Dashboard', currentSubChild);
+            break;
+        case 'reports':
+            loadReportsData();
             break;
     }
 }
@@ -3626,6 +3723,16 @@ function _renderSettingsSection(subMenu) {
     // applies the firewall alias/allow rule via the existing firewall endpoints.
     if (subMenu === 'Collab') {
         _renderCollabTile(content);
+        return;
+    }
+
+    // Notifications — platform-level email alerts (spoke out-of-contact, etc.).
+    // Provider dropdown (Azure ACS / Gmail / Yahoo / Office 365 / Generic); ACS
+    // defaults to the REST API transport with SMTP fallback, creds auto-pulled
+    // from Key Vault. Other providers use SMTP with Fernet-encrypted-at-rest
+    // passwords. Admin-only (/setup/notifications is admin-gated server-side).
+    if (subMenu === 'Notifications') {
+        _renderSettingsNotificationsTile(content);
         return;
     }
 
@@ -4140,7 +4247,12 @@ function _renderSetupRemoteConsoleTile(content) {
                         <button onclick="runExecCommand()" class="${btnCls}" id="rc-run">Run</button>
                     </div>
                 </div>
-                <pre id="rc-output" class="bg-slate-900 text-slate-100 text-xs font-mono rounded-md p-3 overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto hidden"></pre>
+                <div id="rc-output-wrap" class="hidden">
+                    <div class="flex justify-end mb-1">
+                        <button onclick="copyRcOutput()" id="rc-copy" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded-md font-semibold">📋 Copy</button>
+                    </div>
+                    <pre id="rc-output" class="bg-slate-900 text-slate-100 text-xs font-mono rounded-md p-3 overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto"></pre>
+                </div>
             </div>
         </div>`;
     loadExecConfig();
@@ -4210,6 +4322,8 @@ async function runExecCommand() {
     const out = document.getElementById('rc-output');
     const btn = document.getElementById('rc-run');
     if (!command) return;
+    const wrap = document.getElementById('rc-output-wrap');
+    if (wrap) wrap.classList.remove('hidden');
     if (out) { out.classList.remove('hidden'); out.textContent = 'Running…'; }
     if (btn) btn.disabled = true;
     try {
@@ -4229,6 +4343,26 @@ async function runExecCommand() {
         if (out) out.textContent = '⛔ ' + e.message;
     } finally {
         if (btn) btn.disabled = false;
+    }
+}
+
+async function copyRcOutput() {
+    const out = document.getElementById('rc-output');
+    const btn = document.getElementById('rc-copy');
+    if (!out) return;
+    const text = out.textContent || '';
+    try {
+        await navigator.clipboard.writeText(text);
+        if (btn) { const t = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = t; }, 1500); }
+    } catch (e) {
+        // Fallback (older browser / non-secure context): select the text so the
+        // user can Ctrl-C manually.
+        const range = document.createRange();
+        range.selectNodeContents(out);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        if (btn) { const t = btn.textContent; btn.textContent = 'Select+Ctrl-C'; setTimeout(() => { btn.textContent = t; }, 2000); }
     }
 }
 
@@ -6546,6 +6680,348 @@ function rotateKeyVaultAdmin() { _kvAction('/setup/key-vault/rotate-admin', 'Rot
 function pushKeyVaultFernet() { _kvAction('/setup/key-vault/push-fernet', 'Push Fernet'); }
 function backupKeyVaultNow() { _kvAction('/setup/key-vault/backup', 'Backup'); }
 
+// ── Notifications (platform email alerts) ─────────────────────────────────
+const _NOTIF_PRESETS = {
+    azure_acs: { host: 'smtp.azurecomm.net',     port: 587, label: 'Azure ACS (Key Vault-managed)' },
+    gmail:     { host: 'smtp.gmail.com',         port: 587, label: 'Gmail' },
+    yahoo:     { host: 'smtp.mail.yahoo.com',    port: 587, label: 'Yahoo' },
+    office365: { host: 'smtp.office365.com',     port: 587, label: 'Office 365' },
+    generic:   { host: '',                       port: 587, label: 'Generic SMTP' },
+};
+
+function _renderSettingsNotificationsTile(content) {
+    const { card, inputCls, labelCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Notifications — email alerts</h3>
+                <span id="notif-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">The hub sends its own alerts (spoke out-of-contact, etc.) over email. Pick a provider; recipient list is always manual. <b>Azure ACS</b> pulls sender creds from <b>Key Vault</b> and defaults to the <b>REST API</b> (grant the SSO app the Communication Services permission) with an SMTP fallback. Other providers use SMTP with the password encrypted at rest.</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="notif-enabled" class="w-4 h-4 text-green-600 rounded">Enable email alerts</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Provider</label>
+                    <select id="notif-provider" class="${inputCls}" onchange="notifProviderChanged()">
+                        <option value="azure_acs">Azure ACS (Key Vault-managed)</option>
+                        <option value="gmail">Gmail</option>
+                        <option value="yahoo">Yahoo</option>
+                        <option value="office365">Office 365</option>
+                        <option value="generic">Generic SMTP</option>
+                    </select></div>
+                <div class="space-y-1" id="notif-transport-wrap"><label class="${labelCls}">ACS transport</label>
+                    <select id="notif-transport" class="${inputCls}" onchange="notifTransportChanged()">
+                        <option value="api">REST API (default)</option>
+                        <option value="smtp">SMTP</option>
+                    </select></div>
+                <div class="space-y-1" id="notif-acs-source-wrap"><label class="${labelCls}">ACS credential source</label>
+                    <select id="notif-acs-source" class="${inputCls}" onchange="notifAcsSourceChanged()">
+                        <option value="arm">ARM auto-pull (no vault access)</option>
+                        <option value="keyvault">Key Vault secret</option>
+                    </select></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-arm-wrap"><label class="${labelCls}">ACS resource (ARM listKeys)</label>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <div class="flex gap-1">
+                            <select id="notif-acs-sub" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsSubChanged()"><option value="">Subscription ID…</option></select>
+                            <button type="button" onclick="pullAzureSubs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                        </div>
+                        <div class="flex gap-1">
+                            <select id="notif-acs-rg" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsRgChanged()"><option value="">Resource group…</option></select>
+                            <button type="button" onclick="pullAzureRgs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                        </div>
+                        <div class="flex gap-1">
+                            <select id="notif-acs-name" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsResourceChanged()"><option value="">Resource name…</option></select>
+                            <button type="button" onclick="pullAcsResources()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                        </div>
+                    </div>
+                    <p class="text-[11px] text-slate-400 mt-1">The SSO app calls <span class="font-mono">communicationServices/listKeys</span> via ARM (needs <b>Contributor</b> on the ACS resource/RG). The connection string is cached ~10 min and never touches the vault. <b>Pull</b> lists the subscriptions, resource groups, and ACS resources the app can see — choose top-down.</p></div>
+                <div class="space-y-1"><label class="${labelCls}">SMTP host</label><input id="notif-host" type="text" placeholder="smtp.example.com" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">SMTP port</label><input id="notif-port" type="number" placeholder="587" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">SMTP user</label><input id="notif-user" type="text" placeholder="user@example.com" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">SMTP password</label><input id="notif-pass" type="password" placeholder="" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-kv-name-wrap"><label class="${labelCls}">ACS Key Vault secret name</label><input id="notif-acs-secret" type="text" placeholder="acs-email-connstr" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-vault-wrap"><label class="${labelCls}">Key Vault URL <span class="text-slate-400 normal-case font-normal">(blank = reuse the DR Key Vault URL)</span></label><input id="notif-vault-url" type="text" placeholder="https://my-vault.vault.azure.net" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-connstr-wrap"><label class="${labelCls}">ACS connection string <span class="text-slate-400 normal-case font-normal">(one-time push to Key Vault — the SSO app writes it for you)</span></label><textarea id="notif-acs-connstr" rows="2" placeholder="endpoint=https://<resourcename>.communication.azure.com;accesskey=<key>" class="${inputCls} font-mono text-xs"></textarea></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">From email</label><input id="notif-from" type="text" placeholder="DoNotReply@<resourcename>.azurecomm.net" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">To emails <span class="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input id="notif-to" type="text" placeholder="ops@example.com, oncall@example.com" class="${inputCls} font-mono text-xs"></div>
+            </div>
+            <p id="notif-acs-note" class="text-[11px] text-slate-400 mt-2 hidden">ACS API transport signs each request with the access key (HMAC-SHA256) — no Entra app permission needed. The access key is pulled from ARM (listKeys) or read from the Key Vault secret, depending on the credential source above.</p>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+                <button type="button" id="notif-push-btn" onclick="pushAcsSecret()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push ACS connection string to Key Vault</button>
+                <span id="notif-action-out" class="text-[11px] font-mono text-slate-600 break-all"></span>
+                <div class="ml-auto flex items-center gap-2">
+                    <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Send test email</button>
+                    <button type="button" onclick="saveNotifications()" class="bg-[#01A982] hover:bg-[#01A982]/90 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
+                </div>
+            </div>
+        </div>`;
+    loadNotifications();
+}
+
+function _notifProvider() { return document.getElementById('notif-provider')?.value || 'azure_acs'; }
+
+function notifProviderChanged() {
+    const p = _notifProvider();
+    const preset = _NOTIF_PRESETS[p] || _NOTIF_PRESETS.generic;
+    const isAcs = p === 'azure_acs';
+    const isGeneric = p === 'generic';
+    // host/port: editable only for generic; read-only preset for the rest.
+    const hostEl = document.getElementById('notif-host');
+    const portEl = document.getElementById('notif-port');
+    if (hostEl) { if (!isGeneric) hostEl.value = preset.host; hostEl.disabled = !isGeneric; }
+    if (portEl) { if (!isGeneric) portEl.value = preset.port; portEl.disabled = !isGeneric; }
+    // ACS-only controls
+    const showKv = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
+    showKv('notif-transport-wrap', isAcs);
+    showKv('notif-acs-source-wrap', isAcs);
+    showKv('notif-acs-arm-wrap', isAcs);        // toggled further by source below
+    showKv('notif-acs-kv-name-wrap', isAcs);   // toggled further by source below
+    showKv('notif-acs-vault-wrap', isAcs);      // toggled further by source below
+    showKv('notif-acs-connstr-wrap', isAcs);    // toggled further by source below
+    showKv('notif-push-btn', isAcs);            // toggled further by source below
+    // Password field: hidden for ACS (creds via ARM/Key Vault).
+    const passEl = document.getElementById('notif-pass');
+    if (passEl) { passEl.disabled = isAcs; if (isAcs) passEl.value = ''; passEl.placeholder = isAcs ? 'managed automatically' : ''; }
+    if (isAcs) notifAcsSourceChanged(); else notifTransportChanged();
+}
+
+function notifAcsSourceChanged() {
+    const isAcs = _notifProvider() === 'azure_acs';
+    const isKv = isAcs && (document.getElementById('notif-acs-source')?.value || 'arm') === 'keyvault';
+    const show = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
+    // ARM fields only when source=arm; Key Vault secret/push fields only when source=keyvault.
+    show('notif-acs-arm-wrap', isAcs && !isKv);
+    show('notif-acs-kv-name-wrap', isKv);
+    show('notif-acs-vault-wrap', isKv);
+    show('notif-acs-connstr-wrap', isKv);
+    show('notif-push-btn', isKv);
+    notifTransportChanged();
+}
+
+function notifTransportChanged() {
+    const isAcs = _notifProvider() === 'azure_acs';
+    const isApi = isAcs && (document.getElementById('notif-transport')?.value || 'api') === 'api';
+    const note = document.getElementById('notif-acs-note');
+    if (note) note.classList.toggle('hidden', !isApi);
+}
+
+async function loadNotifications() {
+    try {
+        const r = await setupFetch('/setup/notifications');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
+        const en = document.getElementById('notif-enabled'); if (en) en.checked = !!c.enabled;
+        set('notif-provider', c.provider || 'azure_acs');
+        set('notif-transport', c.transport || 'api');
+        set('notif-acs-source', c.acs_source || 'arm');
+        // Subscription is a select populated by Pull; if a saved id isn't an
+        // option yet, seed a placeholder option so it shows (not lost on save).
+        const subSel = document.getElementById('notif-acs-sub');
+        if (subSel) {
+            const savedSub = c.azure_subscription_id || '';
+            if (savedSub && !Array.from(subSel.options).some(o => o.value === savedSub)) {
+                subSel.innerHTML = `<option value="${savedSub}">${savedSub}</option>`;
+            }
+            subSel.value = savedSub;
+        }
+        // RG + resource name are Pull-populated selects; seed a placeholder
+        // option for a saved value so it shows (and isn't lost on save) before
+        // the user clicks Pull for that level.
+        const seedAcsSel = (id, val) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const v = val || '';
+            if (v && !Array.from(el.options).some(o => o.value === v)) {
+                el.innerHTML = `<option value="${v}">${v}</option>`;
+            }
+            el.value = v;
+        };
+        seedAcsSel('notif-acs-rg', c.azure_resource_group);
+        seedAcsSel('notif-acs-name', c.acs_resource_name);
+        set('notif-host', c.smtp_host);
+        set('notif-port', c.smtp_port || 587);
+        set('notif-user', c.smtp_user);
+        set('notif-acs-secret', c.acs_kv_secret_name || 'acs-email-connstr');
+        set('notif-vault-url', c.vault_url);
+        set('notif-from', c.from_email);
+        const to = Array.isArray(c.to_emails) ? c.to_emails.join(', ') : (c.to_emails || '');
+        set('notif-to', to);
+        const passEl = document.getElementById('notif-pass');
+        if (passEl) { passEl.value = ''; passEl.placeholder = c.has_password ? 'set (leave blank to keep)' : ''; }
+        const pill = document.getElementById('notif-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        notifProviderChanged();
+    } catch (e) { console.error('loadNotifications failed', e); }
+}
+
+function _notifFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    const p = _notifProvider();
+    const cfg = {
+        enabled: !!document.getElementById('notif-enabled')?.checked,
+        provider: p,
+        smtp_host: v('notif-host'),
+        smtp_port: parseInt(v('notif-port'), 10) || 587,
+        smtp_user: v('notif-user'),
+        from_email: v('notif-from'),
+        to_emails: v('notif-to'),
+    };
+    if (p === 'azure_acs') {
+        cfg.transport = document.getElementById('notif-transport')?.value || 'api';
+        cfg.acs_source = document.getElementById('notif-acs-source')?.value || 'arm';
+        if (cfg.acs_source === 'arm') {
+            cfg.azure_subscription_id = v('notif-acs-sub');
+            cfg.azure_resource_group = v('notif-acs-rg');
+            cfg.acs_resource_name = v('notif-acs-name');
+        } else {
+            cfg.acs_kv_secret_name = v('notif-acs-secret') || 'acs-email-connstr';
+            cfg.vault_url = v('notif-vault-url');
+        }
+    } else {
+        const pw = v('notif-pass');
+        if (pw) cfg.smtp_password = pw;   // plaintext → hub Fernet-encrypts at rest
+    }
+    return cfg;
+}
+
+async function saveNotifications() {
+    const out = document.getElementById('notif-action-out');
+    if (out) out.textContent = 'Saving…';
+    try {
+        const r = await setupFetch('/setup/notifications', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _notifFormConfig() }) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        showToast('Notifications settings saved.', 'success');
+        if (out) out.textContent = 'saved';
+        loadNotifications();
+    } catch (e) { if (out) out.textContent = ''; showToast('Save failed: ' + (e.message || e), 'error'); }
+}
+
+async function testNotifications() {
+    const out = document.getElementById('notif-action-out');
+    if (out) out.textContent = 'Sending test…';
+    try {
+        const r = await setupFetch('/setup/notifications/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _notifFormConfig() }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { if (out) out.textContent = `OK — sent via ${d.host} to ${d.recipients} recipient(s)`; showToast('Test email sent.', 'success'); }
+        else { if (out) out.textContent = d.message || 'failed'; showToast('Test failed: ' + (d.message || ''), 'error'); }
+    } catch (e) { if (out) out.textContent = ''; showToast('Test failed: ' + (e.message || e), 'error'); }
+}
+
+async function pushAcsSecret() {
+    const out = document.getElementById('notif-action-out');
+    const value = (document.getElementById('notif-acs-connstr')?.value || '').trim();
+    if (!value) { if (out) out.textContent = 'paste the ACS connection string first'; showToast('Paste the connection string first.', 'error'); return; }
+    if (out) out.textContent = 'Pushing to Key Vault…';
+    try {
+        const r = await setupFetch('/setup/notifications/push-acs-secret', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { if (out) out.textContent = `pushed to secret '${d.secret}'`; showToast('Connection string stored in Key Vault.', 'success'); const ta = document.getElementById('notif-acs-connstr'); if (ta) ta.value = ''; }
+        else { if (out) out.textContent = d.message || 'failed'; showToast('Push failed: ' + (d.message || ''), 'error'); }
+    } catch (e) { if (out) out.textContent = ''; showToast('Push failed: ' + (e.message || e), 'error'); }
+}
+
+async function pullAzureSubs() {
+    const out = document.getElementById('notif-action-out');
+    const sel = document.getElementById('notif-acs-sub');
+    if (!sel) return;
+    const cur = (sel.value || '').trim();
+    if (out) out.textContent = 'Pulling subscriptions…';
+    try {
+        const r = await setupFetch('/setup/notifications/azure-subs');
+        const d = await r.json().catch(() => ({}));
+        if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
+        const subs = d.subscriptions || [];
+        if (!subs.length) { if (out) out.textContent = 'no subscriptions visible to the SSO app'; showToast('No subscriptions visible to the SSO app.', 'error'); return; }
+        sel.innerHTML = subs.map(s => `<option value="${s.id}">${escapeHtml(s.name)} — ${s.id}</option>`).join('');
+        if (cur && subs.some(s => s.id === cur)) sel.value = cur;
+        if (out) out.textContent = `${subs.length} subscription(s) listed`;
+        showToast('Subscriptions pulled.', 'success');
+    } catch (e) { if (out) out.textContent = ''; showToast('Pull failed: ' + (e.message || e), 'error'); }
+}
+
+async function pullAzureRgs() {
+    const out = document.getElementById('notif-action-out');
+    const subSel = document.getElementById('notif-acs-sub');
+    const rgSel = document.getElementById('notif-acs-rg');
+    if (!rgSel) return;
+    const sub = (subSel?.value || '').trim();
+    if (!sub) { if (out) out.textContent = 'select a subscription first'; showToast('Select a subscription first.', 'error'); return; }
+    const cur = (rgSel.value || '').trim();
+    if (out) out.textContent = 'Pulling resource groups…';
+    try {
+        const r = await setupFetch('/setup/notifications/azure-rgs?subscription_id=' + encodeURIComponent(sub));
+        const d = await r.json().catch(() => ({}));
+        if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
+        const rgs = d.resource_groups || [];
+        if (!rgs.length) { if (out) out.textContent = 'no resource groups in this subscription'; showToast('No resource groups in this subscription.', 'error'); return; }
+        rgSel.innerHTML = rgs.map(g => `<option value="${g.name}">${escapeHtml(g.name)}</option>`).join('');
+        if (cur && rgs.some(g => g.name === cur)) rgSel.value = cur;
+        if (out) out.textContent = `${rgs.length} resource group(s) listed`;
+        showToast('Resource groups pulled.', 'success');
+    } catch (e) { if (out) out.textContent = ''; showToast('Pull failed: ' + (e.message || e), 'error'); }
+}
+
+async function pullAcsResources() {
+    const out = document.getElementById('notif-action-out');
+    const subSel = document.getElementById('notif-acs-sub');
+    const rgSel = document.getElementById('notif-acs-rg');
+    const nameSel = document.getElementById('notif-acs-name');
+    if (!nameSel) return;
+    const sub = (subSel?.value || '').trim();
+    const rg = (rgSel?.value || '').trim();
+    if (!sub || !rg) { if (out) out.textContent = 'select a subscription and resource group first'; showToast('Select a subscription and resource group first.', 'error'); return; }
+    const cur = (nameSel.value || '').trim();
+    if (out) out.textContent = 'Pulling ACS resources…';
+    try {
+        const r = await setupFetch('/setup/notifications/azure-acs-resources?subscription_id=' + encodeURIComponent(sub) + '&resource_group=' + encodeURIComponent(rg));
+        const d = await r.json().catch(() => ({}));
+        if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
+        const items = d.acs_resources || [];
+        if (!items.length) { if (out) out.textContent = 'no Communication Services resources in this RG'; showToast('No ACS resources in this resource group.', 'error'); return; }
+        nameSel.innerHTML = items.map(i => `<option value="${i.name}" data-from="${escapeHtml(i.fromEmail || '')}" data-endpoint="${escapeHtml(i.endpoint || '')}" data-state="${escapeHtml(i.provisioningState || '')}">${escapeHtml(i.name)}${i.location ? ' — ' + escapeHtml(i.location) : ''}</option>`).join('');
+        if (cur && items.some(i => i.name === cur)) nameSel.value = cur;
+        else if (items.length === 1) nameSel.value = items[0].name;  // auto-select the only resource
+        if (out) out.textContent = `${items.length} ACS resource(s) listed`;
+        // Auto-populate from_email (etc.) for whichever resource is now selected.
+        onAcsResourceChanged();
+        showToast('ACS resources pulled.', 'success');
+    } catch (e) { if (out) out.textContent = ''; showToast('Pull failed: ' + (e.message || e), 'error'); }
+}
+
+// Chained auto-pull: changing the subscription clears RG/resource and pulls
+// RGs; changing the RG clears the resource and pulls ACS resources.
+function onAcsSubChanged() {
+    const rgSel = document.getElementById('notif-acs-rg');
+    const nameSel = document.getElementById('notif-acs-name');
+    if (rgSel) rgSel.innerHTML = '<option value="">Resource group…</option>';
+    if (nameSel) nameSel.innerHTML = '<option value="">Resource name…</option>';
+    if ((document.getElementById('notif-acs-sub')?.value || '').trim()) pullAzureRgs();
+}
+
+function onAcsRgChanged() {
+    const nameSel = document.getElementById('notif-acs-name');
+    if (nameSel) nameSel.innerHTML = '<option value="">Resource name…</option>';
+    if ((document.getElementById('notif-acs-rg')?.value || '').trim()) pullAcsResources();
+}
+
+// Selecting an ACS resource auto-populates everything derivable from it:
+// from_email (the resource's default AzureManaged MailFrom domain) — only
+// when the admin hasn't already typed a custom verified domain — and shows
+// the data-plane endpoint + provisioning state as confirmation.
+function onAcsResourceChanged() {
+    const nameSel = document.getElementById('notif-acs-name');
+    if (!nameSel) return;
+    const opt = nameSel.options[nameSel.selectedIndex];
+    if (!opt) return;
+    const fromEl = document.getElementById('notif-from');
+    const from = opt.getAttribute('data-from') || '';
+    if (fromEl && from && !(fromEl.value || '').trim()) fromEl.value = from;
+    const out = document.getElementById('notif-action-out');
+    const ep = opt.getAttribute('data-endpoint') || '';
+    const st = opt.getAttribute('data-state') || '';
+    if (out && ep) out.textContent = `${ep}${st ? ' [' + st + ']' : ''}`;
+}
+
 async function downloadKeyVaultMin() {
     try {
         const r = await setupFetch('/setup/key-vault/download-min');
@@ -6617,6 +7093,7 @@ const LM_NAV_ICONS = [
     { id: 8,  name: 'DNS',          key: 'dns',        svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18"></path></svg>' },
     { id: 9,  name: 'DHCP',         key: 'dhcp',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 3.75H6.912a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H15M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859M12 3v8.25m0 0l-3-3m3 3l3-3"></path></svg>' },
     { id: 10, name: 'Certificates', key: 'le',         svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m-6-8h6M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.5 19.5l1.5 1.5 2.5-2.5"></path></svg>' },
+    { id: 11, name: 'Reports',      key: 'reports',    svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8 17V11m4 6V7m4 10v-4M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>' },
     { id: 11, name: 'Console',      key: 'console',    svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z"></path></svg>' },
     { id: 12, name: 'Template Repo',key: 'templates',  svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>' },
     { id: 13, name: 'Bug Report',   key: 'bugs',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M4.5 8.5l2-1.5m13 1.5l-2-1.5M4.5 15.5l2 1.5m13-1.5l-2 1.5M12 4a4 4 0 014 4v4a4 4 0 01-8 0V8a4 4 0 014-4z"></path></svg>' },
@@ -7152,8 +7629,142 @@ const SETUP_TILES = {
     'Tenant Config':    _renderSetupTenantTile,
     'User Access':      _renderSetupUserAccessTile,
     'Simulations':      _renderSetupSimulationsTile,
+    'Global Learned Values': _renderSetupGlobalLearnedValuesTile,
     'Remote Console':   _renderSetupRemoteConsoleTile,
 };
+
+// Setup → Global Learned Values (Global Admin only). A learning tenant's lab
+// rows produce stable learned_op values; the Admin selects one per alert and
+// Publishes it here so every other tenant's learning-OFF consumer rows seed/lift
+// from it (applied_op = max(own, global)). Endpoints in simulations/routes.py:
+// GET /sim/api/superadmin/learned-values/candidates, GET/PUT .../global-learned-values.
+let _glvCandidates = [];
+let _glvPublished = {};
+
+function _renderSetupGlobalLearnedValuesTile(content) {
+    const { card, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global Learned Values ${helpIcon('cs', null, 'Simulations help')}</h3>
+            <p class="text-xs text-slate-500 mb-3">Publish the learned client count needed to fire each alert, platform-wide. A tenant marks a quota row as a <b>Learning lab</b> (Config → Engine); its controller ratchets down to find the min count that fires and records a <b>learned_op</b>. Pick a tenant's stable learned value per alert and Publish it — every other tenant's <b>Consumer</b> rows (Learning off) then seed/lift from it (up-only; never down-ratchet). Highest learned op wins.</p>
+            <div id="glv-published" class="space-y-2 mb-4"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+        </div>
+        <div class="${card}">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Candidates from Learning Labs</h3>
+            <p class="text-xs text-slate-500 mb-3">Stable learned values from every tenant's Learning-lab rows, grouped by alert. The highest op per tenant leads. Click <b>Publish</b> to publish that value for the alert (replaces any current published value for it).</p>
+            <div id="glv-candidates" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+        </div>`;
+    loadGlobalLearnedValues();
+}
+
+async function loadGlobalLearnedValues() {
+    try {
+        const [candRes, pubRes] = await Promise.all([
+            setupFetch('/sim/api/superadmin/learned-values/candidates'),
+            setupFetch('/sim/api/superadmin/global-learned-values'),
+        ]);
+        const cand = await candRes.json().catch(() => ({}));
+        const pub = await pubRes.json().catch(() => ({}));
+        _glvCandidates = Array.isArray(cand.candidates) ? cand.candidates : [];
+        _glvPublished = (pub && typeof pub.published === 'object' && pub.published) || {};
+        renderGlvPublished();
+        renderGlvCandidates();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Load failed: ' + e.message, 'error');
+    }
+}
+
+function renderGlvPublished() {
+    const el = document.getElementById('glv-published');
+    if (!el) return;
+    const keys = Object.keys(_glvPublished).sort();
+    if (!keys.length) {
+        el.innerHTML = '<p class="text-xs text-slate-400 italic">Nothing published yet. Publish a candidate below.</p>';
+        return;
+    }
+    el.innerHTML = keys.map(k => {
+        const v = _glvPublished[k] || {};
+        const when = v.published_at ? new Date(Number(v.published_at) * 1000).toLocaleString() : '';
+        return `<div class="flex flex-wrap items-center gap-3 text-xs py-1 border-b border-slate-100 last:border-0">
+            <span class="font-mono text-slate-700 flex-1 min-w-[12rem]">${escapeHtml(k)}</span>
+            <span class="font-semibold text-emerald-700">op ${escapeHtml(String(v.op))}</span>
+            ${v.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(v.floor))}</span>` : ''}
+            ${v.source_tenant ? `<span class="text-slate-400">from ${escapeHtml(v.source_tenant)}</span>` : ''}
+            ${when ? `<span class="text-slate-400">${escapeHtml(when)}</span>` : ''}
+            <button onclick="unpublishGlv('${escJsAttr(k)}')" class="text-xs text-red-600 hover:text-red-800 font-bold">Unpublish</button>
+        </div>`;
+    }).join('');
+}
+
+function renderGlvCandidates() {
+    const el = document.getElementById('glv-candidates');
+    if (!el) return;
+    if (!_glvCandidates.length) {
+        el.innerHTML = '<p class="text-xs text-slate-400 italic">No stable learned values yet. Mark a quota row as a Learning lab (Config → Engine) and let it settle (phase = stable).</p>';
+        return;
+    }
+    // Group by alert_key; within a group, highest op first.
+    const groups = {};
+    for (const c of _glvCandidates) {
+        (groups[c.alert_key] = groups[c.alert_key] || []).push(c);
+    }
+    const alertKeys = Object.keys(groups).sort();
+    el.innerHTML = alertKeys.map(ak => {
+        const rows = groups[ak].sort((a, b) => b.op - a.op);
+        const pub = _glvPublished[ak];
+        const isPublished = pub && rows[0] && pub.op === rows[0].op && pub.source_tenant === rows[0].source_tenant;
+        return `<div class="border border-slate-200 rounded-md p-3">
+            <div class="flex items-center gap-2 mb-2">
+                <span class="font-mono text-xs text-slate-700 font-semibold">${escapeHtml(ak)}</span>
+                ${pub ? `<span class="text-[10px] uppercase tracking-wider text-emerald-700">published op ${escapeHtml(String(pub.op))}</span>` : ''}
+            </div>
+            <div class="space-y-1">
+                ${rows.map(r => `<div class="flex flex-wrap items-center gap-3 text-xs py-0.5">
+                    <span class="text-slate-600">op <b>${escapeHtml(String(r.op))}</b></span>
+                    ${r.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(r.floor))}</span>` : ''}
+                    <span class="text-slate-400">${escapeHtml(r.source_tenant)} · ${escapeHtml(r.site || 'all sites')}</span>
+                    <button onclick="publishGlv('${escJsAttr(ak)}', ${Number(r.op)||0}, ${r.floor!=null?Number(r.floor):'null'}, '${escJsAttr(r.source_tenant)}')" class="ml-auto ${isPublished && r === rows[0] ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]'} px-3 py-1 rounded-md text-xs font-bold">${isPublished && r === rows[0] ? 'Published' : 'Publish'}</button>
+                </div>`).join('')}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function publishGlv(alertKey, op, floor, sourceTenant) {
+    const next = { ..._glvPublished };
+    next[alertKey] = { op, floor: floor != null ? floor : null, source_tenant: sourceTenant, published_at: Date.now() / 1000 };
+    try {
+        const res = await setupFetch('/sim/api/superadmin/global-learned-values', {
+            method: 'PUT', body: JSON.stringify({ values: next }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        _glvPublished = data.values || next;
+        if (typeof showToast === 'function') showToast(`Published op ${op} for ${alertKey} (pushed to ${data.pushed_to_spokes ?? 0} spokes)`, 'success');
+        renderGlvPublished();
+        renderGlvCandidates();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Publish failed: ' + e.message, 'error');
+    }
+}
+
+async function unpublishGlv(alertKey) {
+    const next = { ..._glvPublished };
+    delete next[alertKey];
+    try {
+        const res = await setupFetch('/sim/api/superadmin/global-learned-values', {
+            method: 'PUT', body: JSON.stringify({ values: next }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        _glvPublished = data.values || next;
+        if (typeof showToast === 'function') showToast(`Unpublished ${alertKey}`, 'success');
+        renderGlvPublished();
+        renderGlvCandidates();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Unpublish failed: ' + e.message, 'error');
+    }
+}
 
 // _renderSetupSection — dispatches to one of the _renderSetup*Tile helpers
 // above based on the Setup submenu. Each tile renders its cards into `content`
@@ -7181,6 +7792,7 @@ const _SUBNET_FILTER_MODULES = [
     { key: 'dhcp',       label: 'DHCP' },
     { key: 'hypervisor', label: 'Hypervisor' },
     { key: 'cs',         label: 'Simulations (tenant-ID scoped)' },
+    { key: 'le',         label: 'Certificates (SAN → DNS → IP)' },
 ];
 let _subnetFilterState = {};
 
@@ -10054,6 +10666,7 @@ const _RBAC_RIGHT_LABELS = {
     console: 'Console',
     console_write: 'Console Write',
     cs: 'Simulations',
+    reports: 'Reports',
 };
 
 async function loadGroups() {
@@ -15707,6 +16320,23 @@ function leIssueRenderTargets() {
             </span>`).join('')}</div>`;
 }
 
+// Populate the issue-cert Domain datalist with the caller's eligible domains: the
+// A/AAAA hostnames from their tenant's DNS (DNS module + firewalls) + a derived
+// *.<domain> wildcard per parent domain. Best-effort — free text still works, but
+// with the `le` subnet filter ON a cert only shows for a domain that resolves into
+// the tenant's subnet, so this steers the operator to a DNS entry they've configured.
+async function leIssuePopulateDomains() {
+    const dl = document.getElementById('le-issue-domain-list');
+    if (!dl) return;
+    try {
+        const { ok, data } = await _spokeFetch('/api/le/eligible-domains');
+        if (!ok || !data) return;
+        const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        const opts = [...(data.hosts || []), ...(data.wildcards || [])];
+        dl.innerHTML = opts.map(h => `<option value="${esc(h)}"></option>`).join('');
+    } catch (e) { /* best-effort — the field is still free-text */ }
+}
+
 async function showLeIssueModal() {
     _leIssueTargets = [];
     if (!window._leAvailableTargets || !window._leAvailableTargets.length) {
@@ -15726,7 +16356,9 @@ async function showLeIssueModal() {
             <div class="grid grid-cols-2 gap-3">
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">Domain <span class="text-red-500">*</span></label>
-                    <input id="le-issue-domain" type="text" placeholder="www.example.com" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                    <input id="le-issue-domain" type="text" list="le-issue-domain-list" placeholder="pick or type a domain" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                    <datalist id="le-issue-domain-list"></datalist>
+                    <p class="text-[11px] text-slate-400 mt-1">Your DNS entries (from DNS + firewalls). A cert only shows on your Certificates page if its domain resolves into your subnet.</p>
                 </div>
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">ACME account email <span class="text-red-500">*</span></label>
@@ -15858,6 +16490,7 @@ async function showLeIssueModal() {
         </div>
     </div>`;
     document.body.appendChild(modal);
+    leIssuePopulateDomains();
     leIssueRenderTargets();
     leIssueUpdateDnsFields();
     leTgtMtChange('le-issue-tgt-mt', 'le-issue-tgt-id');  // seed device list for the first module

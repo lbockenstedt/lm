@@ -111,7 +111,7 @@ except ImportError:
             for _n in list(_logging.root.manager.loggerDict):
                 _logging.getLogger(_n).setLevel(lvl)
             return lvl
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 from typing import Any, Dict
@@ -996,6 +996,34 @@ def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
     return access.get_tenant_scoping(hub, tenant_id)
 
 
+# mtime-cached WebUI VERSION — drives the index.html ?v= cache-bust so a
+# version-bump (version-bump.yml bumps WebUI/VERSION on every push to main)
+# invalidates cached JS without anyone touching index.html by hand. The
+# placeholder ``__WEBUI_VERSION__`` in index.html is swapped for this value
+# at serve time (see ``serve_ui``).
+_WEBUI_VER_CACHE: Dict[str, Any] = {}
+
+
+def _webui_version(ui_path: str) -> str:
+    """Return the stripped ``WebUI/VERSION`` content (mtime-cached so a
+    deploy/bump is picked up without a restart). Falls back to ``"0"``."""
+    ver_path = os.path.join(ui_path, "VERSION")
+    try:
+        mtime = os.path.getmtime(ver_path)
+    except OSError:
+        return "0"
+    cached = _WEBUI_VER_CACHE.get(ver_path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        with open(ver_path, "r", encoding="utf-8") as f:
+            ver = f.read().strip() or "0"
+    except OSError:
+        ver = "0"
+    _WEBUI_VER_CACHE[ver_path] = (mtime, ver)
+    return ver
+
+
 def create_app(hub):
     """Build the FastAPI app for the Hub.
 
@@ -1198,6 +1226,14 @@ def create_app(hub):
             if not (_is_admin(sess) or _has_le_access(sess)):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Certificate module access required"})
+
+        # /api/reports/* (Reports module) requires the ``reports`` right OR admin.
+        # A global admin can run any tenant's report (?tenant=); a non-admin is
+        # scoped to their own tenant by check_tenant_access on the ?tenant= gate.
+        if path.startswith("/api/reports/"):
+            if not (_is_admin(sess) or _has_reports_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Reports module access required"})
 
         # /api/console/config/* (device config read/push) requires the higher
         # ``console_write`` right OR admin — checked BEFORE the general console gate.
@@ -1467,6 +1503,9 @@ def create_app(hub):
     def _has_le_access(sess):
         return access.has_le_access(sess)
 
+    def _has_reports_access(sess):
+        return access.has_reports_access(sess)
+
     def _has_console_access(sess):
         return access.has_console_access(sess)
 
@@ -1615,7 +1654,7 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes, collab,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes, notifications as notifications_routes, collab,
     hub_watchdog as hub_watchdog_routes, netbox_sso as netbox_sso_routes,
     )
     setup.register(app, hub, ctx)
@@ -1638,6 +1677,7 @@ def create_app(hub):
     azure_nsg.register(app, hub, ctx)
     cloud_nac_routes.register(app, hub, ctx)
     key_vault_routes.register(app, hub, ctx)
+    notifications_routes.register(app, hub, ctx)
     hub_watchdog_routes.register(app, hub, ctx)
     netbox_sso_routes.register(app, hub, ctx)
     setup_misc.register(app, hub, ctx)
@@ -1728,7 +1768,17 @@ def create_app(hub):
 
             index_html_path = os.path.join(ui_path, "index.html")
             if os.path.exists(index_html_path):
-                response = FileResponse(index_html_path)
+                # Serve index.html with the ?v= cache-bust placeholder
+                # (__WEBUI_VERSION__) resolved to the current WebUI/VERSION so
+                # every version-bump invalidates cached JS. no-store keeps the
+                # version itself from being cached.
+                try:
+                    with open(index_html_path, "r", encoding="utf-8") as f:
+                        html = f.read()
+                except OSError:
+                    raise HTTPException(status_code=404, detail="UI index.html not found in WebUI folder")
+                html = html.replace("__WEBUI_VERSION__", _webui_version(ui_path))
+                response = HTMLResponse(html)
                 response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
                 response.headers["Pragma"] = "no-cache"
                 response.headers["Expires"] = "0"

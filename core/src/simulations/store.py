@@ -676,12 +676,32 @@ class SimulationsStore:
     async def get_processing_modes(self, tenant_id: str) -> Dict[str, str]:
         return dict(self._data.get(tenant_id, {}).get("processing_modes", {}))
 
+    @staticmethod
+    def central_api_is_centralized(modes: Dict[str, Any] | None) -> bool:
+        """Whether the tenant's Central API is processed centrally (the HUB polls
+        Aruba Central itself — no spoke required). DEFAULTS to centralized: only an
+        explicit ``central_api == "distributed"`` opts out (a spoke holds the creds
+        and does the polling). Unset / blank / unknown → centralized, so a hub with
+        a Central config shows its checks with zero spokes assigned."""
+        return str((modes or {}).get("central_api") or "").strip().lower() != "distributed"
+
     async def set_processing_mode(self, tenant_id: str, feature: str, value: str) -> None:
         with self._lock:
             t = self._tenant(tenant_id)
             modes = dict(t.get("processing_modes", {}))
             modes[feature] = value
             t["processing_modes"] = modes
+            await self._asave()
+
+    # ── scheduled email report config (Setup → Notifications → Email Reports) ──
+    async def get_email_report(self, tenant_id: str) -> Dict[str, Any]:
+        """{enabled, sections:{checks,clients}, schedule:{freq,dow,dom,hour},
+        recipients:[...], last_sent} — the scheduled health-report config."""
+        return dict(self._data.get(tenant_id, {}).get("email_report", {}))
+
+    async def set_email_report(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
+        with self._lock:
+            self._tenant(tenant_id)["email_report"] = cfg or {}
             await self._asave()
 
     # ── notifications (smtp / teams / email) ───────────────────────────────
@@ -724,6 +744,23 @@ class SimulationsStore:
         with self._lock:
             self._global()["sim_quota_defaults"] = [
                 dict(d) for d in (quotas or []) if isinstance(d, dict)]
+            await self._asave()
+
+    # ── GLOBAL learned sim-quota operating points (Setup → Global Learned Values) ──
+    # Platform-wide (superadmin-curated) published learned values, keyed per ALERT
+    # ``{alert_type}:{alert_id}`` (no site): ``{op, floor, source_tenant,
+    # published_at}``. A Global Admin pulls a learning tenant's stable learned_op
+    # and publishes it here; other tenants' learning-OFF consumer rows seed/lift
+    # from it via apply_adaptive_targets (applied_op = max(own, global)). Lives
+    # under ``__global__`` so it's shared by every tenant.
+    async def get_global_learned_values(self) -> Dict[str, Any]:
+        v = self._global().get("global_learned_values")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_global_learned_values(self, mapping: Dict[str, Any]) -> None:
+        with self._lock:
+            self._global()["global_learned_values"] = (
+                dict(mapping) if isinstance(mapping, dict) else {})
             await self._asave()
 
     # ── GLOBAL simulation sharing (stacking) + N/A hide (Setup → Simulations) ──

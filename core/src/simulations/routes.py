@@ -21,9 +21,11 @@ import inspect
 import json
 import logging
 import re
-from .service import SimulationsService
+from .service import SimulationsService, _PASS, _FAIL
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
 from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini
+from . import sim_quota
+from . import email_report
 from access import safe_external_url, host_resolves_external
 from urllib.parse import urlsplit
 
@@ -1388,166 +1390,244 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # A tenant may opt OUT of the platform-wide quota defaults (Config → Sim
         # Quotas → "Ignore global quotas"): then only its own enabled rows apply.
         if t_csc.get("ignore_global_quotas"):
-            return resolve_effective_quotas(t_csc.get("sim_quotas"), list(SIM_META.keys()))
-        try:
-            g_defaults = await store.get_sim_quota_defaults()
-        except Exception:  # noqa: BLE001
-            g_defaults = []
-        merged = merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
-        return await _apply_adaptive_targets(tenant_id, merged)
+            base = resolve_effective_quotas(t_csc.get("sim_quotas"), list(SIM_META.keys()))
+        else:
+            try:
+                g_defaults = await store.get_sim_quota_defaults()
+            except Exception:  # noqa: BLE001
+                g_defaults = []
+            base = merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
+        # Adaptive targets MUST be applied in BOTH branches — the controller ramps
+        # state.target from csc.sim_quotas regardless of ignore_global_quotas, so
+        # skipping apply here (the old early-return) left count pinned at the min
+        # floor while the controller maxed its target and reported "at max, still
+        # not firing" — a false alarm: the engine only ever ran the floor.
+        return await _apply_adaptive_targets(tenant_id, base)
 
     def _adaptive_is_on(q: dict) -> bool:
-        """A quota is adaptive when it declares a max above its min (design §9).
-        Fixed-count quotas (no min/max, or min==max) are left untouched."""
-        try:
-            return int(q.get("max")) > int(q.get("min") or 1)
-        except (TypeError, ValueError):
-            return False
+        return sim_quota.adaptive_is_on(q)
 
     def _adaptive_key(q: dict) -> str:
-        return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
+        return sim_quota.adaptive_key(q)
 
     async def _apply_adaptive_targets(tenant_id: str, quotas: list) -> list:
         """Replace an adaptive quota's ``count`` with the controller's current
-        target (stored state; the controller loop advances it). A quota with no
-        controller state yet starts at its ``min``."""
-        adaptive = [q for q in quotas if _adaptive_is_on(q)]
-        if not adaptive:
-            return quotas
+        target (stored state; the controller loop advances it), lifted by the
+        effective learned operating point for the alert (max of this tenant's
+        learning-ON stable learned_op and the global published value). A quota
+        with no controller state yet seeds from that op (or ``min``)."""
         try:
             state = await store.get_adaptive_state(tenant_id)
         except Exception:  # noqa: BLE001
             state = {}
-        for q in adaptive:
-            st = state.get(_adaptive_key(q)) or {}
-            tgt = st.get("target")
-            q["count"] = int(tgt) if tgt is not None else int(q.get("min") or 1)
-        return quotas
+        try:
+            global_lv = await store.get_global_learned_values()
+        except Exception:  # noqa: BLE001
+            global_lv = {}
+        return sim_quota.apply_adaptive_targets(quotas, state, global_lv)
 
     def _ceil(x: float) -> int:
-        xi = int(x)
-        return xi + 1 if x > xi else xi
+        return sim_quota.ceil_to_int(x)
 
-    def _adaptive_step(st: dict, q: dict, firing, now: float) -> dict:
-        """Advance one controller tick (design §9). ``firing`` is True/False/None
-        (None = unknown → hold). Ramp up fast when not firing; when firing, learn
-        the floor (min sufficient) and hold at floor×(1+buffer), decaying slowly
-        toward it. Respects a settle window between changes."""
-        mn = int(q.get("min") or 1)
-        mx = max(mn, int(q.get("max") or mn))
-        step = max(1, int(q.get("step") or 1))
-        # Central reports alerts with LATENCY — often 30+ min. The controller must
-        # not change the target (up OR down) faster than that, or it ramps to max
-        # long before Central ever confirms firing (the "at max, not firing" false
-        # alarm). Floor the settle window at 30 min regardless of the config.
-        settle = max(1800.0, float(q.get("settle") or 1800.0))
-        buffer = float(q.get("buffer") if q.get("buffer") is not None else 0.20)
-        target = st.get("target")
-        floor = st.get("floor")
-        last = float(st.get("last_change") or 0)
-        mode = st.get("mode") or "learning"
-        if target is None:  # cold start (or warm-start from a persisted floor)
-            if floor is not None:
-                target = min(mx, max(mn, _ceil(float(floor) * (1 + buffer))))
-                mode = "stable"
-            else:
-                target, mode = mn, "learning"
-            # Start the settle clock now so even the FIRST change waits a full
-            # 30-min window (give Central time to confirm firing at the start level).
-            last = now
-        target = max(mn, min(mx, int(target)))
-        if (now - last) >= settle:
-            if firing is False:
-                if target >= mx:
-                    mode = "at_max"
-                else:
-                    target = min(mx, target + step); mode = "learning"; last = now
-            elif firing is True:
-                floor = target if floor is None else min(int(floor), target)
-                op = max(mn, _ceil(float(floor) * (1 + buffer)))
-                if target > op:  # decay toward the operating point to probe lower
-                    target = max(op, target - step); last = now
-                mode = "stable"
-            # firing None → hold
-        return {"target": max(mn, min(mx, int(target))), "floor": floor,
-                "mode": mode, "last_change": last}
-
-    _adaptive_firing_cache: dict = {}
+    def _adaptive_step(st: dict, q: dict, firing, now: float,
+                       applied_op: int | None = None) -> dict:
+        return sim_quota.adaptive_step(st, q, firing, now, applied_op)
 
     async def _alert_firing(tenant_id: str, q: dict):
-        """Best-effort: is this quota's alert currently firing at its site?
-        Reads active Central alerts (mode-aware, cached ~30s). Returns None when
-        the signal is unavailable, so the controller safely holds."""
-        import time as _t
-        now = _t.time()
-        cached = _adaptive_firing_cache.get(tenant_id)
-        if cached and now - cached[0] < 30:
-            fmap = cached[1]
-        else:
-            fmap = {}
-            try:
-                modes = await store.get_processing_modes(tenant_id)
-                if modes.get("central_api") == "centralized":
-                    browse = await browse_all_from_config(await store.get_central_config(tenant_id) or {})
-                else:
-                    browse = await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=20.0)
-                for a in (browse or {}).get("alerts", []) or []:
-                    if str(a.get("status") or "active").lower() == "cleared":
-                        continue
-                    nm = str(a.get("name") or a.get("category") or "").strip().lower()
-                    if nm:
-                        fmap.setdefault(nm, set()).add(str(a.get("site") or "").strip())
-            except Exception:  # noqa: BLE001
-                fmap = {}
-            _adaptive_firing_cache[tenant_id] = (now, fmap)
-        if not fmap:
+        """Is this quota's alert firing at its site?
+
+        Reads the SAME per-site check status the dashboard already computed — the
+        hub's 5-min Central poller for centralized tenants (``central_hub_status``)
+        plus relayed spoke telemetry for distributed ones — so the Engine and the
+        dashboard Checks view can NEVER disagree, and NO extra Central API call is
+        made. This is a cheap in-memory read, so the controller may call it as
+        often as it runs; the Central poll itself stays on its own 5-min cadence.
+
+        INVERTED semantics (see central_hub_poller): a check status of "ok" means
+        the expected error IS present, i.e. the alert IS firing. Returns True when
+        firing at a matching site, False when the check is present but definitively
+        not firing, and None when the signal is unavailable (check not found, or
+        only an unknown/pending status) so the controller HOLDS instead of ramping.
+
+        Historically this made its own browse_all_from_config call and scanned only
+        ``browse["alerts"]`` (never insights) with a separate site matcher — so an
+        alert the dashboard showed firing was invisible to the Engine, which then
+        ramped to max forever. Reading the dashboard value removes that whole
+        second code path.
+        """
+        alert_id = str(q.get("alert_id") or "").strip().lower()
+        if not alert_id:
             return None
-        sites = fmap.get(str(q.get("alert_id") or "").strip().lower())
-        if sites is None:
-            return False
+        # Every (status_map, site_mappings) the dashboard has for this tenant.
+        blocks = []
+        hub_central = service._hub_central(tenant_id)               # centralized
+        hub_present = isinstance(hub_central, dict)
+        if hub_present:
+            blocks.append((hub_central.get("status") or {},
+                           hub_central.get("site_mappings") or {}))
+        spokes = list(service._spokes_for_tenant(tenant_id))        # distributed
+        for _sid, data in spokes:
+            central = (data or {}).get("central") or {}
+            blocks.append((central.get("status") or {},
+                           central.get("site_mappings") or {}))
+        # No early-return on empty blocks: always fall through to the diag so
+        # "engine sees NO dashboard status for this tenant" is visible in the log
+        # (hub_status=False spokes=0) rather than silently producing no diag line.
+        # Resolve the quota's site to the wsite / central_site aliases the status
+        # map is keyed by: a cell-scoped quota (MIA-ACD) must match its physical
+        # wsite (MIA) and linked central_site (Miami); an empty site = global →
+        # match every wsite.
         site = str(q.get("site") or "").strip()
-        # Resolve the quota's site to the CENTRAL site name Central reports the
-        # alert under. Two hops: (1) if `site` names an SSID cell (e.g. MIA-ACD),
-        # map it to its physical wsite (MIA) via the ssid_matrix; (2) map that
-        # wsite to the Central site (e.g. Miami) via site_links. Without hop (1)
-        # a cell-scoped adaptive quota never matched a firing site and ramped to
-        # max forever ("at max, not firing").
+        aliases = set()
         if site:
+            aliases.add(site.lower())
             try:
                 csc = await store.get_central_sites_config(tenant_id) or {}
+                # Build "groups" of co-referring site identifiers: each ssid_matrix
+                # cell, each site_link, and each site_mappings pair contributes the
+                # SET of its site-ish field values. A quota's site can be a cell
+                # name, a wsite code, a link name, or a central_site — and the chain
+                # is multi-hop (cell "MIA-ACD" → wsite "MIA" → central_site "Miami",
+                # which is the form the poller keys status by). Fold groups into the
+                # alias set TRANSITIVELY (fixpoint) so any hop is reachable; the
+                # earlier single-hop resolver stopped at "MIA" and missed "Miami".
+                _FIELDS = ("name", "cell", "site", "wsite", "central_site")
+                groups = []
                 for cd in (csc.get("ssid_matrix") or []):
-                    if str(cd.get("name") or "").strip() == site and cd.get("site"):
-                        site = str(cd.get("site")).strip()
-                        break
+                    g = {str(cd.get(f) or "").strip().lower() for f in _FIELDS}
+                    g.discard("")
+                    if g:
+                        groups.append(g)
                 for lk in (csc.get("site_links") or []):
-                    if str(lk.get("wsite") or "").strip() == site and lk.get("central_site"):
-                        site = str(lk.get("central_site")).strip()
-                        break
+                    g = {str(lk.get(f) or "").strip().lower() for f in _FIELDS}
+                    g.discard("")
+                    if g:
+                        groups.append(g)
+                for wk, cv in (csc.get("site_mappings") or {}).items():
+                    g = {str(wk).strip().lower(), str(cv or "").strip().lower()}
+                    g.discard("")
+                    if g:
+                        groups.append(g)
+                # Fixpoint: union any group that shares a member with the alias set,
+                # repeating until nothing new is added (bounded by len(groups)).
+                changed = True
+                while changed:
+                    changed = False
+                    for g in groups:
+                        if (aliases & g) and not (g <= aliases):
+                            aliases |= g
+                            changed = True
             except Exception:  # noqa: BLE001
                 pass
-        return True if not site else (site in sites or "" in sites or "—" in sites)
+        # Look the alert up in the dashboard status. "ok" (in _PASS) = firing.
+        firing = None
+        saw_fail = False
+        matched_status = None
+        seen_cids: set = set()   # every check id available at the matched site(s)
+        for status_map, site_mappings in blocks:
+            for wsite, checks_map in (status_map or {}).items():
+                if not isinstance(checks_map, dict):
+                    continue
+                if aliases:
+                    wkey = str(wsite).strip().lower()
+                    csite = str(site_mappings.get(wsite) or "").strip().lower()
+                    if wkey not in aliases and csite not in aliases:
+                        continue
+                for cid, info in checks_map.items():
+                    seen_cids.add(str(cid))
+                    if str(cid).strip().lower() != alert_id:
+                        continue
+                    s = (info.get("status") if isinstance(info, dict) else info) or ""
+                    sl = str(s).strip().lower()
+                    matched_status = sl
+                    if sl in _PASS:
+                        firing = True         # error present at a matching site → firing
+                    elif sl in _FAIL and firing is None:
+                        saw_fail = True       # present, definitively not firing
+        # Only report "not firing" when the dashboard definitively says so;
+        # otherwise hold (None) rather than ramp on an unclear/absent signal.
+        if firing is None and saw_fail:
+            firing = False
+        # DIAG: what the Engine looked for vs what the dashboard status held.
+        #  - status_wsites = every site key the dashboard status is keyed by (with
+        #    its central_site). If none of these appear in `aliases`, the quota's
+        #    site didn't resolve to the status's key form (add the missing hop /
+        #    the site-link's Central Site).
+        #  - alert_id NOT in cids_at_site → name/format mismatch with the check id.
+        #  - present but firing False → the dashboard has it not-ok at that site.
+        status_wsites = sorted({
+            f"{w}→{(smap or {}).get(w)}"
+            for stat, smap in blocks for w in (stat or {})
+        })
+        logger.info("engine-firing diag [%s]: alert_id=%r site=%r hub_status=%s spokes=%d "
+                    "aliases=%s matched_status=%r → firing=%s; status_wsites=%s cids_at_site=%s",
+                    tenant_id, alert_id, site or "(global)", hub_present, len(spokes),
+                    sorted(aliases), matched_status, firing, status_wsites, sorted(seen_cids))
+        return firing
 
     async def _run_adaptive_controller() -> None:
         """One controller pass over every tenant's adaptive quotas — advance the
-        target and re-push when it moves. Small (per-quota state)."""
+        target and re-push when it moves. Small (per-quota state).
+
+        For each alert, ``applied_op`` = max(this tenant's learning-ON stable
+        rows' learned_op, the global published value). Learning-ON rows run the
+        full thermostat (the lab); learning-OFF rows are up-only consumers that
+        seed/lift from ``applied_op``. Only learning-ON rows down-ratchet — a
+        consumer never risks stopping its alert."""
         import time as _t
-        from .sim_quota import normalize_quota
+        from .sim_quota import normalize_quota, _alert_key
         now = _t.time()
+        try:
+            global_lv = await store.get_global_learned_values()
+        except Exception:  # noqa: BLE001
+            global_lv = {}
         for tid in _all_tenant_ids():
             try:
                 csc = await store.get_central_sites_config(tid) or {}
-                adaptive = [q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
-                            if q.get("enabled") and _adaptive_is_on(q)]
+                all_q = [normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
+                adaptive = [q for q in all_q if q.get("enabled") and _adaptive_is_on(q)]
+                # DIAG: does the controller even reach _alert_firing for this tenant?
+                # total_quotas>0 but adaptive=0 = quotas aren't adaptive (min==max /
+                # disabled) → no firing eval → an "underfilled" row is a fixed-count
+                # pool-fill issue, not a firing issue.
+                logger.info("adaptive-controller diag [%s]: total_quotas=%d adaptive=%d %s",
+                            tid, len(all_q), len(adaptive),
+                            [f"{q.get('alert_id')}@{q.get('site')} min={q.get('min')} "
+                             f"max={q.get('max')} learn={q.get('learning')}" for q in adaptive])
                 if not adaptive:
                     continue
                 state = await store.get_adaptive_state(tid)
+                # applied_op per alert = max(own learning-ON stable learned_op, global op)
+                applied_op: dict = {}
+                for q in adaptive:
+                    if not q.get("learning"):
+                        continue
+                    st = state.get(_adaptive_key(q)) or {}
+                    if st.get("phase") == "stable" and st.get("learned_op") is not None:
+                        ak = _alert_key(q)
+                        val = int(st["learned_op"])
+                        if ak not in applied_op or val > applied_op[ak]:
+                            applied_op[ak] = val
+                for ak, gv in (global_lv or {}).items():
+                    if not isinstance(gv, dict):
+                        continue
+                    gop = gv.get("op")
+                    if gop is None:
+                        continue
+                    try:
+                        gval = int(gop)
+                    except (TypeError, ValueError):
+                        continue
+                    if ak not in applied_op or gval > applied_op[ak]:
+                        applied_op[ak] = gval
                 changed = False
                 live = set()
                 for q in adaptive:
                     k = _adaptive_key(q); live.add(k)
                     firing = await _alert_firing(tid, q)
                     before = dict(state.get(k) or {})
-                    after = _adaptive_step(before, q, firing, now)
+                    after = _adaptive_step(before, q, firing, now,
+                                            applied_op.get(_alert_key(q)))
                     if after != before:
                         state[k] = after; changed = True
                 for k in list(state.keys()):
@@ -1774,6 +1854,36 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def get_central(tenant_id: str = Depends(get_tenant_id)):
         return await service.get_central_data(tenant_id)
 
+    @app.get("/sim/api/aggregate/central-health")
+    async def get_central_health(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        """30-day per-check health history (green/yellow/red). Default: DAILY
+        summaries for every check ({site:{check_id:[{d,o,w,e,n}]}}) — the strip.
+        With ?site=&check= → that check's raw HOURLY buckets ([{h,o,w,e,n}]) for
+        the on-hover breakdown. Merges the centralized hub-poller history with any
+        DISTRIBUTED spoke's relayed daily summary (central_status.health); hourly for
+        a distributed check is fetched on demand from the owning spoke (CS_GET_HEALTH)."""
+        poller = getattr(hub, "central_hub_poller", None)
+        health = getattr(poller, "_health", None)
+        site = request.query_params.get("site")
+        check = request.query_params.get("check")
+        if site and check:
+            hourly = health.hourly(tenant_id, site, check) if health else []
+            if not hourly:  # distributed → ask the owning spoke
+                try:
+                    r = await _cs_forward(tenant_id, "CS_GET_HEALTH",
+                                          {"site": site, "check": check}, timeout=10.0)
+                    hourly = (r or {}).get("hourly") or []
+                except Exception:  # noqa: BLE001 — no spoke / offline → empty
+                    pass
+            return {"hourly": hourly}
+        daily = dict(health.summary(tenant_id)) if health else {}
+        # Merge relayed spoke health (distributed-mode tenants).
+        for _sid, data in service._spokes_for_tenant(tenant_id):
+            sp = ((data or {}).get("central") or {}).get("health") or {}
+            for site_name, checks in sp.items():
+                daily.setdefault(site_name, {}).update(checks)
+        return {"daily": daily}
+
     @app.get("/sim/api/aggregate/central-status")
     async def get_central_status(tenant_id: str = Depends(get_tenant_id)):
         data = await service.get_central_status_data(tenant_id)
@@ -1803,7 +1913,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Sites/Alerts/Clients tabs asked a credential-less spoke and got
         'Central not configured'."""
         modes = await store.get_processing_modes(tenant_id)
-        if modes.get("central_api") == "centralized":
+        if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
             result = await browse_all_from_config(cc or {})
         else:
@@ -1856,6 +1966,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     detail="cluster_url resolves to an internal address — "
                            "DNS rebinding to a private/loopback host is blocked.",
                 )
+        # Central poll interval (seconds). Optional; coerce + floor at 60s here so
+        # a bad value can't be stored (the poller also floors defensively).
+        if "poll_interval_s" in cfg:
+            try:
+                cfg["poll_interval_s"] = max(60, int(cfg["poll_interval_s"] or 300))
+            except (TypeError, ValueError):
+                cfg["poll_interval_s"] = 300
         await store.set_central_config(tenant_id, cfg)
         # Push ``cfg`` (NOT ``hub_cc``): cfg carries ``mode`` on top of the
         # cluster creds, and the spoke's poller (_build_config) needs ``mode`` to
@@ -2224,6 +2341,54 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         diag["last_seen"] = entry.get("last_seen")
         diag["telemetry_keys"] = sorted(list(entry.keys())) if isinstance(entry, dict) else []
         return diag
+
+    # ── scheduled email health report (Setup → Notifications → Email Reports) ──
+    _EMAIL_REPORT_DEFAULTS = {
+        "enabled": False,
+        "sections": {"checks": True, "clients": True},
+        "schedule": {"freq": "weekly", "dow": 0, "dom": 1, "hour": 7},
+        "recipients": [],
+    }
+
+    @app.get("/api/reports/email-report")
+    async def get_email_report(tenant_id: str = Depends(get_tenant_id)):
+        cfg = await store.get_email_report(tenant_id)
+        out = {**_EMAIL_REPORT_DEFAULTS, **(cfg or {})}
+        out["sections"] = {**_EMAIL_REPORT_DEFAULTS["sections"], **(out.get("sections") or {})}
+        out["schedule"] = {**_EMAIL_REPORT_DEFAULTS["schedule"], **(out.get("schedule") or {})}
+        return out
+
+    @app.put("/api/reports/email-report")
+    async def set_email_report_cfg(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        body = await request.json()
+        body = body if isinstance(body, dict) else {}
+        sch = body.get("schedule") or {}
+        freq = str(sch.get("freq", "weekly"))
+        existing = await store.get_email_report(tenant_id) or {}
+        cfg = {
+            "enabled": bool(body.get("enabled")),
+            "sections": {"checks": bool((body.get("sections") or {}).get("checks", True)),
+                         "clients": bool((body.get("sections") or {}).get("clients", True))},
+            "schedule": {
+                "freq": freq if freq in ("daily", "weekly", "monthly") else "weekly",
+                "dow": max(0, min(6, int(sch.get("dow", 0) or 0))),
+                "dom": max(1, min(28, int(sch.get("dom", 1) or 1))),
+                "hour": max(0, min(23, int(sch.get("hour", 7) or 7))),
+            },
+            "recipients": [str(r).strip() for r in (body.get("recipients") or []) if str(r).strip()][:20],
+            "last_sent": existing.get("last_sent"),  # preserve the period marker
+        }
+        await store.set_email_report(tenant_id, cfg)
+        return {"saved": True}
+
+    @app.post("/api/reports/email-report/test")
+    async def test_email_report(tenant_id: str = Depends(get_tenant_id)):
+        cfg = {**_EMAIL_REPORT_DEFAULTS, **(await store.get_email_report(tenant_id) or {})}
+        try:
+            await email_report.send_now(hub, tenant_id, cfg)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Send failed: {exc}")
+        return {"sent": True, "to": cfg.get("recipients") or []}
 
     # ── hub tenant processing-modes (literal "hub" first segment) ──────────
     @app.patch("/sim/api/hub/tenants/{tenant}/processing-modes")
@@ -2601,23 +2766,33 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/{tenant}/settings")
     async def get_settings(tenant: str, tenant_id: str = Depends(get_tenant_id)):
-        return await store.get_settings(tenant_id)
+        settings = await store.get_settings(tenant_id)
+        # Never echo the password (legacy plaintext smtp_pass or the Fernet
+        # ciphertext) to the UI — surface a has_password flag instead.
+        notif = dict(settings.get("notifications") or {})
+        has_pw = bool(notif.get("smtp_password_enc") or notif.get("smtp_pass"))
+        for _k in ("smtp_pass", "smtp_password", "smtp_password_enc"):
+            notif.pop(_k, None)
+        notif["has_password"] = has_pw
+        settings["notifications"] = notif
+        return settings
 
     @app.post("/sim/api/{tenant}/settings/notifications")
     async def set_notifications(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
         body = await request.json()
         cfg = body if isinstance(body, dict) else {}
-        await store.set_notifications(tenant_id, cfg)
-        # Map sim-views field names onto the spoke's notifications settings.
-        notif = {k: v for k, v in cfg.items() if k != "to_emails"}
-        if cfg.get("to_emails"):
-            notif["smtp_to"] = cfg["to_emails"] if isinstance(cfg["to_emails"], str) else ",".join(cfg["to_emails"])
-        if cfg.get("smtp_pass"):
-            notif["smtp_password"] = cfg["smtp_pass"]
-        if cfg.get("teams_webhook_url"):
-            notif["teams_webhook_url"] = cfg["teams_webhook_url"]
-        pushed = await _push_config(tenant_id, {"notifications": notif})
-        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
+        # The hub sends this tenant's spoke out-of-contact alerts itself, using
+        # the hub's global notifications config (provider / ACS creds /
+        # from_email — see Hub → Setup → Notifications). The tenant only
+        # supplies a recipient list; nothing is pushed to the spoke and no
+        # sender creds are stored here (the spoke-sent email path is retired).
+        # Legacy sender-config fields already on disk are preserved untouched
+        # (non-destructive) in case the spoke-sent path is ever revived.
+        cur = await store.get_notifications(tenant_id) or {}
+        stored = dict(cur)
+        stored["to_emails"] = cfg.get("to_emails")
+        await store.set_notifications(tenant_id, stored)
+        return {"saved": True}
 
     @app.get("/sim/api/{tenant}/spokes")
     async def list_spokes(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -3218,6 +3393,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         merged_ledger: dict = {}
         monitored: list = []
         pool = {"online": 0, "by_site": {}, "tenant_pool": 0}   # cheap tenant-wide sum
+        # The spoke's ACTUAL effective_sim_quotas (what its engine is running
+        # against) — the hub pushes count to the spoke, but until it lands the
+        # spoke runs a stale count. Capture per-quota count so the UI can show
+        # the engine's real target vs. the controller's and flag a stale push
+        # (the root cause of "4/15" that looks like an eligibility problem).
+        spoke_counts: dict = {}
         for _sid, data in results:
             if not isinstance(data, dict):
                 continue
@@ -3225,6 +3406,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 m = merged_ledger.setdefault(
                     k, {"sim_id": e.get("sim_id"), "site": e.get("site"), "clients": []})
                 m["clients"].extend(e.get("clients") or [])
+            for q in (data.get("effective") or []):
+                if isinstance(q, dict):
+                    spoke_counts.setdefault(sim_quota.quota_dedup_key(q), int(q.get("count") or 0))
             p = data.get("pool") or {}
             pool["online"] += int(p.get("online") or 0)
             pool["tenant_pool"] += int(p.get("tenant_pool") or 0)
@@ -3250,8 +3434,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             {"site": site, "cell": cell, "have": have, "want": int(want or 0)})
         except Exception:  # noqa: BLE001
             pass
+        eff_quotas = await _effective_sim_quotas(tenant_id)
+        # Flag adaptive quotas whose spoke count (engine's real target) lags the
+        # hub count (controller's applied target) — a push that hasn't landed yet,
+        # which presents as "underfilled" but is really a stale count on the spoke.
+        stale_push: list = []
+        for q in eff_quotas:
+            k = sim_quota.quota_dedup_key(q)
+            sc = spoke_counts.get(k)
+            hc = int(q.get("count") or 0)
+            if sc is not None and sc != hc:
+                stale_push.append({"key": k, "spoke_count": sc, "hub_count": hc})
         result = {"status": "SUCCESS",
-                  "effective": await _effective_sim_quotas(tenant_id),
+                  "effective": eff_quotas,
+                  "spoke_counts": spoke_counts,
+                  "stale_push": stale_push,
                   "ledger": merged_ledger, "monitored_checks": monitored,
                   "placement_warnings": placement_warnings, "pool": pool}
         try:
@@ -3362,6 +3559,84 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return {"status": "saved", "defaults": clean, "errors": errs,
                 "pushed_to_spokes": pushed}
 
+    # ── Global Learned Values (Setup → Global Learned Values, superadmin) ──────
+    # A Global Admin curates the platform-wide published learned operating points
+    # (per alert). A learning tenant's lab rows produce stable learned_op values;
+    # the Admin selects one and Publishes it here so every other tenant's
+    # learning-OFF consumer rows seed/lift from it (applied_op = max(own, global)).
+    @app.get("/sim/api/superadmin/learned-values/candidates")
+    async def get_learned_value_candidates(request: Request):
+        """Roll up every tenant's stable learning-ON ``learned_op`` per alert, so
+        the Global Admin can pick one to Publish. Returns one row per
+        (tenant, alert, site) that has reached ``stable`` with a recorded op."""
+        _require_admin(request)
+        from .sim_quota import _alert_key
+        out = []
+        for tid in _all_tenant_ids():
+            try:
+                state = await store.get_adaptive_state(tid)
+            except Exception:  # noqa: BLE001
+                continue
+            for key, st in (state or {}).items():
+                if not isinstance(st, dict) or st.get("phase") != "stable":
+                    continue
+                op = st.get("learned_op")
+                if op is None:
+                    continue
+                # key = "{alert_type}:{alert_id}:{site}" (adaptive_key)
+                head, _, site = key.rpartition(":")
+                atype, _, aid = head.partition(":")
+                out.append({"alert_key": _alert_key({"alert_type": atype, "alert_id": aid}),
+                            "alert_type": atype or "alert", "alert_id": aid,
+                            "site": site, "op": int(op),
+                            "floor": st.get("floor"),
+                            "source_tenant": tid})
+        # Highest op per (tenant, alert_key) first for easy picking.
+        out.sort(key=lambda r: (r["alert_key"], r["source_tenant"], -r["op"]))
+        return {"candidates": out}
+
+    @app.get("/sim/api/superadmin/global-learned-values")
+    async def get_global_learned_values(request: Request):
+        _require_admin(request)
+        return {"published": await store.get_global_learned_values()}
+
+    @app.put("/sim/api/superadmin/global-learned-values")
+    async def put_global_learned_values(request: Request):
+        """Publish the global learned-values registry. Body: ``{values: {
+        alert_key: {op, floor, source_tenant, published_at?}}}``. Replaces the
+        registry wholesale (the Admin curates the whole set in the UI). Each
+        entry's ``published_at`` is stamped server-side when omitted. Force-pushes
+        every tenant so consumers lift to the new op without waiting for a
+        controller tick."""
+        import time as _t
+        _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        raw = (body or {}).get("values") or {}
+        clean: dict = {}
+        if isinstance(raw, dict):
+            now = _t.time()
+            for ak, v in raw.items():
+                if not isinstance(v, dict) or v.get("op") is None:
+                    continue
+                try:
+                    op = int(v.get("op"))
+                except (TypeError, ValueError):
+                    continue
+                if op < 1:
+                    continue
+                clean[str(ak)] = {
+                    "op": op,
+                    "floor": int(v["floor"]) if v.get("floor") is not None else None,
+                    "source_tenant": str(v.get("source_tenant") or ""),
+                    "published_at": float(v.get("published_at") or now),
+                }
+        await store.set_global_learned_values(clean)
+        pushed = await _push_sim_quotas_all_tenants()
+        return {"status": "published", "values": clean, "pushed_to_spokes": pushed}
+
     @app.get("/sim/api/{tenant}/central/available")
     async def get_central_available(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         """Available-checks catalog (alerts/insights/hardware) for the Central API
@@ -3377,7 +3652,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
           CS_GET_CENTRAL_AVAILABLE; degrades to an empty catalog when no spoke is
           connected (the editor still works with manual checks)."""
         modes = await store.get_processing_modes(tenant_id)
-        if modes.get("central_api") == "centralized":
+        if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
             return await get_central_available_from_config(cc or {})
         try:
@@ -3414,7 +3689,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # could never validate the creds the operator typed into the hub form).
         # Distributed mode → fan CS_TEST_CENTRAL out to the tenant's cs spokes.
         modes = await store.get_processing_modes(tenant_id)
-        if modes.get("central_api") == "centralized":
+        if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
             return {"spokes": [await test_central_from_config(cc or {}, spoke_id="hub")]}
         # Registered Client-Sim spokes for this tenant (approved + bound, or

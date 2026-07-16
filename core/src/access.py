@@ -55,10 +55,14 @@ _PREFIX_CACHE_TTL = 300  # seconds — session-prefix cache TTL (was a create_ap
 # Per-module enable map for server-side subnet filtering. Modules whose data
 # carries tenant IP addresses (nac, firewall, netbox, dhcp, hypervisor) default
 # ON; the cs / Simulations module is scoped by tenant ID instead of subnet, so
-# it defaults OFF. Admins can toggle each module in System → General.
-_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "dns", "cs", "hypervisor", "nw")
+# it defaults OFF. Admins can toggle each module in System → General. ``le``
+# (Certificates) has no IP column — it attributes a cert to a tenant by resolving
+# its SANs through the internal DNS A-records (see net_services._filter_le_certs) —
+# so it defaults OFF (best-effort, opt-in).
+_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "dns", "cs", "hypervisor", "nw", "le")
 _FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
-                            "dhcp": True, "dns": False, "cs": False, "hypervisor": True, "nw": True}
+                            "dhcp": True, "dns": False, "cs": False, "hypervisor": True,
+                            "nw": True, "le": False}
 
 # Firewall endpoint → filter spec. "rules" uses the strict source/destination
 # check (with OPNsense alias expansion); the field-based endpoints filter on
@@ -406,14 +410,14 @@ def session_user(sessions: dict, request: "Request"):
 # editors and the effective-permission union operate over this set (plus the
 # admin flag). Kept here so the UI, routes, and resolver agree on one list.
 ENFORCED_RIGHTS = ("cs", "nw", "ipam", "le", "console", "console_write",
-                   "firewall", "dns", "dhcp", "nac", "ldap", "pxmx", "edit")
+                   "firewall", "dns", "dhcp", "nac", "ldap", "pxmx", "reports", "edit")
 # Module ACCESS rights (menu + API visibility). Each gates one module's nav +
 # API namespace; a user needs the right (or admin/tenant-admin, which auto-pass)
 # to see/reach it. cs is included but the Simulations module keeps its own
 # tenant model. ``edit`` is NOT here — it is the cross-module write tier (see
 # has_edit_access), not a module.
 MODULE_RIGHTS = ("cs", "nw", "ipam", "le", "console",
-                 "firewall", "dns", "dhcp", "nac", "ldap", "pxmx")
+                 "firewall", "dns", "dhcp", "nac", "ldap", "pxmx", "reports")
 
 
 def resolve_effective_permissions(hub, user_record: dict) -> dict:
@@ -606,6 +610,12 @@ def has_nw_access(sess) -> bool:
 def has_ipam_access(sess) -> bool:
     """IPAM (``ipam``) module access gate (see ``has_module_access``)."""
     return has_module_access(sess, "ipam")
+
+
+def has_reports_access(sess) -> bool:
+    """Reports module (tenant-scoped health reports + scheduled email). Right key
+    ``"reports"``; a global admin auto-passes and can run any tenant's report."""
+    return has_module_access(sess, "reports")
 
 
 def has_le_access(sess) -> bool:

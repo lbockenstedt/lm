@@ -22,7 +22,7 @@ logger = logging.getLogger("SimQuota")
 
 # ── Schema (byte-identical to cs/lm-spoke/src/sim_quota.py) ───────────────
 SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
-                  "multi_capable", "rehome", "enabled")
+                  "multi_capable", "rehome", "enabled", "learning")
 ALERT_TYPES = ("alert", "insight")
 
 SIM_META: Dict[str, Dict[str, object]] = {
@@ -91,6 +91,12 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         else _as_bool(raw.get("multi_capable"), bool(meta.get("multi_capable", False))),
         "rehome": _as_bool(raw.get("rehome"), False),
         "enabled": _as_bool(raw.get("enabled"), False),
+        # `learning` ON = this row is the "learning lab" that runs the full
+        # thermostat (down-ratchet to find the floor, settle floor+20%, record a
+        # publishable learned_op). OFF (default) = a consumer: up-only, seeds/lifts
+        # from the tenant/global learned operating point, never down-ratchets (never
+        # risks stopping a firing alert). See design doc §9 / adaptive_step.
+        "learning": _as_bool(raw.get("learning"), False),
     }
     # Adaptive-controller fields (design doc §9) — carried through only when the
     # quota declares them, so a fixed-count quota stays exactly as before. The
@@ -230,6 +236,254 @@ def merge_effective_quotas(
         if site not in tsite:
             out.extend(r for r in rows if r.get("enabled"))
     return out
+
+
+# ── Adaptive harvest controller (design doc §9) — PURE helpers ──────────────
+# Module-level so they're importable + testable. routes.py wires the async
+# apply/loop around ``store``; these are the stateless bits.
+def adaptive_is_on(q: Dict[str, Any]) -> bool:
+    """A quota is adaptive when it declares a max above its min. Fixed-count
+    quotas (no min/max, or min==max) are left untouched."""
+    try:
+        return int(q.get("max")) > int(q.get("min") or 1)
+    except (TypeError, ValueError):
+        return False
+
+
+def adaptive_key(q: Dict[str, Any]) -> str:
+    """The controller-state key for an adaptive quota."""
+    return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
+
+
+def ceil_to_int(x: float) -> int:
+    """``ceil`` for positive floats without a math import."""
+    xi = int(x)
+    return xi + 1 if x > xi else xi
+
+
+def _alert_key(q: Dict[str, Any]) -> str:
+    """The per-ALERT key (no site) used to share learned operating points across
+    a tenant's sites and the global registry: ``alert_type:alert_id``."""
+    return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}"
+
+
+def _derived_mode(phase: str) -> str:
+    """Map an internal thermostat phase to the UI-facing mode badge."""
+    if phase == "stable":
+        return "stable"
+    if phase == "at_max":
+        return "at_max"
+    return "learning"
+
+
+def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
+                  applied_op: int | None = None) -> Dict[str, Any]:
+    """Advance one controller tick (design §9). ``firing`` is True/False/None
+    (None = unknown → hold). ``applied_op`` is the effective learned operating
+    point for this alert (max of this tenant's learning-ON stable learned_op and
+    the global published value) — used to SEED a cold start so a consumer/lab
+    begins near the known-good count instead of ramping from min.
+
+    Two behaviors, gated by ``q["learning"]``:
+
+    * **learning ON (the lab):** full thermostat. ``up_find`` ramps +step until
+      firing → ``down_floor`` ratchets −step while still firing (floor = lowest
+      count that fires, re-learned fresh each cycle) → on the first non-firing
+      step, floor = last firing count, restore target → ``up_confirm`` adds +step
+      until it re-fires → ``stable`` settles at ``ceil(floor*(1+buffer))`` and
+      records ``learned_op``. From ``stable`` the lab keeps learning: it re-probes
+      down (drift down) or ramps up (drift up) on later ticks.
+
+    * **learning OFF (the consumer):** up-only. Seed from ``applied_op``; not
+      firing → +step until firing; firing → HOLD (never down-ratchet, never risk
+      stopping the alert). Produces no ``learned_op``.
+
+    A settle window (≥30 min, floored for Central's reporting latency) gates
+    every change. Returns the next state dict
+    ``{target, floor, phase, learned_op, mode, last_change}``."""
+    mn = int(q.get("min") or 1)
+    mx = max(mn, int(q.get("max") or mn))
+    step = max(1, int(q.get("step") or 1))
+    # Central reports alerts with LATENCY — often 30+ min. The controller must
+    # not change the target (up OR down) faster than that, or it ramps to max
+    # long before Central ever confirms firing (the "at max, not firing" false
+    # alarm). Floor the settle window at 30 min regardless of the config.
+    settle = max(1800.0, float(q.get("settle") or 1800.0))
+    buffer = float(q.get("buffer") if q.get("buffer") is not None else 0.20)
+    learning = _as_bool(q.get("learning"), False)
+
+    target = st.get("target")
+    floor = st.get("floor")
+    phase = st.get("phase") or "up_find"
+    learned_op = st.get("learned_op")
+    last = float(st.get("last_change") or 0)
+
+    if target is None:  # cold start — seed from the known-good op if any
+        seed = applied_op if applied_op else mn
+        target = max(mn, min(mx, int(seed)))
+        floor = None
+        learned_op = None
+        phase = "up_find"
+        # Start the settle clock now so even the FIRST change waits a full
+        # 30-min window (give Central time to confirm firing at the start level).
+        last = now
+    target = max(mn, min(mx, int(target)))
+
+    def _stable_at(fl: int) -> None:
+        """Enter `stable`: record learned_op and park target at floor+buffer."""
+        nonlocal floor, learned_op, target, phase, last
+        floor = fl
+        learned_op = max(mn, ceil_to_int(float(fl) * (1 + buffer)))
+        target = min(mx, learned_op)
+        phase = "stable"
+        last = now
+
+    if (now - last) >= settle:
+        if firing is None:
+            pass  # unknown → hold
+        elif learning:
+            # ── learning lab: full thermostat ───────────────────────────────
+            if firing is True:
+                if phase == "up_find":
+                    # found firing from below — start ratcheting down
+                    floor = target
+                    target = max(mn, target - step)
+                    phase = "down_floor"; last = now
+                elif phase == "down_floor":
+                    if target <= mn:
+                        _stable_at(mn)  # still firing at min → floor is min
+                    else:
+                        floor = target          # lower count still fires
+                        target = max(mn, target - step)
+                        last = now
+                elif phase == "up_confirm":
+                    _stable_at(target)  # re-fired → floor confirmed
+                elif phase == "stable":
+                    # continuous re-learning: re-probe DOWN to track drift
+                    floor = target
+                    target = max(mn, target - step)
+                    phase = "down_floor"; last = now
+                elif phase == "at_max":
+                    # Ramped to the ceiling while the firing signal was missing,
+                    # now it IS firing — the real firing point is at/below max, so
+                    # ratchet DOWN to find the floor instead of holding at max
+                    # forever. (Bug: a quota that hit at_max during a firing outage
+                    # never came back down once firing was detected again — it sat
+                    # underfilled at max. There was no at_max→stable path despite
+                    # the old comment claiming one.)
+                    floor = target
+                    target = max(mn, target - step)
+                    phase = "down_floor"; last = now
+            else:  # firing is False
+                if phase == "down_floor":
+                    # over-stepped: the last firing count was target+step
+                    floor = target + step
+                    target = floor  # restore to the firing count
+                    phase = "up_confirm"; last = now
+                elif phase == "up_confirm":
+                    # not re-firing yet (latency/hysteresis) — keep adding back
+                    if target >= mx:
+                        phase = "at_max"
+                    else:
+                        target = min(mx, target + step); last = now
+                elif phase == "stable":
+                    # drift UP: learned_op no longer fires — re-find the floor
+                    if target >= mx:
+                        phase = "at_max"
+                    else:
+                        target = min(mx, target + step)
+                        phase = "up_find"; last = now
+                else:  # up_find / at_max
+                    if target >= mx:
+                        phase = "at_max"
+                    else:
+                        target = min(mx, target + step)
+                        phase = "up_find"; last = now
+        else:
+            # ── consumer: up-only, never down-ratchet ───────────────────────
+            if firing is True:
+                phase = "stable"  # hold — never risk stopping the alert
+            else:  # not firing
+                if target >= mx:
+                    phase = "at_max"
+                else:
+                    target = min(mx, target + step)
+                    phase = "up_find"; last = now
+
+    return {"target": max(mn, min(mx, int(target))), "floor": floor,
+            "phase": phase, "learned_op": learned_op, "learning": learning,
+            "mode": _derived_mode(phase), "last_change": last}
+
+
+def apply_adaptive_targets(quotas: List[Dict[str, Any]],
+                           state: Dict[str, Any],
+                           global_learned: Dict[str, Any] | None = None
+                           ) -> List[Dict[str, Any]]:
+    """Replace each adaptive quota's ``count`` with the controller's current
+    target (from ``state`` keyed by ``adaptive_key``), lifted by the effective
+    learned operating point for the alert. Pure (no store) — routes.py wraps
+    this with the async store read so the push path and the state view apply the
+    same target.
+
+    ``applied_op[alert]`` = max of this tenant's learning-ON stable rows'
+    ``learned_op`` for that alert and the global published value
+    (``global_learned[alert_key].op``). Highest wins across multiple learners.
+
+    * learning-ON row: ``count`` = its own thermostat ``target`` (the probe).
+    * learning-OFF row: ``count`` = ``max(its target, applied_op)`` — seeds/lifts
+      from the learned op, up-only (a higher op lifts it; a lower one never
+      drops it, so a firing site stays firing). Cold start (no state) seeds from
+      ``applied_op`` (or ``min`` when none exists yet).
+
+    Non-adaptive quotas are left untouched."""
+    global_learned = global_learned or {}
+    adaptive = [q for q in quotas if adaptive_is_on(q)]
+    if not adaptive:
+        return quotas
+
+    # applied_op per alert = max(own learning-ON stable learned_op, global op)
+    applied_op: Dict[str, int] = {}
+    for q in adaptive:
+        if not _as_bool(q.get("learning"), False):
+            continue
+        st = state.get(adaptive_key(q)) or {}
+        if st.get("phase") == "stable" and st.get("learned_op") is not None:
+            ak = _alert_key(q)
+            cur = applied_op.get(ak)
+            val = int(st["learned_op"])
+            if cur is None or val > cur:
+                applied_op[ak] = val
+    for ak, gv in global_learned.items():
+        if not isinstance(gv, dict):
+            continue
+        gop = gv.get("op")
+        if gop is None:
+            continue
+        try:
+            gval = int(gop)
+        except (TypeError, ValueError):
+            continue
+        cur = applied_op.get(ak)
+        if cur is None or gval > cur:
+            applied_op[ak] = gval
+
+    for q in adaptive:
+        st = state.get(adaptive_key(q)) or {}
+        ak = _alert_key(q)
+        op = applied_op.get(ak)
+        if _as_bool(q.get("learning"), False):
+            # lab runs its own probe target
+            tgt = st.get("target")
+            q["count"] = int(tgt) if tgt is not None else int(q.get("min") or 1)
+        else:
+            # consumer: up-only, seed/lift from applied_op, never drop
+            tgt = st.get("target")
+            if tgt is None:  # cold start
+                q["count"] = int(op) if op is not None else int(q.get("min") or 1)
+            else:
+                base = int(tgt)
+                q["count"] = max(base, int(op)) if op is not None else base
+    return quotas
 
 
 # ── Catalog from raw INI text (hub centralized mode) ──────────────────────

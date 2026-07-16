@@ -58,6 +58,12 @@ def test_normalize_quota_count_floor():
     assert sim_quota.normalize_quota({"alert_id": "X", "sim_id": "dns_fail", "count": "garbage"})["count"] == 1
 
 
+def test_normalize_quota_learning_default_off_explicit_on():
+    assert sim_quota.normalize_quota({"alert_id": "X", "sim_id": "dns_fail"})["learning"] is False
+    assert sim_quota.normalize_quota({"alert_id": "X", "sim_id": "dns_fail", "learning": True})["learning"] is True
+    assert sim_quota.normalize_quota({"alert_id": "X", "sim_id": "dns_fail", "learning": "true"})["learning"] is True
+
+
 # ── validate_sim_quotas / resolve ──────────────────────────────────────────
 def test_validate_drops_missing_fields():
     clean, errs = sim_quota.validate_sim_quotas(
@@ -255,3 +261,196 @@ def test_merge_presence_and_sim_quotas_coexist():
     sim = [q for q in eff if q["sim_id"]]
     assert len(pres) == 1 and pres[0]["site"] == "MIA"
     assert len(sim) == 1 and sim[0]["alert_id"] == "A"
+
+
+# ── Adaptive harvest controller (design §9) ────────────────────────────────
+def _aq(**kw):
+    base = {"alert_type": "alert", "alert_id": "DNS Server Failed to Respond",
+            "sim_id": "dns_fail", "site": "MIA-PSK", "count": 1,
+            "min": 1, "max": 15, "enabled": True}
+    base.update(kw)
+    return base
+
+
+def _run_thermostat(q, firing_seq, applied_op=None, start=None):
+    """Drive the thermostat through a sequence of (firing, now) ticks; return
+    the final state dict. ``firing_seq`` is a list of (firing, now) tuples
+    spaced >= settle so each advances."""
+    st = start or {}
+    for firing, now in firing_seq:
+        st = sim_quota.adaptive_step(st, q, firing=firing, now=now,
+                                     applied_op=applied_op)
+    return st
+
+
+def test_adaptive_is_on_requires_max_above_min():
+    assert sim_quota.adaptive_is_on(_aq(min=1, max=15)) is True
+    assert sim_quota.adaptive_is_on(_aq(min=5, max=5)) is False   # min==max → fixed
+    assert sim_quota.adaptive_is_on(_aq(max=None)) is False        # no max → fixed
+    assert sim_quota.adaptive_is_on({"count": 10}) is False        # plain quota
+
+
+# ── apply_adaptive_targets: learning-ON probe vs consumer seed/lift ─────────
+def test_apply_learning_row_runs_own_probe_target_not_lifted():
+    """A learning-ON lab row runs its OWN thermostat target as count — it is the
+    source of the learned value, not a consumer of it, so applied_op never
+    overrides its probe."""
+    lab = _aq(site="DFW", learning=True, min=1, max=15)
+    state = {sim_quota.adaptive_key(lab): {"target": 8, "phase": "down_floor",
+                                           "learned_op": 11, "last_change": 0}}
+    out = sim_quota.apply_adaptive_targets([dict(lab)], state,
+                                           {"alert:DNS Server Failed to Respond": {"op": 14}})
+    assert out[0]["count"] == 8  # own probe, not lifted to 14
+
+
+def test_apply_consumer_adopts_max_of_target_and_applied_op():
+    """A learning-OFF consumer takes max(its target, applied_op) — lifted up to
+    the learned op but never dropped below its working count."""
+    lab = _aq(site="DFW", learning=True, min=1, max=15)
+    cons = _aq(site="MIA-PSK", learning=False, min=1, max=15)
+    state = {
+        sim_quota.adaptive_key(lab): {"target": 11, "phase": "stable",
+                                      "learned_op": 11, "last_change": 0},
+        sim_quota.adaptive_key(cons): {"target": 5, "phase": "up_find",
+                                       "last_change": 0},
+    }
+    out = sim_quota.apply_adaptive_targets([dict(lab), dict(cons)], state)
+    by_site = {q["site"]: q for q in out}
+    assert by_site["DFW"]["count"] == 11      # lab own target
+    assert by_site["MIA-PSK"]["count"] == 11  # consumer lifted 5 → 11
+
+
+def test_apply_consumer_never_drops_below_working_target():
+    """A published global op LOWER than the consumer's working target does not
+    drop it (up-only / always-firing)."""
+    cons = _aq(site="MIA-PSK", learning=False, min=1, max=15)
+    state = {sim_quota.adaptive_key(cons): {"target": 9, "phase": "stable",
+                                            "last_change": 0}}
+    out = sim_quota.apply_adaptive_targets([dict(cons)], state,
+                                           {"alert:DNS Server Failed to Respond": {"op": 4}})
+    assert out[0]["count"] == 9  # kept its working count; op=4 ignored
+
+
+def test_apply_consumer_cold_start_seeds_from_global():
+    """No controller state yet + a published global op → consumer seeds at the
+    global op (its initial starting point), not min."""
+    cons = _aq(site="MIA-PSK", learning=False, min=1, max=15)
+    out = sim_quota.apply_adaptive_targets([dict(cons)], {},
+                                           {"alert:DNS Server Failed to Respond": {"op": 11}})
+    assert out[0]["count"] == 11
+
+
+def test_apply_consumer_cold_start_falls_back_to_min():
+    """No state and no learned op anywhere → consumer starts at min (bootstrap)."""
+    cons = _aq(site="MIA-PSK", learning=False, min=1, max=15)
+    out = sim_quota.apply_adaptive_targets([dict(cons)], {})
+    assert out[0]["count"] == 1
+
+
+def test_apply_highest_learned_op_wins_across_learners():
+    """Multiple learning-ON stable rows for the same alert: the highest
+    learned_op wins as the applied_op consumers adopt."""
+    lab_a = _aq(site="DFW", learning=True, min=1, max=15)
+    lab_b = _aq(site="ATL", learning=True, min=1, max=20)
+    cons = _aq(site="MIA-PSK", learning=False, min=1, max=20)
+    state = {
+        sim_quota.adaptive_key(lab_a): {"target": 11, "phase": "stable",
+                                        "learned_op": 11, "last_change": 0},
+        sim_quota.adaptive_key(lab_b): {"target": 14, "phase": "stable",
+                                        "learned_op": 14, "last_change": 0},
+        sim_quota.adaptive_key(cons): {"target": 3, "phase": "up_find",
+                                       "last_change": 0},
+    }
+    out = sim_quota.apply_adaptive_targets([dict(lab_a), dict(lab_b), dict(cons)],
+                                           state)
+    by_site = {q["site"]: q for q in out}
+    assert by_site["MIA-PSK"]["count"] == 14  # max(11, 14) wins
+
+
+def test_apply_leaves_fixed_quotas_untouched():
+    """A non-adaptive quota (no max>min) keeps its configured count."""
+    fixed = {"alert_type": "alert", "alert_id": "X", "sim_id": "ping_test",
+             "site": "MIA", "count": 7, "enabled": True}
+    out = sim_quota.apply_adaptive_targets([dict(fixed)],
+                                           {"alert:X:MIA": {"target": 99}})
+    assert out[0]["count"] == 7
+
+
+# ── adaptive_step: learning-ON full thermostat ──────────────────────────────
+def test_learning_on_full_cycle_settles_at_floor_plus_buffer():
+    """up_find → down_floor → up_confirm → stable. Threshold fires at >=9;
+    the lab ramps to 9, ratchets down to 8 (stops), restores 9, confirms, and
+    settles at ceil(9*1.2)=11 with learned_op=11."""
+    q = _aq(learning=True, min=1, max=15, step=1, buffer=0.2)
+    threshold = 9
+    # (firing, now) ticks spaced 1800s. The target entering tick i is i (tick 0
+    # cold-seeds to 1; each not-firing up_find tick +1). So targets 1..8 don't
+    # fire, 9 fires (down_floor→8), 8 stops (up_confirm→9), 9 fires (stable@11).
+    firings = [False, False, False, False, False, False, False, False, False,  # 1..8
+               True,   # target=9 fires → down_floor, target→8
+               False,  # target=8 stops → up_confirm, target→9
+               True]   # target=9 fires → stable @ 11
+    seq = [(f, i * 1800) for i, f in enumerate(firings)]
+    st = _run_thermostat(q, seq)
+    assert st["phase"] == "stable"
+    assert st["floor"] == 9
+    assert st["learned_op"] == 11
+    assert st["target"] == 11
+    assert st["mode"] == "stable"
+
+
+def test_learning_on_floor_relearned_fresh_not_stale():
+    """From stable + firing, the lab re-probes down (continuous learning) and
+    floor tracks the new probe target — it does NOT get stuck at the old floor."""
+    q = _aq(learning=True, min=1, max=15, step=1, buffer=0.2)
+    start = {"target": 11, "floor": 9, "phase": "stable", "learned_op": 11,
+             "last_change": 0}
+    after = sim_quota.adaptive_step(start, q, firing=True, now=10_000)
+    assert after["phase"] == "down_floor"
+    assert after["floor"] == 11  # re-seeded to the current target, not stuck at 9
+    assert after["target"] == 10
+
+
+def test_learning_on_drift_up_relearning_when_stable_stops_firing():
+    """If the learned op stops firing (drift up), stable → up_find ramps higher."""
+    q = _aq(learning=True, min=1, max=15, step=1, buffer=0.2)
+    start = {"target": 11, "floor": 9, "phase": "stable", "learned_op": 11,
+             "last_change": 0}
+    after = sim_quota.adaptive_step(start, q, firing=False, now=10_000)
+    assert after["phase"] == "up_find"
+    assert after["target"] == 12
+
+
+# ── adaptive_step: learning-OFF consumer (up-only) ──────────────────────────
+def test_consumer_cold_start_seeds_from_applied_op():
+    q = _aq(learning=False, min=1, max=15, step=1)
+    after = sim_quota.adaptive_step({}, q, firing=False, now=0, applied_op=11)
+    assert after["target"] == 11
+    assert after["phase"] == "up_find"
+
+
+def test_consumer_holds_when_firing_never_down_ratchets():
+    """Consumer firing → hold (stable); a later not-firing tick ramps UP, never
+    down, so a firing site can't be driven below its working count."""
+    q = _aq(learning=False, min=1, max=15, step=1)
+    st = {"target": 9, "phase": "up_find", "last_change": 0}
+    hold = sim_quota.adaptive_step(st, q, firing=True, now=10_000)
+    assert hold["target"] == 9 and hold["phase"] == "stable"   # held, not decayed
+    up = sim_quota.adaptive_step(hold, q, firing=False, now=11_800 + 1800)
+    assert up["target"] == 10 and up["phase"] == "up_find"     # ramped up, not down
+
+
+def test_consumer_at_max_when_ceiling_reached_and_not_firing():
+    q = _aq(learning=False, min=1, max=15, step=1)
+    st = {"target": 15, "phase": "up_find", "last_change": 0}
+    after = sim_quota.adaptive_step(st, q, firing=False, now=10_000)
+    assert after["target"] == 15 and after["mode"] == "at_max"
+
+
+# ── adaptive_step: settle-window guard (applies to both) ────────────────────
+def test_adaptive_step_holds_within_settle_window():
+    """No target change within 30 min of the last change, even when not firing."""
+    q = _aq(learning=True, min=1, max=15, step=1)
+    st = {"target": 5, "phase": "up_find", "last_change": 9_900}
+    after = sim_quota.adaptive_step(st, q, firing=False, now=10_000)  # 100s < 1800
+    assert after["target"] == 5  # unchanged

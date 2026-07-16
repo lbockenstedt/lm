@@ -2050,6 +2050,37 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             logger.debug("CS_* relay: no cs spoke for tenant=%s (agent=%s, %s) — dropping",
                          tenant_id, agent_id, cs_type)
             return
+        # Defense-in-depth: before forwarding a delete_vm "completed" (which the
+        # cs spoke acks completed at CS_INGEST_COMMAND_RESULT), confirm the VM
+        # is actually gone from the agent's live list. The agent already verifies
+        # via wait_guest_gone before reporting completed; this catches the rare
+        # case it's wrong. If still present, ack the original FAILED and ENQUEUE
+        # A FRESH delete_vm — re-delivering the same cs_cmd_id would only re-ack
+        # the cached terminal (the agent's liveness-dedup), not re-run, so a new
+        # command is required. Bounded to ONE re-enqueue per (agent,vmid) within
+        # a TTL so a genuinely-undeletable VM can't loop forever; on the second
+        # still-present we accept the completed and log. Best-effort: on any
+        # verify error/timeout fall through to ack (never wedge a delete on a
+        # verify failure). delete_vm only — reclone's "completed" means a new VM
+        # exists, not an absence to verify.
+        if cs_type == "CS_COMMAND_RESULT":
+            action = (data or {}).get("action")
+            status = str((data or {}).get("status") or "").lower()
+            if action == "delete_vm" and status == "completed":
+                vmid = (data or {}).get("vmid")
+                cs_cmd_id = (data or {}).get("cs_cmd_id")
+                gone = await self._verify_delete_vm_gone(tenant_id, agent_id, vmid)
+                if gone is False and cs_cmd_id is not None:
+                    reran = await self._rerun_delete_if_needed(
+                        cs_spoke, agent_id, hostname, vmid, cs_cmd_id)
+                    if reran:
+                        return  # fresh command owns the retry; original acked failed
+                    # Already re-enqueued within the TTL — accept and log.
+                    logger.warning(
+                        "delete_vm cs_cmd_id=%s vmid=%s still present after "
+                        "re-enqueue on agent=%s — accepting completed (bound)",
+                        cs_cmd_id, vmid, agent_id)
+                # gone True/None or accepted-above → fall through to ack.
         payload = {"hostname": hostname, **(data or {})}
         try:
             # 30s (not the 5s default): the cs spoke processes commands inline on
@@ -2134,6 +2165,100 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     break
         finally:
             self._vm_refresh_inflight.discard(tenant_id)
+
+    async def _verify_delete_vm_gone(self, tenant_id: Optional[str],
+                                     agent_id: str, vmid: Any) -> Optional[bool]:
+        """Defense-in-depth post-completion check for delete_vm. Returns
+        ``True`` if ``vmid`` is absent from the agent's live VM list, ``False``
+        if still present, ``None`` on error/timeout (caller falls through to ack
+        so a verify failure never wedges a delete). Scoped to the owning agent
+        via PXMX_LIST_VMS{agent_id} — sim VMIDs can collide across hosts."""
+        if vmid is None or vmid == "":
+            return None
+        try:
+            vid = int(vmid)
+        except (TypeError, ValueError):
+            return None
+        pxmx_spoke = None
+        try:
+            pxmx_spoke = self.get_hypervisor_spoke_for_tenant(tenant_id)
+        except Exception:
+            pxmx_spoke = None
+        if not pxmx_spoke:
+            try:
+                pxmx_spoke = self.get_hypervisor_spoke()
+            except Exception:
+                pxmx_spoke = None
+        if not pxmx_spoke:
+            return None
+        try:
+            raw = await asyncio.wait_for(
+                self.request_response(pxmx_spoke, "PXMX_LIST_VMS",
+                                      {"agent_id": agent_id}),
+                timeout=10.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("delete verify PXMX_LIST_VMS agent=%s failed: %s",
+                         agent_id, exc)
+            return None
+        data = raw.get("payload", {}).get("data", raw) if isinstance(raw, dict) else {}
+        for v in (data or {}).get("vms") or []:
+            try:
+                if int(v.get("vmid")) == vid:
+                    return False
+            except (TypeError, ValueError):
+                continue
+        return True
+
+    # One defense-in-depth re-enqueue per (agent, vmid) per TTL so a genuinely
+    # undeletable VM can't loop: completed-but-present → fresh delete → if THAT
+    # also completes-but-present we accept it (bound) and log. Re-delivering the
+    # same cs_cmd_id would only re-ack the cached terminal (agent liveness-dedup),
+    # so a fresh command is required to actually re-run the destroy.
+    _DELETE_RERUN_TTL = 600.0
+
+    async def _rerun_delete_if_needed(self, cs_spoke: str, agent_id: str,
+                                       hostname: str, vmid: Any,
+                                       cs_cmd_id: str) -> bool:
+        """If this (agent, vmid) hasn't been re-enqueued within the TTL: ack the
+        original command FAILED and enqueue a FRESH delete_vm. Returns True if a
+        fresh command was enqueued (caller skips the completed ack); False if
+        already re-enqueued within the TTL (caller accepts the completed)."""
+        try:
+            vid = int(vmid)
+        except (TypeError, ValueError):
+            return False
+        key = f"{agent_id}|{vid}"
+        now = time.time()
+        reran = getattr(self, "_delete_verify_reran", None)
+        if reran is None:
+            reran = self._delete_verify_reran = {}
+        for k in [k for k, ts in reran.items() if now - ts > self._DELETE_RERUN_TTL]:
+            reran.pop(k, None)
+        if key in reran:
+            return False
+        reran[key] = now
+        logger.warning(
+            "delete_vm cs_cmd_id=%s vmid=%s reported completed but still present "
+            "on agent=%s — acking original failed + enqueuing fresh delete_vm",
+            cs_cmd_id, vid, agent_id)
+        try:
+            await self.request_response(
+                cs_spoke, "CS_ACK_COMMAND",
+                {"id": cs_cmd_id, "status": "failed",
+                 "message": "post-completion verify: VM still present — re-enqueued"},
+                timeout=5.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("delete verify ack-failed %s failed: %s", cs_cmd_id, exc)
+        try:
+            await self.request_response(
+                cs_spoke, "CS_QUEUE_COMMAND",
+                {"target": hostname or agent_id, "action": "delete_vm",
+                 "args": {"vmid": vid}, "type": None},
+                timeout=10.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("delete verify fresh enqueue vmid=%s failed: %s",
+                           vid, exc)
+        return True
 
     async def push_config_to_spoke(self, spoke_id: str):
         """Pushes the module-specific configuration from global state to the spoke."""
@@ -6636,6 +6761,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # tabs render (distributed mode gets it from the spoke's CentralPoller
         # via CS_TELEMETRY instead). See simulations/central_hub_poller.py.
         central_hub_poll_task = asyncio.create_task(self.central_hub_poller.run_loop())
+        # Scheduled email health report: fires each tenant's Checks + Client Count
+        # report on its configured cadence via the tenant's SMTP (Setup →
+        # Notifications → Email Reports). Off unless enabled per tenant.
+        try:
+            from simulations import email_report as _email_report
+            asyncio.create_task(_email_report.run_loop(self))
+        except Exception as _er_exc:  # noqa: BLE001 — never let the report loop block startup
+            logger.warning("email report loop not started: %s", _er_exc)
         # Adaptive sim-quota controller: modulates each adaptive quota's count
         # between min/max to keep its alert firing (ramp/decay/learn — design §9).
         # Registered on the Hub by register_simulations_routes.

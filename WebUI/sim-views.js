@@ -758,6 +758,10 @@ async function csRenderSimulations() {
     const data = await csSimLoadCentral();
     const spokes = csSimSpokes(data);
     if (!spokes) return;
+    // 30-day per-check health history (for the strip under each check row).
+    try { window._csHealthDaily = ((await csFetch(`/aggregate/central-health?tenant_id=${csTenant()}`)) || {}).daily || {}; }
+    catch (e) { console.error('central-health fetch failed', e); window._csHealthDaily = {}; }
+    window._csHealthHourly = window._csHealthHourly || {};
     // Collect the universe of check ids + per-bucket counts.
     const checkIds = new Set();
     let bf = 0, bw = 0, bo = 0;
@@ -797,20 +801,92 @@ window.csSimChecksFilter = function () {
         if (!q) return true;
         return (r.spoke + ' ' + r.site + ' ' + r.check).toLowerCase().includes(q);
     });
+    // Order: errors (red) first, warnings (yellow) second, functional (green) third.
+    const _rank = s => { const b = csCheckBuckets(s); return b === 'failing' ? 0 : b === 'warning' ? 1 : b === 'functional' ? 2 : 3; };
+    rows.sort((a, b) => _rank(a.status) - _rank(b.status) || (a.site + a.check).localeCompare(b.site + b.check));
     const body = csEl('cs-sim-checks-body');
     if (!rows.length) { body.innerHTML = csEmpty('No checks match.', 'Adjust the filter above.'); return; }
-    const rh = rows.map(r => `<tr>
-      <td class="px-3 py-2 font-mono text-xs text-slate-600">${csEscape(r.site)}</td>
-      <td class="px-3 py-2 font-mono text-xs">${csEscape(r.check)}</td>
-      <td class="px-3 py-2">${csStatusBadge(r.status)}</td>
-      <td class="px-3 py-2 text-xs text-slate-400">${csEscape((r.detail && (r.detail.message || r.detail.last_error)) || '—')}</td>
-    </tr>`).join('');
+    const rh = rows.map(r => {
+      const daily = ((window._csHealthDaily || {})[r.site] || {})[r.check];
+      const bar = csHealthBar(daily, r.site, r.check);
+      return `<tr>
+      <td class="px-3 pt-2 pb-1 font-mono text-xs text-slate-600">${csEscape(r.site)}</td>
+      <td class="px-3 pt-2 pb-1 font-mono text-xs">${csEscape(r.check)}</td>
+      <td class="px-3 pt-2 pb-1">${csStatusBadge(r.status)}</td>
+      <td class="px-3 pt-2 pb-1 text-xs text-slate-400">${csEscape((r.detail && (r.detail.message || r.detail.last_error)) || '—')}</td>
+    </tr>${bar ? `<tr><td colspan="4" class="px-3 pb-2 pt-0">${bar}</td></tr>` : ''}`;
+    }).join('');
     body.innerHTML = csTable(['Site', 'Check', 'Status', 'Detail'], rh);
 };
 
 // Keystroke-debounced entry point for the free-text filter input (the bucket
 // <select> stays on the immediate onchange= above). See csDebounce.
 window.csSimChecksFilterKey = csDebounce(window.csSimChecksFilter, 200);
+
+// ── Per-check 30-day health strip (green/yellow/red) ─────────────────────────
+// Full-width, thin daily bar rendered on its own row under each check. One
+// segment per day, colored by the WORST status seen that day; the per-day title
+// shows the green/yellow/red counts. Hovering a day pops the hourly breakdown
+// (lazy-fetched once per check). Data from GET /aggregate/central-health.
+function csHealthBar(daily, site, check) {
+    if (!daily || !daily.length) return '';
+    const segColor = d => (d.e > 0) ? '#ef4444' : (d.w > 0) ? '#f59e0b' : (d.o > 0) ? '#10b981' : '#cbd5e1';
+    const pad = Math.max(0, 30 - daily.length);
+    const padHtml = `<div style="flex:1 1 0;background:#eef2f6"></div>`.repeat(pad);
+    const segs = daily.map(d => {
+        const date = new Date(d.d * 1000).toISOString().slice(0, 10);
+        const t = `${date}: ${d.o || 0} green / ${d.w || 0} yellow / ${d.e || 0} red${d.n ? ' / ' + d.n + ' n/a' : ''}`;
+        return `<div class="cs-hbar-seg" style="flex:1 1 0;background:${segColor(d)};cursor:pointer"
+                     data-day="${d.d}" title="${csEscape(t)}"></div>`;
+    }).join('');
+    return `<div class="cs-hbar flex gap-px h-2 rounded overflow-hidden w-full"
+                 data-site="${csEscape(site)}" data-check="${csEscape(check)}"
+                 onmouseover="csHealthHover(event)" onmouseleave="csHealthHoverOut()"
+                 title="30-day health — hover a day for the hourly breakdown">${padHtml}${segs}</div>`;
+}
+
+async function csHealthLoadHourly(site, check) {
+    const k = site + '\x1f' + check;
+    window._csHealthHourly = window._csHealthHourly || {};
+    if (window._csHealthHourly[k]) return window._csHealthHourly[k];
+    try {
+        const r = await csFetch(`/aggregate/central-health?tenant_id=${csTenant()}&site=${encodeURIComponent(site)}&check=${encodeURIComponent(check)}`);
+        window._csHealthHourly[k] = (r && r.hourly) || [];
+    } catch (e) { window._csHealthHourly[k] = []; }
+    return window._csHealthHourly[k];
+}
+
+window.csHealthHover = async function (ev) {
+    const seg = ev.target.closest && ev.target.closest('.cs-hbar-seg');
+    const bar = ev.target.closest && ev.target.closest('.cs-hbar');
+    if (!seg || !bar) return;
+    const site = bar.getAttribute('data-site'), check = bar.getAttribute('data-check');
+    const day = parseInt(seg.getAttribute('data-day'), 10);
+    const rect = seg.getBoundingClientRect();
+    const hourly = await csHealthLoadHourly(site, check);
+    const color = h => (h.e > 0) ? '#ef4444' : (h.w > 0) ? '#f59e0b' : (h.o > 0) ? '#10b981' : '#cbd5e1';
+    const byHour = {};
+    hourly.filter(h => h.h >= day && h.h < day + 86400).forEach(h => { byHour[Math.floor((h.h - day) / 3600)] = h; });
+    const slots = Array.from({ length: 24 }, (_, i) => {
+        const h = byHour[i];
+        const c = h ? color(h) : '#e2e8f0';
+        const t = h ? `${i}:00 — ${h.o || 0} green / ${h.w || 0} yellow / ${h.e || 0} red` : `${i}:00 — no data`;
+        return `<div style="width:6px;height:16px;background:${c}" title="${csEscape(t)}"></div>`;
+    }).join('');
+    let pop = document.getElementById('cs-hbar-pop');
+    if (!pop) { pop = document.createElement('div'); pop.id = 'cs-hbar-pop'; document.body.appendChild(pop); }
+    const date = new Date(day * 1000).toISOString().slice(0, 10);
+    pop.innerHTML = `<div style="font-size:10px;color:#64748b;margin-bottom:4px">${csEscape(check)} · ${date} · hourly</div><div style="display:flex;gap:1px">${slots}</div>`;
+    pop.style.cssText = 'position:fixed;z-index:9999;background:white;border:1px solid #cbd5e1;border-radius:6px;padding:6px;box-shadow:0 4px 12px rgba(0,0,0,.15)';
+    pop.style.left = Math.min(rect.left, window.innerWidth - 180) + 'px';
+    pop.style.top = (rect.bottom + 4) + 'px';
+    pop.style.display = 'block';
+};
+
+window.csHealthHoverOut = function () {
+    const pop = document.getElementById('cs-hbar-pop');
+    if (pop) pop.style.display = 'none';
+};
 
 async function csRenderSimHardware() {
     csSetToolbar('');
@@ -865,11 +941,15 @@ async function csRenderSimClientCount() {
                   <td class="px-3 py-2 font-mono text-xs text-slate-600">${csEscape(c.site_name || w)}</td>
                   <td class="px-3 py-2">${csStatusBadge(c.status)}</td>
                   <td class="px-3 py-2 font-bold text-slate-700">${csEscape(c.current || 0)}</td>
+                  <td class="px-3 py-2 text-slate-500">${csEscape(c.wired != null ? c.wired : '—')}</td>
+                  <td class="px-3 py-2 text-slate-500">${csEscape(c.wireless != null ? c.wireless : '—')}</td>
                   <td class="px-3 py-2 text-slate-500">${csEscape(c.hourly_avg != null ? c.hourly_avg : '—')}</td>
                   <td class="px-3 py-2 ${c.drop_pct > 0 ? 'text-amber-600' : 'text-slate-500'}">${csEscape(c.drop_pct != null ? c.drop_pct + '%' : '—')}</td>
+                  <td class="px-3 py-2 text-slate-400">${csEscape(c.max_7day != null ? c.max_7day : '—')}</td>
+                  <td class="px-3 py-2 text-slate-400">${csEscape(c.max_30day != null ? c.max_30day : '—')}</td>
                 </tr>`;
             }).join('');
-            html = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Drop %'], rows);
+            html = csTable(['Site', 'Status', 'Current', 'Wired', 'Wireless', 'Hourly Avg', 'Drop %', '7d Peak', '30d Peak'], rows);
         }
         return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden">
           <summary class="flex items-center justify-between px-5 py-3 cursor-pointer hover:bg-slate-50">
@@ -1110,11 +1190,15 @@ function csSimSpokeCard(s) {
               <td class="px-3 py-2 font-mono text-xs text-slate-600">${csEscape(c.site_name || w)}</td>
               <td class="px-3 py-2">${csStatusBadge(c.status)}</td>
               <td class="px-3 py-2 font-bold text-slate-700">${csEscape(c.current || 0)}</td>
+              <td class="px-3 py-2 text-slate-500">${csEscape(c.wired != null ? c.wired : '—')}</td>
+              <td class="px-3 py-2 text-slate-500">${csEscape(c.wireless != null ? c.wireless : '—')}</td>
               <td class="px-3 py-2 text-slate-500">${csEscape(c.hourly_avg != null ? c.hourly_avg : '—')}</td>
               <td class="px-3 py-2 ${c.drop_pct > 0 ? 'text-amber-600' : 'text-slate-500'}">${csEscape(c.drop_pct != null ? c.drop_pct + '%' : '—')}</td>
+              <td class="px-3 py-2 text-slate-400">${csEscape(c.max_7day != null ? c.max_7day : '—')}</td>
+              <td class="px-3 py-2 text-slate-400">${csEscape(c.max_30day != null ? c.max_30day : '—')}</td>
             </tr>`;
         }).join('');
-        ccHtml = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Drop %'], rows);
+        ccHtml = csTable(['Site', 'Status', 'Current', 'Wired', 'Wireless', 'Hourly Avg', 'Drop %', '7d Peak', '30d Peak'], rows);
     }
 
     return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden" open>
@@ -2685,6 +2769,9 @@ function csSimQuotaRowFromServer(q) {
         tied: !!(q.sim_id && q.alert_id),
         // Adaptive when a max above the min was saved (design §9).
         adaptive: !!(q.max != null && Number(q.max) > Number(q.min != null ? q.min : q.count)),
+        // Learning lab toggle (design §9): OFF = consumer (up-only), ON = runs the
+        // full thermostat + records a publishable learned_op. Default OFF.
+        learning: !!q.learning,
         min: q.min != null ? q.min : undefined,
         max: q.max != null ? q.max : undefined,
     };
@@ -2845,6 +2932,7 @@ function csRenderSimQuotaEditor() {
           </label>
           <label class="text-xs text-slate-500 flex flex-col gap-1">
             ${(!isPresence && tied) ? `<span class="flex items-center gap-1"><input data-cs-sq="adaptive" type="checkbox" onchange="csSimQuotaOnAdaptiveChange(this)" ${r.adaptive ? 'checked' : ''}> Adaptive (keep firing)</span>` : ''}
+            ${(tied && r.adaptive) ? `<span class="flex items-center gap-1" title="ON = this site is the 'learning lab': the controller ratchets DOWN to find the min count that fires, settles at floor+20%, and records a publishable learned value. OFF (default) = a consumer: seeds/lifts from the tenant or global learned value, never down-ratchets (never risks stopping the alert)."><input data-cs-sq="learning" type="checkbox" ${r.learning ? 'checked' : ''}> Learning</span>` : ''}
             <span class="flex items-center gap-1"><input data-cs-sq="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
@@ -3179,6 +3267,7 @@ function csSimQuotaSyncFromDom() {
             enabled: !!g('enabled').checked,
             tied,
             adaptive,
+            learning: adaptive ? !!(g('learning') || {}).checked : false,
         };
         if (adaptive) {
             // Adaptive rows use Min/Max; count is the floor the controller ramps from.
@@ -3251,6 +3340,7 @@ window.csSimQuotaAdd = function (preset) {
         rehome: p.rehome != null ? !!p.rehome : false,
         enabled: p.enabled != null ? !!p.enabled : false,
         tied: p.tied != null ? !!p.tied : true,
+        learning: p.learning != null ? !!p.learning : false,
     });
     csRenderSimQuotaEditor();
 };
@@ -3399,10 +3489,18 @@ async function csRenderSimQuotaState() {
                 ? `<span class="text-[#01A982] font-semibold">${clients.length}/${target}</span>`
                 : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
             // Adaptive controller indicator (design §9): 🔄 Learning / ✅ Stable · floor N / ⚠️ At max.
+            // "At max" = the controller's target hit the configured ceiling. But the
+            // engine may only have filled a fraction of that target (pool too small /
+            // clients claimed by exclusive sims) — in that case "at max" is misleading
+            // (the alert isn't firing because the engine can't fill, not because max
+            // runners are running). When underfilled, say so instead.
             const _as = (st.adaptive_state || {})[`${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`];
             if (_as) {
                 const _m = _as.mode || 'learning', _fl = _as.floor;
-                fill += ' ' + (_m === 'at_max'
+                const _under = target > 0 && clients.length < target;
+                fill += ' ' + (_under
+                    ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="Engine can't reach the target from the online pool">⚠️ Underfilled</span>`
+                    : _m === 'at_max'
                     ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="At max, alert not firing">⚠️ At max</span>`
                     : _m === 'stable'
                     ? `<span class="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">✅ Stable${_fl != null ? ' · floor ' + _fl : ''}</span>`
@@ -3459,10 +3557,21 @@ async function csRenderSimQuotaState() {
         // placement cells that couldn't reach their floor (pool too small).
         const _warns = [];
         Object.entries((st.adaptive_state || {})).forEach(([k, v]) => {
-            if (v && v.mode === 'at_max') _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is at max (${csEscape(String(v.target != null ? v.target : ''))}) and still not firing.`);
+            if (!v) return;
+            const _lk = ledger[k] || {};
+            const assigned = Array.isArray(_lk.clients) ? _lk.clients.length : 0;
+            const tgt = (v.target != null) ? v.target : 0;
+            if (tgt > 0 && assigned < tgt) {
+                _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is underfilled (${assigned}/${tgt}) — the engine can't reach the target from the online pool, so the alert may not fire regardless of max.`);
+            } else if (v.mode === 'at_max') {
+                _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is at max (${csEscape(String(tgt))}) and still not firing.`);
+            }
         });
         (Array.isArray(st.placement_warnings) ? st.placement_warnings : []).forEach(w => {
             _warns.push(`SSID <span class="font-mono">${csEscape(w.cell || '')}</span> under min (${csEscape(String(w.have))}/${csEscape(String(w.want))}) — not enough online clients at ${csEscape(w.site || '')}.`);
+        });
+        (Array.isArray(st.stale_push) ? st.stale_push : []).forEach(s => {
+            _warns.push(`Quota <span class="font-mono">${csEscape(s.key || '')}</span> spoke count (${csEscape(String(s.spoke_count))}) lags hub target (${csEscape(String(s.hub_count))}) — the engine is running a stale count; the adaptive push hasn't landed on the spoke yet.`);
         });
         const warnBanner = _warns.length
             ? `<div class="bg-amber-50 border border-amber-200 rounded-md p-3 mb-3 text-xs text-amber-800">
@@ -3476,21 +3585,40 @@ async function csRenderSimQuotaState() {
             const p = String(k).split(':');  // alert_type:alert_id:site
             const label = `${p[1] || '(sim)'} @ ${p[2] || 'all sites'}`;
             const m = (v && v.mode) || 'learning';
-            const badge = m === 'at_max'
-                ? '<span class="text-amber-700">⚠️ At max</span>'
-                : m === 'stable' ? '<span class="text-emerald-700">✅ Stable</span>'
-                : '<span class="text-slate-600">🔄 Learning</span>';
+            const tgt = (v && v.target != null) ? v.target : 0;
+            const isLab = !!(v && v.learning);
+            const phase = (v && v.phase) || '';
+            const labTag = isLab
+                ? `<span class="text-violet-700" title="Learning lab: runs the full thermostat (ratchets down to find the floor) and records a publishable learned value. Phase: ${csEscape(phase)}">🧪 Lab${phase ? `·${csEscape(phase)}` : ''}</span>`
+                : `<span class="text-slate-400" title="Consumer: up-only — seeds/lifts from the learned value, never down-ratchets.">📥 Consumer</span>`;
+            // Join the live ledger to show the ACTUAL runner count, not just the
+            // controller's target. "At max" means the controller's target hit the
+            // configured ceiling — but if the engine only filled 4 of 15 (pool too
+            // small / clients claimed by exclusive sims), "at max" is misleading:
+            // the alert isn't firing because the engine can't fill, not because max
+            // runners are running and still not firing. Surface that honestly.
+            const _lk = ledger[k] || {};
+            const assigned = Array.isArray(_lk.clients) ? _lk.clients.length : 0;
+            const underfilled = tgt > 0 && assigned < tgt;
+            const badge = underfilled
+                ? `<span class="text-amber-700">⚠️ Underfilled ${assigned}/${tgt}</span>`
+                : (m === 'at_max'
+                    ? '<span class="text-amber-700">⚠️ At max</span>'
+                    : m === 'stable' ? '<span class="text-emerald-700">✅ Stable</span>'
+                    : '<span class="text-slate-600">🔄 Learning</span>');
             return `<div class="flex flex-wrap items-center gap-3 text-xs py-0.5">
-              <span class="w-48 font-mono text-slate-600 truncate">${csEscape(label)}</span>
+              <span class="w-96 max-w-full font-mono text-slate-600 truncate" title="${csEscape(label)}">${csEscape(label)}</span>
               <span class="font-semibold">${badge}</span>
+              ${labTag}
               ${(v && v.floor != null) ? `<span class="text-slate-400">floor ${csEscape(String(v.floor))}</span>` : ''}
+              ${(v && v.learned_op != null) ? `<span class="text-slate-400">learned ${csEscape(String(v.learned_op))}</span>` : ''}
               <span class="text-slate-400">target ${csEscape(String((v && v.target != null) ? v.target : '—'))}</span>
             </div>`;
         };
         const adaptivePanel = `<div class="hpe-card rounded-lg p-5 shadow-sm">
             <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Adaptive Controllers</h3>
             ${_adEntries.length
-              ? `<p class="text-xs text-slate-500 mb-2">Each adaptive quota ramps its runner count to keep its alert firing, then settles at the learned floor + 20%. 🔄 learning · ✅ stable · ⚠️ at max.</p>
+              ? `<p class="text-xs text-slate-500 mb-2">Each adaptive quota ramps its runner count to keep its alert firing, then settles at the learned floor + 20%. 🧪 Lab rows run the full thermostat and record a publishable learned value; 📥 Consumer rows seed/lift from it (up-only, never down-ratchet). 🔄 learning · ✅ stable · ⚠️ at max / underfilled.</p>
                  <div class="space-y-0.5">${_adEntries.map(_adRow).join('')}</div>`
               : `<p class="text-xs text-slate-400 italic">No adaptive quotas yet. In <span class="font-semibold">Config → Engine</span>, tie a quota to an alert/insight and check <span class="font-semibold">Adaptive (keep firing)</span> — its Clients field becomes Min/Max and the learning state shows here.</p>`}
           </div>`;
@@ -3520,7 +3648,7 @@ async function csRenderSimQuotaState() {
             ${eff.length ? `<table class="w-full text-left">
               <thead><tr class="text-[11px] text-slate-400 uppercase tracking-wider">
                 <th class="px-2 py-1">Type</th><th class="px-2 py-1">Alert / Insight ID</th>
-                <th class="px-2 py-1">Sim</th><th class="px-2 py-1">Site</th>
+                <th class="px-2 py-1">Sim</th><th class="px-2 py-1">SSID</th>
                 <th class="px-2 py-1 text-center">Assigned</th><th class="px-2 py-1 text-center">Multi</th>
                 <th class="px-2 py-1 text-center">Re-home</th>
               </tr></thead>
@@ -3542,7 +3670,7 @@ async function csRenderSimQuotaState() {
 // server is in MIA. Mirrored in both sim-views.js copies (hub + spoke).
 let csPxmxSiteMap = {};
 let csPxmxAgents = [];
-let csPxmxSites = [];
+let csSites = [];
 
 let csSiteLinks = [];        // [{name, wsite, central_site}] — wsite↔Central links
 let csCentralSitesList = []; // Central site names for the link editor dropdown
@@ -3557,7 +3685,7 @@ async function csRenderPxmxSiteMap() {
         ]);
         csPxmxSiteMap = (mapRes && mapRes.pxmx_site_map) || {};
         csPxmxAgents = Array.isArray(mapRes && mapRes.agents) ? mapRes.agents : [];
-        csPxmxSites = (cat && cat.sites) || [];
+        csSites = (cat && cat.sites) || [];
         csSiteLinks = Array.isArray(cfg && cfg.site_links) ? cfg.site_links.map(l => ({ ...l })) : [];
         // Central site names: from browse (sites/alerts) + the configured mappings.
         const cs = new Set();
@@ -3630,8 +3758,11 @@ function csRenderPxmxSiteMapEditor() {
 // lets alert-driven quotas match where the alert actually fires in Central.
 function csSiteLinksCardHtml() {
     const esc = s => csEscape(String(s == null ? '' : s));
-    const wsiteOpts = (sel) => `<option value="">— wsite —</option>` +
-        csPxmxSites.map(s => `<option value="${esc(s)}" ${s === sel ? 'selected' : ''}>${esc(s)}</option>`).join('');
+    // wsite is DEFINED here (typed, e.g. "MIA") — the Site Links are the source of
+    // truth for wsites. It used to be a dropdown sourced from the sim-quota catalog
+    // sites list, which merged simulation.conf wsites WITH Central site names; once
+    // simulation.conf's wsite entries went away that list held only Central names
+    // (Miami), so links/SSID cells came out as "Miami-PSK" instead of "MIA-PSK".
     const centralOpts = (sel) => {
         const list = csCentralSitesList.slice();
         if (sel && list.indexOf(sel) < 0) list.push(sel);
@@ -3641,7 +3772,7 @@ function csSiteLinksCardHtml() {
     const rows = csSiteLinks.map((l, i) =>
         `<div class="grid grid-cols-1 sm:grid-cols-4 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-link="${i}">
           <label class="text-xs text-slate-500">Name<input data-cs-link-k="name" value="${esc(l.name)}" placeholder="Miami" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
-          <label class="text-xs text-slate-500">wsite (SSID)<select data-cs-link-k="wsite" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${wsiteOpts(l.wsite)}</select></label>
+          <label class="text-xs text-slate-500">wsite (SSID prefix)<input data-cs-link-k="wsite" value="${esc(l.wsite)}" placeholder="MIA" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
           <label class="text-xs text-slate-500">Central site<select data-cs-link-k="central_site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${centralOpts(l.central_site)}</select></label>
           <button onclick="csSiteLinkDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1 justify-self-end">Remove</button>
         </div>`).join('');
@@ -4387,12 +4518,12 @@ async function csProcessingModesCard() {
     const data = await csFetch('/' + csTenant() + '/settings');
     const modes = (data && data.processing_modes) || {};
     const features = [['central_api', 'Central API'], ['teams', 'Teams'], ['email', 'Email']];
-    // Unset == distributed at runtime (routes.py test_central: `modes.get("central_api") == "centralized"`
-    // is False when unset → distributed branch). Show that truth in the dropdown instead of letting the
-    // browser default-display the first option ("Centralized"), which misleads operators into thinking
-    // centralized is active when nothing has been persisted.
+    // Unset == CENTRALIZED at runtime (store.central_api_is_centralized: only an
+    // explicit 'distributed' opts out). The hub polls Central itself and shows its
+    // checks with no spoke assigned, so an unconfigured tenant defaults to
+    // centralized here to match the backend.
     const opts = (cur) => {
-        if (!cur) cur = 'distributed';
+        if (!cur) cur = 'centralized';
         return ['centralized', 'distributed'].map(v =>
             `<option value="${v}" ${cur === v ? 'selected' : ''}>${v.charAt(0).toUpperCase() + v.slice(1)}</option>`).join('');
     };
@@ -4420,16 +4551,13 @@ window.csSaveProcessingModes = async function () {
 async function csNotificationsCard() {
     const data = await csFetch('/' + csTenant() + '/settings');
     const n = (data && data.notifications) || {};
-    const f = (id, label, val, type) => `<label class="text-xs text-slate-500">${csEscape(label)}
-      <input id="${id}" ${type === 'checkbox' ? 'type="checkbox" ' + (val ? 'checked' : '') : `value="${csEscape(val != null ? val : '')}"`} class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+    const f = (id, label, val) => `<label class="text-xs text-slate-500">${csEscape(label)}
+      <input id="${id}" value="${csEscape(val != null ? val : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
     </label>`;
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Notifications ${helpIcon('cs', null, 'Simulations help')}</h3>
-      <label class="flex items-center gap-2 text-xs text-slate-600 mb-3"><input id="cs-notif-enabled" type="checkbox" ${n.enabled ? 'checked' : ''}> Notifications enabled</label>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-        ${f('cs-notif-host', 'SMTP Host', n.smtp_host)}${f('cs-notif-port', 'SMTP Port', n.smtp_port, 'number')}
-        ${f('cs-notif-user', 'SMTP User', n.smtp_user)}${f('cs-notif-pass', 'SMTP Password (new)', '', 'password')}
-        ${f('cs-notif-teams', 'Teams Webhook URL (new)', '', 'password')}
+      <p class="text-[11px] text-slate-400 mb-3">The hub sends this tenant's spoke out-of-contact alerts using the hub's configured email provider (Hub → Setup → Notifications). Just enter where this tenant's alerts should go.</p>
+      <div class="grid grid-cols-1 gap-3">
         ${f('cs-notif-emails', 'To Emails (comma-separated)', Array.isArray(n.to_emails) ? n.to_emails.join(', ') : (n.to_emails || ''))}
       </div>
       <div class="mt-4 flex justify-end"><button onclick="csSaveNotifications()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button></div>
@@ -4438,16 +4566,8 @@ async function csNotificationsCard() {
 
 window.csSaveNotifications = async function () {
     const body = {
-        enabled: !!(csEl('cs-notif-enabled') && csEl('cs-notif-enabled').checked),
-        smtp_host: csEl('cs-notif-host') && csEl('cs-notif-host').value,
-        smtp_port: parseInt((csEl('cs-notif-port') && csEl('cs-notif-port').value) || '0', 10),
-        smtp_user: csEl('cs-notif-user') && csEl('cs-notif-user').value,
         to_emails: csEl('cs-notif-emails') && csEl('cs-notif-emails').value
     };
-    const pass = csEl('cs-notif-pass') && csEl('cs-notif-pass').value;
-    const teams = csEl('cs-notif-teams') && csEl('cs-notif-teams').value;
-    if (pass) body.smtp_pass = pass;
-    if (teams) body.teams_webhook_url = teams;
     try {
         await csFetch('/' + csTenant() + '/settings/notifications', { method: 'POST', body: JSON.stringify(body) });
         showToast('Saved.', 'success');
@@ -4558,6 +4678,10 @@ async function csRenderSetupCentralApi() {
         ${f('cs-csc-clientsecret', 'Client Secret', hc.client_secret, 'password')}
         ${f('cs-csc-accesstoken', 'Access Token (classic)', hc.access_token, 'password')}
         ${f('cs-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token, 'password')}
+        <label class="text-xs text-slate-500">Poll interval (minutes)
+          <input id="cs-csc-pollmin" type="number" min="1" step="1" value="${Math.max(1, Math.round((Number(hc.poll_interval_s) || 300) / 60))}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">How often the hub polls Aruba Central for this tenant (default 5, minimum 1).</span>
+        </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
         <button onclick="csSaveCentralConn()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
@@ -4730,6 +4854,9 @@ window.csSaveCentralConn = async function () {
     if (v('cs-csc-clientsecret')) hub_central_config.client_secret = v('cs-csc-clientsecret');
     if (v('cs-csc-accesstoken'))  hub_central_config.access_token  = v('cs-csc-accesstoken');
     if (v('cs-csc-refreshtoken')) hub_central_config.refresh_token = v('cs-csc-refreshtoken');
+    // Central poll interval (minutes in the UI → seconds stored; the hub floors at 60s).
+    const _pm = parseInt(v('cs-csc-pollmin'), 10);
+    if (!isNaN(_pm) && _pm > 0) hub_central_config.poll_interval_s = Math.max(60, _pm * 60);
     try {
         const r = await csFetch('/aggregate/central', { method: 'POST', body: JSON.stringify({ mode, hub_central_config }) });
         csPushToast(r, 'Saved');
