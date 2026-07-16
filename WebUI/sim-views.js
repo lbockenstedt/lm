@@ -758,6 +758,10 @@ async function csRenderSimulations() {
     const data = await csSimLoadCentral();
     const spokes = csSimSpokes(data);
     if (!spokes) return;
+    // 30-day per-check health history (for the strip under each check row).
+    try { window._csHealthDaily = ((await csFetch(`/aggregate/central-health?tenant_id=${csTenant()}`)) || {}).daily || {}; }
+    catch (e) { console.error('central-health fetch failed', e); window._csHealthDaily = {}; }
+    window._csHealthHourly = window._csHealthHourly || {};
     // Collect the universe of check ids + per-bucket counts.
     const checkIds = new Set();
     let bf = 0, bw = 0, bo = 0;
@@ -799,18 +803,87 @@ window.csSimChecksFilter = function () {
     });
     const body = csEl('cs-sim-checks-body');
     if (!rows.length) { body.innerHTML = csEmpty('No checks match.', 'Adjust the filter above.'); return; }
-    const rh = rows.map(r => `<tr>
-      <td class="px-3 py-2 font-mono text-xs text-slate-600">${csEscape(r.site)}</td>
-      <td class="px-3 py-2 font-mono text-xs">${csEscape(r.check)}</td>
-      <td class="px-3 py-2">${csStatusBadge(r.status)}</td>
-      <td class="px-3 py-2 text-xs text-slate-400">${csEscape((r.detail && (r.detail.message || r.detail.last_error)) || '—')}</td>
-    </tr>`).join('');
+    const rh = rows.map(r => {
+      const daily = ((window._csHealthDaily || {})[r.site] || {})[r.check];
+      const bar = csHealthBar(daily, r.site, r.check);
+      return `<tr>
+      <td class="px-3 pt-2 pb-1 font-mono text-xs text-slate-600">${csEscape(r.site)}</td>
+      <td class="px-3 pt-2 pb-1 font-mono text-xs">${csEscape(r.check)}</td>
+      <td class="px-3 pt-2 pb-1">${csStatusBadge(r.status)}</td>
+      <td class="px-3 pt-2 pb-1 text-xs text-slate-400">${csEscape((r.detail && (r.detail.message || r.detail.last_error)) || '—')}</td>
+    </tr>${bar ? `<tr><td colspan="4" class="px-3 pb-2 pt-0">${bar}</td></tr>` : ''}`;
+    }).join('');
     body.innerHTML = csTable(['Site', 'Check', 'Status', 'Detail'], rh);
 };
 
 // Keystroke-debounced entry point for the free-text filter input (the bucket
 // <select> stays on the immediate onchange= above). See csDebounce.
 window.csSimChecksFilterKey = csDebounce(window.csSimChecksFilter, 200);
+
+// ── Per-check 30-day health strip (green/yellow/red) ─────────────────────────
+// Full-width, thin daily bar rendered on its own row under each check. One
+// segment per day, colored by the WORST status seen that day; the per-day title
+// shows the green/yellow/red counts. Hovering a day pops the hourly breakdown
+// (lazy-fetched once per check). Data from GET /aggregate/central-health.
+function csHealthBar(daily, site, check) {
+    if (!daily || !daily.length) return '';
+    const segColor = d => (d.e > 0) ? '#ef4444' : (d.w > 0) ? '#f59e0b' : (d.o > 0) ? '#10b981' : '#cbd5e1';
+    const pad = Math.max(0, 30 - daily.length);
+    const padHtml = `<div style="flex:1 1 0;background:#eef2f6"></div>`.repeat(pad);
+    const segs = daily.map(d => {
+        const date = new Date(d.d * 1000).toISOString().slice(0, 10);
+        const t = `${date}: ${d.o || 0} green / ${d.w || 0} yellow / ${d.e || 0} red${d.n ? ' / ' + d.n + ' n/a' : ''}`;
+        return `<div class="cs-hbar-seg" style="flex:1 1 0;background:${segColor(d)};cursor:pointer"
+                     data-day="${d.d}" title="${csEscape(t)}"></div>`;
+    }).join('');
+    return `<div class="cs-hbar flex gap-px h-2 rounded overflow-hidden w-full"
+                 data-site="${csEscape(site)}" data-check="${csEscape(check)}"
+                 onmouseover="csHealthHover(event)" onmouseleave="csHealthHoverOut()"
+                 title="30-day health — hover a day for the hourly breakdown">${padHtml}${segs}</div>`;
+}
+
+async function csHealthLoadHourly(site, check) {
+    const k = site + '\x1f' + check;
+    window._csHealthHourly = window._csHealthHourly || {};
+    if (window._csHealthHourly[k]) return window._csHealthHourly[k];
+    try {
+        const r = await csFetch(`/aggregate/central-health?tenant_id=${csTenant()}&site=${encodeURIComponent(site)}&check=${encodeURIComponent(check)}`);
+        window._csHealthHourly[k] = (r && r.hourly) || [];
+    } catch (e) { window._csHealthHourly[k] = []; }
+    return window._csHealthHourly[k];
+}
+
+window.csHealthHover = async function (ev) {
+    const seg = ev.target.closest && ev.target.closest('.cs-hbar-seg');
+    const bar = ev.target.closest && ev.target.closest('.cs-hbar');
+    if (!seg || !bar) return;
+    const site = bar.getAttribute('data-site'), check = bar.getAttribute('data-check');
+    const day = parseInt(seg.getAttribute('data-day'), 10);
+    const rect = seg.getBoundingClientRect();
+    const hourly = await csHealthLoadHourly(site, check);
+    const color = h => (h.e > 0) ? '#ef4444' : (h.w > 0) ? '#f59e0b' : (h.o > 0) ? '#10b981' : '#cbd5e1';
+    const byHour = {};
+    hourly.filter(h => h.h >= day && h.h < day + 86400).forEach(h => { byHour[Math.floor((h.h - day) / 3600)] = h; });
+    const slots = Array.from({ length: 24 }, (_, i) => {
+        const h = byHour[i];
+        const c = h ? color(h) : '#e2e8f0';
+        const t = h ? `${i}:00 — ${h.o || 0} green / ${h.w || 0} yellow / ${h.e || 0} red` : `${i}:00 — no data`;
+        return `<div style="width:6px;height:16px;background:${c}" title="${csEscape(t)}"></div>`;
+    }).join('');
+    let pop = document.getElementById('cs-hbar-pop');
+    if (!pop) { pop = document.createElement('div'); pop.id = 'cs-hbar-pop'; document.body.appendChild(pop); }
+    const date = new Date(day * 1000).toISOString().slice(0, 10);
+    pop.innerHTML = `<div style="font-size:10px;color:#64748b;margin-bottom:4px">${csEscape(check)} · ${date} · hourly</div><div style="display:flex;gap:1px">${slots}</div>`;
+    pop.style.cssText = 'position:fixed;z-index:9999;background:white;border:1px solid #cbd5e1;border-radius:6px;padding:6px;box-shadow:0 4px 12px rgba(0,0,0,.15)';
+    pop.style.left = Math.min(rect.left, window.innerWidth - 180) + 'px';
+    pop.style.top = (rect.bottom + 4) + 'px';
+    pop.style.display = 'block';
+};
+
+window.csHealthHoverOut = function () {
+    const pop = document.getElementById('cs-hbar-pop');
+    if (pop) pop.style.display = 'none';
+};
 
 async function csRenderSimHardware() {
     csSetToolbar('');
