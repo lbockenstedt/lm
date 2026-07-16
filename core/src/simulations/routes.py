@@ -24,6 +24,7 @@ import re
 from .service import SimulationsService
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
 from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini
+from . import sim_quota
 from access import safe_external_url, host_resolves_external
 from urllib.parse import urlsplit
 
@@ -1388,89 +1389,41 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # A tenant may opt OUT of the platform-wide quota defaults (Config → Sim
         # Quotas → "Ignore global quotas"): then only its own enabled rows apply.
         if t_csc.get("ignore_global_quotas"):
-            return resolve_effective_quotas(t_csc.get("sim_quotas"), list(SIM_META.keys()))
-        try:
-            g_defaults = await store.get_sim_quota_defaults()
-        except Exception:  # noqa: BLE001
-            g_defaults = []
-        merged = merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
-        return await _apply_adaptive_targets(tenant_id, merged)
+            base = resolve_effective_quotas(t_csc.get("sim_quotas"), list(SIM_META.keys()))
+        else:
+            try:
+                g_defaults = await store.get_sim_quota_defaults()
+            except Exception:  # noqa: BLE001
+                g_defaults = []
+            base = merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
+        # Adaptive targets MUST be applied in BOTH branches — the controller ramps
+        # state.target from csc.sim_quotas regardless of ignore_global_quotas, so
+        # skipping apply here (the old early-return) left count pinned at the min
+        # floor while the controller maxed its target and reported "at max, still
+        # not firing" — a false alarm: the engine only ever ran the floor.
+        return await _apply_adaptive_targets(tenant_id, base)
 
     def _adaptive_is_on(q: dict) -> bool:
-        """A quota is adaptive when it declares a max above its min (design §9).
-        Fixed-count quotas (no min/max, or min==max) are left untouched."""
-        try:
-            return int(q.get("max")) > int(q.get("min") or 1)
-        except (TypeError, ValueError):
-            return False
+        return sim_quota.adaptive_is_on(q)
 
     def _adaptive_key(q: dict) -> str:
-        return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
+        return sim_quota.adaptive_key(q)
 
     async def _apply_adaptive_targets(tenant_id: str, quotas: list) -> list:
         """Replace an adaptive quota's ``count`` with the controller's current
         target (stored state; the controller loop advances it). A quota with no
         controller state yet starts at its ``min``."""
-        adaptive = [q for q in quotas if _adaptive_is_on(q)]
-        if not adaptive:
-            return quotas
         try:
             state = await store.get_adaptive_state(tenant_id)
         except Exception:  # noqa: BLE001
             state = {}
-        for q in adaptive:
-            st = state.get(_adaptive_key(q)) or {}
-            tgt = st.get("target")
-            q["count"] = int(tgt) if tgt is not None else int(q.get("min") or 1)
-        return quotas
+        return sim_quota.apply_adaptive_targets(quotas, state)
 
     def _ceil(x: float) -> int:
-        xi = int(x)
-        return xi + 1 if x > xi else xi
+        return sim_quota.ceil_to_int(x)
 
     def _adaptive_step(st: dict, q: dict, firing, now: float) -> dict:
-        """Advance one controller tick (design §9). ``firing`` is True/False/None
-        (None = unknown → hold). Ramp up fast when not firing; when firing, learn
-        the floor (min sufficient) and hold at floor×(1+buffer), decaying slowly
-        toward it. Respects a settle window between changes."""
-        mn = int(q.get("min") or 1)
-        mx = max(mn, int(q.get("max") or mn))
-        step = max(1, int(q.get("step") or 1))
-        # Central reports alerts with LATENCY — often 30+ min. The controller must
-        # not change the target (up OR down) faster than that, or it ramps to max
-        # long before Central ever confirms firing (the "at max, not firing" false
-        # alarm). Floor the settle window at 30 min regardless of the config.
-        settle = max(1800.0, float(q.get("settle") or 1800.0))
-        buffer = float(q.get("buffer") if q.get("buffer") is not None else 0.20)
-        target = st.get("target")
-        floor = st.get("floor")
-        last = float(st.get("last_change") or 0)
-        mode = st.get("mode") or "learning"
-        if target is None:  # cold start (or warm-start from a persisted floor)
-            if floor is not None:
-                target = min(mx, max(mn, _ceil(float(floor) * (1 + buffer))))
-                mode = "stable"
-            else:
-                target, mode = mn, "learning"
-            # Start the settle clock now so even the FIRST change waits a full
-            # 30-min window (give Central time to confirm firing at the start level).
-            last = now
-        target = max(mn, min(mx, int(target)))
-        if (now - last) >= settle:
-            if firing is False:
-                if target >= mx:
-                    mode = "at_max"
-                else:
-                    target = min(mx, target + step); mode = "learning"; last = now
-            elif firing is True:
-                floor = target if floor is None else min(int(floor), target)
-                op = max(mn, _ceil(float(floor) * (1 + buffer)))
-                if target > op:  # decay toward the operating point to probe lower
-                    target = max(op, target - step); last = now
-                mode = "stable"
-            # firing None → hold
-        return {"target": max(mn, min(mx, int(target))), "floor": floor,
-                "mode": mode, "last_change": last}
+        return sim_quota.adaptive_step(st, q, firing, now)
 
     _adaptive_firing_cache: dict = {}
 

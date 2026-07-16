@@ -255,3 +255,80 @@ def test_merge_presence_and_sim_quotas_coexist():
     sim = [q for q in eff if q["sim_id"]]
     assert len(pres) == 1 and pres[0]["site"] == "MIA"
     assert len(sim) == 1 and sim[0]["alert_id"] == "A"
+
+
+# ── Adaptive harvest controller (design §9) ────────────────────────────────
+def _aq(**kw):
+    base = {"alert_type": "alert", "alert_id": "DNS Server Failed to Respond",
+            "sim_id": "dns_fail", "site": "MIA-PSK", "count": 1,
+            "min": 1, "max": 15, "enabled": True}
+    base.update(kw)
+    return base
+
+
+def test_adaptive_is_on_requires_max_above_min():
+    assert sim_quota.adaptive_is_on(_aq(min=1, max=15)) is True
+    assert sim_quota.adaptive_is_on(_aq(min=5, max=5)) is False   # min==max → fixed
+    assert sim_quota.adaptive_is_on(_aq(max=None)) is False        # no max → fixed
+    assert sim_quota.adaptive_is_on({"count": 10}) is False        # plain quota
+
+
+def test_apply_adaptive_targets_writes_controller_target_into_count():
+    """The whole point of the controller: its ramped target must reach the
+    engine's ``count``. With state.target=15 the effective count becomes 15,
+    not the saved floor (1)."""
+    q = _aq(count=1, min=1, max=15)
+    state = {"alert:DNS Server Failed to Respond:MIA-PSK":
+             {"target": 15, "floor": 5, "mode": "at_max", "last_change": 0}}
+    out = sim_quota.apply_adaptive_targets([dict(q)], state)
+    assert out[0]["count"] == 15
+    assert sim_quota.adaptive_key(q) in state
+
+
+def test_apply_adaptive_targets_cold_starts_at_min_floor():
+    """No controller state yet → count stays at the min floor (the ramp origin)."""
+    q = _aq(count=1, min=1, max=15)
+    out = sim_quota.apply_adaptive_targets([dict(q)], {})
+    assert out[0]["count"] == 1
+
+
+def test_apply_adaptive_targets_leaves_fixed_quotas_untouched():
+    """A non-adaptive quota (no max>min) keeps its configured count — the
+    controller never touches fixed-count rows."""
+    fixed = {"alert_type": "alert", "alert_id": "X", "sim_id": "ping_test",
+             "site": "MIA", "count": 7, "enabled": True}
+    out = sim_quota.apply_adaptive_targets([dict(fixed)],
+                                           {"alert:X:MIA": {"target": 99}})
+    assert out[0]["count"] == 7
+
+
+def test_adaptive_step_ramps_up_when_not_firing_past_settle():
+    q = _aq(min=1, max=15, step=1)
+    st = {"target": 5, "floor": None, "mode": "learning", "last_change": 0}
+    after = sim_quota.adaptive_step(st, q, firing=False, now=10_000)
+    assert after["target"] == 6 and after["mode"] == "learning"
+
+
+def test_adaptive_step_at_max_when_target_reaches_ceiling_and_not_firing():
+    q = _aq(min=1, max=15, step=1)
+    st = {"target": 15, "floor": 5, "mode": "learning", "last_change": 0}
+    after = sim_quota.adaptive_step(st, q, firing=False, now=10_000)
+    assert after["target"] == 15 and after["mode"] == "at_max"
+
+
+def test_adaptive_step_holds_within_settle_window():
+    """Central alert latency: no target change within 30 min of the last change,
+    even when not firing — the 'at max, not firing' false-alarm guard."""
+    q = _aq(min=1, max=15, step=1)
+    st = {"target": 5, "floor": None, "mode": "learning", "last_change": 9_900}
+    after = sim_quota.adaptive_step(st, q, firing=False, now=10_000)  # 100s < 1800
+    assert after["target"] == 5  # unchanged
+
+
+def test_adaptive_step_learns_floor_and_decays_when_firing():
+    q = _aq(min=1, max=15, step=1, buffer=0.2)
+    st = {"target": 10, "floor": None, "mode": "learning", "last_change": 0}
+    after = sim_quota.adaptive_step(st, q, firing=True, now=10_000)
+    assert after["floor"] == 10 and after["mode"] == "stable"
+    # op = ceil(10 * 1.2) = 12; target 10 ≤ 12 → no decay, stays 10
+    assert after["target"] == 10

@@ -232,6 +232,91 @@ def merge_effective_quotas(
     return out
 
 
+# ── Adaptive harvest controller (design doc §9) — PURE helpers ──────────────
+# Module-level so they're importable + testable. routes.py wires the async
+# apply/loop around ``store``; these are the stateless bits.
+def adaptive_is_on(q: Dict[str, Any]) -> bool:
+    """A quota is adaptive when it declares a max above its min. Fixed-count
+    quotas (no min/max, or min==max) are left untouched."""
+    try:
+        return int(q.get("max")) > int(q.get("min") or 1)
+    except (TypeError, ValueError):
+        return False
+
+
+def adaptive_key(q: Dict[str, Any]) -> str:
+    """The controller-state key for an adaptive quota."""
+    return f"{q.get('alert_type', 'alert')}:{q.get('alert_id', '')}:{q.get('site', '')}"
+
+
+def ceil_to_int(x: float) -> int:
+    """``ceil`` for positive floats without a math import."""
+    xi = int(x)
+    return xi + 1 if x > xi else xi
+
+
+def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float) -> Dict[str, Any]:
+    """Advance one controller tick (design §9). ``firing`` is True/False/None
+    (None = unknown → hold). Ramp up fast when not firing; when firing, learn
+    the floor (min sufficient) and hold at floor×(1+buffer), decaying slowly
+    toward it. Respects a settle window between changes."""
+    mn = int(q.get("min") or 1)
+    mx = max(mn, int(q.get("max") or mn))
+    step = max(1, int(q.get("step") or 1))
+    # Central reports alerts with LATENCY — often 30+ min. The controller must
+    # not change the target (up OR down) faster than that, or it ramps to max
+    # long before Central ever confirms firing (the "at max, not firing" false
+    # alarm). Floor the settle window at 30 min regardless of the config.
+    settle = max(1800.0, float(q.get("settle") or 1800.0))
+    buffer = float(q.get("buffer") if q.get("buffer") is not None else 0.20)
+    target = st.get("target")
+    floor = st.get("floor")
+    last = float(st.get("last_change") or 0)
+    mode = st.get("mode") or "learning"
+    if target is None:  # cold start (or warm-start from a persisted floor)
+        if floor is not None:
+            target = min(mx, max(mn, ceil_to_int(float(floor) * (1 + buffer))))
+            mode = "stable"
+        else:
+            target, mode = mn, "learning"
+        # Start the settle clock now so even the FIRST change waits a full
+        # 30-min window (give Central time to confirm firing at the start level).
+        last = now
+    target = max(mn, min(mx, int(target)))
+    if (now - last) >= settle:
+        if firing is False:
+            if target >= mx:
+                mode = "at_max"
+            else:
+                target = min(mx, target + step); mode = "learning"; last = now
+        elif firing is True:
+            floor = target if floor is None else min(int(floor), target)
+            op = max(mn, ceil_to_int(float(floor) * (1 + buffer)))
+            if target > op:  # decay toward the operating point to probe lower
+                target = max(op, target - step); last = now
+            mode = "stable"
+        # firing None → hold
+    return {"target": max(mn, min(mx, int(target))), "floor": floor,
+            "mode": mode, "last_change": last}
+
+
+def apply_adaptive_targets(quotas: List[Dict[str, Any]],
+                           state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Replace each adaptive quota's ``count`` with the controller's current
+    target (from ``state`` keyed by ``adaptive_key``). A quota with no
+    controller state yet starts at its ``min`` floor. Non-adaptive quotas are
+    left untouched. Pure (no store) — routes.py wraps this with the async store
+    read so both the push path and the state view apply the same target."""
+    adaptive = [q for q in quotas if adaptive_is_on(q)]
+    if not adaptive:
+        return quotas
+    for q in adaptive:
+        st = state.get(adaptive_key(q)) or {}
+        tgt = st.get("target")
+        q["count"] = int(tgt) if tgt is not None else int(q.get("min") or 1)
+    return quotas
+
+
 # ── Catalog from raw INI text (hub centralized mode) ──────────────────────
 def _parse_ini(text: str) -> configparser.ConfigParser:
     p = configparser.ConfigParser()
