@@ -22,7 +22,7 @@ logger = logging.getLogger("SimQuota")
 
 # ── Schema (byte-identical to cs/lm-spoke/src/sim_quota.py) ───────────────
 SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
-                  "multi_capable", "rehome", "enabled")
+                  "multi_capable", "rehome", "enabled", "learning")
 ALERT_TYPES = ("alert", "insight")
 
 SIM_META: Dict[str, Dict[str, object]] = {
@@ -91,6 +91,12 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         else _as_bool(raw.get("multi_capable"), bool(meta.get("multi_capable", False))),
         "rehome": _as_bool(raw.get("rehome"), False),
         "enabled": _as_bool(raw.get("enabled"), False),
+        # `learning` ON = this row is the "learning lab" that runs the full
+        # thermostat (down-ratchet to find the floor, settle floor+20%, record a
+        # publishable learned_op). OFF (default) = a consumer: up-only, seeds/lifts
+        # from the tenant/global learned operating point, never down-ratchets (never
+        # risks stopping a firing alert). See design doc §9 / adaptive_step.
+        "learning": _as_bool(raw.get("learning"), False),
     }
     # Adaptive-controller fields (design doc §9) — carried through only when the
     # quota declares them, so a fixed-count quota stays exactly as before. The
