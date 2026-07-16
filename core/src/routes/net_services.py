@@ -247,9 +247,11 @@ def register(app, hub, ctx):
         attributed to a tenant by resolving its SANs through the internal DNS A/AAAA
         records: a non-admin sees a cert only if one of its SANs maps to a hostname
         whose DNS IP is in the tenant's prefixes. A wildcard SAN (``*.d``) matches any
-        A-record host under that domain. Admins / ``le`` toggle off / no prefixes →
-        unchanged. DNS unavailable → fail OPEN (don't hide certs on a DNS outage).
-        The cache stores the UNFILTERED list; this runs per request."""
+        A-record host under that domain. TWO DNS sources are consulted: the DNS
+        module (Unbound spoke) AND every connected firewall's Unbound host-overrides
+        (OPNsense). Admins / ``le`` toggle off / no prefixes → unchanged. If BOTH DNS
+        sources are unreachable → fail OPEN (don't hide certs on an outage). The cache
+        stores the UNFILTERED list; this runs per request."""
         if not isinstance(data, dict):
             return data
         sess = _session_user(request)
@@ -257,10 +259,6 @@ def register(app, hub, ctx):
             return data
         prefixes = await access.resolve_prefixes(hub, sess)
         if not prefixes:
-            return data
-        try:
-            dns_data = await _relay_spoke(_get_dns_spoke(hub), "DNS_LIST", log_name="le_filter_dns")
-        except Exception:  # noqa: BLE001 — DNS down → fail open
             return data
         import ipaddress
         nets = []
@@ -277,14 +275,48 @@ def register(app, hub, ctx):
                 return False
             return any(a in n for n in nets)
 
+        def _collect(records, name_keys, ip_keys):
+            for r in records if isinstance(records, list) else []:
+                if not isinstance(r, dict):
+                    continue
+                if str(r.get("type", "A")).upper() not in ("A", "AAAA"):
+                    continue
+                name = ""
+                for k in name_keys:
+                    name = str(r.get(k) or "").strip().rstrip(".").lower()
+                    if name:
+                        break
+                ip = next((r.get(k) for k in ip_keys if r.get(k)), None)
+                if name and ip and _in(ip):
+                    tenant_hosts.add(name)
+
         tenant_hosts = set()
-        for r in (dns_data or {}).get("records") or []:
-            if str(r.get("type", "A")).upper() not in ("A", "AAAA"):
+        any_source = False
+        # Source 1: the DNS module (Unbound spoke).
+        try:
+            dns_data = await _relay_spoke(_get_dns_spoke(hub), "DNS_LIST", log_name="le_filter_dns")
+            any_source = True
+            _collect((dns_data or {}).get("records") or [], ("name",), ("value", "ip"))
+        except Exception:  # noqa: BLE001 — DNS module down; try the firewalls
+            pass
+        # Source 2: OPNsense firewalls' Unbound host-overrides (per connected fw spoke).
+        try:
+            firewalls = (hub.state.system_state.get("global_config", {}) or {}).get("firewalls", []) or []
+        except Exception:  # noqa: BLE001
+            firewalls = []
+        for sid in {fw.get("spoke_id") for fw in firewalls if fw.get("spoke_id")}:
+            if sid not in getattr(hub, "active_connections", {}):
                 continue
-            name = str(r.get("name") or "").strip().rstrip(".").lower()
-            ip = r.get("value") or r.get("ip")
-            if name and ip and _in(ip):
-                tenant_hosts.add(name)
+            try:
+                fres = await hub.request_response(sid, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=10.0)
+                any_source = True
+                recs = (fres or {}).get("data") or (fres or {}).get("dns_records") \
+                    or (fres or {}).get("records") or (fres if isinstance(fres, list) else [])
+                _collect(recs, ("hostname", "host", "name"), ("ip", "value", "server"))
+            except Exception:  # noqa: BLE001 — one bad firewall never blocks the rest
+                continue
+        if not any_source:
+            return data  # both DNS sources unreachable → fail open
         if not tenant_hosts:
             return {**data, "certs": []}
 
