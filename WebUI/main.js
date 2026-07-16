@@ -1214,7 +1214,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Icons'],
+    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
     setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Global Learned Values', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3626,6 +3626,16 @@ function _renderSettingsSection(subMenu) {
     // applies the firewall alias/allow rule via the existing firewall endpoints.
     if (subMenu === 'Collab') {
         _renderCollabTile(content);
+        return;
+    }
+
+    // Notifications — platform-level email alerts (spoke out-of-contact, etc.).
+    // Provider dropdown (Azure ACS / Gmail / Yahoo / Office 365 / Generic); ACS
+    // defaults to the REST API transport with SMTP fallback, creds auto-pulled
+    // from Key Vault. Other providers use SMTP with Fernet-encrypted-at-rest
+    // passwords. Admin-only (/setup/notifications is admin-gated server-side).
+    if (subMenu === 'Notifications') {
+        _renderSettingsNotificationsTile(content);
         return;
     }
 
@@ -6559,6 +6569,159 @@ async function _kvAction(path, label, confirmMsg) {
 function rotateKeyVaultAdmin() { _kvAction('/setup/key-vault/rotate-admin', 'Rotate admin', 'Rotate the local admin password now?\n\nThe new password is stored ONLY in Key Vault (break-glass) and all of that admin’s sessions are logged out. Retrieve it from the vault to log back in.'); }
 function pushKeyVaultFernet() { _kvAction('/setup/key-vault/push-fernet', 'Push Fernet'); }
 function backupKeyVaultNow() { _kvAction('/setup/key-vault/backup', 'Backup'); }
+
+// ── Notifications (platform email alerts) ─────────────────────────────────
+const _NOTIF_PRESETS = {
+    azure_acs: { host: 'smtp.azurecomm.net',     port: 587, label: 'Azure ACS (Key Vault-managed)' },
+    gmail:     { host: 'smtp.gmail.com',         port: 587, label: 'Gmail' },
+    yahoo:     { host: 'smtp.mail.yahoo.com',    port: 587, label: 'Yahoo' },
+    office365: { host: 'smtp.office365.com',     port: 587, label: 'Office 365' },
+    generic:   { host: '',                       port: 587, label: 'Generic SMTP' },
+};
+
+function _renderSettingsNotificationsTile(content) {
+    const { card, inputCls, labelCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Notifications — email alerts</h3>
+                <span id="notif-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">The hub sends its own alerts (spoke out-of-contact, etc.) over email. Pick a provider; recipient list is always manual. <b>Azure ACS</b> pulls sender creds from <b>Key Vault</b> and defaults to the <b>REST API</b> (grant the SSO app the Communication Services permission) with an SMTP fallback. Other providers use SMTP with the password encrypted at rest.</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="notif-enabled" class="w-4 h-4 text-green-600 rounded">Enable email alerts</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Provider</label>
+                    <select id="notif-provider" class="${inputCls}" onchange="notifProviderChanged()">
+                        <option value="azure_acs">Azure ACS (Key Vault-managed)</option>
+                        <option value="gmail">Gmail</option>
+                        <option value="yahoo">Yahoo</option>
+                        <option value="office365">Office 365</option>
+                        <option value="generic">Generic SMTP</option>
+                    </select></div>
+                <div class="space-y-1" id="notif-transport-wrap"><label class="${labelCls}">ACS transport</label>
+                    <select id="notif-transport" class="${inputCls}" onchange="notifTransportChanged()">
+                        <option value="api">REST API (default)</option>
+                        <option value="smtp">SMTP</option>
+                    </select></div>
+                <div class="space-y-1"><label class="${labelCls}">SMTP host</label><input id="notif-host" type="text" placeholder="smtp.example.com" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">SMTP port</label><input id="notif-port" type="number" placeholder="587" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">SMTP user</label><input id="notif-user" type="text" placeholder="user@example.com" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">SMTP password</label><input id="notif-pass" type="password" placeholder="" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-kv-name-wrap"><label class="${labelCls}">ACS Key Vault secret name</label><input id="notif-acs-secret" type="text" placeholder="acs-email-connstr" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-vault-wrap"><label class="${labelCls}">Key Vault URL <span class="text-slate-400 normal-case font-normal">(blank = reuse the DR Key Vault URL)</span></label><input id="notif-vault-url" type="text" placeholder="https://my-vault.vault.azure.net" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">From email</label><input id="notif-from" type="text" placeholder="DoNotReply@<resourcename>.azurecomm.net" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2"><label class="${labelCls}">To emails <span class="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input id="notif-to" type="text" placeholder="ops@example.com, oncall@example.com" class="${inputCls} font-mono text-xs"></div>
+            </div>
+            <p id="notif-acs-note" class="text-[11px] text-slate-400 mt-2 hidden">ACS API transport signs each request with the access key from the Key Vault connection string (HMAC-SHA256) — no Entra app permission needed. The connection string is read from the Key Vault secret at send time.</p>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+                <button type="button" onclick="saveNotifications()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
+                <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Send test email</button>
+                <span id="notif-action-out" class="text-[11px] font-mono text-slate-600 break-all"></span>
+            </div>
+        </div>`;
+    loadNotifications();
+}
+
+function _notifProvider() { return document.getElementById('notif-provider')?.value || 'azure_acs'; }
+
+function notifProviderChanged() {
+    const p = _notifProvider();
+    const preset = _NOTIF_PRESETS[p] || _NOTIF_PRESETS.generic;
+    const isAcs = p === 'azure_acs';
+    const isGeneric = p === 'generic';
+    // host/port: editable only for generic; read-only preset for the rest.
+    const hostEl = document.getElementById('notif-host');
+    const portEl = document.getElementById('notif-port');
+    if (hostEl) { if (!isGeneric) hostEl.value = preset.host; hostEl.disabled = !isGeneric; }
+    if (portEl) { if (!isGeneric) portEl.value = preset.port; portEl.disabled = !isGeneric; }
+    // ACS-only controls
+    const showKv = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
+    showKv('notif-transport-wrap', isAcs);
+    showKv('notif-acs-kv-name-wrap', isAcs);
+    showKv('notif-acs-vault-wrap', isAcs);
+    // Password field: hidden for ACS (creds via Key Vault).
+    const passEl = document.getElementById('notif-pass');
+    if (passEl) { passEl.disabled = isAcs; if (isAcs) passEl.value = ''; passEl.placeholder = isAcs ? 'managed via Key Vault' : ''; }
+    notifTransportChanged();
+}
+
+function notifTransportChanged() {
+    const isAcs = _notifProvider() === 'azure_acs';
+    const isApi = isAcs && (document.getElementById('notif-transport')?.value || 'api') === 'api';
+    const note = document.getElementById('notif-acs-note');
+    if (note) note.classList.toggle('hidden', !isApi);
+}
+
+async function loadNotifications() {
+    try {
+        const r = await setupFetch('/setup/notifications');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
+        const en = document.getElementById('notif-enabled'); if (en) en.checked = !!c.enabled;
+        set('notif-provider', c.provider || 'azure_acs');
+        set('notif-transport', c.transport || 'api');
+        set('notif-host', c.smtp_host);
+        set('notif-port', c.smtp_port || 587);
+        set('notif-user', c.smtp_user);
+        set('notif-acs-secret', c.acs_kv_secret_name || 'acs-email-connstr');
+        set('notif-vault-url', c.vault_url);
+        set('notif-from', c.from_email);
+        const to = Array.isArray(c.to_emails) ? c.to_emails.join(', ') : (c.to_emails || '');
+        set('notif-to', to);
+        const passEl = document.getElementById('notif-pass');
+        if (passEl) { passEl.value = ''; passEl.placeholder = c.has_password ? 'set (leave blank to keep)' : ''; }
+        const pill = document.getElementById('notif-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        notifProviderChanged();
+    } catch (e) { console.error('loadNotifications failed', e); }
+}
+
+function _notifFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    const p = _notifProvider();
+    const cfg = {
+        enabled: !!document.getElementById('notif-enabled')?.checked,
+        provider: p,
+        smtp_host: v('notif-host'),
+        smtp_port: parseInt(v('notif-port'), 10) || 587,
+        smtp_user: v('notif-user'),
+        from_email: v('notif-from'),
+        to_emails: v('notif-to'),
+    };
+    if (p === 'azure_acs') {
+        cfg.transport = document.getElementById('notif-transport')?.value || 'api';
+        cfg.acs_kv_secret_name = v('notif-acs-secret') || 'acs-email-connstr';
+        cfg.vault_url = v('notif-vault-url');
+    } else {
+        const pw = v('notif-pass');
+        if (pw) cfg.smtp_password = pw;   // plaintext → hub Fernet-encrypts at rest
+    }
+    return cfg;
+}
+
+async function saveNotifications() {
+    const out = document.getElementById('notif-action-out');
+    if (out) out.textContent = 'Saving…';
+    try {
+        const r = await setupFetch('/setup/notifications', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _notifFormConfig() }) });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        showToast('Notifications settings saved.', 'success');
+        if (out) out.textContent = 'saved';
+        loadNotifications();
+    } catch (e) { if (out) out.textContent = ''; showToast('Save failed: ' + (e.message || e), 'error'); }
+}
+
+async function testNotifications() {
+    const out = document.getElementById('notif-action-out');
+    if (out) out.textContent = 'Sending test…';
+    try {
+        const r = await setupFetch('/setup/notifications/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _notifFormConfig() }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { if (out) out.textContent = `OK — sent via ${d.host} to ${d.recipients} recipient(s)`; showToast('Test email sent.', 'success'); }
+        else { if (out) out.textContent = d.message || 'failed'; showToast('Test failed: ' + (d.message || ''), 'error'); }
+    } catch (e) { if (out) out.textContent = ''; showToast('Test failed: ' + (e.message || e), 'error'); }
+}
 
 async function downloadKeyVaultMin() {
     try {

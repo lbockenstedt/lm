@@ -2704,21 +2704,79 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/{tenant}/settings")
     async def get_settings(tenant: str, tenant_id: str = Depends(get_tenant_id)):
-        return await store.get_settings(tenant_id)
+        settings = await store.get_settings(tenant_id)
+        # Never echo the password (legacy plaintext smtp_pass or the Fernet
+        # ciphertext) to the UI — surface a has_password flag instead.
+        notif = dict(settings.get("notifications") or {})
+        has_pw = bool(notif.get("smtp_password_enc") or notif.get("smtp_pass"))
+        for _k in ("smtp_pass", "smtp_password", "smtp_password_enc"):
+            notif.pop(_k, None)
+        notif["has_password"] = has_pw
+        settings["notifications"] = notif
+        return settings
 
     @app.post("/sim/api/{tenant}/settings/notifications")
     async def set_notifications(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
         body = await request.json()
         cfg = body if isinstance(body, dict) else {}
-        await store.set_notifications(tenant_id, cfg)
-        # Map sim-views field names onto the spoke's notifications settings.
-        notif = {k: v for k, v in cfg.items() if k != "to_emails"}
+        provider = str(cfg.get("provider") or "generic")
+        from security.encryption import hub_encryption
+
+        # --- stored-at-rest blob: Fernet-encrypt the password (never plaintext) ---
+        stored = {k: v for k, v in cfg.items() if k not in ("smtp_pass", "smtp_password")}
+        stored["provider"] = provider
+        if provider == "azure_acs":
+            # ACS creds live in Key Vault — no password stored here.
+            stored["transport"] = str(cfg.get("transport") or "api")
+            stored.pop("smtp_password_enc", None)
+        else:
+            new_pw = str(cfg.get("smtp_pass") or "")
+            if new_pw:
+                stored["smtp_password_enc"] = hub_encryption.encrypt(new_pw).decode()
+            elif not stored.get("smtp_password_enc"):
+                # No new password submitted — preserve the existing ciphertext.
+                cur = await store.get_notifications(tenant_id)
+                stored["smtp_password_enc"] = cur.get("smtp_password_enc", "")
+        await store.set_notifications(tenant_id, stored)
+
+        # --- pushed-to-spoke blob: the spoke sends via SMTP, so always SMTP
+        # creds. Map sim-views field names onto the spoke's notifications schema. ---
+        notif = {k: v for k, v in stored.items()
+                 if k not in ("smtp_password_enc", "to_emails")}
         if cfg.get("to_emails"):
-            notif["smtp_to"] = cfg["to_emails"] if isinstance(cfg["to_emails"], str) else ",".join(cfg["to_emails"])
-        if cfg.get("smtp_pass"):
-            notif["smtp_password"] = cfg["smtp_pass"]
+            notif["smtp_to"] = (cfg["to_emails"] if isinstance(cfg["to_emails"], str)
+                                else ",".join(cfg["to_emails"]))
         if cfg.get("teams_webhook_url"):
             notif["teams_webhook_url"] = cfg["teams_webhook_url"]
+
+        if provider == "azure_acs":
+            # The spoke has no Azure creds. The hub resolves ACS creds from Key
+            # Vault and injects derived SMTP creds so the spoke's existing SMTP
+            # sender works unchanged. (API transport is a hub-platform-only
+            # optimization; the spoke always uses SMTP.)
+            try:
+                import notifications as _n
+                resolve_cfg = {**stored, "provider": "azure_acs", "transport": "smtp"}
+                mode, payload = await _n._resolve(hub, resolve_cfg)
+                if mode == "smtp":
+                    _host, _port, _user, _pw, _stls = payload
+                    notif["smtp_host"] = _host
+                    notif["smtp_port"] = _port
+                    notif["smtp_user"] = _user
+                    notif["smtp_password"] = _pw
+            except _n.NotificationsError as e:
+                raise HTTPException(status_code=400, detail=f"ACS credential resolution failed: {e}")
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail=f"ACS credential resolution failed: {e}")
+        else:
+            # Non-ACS: pass through the manually-entered SMTP creds. The password
+            # is plaintext to the spoke (the spoke↔hub channel is already
+            # TLS/PSK-protected); at-rest encryption only applies to hub storage.
+            if stored.get("smtp_password_enc"):
+                notif["smtp_password"] = hub_encryption.decrypt(stored["smtp_password_enc"].encode())
+            elif cfg.get("smtp_pass"):
+                notif["smtp_password"] = cfg["smtp_pass"]
+
         pushed = await _push_config(tenant_id, {"notifications": notif})
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
