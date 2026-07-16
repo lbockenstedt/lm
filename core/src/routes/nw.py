@@ -56,7 +56,10 @@ def register(app, hub, ctx):
         """Re-push the bound device slice to a connected nw spoke."""
         if not spoke_id or spoke_id not in hub.active_connections:
             return False
-        payload = {"devices": _project_nw_devices_for_push(_nw_devices_for_spoke(hub, spoke_id))}
+        payload = {"devices": _project_nw_devices_for_push(_nw_devices_for_spoke(hub, spoke_id)),
+                   "default_poll_interval":
+                       (hub.state.system_state.get("global_config", {}) or {})
+                       .get("nw_poll_default_interval")}
         msg = _hub_msg(spoke_id, "UPDATE_CONFIG", payload)
         await hub.send_to_spoke(msg)
         return True
@@ -232,6 +235,38 @@ def register(app, hub, ctx):
             devices = [d for d in devices
                        if access.spoke_visible_to_session(sess, (d or {}).get("tenant_id", ""))]
         return {"nw_devices": devices}
+
+    @app.get("/setup/nw-poll-config")
+    async def get_nw_poll_config(request: Request):
+        """Module-level nw poll cadence. ``default_poll_interval`` (seconds) is
+        the fallback each nw spoke applies to any device that doesn't set its own
+        (device-level always wins). null/absent → the spoke's built-in 15m."""
+        hub = app.state.hub
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        return {"default_poll_interval": gc.get("nw_poll_default_interval")}
+
+    @app.post("/setup/nw-poll-config")
+    async def set_nw_poll_config(request: Request):
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        data = await request.json()
+        raw = data.get("default_poll_interval")
+        try:
+            val = None if raw in (None, "", "null") else int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="default_poll_interval must be an integer or null")
+        gc = hub.state.system_state.get("global_config", {})
+        gc["nw_poll_default_interval"] = val
+        hub.state.system_state["global_config"] = gc
+        hub.state.save_state()
+        # Re-push every connected nw spoke so the new module default takes effect.
+        pushed = 0
+        for sid in (hub.get_all_spokes_by_type("nw") or []):
+            if await _nw_push_fleet(hub, sid):
+                pushed += 1
+        return {"status": "ok", "default_poll_interval": val, "pushed": pushed}
 
     @app.post("/setup/nw-devices")
     async def add_nw_device(request: Request):

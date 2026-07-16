@@ -2226,7 +2226,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 mine = [d for d in devices if isinstance(d, dict) and d.get("spoke_id") == spoke_id]
                 if not mine:
                     mine = [d for d in devices if isinstance(d, dict) and not d.get("spoke_id")]
-                config = {"devices": _project_nw_devices(mine)}
+                # default_poll_interval = module-level poll cadence; the spoke
+                # uses it for devices that don't set their own (device wins).
+                config = {"devices": _project_nw_devices(mine),
+                          "default_poll_interval":
+                              self.state.get_global_config().get("nw_poll_default_interval")}
             elif module_key in _INSTANCE_CONFIG_SOURCES:
                 # NAC / IPAM / Directory migrated to multi-instance storage
                 # (nac_instances / ipam_instances / ldap_instances). The legacy

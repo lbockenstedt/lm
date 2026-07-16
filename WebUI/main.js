@@ -5117,8 +5117,62 @@ function _renderSetupModuleMgmtTile(content) {
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Every managed module device in one place — firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances. Click <strong>Add Device</strong> then choose the module type to attach.</p>
                 <div id="all-devices-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
+            <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Network Devices — Auto-Poll Default</h3>
+                <p class="text-xs text-slate-400 mb-3">Module-level poll cadence applied to every network device that inherits it. A device's own Auto-Poll Interval always overrides this. The nw spoke polls on this cycle to warm the hub cache and sync device inventory into NetBox.</p>
+                <div class="flex items-center gap-3">
+                    <select id="nw-module-poll-default" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="">Built-in default (15 minutes)</option>
+                        <option value="0">Off (no auto-poll)</option>
+                        <option value="60">Every 1 minute</option>
+                        <option value="300">Every 5 minutes</option>
+                        <option value="900">Every 15 minutes</option>
+                        <option value="1800">Every 30 minutes</option>
+                        <option value="3600">Every hour</option>
+                        <option value="21600">Every 6 hours</option>
+                        <option value="86400">Every day</option>
+                    </select>
+                    <button onclick="saveNwPollConfig(this)" class="${btnCls} ml-auto">Save</button>
+                </div>
             </div>`;
     loadAllDevices();
+    loadNwPollConfig();
+}
+
+// Module-level nw auto-poll default (Setup → Module Management). Device-level wins.
+async function loadNwPollConfig() {
+    const sel = document.getElementById('nw-module-poll-default');
+    if (!sel) return;
+    try {
+        const r = await setupFetch('/setup/nw-poll-config');
+        if (!r.ok) return;
+        const d = await r.json();
+        sel.value = (d.default_poll_interval === null || d.default_poll_interval === undefined)
+            ? '' : String(d.default_poll_interval);
+    } catch (e) { /* leave built-in default selected */ }
+}
+
+async function saveNwPollConfig(btn) {
+    const sel = document.getElementById('nw-module-poll-default');
+    if (!sel) return;
+    const raw = sel.value;
+    const body = { default_poll_interval: raw === '' ? null : (parseInt(raw, 10) || 0) };
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const r = await setupFetch('/setup/nw-poll-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) showToast(`Module poll default saved${d.pushed ? ` (pushed to ${d.pushed} spoke${d.pushed === 1 ? '' : 's'})` : ''}.`, 'success');
+        else showToast('Failed to save: ' + (d.detail || r.status), 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
 }
 
 // Setup → Simulations tile. Sim admin overview: global + per-tenant USB
@@ -11614,11 +11668,11 @@ async function loadNwData(subMenu) {
         }
 
         let keys;
-        if (subMenu === 'MAC Table') keys = ['device', 'mac', 'vlan', 'interface'];
+        if (subMenu === 'MAC Table') keys = ['device', 'mac', 'ip', 'vlan', 'interface'];
         else if (subMenu === 'ARP') keys = ['device', 'ip', 'mac', 'interface'];
         else if (subMenu === 'Interfaces') keys = ['device', 'name', 'ip', 'mac', 'vlan', 'status', 'speed'];
         else if (subMenu === 'IP Addresses') keys = ['device', 'ip', 'mac', 'vlan', 'interface'];
-        else if (subMenu === 'VLANs') keys = ['device', 'vlan', 'endpoints', 'macs', 'ips', 'gateway_ip'];
+        else if (subMenu === 'VLANs') keys = ['device', 'vlan', 'name', 'ports', 'macs', 'ips', 'gateway_ip'];
         else keys = ['device', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && k !== 'device' && !k.startsWith('_'))];
 
         const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
@@ -17484,16 +17538,17 @@ function showAddNwDeviceModal() {
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Auto-Poll Interval</label>
                     <select id="nw-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="inherit" selected>Inherit module default</option>
                         <option value="0">Off (manual Poll Now only)</option>
                         <option value="60">Every 1 minute</option>
                         <option value="300">Every 5 minutes</option>
-                        <option value="900" selected>Every 15 minutes (default)</option>
+                        <option value="900">Every 15 minutes</option>
                         <option value="1800">Every 30 minutes</option>
                         <option value="3600">Every hour</option>
                         <option value="21600">Every 6 hours</option>
                         <option value="86400">Every day</option>
                     </select>
-                    <p class="text-[11px] text-slate-400">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces), warms the hub cache so sub-views load instantly, and syncs the device + interfaces into NetBox. Defaults to 15 minutes if left unset.</p>
+                    <p class="text-[11px] text-slate-400">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces), warms the hub cache so sub-views load instantly, and syncs the device + interfaces into NetBox. <b>This device setting overrides the module default</b> (set under Setup → Module Management). Inherit uses the module default (15 min if unset).</p>
                 </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
@@ -17534,10 +17589,10 @@ async function editNwDevice(id) {
     document.getElementById('nw-enable-secret').value = d.enable_secret || '';
     document.getElementById('nw-api-token').value = d.api_token || '';
     document.getElementById('nw-snmp-community').value = d.snmp_community || '';
-    // Unset → show the 15m default (matches the spoke's fallback); explicit 0 = Off.
+    // Unset → "Inherit" (uses module default); a stored number (incl 0=Off) wins.
     document.getElementById('nw-poll-interval').value =
         (d.poll_interval === undefined || d.poll_interval === null || d.poll_interval === '')
-            ? '900' : String(d.poll_interval);
+            ? 'inherit' : String(d.poll_interval);
 
     setTimeout(() => {
         const selector = document.getElementById('nw-spoke');
@@ -17562,7 +17617,11 @@ async function saveNwDevice() {
         enable_secret: document.getElementById('nw-enable-secret').value,
         api_token: document.getElementById('nw-api-token').value,
         snmp_community: document.getElementById('nw-snmp-community').value,
-        poll_interval: parseInt(document.getElementById('nw-poll-interval').value, 10) || 0,
+        // 'inherit' → null (use the module default); a number (incl 0=Off) overrides.
+        poll_interval: (() => {
+            const pv = document.getElementById('nw-poll-interval').value;
+            return (pv === 'inherit' || pv === '') ? null : (parseInt(pv, 10) || 0);
+        })(),
     };
     if (!config.name || !config.object_type) {
         showToast('Device name and object type are required.', 'error');
