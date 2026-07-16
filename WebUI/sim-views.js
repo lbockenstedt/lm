@@ -4434,12 +4434,12 @@ async function csProcessingModesCard() {
     const data = await csFetch('/' + csTenant() + '/settings');
     const modes = (data && data.processing_modes) || {};
     const features = [['central_api', 'Central API'], ['teams', 'Teams'], ['email', 'Email']];
-    // Unset == distributed at runtime (routes.py test_central: `modes.get("central_api") == "centralized"`
-    // is False when unset → distributed branch). Show that truth in the dropdown instead of letting the
-    // browser default-display the first option ("Centralized"), which misleads operators into thinking
-    // centralized is active when nothing has been persisted.
+    // Unset == CENTRALIZED at runtime (store.central_api_is_centralized: only an
+    // explicit 'distributed' opts out). The hub polls Central itself and shows its
+    // checks with no spoke assigned, so an unconfigured tenant defaults to
+    // centralized here to match the backend.
     const opts = (cur) => {
-        if (!cur) cur = 'distributed';
+        if (!cur) cur = 'centralized';
         return ['centralized', 'distributed'].map(v =>
             `<option value="${v}" ${cur === v ? 'selected' : ''}>${v.charAt(0).toUpperCase() + v.slice(1)}</option>`).join('');
     };

@@ -246,7 +246,10 @@ class CentralHubPoller:
         for tid in self._store.tenant_ids():
             try:
                 modes = await self._store.get_processing_modes(tid)
-                if modes.get("central_api") != "centralized":
+                # Central API defaults to CENTRALIZED — only explicit 'distributed'
+                # (a spoke owns the creds) opts out. So a hub with a Central config
+                # and no spoke still gets polled and its checks show.
+                if not self._store.central_api_is_centralized(modes):
                     continue
                 cc = await self._store.get_central_config(tid)
                 if cc:

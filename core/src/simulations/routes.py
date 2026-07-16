@@ -1882,7 +1882,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Sites/Alerts/Clients tabs asked a credential-less spoke and got
         'Central not configured'."""
         modes = await store.get_processing_modes(tenant_id)
-        if modes.get("central_api") == "centralized":
+        if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
             result = await browse_all_from_config(cc or {})
         else:
@@ -3563,7 +3563,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
           CS_GET_CENTRAL_AVAILABLE; degrades to an empty catalog when no spoke is
           connected (the editor still works with manual checks)."""
         modes = await store.get_processing_modes(tenant_id)
-        if modes.get("central_api") == "centralized":
+        if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
             return await get_central_available_from_config(cc or {})
         try:
@@ -3600,7 +3600,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # could never validate the creds the operator typed into the hub form).
         # Distributed mode → fan CS_TEST_CENTRAL out to the tenant's cs spokes.
         modes = await store.get_processing_modes(tenant_id)
-        if modes.get("central_api") == "centralized":
+        if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
             return {"spokes": [await test_central_from_config(cc or {}, spoke_id="hub")]}
         # Registered Client-Sim spokes for this tenant (approved + bound, or

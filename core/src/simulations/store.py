@@ -676,6 +676,15 @@ class SimulationsStore:
     async def get_processing_modes(self, tenant_id: str) -> Dict[str, str]:
         return dict(self._data.get(tenant_id, {}).get("processing_modes", {}))
 
+    @staticmethod
+    def central_api_is_centralized(modes: Dict[str, Any] | None) -> bool:
+        """Whether the tenant's Central API is processed centrally (the HUB polls
+        Aruba Central itself — no spoke required). DEFAULTS to centralized: only an
+        explicit ``central_api == "distributed"`` opts out (a spoke holds the creds
+        and does the polling). Unset / blank / unknown → centralized, so a hub with
+        a Central config shows its checks with zero spokes assigned."""
+        return str((modes or {}).get("central_api") or "").strip().lower() != "distributed"
+
     async def set_processing_mode(self, tenant_id: str, feature: str, value: str) -> None:
         with self._lock:
             t = self._tenant(tenant_id)
