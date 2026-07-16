@@ -84,10 +84,18 @@ class SpokeClient:
             logger.warning("could not persist provisioned secret: %s", e)
 
     def _ssl_ctx(self):
-        if self.spoke_url.startswith("wss://"):
-            # Unverified for now; mTLS verification is plumbed + flag-gated later.
-            return _ssl._create_unverified_context()
-        return None
+        # mTLS-aware (plumbed, default-off): today's unverified-but-encrypted
+        # context unless LM_MTLS_ENABLED — then verify the spoke against the CA
+        # and present the client cert. See core/src/security/mtls.py.
+        is_wss = self.spoke_url.startswith("wss://")
+        try:
+            try:
+                from core.src.security.mtls import client_context
+            except ImportError:
+                from security.mtls import client_context
+            return client_context(is_wss)
+        except Exception:  # noqa: BLE001 - fall back to today's behavior
+            return _ssl._create_unverified_context() if is_wss else None
 
     # ── run loop ────────────────────────────────────────────────────────────
     async def run(self):
