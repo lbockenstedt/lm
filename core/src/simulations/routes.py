@@ -1853,6 +1853,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def get_central(tenant_id: str = Depends(get_tenant_id)):
         return await service.get_central_data(tenant_id)
 
+    @app.get("/sim/api/aggregate/central-health")
+    async def get_central_health(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        """30-day per-check health history (green/yellow/red). Default: DAILY
+        summaries for every check ({site:{check_id:[{d,o,w,e,n}]}}) — the strip.
+        With ?site=&check= → that check's raw HOURLY buckets ([{h,o,w,e,n}]) for
+        the on-hover breakdown. Centralized (hub-poller) source; empty when the
+        poller hasn't recorded any history yet."""
+        poller = getattr(hub, "central_hub_poller", None)
+        health = getattr(poller, "_health", None)
+        if health is None:
+            return {"daily": {}, "hourly": []}
+        site = request.query_params.get("site")
+        check = request.query_params.get("check")
+        if site and check:
+            return {"hourly": health.hourly(tenant_id, site, check)}
+        return {"daily": health.summary(tenant_id)}
+
     @app.get("/sim/api/aggregate/central-status")
     async def get_central_status(tenant_id: str = Depends(get_tenant_id)):
         data = await service.get_central_status_data(tenant_id)

@@ -237,6 +237,97 @@ class ClientCountTracker:
             logger.warning("ClientCountTracker: persist failed (%s): %s", path, exc)
 
 
+_HEALTH_IDX = {"ok": 0, "warning": 1, "error": 2}  # else (no_data/pending/unknown) -> 3
+
+
+class CheckHealthHistory:
+    """Rolling 30-day status history for every dashboard check, in HOURLY buckets.
+
+    Each poll records one status sample per (tenant, site, check) into the current
+    hour's bucket as counts ``[ok, warning, error, other]`` (green/yellow/red/grey).
+    ``summary`` rolls the hourly buckets up to 30 DAILY buckets for the at-a-glance
+    health strip; ``hourly`` returns the raw hourly buckets for the on-hover
+    breakdown. Persisted to one JSON file in the data dir (not sensitive)."""
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        # key = tenant\x1fsite\x1fcheck -> {hour_ts(int): [o, w, e, n]}
+        self._h: Dict[str, Dict[int, list]] = {}
+        self._load()
+
+    @staticmethod
+    def _key(tenant: str, site: str, check_id: str) -> str:
+        return f"{tenant}{_CC_KEYSEP}{site}{_CC_KEYSEP}{check_id}"
+
+    def _load(self) -> None:
+        try:
+            with open(self._path, encoding="utf-8") as f:
+                raw = json.load(f) or {}
+            cutoff = time.time() - _CC_30DAY_WINDOW
+            self._h = {
+                k: {int(b): list(v) for b, v in buckets.items() if int(b) >= cutoff}
+                for k, buckets in raw.items()
+            }
+        except Exception:  # noqa: BLE001 — absent/corrupt → start empty
+            self._h = {}
+
+    def record(self, tenant: str, site: str, check_id: str, status: str) -> None:
+        now = time.time()
+        buckets = self._h.setdefault(self._key(tenant, site, check_id), {})
+        bucket = int(now // 3600 * 3600)
+        cell = buckets.get(bucket)
+        if cell is None:
+            cell = [0, 0, 0, 0]
+            buckets[bucket] = cell
+        cell[_HEALTH_IDX.get(str(status).strip().lower(), 3)] += 1
+        cutoff = now - _CC_30DAY_WINDOW
+        for b in [b for b in buckets if b < cutoff]:
+            del buckets[b]
+
+    def save(self) -> None:
+        try:
+            tmp = self._path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({k: {str(b): v for b, v in bk.items()}
+                           for k, bk in self._h.items()}, f, default=str)
+            os.replace(tmp, self._path)
+        except Exception:  # noqa: BLE001 — never let persistence kill the poll
+            pass
+
+    def summary(self, tenant: str) -> Dict[str, Any]:
+        """{site: {check_id: [{d, o, w, e, n} ... up to 30 daily]}} for the tenant."""
+        now = time.time()
+        floor = int(now // 86400 * 86400) - 29 * 86400
+        prefix = f"{tenant}{_CC_KEYSEP}"
+        out: Dict[str, Any] = {}
+        for key, buckets in self._h.items():
+            if not key.startswith(prefix):
+                continue
+            parts = key.split(_CC_KEYSEP, 2)
+            if len(parts) != 3:
+                continue
+            _, site, check_id = parts
+            days: Dict[int, list] = {}
+            for b, cell in buckets.items():
+                d = int(b // 86400 * 86400)
+                if d < floor:
+                    continue
+                acc = days.setdefault(d, [0, 0, 0, 0])
+                for i in range(4):
+                    acc[i] += cell[i]
+            out.setdefault(site, {})[check_id] = [
+                {"d": d, "o": v[0], "w": v[1], "e": v[2], "n": v[3]}
+                for d, v in sorted(days.items())
+            ]
+        return out
+
+    def hourly(self, tenant: str, site: str, check_id: str) -> list:
+        """Raw hourly buckets [{h, o, w, e, n}] (last 30 days) for one check."""
+        buckets = self._h.get(self._key(tenant, site, check_id), {})
+        return [{"h": b, "o": v[0], "w": v[1], "e": v[2], "n": v[3]}
+                for b, v in sorted(buckets.items())]
+
+
 class CentralHubPoller:
     """Polls Aruba Central hub-side for every centralized-mode tenant on a
     5-minute loop, writing ``hub.central_hub_status[tenant_id]`` in the shape the
@@ -251,6 +342,8 @@ class CentralHubPoller:
             os.path.join(ddir, "client_count_7day.json"),
             os.path.join(ddir, "client_count_samples.json"),
         )
+        # 30-day per-check status history (green/yellow/red) for the health graphs.
+        self._health = CheckHealthHistory(os.path.join(ddir, "check_health_history.json"))
         # Per-tenant last-poll timestamps + the next loop sleep. The Central poll
         # interval is configurable per tenant (Setup → Central API → Connection);
         # tenants are gated by their own interval and the loop wakes on the
@@ -416,6 +509,13 @@ class CentralHubPoller:
             "token_valid": True,
             "fetched_at": time.time(),
         }
+        # Record each check's status into the 30-day health history (hourly bucket).
+        for wsite, checks_map in status.items():
+            if not isinstance(checks_map, dict):
+                continue
+            for cid, info in checks_map.items():
+                st = (info.get("status") if isinstance(info, dict) else info) or "no_data"
+                self._health.record(tenant_id, wsite, cid, st)
 
     async def _poll_once(self) -> None:
         tenants = await self._centralized_tenants()
@@ -447,6 +547,11 @@ class CentralHubPoller:
         # last-hour reference instead of showing NO_DATA for ~15 min while it
         # rebuilds. Cheap (small dict); best-effort.
         self._cc.save_samples()
+        # Persist the per-check health history off-thread (bounded once-per-cycle write).
+        try:
+            await asyncio.to_thread(self._health.save)
+        except Exception as exc:  # noqa: BLE001 — never let persistence kill the poll
+            logger.debug("check health persist skipped: %s", exc)
         # Warm-start persistence for the whole per-tenant dashboard status. Off the
         # event loop — a bounded write once per 5-min cycle can't starve the WS.
         save = getattr(self.hub, "_save_central_hub_status", None)
