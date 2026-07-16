@@ -762,6 +762,34 @@ class GenericAgent(BaseSpoke):
         if cmd == "GET_VERSION":
             return {"status": "SUCCESS", "version": self.get_version()}
 
+        # ── Generic dumb-executor primitives ────────────────────────────────
+        # The Agent runs whatever the spoke tells it — no product knowledge. The
+        # spoke holds the logic; these are the hands. RUN_COMMAND (allowlist, or
+        # allow_shell for spoke-trusted commands) + WRITE_FILE (place a file, e.g.
+        # a TLS cert). Both return the raw runner/writer dict as ``result``.
+        if cmd == "RUN_COMMAND":
+            from command_runner import run_local_command
+            res = await asyncio.to_thread(
+                run_local_command,
+                data.get("command", ""),
+                bool(data.get("allow_shell", False)),
+                float(data.get("timeout", 30.0) or 30.0))
+            return {"status": "SUCCESS" if res.get("ok") else "ERROR",
+                    "result": res, "message": res.get("error", "")}
+
+        if cmd == "WRITE_FILE":
+            from command_runner import write_local_file
+            res = await asyncio.to_thread(
+                write_local_file,
+                data.get("path", ""),
+                data.get("content", ""),
+                b64=data.get("b64", ""),
+                mode=int(data.get("mode", 0o600)),
+                mkdirs=bool(data.get("mkdirs", True)),
+                atomic=bool(data.get("atomic", True)))
+            return {"status": "SUCCESS" if res.get("ok") else "ERROR",
+                    "result": res, "message": res.get("error", "")}
+
         if cmd == "INSTALL_CERT":
             # This host ran the netbox-server deploy role, so it has the NetBox
             # nginx + the root cert helper. LE distribution (hub-brokered) routes
