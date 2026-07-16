@@ -274,6 +274,28 @@ class CentralHubPoller:
                 continue
             alert_counts = data.get("alert_type_counts") or {}
             insight_counts = data.get("insight_cat_counts") or {}
+            # Match case-insensitively AND across BOTH the alert and insight
+            # buckets. The dashboard's alert/insight query is merged, so a check
+            # must fire whether Central classifies the named condition as an alert
+            # or an insight — e.g. "DNS Server Failed to Respond" comes back as an
+            # INSIGHT, but its quota is typed "alert". Reading only the typed
+            # bucket (case-sensitively) reported a live condition as absent, so the
+            # adaptive controller ramped forever and exhausted the client pool.
+            # Typed bucket wins; fall back to the other.
+            def _ci(d):
+                out: Dict[str, int] = {}
+                for k, v in (d or {}).items():
+                    kk = str(k).strip().lower()
+                    out[kk] = out.get(kk, 0) + int(v or 0)
+                return out
+            alert_ci, insight_ci = _ci(alert_counts), _ci(insight_counts)
+            # DIAG: what the engine looks for vs what Central actually returned for
+            # this site. A monitored id absent from BOTH lists = a site-drop or a
+            # name diff; present = should fire.
+            logger.info("central-check diag [%s→%s]: monitored=%s alert_keys=%s insight_keys=%s",
+                        wireless_site, central_site,
+                        [str(c.get("id")) for c in monitored if isinstance(c, dict) and c.get("id")],
+                        sorted(alert_ci), sorted(insight_ci))
             checks: Dict[str, Any] = {}
             for chk in monitored:
                 cid = str(chk.get("id") or "")
@@ -285,8 +307,10 @@ class CentralHubPoller:
                 chk_site = str(chk.get("site") or "").strip().lower()
                 if chk_site and chk_site not in (str(central_site).lower(), str(wireless_site).lower(), "all sites"):
                     continue
-                counts = alert_counts if (chk.get("type") or "alert") == "alert" else insight_counts
-                n = int(counts.get(cid, 0) or 0)
+                key = cid.strip().lower()
+                is_alert = (chk.get("type") or "alert") == "alert"
+                primary, other = (alert_ci, insight_ci) if is_alert else (insight_ci, alert_ci)
+                n = int(primary.get(key, 0) or other.get(key, 0) or 0)
                 # INVERTED semantics: this is a demo/simulation platform that is
                 # SUPPOSED to be generating these alerts/insights. A monitored check
                 # is HEALTHY (ok) when its error IS present, and FAILING (error) when
