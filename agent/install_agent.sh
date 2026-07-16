@@ -32,6 +32,13 @@ ENV_FILE="$INSTALL_DIR/agent/.env"
 LM_BRANCH="${LM_BRANCH:-main}"
 
 HUB_URL=""; SPOKE_ID=""; SPOKE_SECRET=""; HUB_SECRET=""; STARTUP_ROLE=""; STARTUP_ROLES=""
+# Device mode: the Agent is a DUMB executor that dials a SPOKE's /ws/agent
+# (never the hub) and only runs generic primitives (RUN_COMMAND/WRITE_FILE).
+# --spoke-ip <host>  → wss://<host>:443/ws/agent (Style 1 split; pass :port in the
+#                      url form if the spoke listens elsewhere, e.g. netbox :8444)
+# --spoke-url <url>  → fully-pinned ws(s)://host:port/ws/agent (wins)
+# When either is set, --hub/--roles are ignored and no hub connection is opened.
+SPOKE_IP=""; SPOKE_URL=""
 CLONE_ONLY=false
 TLS_VERIFY=false
 TLS_CA_CERT=""
@@ -49,6 +56,8 @@ while [[ "$#" -gt 0 ]]; do
         --hub-secret) HUB_SECRET="$2";   shift ;;
         --role)       STARTUP_ROLE="$2"; shift ;;
         --roles)      STARTUP_ROLES="$2"; shift ;;
+        --spoke-ip)   SPOKE_IP="$2";     shift ;;
+        --spoke-url)  SPOKE_URL="$2";    shift ;;
         --clone)      CLONE_ONLY=true ;;
         --loopback)   AGENT_COLOCATED=true ;;
         --tls-verify) TLS_VERIFY=true ;;
@@ -446,6 +455,19 @@ SECRET_ARG=""
 ID_ARG=""
 [[ -n "$SPOKE_ID" ]] && ID_ARG="--id \$SPOKE_ID"
 
+# Target args: device mode (dial a spoke, never the hub) vs hub/role-hosting mode.
+# --spoke-url wins over --spoke-ip; in device mode --hub/--roles are dropped.
+if [ -n "$SPOKE_URL" ]; then
+    EXEC_TARGET="--spoke-url $SPOKE_URL"
+    MODE_DESC="device mode → $SPOKE_URL"
+elif [ -n "$SPOKE_IP" ]; then
+    EXEC_TARGET="--spoke-ip $SPOKE_IP"
+    MODE_DESC="device mode → spoke $SPOKE_IP"
+else
+    EXEC_TARGET="--hub \$HUB_URL $ROLES_ARG"
+    MODE_DESC="hub/role-hosting mode"
+fi
+
 # TLS-verify Environment fragment (empty when verification is off, the default).
 _TLS_ENV="LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV"
 [ -n "$HUB_TLS_CA_ENV" ] && _TLS_ENV="$_TLS_ENV LM_HUB_CA_CERT=$HUB_TLS_CA_ENV"
@@ -459,7 +481,7 @@ fi
 
 cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
-Description=Lab Manager Generic Agent ($ID_DISP)
+Description=Lab Manager Agent ($ID_DISP) — $MODE_DESC
 After=network-online.target
 Wants=network-online.target
 # This agent restarts ITSELF on self-update (os._exit(3) after pulling new code)
@@ -488,7 +510,7 @@ WorkingDirectory=$INSTALL_DIR/agent/src
 # blip never blocks start); with StartLimitIntervalSec=0 the box recovers on a
 # later restart instead of staying dark. No-op once the tree is intact.
 ExecStartPre=-/bin/sh -c 'test -f $INSTALL_DIR/agent/src/control_plane.py || { git -C $INSTALL_DIR remote set-url origin https://github.com/lbockenstedt/lm.git && git -C $INSTALL_DIR fetch origin $LM_BRANCH && git -C $INSTALL_DIR reset --hard origin/$LM_BRANCH; }'
-ExecStart=$INSTALL_DIR/agent/venv/bin/python3 control_plane.py $ID_ARG $SECRET_ARG --hub \$HUB_URL $ROLES_ARG
+ExecStart=$INSTALL_DIR/agent/venv/bin/python3 control_plane.py $ID_ARG $SECRET_ARG $EXEC_TARGET
 StandardOutput=append:/var/log/lm/lm-agent.log
 StandardError=append:/var/log/lm/lm-agent.log
 Restart=always
