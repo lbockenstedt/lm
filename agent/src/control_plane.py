@@ -444,17 +444,12 @@ class AgentControlPlane(BaseControlPlane):
         return "lm-agent"
 
     def _extra_auth_fields(self) -> dict:
-        """Advertise cert-target capabilities in the WS auth frame. A host that
-        ran the netbox-server deploy role has the root nginx cert helper, so the
-        hub can route the NetBox cert here (Settings → Certificates target
-        "netbox-server") instead of to the API-only IPAM spoke."""
-        fields = {}
-        try:
-            if os.path.exists(_NETBOX_INSTALL_CERT_HELPER):
-                fields["netbox_server"] = True
-        except Exception:  # noqa: BLE001
-            pass
-        return fields
+        """No cert-target capability is advertised anymore. In the tiered
+        Hub→Spoke→Agent model the ipam spoke is the cert custodian and drives its
+        hosted Agent directly (WRITE_FILE + RUN_COMMAND) — the hub no longer routes
+        NetBox certs to a capability-advertising agent. Kept as a hook for future
+        auth fields."""
+        return {}
 
     def __init__(self, spoke_id, secret, hub_secret="", hub_url="",
                  startup_roles: List[str] = None, startup_role: str = ""):
@@ -587,18 +582,36 @@ if __name__ == "__main__":
     parser.add_argument("--secret", default=(os.environ.get("SPOKE_SECRET") or None),
                         help="Session secret. Omit for zero-touch provisioning — the hub will send it after admin approval (persisted to SPOKE_SECRET and reused on restart).")
     parser.add_argument("--hub-secret", nargs='?', default="", const="")
-    parser.add_argument("--hub",    required=True)
+    parser.add_argument("--hub",    default=None,
+                        help="Hub WebSocket URL (hub/role-hosting mode).")
     parser.add_argument("--role",   default=os.environ.get("STARTUP_ROLE", ""),
                         help="Pre-load a single role at startup (backward-compat alias for --roles).")
     parser.add_argument("--roles",  default=os.environ.get("STARTUP_ROLES", ""),
                         help="Pre-load multiple roles at startup: comma-list, e.g. dns,dhcp.")
+    # Device mode: the Agent is a DUMB executor that dials a SPOKE's /ws/agent
+    # (never the hub) and only runs generic primitives (RUN_COMMAND/WRITE_FILE).
+    # --spoke-ip <host> → wss://<host>:443/ws/agent; --spoke-url pins it fully.
+    parser.add_argument("--spoke-ip",  default=os.environ.get("SPOKE_IP", ""),
+                        help="Device mode: dial this spoke's /ws/agent (dumb executor).")
+    parser.add_argument("--spoke-url", default=os.environ.get("SPOKE_URL", ""),
+                        help="Device mode: fully-pinned ws(s)://host:port/ws/agent.")
     args = parser.parse_args()
 
     if not args.id:
         args.id = _socket.gethostname().split(".")[0]
 
-    startup_roles = [r for r in (args.roles or "").split(",") if r.strip()]
-    cp = AgentControlPlane(args.id, args.secret, args.hub_secret, args.hub,
-                           startup_roles=startup_roles,
-                           startup_role=args.role)
-    asyncio.run(cp.run())
+    # ── Device mode (dumb executor under a spoke) ──────────────────────────
+    spoke_target = (args.spoke_url or args.spoke_ip or "").strip()
+    if spoke_target:
+        from spoke_client import SpokeClient
+        client = SpokeClient(args.id, spoke_target, secret=args.secret or "")
+        asyncio.run(client.run())
+    else:
+        # ── Hub/role-hosting mode (today's Generic Agent) ──────────────────
+        if not args.hub:
+            parser.error("--hub is required unless --spoke-ip/--spoke-url is given")
+        startup_roles = [r for r in (args.roles or "").split(",") if r.strip()]
+        cp = AgentControlPlane(args.id, args.secret, args.hub_secret, args.hub,
+                               startup_roles=startup_roles,
+                               startup_role=args.role)
+        asyncio.run(cp.run())

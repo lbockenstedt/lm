@@ -216,6 +216,13 @@ class AgentHostingControlPlane(BaseControlPlane):
             port = int(os.environ.get(self.AGENT_PORT_ENV, str(self.AGENT_WSS_PORT)))
             server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             server_ctx.load_cert_chain(cert, key)
+            # mTLS (plumbed, default-off): require+verify a client cert only when
+            # LM_MTLS_ENABLED + a CA is configured. No-op otherwise.
+            try:
+                from security.mtls import apply_server_client_auth
+                apply_server_client_auth(server_ctx)
+            except Exception:  # noqa: BLE001
+                pass
             serve_kwargs = {"ssl": server_ctx}
             scheme = "wss"
         else:
