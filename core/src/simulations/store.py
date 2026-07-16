@@ -693,6 +693,17 @@ class SimulationsStore:
             t["processing_modes"] = modes
             await self._asave()
 
+    # ── scheduled email report config (Setup → Notifications → Email Reports) ──
+    async def get_email_report(self, tenant_id: str) -> Dict[str, Any]:
+        """{enabled, sections:{checks,clients}, schedule:{freq,dow,dom,hour},
+        recipients:[...], last_sent} — the scheduled health-report config."""
+        return dict(self._data.get(tenant_id, {}).get("email_report", {}))
+
+    async def set_email_report(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
+        with self._lock:
+            self._tenant(tenant_id)["email_report"] = cfg or {}
+            await self._asave()
+
     # ── notifications (smtp / teams / email) ───────────────────────────────
     async def get_notifications(self, tenant_id: str) -> Dict[str, Any]:
         return dict(self._data.get(tenant_id, {}).get("notifications", {}))

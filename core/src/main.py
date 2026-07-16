@@ -6765,6 +6765,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # tabs render (distributed mode gets it from the spoke's CentralPoller
         # via CS_TELEMETRY instead). See simulations/central_hub_poller.py.
         central_hub_poll_task = asyncio.create_task(self.central_hub_poller.run_loop())
+        # Scheduled email health report: fires each tenant's Checks + Client Count
+        # report on its configured cadence via the tenant's SMTP (Setup →
+        # Notifications → Email Reports). Off unless enabled per tenant.
+        try:
+            from simulations import email_report as _email_report
+            asyncio.create_task(_email_report.run_loop(self))
+        except Exception as _er_exc:  # noqa: BLE001 — never let the report loop block startup
+            logger.warning("email report loop not started: %s", _er_exc)
         # Adaptive sim-quota controller: modulates each adaptive quota's count
         # between min/max to keep its alert firing (ramp/decay/learn — design §9).
         # Registered on the Hub by register_simulations_routes.

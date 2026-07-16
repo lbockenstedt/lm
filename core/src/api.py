@@ -1227,6 +1227,14 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Certificate module access required"})
 
+        # /api/reports/* (Reports module) requires the ``reports`` right OR admin.
+        # A global admin can run any tenant's report (?tenant=); a non-admin is
+        # scoped to their own tenant by check_tenant_access on the ?tenant= gate.
+        if path.startswith("/api/reports/"):
+            if not (_is_admin(sess) or _has_reports_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Reports module access required"})
+
         # /api/console/config/* (device config read/push) requires the higher
         # ``console_write`` right OR admin — checked BEFORE the general console gate.
         if path.startswith("/api/console/config"):
@@ -1494,6 +1502,9 @@ def create_app(hub):
 
     def _has_le_access(sess):
         return access.has_le_access(sess)
+
+    def _has_reports_access(sess):
+        return access.has_reports_access(sess)
 
     def _has_console_access(sess):
         return access.has_console_access(sess)

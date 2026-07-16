@@ -674,7 +674,7 @@ window.fetch = async function lmFetch(input, init) {
 // granted its explicit right. Today only the Simulations (cs) module is gated
 // this way; other modules remain product-driven (visible when their spoke is
 // connected). Add a key here to gate another module the same way.
-const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'Security/NAC': 'nac', 'DNS': 'dns', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx', 'Directory': 'ldap' };
+const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'Security/NAC': 'nac', 'DNS': 'dns', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx', 'Directory': 'ldap', 'Reports': 'reports' };
 function canSeeModule(className) {
     const right = MODULE_RIGHT[className];
     if (!right) return true;              // no right defined → product-driven
@@ -3262,9 +3262,103 @@ function _viewTemplate(viewId) {
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
+        case 'reports':
+            return `<div class="space-y-4">
+  <div>
+    <h2 class="text-xl font-bold text-slate-800">Reports</h2>
+    <p class="text-sm text-slate-500">Tenant-scoped health reports — schedule the Dashboard Checks &amp; Client Count out by email.</p>
+  </div>
+  <div id="reports-content" class="${card}"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
+</div>`;
+
         default:
             return `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500 italic">Loading…</p></div>`;
     }
+}
+
+// ── Reports module (Setup → Reports nav, gated by the ``reports`` right) ──────
+// First report: the Simulations Dashboard → Checks + Client Count, tenant-scoped
+// (a tenant only ever sees its own sites). A Global Admin can switch tenant in the
+// header and manage/run any tenant's report. Config + send: /api/reports/email-report.
+async function loadReportsData() {
+    const el = document.getElementById('reports-content');
+    if (!el) return;
+    el.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    let c = {};
+    try {
+        const res = await setupFetch('/api/reports/email-report?' + tq);
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || ('HTTP ' + res.status));
+        c = (await res.json()) || {};
+    } catch (e) { el.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load report settings: ${escapeHtml(e.message || String(e))}</div>`; return; }
+    const sec = c.sections || {}, sch = c.schedule || {};
+    const toggle = (id, on, label, hint) => `
+      <label class="flex items-center justify-between gap-3 py-2.5 border-t border-slate-100">
+        <span><span class="text-sm font-semibold text-slate-700">${label}</span>${hint ? `<span class="block text-[11px] text-slate-400">${hint}</span>` : ''}</span>
+        <input type="checkbox" id="${id}" ${on ? 'checked' : ''} class="w-5 h-5 accent-[#01A982]"></label>`;
+    const freqSel = ['daily', 'weekly', 'monthly'].map(f => `<option value="${f}" ${sch.freq === f ? 'selected' : ''}>${f[0].toUpperCase() + f.slice(1)}</option>`).join('');
+    const dows = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => `<option value="${i}" ${sch.dow == i ? 'selected' : ''}>${d}</option>`).join('');
+    const hours = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${sch.hour == h ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
+    const inp = 'w-full bg-white border border-slate-300 rounded-md px-2 py-2 text-sm mt-1';
+    el.innerHTML = `<div class="p-5">
+      <p class="text-xs text-slate-400 mb-1">Emails the Dashboard <span class="font-semibold">Checks</span> and <span class="font-semibold">Client Count</span> for
+        <span class="font-semibold text-slate-600">${escapeHtml(currentTenant || 'default')}</span> on a schedule, via the SMTP under Notifications.
+        Each tenant only receives its own sites; a Global Admin can switch tenant in the header to manage any tenant's report.</p>
+      ${toggle('rp-enabled', c.enabled, 'Email this report', 'Master on/off — nothing is sent while off')}
+      ${toggle('rp-checks', sec.checks !== false, 'Include Dashboard Checks')}
+      ${toggle('rp-clients', sec.clients !== false, 'Include Client Count')}
+      <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-3">
+        <label class="text-xs text-slate-500">Frequency<select id="rp-freq" onchange="_reportsToggleWhen()" class="${inp}">${freqSel}</select></label>
+        <label class="text-xs text-slate-500" id="rp-dow-w">Day of week<select id="rp-dow" class="${inp}">${dows}</select></label>
+        <label class="text-xs text-slate-500" id="rp-dom-w" style="display:none">Day of month<input id="rp-dom" type="number" min="1" max="28" value="${escapeHtml(sch.dom || 1)}" class="${inp}"></label>
+        <label class="text-xs text-slate-500">Hour<select id="rp-hour" class="${inp}">${hours}</select></label>
+      </div>
+      <label class="text-xs text-slate-500 block mt-3">Recipients <span class="text-slate-400">(comma-separated)</span>
+        <input id="rp-to" value="${escapeHtml((c.recipients || []).join(', '))}" placeholder="noc@acme.com, ops@acme.com" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="testReportNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Send test now</button>
+        <button onclick="saveReportConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
+      </div>
+    </div>`;
+    _reportsToggleWhen();
+}
+
+function _reportsToggleWhen() {
+    const f = document.getElementById('rp-freq') && document.getElementById('rp-freq').value;
+    const dow = document.getElementById('rp-dow-w'), dom = document.getElementById('rp-dom-w');
+    if (dow) dow.style.display = f === 'weekly' ? '' : 'none';
+    if (dom) dom.style.display = f === 'monthly' ? '' : 'none';
+}
+
+async function saveReportConfig() {
+    const g = id => document.getElementById(id);
+    const body = {
+        enabled: g('rp-enabled').checked,
+        sections: { checks: g('rp-checks').checked, clients: g('rp-clients').checked },
+        schedule: {
+            freq: g('rp-freq').value,
+            dow: parseInt(g('rp-dow').value, 10) || 0,
+            dom: parseInt((g('rp-dom') && g('rp-dom').value) || 1, 10) || 1,
+            hour: parseInt(g('rp-hour').value, 10) || 7,
+        },
+        recipients: g('rp-to').value.split(',').map(s => s.trim()).filter(Boolean),
+    };
+    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try {
+        const res = await setupFetch('/api/reports/email-report?' + tq, { method: 'PUT', body: JSON.stringify(body) });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || ('HTTP ' + res.status));
+        showToast('Report settings saved.', 'success');
+    } catch (e) { console.error('saveReportConfig', e); showToast(e.message || 'Save failed', 'error'); }
+}
+
+async function testReportNow() {
+    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try {
+        const res = await setupFetch('/api/reports/email-report/test?' + tq, { method: 'POST' });
+        const r = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(r.detail || ('HTTP ' + res.status));
+        showToast('Test report sent to ' + ((r.to || []).join(', ') || 'the configured recipients'), 'success');
+    } catch (e) { console.error('testReportNow', e); showToast(e.message || 'Send failed — check SMTP + recipients', 'error'); }
 }
 
 function initView(viewId, subView) {
@@ -3324,6 +3418,9 @@ function initView(viewId, subView) {
             break;
         case 'cs':
             loadCSData(subView || 'Dashboard', currentSubChild);
+            break;
+        case 'reports':
+            loadReportsData();
             break;
     }
 }
@@ -6983,6 +7080,7 @@ const LM_NAV_ICONS = [
     { id: 8,  name: 'DNS',          key: 'dns',        svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18"></path></svg>' },
     { id: 9,  name: 'DHCP',         key: 'dhcp',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 3.75H6.912a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H15M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859M12 3v8.25m0 0l-3-3m3 3l3-3"></path></svg>' },
     { id: 10, name: 'Certificates', key: 'le',         svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m-6-8h6M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.5 19.5l1.5 1.5 2.5-2.5"></path></svg>' },
+    { id: 11, name: 'Reports',      key: 'reports',    svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8 17V11m4 6V7m4 10v-4M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>' },
     { id: 11, name: 'Console',      key: 'console',    svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z"></path></svg>' },
     { id: 12, name: 'Template Repo',key: 'templates',  svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>' },
     { id: 13, name: 'Bug Report',   key: 'bugs',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M4.5 8.5l2-1.5m13 1.5l-2-1.5M4.5 15.5l2 1.5m13-1.5l-2 1.5M12 4a4 4 0 014 4v4a4 4 0 01-8 0V8a4 4 0 014-4z"></path></svg>' },
@@ -10555,6 +10653,7 @@ const _RBAC_RIGHT_LABELS = {
     console: 'Console',
     console_write: 'Console Write',
     cs: 'Simulations',
+    reports: 'Reports',
 };
 
 async function loadGroups() {

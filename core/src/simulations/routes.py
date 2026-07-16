@@ -25,6 +25,7 @@ from .service import SimulationsService, _PASS, _FAIL
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
 from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini
 from . import sim_quota
+from . import email_report
 from access import safe_external_url, host_resolves_external
 from urllib.parse import urlsplit
 
@@ -2340,6 +2341,54 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         diag["last_seen"] = entry.get("last_seen")
         diag["telemetry_keys"] = sorted(list(entry.keys())) if isinstance(entry, dict) else []
         return diag
+
+    # ── scheduled email health report (Setup → Notifications → Email Reports) ──
+    _EMAIL_REPORT_DEFAULTS = {
+        "enabled": False,
+        "sections": {"checks": True, "clients": True},
+        "schedule": {"freq": "weekly", "dow": 0, "dom": 1, "hour": 7},
+        "recipients": [],
+    }
+
+    @app.get("/api/reports/email-report")
+    async def get_email_report(tenant_id: str = Depends(get_tenant_id)):
+        cfg = await store.get_email_report(tenant_id)
+        out = {**_EMAIL_REPORT_DEFAULTS, **(cfg or {})}
+        out["sections"] = {**_EMAIL_REPORT_DEFAULTS["sections"], **(out.get("sections") or {})}
+        out["schedule"] = {**_EMAIL_REPORT_DEFAULTS["schedule"], **(out.get("schedule") or {})}
+        return out
+
+    @app.put("/api/reports/email-report")
+    async def set_email_report_cfg(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        body = await request.json()
+        body = body if isinstance(body, dict) else {}
+        sch = body.get("schedule") or {}
+        freq = str(sch.get("freq", "weekly"))
+        existing = await store.get_email_report(tenant_id) or {}
+        cfg = {
+            "enabled": bool(body.get("enabled")),
+            "sections": {"checks": bool((body.get("sections") or {}).get("checks", True)),
+                         "clients": bool((body.get("sections") or {}).get("clients", True))},
+            "schedule": {
+                "freq": freq if freq in ("daily", "weekly", "monthly") else "weekly",
+                "dow": max(0, min(6, int(sch.get("dow", 0) or 0))),
+                "dom": max(1, min(28, int(sch.get("dom", 1) or 1))),
+                "hour": max(0, min(23, int(sch.get("hour", 7) or 7))),
+            },
+            "recipients": [str(r).strip() for r in (body.get("recipients") or []) if str(r).strip()][:20],
+            "last_sent": existing.get("last_sent"),  # preserve the period marker
+        }
+        await store.set_email_report(tenant_id, cfg)
+        return {"saved": True}
+
+    @app.post("/api/reports/email-report/test")
+    async def test_email_report(tenant_id: str = Depends(get_tenant_id)):
+        cfg = {**_EMAIL_REPORT_DEFAULTS, **(await store.get_email_report(tenant_id) or {})}
+        try:
+            await email_report.send_now(hub, tenant_id, cfg)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Send failed: {exc}")
+        return {"sent": True, "to": cfg.get("recipients") or []}
 
     # ── hub tenant processing-modes (literal "hub" first segment) ──────────
     @app.patch("/sim/api/hub/tenants/{tenant}/processing-modes")
