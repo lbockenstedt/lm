@@ -95,3 +95,21 @@ def register(app, hub, ctx):
             return {"status": "error", "message": str(e)}
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "message": str(e)}
+
+    @app.post("/setup/notifications/push-acs-secret")
+    async def push_acs_secret(request: Request):
+        """One-time: write the ACS connection string into the Key Vault secret
+        via the SSO app (which has Set), so an admin can provision it from the
+        tile without personal data-plane vault access."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        value = str((body or {}).get("value") or "")
+        try:
+            res = await _n.push_acs_secret(hub, value)
+            return {"status": "ok", **res}
+        except _n.NotificationsError as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": str(e)}

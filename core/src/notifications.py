@@ -270,6 +270,27 @@ async def _acs_api_send(endpoint: str, accesskey: str, sender: str,
             f"ACS email send failed: HTTP {resp.status_code} — {resp.text[:300]}")
 
 
+async def push_acs_secret(hub, connstr: str,
+                          http: Optional[httpx.AsyncClient] = None) -> Dict[str, Any]:
+    """One-time: write the ACS connection string into the Key Vault secret
+    using the SSO app (which has Set). Lets an admin provision the secret from
+    the Notifications tile without personal data-plane access to the vault."""
+    cfg = get_config(hub)
+    vault_url = _vault_url(hub, cfg)
+    if not vault_url:
+        raise NotificationsError("Key Vault URL not configured (set it in Key Vault or Notifications)")
+    secret_name = str(cfg.get("acs_kv_secret_name") or "acs-email-connstr")
+    connstr = str(connstr or "").strip()
+    if "accesskey=" not in connstr or "endpoint=" not in connstr:
+        raise NotificationsError(
+            "connection string looks malformed — expected "
+            "'endpoint=https://<name>.communication.azure.com;accesskey=<key>'")
+    sid = await key_vault.set_secret(get_oidc_config(hub), vault_url, secret_name,
+                                     connstr, http=http)
+    logger.info("notifications: pushed ACS connection string to Key Vault secret '%s'", secret_name)
+    return {"secret": secret_name, "id": sid}
+
+
 async def send_email(hub, subject: str, body: str,
                      to_emails: Any = None,
                      http: Optional[httpx.AsyncClient] = None) -> bool:

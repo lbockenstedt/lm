@@ -6609,6 +6609,7 @@ function _renderSettingsNotificationsTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">SMTP password</label><input id="notif-pass" type="password" placeholder="" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1 md:col-span-2" id="notif-acs-kv-name-wrap"><label class="${labelCls}">ACS Key Vault secret name</label><input id="notif-acs-secret" type="text" placeholder="acs-email-connstr" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1 md:col-span-2" id="notif-acs-vault-wrap"><label class="${labelCls}">Key Vault URL <span class="text-slate-400 normal-case font-normal">(blank = reuse the DR Key Vault URL)</span></label><input id="notif-vault-url" type="text" placeholder="https://my-vault.vault.azure.net" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-connstr-wrap"><label class="${labelCls}">ACS connection string <span class="text-slate-400 normal-case font-normal">(one-time push to Key Vault — the SSO app writes it for you)</span></label><textarea id="notif-acs-connstr" rows="2" placeholder="endpoint=https://<resourcename>.communication.azure.com;accesskey=<key>" class="${inputCls} font-mono text-xs"></textarea></div>
                 <div class="space-y-1 md:col-span-2"><label class="${labelCls}">From email</label><input id="notif-from" type="text" placeholder="DoNotReply@<resourcename>.azurecomm.net" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1 md:col-span-2"><label class="${labelCls}">To emails <span class="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input id="notif-to" type="text" placeholder="ops@example.com, oncall@example.com" class="${inputCls} font-mono text-xs"></div>
             </div>
@@ -6616,6 +6617,7 @@ function _renderSettingsNotificationsTile(content) {
             <div class="mt-3 flex flex-wrap items-center gap-2">
                 <button type="button" onclick="saveNotifications()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
                 <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Send test email</button>
+                <button type="button" id="notif-push-btn" onclick="pushAcsSecret()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push ACS connection string to Key Vault</button>
                 <span id="notif-action-out" class="text-[11px] font-mono text-slate-600 break-all"></span>
             </div>
         </div>`;
@@ -6639,6 +6641,8 @@ function notifProviderChanged() {
     showKv('notif-transport-wrap', isAcs);
     showKv('notif-acs-kv-name-wrap', isAcs);
     showKv('notif-acs-vault-wrap', isAcs);
+    showKv('notif-acs-connstr-wrap', isAcs);
+    showKv('notif-push-btn', isAcs);
     // Password field: hidden for ACS (creds via Key Vault).
     const passEl = document.getElementById('notif-pass');
     if (passEl) { passEl.disabled = isAcs; if (isAcs) passEl.value = ''; passEl.placeholder = isAcs ? 'managed via Key Vault' : ''; }
@@ -6721,6 +6725,19 @@ async function testNotifications() {
         if (d.status === 'ok') { if (out) out.textContent = `OK — sent via ${d.host} to ${d.recipients} recipient(s)`; showToast('Test email sent.', 'success'); }
         else { if (out) out.textContent = d.message || 'failed'; showToast('Test failed: ' + (d.message || ''), 'error'); }
     } catch (e) { if (out) out.textContent = ''; showToast('Test failed: ' + (e.message || e), 'error'); }
+}
+
+async function pushAcsSecret() {
+    const out = document.getElementById('notif-action-out');
+    const value = (document.getElementById('notif-acs-connstr')?.value || '').trim();
+    if (!value) { if (out) out.textContent = 'paste the ACS connection string first'; showToast('Paste the connection string first.', 'error'); return; }
+    if (out) out.textContent = 'Pushing to Key Vault…';
+    try {
+        const r = await setupFetch('/setup/notifications/push-acs-secret', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { if (out) out.textContent = `pushed to secret '${d.secret}'`; showToast('Connection string stored in Key Vault.', 'success'); const ta = document.getElementById('notif-acs-connstr'); if (ta) ta.value = ''; }
+        else { if (out) out.textContent = d.message || 'failed'; showToast('Push failed: ' + (d.message || ''), 'error'); }
+    } catch (e) { if (out) out.textContent = ''; showToast('Push failed: ' + (e.message || e), 'error'); }
 }
 
 async function downloadKeyVaultMin() {
