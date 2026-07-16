@@ -111,7 +111,7 @@ except ImportError:
             for _n in list(_logging.root.manager.loggerDict):
                 _logging.getLogger(_n).setLevel(lvl)
             return lvl
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.websockets import WebSocketState
 from typing import Any, Dict
@@ -996,6 +996,34 @@ def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
     return access.get_tenant_scoping(hub, tenant_id)
 
 
+# mtime-cached WebUI VERSION — drives the index.html ?v= cache-bust so a
+# version-bump (version-bump.yml bumps WebUI/VERSION on every push to main)
+# invalidates cached JS without anyone touching index.html by hand. The
+# placeholder ``__WEBUI_VERSION__`` in index.html is swapped for this value
+# at serve time (see ``serve_ui``).
+_WEBUI_VER_CACHE: Dict[str, Any] = {}
+
+
+def _webui_version(ui_path: str) -> str:
+    """Return the stripped ``WebUI/VERSION`` content (mtime-cached so a
+    deploy/bump is picked up without a restart). Falls back to ``"0"``."""
+    ver_path = os.path.join(ui_path, "VERSION")
+    try:
+        mtime = os.path.getmtime(ver_path)
+    except OSError:
+        return "0"
+    cached = _WEBUI_VER_CACHE.get(ver_path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        with open(ver_path, "r", encoding="utf-8") as f:
+            ver = f.read().strip() or "0"
+    except OSError:
+        ver = "0"
+    _WEBUI_VER_CACHE[ver_path] = (mtime, ver)
+    return ver
+
+
 def create_app(hub):
     """Build the FastAPI app for the Hub.
 
@@ -1729,7 +1757,17 @@ def create_app(hub):
 
             index_html_path = os.path.join(ui_path, "index.html")
             if os.path.exists(index_html_path):
-                response = FileResponse(index_html_path)
+                # Serve index.html with the ?v= cache-bust placeholder
+                # (__WEBUI_VERSION__) resolved to the current WebUI/VERSION so
+                # every version-bump invalidates cached JS. no-store keeps the
+                # version itself from being cached.
+                try:
+                    with open(index_html_path, "r", encoding="utf-8") as f:
+                        html = f.read()
+                except OSError:
+                    raise HTTPException(status_code=404, detail="UI index.html not found in WebUI folder")
+                html = html.replace("__WEBUI_VERSION__", _webui_version(ui_path))
+                response = HTMLResponse(html)
                 response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
                 response.headers["Pragma"] = "no-cache"
                 response.headers["Expires"] = "0"
