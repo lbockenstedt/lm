@@ -2242,7 +2242,7 @@ function _updateMetrics(statusData) {
             : updateAvail
                 ? `Update available — a newer version is on the remote (running ${running}); click Update to pull`
                 : `Up to date (running ${running})`;
-        versionEl.innerHTML = `<span class="inline-block w-1.5 h-1.5 rounded-full ${dotTone} align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
+        versionEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full ${dotTone} transition-all align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
         window.__lmHubVersion = m.version;  // for File-a-Bug context (running version)
         window.__lmTargetVersion = target || null;  // on-disk VERSION, for the Update toast
     }
