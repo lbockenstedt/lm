@@ -495,6 +495,13 @@ class CSBridgePoller:
         # CS_COMMAND_RESULT later (Phase E). Leave delivered; do not ack now.
         if status in ("ACCEPTED", "PENDING", "QUEUED"):
             self._bump(agent_id, hostname, "accepted")
+            # Touch the command so its updated_at + last_contact refresh — this
+            # SUPPRESSES the cs spoke's 30s stale-delivered re-send (pointless
+            # while the op runs) and keeps the delete-verify sweep
+            # (DELETE_VERIFY_TIMEOUT_SECS) from firing on a slow-but-alive
+            # delete that re-acks every poll. The cs spoke re-probes every 30s
+            # even without this, but the touch keeps the verify window honest.
+            await self._touch(cs_spoke, cmd_id)
             logger.debug("CS bridge: %s %s accepted by %s (long-op; ack deferred)",
                          cmd_id, action, agent_id)
             return
@@ -562,6 +569,18 @@ class CSBridgePoller:
             self._bump(agent_id, hostname, "gave_up")
             logger.warning("[cs-bridge] %s %s %s gave up after %s relay attempt(s): %s",
                             agent_id, hostname, action, data.get("attempts"), message)
+
+    async def _touch(self, cs_spoke: str, cmd_id: str) -> None:
+        """Refresh a delivered command's updated_at + last_contact (in-memory on
+        the cs spoke) on ACCEPTED, so the stale-delivered re-probe and the
+        delete-verify sweep don't fire while a long op is alive and re-acking.
+        Best-effort — a touch failure just means the spoke re-probes normally."""
+        try:
+            await self.hub.request_response(
+                cs_spoke, "CS_TOUCH_COMMAND", {"id": cmd_id}, timeout=5.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("CS bridge: touch %s failed: %s", cmd_id, exc)
 
     async def _ack(self, cs_spoke: str, agent_id: str, hostname: str,
                    cmd_id: str, action: str, status: str, message: str) -> None:
