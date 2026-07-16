@@ -1479,34 +1479,40 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             aliases.add(site.lower())
             try:
                 csc = await store.get_central_sites_config(tenant_id) or {}
-                # An ssid_matrix cell (matched by name) carries its wsite / site.
+                # Build "groups" of co-referring site identifiers: each ssid_matrix
+                # cell, each site_link, and each site_mappings pair contributes the
+                # SET of its site-ish field values. A quota's site can be a cell
+                # name, a wsite code, a link name, or a central_site — and the chain
+                # is multi-hop (cell "MIA-ACD" → wsite "MIA" → central_site "Miami",
+                # which is the form the poller keys status by). Fold groups into the
+                # alias set TRANSITIVELY (fixpoint) so any hop is reachable; the
+                # earlier single-hop resolver stopped at "MIA" and missed "Miami".
+                _FIELDS = ("name", "cell", "site", "wsite", "central_site")
+                groups = []
                 for cd in (csc.get("ssid_matrix") or []):
-                    if str(cd.get("name") or "").strip().lower() == site.lower():
-                        for fld in ("site", "wsite", "central_site"):
-                            val = str(cd.get(fld) or "").strip()
-                            if val:
-                                aliases.add(val.lower())
-                # A site_link relates name ↔ wsite ↔ central_site. The quota's site
-                # is stored as the link's WSITE (the UI option value) but may also
-                # be a link name or a central_site; if it matches ANY of a link's
-                # fields, pull in the other two so e.g. wsite "MIA-PSK" resolves to
-                # central_site "Miami" (the form the poller keys status by) and
-                # vice-versa — this is the join the dashboard row already shows.
+                    g = {str(cd.get(f) or "").strip().lower() for f in _FIELDS}
+                    g.discard("")
+                    if g:
+                        groups.append(g)
                 for lk in (csc.get("site_links") or []):
-                    vals = [str(lk.get(f) or "").strip() for f in ("name", "wsite", "central_site")]
-                    if any(v and v.lower() == site.lower() for v in vals):
-                        for v in vals:
-                            if v:
-                                aliases.add(v.lower())
-                # site_mappings maps wsite → central_site; fold both directions so a
-                # match on either key pulls in the other.
+                    g = {str(lk.get(f) or "").strip().lower() for f in _FIELDS}
+                    g.discard("")
+                    if g:
+                        groups.append(g)
                 for wk, cv in (csc.get("site_mappings") or {}).items():
-                    wl = str(wk).strip().lower()
-                    cl = str(cv or "").strip().lower()
-                    if wl and wl in aliases and cl:
-                        aliases.add(cl)
-                    if cl and cl in aliases and wl:
-                        aliases.add(wl)
+                    g = {str(wk).strip().lower(), str(cv or "").strip().lower()}
+                    g.discard("")
+                    if g:
+                        groups.append(g)
+                # Fixpoint: union any group that shares a member with the alias set,
+                # repeating until nothing new is added (bounded by len(groups)).
+                changed = True
+                while changed:
+                    changed = False
+                    for g in groups:
+                        if (aliases & g) and not (g <= aliases):
+                            aliases |= g
+                            changed = True
             except Exception:  # noqa: BLE001
                 pass
         # Look the alert up in the dashboard status. "ok" (in _PASS) = firing.
@@ -1538,14 +1544,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # otherwise hold (None) rather than ramp on an unclear/absent signal.
         if firing is None and saw_fail:
             firing = False
-        # DIAG: what the Engine looked for vs what the dashboard status held. If
-        # alert_id is NOT in cids_at_site → the quota's alert_id doesn't match any
-        # monitored-check id (name/format mismatch) OR the site aliases missed the
-        # wsite. If it IS present but firing is False → the dashboard has it not-ok.
+        # DIAG: what the Engine looked for vs what the dashboard status held.
+        #  - status_wsites = every site key the dashboard status is keyed by (with
+        #    its central_site). If none of these appear in `aliases`, the quota's
+        #    site didn't resolve to the status's key form (add the missing hop /
+        #    the site-link's Central Site).
+        #  - alert_id NOT in cids_at_site → name/format mismatch with the check id.
+        #  - present but firing False → the dashboard has it not-ok at that site.
+        status_wsites = sorted({
+            f"{w}→{(smap or {}).get(w)}"
+            for stat, smap in blocks for w in (stat or {})
+        })
         logger.info("engine-firing diag [%s]: alert_id=%r site=%r aliases=%s "
-                    "matched_status=%r → firing=%s; cids_at_site=%s",
+                    "matched_status=%r → firing=%s; status_wsites=%s cids_at_site=%s",
                     tenant_id, alert_id, site or "(global)", sorted(aliases),
-                    matched_status, firing, sorted(seen_cids))
+                    matched_status, firing, status_wsites, sorted(seen_cids))
         return firing
 
     async def _run_adaptive_controller() -> None:

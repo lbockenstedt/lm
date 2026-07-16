@@ -4127,7 +4127,12 @@ function _renderSetupRemoteConsoleTile(content) {
                         <button onclick="runExecCommand()" class="${btnCls}" id="rc-run">Run</button>
                     </div>
                 </div>
-                <pre id="rc-output" class="bg-slate-900 text-slate-100 text-xs font-mono rounded-md p-3 overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto hidden"></pre>
+                <div id="rc-output-wrap" class="hidden">
+                    <div class="flex justify-end mb-1">
+                        <button onclick="copyRcOutput()" id="rc-copy" class="text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded-md font-semibold">📋 Copy</button>
+                    </div>
+                    <pre id="rc-output" class="bg-slate-900 text-slate-100 text-xs font-mono rounded-md p-3 overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto"></pre>
+                </div>
             </div>
         </div>`;
     loadExecConfig();
@@ -4197,6 +4202,8 @@ async function runExecCommand() {
     const out = document.getElementById('rc-output');
     const btn = document.getElementById('rc-run');
     if (!command) return;
+    const wrap = document.getElementById('rc-output-wrap');
+    if (wrap) wrap.classList.remove('hidden');
     if (out) { out.classList.remove('hidden'); out.textContent = 'Running…'; }
     if (btn) btn.disabled = true;
     try {
@@ -4216,6 +4223,26 @@ async function runExecCommand() {
         if (out) out.textContent = '⛔ ' + e.message;
     } finally {
         if (btn) btn.disabled = false;
+    }
+}
+
+async function copyRcOutput() {
+    const out = document.getElementById('rc-output');
+    const btn = document.getElementById('rc-copy');
+    if (!out) return;
+    const text = out.textContent || '';
+    try {
+        await navigator.clipboard.writeText(text);
+        if (btn) { const t = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = t; }, 1500); }
+    } catch (e) {
+        // Fallback (older browser / non-secure context): select the text so the
+        // user can Ctrl-C manually.
+        const range = document.createRange();
+        range.selectNodeContents(out);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        if (btn) { const t = btn.textContent; btn.textContent = 'Select+Ctrl-C'; setTimeout(() => { btn.textContent = t; }, 2000); }
     }
 }
 
