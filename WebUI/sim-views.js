@@ -3564,7 +3564,7 @@ async function csRenderSimQuotaState() {
             ${eff.length ? `<table class="w-full text-left">
               <thead><tr class="text-[11px] text-slate-400 uppercase tracking-wider">
                 <th class="px-2 py-1">Type</th><th class="px-2 py-1">Alert / Insight ID</th>
-                <th class="px-2 py-1">Sim</th><th class="px-2 py-1">Site</th>
+                <th class="px-2 py-1">Sim</th><th class="px-2 py-1">SSID</th>
                 <th class="px-2 py-1 text-center">Assigned</th><th class="px-2 py-1 text-center">Multi</th>
                 <th class="px-2 py-1 text-center">Re-home</th>
               </tr></thead>
