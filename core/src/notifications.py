@@ -7,10 +7,17 @@ its own alerts — starting with spoke out-of-contact (``spoke_alert_sync.py``).
 
 Provider dropdown (``global_config["notifications"]``):
 
-  * ``azure_acs`` — Azure Communication Services Email. Sender creds are
-    **auto-pulled from Key Vault** (the "automatic" path): a secret holds the
-    ACS connection string ``endpoint=https://<name>.communication.azure.com;
-    accesskey=<key>``. Two transports:
+  * ``azure_acs`` — Azure Communication Services Email. Sender creds come from
+    one of two sources (``acs_source``):
+      - ``arm`` (default) — the hub auto-pulls the connection string from Azure
+        via the ``communicationServices/{name}/listKeys`` ARM action using the
+        SSO app cert (the same ARM access the NSG hook uses). Nothing is stored
+        in Key Vault; a key rotation is picked up within the cache TTL. The app
+        needs a role with ``listKeys`` on the ACS resource (Contributor on it
+        or its resource group).
+      - ``keyvault`` — a Key Vault secret holds the ACS connection string
+        ``endpoint=https://<name>.communication.azure.com;accesskey=<key>``.
+    Two transports:
       - ``api`` (default) — pure REST: POST ``{endpoint}/emails:send`` signed
         with the ACS access key (HMAC-SHA256). No smtplib, no blocking, no
         Entra app permission — the access key comes from the same Key Vault
@@ -43,7 +50,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from security.encryption import hub_encryption
-from security.oidc import get_oidc_config
+from security.oidc import fetch_app_token, get_oidc_config
 import key_vault
 
 logger = logging.getLogger("Notifications")
@@ -51,6 +58,12 @@ logger = logging.getLogger("Notifications")
 _ACS_API_VERSION = "2023-07-01-preview"
 _ACS_SMTP_HOST = "smtp.azurecomm.net"
 _ACS_SMTP_PORT = 587
+_ACS_ARM_API = "2023-04-01"
+_ARM_SCOPE = "https://management.azure.com/.default"
+# Short TTL cache for the ARM-fetched connection string so a burst of alerts
+# doesn't hammer listKeys, but a key rotation is picked up within the TTL.
+_ACS_ARM_CACHE: Dict[str, Tuple[float, str]] = {}
+_ACS_ARM_CACHE_TTL = 600.0
 
 PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
     "azure_acs": {"host": _ACS_SMTP_HOST, "port": _ACS_SMTP_PORT, "starttls": True,
@@ -70,13 +83,18 @@ class NotificationsError(Exception):
 # config helpers (mirror key_vault.CFG_FIELDS / DEFAULTS / get_config / save_config)
 # ---------------------------------------------------------------------------
 
-CFG_FIELDS = ("enabled", "provider", "transport", "smtp_host", "smtp_port",
-              "smtp_user", "smtp_password_enc", "acs_kv_secret_name",
-              "vault_url", "from_email", "to_emails")
+CFG_FIELDS = ("enabled", "provider", "transport", "acs_source",
+              "azure_subscription_id", "azure_resource_group", "acs_resource_name",
+              "smtp_host", "smtp_port", "smtp_user", "smtp_password_enc",
+              "acs_kv_secret_name", "vault_url", "from_email", "to_emails")
 DEFAULTS: Dict[str, Any] = {
     "enabled": False,
     "provider": "azure_acs",
     "transport": "api",          # only meaningful for azure_acs; others are SMTP
+    "acs_source": "arm",         # azure_acs cred source: arm (auto listKeys) or keyvault
+    "azure_subscription_id": "",
+    "azure_resource_group": "",
+    "acs_resource_name": "",
     "smtp_host": "",
     "smtp_port": 587,
     "smtp_user": "",
@@ -143,9 +161,9 @@ def _parse_acs_connstr(connstr: str) -> Tuple[str, str, str]:
     return endpoint.rstrip("/"), resourcename, accesskey
 
 
-async def _acs_connstr(hub, cfg: Dict[str, Any],
-                       http: Optional[httpx.AsyncClient] = None) -> str:
-    """Pull the ACS connection string from Key Vault (auto-managed creds)."""
+async def _acs_connstr_kv(hub, cfg: Dict[str, Any],
+                          http: Optional[httpx.AsyncClient] = None) -> str:
+    """Pull the ACS connection string from Key Vault (optional cred source)."""
     vault_url = _vault_url(hub, cfg)
     if not vault_url:
         raise NotificationsError("Key Vault URL not configured (set it in Key Vault or Notifications)")
@@ -156,6 +174,58 @@ async def _acs_connstr(hub, cfg: Dict[str, Any],
         raise NotificationsError(
             f"ACS connection string not found in Key Vault secret '{secret_name}'")
     return connstr
+
+
+async def _acs_connstr_arm(hub, cfg: Dict[str, Any],
+                           http: Optional[httpx.AsyncClient] = None) -> str:
+    """Auto-pull the ACS connection string from Azure via the
+    ``communicationServices/{name}/listKeys`` ARM action (no Key Vault needed).
+    The SSO app must hold a role with ``listKeys`` on the ACS resource
+    (Contributor on the resource or its resource group covers it). Short TTL
+    cache so a burst doesn't repeat the call but a key rotation is picked up."""
+    sub = str(cfg.get("azure_subscription_id") or "").strip()
+    rg = str(cfg.get("azure_resource_group") or "").strip()
+    name = str(cfg.get("acs_resource_name") or "").strip()
+    if not (sub and rg and name):
+        raise NotificationsError(
+            "ACS resource not configured — set subscription id, resource group, "
+            "and the Communication Services resource name (or switch to the "
+            "Key Vault cred source)")
+    cache_key = f"{sub}/{rg}/{name}"
+    import time as _t
+    cached = _ACS_ARM_CACHE.get(cache_key)
+    if cached and (_t.time() - cached[0] < _ACS_ARM_CACHE_TTL):
+        return cached[1]
+    oidc_cfg = get_oidc_config(hub)
+    token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
+    url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
+           f"/providers/Microsoft.Communication/communicationServices/{name}"
+           f"/listKeys?api-version={_ACS_ARM_API}")
+    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+        resp = await c.post(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        raise NotificationsError(
+            f"ACS listKeys failed: HTTP {resp.status_code} — {resp.text[:300]}")
+    body = resp.json()
+    connstr = body.get("primaryConnectionString") or ""
+    if not connstr:
+        # Some API versions return only primaryKey; reconstruct from endpoint.
+        pk = body.get("primaryKey") or ""
+        if pk:
+            connstr = f"endpoint=https://{name}.communication.azure.com;accesskey={pk}"
+    if not connstr:
+        raise NotificationsError("ACS listKeys returned no connection string or key")
+    _ACS_ARM_CACHE[cache_key] = (_t.time(), connstr)
+    return connstr
+
+
+async def _acs_connstr(hub, cfg: Dict[str, Any],
+                       http: Optional[httpx.AsyncClient] = None) -> str:
+    """Resolve the ACS connection string per the configured cred source
+    (ARM auto-pull by default; Key Vault optional)."""
+    if str(cfg.get("acs_source") or "arm") == "keyvault":
+        return await _acs_connstr_kv(hub, cfg, http=http)
+    return await _acs_connstr_arm(hub, cfg, http=http)
 
 
 async def _resolve(hub, cfg: Dict[str, Any],

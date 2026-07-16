@@ -3,9 +3,11 @@
 Config + a send-test for the platform-level email channel (see
 ``notifications.py``): provider dropdown (Azure ACS / Gmail / Yahoo /
 Office 365 / Generic), transport (ACS API default, SMTP fallback), sender +
-recipients. ACS creds are auto-pulled from Key Vault at send time, so no
-password is stored for ACS; non-ACS passwords are Fernet-encrypted at rest and
-never echoed back to the UI (a ``has_password`` flag is returned instead).
+recipients. ACS creds are pulled at send time from one of two sources — ARM
+``listKeys`` auto-pull (default; keeps the vault out of the email path) or a
+Key Vault secret — so no password is stored for ACS; non-ACS passwords are
+Fernet-encrypted at rest and never echoed back to the UI (a ``has_password``
+flag is returned instead).
 
 Under ``/setup/`` so the access-control middleware gates it to admins.
 """
@@ -46,6 +48,12 @@ def register(app, hub, ctx):
         cur["to_emails"] = _n._normalize_recipients(cur.get("to_emails"))
         cur["provider"] = str(cur.get("provider") or "azure_acs")
         cur["transport"] = str(cur.get("transport") or "api")
+        cur["acs_source"] = str(cur.get("acs_source") or "arm").strip()
+        if cur["acs_source"] not in ("arm", "keyvault"):
+            cur["acs_source"] = "arm"
+        cur["azure_subscription_id"] = str(cur.get("azure_subscription_id") or "").strip()
+        cur["azure_resource_group"] = str(cur.get("azure_resource_group") or "").strip()
+        cur["acs_resource_name"] = str(cur.get("acs_resource_name") or "").strip()
         cur["from_email"] = str(cur.get("from_email") or "").strip()
         cur["smtp_host"] = str(cur.get("smtp_host") or "").strip()
         cur["smtp_user"] = str(cur.get("smtp_user") or "").strip()

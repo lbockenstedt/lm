@@ -6603,6 +6603,18 @@ function _renderSettingsNotificationsTile(content) {
                         <option value="api">REST API (default)</option>
                         <option value="smtp">SMTP</option>
                     </select></div>
+                <div class="space-y-1" id="notif-acs-source-wrap"><label class="${labelCls}">ACS credential source</label>
+                    <select id="notif-acs-source" class="${inputCls}" onchange="notifAcsSourceChanged()">
+                        <option value="arm">ARM auto-pull (no vault access)</option>
+                        <option value="keyvault">Key Vault secret</option>
+                    </select></div>
+                <div class="space-y-1 md:col-span-2" id="notif-acs-arm-wrap"><label class="${labelCls}">ACS resource (ARM listKeys)</label>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
+                        <input id="notif-acs-sub" type="text" placeholder="Subscription ID" class="${inputCls} font-mono text-xs">
+                        <input id="notif-acs-rg" type="text" placeholder="Resource group" class="${inputCls} font-mono text-xs">
+                        <input id="notif-acs-name" type="text" placeholder="Resource name" class="${inputCls} font-mono text-xs">
+                    </div>
+                    <p class="text-[11px] text-slate-400 mt-1">The SSO app calls <span class="font-mono">communicationServices/listKeys</span> via ARM (needs <b>Contributor</b> on the ACS resource/RG). The connection string is cached ~10 min and never touches the vault.</p></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP host</label><input id="notif-host" type="text" placeholder="smtp.example.com" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP port</label><input id="notif-port" type="number" placeholder="587" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP user</label><input id="notif-user" type="text" placeholder="user@example.com" class="${inputCls} font-mono text-xs"></div>
@@ -6613,7 +6625,7 @@ function _renderSettingsNotificationsTile(content) {
                 <div class="space-y-1 md:col-span-2"><label class="${labelCls}">From email</label><input id="notif-from" type="text" placeholder="DoNotReply@<resourcename>.azurecomm.net" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1 md:col-span-2"><label class="${labelCls}">To emails <span class="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input id="notif-to" type="text" placeholder="ops@example.com, oncall@example.com" class="${inputCls} font-mono text-xs"></div>
             </div>
-            <p id="notif-acs-note" class="text-[11px] text-slate-400 mt-2 hidden">ACS API transport signs each request with the access key from the Key Vault connection string (HMAC-SHA256) — no Entra app permission needed. The connection string is read from the Key Vault secret at send time.</p>
+            <p id="notif-acs-note" class="text-[11px] text-slate-400 mt-2 hidden">ACS API transport signs each request with the access key (HMAC-SHA256) — no Entra app permission needed. The access key is pulled from ARM (listKeys) or read from the Key Vault secret, depending on the credential source above.</p>
             <div class="mt-3 flex flex-wrap items-center gap-2">
                 <button type="button" onclick="saveNotifications()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
                 <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Send test email</button>
@@ -6639,13 +6651,28 @@ function notifProviderChanged() {
     // ACS-only controls
     const showKv = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
     showKv('notif-transport-wrap', isAcs);
-    showKv('notif-acs-kv-name-wrap', isAcs);
-    showKv('notif-acs-vault-wrap', isAcs);
-    showKv('notif-acs-connstr-wrap', isAcs);
-    showKv('notif-push-btn', isAcs);
-    // Password field: hidden for ACS (creds via Key Vault).
+    showKv('notif-acs-source-wrap', isAcs);
+    showKv('notif-acs-arm-wrap', isAcs);        // toggled further by source below
+    showKv('notif-acs-kv-name-wrap', isAcs);   // toggled further by source below
+    showKv('notif-acs-vault-wrap', isAcs);      // toggled further by source below
+    showKv('notif-acs-connstr-wrap', isAcs);    // toggled further by source below
+    showKv('notif-push-btn', isAcs);            // toggled further by source below
+    // Password field: hidden for ACS (creds via ARM/Key Vault).
     const passEl = document.getElementById('notif-pass');
-    if (passEl) { passEl.disabled = isAcs; if (isAcs) passEl.value = ''; passEl.placeholder = isAcs ? 'managed via Key Vault' : ''; }
+    if (passEl) { passEl.disabled = isAcs; if (isAcs) passEl.value = ''; passEl.placeholder = isAcs ? 'managed automatically' : ''; }
+    if (isAcs) notifAcsSourceChanged(); else notifTransportChanged();
+}
+
+function notifAcsSourceChanged() {
+    const isAcs = _notifProvider() === 'azure_acs';
+    const isKv = isAcs && (document.getElementById('notif-acs-source')?.value || 'arm') === 'keyvault';
+    const show = (id, show) => { const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !show); };
+    // ARM fields only when source=arm; Key Vault secret/push fields only when source=keyvault.
+    show('notif-acs-arm-wrap', isAcs && !isKv);
+    show('notif-acs-kv-name-wrap', isKv);
+    show('notif-acs-vault-wrap', isKv);
+    show('notif-acs-connstr-wrap', isKv);
+    show('notif-push-btn', isKv);
     notifTransportChanged();
 }
 
@@ -6665,6 +6692,10 @@ async function loadNotifications() {
         const en = document.getElementById('notif-enabled'); if (en) en.checked = !!c.enabled;
         set('notif-provider', c.provider || 'azure_acs');
         set('notif-transport', c.transport || 'api');
+        set('notif-acs-source', c.acs_source || 'arm');
+        set('notif-acs-sub', c.azure_subscription_id);
+        set('notif-acs-rg', c.azure_resource_group);
+        set('notif-acs-name', c.acs_resource_name);
         set('notif-host', c.smtp_host);
         set('notif-port', c.smtp_port || 587);
         set('notif-user', c.smtp_user);
@@ -6695,8 +6726,15 @@ function _notifFormConfig() {
     };
     if (p === 'azure_acs') {
         cfg.transport = document.getElementById('notif-transport')?.value || 'api';
-        cfg.acs_kv_secret_name = v('notif-acs-secret') || 'acs-email-connstr';
-        cfg.vault_url = v('notif-vault-url');
+        cfg.acs_source = document.getElementById('notif-acs-source')?.value || 'arm';
+        if (cfg.acs_source === 'arm') {
+            cfg.azure_subscription_id = v('notif-acs-sub');
+            cfg.azure_resource_group = v('notif-acs-rg');
+            cfg.acs_resource_name = v('notif-acs-name');
+        } else {
+            cfg.acs_kv_secret_name = v('notif-acs-secret') || 'acs-email-connstr';
+            cfg.vault_url = v('notif-vault-url');
+        }
     } else {
         const pw = v('notif-pass');
         if (pw) cfg.smtp_password = pw;   // plaintext → hub Fernet-encrypts at rest
