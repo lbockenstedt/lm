@@ -3523,7 +3523,7 @@ async function csRenderSimQuotaState() {
                     : m === 'stable' ? '<span class="text-emerald-700">✅ Stable</span>'
                     : '<span class="text-slate-600">🔄 Learning</span>');
             return `<div class="flex flex-wrap items-center gap-3 text-xs py-0.5">
-              <span class="w-48 font-mono text-slate-600 truncate">${csEscape(label)}</span>
+              <span class="w-96 max-w-full font-mono text-slate-600 truncate" title="${csEscape(label)}">${csEscape(label)}</span>
               <span class="font-semibold">${badge}</span>
               ${labTag}
               ${(v && v.floor != null) ? `<span class="text-slate-400">floor ${csEscape(String(v.floor))}</span>` : ''}
@@ -4602,6 +4602,10 @@ async function csRenderSetupCentralApi() {
         ${f('cs-csc-clientsecret', 'Client Secret', hc.client_secret, 'password')}
         ${f('cs-csc-accesstoken', 'Access Token (classic)', hc.access_token, 'password')}
         ${f('cs-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token, 'password')}
+        <label class="text-xs text-slate-500">Poll interval (minutes)
+          <input id="cs-csc-pollmin" type="number" min="1" step="1" value="${Math.max(1, Math.round((Number(hc.poll_interval_s) || 300) / 60))}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">How often the hub polls Aruba Central for this tenant (default 5, minimum 1).</span>
+        </label>
       </div>
       <div class="flex justify-end gap-2 mt-4">
         <button onclick="csSaveCentralConn()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
@@ -4774,6 +4778,9 @@ window.csSaveCentralConn = async function () {
     if (v('cs-csc-clientsecret')) hub_central_config.client_secret = v('cs-csc-clientsecret');
     if (v('cs-csc-accesstoken'))  hub_central_config.access_token  = v('cs-csc-accesstoken');
     if (v('cs-csc-refreshtoken')) hub_central_config.refresh_token = v('cs-csc-refreshtoken');
+    // Central poll interval (minutes in the UI → seconds stored; the hub floors at 60s).
+    const _pm = parseInt(v('cs-csc-pollmin'), 10);
+    if (!isNaN(_pm) && _pm > 0) hub_central_config.poll_interval_s = Math.max(60, _pm * 60);
     try {
         const r = await csFetch('/aggregate/central', { method: 'POST', body: JSON.stringify({ mode, hub_central_config }) });
         csPushToast(r, 'Saved');

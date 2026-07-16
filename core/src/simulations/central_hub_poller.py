@@ -32,7 +32,8 @@ from .check_eval import count_for_check, normalize_counts
 
 logger = logging.getLogger("CentralHubPoller")
 
-_POLL_INTERVAL_S = 300  # 5 min — matches the spoke poller + aruba.py cache TTLs
+_POLL_INTERVAL_S = 300  # 5 min — default; matches the spoke poller + aruba.py cache TTLs
+_POLL_INTERVAL_FLOOR_S = 60  # min allowed per-tenant interval (protect the Central API)
 
 # Client-count baseline constants — ported verbatim from the source webui-spoke
 # (server.py). The alarm baseline is a 7-DAY rolling average of hourly snapshots
@@ -227,6 +228,12 @@ class CentralHubPoller:
             os.path.join(ddir, "client_count_7day.json"),
             os.path.join(ddir, "client_count_samples.json"),
         )
+        # Per-tenant last-poll timestamps + the next loop sleep. The Central poll
+        # interval is configurable per tenant (Setup → Central API → Connection);
+        # tenants are gated by their own interval and the loop wakes on the
+        # shortest configured one.
+        self._last_poll: Dict[str, float] = {}
+        self._next_sleep_s: float = _POLL_INTERVAL_S
 
     @property
     def _store(self):
@@ -247,6 +254,17 @@ class CentralHubPoller:
             except Exception:  # noqa: BLE001 — one bad tenant never blocks the rest
                 continue
         return out
+
+    @staticmethod
+    def _interval_for(central_config: Dict[str, Any]) -> int:
+        """This tenant's Central poll interval in seconds — ``poll_interval_s`` from
+        its central_config (Setup → Central API → Connection), defaulting to 5 min
+        and clamped to the floor so a misconfig can't hammer the Central API."""
+        try:
+            iv = int((central_config or {}).get("poll_interval_s") or _POLL_INTERVAL_S)
+        except (TypeError, ValueError):
+            iv = _POLL_INTERVAL_S
+        return max(_POLL_INTERVAL_FLOOR_S, iv)
 
     async def _poll_tenant(self, tenant_id: str, central_config: Dict[str, Any]) -> None:
         # ArubaClient maps central_config's ``mode`` -> api_version itself.
@@ -381,7 +399,16 @@ class CentralHubPoller:
         for stale in [t for t in list(self.hub.central_hub_status.keys()) if t not in live]:
             self.hub.central_hub_status.pop(stale, None)
             self._cc.forget(stale)
+            self._last_poll.pop(stale, None)
+        now = time.time()
+        # Gate each tenant by its own configured interval; wake on the shortest.
+        intervals = [self._interval_for(cc) for _, cc in tenants]
+        self._next_sleep_s = min(intervals) if intervals else _POLL_INTERVAL_S
         for tid, cc in tenants:
+            iv = self._interval_for(cc)
+            if now - self._last_poll.get(tid, 0.0) < iv:
+                continue  # not due yet
+            self._last_poll[tid] = now
             try:
                 await self._poll_tenant(tid, cc)
             except Exception as exc:  # noqa: BLE001
@@ -411,4 +438,4 @@ class CentralHubPoller:
                 raise
             except Exception as exc:  # noqa: BLE001 — never let a bad poll kill the loop
                 logger.warning("Central hub poll loop error: %s", exc)
-            await asyncio.sleep(_POLL_INTERVAL_S)
+            await asyncio.sleep(max(_POLL_INTERVAL_FLOOR_S, self._next_sleep_s))

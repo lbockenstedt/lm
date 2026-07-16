@@ -1474,27 +1474,46 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # wsite (MIA) and linked central_site (Miami); an empty site = global →
         # match every wsite.
         site = str(q.get("site") or "").strip()
-        aliases = {site.lower()} if site else set()
+        aliases = set()
         if site:
+            aliases.add(site.lower())
             try:
                 csc = await store.get_central_sites_config(tenant_id) or {}
-                wsite = site
+                # An ssid_matrix cell (matched by name) carries its wsite / site.
                 for cd in (csc.get("ssid_matrix") or []):
-                    if str(cd.get("name") or "").strip() == site and cd.get("site"):
-                        wsite = str(cd.get("site")).strip()
-                        aliases.add(wsite.lower())
-                        break
+                    if str(cd.get("name") or "").strip().lower() == site.lower():
+                        for fld in ("site", "wsite", "central_site"):
+                            val = str(cd.get(fld) or "").strip()
+                            if val:
+                                aliases.add(val.lower())
+                # A site_link relates name ↔ wsite ↔ central_site. The quota's site
+                # is stored as the link's WSITE (the UI option value) but may also
+                # be a link name or a central_site; if it matches ANY of a link's
+                # fields, pull in the other two so e.g. wsite "MIA-PSK" resolves to
+                # central_site "Miami" (the form the poller keys status by) and
+                # vice-versa — this is the join the dashboard row already shows.
                 for lk in (csc.get("site_links") or []):
-                    lk_ws = str(lk.get("wsite") or "").strip()
-                    lk_cs = str(lk.get("central_site") or "").strip()
-                    if lk_ws == wsite and lk_cs:
-                        aliases.add(lk_cs.lower())
-                    if lk_cs == site and lk_ws:
-                        aliases.add(lk_ws.lower())
+                    vals = [str(lk.get(f) or "").strip() for f in ("name", "wsite", "central_site")]
+                    if any(v and v.lower() == site.lower() for v in vals):
+                        for v in vals:
+                            if v:
+                                aliases.add(v.lower())
+                # site_mappings maps wsite → central_site; fold both directions so a
+                # match on either key pulls in the other.
+                for wk, cv in (csc.get("site_mappings") or {}).items():
+                    wl = str(wk).strip().lower()
+                    cl = str(cv or "").strip().lower()
+                    if wl and wl in aliases and cl:
+                        aliases.add(cl)
+                    if cl and cl in aliases and wl:
+                        aliases.add(wl)
             except Exception:  # noqa: BLE001
                 pass
         # Look the alert up in the dashboard status. "ok" (in _PASS) = firing.
+        firing = None
         saw_fail = False
+        matched_status = None
+        seen_cids: set = set()   # every check id available at the matched site(s)
         for status_map, site_mappings in blocks:
             for wsite, checks_map in (status_map or {}).items():
                 if not isinstance(checks_map, dict):
@@ -1505,17 +1524,29 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     if wkey not in aliases and csite not in aliases:
                         continue
                 for cid, info in checks_map.items():
+                    seen_cids.add(str(cid))
                     if str(cid).strip().lower() != alert_id:
                         continue
                     s = (info.get("status") if isinstance(info, dict) else info) or ""
                     sl = str(s).strip().lower()
+                    matched_status = sl
                     if sl in _PASS:
-                        return True          # error present at a matching site → firing
-                    if sl in _FAIL:
+                        firing = True         # error present at a matching site → firing
+                    elif sl in _FAIL and firing is None:
                         saw_fail = True       # present, definitively not firing
         # Only report "not firing" when the dashboard definitively says so;
         # otherwise hold (None) rather than ramp on an unclear/absent signal.
-        return False if saw_fail else None
+        if firing is None and saw_fail:
+            firing = False
+        # DIAG: what the Engine looked for vs what the dashboard status held. If
+        # alert_id is NOT in cids_at_site → the quota's alert_id doesn't match any
+        # monitored-check id (name/format mismatch) OR the site aliases missed the
+        # wsite. If it IS present but firing is False → the dashboard has it not-ok.
+        logger.info("engine-firing diag [%s]: alert_id=%r site=%r aliases=%s "
+                    "matched_status=%r → firing=%s; cids_at_site=%s",
+                    tenant_id, alert_id, site or "(global)", sorted(aliases),
+                    matched_status, firing, sorted(seen_cids))
+        return firing
 
     async def _run_adaptive_controller() -> None:
         """One controller pass over every tenant's adaptive quotas — advance the
@@ -1880,6 +1911,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     detail="cluster_url resolves to an internal address — "
                            "DNS rebinding to a private/loopback host is blocked.",
                 )
+        # Central poll interval (seconds). Optional; coerce + floor at 60s here so
+        # a bad value can't be stored (the poller also floors defensively).
+        if "poll_interval_s" in cfg:
+            try:
+                cfg["poll_interval_s"] = max(60, int(cfg["poll_interval_s"] or 300))
+            except (TypeError, ValueError):
+                cfg["poll_interval_s"] = 300
         await store.set_central_config(tenant_id, cfg)
         # Push ``cfg`` (NOT ``hub_cc``): cfg carries ``mode`` on top of the
         # cluster creds, and the spoke's poller (_build_config) needs ``mode`` to
