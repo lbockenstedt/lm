@@ -16069,6 +16069,23 @@ function leIssueRenderTargets() {
             </span>`).join('')}</div>`;
 }
 
+// Populate the issue-cert Domain datalist with the caller's eligible domains: the
+// A/AAAA hostnames from their tenant's DNS (DNS module + firewalls) + a derived
+// *.<domain> wildcard per parent domain. Best-effort — free text still works, but
+// with the `le` subnet filter ON a cert only shows for a domain that resolves into
+// the tenant's subnet, so this steers the operator to a DNS entry they've configured.
+async function leIssuePopulateDomains() {
+    const dl = document.getElementById('le-issue-domain-list');
+    if (!dl) return;
+    try {
+        const { ok, data } = await _spokeFetch('/api/le/eligible-domains');
+        if (!ok || !data) return;
+        const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        const opts = [...(data.hosts || []), ...(data.wildcards || [])];
+        dl.innerHTML = opts.map(h => `<option value="${esc(h)}"></option>`).join('');
+    } catch (e) { /* best-effort — the field is still free-text */ }
+}
+
 async function showLeIssueModal() {
     _leIssueTargets = [];
     if (!window._leAvailableTargets || !window._leAvailableTargets.length) {
@@ -16088,7 +16105,9 @@ async function showLeIssueModal() {
             <div class="grid grid-cols-2 gap-3">
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">Domain <span class="text-red-500">*</span></label>
-                    <input id="le-issue-domain" type="text" placeholder="www.example.com" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                    <input id="le-issue-domain" type="text" list="le-issue-domain-list" placeholder="pick or type a domain" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" />
+                    <datalist id="le-issue-domain-list"></datalist>
+                    <p class="text-[11px] text-slate-400 mt-1">Your DNS entries (from DNS + firewalls). A cert only shows on your Certificates page if its domain resolves into your subnet.</p>
                 </div>
                 <div class="flex flex-col">
                     <label class="text-xs text-slate-500 mb-1">ACME account email <span class="text-red-500">*</span></label>
@@ -16220,6 +16239,7 @@ async function showLeIssueModal() {
         </div>
     </div>`;
     document.body.appendChild(modal);
+    leIssuePopulateDomains();
     leIssueRenderTargets();
     leIssueUpdateDnsFields();
     leTgtMtChange('le-issue-tgt-mt', 'le-issue-tgt-id');  // seed device list for the first module

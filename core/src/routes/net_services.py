@@ -242,6 +242,61 @@ def register(app, hub, ctx):
             "LE_DELETE_DNS_CRED", {"tenant_id": _le_tenant(request), "name": name})
         return payload
 
+    async def _dns_hosts(nets):
+        """A/AAAA hostnames from BOTH DNS sources — the DNS module (Unbound spoke)
+        AND every connected OPNsense firewall's Unbound host-overrides. ``nets`` =
+        list of ip_network to keep (only hosts whose IP is in one), or None to keep
+        ALL hosts. Returns (hostnames:set, any_source_reachable:bool)."""
+        import ipaddress
+
+        def _in(ip):
+            try:
+                a = ipaddress.ip_address(str(ip).strip())
+            except (ValueError, AttributeError):
+                return False
+            return any(a in n for n in (nets or []))
+
+        hosts = set()
+        any_source = False
+
+        def _collect(records, name_keys, ip_keys):
+            for r in records if isinstance(records, list) else []:
+                if not isinstance(r, dict):
+                    continue
+                if str(r.get("type", "A")).upper() not in ("A", "AAAA"):
+                    continue
+                name = ""
+                for k in name_keys:
+                    name = str(r.get(k) or "").strip().rstrip(".").lower()
+                    if name:
+                        break
+                ip = next((r.get(k) for k in ip_keys if r.get(k)), None)
+                if name and (nets is None or (ip and _in(ip))):
+                    hosts.add(name)
+
+        try:
+            dns_data = await _relay_spoke(_get_dns_spoke(hub), "DNS_LIST", log_name="le_dns_hosts")
+            any_source = True
+            _collect((dns_data or {}).get("records") or [], ("name",), ("value", "ip"))
+        except Exception:  # noqa: BLE001 — DNS module down; try the firewalls
+            pass
+        try:
+            firewalls = (hub.state.system_state.get("global_config", {}) or {}).get("firewalls", []) or []
+        except Exception:  # noqa: BLE001
+            firewalls = []
+        for sid in {fw.get("spoke_id") for fw in firewalls if fw.get("spoke_id")}:
+            if sid not in getattr(hub, "active_connections", {}):
+                continue
+            try:
+                fres = await hub.request_response(sid, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=10.0)
+                any_source = True
+                recs = (fres or {}).get("data") or (fres or {}).get("dns_records") \
+                    or (fres or {}).get("records") or (fres if isinstance(fres, list) else [])
+                _collect(recs, ("hostname", "host", "name"), ("ip", "value", "server"))
+            except Exception:  # noqa: BLE001 — one bad firewall never blocks the rest
+                continue
+        return hosts, any_source
+
     async def _filter_le_certs(request, data):
         """Tenant subnet-filter the cert list. Certs have no IP column, so a cert is
         attributed to a tenant by resolving its SANs through the internal DNS A/AAAA
@@ -267,54 +322,7 @@ def register(app, hub, ctx):
                 nets.append(ipaddress.ip_network(p, strict=False))
             except ValueError:
                 continue
-
-        def _in(ip):
-            try:
-                a = ipaddress.ip_address(str(ip).strip())
-            except ValueError:
-                return False
-            return any(a in n for n in nets)
-
-        def _collect(records, name_keys, ip_keys):
-            for r in records if isinstance(records, list) else []:
-                if not isinstance(r, dict):
-                    continue
-                if str(r.get("type", "A")).upper() not in ("A", "AAAA"):
-                    continue
-                name = ""
-                for k in name_keys:
-                    name = str(r.get(k) or "").strip().rstrip(".").lower()
-                    if name:
-                        break
-                ip = next((r.get(k) for k in ip_keys if r.get(k)), None)
-                if name and ip and _in(ip):
-                    tenant_hosts.add(name)
-
-        tenant_hosts = set()
-        any_source = False
-        # Source 1: the DNS module (Unbound spoke).
-        try:
-            dns_data = await _relay_spoke(_get_dns_spoke(hub), "DNS_LIST", log_name="le_filter_dns")
-            any_source = True
-            _collect((dns_data or {}).get("records") or [], ("name",), ("value", "ip"))
-        except Exception:  # noqa: BLE001 — DNS module down; try the firewalls
-            pass
-        # Source 2: OPNsense firewalls' Unbound host-overrides (per connected fw spoke).
-        try:
-            firewalls = (hub.state.system_state.get("global_config", {}) or {}).get("firewalls", []) or []
-        except Exception:  # noqa: BLE001
-            firewalls = []
-        for sid in {fw.get("spoke_id") for fw in firewalls if fw.get("spoke_id")}:
-            if sid not in getattr(hub, "active_connections", {}):
-                continue
-            try:
-                fres = await hub.request_response(sid, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=10.0)
-                any_source = True
-                recs = (fres or {}).get("data") or (fres or {}).get("dns_records") \
-                    or (fres or {}).get("records") or (fres if isinstance(fres, list) else [])
-                _collect(recs, ("hostname", "host", "name"), ("ip", "value", "server"))
-            except Exception:  # noqa: BLE001 — one bad firewall never blocks the rest
-                continue
+        tenant_hosts, any_source = await _dns_hosts(nets)
         if not any_source:
             return data  # both DNS sources unreachable → fail open
         if not tenant_hosts:
@@ -365,6 +373,27 @@ def register(app, hub, ctx):
                 out["stale"] = True
                 return await _filter_le_certs(request, out)
             raise
+
+    @app.get("/api/le/eligible-domains")
+    async def le_eligible_domains(request: Request):
+        """Domains the caller can issue a cert for and still SEE it under the ``le``
+        subnet filter: the A/AAAA hostnames from their tenant's DNS (both the DNS
+        module and firewalls), plus a derived ``*.<domain>`` wildcard per parent
+        domain. Non-admin with the filter ON → only hostnames in their prefixes;
+        admin or filter OFF → all DNS hostnames. Feeds the issue-cert domain dropdown."""
+        sess = _session_user(request)
+        nets = None
+        if sess and not _is_admin(sess) and access.filter_enabled(hub, "le"):
+            import ipaddress
+            nets = []
+            for p in (await access.resolve_prefixes(hub, sess)) or []:
+                try:
+                    nets.append(ipaddress.ip_network(p, strict=False))
+                except ValueError:
+                    continue
+        hosts, _src = await _dns_hosts(nets)
+        wildcards = sorted({f"*.{h.split('.', 1)[1]}" for h in hosts if "." in h})
+        return {"hosts": sorted(hosts), "wildcards": wildcards}
 
     @app.get("/api/le/inflight")
     async def le_inflight():
