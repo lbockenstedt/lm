@@ -867,9 +867,11 @@ async function csRenderSimClientCount() {
                   <td class="px-3 py-2 font-bold text-slate-700">${csEscape(c.current || 0)}</td>
                   <td class="px-3 py-2 text-slate-500">${csEscape(c.hourly_avg != null ? c.hourly_avg : '—')}</td>
                   <td class="px-3 py-2 ${c.drop_pct > 0 ? 'text-amber-600' : 'text-slate-500'}">${csEscape(c.drop_pct != null ? c.drop_pct + '%' : '—')}</td>
+                  <td class="px-3 py-2 text-slate-400">${csEscape(c.max_7day != null ? c.max_7day : '—')}</td>
+                  <td class="px-3 py-2 text-slate-400">${csEscape(c.max_30day != null ? c.max_30day : '—')}</td>
                 </tr>`;
             }).join('');
-            html = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Drop %'], rows);
+            html = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Drop %', '7d Peak', '30d Peak'], rows);
         }
         return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden">
           <summary class="flex items-center justify-between px-5 py-3 cursor-pointer hover:bg-slate-50">
@@ -1112,9 +1114,11 @@ function csSimSpokeCard(s) {
               <td class="px-3 py-2 font-bold text-slate-700">${csEscape(c.current || 0)}</td>
               <td class="px-3 py-2 text-slate-500">${csEscape(c.hourly_avg != null ? c.hourly_avg : '—')}</td>
               <td class="px-3 py-2 ${c.drop_pct > 0 ? 'text-amber-600' : 'text-slate-500'}">${csEscape(c.drop_pct != null ? c.drop_pct + '%' : '—')}</td>
+              <td class="px-3 py-2 text-slate-400">${csEscape(c.max_7day != null ? c.max_7day : '—')}</td>
+              <td class="px-3 py-2 text-slate-400">${csEscape(c.max_30day != null ? c.max_30day : '—')}</td>
             </tr>`;
         }).join('');
-        ccHtml = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Drop %'], rows);
+        ccHtml = csTable(['Site', 'Status', 'Current', 'Hourly Avg', 'Drop %', '7d Peak', '30d Peak'], rows);
     }
 
     return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden" open>

@@ -44,7 +44,13 @@ _CC_MIN_SAMPLES = 3        # minimum live samples before flagging
 _CC_WARN_PCT = 20.0        # >20% below the hour average -> WARNING
 _CC_ERROR_PCT = 50.0       # >50% below -> ERROR        # percent drop below baseline that flags DEGRADED
 _CC_7DAY_WINDOW = 7 * 86400
-_CC_SNAPSHOT_INTERVAL = 3600  # append one hourly snapshot to the 7-day history / hr
+_CC_30DAY_WINDOW = 30 * 86400   # long-run history retention (the 7-day is a subset)
+_CC_SNAPSHOT_INTERVAL = 3600  # append one hourly snapshot to the history / hr
+# Severe sustained die-off: the current hour is < 20% of the rolling PEAK
+# (max hourly-avg) over the window → ERROR. Gated on a meaningful peak so a
+# quiet/low-traffic site can't error on noise.
+_CC_MAX_FRACTION = 0.20
+_CC_MAX_MIN_PEAK = 5
 _CC_KEYSEP = "\x1f"        # composite (tenant, wsite) key separator
 
 
@@ -100,7 +106,7 @@ class ClientCountTracker:
         try:
             with open(self._sevenday_path, encoding="utf-8") as f:
                 raw = json.load(f) or {}
-            cutoff = now - _CC_7DAY_WINDOW
+            cutoff = now - _CC_30DAY_WINDOW
             self._hourly = {
                 k: [(float(ts), float(v)) for ts, v in entries if float(ts) >= cutoff]
                 for k, entries in raw.items()
@@ -131,33 +137,50 @@ class ClientCountTracker:
         self._samples[key] = [s for s in samples if s[0] >= cutoff]
 
     def entry(self, scope: str, wsite: str, central_site: str) -> Dict[str, Any]:
-        """Per-site client-count status. Baseline = the AVERAGE over the last hour;
-        the site goes WARNING when the current count is >20%% below that hourly
-        average and ERROR when >50%% below (needs _CC_MIN_SAMPLES first -> no_data).
-        Detects sim-client die-off within the last hour (the demo's failure mode).
-        Status values (ok/warning/error/no_data) double as dashboard CHECK statuses."""
+        """Per-site client-count status (doubles as a dashboard CHECK). Tiered:
+          - WITHIN-HOUR drop (current vs the last-hour average): WARNING at >20%
+            below, ERROR at >50% below — catches sim-client die-off inside the hour.
+          - SUSTAINED die-off: the current hour < 20% (``_CC_MAX_FRACTION``) of the
+            7-DAY or 30-DAY rolling PEAK (max hourly-avg) → ERROR. Gated on a peak
+            of at least ``_CC_MAX_MIN_PEAK`` so a quiet site can't false-trigger.
+        The 7d/30d peaks are recorded for display regardless of status."""
         now = time.time()
         key = self._key(scope, wsite)
         samples = self._samples.get(key, [])
+        hist = self._hourly.get(key, [])
+        # Rolling peaks over each window (include the live hour so a fresh spike counts).
+        vals_7d = [v for ts, v in hist if ts >= now - _CC_7DAY_WINDOW]
+        vals_30d = [v for ts, v in hist if ts >= now - _CC_30DAY_WINDOW]
         if not samples:
             return {"site_name": central_site, "current": 0, "hourly_avg": 0,
-                    "drop_pct": 0.0, "status": "no_data", "ts": now}
+                    "drop_pct": 0.0, "max_7day": round(max(vals_7d or [0]), 1),
+                    "max_30day": round(max(vals_30d or [0]), 1),
+                    "status": "no_data", "ts": now}
         current = samples[-1][1]
         hourly_avg = sum(s[1] for s in samples) / len(samples)
+        max_7day = round(max(vals_7d + [hourly_avg]), 1)
+        max_30day = round(max(vals_30d + [hourly_avg]), 1)
         if len(samples) < _CC_MIN_SAMPLES:
             drop_pct, status = 0.0, "no_data"
-        elif hourly_avg >= 1:
-            drop_pct = max(0.0, (hourly_avg - current) / hourly_avg * 100.0)
+        else:
+            if hourly_avg >= 1:
+                drop_pct = max(0.0, (hourly_avg - current) / hourly_avg * 100.0)
+            else:
+                drop_pct = 0.0
+            # Within-hour tier.
             if drop_pct > _CC_ERROR_PCT:
                 status = "error"
             elif drop_pct > _CC_WARN_PCT:
                 status = "warning"
             else:
                 status = "ok"
-        else:
-            drop_pct, status = 0.0, "ok"
+            # Sustained die-off vs the 7d/30d peak → hard ERROR (overrides warn/ok).
+            if ((max_7day >= _CC_MAX_MIN_PEAK and hourly_avg < _CC_MAX_FRACTION * max_7day)
+                    or (max_30day >= _CC_MAX_MIN_PEAK and hourly_avg < _CC_MAX_FRACTION * max_30day)):
+                status = "error"
         return {"site_name": central_site, "current": current,
                 "hourly_avg": round(hourly_avg, 1), "drop_pct": round(drop_pct, 1),
+                "max_7day": max_7day, "max_30day": max_30day,
                 "status": status, "ts": samples[-1][0]}
 
     def maybe_snapshot(self) -> None:
@@ -168,7 +191,7 @@ class ClientCountTracker:
         if now - self._last_snapshot < _CC_SNAPSHOT_INTERVAL:
             return
         self._last_snapshot = now
-        cutoff = now - _CC_7DAY_WINDOW
+        cutoff = now - _CC_30DAY_WINDOW
         snapshot: Dict[str, dict] = {}
         for key, samples in self._samples.items():
             if len(samples) < _CC_MIN_SAMPLES:
