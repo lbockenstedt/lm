@@ -3399,10 +3399,18 @@ async function csRenderSimQuotaState() {
                 ? `<span class="text-[#01A982] font-semibold">${clients.length}/${target}</span>`
                 : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
             // Adaptive controller indicator (design §9): 🔄 Learning / ✅ Stable · floor N / ⚠️ At max.
+            // "At max" = the controller's target hit the configured ceiling. But the
+            // engine may only have filled a fraction of that target (pool too small /
+            // clients claimed by exclusive sims) — in that case "at max" is misleading
+            // (the alert isn't firing because the engine can't fill, not because max
+            // runners are running). When underfilled, say so instead.
             const _as = (st.adaptive_state || {})[`${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`];
             if (_as) {
                 const _m = _as.mode || 'learning', _fl = _as.floor;
-                fill += ' ' + (_m === 'at_max'
+                const _under = target > 0 && clients.length < target;
+                fill += ' ' + (_under
+                    ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="Engine can't reach the target from the online pool">⚠️ Underfilled</span>`
+                    : _m === 'at_max'
                     ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="At max, alert not firing">⚠️ At max</span>`
                     : _m === 'stable'
                     ? `<span class="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">✅ Stable${_fl != null ? ' · floor ' + _fl : ''}</span>`
@@ -3459,7 +3467,15 @@ async function csRenderSimQuotaState() {
         // placement cells that couldn't reach their floor (pool too small).
         const _warns = [];
         Object.entries((st.adaptive_state || {})).forEach(([k, v]) => {
-            if (v && v.mode === 'at_max') _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is at max (${csEscape(String(v.target != null ? v.target : ''))}) and still not firing.`);
+            if (!v) return;
+            const _lk = ledger[k] || {};
+            const assigned = Array.isArray(_lk.clients) ? _lk.clients.length : 0;
+            const tgt = (v.target != null) ? v.target : 0;
+            if (tgt > 0 && assigned < tgt) {
+                _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is underfilled (${assigned}/${tgt}) — the engine can't reach the target from the online pool, so the alert may not fire regardless of max.`);
+            } else if (v.mode === 'at_max') {
+                _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is at max (${csEscape(String(tgt))}) and still not firing.`);
+            }
         });
         (Array.isArray(st.placement_warnings) ? st.placement_warnings : []).forEach(w => {
             _warns.push(`SSID <span class="font-mono">${csEscape(w.cell || '')}</span> under min (${csEscape(String(w.have))}/${csEscape(String(w.want))}) — not enough online clients at ${csEscape(w.site || '')}.`);
@@ -3476,10 +3492,22 @@ async function csRenderSimQuotaState() {
             const p = String(k).split(':');  // alert_type:alert_id:site
             const label = `${p[1] || '(sim)'} @ ${p[2] || 'all sites'}`;
             const m = (v && v.mode) || 'learning';
-            const badge = m === 'at_max'
-                ? '<span class="text-amber-700">⚠️ At max</span>'
-                : m === 'stable' ? '<span class="text-emerald-700">✅ Stable</span>'
-                : '<span class="text-slate-600">🔄 Learning</span>';
+            const tgt = (v && v.target != null) ? v.target : 0;
+            // Join the live ledger to show the ACTUAL runner count, not just the
+            // controller's target. "At max" means the controller's target hit the
+            // configured ceiling — but if the engine only filled 4 of 15 (pool too
+            // small / clients claimed by exclusive sims), "at max" is misleading:
+            // the alert isn't firing because the engine can't fill, not because max
+            // runners are running and still not firing. Surface that honestly.
+            const _lk = ledger[k] || {};
+            const assigned = Array.isArray(_lk.clients) ? _lk.clients.length : 0;
+            const underfilled = tgt > 0 && assigned < tgt;
+            const badge = underfilled
+                ? `<span class="text-amber-700">⚠️ Underfilled ${assigned}/${tgt}</span>`
+                : (m === 'at_max'
+                    ? '<span class="text-amber-700">⚠️ At max</span>'
+                    : m === 'stable' ? '<span class="text-emerald-700">✅ Stable</span>'
+                    : '<span class="text-slate-600">🔄 Learning</span>');
             return `<div class="flex flex-wrap items-center gap-3 text-xs py-0.5">
               <span class="w-48 font-mono text-slate-600 truncate">${csEscape(label)}</span>
               <span class="font-semibold">${badge}</span>
