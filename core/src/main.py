@@ -4515,30 +4515,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # there, returning the agent's result. See _cert_target_spoke
             # (netbox-server branch) + request_response.
             if req_type == "RELAY_NETBOX_CERT":
-                cert = req.get("cert") or {}
-                agent_sid = self._cert_target_spoke(
-                    "netbox-server", req.get("identifier", "") or "")
-                if not agent_sid or agent_sid not in self.active_connections:
-                    logger.warning(
-                        "[cert] RELAY_NETBOX_CERT from %s: no netbox-server "
-                        "agent connected", spoke_id)
-                    return {"status": "ERROR",
-                            "message": ("no netbox-server agent connected — "
-                                        "load the netbox-server role on the "
-                                        "NetBox host")}
-                try:
-                    return await self.request_response(
-                        agent_sid, "INSTALL_CERT",
-                        {"domain": req.get("domain", "") or "",
-                         "fullchain": cert.get("fullchain", "") or "",
-                         "privkey": cert.get("privkey", "") or ""},
-                        timeout=30.0,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning("[cert] RELAY_NETBOX_CERT → %s failed: %s",
-                                   agent_sid, e)
-                    return {"status": "ERROR",
-                            "message": f"relay to netbox-server agent failed: {e}"}
+                # DEPRECATED (tiered Hub→Spoke→Agent): the ipam spoke is now a
+                # cert custodian + agent host — it installs the cert by driving
+                # its OWN hosted Agent (WRITE_FILE + RUN_COMMAND), never bouncing
+                # back to the hub. This handler stays only so a transitional
+                # old spoke gets a clear message instead of an unknown-request
+                # error. Update the netbox spoke to the agent-host build.
+                logger.warning("[cert] RELAY_NETBOX_CERT from %s is DEPRECATED — "
+                               "the ipam spoke now installs via its hosted Agent; "
+                               "update the netbox spoke.", spoke_id)
+                return {"status": "ERROR",
+                        "message": ("RELAY_NETBOX_CERT is retired — the ipam spoke "
+                                    "installs the cert via its hosted Agent now. "
+                                    "Update the netbox spoke to the agent-host build.")}
 
             logger.warning(f"Unknown HUB_REQUEST type '{req_type}' from {spoke_id}")
             return {"status": "error", "message": f"unknown request type: {req_type}"}

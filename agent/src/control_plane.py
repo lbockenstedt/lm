@@ -444,17 +444,12 @@ class AgentControlPlane(BaseControlPlane):
         return "lm-agent"
 
     def _extra_auth_fields(self) -> dict:
-        """Advertise cert-target capabilities in the WS auth frame. A host that
-        ran the netbox-server deploy role has the root nginx cert helper, so the
-        hub can route the NetBox cert here (Settings → Certificates target
-        "netbox-server") instead of to the API-only IPAM spoke."""
-        fields = {}
-        try:
-            if os.path.exists(_NETBOX_INSTALL_CERT_HELPER):
-                fields["netbox_server"] = True
-        except Exception:  # noqa: BLE001
-            pass
-        return fields
+        """No cert-target capability is advertised anymore. In the tiered
+        Hub→Spoke→Agent model the ipam spoke is the cert custodian and drives its
+        hosted Agent directly (WRITE_FILE + RUN_COMMAND) — the hub no longer routes
+        NetBox certs to a capability-advertising agent. Kept as a hook for future
+        auth fields."""
+        return {}
 
     def __init__(self, spoke_id, secret, hub_secret="", hub_url="",
                  startup_roles: List[str] = None, startup_role: str = ""):
