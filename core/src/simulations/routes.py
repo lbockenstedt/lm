@@ -21,7 +21,7 @@ import inspect
 import json
 import logging
 import re
-from .service import SimulationsService
+from .service import SimulationsService, _PASS, _FAIL
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
 from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini
 from . import sim_quota
@@ -1432,49 +1432,49 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                        applied_op: int | None = None) -> dict:
         return sim_quota.adaptive_step(st, q, firing, now, applied_op)
 
-    _adaptive_firing_cache: dict = {}
-
     async def _alert_firing(tenant_id: str, q: dict):
-        """Best-effort: is this quota's alert currently firing at its site?
-        Reads active Central alerts (mode-aware, cached ~30s). Returns None when
-        the signal is unavailable, so the controller safely holds."""
-        import time as _t
-        now = _t.time()
-        cached = _adaptive_firing_cache.get(tenant_id)
-        if cached and now - cached[0] < 30:
-            fmap = cached[1]
-        else:
-            fmap = {}
-            try:
-                modes = await store.get_processing_modes(tenant_id)
-                if modes.get("central_api") == "centralized":
-                    browse = await browse_all_from_config(await store.get_central_config(tenant_id) or {})
-                else:
-                    browse = await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=20.0)
-                for a in (browse or {}).get("alerts", []) or []:
-                    if str(a.get("status") or "active").lower() == "cleared":
-                        continue
-                    nm = str(a.get("name") or a.get("category") or "").strip().lower()
-                    if nm:
-                        fmap.setdefault(nm, set()).add(str(a.get("site") or "").strip())
-            except Exception:  # noqa: BLE001
-                fmap = {}
-            _adaptive_firing_cache[tenant_id] = (now, fmap)
-        if not fmap:
+        """Is this quota's alert firing at its site?
+
+        Reads the SAME per-site check status the dashboard already computed — the
+        hub's 5-min Central poller for centralized tenants (``central_hub_status``)
+        plus relayed spoke telemetry for distributed ones — so the Engine and the
+        dashboard Checks view can NEVER disagree, and NO extra Central API call is
+        made. This is a cheap in-memory read, so the controller may call it as
+        often as it runs; the Central poll itself stays on its own 5-min cadence.
+
+        INVERTED semantics (see central_hub_poller): a check status of "ok" means
+        the expected error IS present, i.e. the alert IS firing. Returns True when
+        firing at a matching site, False when the check is present but definitively
+        not firing, and None when the signal is unavailable (check not found, or
+        only an unknown/pending status) so the controller HOLDS instead of ramping.
+
+        Historically this made its own browse_all_from_config call and scanned only
+        ``browse["alerts"]`` (never insights) with a separate site matcher — so an
+        alert the dashboard showed firing was invisible to the Engine, which then
+        ramped to max forever. Reading the dashboard value removes that whole
+        second code path.
+        """
+        alert_id = str(q.get("alert_id") or "").strip().lower()
+        if not alert_id:
             return None
-        sites = fmap.get(str(q.get("alert_id") or "").strip().lower())
-        if sites is None:
-            return False
+        # Every (status_map, site_mappings) the dashboard has for this tenant.
+        blocks = []
+        hub_central = service._hub_central(tenant_id)               # centralized
+        if isinstance(hub_central, dict):
+            blocks.append((hub_central.get("status") or {},
+                           hub_central.get("site_mappings") or {}))
+        for _sid, data in service._spokes_for_tenant(tenant_id):    # distributed
+            central = (data or {}).get("central") or {}
+            blocks.append((central.get("status") or {},
+                           central.get("site_mappings") or {}))
+        if not blocks:
+            return None
+        # Resolve the quota's site to the wsite / central_site aliases the status
+        # map is keyed by: a cell-scoped quota (MIA-ACD) must match its physical
+        # wsite (MIA) and linked central_site (Miami); an empty site = global →
+        # match every wsite.
         site = str(q.get("site") or "").strip()
-        # Resolve the quota's site to the forms Central may report the alert
-        # under. Central reports an alert's site as EITHER the central_site name
-        # (e.g. Miami) OR the wireless site code (e.g. MIA) — see
-        # central_hub_poller, which matches both. A cell-scoped quota (MIA-ACD)
-        # must therefore match a firing site reported under ANY of its aliases:
-        # the cell name, its physical wsite, or its linked central_site. Matching
-        # only the final resolved form missed alerts Central reported under the
-        # other form → the controller never saw firing → ramped to max forever.
-        aliases = {site} if site else set()
+        aliases = {site.lower()} if site else set()
         if site:
             try:
                 csc = await store.get_central_sites_config(tenant_id) or {}
@@ -1482,18 +1482,40 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 for cd in (csc.get("ssid_matrix") or []):
                     if str(cd.get("name") or "").strip() == site and cd.get("site"):
                         wsite = str(cd.get("site")).strip()
-                        aliases.add(wsite)
+                        aliases.add(wsite.lower())
                         break
                 for lk in (csc.get("site_links") or []):
-                    if str(lk.get("wsite") or "").strip() == wsite and lk.get("central_site"):
-                        aliases.add(str(lk.get("central_site")).strip())
-                        break
+                    lk_ws = str(lk.get("wsite") or "").strip()
+                    lk_cs = str(lk.get("central_site") or "").strip()
+                    if lk_ws == wsite and lk_cs:
+                        aliases.add(lk_cs.lower())
+                    if lk_cs == site and lk_ws:
+                        aliases.add(lk_ws.lower())
             except Exception:  # noqa: BLE001
                 pass
-        # Case-insensitive: Central may report "Miami" vs config "miami".
-        sites_l = {s.lower() for s in sites}
-        return True if not aliases else (
-            any(a.lower() in sites_l for a in aliases) or "" in sites or "—" in sites)
+        # Look the alert up in the dashboard status. "ok" (in _PASS) = firing.
+        saw_fail = False
+        for status_map, site_mappings in blocks:
+            for wsite, checks_map in (status_map or {}).items():
+                if not isinstance(checks_map, dict):
+                    continue
+                if aliases:
+                    wkey = str(wsite).strip().lower()
+                    csite = str(site_mappings.get(wsite) or "").strip().lower()
+                    if wkey not in aliases and csite not in aliases:
+                        continue
+                for cid, info in checks_map.items():
+                    if str(cid).strip().lower() != alert_id:
+                        continue
+                    s = (info.get("status") if isinstance(info, dict) else info) or ""
+                    sl = str(s).strip().lower()
+                    if sl in _PASS:
+                        return True          # error present at a matching site → firing
+                    if sl in _FAIL:
+                        saw_fail = True       # present, definitively not firing
+        # Only report "not firing" when the dashboard definitively says so;
+        # otherwise hold (None) rather than ramp on an unclear/absent signal.
+        return False if saw_fail else None
 
     async def _run_adaptive_controller() -> None:
         """One controller pass over every tenant's adaptive quotas — advance the
