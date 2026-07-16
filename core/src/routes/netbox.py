@@ -138,6 +138,26 @@ def register(app, hub, ctx):
                     if subnet_fields:
                         return await _filter_session(request, data, "netbox", subnet_fields)
                     return data
+        # Warm-cache scope key: the resolved tenant slug (admins acting all-
+        # tenants → "_all_"), so cached data is only ever served back to the same
+        # scope (tenant isolation preserved). Slice params vary the key so a
+        # site/rack-filtered read doesn't serve an unfiltered snapshot.
+        scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
+        slug = scoping["netbox_tenant_slug"] or "_all_"
+        slice_sig = ",".join(f"{k}={v}" for k, v in sorted(slice_query.items()) if v)
+        warm_key = f"{slug}|{slice_sig}" if slice_sig else slug
+
+        async def _warm_or_raise(exc):
+            cached = hub.warm_get(f"nb_{cache_key}", warm_key)
+            if cached is not None:
+                out = cached
+                if subnet_fields:
+                    out = await _filter_session(request, cached, "netbox", subnet_fields)
+                if isinstance(out, dict):
+                    out = dict(out); out["stale"] = True
+                return out
+            raise exc
+
         spoke_id = get_netbox_spoke(hub)
         if not spoke_id:
             if sess:
@@ -148,21 +168,24 @@ def register(app, hub, ctx):
                     if subnet_fields:
                         return await _filter_session(request, data, "netbox", subnet_fields)
                     return data
-            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+            return await _warm_or_raise(
+                HTTPException(status_code=503, detail="NetBox spoke not connected"))
         try:
-            scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
             payload = dict(slice_query)
             payload["tenant"] = scoping["netbox_tenant_slug"] or None
-            result = await hub.request_response(spoke_id, cmd, payload)
+            # 20s (was the 5s relay default) — a large NetBox can be slow; the
+            # warm cache covers an overrun so the page still renders.
+            result = await hub.request_response(spoke_id, cmd, payload, timeout=20.0)
             data = _unwrap_netbox(result)
+            await hub.warm_set(f"nb_{cache_key}", warm_key, data)  # cache raw
             if subnet_fields:
                 return await _filter_session(request, data, "netbox", subnet_fields)
             return data
-        except HTTPException:
-            raise
+        except HTTPException as e:
+            return await _warm_or_raise(e)
         except Exception as e:
             logger.exception(route_name + " failed")
-            raise HTTPException(status_code=500, detail=str(e))
+            return await _warm_or_raise(HTTPException(status_code=500, detail=str(e)))
 
     @app.get("/api/netbox/health")
     async def netbox_health():

@@ -14,6 +14,30 @@ def register(app, hub, ctx):
     _filter_tenant = ctx._filter_tenant
     _gate_record_tenant = ctx._gate_record_tenant
 
+    async def _cppm_warm(cmd, warm_key, payload=None):
+        """Run a CPPM read with warm cache: cache the raw (scope-independent)
+        result and serve last-known (stale) on spoke-down / error / overrun so
+        the NAC page renders instantly instead of blocking/503-ing. Tenant/subnet
+        filtering is applied by the caller after — never cache post-filter data."""
+        cppm_spoke = hub.get_spoke_by_type("nac")
+        if not cppm_spoke:
+            cached = hub.warm_get(cmd.lower(), warm_key)
+            if cached is not None:
+                return cached
+            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+        try:
+            result = await hub.request_response(cppm_spoke, cmd, payload or {}, timeout=20.0)
+            data = _cppm_unwrap(result)
+            await hub.warm_set(cmd.lower(), warm_key, data)
+            return data
+        except HTTPException:
+            raise
+        except Exception:
+            cached = hub.warm_get(cmd.lower(), warm_key)
+            if cached is not None:
+                return cached
+            raise
+
     @app.get("/cppm/refresh")
     async def refresh_cppm_cache():
         hub = app.state.hub
@@ -132,39 +156,18 @@ def register(app, hub, ctx):
         tf = lambda d: _filter_devices_by_tenant(d, scope)
 
         if tenant and _effective_tenant(request, tenant):
-            cppm_spoke = hub.get_spoke_by_type("nac")
-            if not cppm_spoke:
-                raise HTTPException(status_code=503, detail="No CPPM spoke connected")
-            try:
-                result = await hub.request_response(cppm_spoke, "LIST_ENDPOINTS", {})
-                return await _filter_tenant(request, tf(_cppm_unwrap(result)), "nac", ["ip"], tenant)
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"API: Error fetching CPPM devices: {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail=str(e))
+            data = await _cppm_warm("LIST_ENDPOINTS", "_all_")
+            return await _filter_tenant(request, tf(data), "nac", ["ip"], tenant)
         if sess and not _is_admin(sess):
             tenant_id = sess.get("user", {}).get("tenant_id")
             if tenant_id:
                 cached = _cache_entry(tenant_id, "cppm_devices")
                 if cached:
                     return await _filter_session(request, tf(cached["data"]), "nac", ["ip"])
-        cppm_spoke = hub.get_spoke_by_type("nac")
-        if not cppm_spoke:
-            if sess:
-                tenant_id = sess.get("user", {}).get("tenant_id")
-                cached = _cache_entry(tenant_id, "cppm_devices") if tenant_id else None
-                if cached:
-                    return await _filter_session(request, tf(cached["data"]), "nac", ["ip"])
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
-        try:
-            result = await hub.request_response(cppm_spoke, "LIST_ENDPOINTS", {})
-            return await _filter_session(request, tf(_cppm_unwrap(result)), "nac", ["ip"])
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"API: Error fetching CPPM devices: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
+        # Live (admin/no-selection) path — warm-cached so a slow/offline CPPM
+        # still renders last-known endpoints instead of 503-ing.
+        data = await _cppm_warm("LIST_ENDPOINTS", "_all_")
+        return await _filter_session(request, tf(data), "nac", ["ip"])
 
     @app.get("/api/cppm/unknown-devices")
     async def get_cppm_unknown_devices(request: Request, tenant: str = None):
@@ -173,24 +176,15 @@ def register(app, hub, ctx):
         selected tenant so a tenant sees untagged devices on their own network;
         an admin with no tenant selected sees every untagged endpoint."""
         hub = app.state.hub
-        cppm_spoke = hub.get_spoke_by_type("nac")
-        if not cppm_spoke:
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
-        try:
-            result = await hub.request_response(cppm_spoke, "LIST_ENDPOINTS", {})
-            data = _cppm_unwrap(result)
-            # Keep only untagged endpoints (assigned to no tenant).
-            if isinstance(data, dict) and isinstance(data.get("devices"), list):
-                untagged = [d for d in data["devices"] if isinstance(d, dict) and not _device_tenant_slug(d)]
-                data = {**data, "devices": untagged, "total": len(untagged)}
-            elif isinstance(data, list):
-                data = [d for d in data if isinstance(d, dict) and not _device_tenant_slug(d)]
-            return await _filter_tenant(request, data, "nac", ["ip"], tenant)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"API: Error fetching CPPM unknown devices: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
+        # Warm-cached LIST_ENDPOINTS (shared with the devices page).
+        data = await _cppm_warm("LIST_ENDPOINTS", "_all_")
+        # Keep only untagged endpoints (assigned to no tenant).
+        if isinstance(data, dict) and isinstance(data.get("devices"), list):
+            untagged = [d for d in data["devices"] if isinstance(d, dict) and not _device_tenant_slug(d)]
+            data = {**data, "devices": untagged, "total": len(untagged)}
+        elif isinstance(data, list):
+            data = [d for d in data if isinstance(d, dict) and not _device_tenant_slug(d)]
+        return await _filter_tenant(request, data, "nac", ["ip"], tenant)
 
     def _norm_mac(m: str) -> str:
         return m.lower().replace(":", "").replace("-", "").replace(".", "") if m else ""

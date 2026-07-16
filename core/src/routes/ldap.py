@@ -97,18 +97,36 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="LDAP spoke not connected")
         return spoke_id
 
+    async def _ldap_warm(hub, cmd):
+        """Warm-cached LDAP list read: cache the raw (scope-independent) result
+        and serve last-known (stale) on spoke-down / error / overrun so the
+        Directory page renders instantly instead of blocking/503-ing. Per-reader
+        OU scoping (_scope_ldap_list) is applied by the caller after."""
+        spoke_id = hub.get_spoke_by_type("directory")
+        if not spoke_id:
+            cached = hub.warm_get(cmd.lower(), "_all_")
+            if cached is not None:
+                return cached
+            raise HTTPException(status_code=503, detail="LDAP spoke not connected")
+        try:
+            result = await hub.request_response(spoke_id, cmd, {}, timeout=20.0)
+            data = result.get("data", result) if isinstance(result, dict) else result
+            await hub.warm_set(cmd.lower(), "_all_", data)
+            return data
+        except HTTPException:
+            raise
+        except Exception:
+            cached = hub.warm_get(cmd.lower(), "_all_")
+            if cached is not None:
+                return cached
+            raise
+
     @app.get("/api/ldap/ous")
     async def get_ldap_ous(request: Request):
         """List LDAP OUs from the directory spoke (tenant-OU scoped for non-admins)."""
         hub = app.state.hub
-        spoke_id = await get_ldap_spoke(hub)
         logger.debug("relay GET /api/ldap/ous")
-        try:
-            result = await hub.request_response(spoke_id, "LIST_OUS", {})
-            return _scope_ldap_list(request, result.get("data", result) if isinstance(result, dict) else result)
-        except Exception as e:
-            logger.exception("get_ldap_ous failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return _scope_ldap_list(request, await _ldap_warm(hub, "LIST_OUS"))
 
     @app.post("/api/ldap/ous")
     async def create_ldap_ou(request: Request):
@@ -147,14 +165,8 @@ def register(app, hub, ctx):
     async def get_ldap_users(request: Request):
         """List LDAP users from the directory spoke (tenant-OU scoped for non-admins)."""
         hub = app.state.hub
-        spoke_id = await get_ldap_spoke(hub)
         logger.debug("relay GET /api/ldap/users")
-        try:
-            result = await hub.request_response(spoke_id, "LIST_USERS", {})
-            return _scope_ldap_list(request, result.get("data", result) if isinstance(result, dict) else result)
-        except Exception as e:
-            logger.exception("get_ldap_users failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return _scope_ldap_list(request, await _ldap_warm(hub, "LIST_USERS"))
 
     @app.post("/api/ldap/users")
     async def create_ldap_user(request: Request):
@@ -193,14 +205,8 @@ def register(app, hub, ctx):
     async def get_ldap_groups(request: Request):
         """List LDAP groups from the directory spoke (tenant-OU scoped for non-admins)."""
         hub = app.state.hub
-        spoke_id = await get_ldap_spoke(hub)
         logger.debug("relay GET /api/ldap/groups")
-        try:
-            result = await hub.request_response(spoke_id, "LIST_GROUPS", {})
-            return _scope_ldap_list(request, result.get("data", result) if isinstance(result, dict) else result)
-        except Exception as e:
-            logger.exception("get_ldap_groups failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return _scope_ldap_list(request, await _ldap_warm(hub, "LIST_GROUPS"))
 
     @app.post("/api/ldap/groups")
     async def create_ldap_group(request: Request):
