@@ -62,6 +62,12 @@ class SpokeClient:
         self.hostname = os.uname().nodename if hasattr(os, "uname") else ""
         self.websocket = None
         self._stop = False
+        # Cert self-heal fallback: if an mTLS connect fails (the wildcard cert is
+        # expired/broken so verification can't complete), the NEXT attempt drops
+        # to the plain PSK-authenticated channel (encrypted, unverified) purely to
+        # let the spoke re-deploy a fresh cert (_on_agent_registered custodian
+        # deploy). Once connected + cert refreshed, mTLS resumes automatically.
+        self._mtls_fallback = False
         if not self.secret:
             self._load_secret()
 
@@ -88,6 +94,12 @@ class SpokeClient:
         # context unless LM_MTLS_ENABLED — then verify the spoke against the CA
         # and present the client cert. See core/src/security/mtls.py.
         is_wss = self.spoke_url.startswith("wss://")
+        if not is_wss:
+            return None
+        # Self-heal: this attempt is a cert-refresh recovery → force the plain
+        # unverified context so a broken/expired cert can't block reconnection.
+        if self._mtls_fallback:
+            return _ssl._create_unverified_context()
         try:
             try:
                 from core.src.security.mtls import client_context
@@ -95,18 +107,31 @@ class SpokeClient:
                 from security.mtls import client_context
             return client_context(is_wss)
         except Exception:  # noqa: BLE001 - fall back to today's behavior
-            return _ssl._create_unverified_context() if is_wss else None
+            return _ssl._create_unverified_context()
 
     # ── run loop ────────────────────────────────────────────────────────────
     async def run(self):
         backoff = 5
         while not self._stop:
+            was_fallback = self._mtls_fallback
             try:
                 await self._connect_once()
+                self._mtls_fallback = False  # connected cleanly → resume mTLS
                 backoff = 5
             except Exception as e:  # noqa: BLE001
-                logger.warning("spoke connection to %s failed: %s — retry in %ss",
-                               self.spoke_url, e, backoff)
+                # If an mTLS attempt failed, the next attempt drops to the plain
+                # PSK channel for a cert-refresh recovery (self-heal). If the
+                # fallback attempt ALSO failed, go back to mTLS next (avoid
+                # sticking in plain mode).
+                try:
+                    from security.mtls import mtls_enabled as _me
+                    mtls_on = _me()
+                except Exception:  # noqa: BLE001
+                    mtls_on = False
+                self._mtls_fallback = bool(mtls_on and not was_fallback)
+                logger.warning("spoke connection to %s failed: %s — retry in %ss%s",
+                               self.spoke_url, e, backoff,
+                               " (cert-refresh fallback)" if self._mtls_fallback else "")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 300)
 
