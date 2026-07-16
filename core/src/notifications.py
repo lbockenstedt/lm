@@ -256,32 +256,86 @@ async def list_azure_subscriptions(hub, http: Optional[httpx.AsyncClient] = None
     return out
 
 
+def _rg_from_id(rid: str) -> str:
+    """Parse the resource-group name out of an Azure resource id of the form
+    ``/subscriptions/{sub}/resourceGroups/{rg}/providers/...``. Case-insensitive
+    on the ``resourceGroups`` segment (ARM ids are lower-case in practice, but
+    don't assume). Empty string if the id is malformed."""
+    parts = (rid or "").split("/")
+    for idx, seg in enumerate(parts):
+        if seg.lower() == "resourcegroups" and idx + 1 < len(parts):
+            return parts[idx + 1]
+    return ""
+
+
 async def list_azure_resource_groups(hub, subscription_id: str,
                                      http: Optional[httpx.AsyncClient] = None
                                      ) -> List[Dict[str, str]]:
     """List resource groups in ``subscription_id`` via ARM (same token as the
     NSG hook / listKeys path). Returns ``[{id, name}]`` sorted by name — drives
     the RG dropdown in the Notifications tile once a subscription is chosen, so
-    the admin picks from what the SSO app can see instead of typing."""
+    the admin picks from what the SSO app can see instead of typing.
+
+    ``GET /subscriptions/{sub}/resourceGroups`` requires ``resourceGroups/read``
+    at the *subscription* scope. An SSO app granted Contributor only on the ACS
+    resource (or its RG) — the least privilege that still lets ``listKeys``
+    work — does NOT have that, so the primary call returns 403/empty and the
+    admin could never pick an RG to list ACS resources from (a deadlock). Fall
+    back to the subscription-scoped Communication-Services provider list, which
+    Azure filters to the resources the app can actually read, and derive the RG
+    set from each resource's id. That breaks the deadlock: the RG dropdown ends
+    up showing exactly the RGs that contain an ACS resource the app can see."""
     sub = (subscription_id or "").strip()
     if not sub:
         raise NotificationsError("Select a subscription before pulling resource groups.")
     oidc_cfg = get_oidc_config(hub)
     token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
-    url = (f"https://management.azure.com/subscriptions/{sub}"
-           f"/resourceGroups?api-version=2021-04-01")
+    rg_url = (f"https://management.azure.com/subscriptions/{sub}"
+              f"/resourceGroups?api-version=2021-04-01")
+    acs_url = (f"https://management.azure.com/subscriptions/{sub}"
+               f"/providers/Microsoft.Communication/communicationServices"
+               f"?api-version={_ACS_ARM_API}")
+    rgs: Optional[List[Dict[str, Any]]] = None
+    rg_status = 0
+    detail = ""
     async with (http or httpx.AsyncClient(timeout=20.0)) as c:
-        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
-    if resp.status_code != 200:
-        raise NotificationsError(
-            f"Azure resource group list failed: HTTP {resp.status_code} — "
-            f"{resp.text[:300]}")
-    rgs = (resp.json() or {}).get("value", []) or []
-    out = [{"id": str(r.get("id") or ""),
-            "name": str(r.get("name") or "")}
-           for r in rgs if r.get("name")]
-    out.sort(key=lambda e: e["name"].lower())
-    return out
+        resp = await c.get(rg_url, headers={"Authorization": f"Bearer {token}"})
+        rg_status = resp.status_code
+        if resp.status_code == 200:
+            rgs = (resp.json() or {}).get("value", []) or []
+        else:
+            detail = f"resourceGroups HTTP {resp.status_code} — {resp.text[:300]}"
+        if not rgs:
+            # Fallback: derive RGs from the ACS resources the app can read
+            # (subscription-scoped provider list is permission-filtered, so it
+            # returns resources even without subscription-wide resourceGroups/read).
+            r2 = await c.get(acs_url, headers={"Authorization": f"Bearer {token}"})
+            if r2.status_code == 200:
+                seen: List[str] = []
+                for i in ((r2.json() or {}).get("value", []) or []):
+                    rname = _rg_from_id(str(i.get("id") or ""))
+                    if rname and rname not in seen:
+                        seen.append(rname)
+                if seen:
+                    rgs = [{"id": "", "name": n} for n in seen]
+                    logger.info("RG list fallback: derived %d RG(s) from ACS "
+                                "resources in %s", len(seen), sub)
+                else:
+                    detail = detail or f"provider-list HTTP 200 — empty"
+            else:
+                detail = detail or (f"provider-list HTTP {r2.status_code} — "
+                                    f"{r2.text[:300]}")
+    if rgs:
+        out = [{"id": str(r.get("id") or ""),
+                "name": str(r.get("name") or "")}
+               for r in rgs if r.get("name")]
+        out.sort(key=lambda e: e["name"].lower())
+        return out
+    logger.warning("No resource groups visible in %s — %s", sub, detail)
+    raise NotificationsError(
+        f"No resource groups visible to the SSO app in subscription {sub} "
+        f"({detail}). Grant the app Reader on the subscription, or Contributor "
+        f"on the ACS resource's resource group, so it can list resource groups.")
 
 
 async def list_acs_resources(hub, subscription_id: str, resource_group: str,
@@ -289,14 +343,19 @@ async def list_acs_resources(hub, subscription_id: str, resource_group: str,
                              ) -> List[Dict[str, str]]:
     """List ``Microsoft.Communication/communicationServices`` resources in
     ``subscription_id`` / ``resource_group`` via ARM (same token as listKeys).
-    Returns ``[{name, location, provisioningState, dataLocation, endpoint,
-    fromEmail}]`` sorted by name — drives the ACS resource dropdown so the
-    admin picks the exact resource ``listKeys`` will target, instead of typing
-    the name. ``endpoint`` and ``fromEmail`` are derived from the resource
-    name (the ACS data-plane endpoint is ``https://{name}.communication.
-    azure.com`` and the default AzureManaged MailFrom domain is
-    ``DoNotReply@{name}.azurecomm.net``) so the tile can auto-populate the
-    sender field."""
+    Returns ``[{name, resourceGroup, location, provisioningState, dataLocation,
+    endpoint, fromEmail}]`` sorted by name — drives the ACS resource dropdown so
+    the admin picks the exact resource ``listKeys`` will target, instead of
+    typing the name. ``endpoint`` and ``fromEmail`` are derived from the
+    resource name (the ACS data-plane endpoint is
+    ``https://{name}.communication.azure.com`` and the default AzureManaged
+    MailFrom domain is ``DoNotReply@{name}.azurecomm.net``) so the tile can
+    auto-populate the sender field.
+
+    Falls back to a subscription-scoped provider list (permission-filtered) if
+    the RG-scoped list is denied/empty — same RBAC-resilience reason as
+    ``list_azure_resource_groups`` — filtering to the chosen RG by parsing each
+    resource's id."""
     sub = (subscription_id or "").strip()
     rg = (resource_group or "").strip()
     if not sub or not rg:
@@ -304,32 +363,61 @@ async def list_acs_resources(hub, subscription_id: str, resource_group: str,
             "Select a subscription and resource group before pulling ACS resources.")
     oidc_cfg = get_oidc_config(hub)
     token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
-    url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
-           f"/providers/Microsoft.Communication/communicationServices"
-           f"?api-version={_ACS_ARM_API}")
+    rg_url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
+              f"/providers/Microsoft.Communication/communicationServices"
+              f"?api-version={_ACS_ARM_API}")
+    sub_url = (f"https://management.azure.com/subscriptions/{sub}"
+               f"/providers/Microsoft.Communication/communicationServices"
+               f"?api-version={_ACS_ARM_API}")
+    items: Optional[List[Dict[str, Any]]] = None
+    status = 0
+    detail = ""
     async with (http or httpx.AsyncClient(timeout=20.0)) as c:
-        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
-    if resp.status_code != 200:
-        raise NotificationsError(
-            f"ACS resource list failed: HTTP {resp.status_code} — "
-            f"{resp.text[:300]}")
-    items = (resp.json() or {}).get("value", []) or []
-    out = []
-    for i in items:
-        name = str(i.get("name") or "")
-        if not name:
-            continue
-        props = i.get("properties") or {}
-        out.append({
-            "name": name,
-            "location": str(i.get("location") or ""),
-            "provisioningState": str(props.get("provisioningState") or ""),
-            "dataLocation": str(props.get("dataLocation") or ""),
-            "endpoint": f"https://{name}.communication.azure.com",
-            "fromEmail": f"DoNotReply@{name}.azurecomm.net",
-        })
-    out.sort(key=lambda e: e["name"].lower())
-    return out
+        resp = await c.get(rg_url, headers={"Authorization": f"Bearer {token}"})
+        status = resp.status_code
+        if resp.status_code == 200:
+            items = (resp.json() or {}).get("value", []) or []
+        else:
+            detail = f"RG-scoped list HTTP {resp.status_code} — {resp.text[:300]}"
+        if not items:
+            # Fallback: subscription-scoped list, filtered to the chosen RG.
+            r2 = await c.get(sub_url, headers={"Authorization": f"Bearer {token}"})
+            if r2.status_code == 200:
+                all_items = (r2.json() or {}).get("value", []) or []
+                items = [i for i in all_items
+                         if _rg_from_id(str(i.get("id") or "")) == rg]
+                if not items:
+                    detail = detail or "subscription-list HTTP 200 — empty"
+                else:
+                    logger.info("ACS list fallback: %d resource(s) in %s via "
+                                "subscription-scoped list", len(items), rg)
+            else:
+                detail = detail or (f"subscription-list HTTP {r2.status_code} — "
+                                    f"{r2.text[:300]}")
+    if items:
+        out = []
+        for i in items:
+            name = str(i.get("name") or "")
+            if not name:
+                continue
+            props = i.get("properties") or {}
+            out.append({
+                "name": name,
+                "resourceGroup": _rg_from_id(str(i.get("id") or "")) or rg,
+                "location": str(i.get("location") or ""),
+                "provisioningState": str(props.get("provisioningState") or ""),
+                "dataLocation": str(props.get("dataLocation") or ""),
+                "endpoint": f"https://{name}.communication.azure.com",
+                "fromEmail": f"DoNotReply@{name}.azurecomm.net",
+            })
+        out.sort(key=lambda e: e["name"].lower())
+        return out
+    logger.warning("No ACS resources visible in %s/%s — %s", sub, rg, detail)
+    raise NotificationsError(
+        f"No Communication Services resources visible to the SSO app in "
+        f"{sub}/{rg} ({detail}). Confirm the ACS resource is in that resource "
+        f"group and the app has Reader on it (or Contributor on the resource / "
+        f"its resource group).")
 
 
 async def _resolve(hub, cfg: Dict[str, Any],
