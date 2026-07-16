@@ -7578,6 +7578,7 @@ const _SUBNET_FILTER_MODULES = [
     { key: 'dhcp',       label: 'DHCP' },
     { key: 'hypervisor', label: 'Hypervisor' },
     { key: 'cs',         label: 'Simulations (tenant-ID scoped)' },
+    { key: 'le',         label: 'Certificates (SAN → DNS → IP)' },
 ];
 let _subnetFilterState = {};
 

@@ -242,14 +242,76 @@ def register(app, hub, ctx):
             "LE_DELETE_DNS_CRED", {"tenant_id": _le_tenant(request), "name": name})
         return payload
 
+    async def _filter_le_certs(request, data):
+        """Tenant subnet-filter the cert list. Certs have no IP column, so a cert is
+        attributed to a tenant by resolving its SANs through the internal DNS A/AAAA
+        records: a non-admin sees a cert only if one of its SANs maps to a hostname
+        whose DNS IP is in the tenant's prefixes. A wildcard SAN (``*.d``) matches any
+        A-record host under that domain. Admins / ``le`` toggle off / no prefixes →
+        unchanged. DNS unavailable → fail OPEN (don't hide certs on a DNS outage).
+        The cache stores the UNFILTERED list; this runs per request."""
+        if not isinstance(data, dict):
+            return data
+        sess = _session_user(request)
+        if not sess or _is_admin(sess) or not access.filter_enabled(hub, "le"):
+            return data
+        prefixes = await access.resolve_prefixes(hub, sess)
+        if not prefixes:
+            return data
+        try:
+            dns_data = await _relay_spoke(_get_dns_spoke(hub), "DNS_LIST", log_name="le_filter_dns")
+        except Exception:  # noqa: BLE001 — DNS down → fail open
+            return data
+        import ipaddress
+        nets = []
+        for p in prefixes:
+            try:
+                nets.append(ipaddress.ip_network(p, strict=False))
+            except ValueError:
+                continue
+
+        def _in(ip):
+            try:
+                a = ipaddress.ip_address(str(ip).strip())
+            except ValueError:
+                return False
+            return any(a in n for n in nets)
+
+        tenant_hosts = set()
+        for r in (dns_data or {}).get("records") or []:
+            if str(r.get("type", "A")).upper() not in ("A", "AAAA"):
+                continue
+            name = str(r.get("name") or "").strip().rstrip(".").lower()
+            ip = r.get("value") or r.get("ip")
+            if name and ip and _in(ip):
+                tenant_hosts.add(name)
+        if not tenant_hosts:
+            return {**data, "certs": []}
+
+        def _match(cert):
+            for san in (cert.get("domains") or []):
+                s = str(san).strip().rstrip(".").lower()
+                if not s:
+                    continue
+                if s.startswith("*."):
+                    apex, suffix = s[2:], s[1:]  # "acme.com", ".acme.com"
+                    if any(h == apex or h.endswith(suffix) for h in tenant_hosts):
+                        return True
+                elif s in tenant_hosts:
+                    return True
+            return False
+
+        return {**data, "certs": [c for c in (data.get("certs") or []) if _match(c)]}
+
     @app.get("/api/le/certs")
-    async def le_list_certs():
+    async def le_list_certs(request: Request):
         """List managed certificates from the le spoke.
 
         Warm-cached (``le_cache``): serves last-known certs (marked ``stale``)
         when the le spoke is offline or a live fetch overruns, so the
         Certificates page renders instantly instead of blocking/503-ing. A
-        successful live fetch refreshes + persists the cache."""
+        successful live fetch refreshes + persists the cache. Tenant subnet
+        filtering (``_filter_le_certs``) runs per request on the UNFILTERED cache."""
         logger.debug("relay GET /api/le/certs")
         hub = app.state.hub
         le_sid = hub.get_spoke_by_type("certificates")
@@ -258,18 +320,18 @@ def register(app, hub, ctx):
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return out
+                return await _filter_le_certs(request, out)
             raise HTTPException(status_code=503, detail="Certificate spoke not connected")
         try:
             data = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_list_certs")
             await hub.le_cache_set("certs", data)
-            return data
+            return await _filter_le_certs(request, data)
         except HTTPException:
             cached = hub.le_cache_get("certs")
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return out
+                return await _filter_le_certs(request, out)
             raise
 
     @app.get("/api/le/inflight")

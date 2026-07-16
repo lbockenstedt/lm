@@ -55,10 +55,14 @@ _PREFIX_CACHE_TTL = 300  # seconds — session-prefix cache TTL (was a create_ap
 # Per-module enable map for server-side subnet filtering. Modules whose data
 # carries tenant IP addresses (nac, firewall, netbox, dhcp, hypervisor) default
 # ON; the cs / Simulations module is scoped by tenant ID instead of subnet, so
-# it defaults OFF. Admins can toggle each module in System → General.
-_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "dns", "cs", "hypervisor", "nw")
+# it defaults OFF. Admins can toggle each module in System → General. ``le``
+# (Certificates) has no IP column — it attributes a cert to a tenant by resolving
+# its SANs through the internal DNS A-records (see net_services._filter_le_certs) —
+# so it defaults OFF (best-effort, opt-in).
+_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "dns", "cs", "hypervisor", "nw", "le")
 _FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
-                            "dhcp": True, "dns": False, "cs": False, "hypervisor": True, "nw": True}
+                            "dhcp": True, "dns": False, "cs": False, "hypervisor": True,
+                            "nw": True, "le": False}
 
 # Firewall endpoint → filter spec. "rules" uses the strict source/destination
 # check (with OPNsense alias expansion); the field-based endpoints filter on
