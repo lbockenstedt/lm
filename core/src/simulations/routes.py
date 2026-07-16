@@ -1460,15 +1460,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Every (status_map, site_mappings) the dashboard has for this tenant.
         blocks = []
         hub_central = service._hub_central(tenant_id)               # centralized
-        if isinstance(hub_central, dict):
+        hub_present = isinstance(hub_central, dict)
+        if hub_present:
             blocks.append((hub_central.get("status") or {},
                            hub_central.get("site_mappings") or {}))
-        for _sid, data in service._spokes_for_tenant(tenant_id):    # distributed
+        spokes = list(service._spokes_for_tenant(tenant_id))        # distributed
+        for _sid, data in spokes:
             central = (data or {}).get("central") or {}
             blocks.append((central.get("status") or {},
                            central.get("site_mappings") or {}))
-        if not blocks:
-            return None
+        # No early-return on empty blocks: always fall through to the diag so
+        # "engine sees NO dashboard status for this tenant" is visible in the log
+        # (hub_status=False spokes=0) rather than silently producing no diag line.
         # Resolve the quota's site to the wsite / central_site aliases the status
         # map is keyed by: a cell-scoped quota (MIA-ACD) must match its physical
         # wsite (MIA) and linked central_site (Miami); an empty site = global →
@@ -1555,10 +1558,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             f"{w}→{(smap or {}).get(w)}"
             for stat, smap in blocks for w in (stat or {})
         })
-        logger.info("engine-firing diag [%s]: alert_id=%r site=%r aliases=%s "
-                    "matched_status=%r → firing=%s; status_wsites=%s cids_at_site=%s",
-                    tenant_id, alert_id, site or "(global)", sorted(aliases),
-                    matched_status, firing, status_wsites, sorted(seen_cids))
+        logger.info("engine-firing diag [%s]: alert_id=%r site=%r hub_status=%s spokes=%d "
+                    "aliases=%s matched_status=%r → firing=%s; status_wsites=%s cids_at_site=%s",
+                    tenant_id, alert_id, site or "(global)", hub_present, len(spokes),
+                    sorted(aliases), matched_status, firing, status_wsites, sorted(seen_cids))
         return firing
 
     async def _run_adaptive_controller() -> None:
@@ -1580,8 +1583,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         for tid in _all_tenant_ids():
             try:
                 csc = await store.get_central_sites_config(tid) or {}
-                adaptive = [q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
-                            if q.get("enabled") and _adaptive_is_on(q)]
+                all_q = [normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
+                adaptive = [q for q in all_q if q.get("enabled") and _adaptive_is_on(q)]
+                # DIAG: does the controller even reach _alert_firing for this tenant?
+                # total_quotas>0 but adaptive=0 = quotas aren't adaptive (min==max /
+                # disabled) → no firing eval → an "underfilled" row is a fixed-count
+                # pool-fill issue, not a firing issue.
+                logger.info("adaptive-controller diag [%s]: total_quotas=%d adaptive=%d %s",
+                            tid, len(all_q), len(adaptive),
+                            [f"{q.get('alert_id')}@{q.get('site')} min={q.get('min')} "
+                             f"max={q.get('max')} learn={q.get('learning')}" for q in adaptive])
                 if not adaptive:
                     continue
                 state = await store.get_adaptive_state(tid)
