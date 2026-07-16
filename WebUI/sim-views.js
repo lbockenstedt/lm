@@ -3480,6 +3480,9 @@ async function csRenderSimQuotaState() {
         (Array.isArray(st.placement_warnings) ? st.placement_warnings : []).forEach(w => {
             _warns.push(`SSID <span class="font-mono">${csEscape(w.cell || '')}</span> under min (${csEscape(String(w.have))}/${csEscape(String(w.want))}) — not enough online clients at ${csEscape(w.site || '')}.`);
         });
+        (Array.isArray(st.stale_push) ? st.stale_push : []).forEach(s => {
+            _warns.push(`Quota <span class="font-mono">${csEscape(s.key || '')}</span> spoke count (${csEscape(String(s.spoke_count))}) lags hub target (${csEscape(String(s.hub_count))}) — the engine is running a stale count; the adaptive push hasn't landed on the spoke yet.`);
+        });
         const warnBanner = _warns.length
             ? `<div class="bg-amber-50 border border-amber-200 rounded-md p-3 mb-3 text-xs text-amber-800">
                  <div class="font-bold mb-1">⚠️ ${_warns.length} warning${_warns.length === 1 ? '' : 's'}</div>

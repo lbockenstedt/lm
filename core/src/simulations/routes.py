@@ -3171,6 +3171,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         merged_ledger: dict = {}
         monitored: list = []
         pool = {"online": 0, "by_site": {}, "tenant_pool": 0}   # cheap tenant-wide sum
+        # The spoke's ACTUAL effective_sim_quotas (what its engine is running
+        # against) — the hub pushes count to the spoke, but until it lands the
+        # spoke runs a stale count. Capture per-quota count so the UI can show
+        # the engine's real target vs. the controller's and flag a stale push
+        # (the root cause of "4/15" that looks like an eligibility problem).
+        spoke_counts: dict = {}
         for _sid, data in results:
             if not isinstance(data, dict):
                 continue
@@ -3178,6 +3184,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 m = merged_ledger.setdefault(
                     k, {"sim_id": e.get("sim_id"), "site": e.get("site"), "clients": []})
                 m["clients"].extend(e.get("clients") or [])
+            for q in (data.get("effective") or []):
+                if isinstance(q, dict):
+                    spoke_counts.setdefault(sim_quota.quota_dedup_key(q), int(q.get("count") or 0))
             p = data.get("pool") or {}
             pool["online"] += int(p.get("online") or 0)
             pool["tenant_pool"] += int(p.get("tenant_pool") or 0)
@@ -3203,8 +3212,21 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             {"site": site, "cell": cell, "have": have, "want": int(want or 0)})
         except Exception:  # noqa: BLE001
             pass
+        eff_quotas = await _effective_sim_quotas(tenant_id)
+        # Flag adaptive quotas whose spoke count (engine's real target) lags the
+        # hub count (controller's applied target) — a push that hasn't landed yet,
+        # which presents as "underfilled" but is really a stale count on the spoke.
+        stale_push: list = []
+        for q in eff_quotas:
+            k = sim_quota.quota_dedup_key(q)
+            sc = spoke_counts.get(k)
+            hc = int(q.get("count") or 0)
+            if sc is not None and sc != hc:
+                stale_push.append({"key": k, "spoke_count": sc, "hub_count": hc})
         result = {"status": "SUCCESS",
-                  "effective": await _effective_sim_quotas(tenant_id),
+                  "effective": eff_quotas,
+                  "spoke_counts": spoke_counts,
+                  "stale_push": stale_push,
                   "ledger": merged_ledger, "monitored_checks": monitored,
                   "placement_warnings": placement_warnings, "pool": pool}
         try:
