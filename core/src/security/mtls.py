@@ -24,9 +24,22 @@ import os
 import ssl
 
 
+# Runtime override set by the hub from global_config.mtls_enabled (the WebUI knob),
+# so enabling doesn't require an env change + restart. None → fall back to the env.
+_runtime_enabled = None
+
+
+def set_runtime_enabled(value) -> None:
+    """Hub applies global_config.mtls_enabled here (startup + on the WebUI knob)."""
+    global _runtime_enabled
+    _runtime_enabled = None if value is None else bool(value)
+
+
 def mtls_enabled() -> bool:
     """Master switch. Default OFF. Turn on only when every spoke/agent has the
     wildcard (see the readiness check) so enabling can't orphan a node."""
+    if _runtime_enabled is not None:
+        return _runtime_enabled
     return str(os.getenv("LM_MTLS_ENABLED", "")).strip().lower() in ("1", "true", "yes", "on")
 
 

@@ -138,6 +138,57 @@ def register(app, hub, ctx):
                 break
         return {"name": os.path.basename(path)[:-3], "title": title, "markdown": markdown}
 
+    @app.get("/setup/mtls-readiness")
+    async def get_mtls_readiness():
+        """mTLS readiness: is the system safe to enable mutual TLS without
+        orphaning a spoke/agent? Reports the master switch, the hub's cert
+        materials, and the connected spokes. Green when the hub has the wildcard
+        + CA in place (the transport endpoints can verify). Per-spoke deep-check
+        is a follow-up refinement; until then this gates on the hub materials +
+        surfaces the connected-spoke count so an admin enables deliberately."""
+        from security import mtls
+        hub = app.state.hub
+        st = mtls.status()
+        spokes = [{"id": sid, "type": mt}
+                  for sid, mt in getattr(hub, "spoke_module_types", {}).items()
+                  if sid in getattr(hub, "active_connections", {})]
+        blockers = []
+        if not st["ca_present"]:
+            blockers.append("no CA bundle (LM_MTLS_CA) — distribute the LE wildcard chain")
+        if not st["server_cert_present"]:
+            blockers.append("hub server cert (LM_TLS_CERT) not present")
+        ready = not blockers
+        return {"enabled": st["enabled"], "ready": ready, "status": st,
+                "connected_spokes": len(spokes), "spokes": spokes,
+                "blockers": blockers}
+
+    @app.post("/setup/mtls-enable")
+    async def set_mtls_enable(request: Request):
+        from security import mtls
+        hub = app.state.hub
+        sess = ctx._session_user(request)
+        if not sess or not ctx._is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        data = await request.json()
+        enable = bool(data.get("enabled"))
+        # Guard: refuse to enable if not ready (would orphan spokes), unless the
+        # caller explicitly forces it.
+        if enable and not bool(data.get("force")):
+            st = mtls.status()
+            if not (st["ca_present"] and st["server_cert_present"]):
+                raise HTTPException(status_code=409,
+                    detail="System not ready for mTLS — distribute the LE wildcard "
+                           "to the hub + spokes first (or pass force=true).")
+        gc = hub.state.system_state.get("global_config", {})
+        gc["mtls_enabled"] = enable
+        hub.state.system_state["global_config"] = gc
+        hub.state.save_state()
+        mtls.set_runtime_enabled(enable)  # applies to new SSL contexts (reconnects)
+        return {"status": "ok", "enabled": enable,
+                "message": ("mTLS enabled — verification arms on the next "
+                            "reconnect of each leg." if enable
+                            else "mTLS disabled (encrypted, unverified).")}
+
     @app.get("/setup/session-timeout")
     async def get_session_timeout():
         """Idle session timeout (minutes) — a user with no requests for this long

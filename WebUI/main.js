@@ -3717,6 +3717,18 @@ function _renderSettingsSection(subMenu) {
                     </div>
                 </div>
                 <div class="${card} p-6">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Mutual TLS (Hub ⇄ Spoke ⇄ Agent)</h3>
+                    <p class="text-xs text-slate-400 mb-3">Every leg is TLS-encrypted. Mutual authentication (client-cert verification) is <b>plumbed but off</b> — enable it only once the LE wildcard is on the hub + all spokes, so no spoke gets orphaned.</p>
+                    <div id="mtls-readiness" class="flex items-center gap-3 mb-3 text-sm text-slate-500">Checking readiness…</div>
+                    <div class="flex items-center gap-3">
+                        <label class="flex items-center gap-2 text-sm text-slate-600">
+                            <input type="checkbox" id="mtls-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                            Enable mutual TLS
+                        </label>
+                        <button onclick="saveMtlsEnable(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
+                    </div>
+                </div>
+                <div class="${card} p-6">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Idle Session Timeout</h3>
                     <p class="text-xs text-slate-400 mb-3">Automatically log out a user who makes no requests for this long. Applies live to all sessions.</p>
                     <div class="flex items-center gap-3">
@@ -3759,6 +3771,7 @@ function _renderSettingsSection(subMenu) {
         loadUpdateGateConfig();
         loadActiveSessions();
         loadSessionTimeout();
+        loadMtlsReadiness();
         // Auto-save on change (no per-card Save buttons). Note: backpressure
         // config applies LIVE each 1s tick, so each committed field change takes
         // effect immediately — `change` fires on commit (blur/Enter), not per
@@ -10403,6 +10416,42 @@ async function revokeApiToken(id) {
     } catch (e) {
         if (typeof showToast === 'function') showToast('Revoke failed: ' + e.message, 'error');
     }
+}
+
+// mTLS readiness + enable (Settings → Active Sessions area). Green when ready.
+async function loadMtlsReadiness() {
+    const ind = document.getElementById('mtls-readiness');
+    const chk = document.getElementById('mtls-enabled');
+    if (!ind) return;
+    try {
+        const r = await setupFetch('/setup/mtls-readiness');
+        if (!r.ok) { ind.textContent = 'Readiness unavailable.'; return; }
+        const d = await r.json();
+        if (chk) chk.checked = !!d.enabled;
+        const green = !!d.ready;
+        const dot = `<span class="inline-block w-2.5 h-2.5 rounded-full ${green ? 'bg-green-500' : 'bg-amber-500'}"></span>`;
+        const label = green
+            ? `<span class="text-green-600 font-semibold">System ready for mTLS</span> · ${d.connected_spokes} spoke(s) connected`
+            : `<span class="text-amber-600 font-semibold">Not ready</span> — ${(d.blockers || []).join('; ') || 'distribute the LE wildcard first'}`;
+        ind.innerHTML = `${dot} ${label}`;
+    } catch (e) { ind.textContent = 'Readiness check failed.'; }
+}
+
+async function saveMtlsEnable(btn) {
+    const chk = document.getElementById('mtls-enabled');
+    if (!chk) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const r = await setupFetch('/setup/mtls-enable', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: chk.checked }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) { showToast(d.message || 'Saved.', 'success'); loadMtlsReadiness(); }
+        else if (r.status === 409) showToast(d.detail || 'Not ready for mTLS.', 'error');
+        else showToast('Failed: ' + (d.detail || r.status), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
 }
 
 // Idle session timeout (Settings → Active Sessions area). 0 = disabled; default 60.

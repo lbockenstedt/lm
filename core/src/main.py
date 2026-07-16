@@ -947,6 +947,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 _access.set_session_idle_timeout(float(_mins) * 60)
         except Exception as _e:  # noqa: BLE001 - never block startup on this
             logger.debug("apply session idle timeout at startup: %s", _e)
+        # Apply the mTLS master switch from config (plumbed, default-off).
+        try:
+            from security import mtls as _mtls
+            _mtls.set_runtime_enabled(
+                (self.state.get_global_config() or {}).get("mtls_enabled"))
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("apply mtls_enabled at startup: %s", _e)
         # File-a-Bug artifact store: each report's console.log / dom.html /
         # screenshot.png / report.json live under data_dir/bugs/<id>/ so the
         # large payloads never bloat the 500-line self.logs deque or the hub
