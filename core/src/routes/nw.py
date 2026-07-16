@@ -268,6 +268,52 @@ def register(app, hub, ctx):
                 pushed += 1
         return {"status": "ok", "default_poll_interval": val, "pushed": pushed}
 
+    @app.get("/setup/nw-netbox-import")
+    async def get_nw_netbox_import(request: Request):
+        """NetBox→NW import config (NetBox = fleet source of truth): which NetBox
+        device roles get imported into the nw fleet, object_type mapping, cadence."""
+        hub = app.state.hub
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        return {"nw_netbox_import": gc.get("nw_netbox_import", {}) or {}}
+
+    @app.post("/setup/nw-netbox-import")
+    async def set_nw_netbox_import(request: Request):
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        data = await request.json()
+        cfg = data.get("config", data) or {}
+        roles = cfg.get("roles")
+        if isinstance(roles, str):
+            roles = [r.strip() for r in roles.split(",") if r.strip()]
+        clean = {
+            "enabled": bool(cfg.get("enabled", False)),
+            "roles": [str(r).strip() for r in (roles or []) if str(r).strip()],
+            "object_type_map": dict(cfg.get("object_type_map") or {}),
+            "default_object_type": str(cfg.get("default_object_type") or "gateway"),
+            "interval": int(cfg.get("interval") or 900),
+            "spoke_id": str(cfg.get("spoke_id") or "").strip(),
+        }
+        gc = hub.state.system_state.get("global_config", {})
+        gc["nw_netbox_import"] = clean
+        hub.state.system_state["global_config"] = gc
+        hub.state.save_state()
+        return {"status": "ok", "nw_netbox_import": clean}
+
+    @app.post("/setup/nw-netbox-import/run")
+    async def run_nw_netbox_import(request: Request):
+        """On-demand 'Import now' — run one NetBox→NW import cycle."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            return await hub.run_nw_netbox_import_all()
+        except Exception as e:
+            logger.exception("run_nw_netbox_import failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.post("/setup/nw-devices")
     async def add_nw_device(request: Request):
         hub = app.state.hub
@@ -282,6 +328,9 @@ def register(app, hub, ctx):
             _enforce_tenant_bind(request, new_dev, "network device")
             if "id" not in new_dev:
                 new_dev["id"] = str(uuid.uuid4())
+            # A manually-added device is nw-owned (not a NetBox import) — tag it so
+            # the NetBox→NW import loop never prunes it as a stale netbox record.
+            new_dev.setdefault("source", "manual")
 
             global_config = hub.state.system_state.get("global_config", {})
             devices = global_config.get("nw_devices", [])
@@ -293,7 +342,19 @@ def register(app, hub, ctx):
             # New device → push the bound slice so the spoke knows about it now.
             spoke_id = new_dev.get("spoke_id")
             pushed = await _nw_push_fleet(hub, spoke_id) if spoke_id else False
-            return {"status": "ok", "device": new_dev, "pushed": pushed}
+
+            # NetBox is the fleet source of truth: write a manually-added device
+            # back to NetBox (dcim.device) so it stays complete. Best-effort — a
+            # NetBox miss must not fail the add. Skipped for netbox-imported rows.
+            netbox_pushed = False
+            if new_dev.get("source") != "netbox":
+                try:
+                    push, _errs = await hub.push_nw_device_inventory(new_dev, {}, [])
+                    netbox_pushed = str((push or {}).get("status", "")).upper() in ("SUCCESS", "PARTIAL")
+                except Exception as e:
+                    logger.debug("add_nw_device NetBox write-back skipped: %s", e)
+            return {"status": "ok", "device": new_dev, "pushed": pushed,
+                    "netbox_pushed": netbox_pushed}
         except HTTPException:
             raise
         except Exception as e:

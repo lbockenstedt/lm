@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import logging
+import re
 from typing import Any, Dict, List, Tuple
 
 try:
@@ -689,3 +690,143 @@ class NwDiscoverySyncMixin:
             except Exception as e:
                 logger.warning("[sync-error] nw-discovery loop cycle failed: %s", e)
                 await asyncio.sleep(60)
+
+    # ── NetBox → NW fleet import (NetBox is source of truth) ─────────────────
+    # Reverse of the discovery/inventory push: devices already in NetBox whose
+    # role matches the configured category are imported into the nw fleet so the
+    # nw module manages them. A user who adds a device manually still gets it
+    # written to NetBox (add_nw_device → push_nw_device_inventory), so NetBox
+    # stays complete/authoritative either way.
+
+    @staticmethod
+    def _nw_role_norm(s: Any) -> str:
+        """Normalize a role name/slug for case/space/hyphen-insensitive matching."""
+        return re.sub(r"[\s_-]+", "", str(s or "").strip().lower())
+
+    def _nw_import_cfg(self) -> Dict[str, Any]:
+        """Module-level NetBox→NW import config from
+        ``global_config.nw_netbox_import`` with defaults."""
+        gc = self.state.system_state.get("global_config", {}) or {}
+        cfg = gc.get("nw_netbox_import", {}) or {}
+        return {
+            "enabled": bool(cfg.get("enabled", False)),
+            "roles": [str(r).strip() for r in (cfg.get("roles") or []) if str(r).strip()],
+            "object_type_map": dict(cfg.get("object_type_map") or {}),
+            "default_object_type": str(cfg.get("default_object_type") or "gateway"),
+            "interval": int(cfg.get("interval") or 900),
+            "spoke_id": str(cfg.get("spoke_id") or "").strip(),
+        }
+
+    def _nw_import_object_type(self, cfg: Dict[str, Any], role: str,
+                              device_type: str) -> str:
+        """Map a NetBox role/device_type to an nw object_type via the config map
+        (case-insensitive on role then device_type), else the default."""
+        valid = {"aos_switch", "cx_switch", "ex_switch", "gateway"}
+        norm_map = {self._nw_role_norm(k): v for k, v in cfg["object_type_map"].items()}
+        for key in (role, device_type):
+            mv = norm_map.get(self._nw_role_norm(key))
+            if mv in valid:
+                return mv
+        dot = cfg["default_object_type"]
+        return dot if dot in valid else "gateway"
+
+    async def run_nw_netbox_import_all(self) -> Dict[str, Any]:
+        """Pull NetBox devices, keep those whose role matches the configured
+        category, and upsert them into the nw fleet (``source="netbox"``).
+
+        NetBox is source of truth: name/address/object_type track NetBox each
+        cycle, but a device's user-entered credentials / poll_interval / bound
+        spoke are preserved. NetBox-sourced devices that no longer match (deleted
+        or re-roled in NetBox) are removed; manually-added devices are untouched.
+        Pushes the updated fleet to every connected nw spoke.
+        """
+        cfg = self._nw_import_cfg()
+        if not cfg["enabled"] or not cfg["roles"]:
+            return {"status": "SKIPPED", "reason": "disabled or no roles configured"}
+        netbox = self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE)
+        if not netbox:
+            return {"status": "ERROR", "message": "NetBox (ipam) spoke not connected"}
+
+        rr = await self.request_response(netbox, "NETBOX_GET_DEVICES", {}, timeout=60.0)
+        data = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+        devices = data.get("devices") if isinstance(data, dict) else []
+        if not isinstance(devices, list):
+            devices = []
+        roles_norm = {self._nw_role_norm(r) for r in cfg["roles"]}
+        matched = [d for d in devices if isinstance(d, dict)
+                   and self._nw_role_norm(d.get("role")) in roles_norm]
+
+        nw_spokes = list(self.get_all_spokes_by_type("nw") or [])
+        target_spoke = cfg["spoke_id"] or (nw_spokes[0] if nw_spokes else "")
+
+        gc = self.state.system_state.get("global_config", {})
+        fleet = gc.get("nw_devices", []) or []
+        by_id = {d.get("id"): d for d in fleet if isinstance(d, dict)}
+        seen, added, updated = set(), 0, 0
+        for d in matched:
+            did = f"nbimport-{d.get('id')}"
+            seen.add(did)
+            addr = str(d.get("primary_ip") or "").split("/")[0]
+            ot = self._nw_import_object_type(cfg, d.get("role"), d.get("device_type"))
+            existing = by_id.get(did)
+            if existing:
+                # NetBox owns name/address/object_type/role; keep user creds etc.
+                changed = False
+                for k, v in (("name", d.get("name") or existing.get("name")),
+                             ("address", addr or existing.get("address")),
+                             ("object_type", ot),
+                             ("netbox_role", d.get("role") or "")):
+                    if existing.get(k) != v:
+                        existing[k] = v
+                        changed = True
+                updated += 1 if changed else 0
+            else:
+                fleet.append({
+                    "id": did, "name": d.get("name") or did, "address": addr,
+                    "object_type": ot, "transport": "auto", "source": "netbox",
+                    "netbox_id": d.get("id"), "netbox_role": d.get("role") or "",
+                    "spoke_id": target_spoke, "poll_interval": None,
+                })
+                added += 1
+
+        # Prune NetBox-sourced devices that no longer match (NetBox = SoT). Never
+        # touch manually-added / discovery devices (source != "netbox").
+        before = len(fleet)
+        fleet[:] = [d for d in fleet if not (isinstance(d, dict)
+                    and d.get("source") == "netbox" and d.get("id") not in seen)]
+        removed = before - len(fleet)
+
+        gc["nw_devices"] = fleet
+        self.state.system_state["global_config"] = gc
+        self.state.save_state()
+
+        pushed = 0
+        for sid in nw_spokes:
+            try:
+                await self.push_config_to_spoke(sid)
+                pushed += 1
+            except Exception as e:  # noqa: BLE001
+                logger.debug("nw import fleet push to %s failed: %s", sid, e)
+
+        logger.info("nw netbox import: %d device(s) matched role(s) %s → +%d added, "
+                    "~%d updated, -%d removed; pushed %d spoke(s)",
+                    len(matched), cfg["roles"], added, updated, removed, pushed)
+        return {"status": "SUCCESS", "matched": len(matched), "added": added,
+                "updated": updated, "removed": removed, "pushed": pushed}
+
+    async def run_nw_netbox_import_loop(self):
+        """Periodic NetBox→NW fleet import per the configured interval. Reads
+        config fresh each cycle; disabled → short re-check. Staggered ~110s after
+        boot so it doesn't stampede with the discovery/fw loops."""
+        await asyncio.sleep(110)
+        while True:
+            try:
+                cfg = self._nw_import_cfg()
+                if (cfg["enabled"] and cfg["roles"]
+                        and self.get_all_spokes_by_type("nw")
+                        and self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE)):
+                    await self.run_nw_netbox_import_all()
+                await asyncio.sleep(max(60, cfg["interval"]) if cfg["enabled"] else 120)
+            except Exception as e:
+                logger.warning("[sync-error] nw netbox import loop failed: %s", e)
+                await asyncio.sleep(120)

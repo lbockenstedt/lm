@@ -6551,6 +6551,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # NETBOX_SYNC_DEVICES (source="Network Devices" so the sink tags records
         # nw-owned). See run_nw_discovery_sync_loop (NwDiscoverySyncMixin).
         nw_discovery_sync_task = asyncio.create_task(self.run_nw_discovery_sync_loop())
+        # NetBox → NW fleet import (reverse; NetBox = source of truth): imports
+        # NetBox devices whose role matches the configured category into the nw
+        # fleet, and prunes NetBox-sourced nw devices that no longer match. Manual
+        # nw adds are written back to NetBox (add_nw_device). Config-gated;
+        # on-demand "Sync now" via /setup/nw-netbox-import/run. See
+        # run_nw_netbox_import_loop (NwDiscoverySyncMixin).
+        nw_netbox_import_task = asyncio.create_task(self.run_nw_netbox_import_loop())
         # Realtime NAC → IPAM reverse sync: every ~1 min pull ClearPass Access
         # Tracker sessions (last 2 min) from the CPPM spoke, attribute by prefix,
         # and add to NetBox the MACs not already present (only-add-missing —

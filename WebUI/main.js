@@ -5135,9 +5135,143 @@ function _renderSetupModuleMgmtTile(content) {
                     </select>
                     <button onclick="saveNwPollConfig(this)" class="${btnCls} ml-auto">Save</button>
                 </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-1">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NetBox → Network Devices Import</h3>
+                    <button onclick="runNwNetboxImport(this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium">Import now</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">NetBox is the source of truth for the network-device fleet. Devices in NetBox whose <b>role</b> matches the categories below are imported into the nw module automatically; devices you add manually here are written back to NetBox. NetBox-imported devices that are deleted or re-roled in NetBox are removed from nw (manual devices are never touched). Add credentials to an imported device to make it pollable.</p>
+                <div class="space-y-3">
+                    <label class="flex items-center gap-2 text-sm text-slate-600">
+                        <input type="checkbox" id="nw-import-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                        Enable NetBox → NW import
+                    </label>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="space-y-1">
+                            <label class="text-xs text-slate-500 uppercase font-bold">NetBox device roles</label>
+                            <input type="text" id="nw-import-roles" placeholder="e.g. Switch, Router, Gateway" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <p class="text-[11px] text-slate-400">Comma-separated NetBox role names (matched case-insensitively).</p>
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Default object type</label>
+                            <select id="nw-import-default-ot" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="gateway">Gateway</option>
+                                <option value="aos_switch">AOS Switch</option>
+                                <option value="cx_switch">CX Switch</option>
+                                <option value="ex_switch">EX Switch</option>
+                            </select>
+                            <p class="text-[11px] text-slate-400">Used when a role isn't in the mapping below.</p>
+                        </div>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Role → object-type mapping</label>
+                        <input type="text" id="nw-import-map" placeholder="Switch=aos_switch, Router=gateway" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500">
+                        <p class="text-[11px] text-slate-400">Optional. <code>role=object_type</code> pairs, comma-separated.</p>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="space-y-1">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Import interval</label>
+                            <select id="nw-import-interval" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="300">Every 5 minutes</option>
+                                <option value="900" selected>Every 15 minutes</option>
+                                <option value="1800">Every 30 minutes</option>
+                                <option value="3600">Every hour</option>
+                                <option value="21600">Every 6 hours</option>
+                                <option value="86400">Every day</option>
+                            </select>
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Owning nw spoke</label>
+                            <select id="nw-import-spoke" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="">Auto (first nw spoke)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="flex justify-end">
+                        <button onclick="saveNwNetboxImport(this)" class="${btnCls}">Save</button>
+                    </div>
+                </div>
             </div>`;
     loadAllDevices();
     loadNwPollConfig();
+    loadNwNetboxImport();
+}
+
+// NetBox → NW import config (Setup → Module Management). NetBox = fleet SoT.
+async function loadNwNetboxImport() {
+    const en = document.getElementById('nw-import-enabled');
+    if (!en) return;
+    // Populate the nw-spoke picker (reuse the approved-spokes helper).
+    try {
+        const spokes = await loadApprovedSpokes();
+        const sel = document.getElementById('nw-import-spoke');
+        if (sel) {
+            const nwSpokes = spokes.filter(s => s.module_type === 'nw' || /^(nw|network)/.test(s.spoke_id));
+            sel.innerHTML = '<option value="">Auto (first nw spoke)</option>' +
+                nwSpokes.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('');
+        }
+    } catch (e) { /* keep Auto */ }
+    try {
+        const r = await setupFetch('/setup/nw-netbox-import');
+        if (!r.ok) return;
+        const c = (await r.json()).nw_netbox_import || {};
+        en.checked = !!c.enabled;
+        document.getElementById('nw-import-roles').value = (c.roles || []).join(', ');
+        document.getElementById('nw-import-default-ot').value = c.default_object_type || 'gateway';
+        document.getElementById('nw-import-map').value =
+            Object.entries(c.object_type_map || {}).map(([k, v]) => `${k}=${v}`).join(', ');
+        if (c.interval) document.getElementById('nw-import-interval').value = String(c.interval);
+        const sp = document.getElementById('nw-import-spoke');
+        if (sp && c.spoke_id) sp.value = c.spoke_id;
+    } catch (e) { /* defaults */ }
+}
+
+function _parseNwImportMap(raw) {
+    const map = {};
+    (raw || '').split(',').forEach(pair => {
+        const [k, v] = pair.split('=').map(s => (s || '').trim());
+        if (k && v) map[k] = v;
+    });
+    return map;
+}
+
+async function saveNwNetboxImport(btn) {
+    const config = {
+        enabled: document.getElementById('nw-import-enabled').checked,
+        roles: document.getElementById('nw-import-roles').value.split(',').map(s => s.trim()).filter(Boolean),
+        default_object_type: document.getElementById('nw-import-default-ot').value,
+        object_type_map: _parseNwImportMap(document.getElementById('nw-import-map').value),
+        interval: parseInt(document.getElementById('nw-import-interval').value, 10) || 900,
+        spoke_id: document.getElementById('nw-import-spoke').value,
+    };
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const r = await setupFetch('/setup/nw-netbox-import', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config }),
+        });
+        if (r.ok) showToast('NetBox → NW import settings saved.', 'success');
+        else showToast('Failed to save: ' + (await r.json().catch(() => ({}))).detail, 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
+}
+
+async function runNwNetboxImport(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+    try {
+        const r = await setupFetch('/setup/nw-netbox-import/run', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.status === 'SUCCESS') {
+            showToast(`Imported: ${d.matched} matched · +${d.added} added · ~${d.updated} updated · -${d.removed} removed.`, 'success');
+            loadAllDevices();
+        } else if (r.ok && d.status === 'SKIPPED') {
+            showToast('Import skipped — enable it and set at least one role first.', 'info');
+        } else {
+            showToast('Import failed: ' + (d.message || d.detail || r.status), 'error');
+        }
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Import now'; } }
 }
 
 // Module-level nw auto-poll default (Setup → Module Management). Device-level wins.
