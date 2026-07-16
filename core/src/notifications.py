@@ -289,9 +289,14 @@ async def list_acs_resources(hub, subscription_id: str, resource_group: str,
                              ) -> List[Dict[str, str]]:
     """List ``Microsoft.Communication/communicationServices`` resources in
     ``subscription_id`` / ``resource_group`` via ARM (same token as listKeys).
-    Returns ``[{name, location}]`` sorted by name — drives the ACS resource
-    dropdown so the admin picks the exact resource ``listKeys`` will target,
-    instead of typing the name."""
+    Returns ``[{name, location, provisioningState, dataLocation, endpoint,
+    fromEmail}]`` sorted by name — drives the ACS resource dropdown so the
+    admin picks the exact resource ``listKeys`` will target, instead of typing
+    the name. ``endpoint`` and ``fromEmail`` are derived from the resource
+    name (the ACS data-plane endpoint is ``https://{name}.communication.
+    azure.com`` and the default AzureManaged MailFrom domain is
+    ``DoNotReply@{name}.azurecomm.net``) so the tile can auto-populate the
+    sender field."""
     sub = (subscription_id or "").strip()
     rg = (resource_group or "").strip()
     if not sub or not rg:
@@ -309,9 +314,20 @@ async def list_acs_resources(hub, subscription_id: str, resource_group: str,
             f"ACS resource list failed: HTTP {resp.status_code} — "
             f"{resp.text[:300]}")
     items = (resp.json() or {}).get("value", []) or []
-    out = [{"name": str(i.get("name") or ""),
-            "location": str(i.get("location") or "")}
-           for i in items if i.get("name")]
+    out = []
+    for i in items:
+        name = str(i.get("name") or "")
+        if not name:
+            continue
+        props = i.get("properties") or {}
+        out.append({
+            "name": name,
+            "location": str(i.get("location") or ""),
+            "provisioningState": str(props.get("provisioningState") or ""),
+            "dataLocation": str(props.get("dataLocation") or ""),
+            "endpoint": f"https://{name}.communication.azure.com",
+            "fromEmail": f"DoNotReply@{name}.azurecomm.net",
+        })
     out.sort(key=lambda e: e["name"].lower())
     return out
 

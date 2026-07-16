@@ -6619,7 +6619,7 @@ function _renderSettingsNotificationsTile(content) {
                             <button type="button" onclick="pullAzureRgs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
                         </div>
                         <div class="flex gap-1">
-                            <select id="notif-acs-name" class="${inputCls} font-mono text-xs flex-1"><option value="">Resource name…</option></select>
+                            <select id="notif-acs-name" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsResourceChanged()"><option value="">Resource name…</option></select>
                             <button type="button" onclick="pullAcsResources()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
                         </div>
                     </div>
@@ -6636,10 +6636,12 @@ function _renderSettingsNotificationsTile(content) {
             </div>
             <p id="notif-acs-note" class="text-[11px] text-slate-400 mt-2 hidden">ACS API transport signs each request with the access key (HMAC-SHA256) — no Entra app permission needed. The access key is pulled from ARM (listKeys) or read from the Key Vault secret, depending on the credential source above.</p>
             <div class="mt-3 flex flex-wrap items-center gap-2">
-                <button type="button" onclick="saveNotifications()" class="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
-                <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Send test email</button>
                 <button type="button" id="notif-push-btn" onclick="pushAcsSecret()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push ACS connection string to Key Vault</button>
                 <span id="notif-action-out" class="text-[11px] font-mono text-slate-600 break-all"></span>
+                <div class="ml-auto flex items-center gap-2">
+                    <button type="button" onclick="testNotifications()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Send test email</button>
+                    <button type="button" onclick="saveNotifications()" class="bg-[#01A982] hover:bg-[#01A982]/90 text-white px-3 py-1.5 rounded-md text-xs font-bold">Save</button>
+                </div>
             </div>
         </div>`;
     loadNotifications();
@@ -6866,9 +6868,12 @@ async function pullAcsResources() {
         if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
         const items = d.acs_resources || [];
         if (!items.length) { if (out) out.textContent = 'no Communication Services resources in this RG'; showToast('No ACS resources in this resource group.', 'error'); return; }
-        nameSel.innerHTML = items.map(i => `<option value="${i.name}">${escapeHtml(i.name)}${i.location ? ' — ' + escapeHtml(i.location) : ''}</option>`).join('');
+        nameSel.innerHTML = items.map(i => `<option value="${i.name}" data-from="${escapeHtml(i.fromEmail || '')}" data-endpoint="${escapeHtml(i.endpoint || '')}" data-state="${escapeHtml(i.provisioningState || '')}">${escapeHtml(i.name)}${i.location ? ' — ' + escapeHtml(i.location) : ''}</option>`).join('');
         if (cur && items.some(i => i.name === cur)) nameSel.value = cur;
+        else if (items.length === 1) nameSel.value = items[0].name;  // auto-select the only resource
         if (out) out.textContent = `${items.length} ACS resource(s) listed`;
+        // Auto-populate from_email (etc.) for whichever resource is now selected.
+        onAcsResourceChanged();
         showToast('ACS resources pulled.', 'success');
     } catch (e) { if (out) out.textContent = ''; showToast('Pull failed: ' + (e.message || e), 'error'); }
 }
@@ -6887,6 +6892,24 @@ function onAcsRgChanged() {
     const nameSel = document.getElementById('notif-acs-name');
     if (nameSel) nameSel.innerHTML = '<option value="">Resource name…</option>';
     if ((document.getElementById('notif-acs-rg')?.value || '').trim()) pullAcsResources();
+}
+
+// Selecting an ACS resource auto-populates everything derivable from it:
+// from_email (the resource's default AzureManaged MailFrom domain) — only
+// when the admin hasn't already typed a custom verified domain — and shows
+// the data-plane endpoint + provisioning state as confirmation.
+function onAcsResourceChanged() {
+    const nameSel = document.getElementById('notif-acs-name');
+    if (!nameSel) return;
+    const opt = nameSel.options[nameSel.selectedIndex];
+    if (!opt) return;
+    const fromEl = document.getElementById('notif-from');
+    const from = opt.getAttribute('data-from') || '';
+    if (fromEl && from && !(fromEl.value || '').trim()) fromEl.value = from;
+    const out = document.getElementById('notif-action-out');
+    const ep = opt.getAttribute('data-endpoint') || '';
+    const st = opt.getAttribute('data-state') || '';
+    if (out && ep) out.textContent = `${ep}${st ? ' [' + st + ']' : ''}`;
 }
 
 async function downloadKeyVaultMin() {
