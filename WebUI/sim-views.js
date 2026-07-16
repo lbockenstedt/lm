@@ -801,6 +801,9 @@ window.csSimChecksFilter = function () {
         if (!q) return true;
         return (r.spoke + ' ' + r.site + ' ' + r.check).toLowerCase().includes(q);
     });
+    // Order: errors (red) first, warnings (yellow) second, functional (green) third.
+    const _rank = s => { const b = csCheckBuckets(s); return b === 'failing' ? 0 : b === 'warning' ? 1 : b === 'functional' ? 2 : 3; };
+    rows.sort((a, b) => _rank(a.status) - _rank(b.status) || (a.site + a.check).localeCompare(b.site + b.check));
     const body = csEl('cs-sim-checks-body');
     if (!rows.length) { body.innerHTML = csEmpty('No checks match.', 'Adjust the filter above.'); return; }
     const rh = rows.map(r => {

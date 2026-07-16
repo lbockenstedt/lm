@@ -1858,17 +1858,30 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """30-day per-check health history (green/yellow/red). Default: DAILY
         summaries for every check ({site:{check_id:[{d,o,w,e,n}]}}) — the strip.
         With ?site=&check= → that check's raw HOURLY buckets ([{h,o,w,e,n}]) for
-        the on-hover breakdown. Centralized (hub-poller) source; empty when the
-        poller hasn't recorded any history yet."""
+        the on-hover breakdown. Merges the centralized hub-poller history with any
+        DISTRIBUTED spoke's relayed daily summary (central_status.health); hourly for
+        a distributed check is fetched on demand from the owning spoke (CS_GET_HEALTH)."""
         poller = getattr(hub, "central_hub_poller", None)
         health = getattr(poller, "_health", None)
-        if health is None:
-            return {"daily": {}, "hourly": []}
         site = request.query_params.get("site")
         check = request.query_params.get("check")
         if site and check:
-            return {"hourly": health.hourly(tenant_id, site, check)}
-        return {"daily": health.summary(tenant_id)}
+            hourly = health.hourly(tenant_id, site, check) if health else []
+            if not hourly:  # distributed → ask the owning spoke
+                try:
+                    r = await _cs_forward(tenant_id, "CS_GET_HEALTH",
+                                          {"site": site, "check": check}, timeout=10.0)
+                    hourly = (r or {}).get("hourly") or []
+                except Exception:  # noqa: BLE001 — no spoke / offline → empty
+                    pass
+            return {"hourly": hourly}
+        daily = dict(health.summary(tenant_id)) if health else {}
+        # Merge relayed spoke health (distributed-mode tenants).
+        for _sid, data in service._spokes_for_tenant(tenant_id):
+            sp = ((data or {}).get("central") or {}).get("health") or {}
+            for site_name, checks in sp.items():
+                daily.setdefault(site_name, {}).update(checks)
+        return {"daily": daily}
 
     @app.get("/sim/api/aggregate/central-status")
     async def get_central_status(tenant_id: str = Depends(get_tenant_id)):
