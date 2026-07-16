@@ -138,6 +138,41 @@ def register(app, hub, ctx):
                 break
         return {"name": os.path.basename(path)[:-3], "title": title, "markdown": markdown}
 
+    @app.get("/setup/session-timeout")
+    async def get_session_timeout():
+        """Idle session timeout (minutes) — a user with no requests for this long
+        is logged out. 0 = disabled. Default 60 minutes."""
+        import access
+        hub = app.state.hub
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        mins = gc.get("session_idle_timeout_minutes")
+        if mins is None:
+            mins = int(round(access.get_session_idle_timeout() / 60))
+        return {"minutes": int(mins)}
+
+    @app.post("/setup/session-timeout")
+    async def set_session_timeout(request: Request):
+        import access
+        hub = app.state.hub
+        sess = ctx._session_user(request)
+        if not sess or not ctx._is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        data = await request.json()
+        try:
+            mins = int(data.get("minutes"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="minutes must be an integer")
+        if mins < 0 or mins > 43200:  # cap at 30 days
+            raise HTTPException(status_code=400, detail="minutes out of range (0–43200)")
+        gc = hub.state.system_state.get("global_config", {})
+        gc["session_idle_timeout_minutes"] = mins
+        hub.state.system_state["global_config"] = gc
+        hub.state.save_state()
+        access.set_session_idle_timeout(mins * 60)  # apply live
+        return {"status": "ok", "minutes": mins,
+                "message": ("Idle timeout disabled." if mins == 0
+                            else f"Users are logged out after {mins} idle minute(s).")}
+
     @app.get("/setup/appearance")
     async def get_appearance():
         hub = app.state.hub

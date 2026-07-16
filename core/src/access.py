@@ -355,7 +355,29 @@ def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
 # Idle timeout: a session with no activity for this long is treated as expired
 # even if its absolute 8h TTL hasn't elapsed. Driven by the ``last_seen`` stamp
 # the access-control middleware bumps per request. 0 disables the idle cap.
-_SESSION_IDLE_TIMEOUT_S = float(os.environ.get("LM_SESSION_IDLE_TIMEOUT_S", "1800"))
+# Runtime-overridable via ``set_session_idle_timeout`` (the hub applies
+# ``global_config.session_idle_timeout_minutes`` at startup + on change); the env
+# var is only the fallback default (60 minutes).
+_SESSION_IDLE_TIMEOUT_S = float(os.environ.get("LM_SESSION_IDLE_TIMEOUT_S", "3600"))
+
+
+def set_session_idle_timeout(seconds) -> None:
+    """Set the idle-timeout window (seconds) at runtime. ``None``/invalid → no
+    change; ``0`` disables the idle cap. Called by the hub from
+    ``global_config.session_idle_timeout_minutes`` so a WebUI change takes effect
+    without a restart."""
+    global _SESSION_IDLE_TIMEOUT_S
+    if seconds is None:
+        return
+    try:
+        _SESSION_IDLE_TIMEOUT_S = max(0.0, float(seconds))
+    except (TypeError, ValueError):
+        pass
+
+
+def get_session_idle_timeout() -> float:
+    """Current idle-timeout window in seconds (0 = disabled)."""
+    return _SESSION_IDLE_TIMEOUT_S
 
 
 def session_user(sessions: dict, request: "Request"):

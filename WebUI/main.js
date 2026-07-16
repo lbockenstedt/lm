@@ -3717,6 +3717,22 @@ function _renderSettingsSection(subMenu) {
                     </div>
                 </div>
                 <div class="${card} p-6">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Idle Session Timeout</h3>
+                    <p class="text-xs text-slate-400 mb-3">Automatically log out a user who makes no requests for this long. Applies live to all sessions.</p>
+                    <div class="flex items-center gap-3">
+                        <select id="session-timeout-minutes" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="0">Never (disabled)</option>
+                            <option value="15">15 minutes</option>
+                            <option value="30">30 minutes</option>
+                            <option value="60">60 minutes</option>
+                            <option value="120">2 hours</option>
+                            <option value="240">4 hours</option>
+                            <option value="480">8 hours</option>
+                        </select>
+                        <button onclick="saveSessionTimeout(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm ml-auto">Save</button>
+                    </div>
+                </div>
+                <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-4">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Active Sessions ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     </div>
@@ -3742,6 +3758,7 @@ function _renderSettingsSection(subMenu) {
         loadBackpressureConfig();
         loadUpdateGateConfig();
         loadActiveSessions();
+        loadSessionTimeout();
         // Auto-save on change (no per-card Save buttons). Note: backpressure
         // config applies LIVE each 1s tick, so each committed field change takes
         // effect immediately — `change` fires on commit (blur/Enter), not per
@@ -10386,6 +10403,42 @@ async function revokeApiToken(id) {
     } catch (e) {
         if (typeof showToast === 'function') showToast('Revoke failed: ' + e.message, 'error');
     }
+}
+
+// Idle session timeout (Settings → Active Sessions area). 0 = disabled; default 60.
+async function loadSessionTimeout() {
+    const sel = document.getElementById('session-timeout-minutes');
+    if (!sel) return;
+    try {
+        const r = await setupFetch('/setup/session-timeout');
+        if (!r.ok) return;
+        const d = await r.json();
+        const mins = String(d.minutes);
+        // If the stored value isn't one of the preset options, inject it so it shows.
+        if (!Array.from(sel.options).some(o => o.value === mins)) {
+            const opt = document.createElement('option');
+            opt.value = mins; opt.textContent = `${mins} minutes`;
+            sel.appendChild(opt);
+        }
+        sel.value = mins;
+    } catch (e) { /* leave default */ }
+}
+
+async function saveSessionTimeout(btn) {
+    const sel = document.getElementById('session-timeout-minutes');
+    if (!sel) return;
+    const minutes = parseInt(sel.value, 10) || 0;
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const r = await setupFetch('/setup/session-timeout', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ minutes }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) showToast(d.message || 'Idle timeout saved.', 'success');
+        else showToast('Failed to save: ' + (d.detail || r.status), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
 }
 
 async function loadActiveSessions() {

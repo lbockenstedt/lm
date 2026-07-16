@@ -937,6 +937,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # NAC/CPPM, Directory/LDAP) — same warm-start contract as nw/le.
         self.warm_cache_init()
         self.warm_cache_load()
+        # Apply the configured session idle-timeout (minutes → seconds). Unset
+        # leaves access.py's 60-minute default; 0 disables. A WebUI change
+        # (/setup/session-timeout) re-applies this live.
+        try:
+            import access as _access
+            _mins = (self.state.get_global_config() or {}).get("session_idle_timeout_minutes")
+            if _mins is not None:
+                _access.set_session_idle_timeout(float(_mins) * 60)
+        except Exception as _e:  # noqa: BLE001 - never block startup on this
+            logger.debug("apply session idle timeout at startup: %s", _e)
         # File-a-Bug artifact store: each report's console.log / dom.html /
         # screenshot.png / report.json live under data_dir/bugs/<id>/ so the
         # large payloads never bloat the 500-line self.logs deque or the hub
