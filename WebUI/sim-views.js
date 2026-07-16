@@ -3586,7 +3586,7 @@ async function csRenderSimQuotaState() {
 // server is in MIA. Mirrored in both sim-views.js copies (hub + spoke).
 let csPxmxSiteMap = {};
 let csPxmxAgents = [];
-let csPxmxSites = [];
+let csSites = [];
 
 let csSiteLinks = [];        // [{name, wsite, central_site}] — wsite↔Central links
 let csCentralSitesList = []; // Central site names for the link editor dropdown
@@ -3601,7 +3601,7 @@ async function csRenderPxmxSiteMap() {
         ]);
         csPxmxSiteMap = (mapRes && mapRes.pxmx_site_map) || {};
         csPxmxAgents = Array.isArray(mapRes && mapRes.agents) ? mapRes.agents : [];
-        csPxmxSites = (cat && cat.sites) || [];
+        csSites = (cat && cat.sites) || [];
         csSiteLinks = Array.isArray(cfg && cfg.site_links) ? cfg.site_links.map(l => ({ ...l })) : [];
         // Central site names: from browse (sites/alerts) + the configured mappings.
         const cs = new Set();
@@ -3674,8 +3674,11 @@ function csRenderPxmxSiteMapEditor() {
 // lets alert-driven quotas match where the alert actually fires in Central.
 function csSiteLinksCardHtml() {
     const esc = s => csEscape(String(s == null ? '' : s));
-    const wsiteOpts = (sel) => `<option value="">— wsite —</option>` +
-        csPxmxSites.map(s => `<option value="${esc(s)}" ${s === sel ? 'selected' : ''}>${esc(s)}</option>`).join('');
+    // wsite is DEFINED here (typed, e.g. "MIA") — the Site Links are the source of
+    // truth for wsites. It used to be a dropdown sourced from the sim-quota catalog
+    // sites list, which merged simulation.conf wsites WITH Central site names; once
+    // simulation.conf's wsite entries went away that list held only Central names
+    // (Miami), so links/SSID cells came out as "Miami-PSK" instead of "MIA-PSK".
     const centralOpts = (sel) => {
         const list = csCentralSitesList.slice();
         if (sel && list.indexOf(sel) < 0) list.push(sel);
@@ -3685,7 +3688,7 @@ function csSiteLinksCardHtml() {
     const rows = csSiteLinks.map((l, i) =>
         `<div class="grid grid-cols-1 sm:grid-cols-4 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-link="${i}">
           <label class="text-xs text-slate-500">Name<input data-cs-link-k="name" value="${esc(l.name)}" placeholder="Miami" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
-          <label class="text-xs text-slate-500">wsite (SSID)<select data-cs-link-k="wsite" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${wsiteOpts(l.wsite)}</select></label>
+          <label class="text-xs text-slate-500">wsite (SSID prefix)<input data-cs-link-k="wsite" value="${esc(l.wsite)}" placeholder="MIA" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1"></label>
           <label class="text-xs text-slate-500">Central site<select data-cs-link-k="central_site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm mt-1">${centralOpts(l.central_site)}</select></label>
           <button onclick="csSiteLinkDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1 justify-self-end">Remove</button>
         </div>`).join('');
