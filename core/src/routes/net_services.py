@@ -244,10 +244,33 @@ def register(app, hub, ctx):
 
     @app.get("/api/le/certs")
     async def le_list_certs():
-        """List managed certificates from the le spoke."""
+        """List managed certificates from the le spoke.
+
+        Warm-cached (``le_cache``): serves last-known certs (marked ``stale``)
+        when the le spoke is offline or a live fetch overruns, so the
+        Certificates page renders instantly instead of blocking/503-ing. A
+        successful live fetch refreshes + persists the cache."""
         logger.debug("relay GET /api/le/certs")
-        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_LIST_CERTS",
-                                  log_name="le_list_certs")
+        hub = app.state.hub
+        le_sid = hub.get_spoke_by_type("certificates")
+        if not le_sid:
+            cached = hub.le_cache_get("certs")
+            if cached is not None:
+                out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
+                out["stale"] = True
+                return out
+            raise HTTPException(status_code=503, detail="Certificate spoke not connected")
+        try:
+            data = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_list_certs")
+            await hub.le_cache_set("certs", data)
+            return data
+        except HTTPException:
+            cached = hub.le_cache_get("certs")
+            if cached is not None:
+                out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
+                out["stale"] = True
+                return out
+            raise
 
     @app.get("/api/le/inflight")
     async def le_inflight():

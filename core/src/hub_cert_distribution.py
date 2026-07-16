@@ -321,6 +321,15 @@ class HubCertDistributionMixin:
                 le_sid = self.get_spoke_by_type("certificates")
                 if le_sid:
                     await self._distribute_all_certs(le_sid)
+                    # Warm the Certificates page cache on the same cadence so a
+                    # hub restart / slow le spoke serves fresh-ish last-known data.
+                    try:
+                        rr = await self.request_response(le_sid, "LE_LIST_CERTS", {})
+                        certs = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else rr
+                        if isinstance(certs, dict) and str(certs.get("status", "SUCCESS")).upper() != "ERROR":
+                            await self.le_cache_set("certs", certs)
+                    except Exception as e:
+                        logger.debug("le cache refresh (distribution loop) skipped: %s", e)
             except Exception as e:
                 logger.warning("[sync-error] cert-distribution loop failed: %s", e)
             await asyncio.sleep(self._cert_distribution_retry_seconds())
