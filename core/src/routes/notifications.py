@@ -121,3 +121,15 @@ def register(app, hub, ctx):
             return {"status": "error", "message": str(e)}
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "message": str(e)}
+
+    @app.get("/setup/notifications/azure-subs")
+    async def list_azure_subs():
+        """List subscriptions the SSO app can see via ARM, so the tile can
+        pre-fill the subscription id (no typing). Same ARM token as listKeys."""
+        try:
+            subs = await _n.list_azure_subscriptions(hub)
+            return {"status": "ok", "subscriptions": subs}
+        except _n.NotificationsError as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": str(e)}

@@ -6610,11 +6610,14 @@ function _renderSettingsNotificationsTile(content) {
                     </select></div>
                 <div class="space-y-1 md:col-span-2" id="notif-acs-arm-wrap"><label class="${labelCls}">ACS resource (ARM listKeys)</label>
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
-                        <input id="notif-acs-sub" type="text" placeholder="Subscription ID" class="${inputCls} font-mono text-xs">
+                        <div class="flex gap-1">
+                            <select id="notif-acs-sub" class="${inputCls} font-mono text-xs flex-1"><option value="">Subscription ID…</option></select>
+                            <button type="button" onclick="pullAzureSubs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                        </div>
                         <input id="notif-acs-rg" type="text" placeholder="Resource group" class="${inputCls} font-mono text-xs">
                         <input id="notif-acs-name" type="text" placeholder="Resource name" class="${inputCls} font-mono text-xs">
                     </div>
-                    <p class="text-[11px] text-slate-400 mt-1">The SSO app calls <span class="font-mono">communicationServices/listKeys</span> via ARM (needs <b>Contributor</b> on the ACS resource/RG). The connection string is cached ~10 min and never touches the vault.</p></div>
+                    <p class="text-[11px] text-slate-400 mt-1">The SSO app calls <span class="font-mono">communicationServices/listKeys</span> via ARM (needs <b>Contributor</b> on the ACS resource/RG). The connection string is cached ~10 min and never touches the vault. <b>Pull</b> lists the subscriptions the app can see.</p></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP host</label><input id="notif-host" type="text" placeholder="smtp.example.com" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP port</label><input id="notif-port" type="number" placeholder="587" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP user</label><input id="notif-user" type="text" placeholder="user@example.com" class="${inputCls} font-mono text-xs"></div>
@@ -6693,7 +6696,16 @@ async function loadNotifications() {
         set('notif-provider', c.provider || 'azure_acs');
         set('notif-transport', c.transport || 'api');
         set('notif-acs-source', c.acs_source || 'arm');
-        set('notif-acs-sub', c.azure_subscription_id);
+        // Subscription is a select populated by Pull; if a saved id isn't an
+        // option yet, seed a placeholder option so it shows (not lost on save).
+        const subSel = document.getElementById('notif-acs-sub');
+        if (subSel) {
+            const savedSub = c.azure_subscription_id || '';
+            if (savedSub && !Array.from(subSel.options).some(o => o.value === savedSub)) {
+                subSel.innerHTML = `<option value="${savedSub}">${savedSub}</option>`;
+            }
+            subSel.value = savedSub;
+        }
         set('notif-acs-rg', c.azure_resource_group);
         set('notif-acs-name', c.acs_resource_name);
         set('notif-host', c.smtp_host);
@@ -6776,6 +6788,25 @@ async function pushAcsSecret() {
         if (d.status === 'ok') { if (out) out.textContent = `pushed to secret '${d.secret}'`; showToast('Connection string stored in Key Vault.', 'success'); const ta = document.getElementById('notif-acs-connstr'); if (ta) ta.value = ''; }
         else { if (out) out.textContent = d.message || 'failed'; showToast('Push failed: ' + (d.message || ''), 'error'); }
     } catch (e) { if (out) out.textContent = ''; showToast('Push failed: ' + (e.message || e), 'error'); }
+}
+
+async function pullAzureSubs() {
+    const out = document.getElementById('notif-action-out');
+    const sel = document.getElementById('notif-acs-sub');
+    if (!sel) return;
+    const cur = (sel.value || '').trim();
+    if (out) out.textContent = 'Pulling subscriptions…';
+    try {
+        const r = await setupFetch('/setup/notifications/azure-subs');
+        const d = await r.json().catch(() => ({}));
+        if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
+        const subs = d.subscriptions || [];
+        if (!subs.length) { if (out) out.textContent = 'no subscriptions visible to the SSO app'; showToast('No subscriptions visible to the SSO app.', 'error'); return; }
+        sel.innerHTML = subs.map(s => `<option value="${s.id}">${escapeHtml(s.name)} — ${s.id}</option>`).join('');
+        if (cur && subs.some(s => s.id === cur)) sel.value = cur;
+        if (out) out.textContent = `${subs.length} subscription(s) listed`;
+        showToast('Subscriptions pulled.', 'success');
+    } catch (e) { if (out) out.textContent = ''; showToast('Pull failed: ' + (e.message || e), 'error'); }
 }
 
 async function downloadKeyVaultMin() {

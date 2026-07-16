@@ -228,6 +228,34 @@ async def _acs_connstr(hub, cfg: Dict[str, Any],
     return await _acs_connstr_arm(hub, cfg, http=http)
 
 
+async def list_azure_subscriptions(hub, http: Optional[httpx.AsyncClient] = None
+                                   ) -> List[Dict[str, str]]:
+    """List the Azure subscriptions the SSO app can see, via ARM (reuses the
+    same ARM token as the NSG hook / listKeys path). Returns ``[{id, name}]``
+    sorted by name — lets the Notifications tile pre-fill the subscription id
+    instead of typing it. Empty list (not an error) if the app has no
+    subscription-level read."""
+    oidc_cfg = get_oidc_config(hub)
+    token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
+    url = "https://management.azure.com/subscriptions?api-version=2020-01-01"
+    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        raise NotificationsError(
+            f"Azure subscription list failed: HTTP {resp.status_code} — "
+            f"{resp.text[:300]}")
+    subs = (resp.json() or {}).get("value", []) or []
+    out = []
+    for s in subs:
+        sid = str(s.get("subscriptionId") or "").strip()
+        if not sid:
+            continue
+        out.append({"id": sid,
+                    "name": str(s.get("displayName") or sid)})
+    out.sort(key=lambda e: e["name"].lower())
+    return out
+
+
 async def _resolve(hub, cfg: Dict[str, Any],
                    http: Optional[httpx.AsyncClient] = None
                    ) -> Tuple[str, Any]:
