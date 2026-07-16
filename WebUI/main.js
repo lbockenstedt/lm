@@ -17487,13 +17487,13 @@ function showAddNwDeviceModal() {
                         <option value="0">Off (manual Poll Now only)</option>
                         <option value="60">Every 1 minute</option>
                         <option value="300">Every 5 minutes</option>
-                        <option value="900">Every 15 minutes</option>
+                        <option value="900" selected>Every 15 minutes (default)</option>
                         <option value="1800">Every 30 minutes</option>
                         <option value="3600">Every hour</option>
                         <option value="21600">Every 6 hours</option>
                         <option value="86400">Every day</option>
                     </select>
-                    <p class="text-[11px] text-slate-400">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces) and pushes the result to the hub, so its sub-views load instantly.</p>
+                    <p class="text-[11px] text-slate-400">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces), warms the hub cache so sub-views load instantly, and syncs the device + interfaces into NetBox. Defaults to 15 minutes if left unset.</p>
                 </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
@@ -17534,7 +17534,10 @@ async function editNwDevice(id) {
     document.getElementById('nw-enable-secret').value = d.enable_secret || '';
     document.getElementById('nw-api-token').value = d.api_token || '';
     document.getElementById('nw-snmp-community').value = d.snmp_community || '';
-    document.getElementById('nw-poll-interval').value = String(d.poll_interval || 0);
+    // Unset → show the 15m default (matches the spoke's fallback); explicit 0 = Off.
+    document.getElementById('nw-poll-interval').value =
+        (d.poll_interval === undefined || d.poll_interval === null || d.poll_interval === '')
+            ? '900' : String(d.poll_interval);
 
     setTimeout(() => {
         const selector = document.getElementById('nw-spoke');

@@ -4143,7 +4143,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     _nw_did = _nwd.get("device_id")
                     _nw_pdata = _nwd.get("data") if isinstance(_nwd.get("data"), dict) else _nwd
                     if _nw_did and isinstance(_nw_pdata, dict):
-                        asyncio.create_task(self.nw_cache_set_poll(_nw_did, _nw_pdata))
+                        # Warm cache + per-device NetBox inventory sync.
+                        asyncio.create_task(self.apply_nw_auto_poll(_nw_did, _nw_pdata))
                     continue
 
                 # --- LE cert renewed (event-driven distribution) ---
