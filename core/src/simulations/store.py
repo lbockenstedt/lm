@@ -726,6 +726,23 @@ class SimulationsStore:
                 dict(d) for d in (quotas or []) if isinstance(d, dict)]
             await self._asave()
 
+    # ── GLOBAL learned sim-quota operating points (Setup → Global Learned Values) ──
+    # Platform-wide (superadmin-curated) published learned values, keyed per ALERT
+    # ``{alert_type}:{alert_id}`` (no site): ``{op, floor, source_tenant,
+    # published_at}``. A Global Admin pulls a learning tenant's stable learned_op
+    # and publishes it here; other tenants' learning-OFF consumer rows seed/lift
+    # from it via apply_adaptive_targets (applied_op = max(own, global)). Lives
+    # under ``__global__`` so it's shared by every tenant.
+    async def get_global_learned_values(self) -> Dict[str, Any]:
+        v = self._global().get("global_learned_values")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_global_learned_values(self, mapping: Dict[str, Any]) -> None:
+        with self._lock:
+            self._global()["global_learned_values"] = (
+                dict(mapping) if isinstance(mapping, dict) else {})
+            await self._asave()
+
     # ── GLOBAL simulation sharing (stacking) + N/A hide (Setup → Simulations) ──
     # Platform-wide (all tenants) authoritative per-sim shareable/stackable map
     # and the UI-only N/A hide map. A non-shareable sim can NEVER be stacked by

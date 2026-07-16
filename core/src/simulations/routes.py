@@ -1411,19 +1411,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     async def _apply_adaptive_targets(tenant_id: str, quotas: list) -> list:
         """Replace an adaptive quota's ``count`` with the controller's current
-        target (stored state; the controller loop advances it). A quota with no
-        controller state yet starts at its ``min``."""
+        target (stored state; the controller loop advances it), lifted by the
+        effective learned operating point for the alert (max of this tenant's
+        learning-ON stable learned_op and the global published value). A quota
+        with no controller state yet seeds from that op (or ``min``)."""
         try:
             state = await store.get_adaptive_state(tenant_id)
         except Exception:  # noqa: BLE001
             state = {}
-        return sim_quota.apply_adaptive_targets(quotas, state)
+        try:
+            global_lv = await store.get_global_learned_values()
+        except Exception:  # noqa: BLE001
+            global_lv = {}
+        return sim_quota.apply_adaptive_targets(quotas, state, global_lv)
 
     def _ceil(x: float) -> int:
         return sim_quota.ceil_to_int(x)
 
-    def _adaptive_step(st: dict, q: dict, firing, now: float) -> dict:
-        return sim_quota.adaptive_step(st, q, firing, now)
+    def _adaptive_step(st: dict, q: dict, firing, now: float,
+                       applied_op: int | None = None) -> dict:
+        return sim_quota.adaptive_step(st, q, firing, now, applied_op)
 
     _adaptive_firing_cache: dict = {}
 
@@ -1490,10 +1497,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     async def _run_adaptive_controller() -> None:
         """One controller pass over every tenant's adaptive quotas — advance the
-        target and re-push when it moves. Small (per-quota state)."""
+        target and re-push when it moves. Small (per-quota state).
+
+        For each alert, ``applied_op`` = max(this tenant's learning-ON stable
+        rows' learned_op, the global published value). Learning-ON rows run the
+        full thermostat (the lab); learning-OFF rows are up-only consumers that
+        seed/lift from ``applied_op``. Only learning-ON rows down-ratchet — a
+        consumer never risks stopping its alert."""
         import time as _t
-        from .sim_quota import normalize_quota
+        from .sim_quota import normalize_quota, _alert_key
         now = _t.time()
+        try:
+            global_lv = await store.get_global_learned_values()
+        except Exception:  # noqa: BLE001
+            global_lv = {}
         for tid in _all_tenant_ids():
             try:
                 csc = await store.get_central_sites_config(tid) or {}
@@ -1502,13 +1519,37 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if not adaptive:
                     continue
                 state = await store.get_adaptive_state(tid)
+                # applied_op per alert = max(own learning-ON stable learned_op, global op)
+                applied_op: dict = {}
+                for q in adaptive:
+                    if not q.get("learning"):
+                        continue
+                    st = state.get(_adaptive_key(q)) or {}
+                    if st.get("phase") == "stable" and st.get("learned_op") is not None:
+                        ak = _alert_key(q)
+                        val = int(st["learned_op"])
+                        if ak not in applied_op or val > applied_op[ak]:
+                            applied_op[ak] = val
+                for ak, gv in (global_lv or {}).items():
+                    if not isinstance(gv, dict):
+                        continue
+                    gop = gv.get("op")
+                    if gop is None:
+                        continue
+                    try:
+                        gval = int(gop)
+                    except (TypeError, ValueError):
+                        continue
+                    if ak not in applied_op or gval > applied_op[ak]:
+                        applied_op[ak] = gval
                 changed = False
                 live = set()
                 for q in adaptive:
                     k = _adaptive_key(q); live.add(k)
                     firing = await _alert_firing(tid, q)
                     before = dict(state.get(k) or {})
-                    after = _adaptive_step(before, q, firing, now)
+                    after = _adaptive_step(before, q, firing, now,
+                                            applied_op.get(_alert_key(q)))
                     if after != before:
                         state[k] = after; changed = True
                 for k in list(state.keys()):
@@ -3344,6 +3385,84 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         pushed = await _push_sim_quotas_all_tenants()
         return {"status": "saved", "defaults": clean, "errors": errs,
                 "pushed_to_spokes": pushed}
+
+    # ── Global Learned Values (Setup → Global Learned Values, superadmin) ──────
+    # A Global Admin curates the platform-wide published learned operating points
+    # (per alert). A learning tenant's lab rows produce stable learned_op values;
+    # the Admin selects one and Publishes it here so every other tenant's
+    # learning-OFF consumer rows seed/lift from it (applied_op = max(own, global)).
+    @app.get("/sim/api/superadmin/learned-values/candidates")
+    async def get_learned_value_candidates(request: Request):
+        """Roll up every tenant's stable learning-ON ``learned_op`` per alert, so
+        the Global Admin can pick one to Publish. Returns one row per
+        (tenant, alert, site) that has reached ``stable`` with a recorded op."""
+        _require_admin(request)
+        from .sim_quota import _alert_key
+        out = []
+        for tid in _all_tenant_ids():
+            try:
+                state = await store.get_adaptive_state(tid)
+            except Exception:  # noqa: BLE001
+                continue
+            for key, st in (state or {}).items():
+                if not isinstance(st, dict) or st.get("phase") != "stable":
+                    continue
+                op = st.get("learned_op")
+                if op is None:
+                    continue
+                # key = "{alert_type}:{alert_id}:{site}" (adaptive_key)
+                head, _, site = key.rpartition(":")
+                atype, _, aid = head.partition(":")
+                out.append({"alert_key": _alert_key({"alert_type": atype, "alert_id": aid}),
+                            "alert_type": atype or "alert", "alert_id": aid,
+                            "site": site, "op": int(op),
+                            "floor": st.get("floor"),
+                            "source_tenant": tid})
+        # Highest op per (tenant, alert_key) first for easy picking.
+        out.sort(key=lambda r: (r["alert_key"], r["source_tenant"], -r["op"]))
+        return {"candidates": out}
+
+    @app.get("/sim/api/superadmin/global-learned-values")
+    async def get_global_learned_values(request: Request):
+        _require_admin(request)
+        return {"published": await store.get_global_learned_values()}
+
+    @app.put("/sim/api/superadmin/global-learned-values")
+    async def put_global_learned_values(request: Request):
+        """Publish the global learned-values registry. Body: ``{values: {
+        alert_key: {op, floor, source_tenant, published_at?}}}``. Replaces the
+        registry wholesale (the Admin curates the whole set in the UI). Each
+        entry's ``published_at`` is stamped server-side when omitted. Force-pushes
+        every tenant so consumers lift to the new op without waiting for a
+        controller tick."""
+        import time as _t
+        _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        raw = (body or {}).get("values") or {}
+        clean: dict = {}
+        if isinstance(raw, dict):
+            now = _t.time()
+            for ak, v in raw.items():
+                if not isinstance(v, dict) or v.get("op") is None:
+                    continue
+                try:
+                    op = int(v.get("op"))
+                except (TypeError, ValueError):
+                    continue
+                if op < 1:
+                    continue
+                clean[str(ak)] = {
+                    "op": op,
+                    "floor": int(v["floor"]) if v.get("floor") is not None else None,
+                    "source_tenant": str(v.get("source_tenant") or ""),
+                    "published_at": float(v.get("published_at") or now),
+                }
+        await store.set_global_learned_values(clean)
+        pushed = await _push_sim_quotas_all_tenants()
+        return {"status": "published", "values": clean, "pushed_to_spokes": pushed}
 
     @app.get("/sim/api/{tenant}/central/available")
     async def get_central_available(tenant: str, tenant_id: str = Depends(get_tenant_id)):
