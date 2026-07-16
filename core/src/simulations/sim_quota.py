@@ -363,7 +363,17 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
                     floor = target
                     target = max(mn, target - step)
                     phase = "down_floor"; last = now
-                # at_max + firing → hold (will re-probe via stable next time)
+                elif phase == "at_max":
+                    # Ramped to the ceiling while the firing signal was missing,
+                    # now it IS firing — the real firing point is at/below max, so
+                    # ratchet DOWN to find the floor instead of holding at max
+                    # forever. (Bug: a quota that hit at_max during a firing outage
+                    # never came back down once firing was detected again — it sat
+                    # underfilled at max. There was no at_max→stable path despite
+                    # the old comment claiming one.)
+                    floor = target
+                    target = max(mn, target - step)
+                    phase = "down_floor"; last = now
             else:  # firing is False
                 if phase == "down_floor":
                     # over-stepped: the last firing count was target+step
