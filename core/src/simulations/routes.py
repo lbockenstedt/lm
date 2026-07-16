@@ -1459,26 +1459,34 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if sites is None:
             return False
         site = str(q.get("site") or "").strip()
-        # Resolve the quota's site to the CENTRAL site name Central reports the
-        # alert under. Two hops: (1) if `site` names an SSID cell (e.g. MIA-ACD),
-        # map it to its physical wsite (MIA) via the ssid_matrix; (2) map that
-        # wsite to the Central site (e.g. Miami) via site_links. Without hop (1)
-        # a cell-scoped adaptive quota never matched a firing site and ramped to
-        # max forever ("at max, not firing").
+        # Resolve the quota's site to the forms Central may report the alert
+        # under. Central reports an alert's site as EITHER the central_site name
+        # (e.g. Miami) OR the wireless site code (e.g. MIA) — see
+        # central_hub_poller, which matches both. A cell-scoped quota (MIA-ACD)
+        # must therefore match a firing site reported under ANY of its aliases:
+        # the cell name, its physical wsite, or its linked central_site. Matching
+        # only the final resolved form missed alerts Central reported under the
+        # other form → the controller never saw firing → ramped to max forever.
+        aliases = {site} if site else set()
         if site:
             try:
                 csc = await store.get_central_sites_config(tenant_id) or {}
+                wsite = site
                 for cd in (csc.get("ssid_matrix") or []):
                     if str(cd.get("name") or "").strip() == site and cd.get("site"):
-                        site = str(cd.get("site")).strip()
+                        wsite = str(cd.get("site")).strip()
+                        aliases.add(wsite)
                         break
                 for lk in (csc.get("site_links") or []):
-                    if str(lk.get("wsite") or "").strip() == site and lk.get("central_site"):
-                        site = str(lk.get("central_site")).strip()
+                    if str(lk.get("wsite") or "").strip() == wsite and lk.get("central_site"):
+                        aliases.add(str(lk.get("central_site")).strip())
                         break
             except Exception:  # noqa: BLE001
                 pass
-        return True if not site else (site in sites or "" in sites or "—" in sites)
+        # Case-insensitive: Central may report "Miami" vs config "miami".
+        sites_l = {s.lower() for s in sites}
+        return True if not aliases else (
+            any(a.lower() in sites_l for a in aliases) or "" in sites or "—" in sites)
 
     async def _run_adaptive_controller() -> None:
         """One controller pass over every tenant's adaptive quotas — advance the
