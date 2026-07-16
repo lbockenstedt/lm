@@ -1216,7 +1216,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Icons'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
-    setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
+    setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Global Learned Values', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['OUs', 'Users', 'Groups'],
@@ -3000,7 +3000,7 @@ function renderTopNav(viewId) {
     // Logs is dynamic: only show tabs for modules that are actually installed
     // (see logsSubmenu). Every other view uses its fixed VIEW_SUBMENUS list.
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
-    const subMenus = rawSubmenus.filter(m => !(m === 'Simulations' && !isAdmin()));
+    const subMenus = rawSubmenus.filter(m => !((m === 'Simulations' || m === 'Global Learned Values') && !isAdmin()));
     // Trailing help affordance for tabbed module views (esp. the table-tab
     // modules — opnsense/netbox/nw/dns/dhcp/ldap/le — whose pages are just a
     // table with no on-page section header to attach an inline icon to). Placed
@@ -7139,8 +7139,142 @@ const SETUP_TILES = {
     'Tenant Config':    _renderSetupTenantTile,
     'User Access':      _renderSetupUserAccessTile,
     'Simulations':      _renderSetupSimulationsTile,
+    'Global Learned Values': _renderSetupGlobalLearnedValuesTile,
     'Remote Console':   _renderSetupRemoteConsoleTile,
 };
+
+// Setup → Global Learned Values (Global Admin only). A learning tenant's lab
+// rows produce stable learned_op values; the Admin selects one per alert and
+// Publishes it here so every other tenant's learning-OFF consumer rows seed/lift
+// from it (applied_op = max(own, global)). Endpoints in simulations/routes.py:
+// GET /sim/api/superadmin/learned-values/candidates, GET/PUT .../global-learned-values.
+let _glvCandidates = [];
+let _glvPublished = {};
+
+function _renderSetupGlobalLearnedValuesTile(content) {
+    const { card, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global Learned Values ${helpIcon('cs', null, 'Simulations help')}</h3>
+            <p class="text-xs text-slate-500 mb-3">Publish the learned client count needed to fire each alert, platform-wide. A tenant marks a quota row as a <b>Learning lab</b> (Config → Engine); its controller ratchets down to find the min count that fires and records a <b>learned_op</b>. Pick a tenant's stable learned value per alert and Publish it — every other tenant's <b>Consumer</b> rows (Learning off) then seed/lift from it (up-only; never down-ratchet). Highest learned op wins.</p>
+            <div id="glv-published" class="space-y-2 mb-4"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+        </div>
+        <div class="${card}">
+            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Candidates from Learning Labs</h3>
+            <p class="text-xs text-slate-500 mb-3">Stable learned values from every tenant's Learning-lab rows, grouped by alert. The highest op per tenant leads. Click <b>Publish</b> to publish that value for the alert (replaces any current published value for it).</p>
+            <div id="glv-candidates" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+        </div>`;
+    loadGlobalLearnedValues();
+}
+
+async function loadGlobalLearnedValues() {
+    try {
+        const [candRes, pubRes] = await Promise.all([
+            setupFetch('/sim/api/superadmin/learned-values/candidates'),
+            setupFetch('/sim/api/superadmin/global-learned-values'),
+        ]);
+        const cand = await candRes.json().catch(() => ({}));
+        const pub = await pubRes.json().catch(() => ({}));
+        _glvCandidates = Array.isArray(cand.candidates) ? cand.candidates : [];
+        _glvPublished = (pub && typeof pub.published === 'object' && pub.published) || {};
+        renderGlvPublished();
+        renderGlvCandidates();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Load failed: ' + e.message, 'error');
+    }
+}
+
+function renderGlvPublished() {
+    const el = document.getElementById('glv-published');
+    if (!el) return;
+    const keys = Object.keys(_glvPublished).sort();
+    if (!keys.length) {
+        el.innerHTML = '<p class="text-xs text-slate-400 italic">Nothing published yet. Publish a candidate below.</p>';
+        return;
+    }
+    el.innerHTML = keys.map(k => {
+        const v = _glvPublished[k] || {};
+        const when = v.published_at ? new Date(Number(v.published_at) * 1000).toLocaleString() : '';
+        return `<div class="flex flex-wrap items-center gap-3 text-xs py-1 border-b border-slate-100 last:border-0">
+            <span class="font-mono text-slate-700 flex-1 min-w-[12rem]">${escapeHtml(k)}</span>
+            <span class="font-semibold text-emerald-700">op ${escapeHtml(String(v.op))}</span>
+            ${v.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(v.floor))}</span>` : ''}
+            ${v.source_tenant ? `<span class="text-slate-400">from ${escapeHtml(v.source_tenant)}</span>` : ''}
+            ${when ? `<span class="text-slate-400">${escapeHtml(when)}</span>` : ''}
+            <button onclick="unpublishGlv('${escJsAttr(k)}')" class="text-xs text-red-600 hover:text-red-800 font-bold">Unpublish</button>
+        </div>`;
+    }).join('');
+}
+
+function renderGlvCandidates() {
+    const el = document.getElementById('glv-candidates');
+    if (!el) return;
+    if (!_glvCandidates.length) {
+        el.innerHTML = '<p class="text-xs text-slate-400 italic">No stable learned values yet. Mark a quota row as a Learning lab (Config → Engine) and let it settle (phase = stable).</p>';
+        return;
+    }
+    // Group by alert_key; within a group, highest op first.
+    const groups = {};
+    for (const c of _glvCandidates) {
+        (groups[c.alert_key] = groups[c.alert_key] || []).push(c);
+    }
+    const alertKeys = Object.keys(groups).sort();
+    el.innerHTML = alertKeys.map(ak => {
+        const rows = groups[ak].sort((a, b) => b.op - a.op);
+        const pub = _glvPublished[ak];
+        const isPublished = pub && rows[0] && pub.op === rows[0].op && pub.source_tenant === rows[0].source_tenant;
+        return `<div class="border border-slate-200 rounded-md p-3">
+            <div class="flex items-center gap-2 mb-2">
+                <span class="font-mono text-xs text-slate-700 font-semibold">${escapeHtml(ak)}</span>
+                ${pub ? `<span class="text-[10px] uppercase tracking-wider text-emerald-700">published op ${escapeHtml(String(pub.op))}</span>` : ''}
+            </div>
+            <div class="space-y-1">
+                ${rows.map(r => `<div class="flex flex-wrap items-center gap-3 text-xs py-0.5">
+                    <span class="text-slate-600">op <b>${escapeHtml(String(r.op))}</b></span>
+                    ${r.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(r.floor))}</span>` : ''}
+                    <span class="text-slate-400">${escapeHtml(r.source_tenant)} · ${escapeHtml(r.site || 'all sites')}</span>
+                    <button onclick="publishGlv('${escJsAttr(ak)}', ${Number(r.op)||0}, ${r.floor!=null?Number(r.floor):'null'}, '${escJsAttr(r.source_tenant)}')" class="ml-auto ${isPublished && r === rows[0] ? 'bg-emerald-100 text-emerald-700 border border-emerald-300' : 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]'} px-3 py-1 rounded-md text-xs font-bold">${isPublished && r === rows[0] ? 'Published' : 'Publish'}</button>
+                </div>`).join('')}
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function publishGlv(alertKey, op, floor, sourceTenant) {
+    const next = { ..._glvPublished };
+    next[alertKey] = { op, floor: floor != null ? floor : null, source_tenant: sourceTenant, published_at: Date.now() / 1000 };
+    try {
+        const res = await setupFetch('/sim/api/superadmin/global-learned-values', {
+            method: 'PUT', body: JSON.stringify({ values: next }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        _glvPublished = data.values || next;
+        if (typeof showToast === 'function') showToast(`Published op ${op} for ${alertKey} (pushed to ${data.pushed_to_spokes ?? 0} spokes)`, 'success');
+        renderGlvPublished();
+        renderGlvCandidates();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Publish failed: ' + e.message, 'error');
+    }
+}
+
+async function unpublishGlv(alertKey) {
+    const next = { ..._glvPublished };
+    delete next[alertKey];
+    try {
+        const res = await setupFetch('/sim/api/superadmin/global-learned-values', {
+            method: 'PUT', body: JSON.stringify({ values: next }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        _glvPublished = data.values || next;
+        if (typeof showToast === 'function') showToast(`Unpublished ${alertKey}`, 'success');
+        renderGlvPublished();
+        renderGlvCandidates();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Unpublish failed: ' + e.message, 'error');
+    }
+}
 
 // _renderSetupSection — dispatches to one of the _renderSetup*Tile helpers
 // above based on the Setup submenu. Each tile renders its cards into `content`

@@ -2685,6 +2685,9 @@ function csSimQuotaRowFromServer(q) {
         tied: !!(q.sim_id && q.alert_id),
         // Adaptive when a max above the min was saved (design §9).
         adaptive: !!(q.max != null && Number(q.max) > Number(q.min != null ? q.min : q.count)),
+        // Learning lab toggle (design §9): OFF = consumer (up-only), ON = runs the
+        // full thermostat + records a publishable learned_op. Default OFF.
+        learning: !!q.learning,
         min: q.min != null ? q.min : undefined,
         max: q.max != null ? q.max : undefined,
     };
@@ -2845,6 +2848,7 @@ function csRenderSimQuotaEditor() {
           </label>
           <label class="text-xs text-slate-500 flex flex-col gap-1">
             ${(!isPresence && tied) ? `<span class="flex items-center gap-1"><input data-cs-sq="adaptive" type="checkbox" onchange="csSimQuotaOnAdaptiveChange(this)" ${r.adaptive ? 'checked' : ''}> Adaptive (keep firing)</span>` : ''}
+            ${(tied && r.adaptive) ? `<span class="flex items-center gap-1" title="ON = this site is the 'learning lab': the controller ratchets DOWN to find the min count that fires, settles at floor+20%, and records a publishable learned value. OFF (default) = a consumer: seeds/lifts from the tenant or global learned value, never down-ratchets (never risks stopping the alert)."><input data-cs-sq="learning" type="checkbox" ${r.learning ? 'checked' : ''}> Learning lab</span>` : ''}
             <span class="flex items-center gap-1"><input data-cs-sq="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
@@ -3179,6 +3183,7 @@ function csSimQuotaSyncFromDom() {
             enabled: !!g('enabled').checked,
             tied,
             adaptive,
+            learning: adaptive ? !!(g('learning') || {}).checked : false,
         };
         if (adaptive) {
             // Adaptive rows use Min/Max; count is the floor the controller ramps from.
@@ -3251,6 +3256,7 @@ window.csSimQuotaAdd = function (preset) {
         rehome: p.rehome != null ? !!p.rehome : false,
         enabled: p.enabled != null ? !!p.enabled : false,
         tied: p.tied != null ? !!p.tied : true,
+        learning: p.learning != null ? !!p.learning : false,
     });
     csRenderSimQuotaEditor();
 };
@@ -3496,6 +3502,11 @@ async function csRenderSimQuotaState() {
             const label = `${p[1] || '(sim)'} @ ${p[2] || 'all sites'}`;
             const m = (v && v.mode) || 'learning';
             const tgt = (v && v.target != null) ? v.target : 0;
+            const isLab = !!(v && v.learning);
+            const phase = (v && v.phase) || '';
+            const labTag = isLab
+                ? `<span class="text-violet-700" title="Learning lab: runs the full thermostat (ratchets down to find the floor) and records a publishable learned value. Phase: ${csEscape(phase)}">🧪 Lab${phase ? `·${csEscape(phase)}` : ''}</span>`
+                : `<span class="text-slate-400" title="Consumer: up-only — seeds/lifts from the learned value, never down-ratchets.">📥 Consumer</span>`;
             // Join the live ledger to show the ACTUAL runner count, not just the
             // controller's target. "At max" means the controller's target hit the
             // configured ceiling — but if the engine only filled 4 of 15 (pool too
@@ -3514,14 +3525,16 @@ async function csRenderSimQuotaState() {
             return `<div class="flex flex-wrap items-center gap-3 text-xs py-0.5">
               <span class="w-48 font-mono text-slate-600 truncate">${csEscape(label)}</span>
               <span class="font-semibold">${badge}</span>
+              ${labTag}
               ${(v && v.floor != null) ? `<span class="text-slate-400">floor ${csEscape(String(v.floor))}</span>` : ''}
+              ${(v && v.learned_op != null) ? `<span class="text-slate-400">learned ${csEscape(String(v.learned_op))}</span>` : ''}
               <span class="text-slate-400">target ${csEscape(String((v && v.target != null) ? v.target : '—'))}</span>
             </div>`;
         };
         const adaptivePanel = `<div class="hpe-card rounded-lg p-5 shadow-sm">
             <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Adaptive Controllers</h3>
             ${_adEntries.length
-              ? `<p class="text-xs text-slate-500 mb-2">Each adaptive quota ramps its runner count to keep its alert firing, then settles at the learned floor + 20%. 🔄 learning · ✅ stable · ⚠️ at max.</p>
+              ? `<p class="text-xs text-slate-500 mb-2">Each adaptive quota ramps its runner count to keep its alert firing, then settles at the learned floor + 20%. 🧪 Lab rows run the full thermostat and record a publishable learned value; 📥 Consumer rows seed/lift from it (up-only, never down-ratchet). 🔄 learning · ✅ stable · ⚠️ at max / underfilled.</p>
                  <div class="space-y-0.5">${_adEntries.map(_adRow).join('')}</div>`
               : `<p class="text-xs text-slate-400 italic">No adaptive quotas yet. In <span class="font-semibold">Config → Engine</span>, tie a quota to an alert/insight and check <span class="font-semibold">Adaptive (keep firing)</span> — its Clients field becomes Min/Max and the learning state shows here.</p>`}
           </div>`;

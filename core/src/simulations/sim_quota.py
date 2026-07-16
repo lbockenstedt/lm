@@ -401,7 +401,7 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
                     phase = "up_find"; last = now
 
     return {"target": max(mn, min(mx, int(target))), "floor": floor,
-            "phase": phase, "learned_op": learned_op,
+            "phase": phase, "learned_op": learned_op, "learning": learning,
             "mode": _derived_mode(phase), "last_change": last}
 
 
