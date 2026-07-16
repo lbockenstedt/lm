@@ -133,3 +133,31 @@ def register(app, hub, ctx):
             return {"status": "error", "message": str(e)}
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "message": str(e)}
+
+    @app.get("/setup/notifications/azure-rgs")
+    async def list_azure_rgs(request: Request):
+        """List resource groups in a subscription via ARM, for the RG dropdown
+        (chained off the chosen subscription). Same ARM token as listKeys."""
+        sub = (request.query_params.get("subscription_id") or "").strip()
+        try:
+            rgs = await _n.list_azure_resource_groups(hub, sub)
+            return {"status": "ok", "resource_groups": rgs}
+        except _n.NotificationsError as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": str(e)}
+
+    @app.get("/setup/notifications/azure-acs-resources")
+    async def list_azure_acs_resources(request: Request):
+        """List Communication Services resources in a subscription/RG via ARM,
+        for the ACS resource dropdown (chained off the chosen RG). Same ARM
+        token as listKeys."""
+        sub = (request.query_params.get("subscription_id") or "").strip()
+        rg = (request.query_params.get("resource_group") or "").strip()
+        try:
+            items = await _n.list_acs_resources(hub, sub, rg)
+            return {"status": "ok", "acs_resources": items}
+        except _n.NotificationsError as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": str(e)}

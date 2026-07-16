@@ -256,6 +256,82 @@ async def list_azure_subscriptions(hub, http: Optional[httpx.AsyncClient] = None
     return out
 
 
+async def list_azure_resource_groups(hub, subscription_id: str,
+                                     http: Optional[httpx.AsyncClient] = None
+                                     ) -> List[Dict[str, str]]:
+    """List resource groups in ``subscription_id`` via ARM (same token as the
+    NSG hook / listKeys path). Returns ``[{id, name}]`` sorted by name — drives
+    the RG dropdown in the Notifications tile once a subscription is chosen, so
+    the admin picks from what the SSO app can see instead of typing."""
+    sub = (subscription_id or "").strip()
+    if not sub:
+        raise NotificationsError("Select a subscription before pulling resource groups.")
+    oidc_cfg = get_oidc_config(hub)
+    token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
+    url = (f"https://management.azure.com/subscriptions/{sub}"
+           f"/resourceGroups?api-version=2021-04-01")
+    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        raise NotificationsError(
+            f"Azure resource group list failed: HTTP {resp.status_code} — "
+            f"{resp.text[:300]}")
+    rgs = (resp.json() or {}).get("value", []) or []
+    out = [{"id": str(r.get("id") or ""),
+            "name": str(r.get("name") or "")}
+           for r in rgs if r.get("name")]
+    out.sort(key=lambda e: e["name"].lower())
+    return out
+
+
+async def list_acs_resources(hub, subscription_id: str, resource_group: str,
+                             http: Optional[httpx.AsyncClient] = None
+                             ) -> List[Dict[str, str]]:
+    """List ``Microsoft.Communication/communicationServices`` resources in
+    ``subscription_id`` / ``resource_group`` via ARM (same token as listKeys).
+    Returns ``[{name, location, provisioningState, dataLocation, endpoint,
+    fromEmail}]`` sorted by name — drives the ACS resource dropdown so the
+    admin picks the exact resource ``listKeys`` will target, instead of typing
+    the name. ``endpoint`` and ``fromEmail`` are derived from the resource
+    name (the ACS data-plane endpoint is ``https://{name}.communication.
+    azure.com`` and the default AzureManaged MailFrom domain is
+    ``DoNotReply@{name}.azurecomm.net``) so the tile can auto-populate the
+    sender field."""
+    sub = (subscription_id or "").strip()
+    rg = (resource_group or "").strip()
+    if not sub or not rg:
+        raise NotificationsError(
+            "Select a subscription and resource group before pulling ACS resources.")
+    oidc_cfg = get_oidc_config(hub)
+    token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
+    url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
+           f"/providers/Microsoft.Communication/communicationServices"
+           f"?api-version={_ACS_ARM_API}")
+    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        raise NotificationsError(
+            f"ACS resource list failed: HTTP {resp.status_code} — "
+            f"{resp.text[:300]}")
+    items = (resp.json() or {}).get("value", []) or []
+    out = []
+    for i in items:
+        name = str(i.get("name") or "")
+        if not name:
+            continue
+        props = i.get("properties") or {}
+        out.append({
+            "name": name,
+            "location": str(i.get("location") or ""),
+            "provisioningState": str(props.get("provisioningState") or ""),
+            "dataLocation": str(props.get("dataLocation") or ""),
+            "endpoint": f"https://{name}.communication.azure.com",
+            "fromEmail": f"DoNotReply@{name}.azurecomm.net",
+        })
+    out.sort(key=lambda e: e["name"].lower())
+    return out
+
+
 async def _resolve(hub, cfg: Dict[str, Any],
                    http: Optional[httpx.AsyncClient] = None
                    ) -> Tuple[str, Any]:
@@ -389,18 +465,58 @@ async def push_acs_secret(hub, connstr: str,
     return {"secret": secret_name, "id": sid}
 
 
+async def _tenant_recipients(hub, spoke_id: str) -> List[str]:
+    """Resolve a spoke's alert recipients from the per-tenant notifications
+    config — the cs tenant Notifications card stores ``to_emails`` in the
+    simulations store (``hub.simulations_store.get_notifications``), keyed by
+    the tenant the spoke is bound to (``state.get_spoke_tenant``). Returns
+    ``[]`` if the spoke isn't tenant-bound or the tenant hasn't configured
+    recipients; the caller then falls back to the hub's global list.
+
+    Import-free on purpose: this is a leaf module, so the store and the
+    tenant binding are reached through the ``hub`` object (no back-import)."""
+    try:
+        tenant_id = hub.state.get_spoke_tenant(spoke_id)
+    except Exception:  # noqa: BLE001
+        return []
+    if not tenant_id:
+        return []
+    store = getattr(hub, "simulations_store", None)
+    if store is None:
+        return []
+    try:
+        ncfg = await store.get_notifications(tenant_id)
+    except Exception:  # noqa: BLE001
+        return []
+    return _normalize_recipients((ncfg or {}).get("to_emails"))
+
+
 async def send_email(hub, subject: str, body: str,
                      to_emails: Any = None,
+                     spoke_id: Optional[str] = None,
                      http: Optional[httpx.AsyncClient] = None) -> bool:
     """Send one email using the hub's notifications config. Returns False (and
     logs) when notifications are disabled or there are no recipients — never
     raises from the alert-loop call site's perspective; callers that need the
-    error (the Test button) call ``send_test`` instead."""
+    error (the Test button) call ``send_test`` instead.
+
+    Recipient resolution order: an explicit ``to_emails`` list wins; else, if
+    ``spoke_id`` is given, the per-tenant recipients from the cs tenant
+    Notifications card are used (falling back to the hub's global list when the
+    tenant hasn't configured any, so an unconfigured tenant's alerts still go
+    somewhere); else the hub's global ``to_emails``."""
     cfg = get_config(hub)
     if not cfg.get("enabled", False):
         logger.debug("notifications: disabled — skipping send")
         return False
-    recipients = _normalize_recipients(to_emails if to_emails is not None else cfg.get("to_emails"))
+    if to_emails is not None:
+        recipients = _normalize_recipients(to_emails)
+    elif spoke_id:
+        recipients = await _tenant_recipients(hub, spoke_id)
+        if not recipients:
+            recipients = _normalize_recipients(cfg.get("to_emails"))
+    else:
+        recipients = _normalize_recipients(cfg.get("to_emails"))
     if not recipients:
         logger.warning("notifications: no recipients — skipping send")
         return False

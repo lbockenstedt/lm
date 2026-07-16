@@ -4551,73 +4551,23 @@ window.csSaveProcessingModes = async function () {
 async function csNotificationsCard() {
     const data = await csFetch('/' + csTenant() + '/settings');
     const n = (data && data.notifications) || {};
-    const f = (id, label, val, type) => `<label class="text-xs text-slate-500">${csEscape(label)}
-      <input id="${id}" ${type === 'checkbox' ? 'type="checkbox" ' + (val ? 'checked' : '') : `value="${csEscape(val != null ? val : '')}"`} class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+    const f = (id, label, val) => `<label class="text-xs text-slate-500">${csEscape(label)}
+      <input id="${id}" value="${csEscape(val != null ? val : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
     </label>`;
-    const provider = n.provider || 'generic';
-    const sel = (id, label, opts) => `<label class="text-xs text-slate-500">${csEscape(label)}
-      <select id="${id}" onchange="csNotifProviderChanged()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">${opts}</select>
-    </label>`;
-    const providerOpts = ['azure_acs:Azure ACS (Key Vault-managed)', 'gmail:Gmail', 'yahoo:Yahoo', 'office365:Office 365', 'generic:Generic SMTP']
-        .map(o => { const [v, l] = o.split(':'); return `<option value="${v}" ${provider === v ? 'selected' : ''}>${l}</option>`; }).join('');
-    const transport = n.transport || 'api';
-    const transportOpts = `<option value="api" ${transport === 'api' ? 'selected' : ''}>REST API (default)</option><option value="smtp" ${transport === 'smtp' ? 'selected' : ''}>SMTP</option>`;
-    const passPlaceholder = n.has_password ? 'set (leave blank to keep)' : '';
     return `<div class="hpe-card rounded-lg p-5 shadow-sm">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Notifications ${helpIcon('cs', null, 'Simulations help')}</h3>
-      <label class="flex items-center gap-2 text-xs text-slate-600 mb-3"><input id="cs-notif-enabled" type="checkbox" ${n.enabled ? 'checked' : ''}> Notifications enabled</label>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-        ${sel('cs-notif-provider', 'Provider', providerOpts)}
-        <div id="cs-notif-transport-wrap">${sel('cs-notif-transport', 'ACS transport', transportOpts)}</div>
-        <div id="cs-notif-smtp-fields" class="contents">
-          ${f('cs-notif-host', 'SMTP Host', n.smtp_host)}${f('cs-notif-port', 'SMTP Port', n.smtp_port, 'number')}
-          ${f('cs-notif-user', 'SMTP User', n.smtp_user)}${f('cs-notif-pass', 'SMTP Password (new)', passPlaceholder, 'password')}
-        </div>
-        <div id="cs-notif-acs-fields" class="contents">
-          ${f('cs-notif-acs-secret', 'ACS Key Vault secret name', n.acs_kv_secret_name || 'acs-email-connstr')}
-          ${f('cs-notif-vault-url', 'Key Vault URL (blank = DR vault)', n.vault_url)}
-        </div>
-        ${f('cs-notif-teams', 'Teams Webhook URL (new)', '', 'password')}
+      <p class="text-[11px] text-slate-400 mb-3">The hub sends this tenant's spoke out-of-contact alerts using the hub's configured email provider (Hub → Setup → Notifications). Just enter where this tenant's alerts should go.</p>
+      <div class="grid grid-cols-1 gap-3">
         ${f('cs-notif-emails', 'To Emails (comma-separated)', Array.isArray(n.to_emails) ? n.to_emails.join(', ') : (n.to_emails || ''))}
       </div>
-      <p id="cs-notif-acs-note" class="text-[11px] text-slate-400 mt-2 hidden">For ACS, the hub resolves sender creds from Key Vault at save time and pushes them to this spoke — leave the SMTP fields empty. API transport signs with the access key (no Entra permission needed).</p>
       <div class="mt-4 flex justify-end"><button onclick="csSaveNotifications()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save Notifications</button></div>
     </div>`;
 }
 
-window.csNotifProviderChanged = function () {
-    const p = csEl('cs-notif-provider') && csEl('cs-notif-provider').value;
-    const isAcs = p === 'azure_acs';
-    const toggle = (id, show) => { const el = csEl(id); if (el) el.classList.toggle('hidden', !show); };
-    toggle('cs-notif-transport-wrap', isAcs);
-    toggle('cs-notif-smtp-fields', !isAcs);
-    toggle('cs-notif-acs-fields', isAcs);
-    const isApi = isAcs && csEl('cs-notif-transport') && csEl('cs-notif-transport').value === 'api';
-    toggle('cs-notif-acs-note', isAcs);
-    const note = csEl('cs-notif-acs-note');
-    if (note && isAcs && !isApi) note.classList.add('hidden');
-};
-
 window.csSaveNotifications = async function () {
-    const provider = csEl('cs-notif-provider') && csEl('cs-notif-provider').value;
     const body = {
-        enabled: !!(csEl('cs-notif-enabled') && csEl('cs-notif-enabled').checked),
-        provider,
         to_emails: csEl('cs-notif-emails') && csEl('cs-notif-emails').value
     };
-    const teams = csEl('cs-notif-teams') && csEl('cs-notif-teams').value;
-    if (teams) body.teams_webhook_url = teams;
-    if (provider === 'azure_acs') {
-        body.transport = csEl('cs-notif-transport') && csEl('cs-notif-transport').value || 'api';
-        body.acs_kv_secret_name = (csEl('cs-notif-acs-secret') && csEl('cs-notif-acs-secret').value) || 'acs-email-connstr';
-        body.vault_url = csEl('cs-notif-vault-url') && csEl('cs-notif-vault-url').value;
-    } else {
-        body.smtp_host = csEl('cs-notif-host') && csEl('cs-notif-host').value;
-        body.smtp_port = parseInt((csEl('cs-notif-port') && csEl('cs-notif-port').value) || '0', 10);
-        body.smtp_user = csEl('cs-notif-user') && csEl('cs-notif-user').value;
-        const pass = csEl('cs-notif-pass') && csEl('cs-notif-pass').value;
-        if (pass) body.smtp_pass = pass;
-    }
     try {
         await csFetch('/' + csTenant() + '/settings/notifications', { method: 'POST', body: JSON.stringify(body) });
         showToast('Saved.', 'success');
@@ -5067,7 +5017,7 @@ window.csSaveSecurity = async function () {
 // ── Notifications (reuses the existing card) ─────────────────────────────────
 async function csRenderSetupNotifications() {
     csSetToolbar('');
-    try { csSet(`<div class="space-y-4">${await csNotificationsCard()}</div>`); if (window.csNotifProviderChanged) csNotifProviderChanged(); }
+    try { csSet(`<div class="space-y-4">${await csNotificationsCard()}</div>`); }
     catch (e) { console.error('csRenderSetupNotifications: notifications load failed', e); csSet(csErrorBox('Could not load Notifications', e)); }
 }
 

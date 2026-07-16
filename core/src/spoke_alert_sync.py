@@ -191,7 +191,10 @@ class SpokeAlertMixin:
                     f"Hub time: {time.time()}")
             # ensure_future → non-blocking; a slow SMTP/API send never stalls
             # the 30s loop. send_email itself swallows errors (logs at error).
-            asyncio.ensure_future(_n.send_email(self, subject, body))
+            # spoke_id=sid so send_email resolves THIS spoke's tenant and uses
+            # that tenant's recipients (cs tenant Notifications card) instead
+            # of the hub's global list.
+            asyncio.ensure_future(_n.send_email(self, subject, body, spoke_id=sid))
         except Exception as e:  # noqa: BLE001
             logger.warning("[spoke-alert] email dispatch failed: %s", e)
 
