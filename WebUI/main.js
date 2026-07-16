@@ -11857,7 +11857,7 @@ async function loadNwData(subMenu) {
         let keys;
         if (subMenu === 'MAC Table') keys = ['device', 'mac', 'ip', 'os', 'vlan', 'interface'];
         else if (subMenu === 'ARP') keys = ['device', 'ip', 'mac', 'os', 'interface'];
-        else if (subMenu === 'Interfaces') keys = ['device', 'name', 'ip', 'mac', 'vlan', 'status', 'speed'];
+        else if (subMenu === 'Interfaces') keys = ['device', 'name', 'status', 'speed', 'mode', 'ip', 'mac', 'vlan'];
         else if (subMenu === 'IP Addresses') keys = ['device', 'ip', 'mac', 'os', 'vlan', 'interface'];
         else if (subMenu === 'VLANs') keys = ['device', 'vlan', 'name', 'ports', 'macs', 'ips', 'gateway_ip'];
         else keys = ['device', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && k !== 'device' && !k.startsWith('_'))];
