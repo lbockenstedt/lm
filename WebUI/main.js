@@ -6611,13 +6611,19 @@ function _renderSettingsNotificationsTile(content) {
                 <div class="space-y-1 md:col-span-2" id="notif-acs-arm-wrap"><label class="${labelCls}">ACS resource (ARM listKeys)</label>
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-2">
                         <div class="flex gap-1">
-                            <select id="notif-acs-sub" class="${inputCls} font-mono text-xs flex-1"><option value="">Subscription ID…</option></select>
+                            <select id="notif-acs-sub" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsSubChanged()"><option value="">Subscription ID…</option></select>
                             <button type="button" onclick="pullAzureSubs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
                         </div>
-                        <input id="notif-acs-rg" type="text" placeholder="Resource group" class="${inputCls} font-mono text-xs">
-                        <input id="notif-acs-name" type="text" placeholder="Resource name" class="${inputCls} font-mono text-xs">
+                        <div class="flex gap-1">
+                            <select id="notif-acs-rg" class="${inputCls} font-mono text-xs flex-1" onchange="onAcsRgChanged()"><option value="">Resource group…</option></select>
+                            <button type="button" onclick="pullAzureRgs()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                        </div>
+                        <div class="flex gap-1">
+                            <select id="notif-acs-name" class="${inputCls} font-mono text-xs flex-1"><option value="">Resource name…</option></select>
+                            <button type="button" onclick="pullAcsResources()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-2 py-1 rounded-md text-xs font-bold whitespace-nowrap">Pull</button>
+                        </div>
                     </div>
-                    <p class="text-[11px] text-slate-400 mt-1">The SSO app calls <span class="font-mono">communicationServices/listKeys</span> via ARM (needs <b>Contributor</b> on the ACS resource/RG). The connection string is cached ~10 min and never touches the vault. <b>Pull</b> lists the subscriptions the app can see.</p></div>
+                    <p class="text-[11px] text-slate-400 mt-1">The SSO app calls <span class="font-mono">communicationServices/listKeys</span> via ARM (needs <b>Contributor</b> on the ACS resource/RG). The connection string is cached ~10 min and never touches the vault. <b>Pull</b> lists the subscriptions, resource groups, and ACS resources the app can see — choose top-down.</p></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP host</label><input id="notif-host" type="text" placeholder="smtp.example.com" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP port</label><input id="notif-port" type="number" placeholder="587" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">SMTP user</label><input id="notif-user" type="text" placeholder="user@example.com" class="${inputCls} font-mono text-xs"></div>
@@ -6706,8 +6712,20 @@ async function loadNotifications() {
             }
             subSel.value = savedSub;
         }
-        set('notif-acs-rg', c.azure_resource_group);
-        set('notif-acs-name', c.acs_resource_name);
+        // RG + resource name are Pull-populated selects; seed a placeholder
+        // option for a saved value so it shows (and isn't lost on save) before
+        // the user clicks Pull for that level.
+        const seedAcsSel = (id, val) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            const v = val || '';
+            if (v && !Array.from(el.options).some(o => o.value === v)) {
+                el.innerHTML = `<option value="${v}">${v}</option>`;
+            }
+            el.value = v;
+        };
+        seedAcsSel('notif-acs-rg', c.azure_resource_group);
+        seedAcsSel('notif-acs-name', c.acs_resource_name);
         set('notif-host', c.smtp_host);
         set('notif-port', c.smtp_port || 587);
         set('notif-user', c.smtp_user);
@@ -6807,6 +6825,68 @@ async function pullAzureSubs() {
         if (out) out.textContent = `${subs.length} subscription(s) listed`;
         showToast('Subscriptions pulled.', 'success');
     } catch (e) { if (out) out.textContent = ''; showToast('Pull failed: ' + (e.message || e), 'error'); }
+}
+
+async function pullAzureRgs() {
+    const out = document.getElementById('notif-action-out');
+    const subSel = document.getElementById('notif-acs-sub');
+    const rgSel = document.getElementById('notif-acs-rg');
+    if (!rgSel) return;
+    const sub = (subSel?.value || '').trim();
+    if (!sub) { if (out) out.textContent = 'select a subscription first'; showToast('Select a subscription first.', 'error'); return; }
+    const cur = (rgSel.value || '').trim();
+    if (out) out.textContent = 'Pulling resource groups…';
+    try {
+        const r = await setupFetch('/setup/notifications/azure-rgs?subscription_id=' + encodeURIComponent(sub));
+        const d = await r.json().catch(() => ({}));
+        if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
+        const rgs = d.resource_groups || [];
+        if (!rgs.length) { if (out) out.textContent = 'no resource groups in this subscription'; showToast('No resource groups in this subscription.', 'error'); return; }
+        rgSel.innerHTML = rgs.map(g => `<option value="${g.name}">${escapeHtml(g.name)}</option>`).join('');
+        if (cur && rgs.some(g => g.name === cur)) rgSel.value = cur;
+        if (out) out.textContent = `${rgs.length} resource group(s) listed`;
+        showToast('Resource groups pulled.', 'success');
+    } catch (e) { if (out) out.textContent = ''; showToast('Pull failed: ' + (e.message || e), 'error'); }
+}
+
+async function pullAcsResources() {
+    const out = document.getElementById('notif-action-out');
+    const subSel = document.getElementById('notif-acs-sub');
+    const rgSel = document.getElementById('notif-acs-rg');
+    const nameSel = document.getElementById('notif-acs-name');
+    if (!nameSel) return;
+    const sub = (subSel?.value || '').trim();
+    const rg = (rgSel?.value || '').trim();
+    if (!sub || !rg) { if (out) out.textContent = 'select a subscription and resource group first'; showToast('Select a subscription and resource group first.', 'error'); return; }
+    const cur = (nameSel.value || '').trim();
+    if (out) out.textContent = 'Pulling ACS resources…';
+    try {
+        const r = await setupFetch('/setup/notifications/azure-acs-resources?subscription_id=' + encodeURIComponent(sub) + '&resource_group=' + encodeURIComponent(rg));
+        const d = await r.json().catch(() => ({}));
+        if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
+        const items = d.acs_resources || [];
+        if (!items.length) { if (out) out.textContent = 'no Communication Services resources in this RG'; showToast('No ACS resources in this resource group.', 'error'); return; }
+        nameSel.innerHTML = items.map(i => `<option value="${i.name}">${escapeHtml(i.name)}${i.location ? ' — ' + escapeHtml(i.location) : ''}</option>`).join('');
+        if (cur && items.some(i => i.name === cur)) nameSel.value = cur;
+        if (out) out.textContent = `${items.length} ACS resource(s) listed`;
+        showToast('ACS resources pulled.', 'success');
+    } catch (e) { if (out) out.textContent = ''; showToast('Pull failed: ' + (e.message || e), 'error'); }
+}
+
+// Chained auto-pull: changing the subscription clears RG/resource and pulls
+// RGs; changing the RG clears the resource and pulls ACS resources.
+function onAcsSubChanged() {
+    const rgSel = document.getElementById('notif-acs-rg');
+    const nameSel = document.getElementById('notif-acs-name');
+    if (rgSel) rgSel.innerHTML = '<option value="">Resource group…</option>';
+    if (nameSel) nameSel.innerHTML = '<option value="">Resource name…</option>';
+    if ((document.getElementById('notif-acs-sub')?.value || '').trim()) pullAzureRgs();
+}
+
+function onAcsRgChanged() {
+    const nameSel = document.getElementById('notif-acs-name');
+    if (nameSel) nameSel.innerHTML = '<option value="">Resource name…</option>';
+    if ((document.getElementById('notif-acs-rg')?.value || '').trim()) pullAcsResources();
 }
 
 async function downloadKeyVaultMin() {

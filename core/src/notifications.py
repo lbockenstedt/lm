@@ -256,6 +256,66 @@ async def list_azure_subscriptions(hub, http: Optional[httpx.AsyncClient] = None
     return out
 
 
+async def list_azure_resource_groups(hub, subscription_id: str,
+                                     http: Optional[httpx.AsyncClient] = None
+                                     ) -> List[Dict[str, str]]:
+    """List resource groups in ``subscription_id`` via ARM (same token as the
+    NSG hook / listKeys path). Returns ``[{id, name}]`` sorted by name — drives
+    the RG dropdown in the Notifications tile once a subscription is chosen, so
+    the admin picks from what the SSO app can see instead of typing."""
+    sub = (subscription_id or "").strip()
+    if not sub:
+        raise NotificationsError("Select a subscription before pulling resource groups.")
+    oidc_cfg = get_oidc_config(hub)
+    token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
+    url = (f"https://management.azure.com/subscriptions/{sub}"
+           f"/resourceGroups?api-version=2021-04-01")
+    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        raise NotificationsError(
+            f"Azure resource group list failed: HTTP {resp.status_code} — "
+            f"{resp.text[:300]}")
+    rgs = (resp.json() or {}).get("value", []) or []
+    out = [{"id": str(r.get("id") or ""),
+            "name": str(r.get("name") or "")}
+           for r in rgs if r.get("name")]
+    out.sort(key=lambda e: e["name"].lower())
+    return out
+
+
+async def list_acs_resources(hub, subscription_id: str, resource_group: str,
+                             http: Optional[httpx.AsyncClient] = None
+                             ) -> List[Dict[str, str]]:
+    """List ``Microsoft.Communication/communicationServices`` resources in
+    ``subscription_id`` / ``resource_group`` via ARM (same token as listKeys).
+    Returns ``[{name, location}]`` sorted by name — drives the ACS resource
+    dropdown so the admin picks the exact resource ``listKeys`` will target,
+    instead of typing the name."""
+    sub = (subscription_id or "").strip()
+    rg = (resource_group or "").strip()
+    if not sub or not rg:
+        raise NotificationsError(
+            "Select a subscription and resource group before pulling ACS resources.")
+    oidc_cfg = get_oidc_config(hub)
+    token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
+    url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
+           f"/providers/Microsoft.Communication/communicationServices"
+           f"?api-version={_ACS_ARM_API}")
+    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        raise NotificationsError(
+            f"ACS resource list failed: HTTP {resp.status_code} — "
+            f"{resp.text[:300]}")
+    items = (resp.json() or {}).get("value", []) or []
+    out = [{"name": str(i.get("name") or ""),
+            "location": str(i.get("location") or "")}
+           for i in items if i.get("name")]
+    out.sort(key=lambda e: e["name"].lower())
+    return out
+
+
 async def _resolve(hub, cfg: Dict[str, Any],
                    http: Optional[httpx.AsyncClient] = None
                    ) -> Tuple[str, Any]:
