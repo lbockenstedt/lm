@@ -6,7 +6,27 @@ condition Central classifies as an INSIGHT (e.g. "DNS Server Failed to Respond")
 matched case-insensitively. check_eval is vendored byte-identical from
 cs/lm-spoke/src/check_eval.py; keep this test in sync with the CS copy.
 """
+import hashlib
+from pathlib import Path
+
 from simulations.check_eval import count_for_check, normalize_counts  # noqa: E402
+
+# ── Drift guard ───────────────────────────────────────────────────────────────
+# check_eval.py is vendored byte-identical to four trees (no shared package). The
+# cs repo's test_check_eval.py pins the SAME constant across its three copies;
+# this pins the lm copy. Bump EXPECTED_SHA in BOTH repos when you legitimately
+# change check_eval.py.
+EXPECTED_SHA = "1bbe785c49d4406dbc9f4453d9c3f663c9ff4b5f75af22c67e31a239db0f5ade"
+
+
+def test_lm_check_eval_in_sync():
+    p = Path(__file__).resolve().parents[1] / "src" / "simulations" / "check_eval.py"
+    got = hashlib.sha256(p.read_bytes()).hexdigest()
+    assert got == EXPECTED_SHA, (
+        f"lm check_eval.py ({got}) drifted from the vendored canonical "
+        f"({EXPECTED_SHA}). Re-copy cs/lm-spoke/src/check_eval.py over it and "
+        "bump EXPECTED_SHA in both repos' test_check_eval.py."
+    )
 
 
 def test_normalize_folds_case_whitespace_and_sums():
