@@ -64,6 +64,15 @@ def _num(v: Any) -> str:
     return _esc(v) if v is not None else "—"
 
 
+def _html_to_text(html: str) -> str:
+    """Crude plain-text fallback for the multipart email (clients render the
+    HTML; this is the text/plain alternative)."""
+    import re as _re
+    txt = _re.sub(r"<(style|script)[^>]*>.*?</\1>", " ", html or "", flags=_re.S | _re.I)
+    txt = _re.sub(r"<[^>]+>", " ", txt).replace("&nbsp;", " ")
+    return _re.sub(r"[ \t]*\n\s*", "\n", _re.sub(r"[ \t]{2,}", " ", txt)).strip()
+
+
 async def build_report(hub, service: SimulationsService, tenant_id: str,
                        cfg: Dict[str, Any]) -> Tuple[str, str]:
     """Return (subject, html) for the tenant's report per ``cfg['sections']``."""
@@ -249,10 +258,14 @@ def _due(now: datetime.datetime, sch: Dict[str, Any]) -> bool:
 
 async def send_now(hub, tenant_id: str, cfg: Dict[str, Any]) -> None:
     """Build + send immediately (the 'Send test now' path)."""
+    import notifications as _n  # leaf, lazy — same provider-aware sender as hub alerts
     service = SimulationsService(hub)
     subject, html = await build_report(hub, service, tenant_id, cfg)
-    notif = await hub.simulations_store.get_notifications(tenant_id)
-    await asyncio.to_thread(send_report, notif, cfg.get("recipients") or [], subject, html)
+    ok = await _n.send_email(hub, subject, _html_to_text(html),
+                             to_emails=cfg.get("recipients") or [], html=html)
+    if not ok:
+        raise RuntimeError("send failed — check Setup → Notifications "
+                           "(provider enabled, From address + recipient(s) set)")
 
 
 async def run_loop(hub) -> None:
@@ -274,8 +287,13 @@ async def run_loop(hub) -> None:
                     if cfg.get("last_sent") == period:
                         continue
                     subject, html = await build_report(hub, service, tid, cfg)
-                    notif = await store.get_notifications(tid)
-                    await asyncio.to_thread(send_report, notif, cfg.get("recipients") or [], subject, html)
+                    import notifications as _n
+                    sent = await _n.send_email(hub, subject, _html_to_text(html),
+                                               to_emails=cfg.get("recipients") or [], html=html)
+                    if not sent:
+                        logger.warning("email report for tenant %s not sent "
+                                       "(notifications disabled / no From / no recipients)", tid)
+                        continue
                     cfg["last_sent"] = period
                     await store.set_email_report(tid, cfg)
                     logger.info("email report delivered for tenant %s (%s)", tid, period)

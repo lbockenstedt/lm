@@ -450,15 +450,20 @@ def _smtp_send(host: str, port: int, user: str, password: str,
 
 async def _acs_api_send(endpoint: str, accesskey: str, sender: str,
                         recipients: List[str], subject: str, body: str,
+                        html: str = "",
                         http: Optional[httpx.AsyncClient] = None) -> None:
     """POST {endpoint}/emails:send signed with the ACS access key
     (HMAC-SHA256). No Entra token/permission needed — the key is parsed from
-    the same Key Vault connection string."""
+    the same Key Vault connection string. ``html`` (optional) adds an HTML body
+    alongside the plain-text one (used by the scheduled report / alert emails)."""
     url = f"{endpoint}/emails:send?api-version={_ACS_API_VERSION}"
+    content = {"subject": subject, "plainText": body}
+    if html:
+        content["html"] = html
     payload = {
         "senderAddress": sender,
         "recipients": {"to": [{"address": a} for a in recipients]},
-        "content": {"subject": subject, "plainText": body},
+        "content": content,
     }
     body_bytes = json.dumps(payload).encode()
     parts = urlsplit(url)
@@ -537,6 +542,7 @@ async def _tenant_recipients(hub, spoke_id: str) -> List[str]:
 async def send_email(hub, subject: str, body: str,
                      to_emails: Any = None,
                      spoke_id: Optional[str] = None,
+                     html: str = "",
                      http: Optional[httpx.AsyncClient] = None) -> bool:
     """Send one email using the hub's notifications config. Returns False (and
     logs) when notifications are disabled or there are no recipients — never
@@ -572,7 +578,7 @@ async def send_email(hub, subject: str, body: str,
         if mode == "acs_api":
             endpoint, _resourcename, accesskey = payload
             await _acs_api_send(endpoint, accesskey, sender,
-                                recipients, subject, body, http=http)
+                                recipients, subject, body, html=html, http=http)
         else:
             host, port, user, password, starttls = payload
             msg = EmailMessage()
@@ -580,6 +586,8 @@ async def send_email(hub, subject: str, body: str,
             msg["To"] = ", ".join(recipients)
             msg["Subject"] = subject
             msg.set_content(body)
+            if html:
+                msg.add_alternative(html, subtype="html")
             await asyncio.to_thread(_smtp_send, host, port, user, password,
                                     starttls, msg)
         logger.info("notifications: sent '%s' to %d recipient(s) via %s",
