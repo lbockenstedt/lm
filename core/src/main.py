@@ -64,6 +64,9 @@ from simulations.store import SimulationsStore
 from simulations.central_hub_poller import CentralHubPoller
 from security.auth_manager import AuthManager, LDAPAuthProvider
 from security.threat_monitor import ThreatMonitor
+from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
+                                   encryption_enabled, is_encrypted, wrap)
+from cryptography.exceptions import InvalidTag
 from api import (build_server, _refresh_module_all_tenants,
                  _invalidate_tenant_module, _fetch_module)
 from update_pipeline import UpdatePipelineMixin
@@ -196,6 +199,13 @@ _REDACT_COMMANDS = frozenset({"CS_STORE_PROXMOX_TOKEN", "CS_CREATE_PROXMOX_TOKEN
                               "SPOKE_SET_HUB_SECRET", "SET_PASSWORD",
                               "SET_USER_PASSWORD", "RESET_PASSWORD",
                               "CONSOLE_PUSH_CONFIG"})
+
+# H4 sentinel: ``_decrypt_inbound_payload`` returns this (instead of a secret)
+# to signal "drop this frame" — an encrypted payload that won't AEAD-decrypt
+# under the key that HMAC-verified it (tamper / wrong key) or a marked-encrypted
+# frame the hub has no secret to decrypt with. The receive loop treats identity
+# with this object as "do not dispatch ciphertext"; compared with ``is``.
+_H4_DROP = object()
 
 # Field keys dropped outright from a redacted payload (the value is still
 # forwarded to the spoke — only the log line is redacted). Covers every secret
@@ -755,6 +765,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         #   a session key, so LOAD_ROLE/GET_AVAILABLE_ROLES can fail fast instead
         #   of hanging to the request_response timeout. }
         self.spoke_authenticated: Dict[str, bool] = {}
+        # { spoke_id: True once the spoke advertised ``enc="v1"`` in its auth
+        #   frame AND app-layer encryption is enabled — the hub may AEAD-encrypt
+        #   secret-bearing outbound frames to it. Cleared on disconnect. A
+        #   legacy/non-capable spoke (or ``LM_APP_ENCRYPTION=0``) stays False →
+        #   plaintext, so a new hub never sends ciphertext a legacy spoke can't
+        #   decrypt (fail-safe, no fleet break). }
+        self.spoke_enc_capable: Dict[str, bool] = {}
         # Spokes already diagnosed as connected-but-never-authenticated this
         # connection cycle (see _maybe_log_unauthenticated_agent). Cleared on
         # authenticate + disconnect so a re-trigger after a future regression
@@ -1218,6 +1235,29 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 header_dict["timestamp"] = round(header_dict["timestamp"], 6)
 
             payload_dict = asdict(message.payload)
+
+            # H4: AEAD-encrypt payload.data of secret-bearing frames to a
+            # capable spoke (encrypt data → build body → HMAC-sign the encrypted
+            # body → send). The AEAD key is the same secret that signs this frame:
+            # for SPOKE_UPDATE_SESSION_KEY that's signing_secret (the PRE-rotation
+            # key the spoke still holds) — and on the FIRST-EVER push
+            # signing_secret is None (the never-keyed spoke has no key to decrypt
+            # with), so the bootstrap push stays plaintext (refinement #1). For
+            # every other type signing_secret is None → fall back to the spoke's
+            # current session key. Skipped entirely for non-secret types, a
+            # non-capable (legacy / kill-switch) spoke, or when encryption is off
+            # — the gate is cheap (a frozenset membership + dict get) and the hot
+            # path (heartbeats/commands/replies) is untouched on the wire.
+            _ptype = payload_dict.get("type")
+            if (encryption_enabled() and self.spoke_enc_capable.get(spoke_id)
+                    and _ptype in ENCRYPTED_TYPES):
+                if _ptype == "SPOKE_UPDATE_SESSION_KEY":
+                    _aead_secret = signing_secret  # None on first-ever push → skip
+                else:
+                    _aead_secret = (signing_secret if signing_secret is not None
+                                    else self.key_manager.current_session_secret(spoke_id))
+                if _aead_secret is not None:
+                    wrap(_aead_secret, payload_dict)
 
             # Encode to the wire form <sig>.<body> (body serialized ONCE, signed
             # over those exact bytes) so the spoke verifies received bytes without
@@ -3402,7 +3442,49 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception as _e:  # noqa: BLE001 — best-effort; never break relay
             logger.debug("agent tenant-inheritance write failed: %s", _e)
 
-    async def _handle_agent_relay_up(self, spoke_id: str, msg_data, payload) -> bool:
+    async def _decrypt_inbound_payload(self, spoke_id: str, src: Optional[str],
+                                       msg_data: dict) -> Any:
+        """H4: AEAD-decrypt ``payload.data`` of an inbound secret-bearing frame
+        AFTER HMAC verify + freshness have passed, before dispatch reads ``data``.
+
+        Resolves the AEAD key from the signature source: ``src == "history"`` →
+        the spoke signed with a PREVIOUS (rotated-out) key, so decrypt with
+        ``previous_session_secret`` (the key the spoke still holds at decode time,
+        mirroring the hub→spoke ``SPOKE_UPDATE_SESSION_KEY`` rule); otherwise the
+        current session key. (Both sides derive the AEAD key from the *same
+        secret that HMAC-signed the frame*, so the verify source is the decrypt
+        source.)
+
+        Returns the resolved secret (so the caller can thread it into the nested
+        ``AGENT_RELAY_UP`` decrypt) on success — including the plaintext/legacy
+        passthrough case, which is a no-op and returns the resolved secret
+        unchanged. Returns the ``_H4_DROP`` sentinel when the frame is marked
+        encrypted but cannot be decrypted: no secret on record, a tampered or
+        wrong-key ciphertext (``InvalidTag``), or a malformed b64/JSON payload
+        (``ValueError``, which covers ``binascii.Error`` and ``json`` failures).
+        A frame that won't AEAD-decrypt under the key that HMAC-verified it is
+        corrupted or hostile — it is dropped, never dispatched as ciphertext.
+        """
+        from security.frame_crypto import unwrap
+        payload = msg_data.get("payload", {})
+        if src == "history":
+            dec_secret = self.key_manager.previous_session_secret(spoke_id)
+        else:
+            dec_secret = self.key_manager.current_session_secret(spoke_id)
+        if not is_encrypted(payload):
+            return dec_secret  # plaintext / legacy passthrough (may be None)
+        if dec_secret is None:
+            logger.warning("Encrypted frame from %s but no decrypt key on record — dropping", spoke_id)
+            return _H4_DROP
+        try:
+            unwrap(dec_secret, payload)
+        except (InvalidTag, ValueError) as e:
+            logger.warning("Dropping tampered/undecryptable frame from %s: %s", spoke_id, e)
+            return _H4_DROP
+        return dec_secret
+
+    async def _handle_agent_relay_up(self, spoke_id: str, msg_data, payload,
+                                      _dec_secret: Optional[str] = None) -> bool:
         """Dispatch a relayed agent frame (AGENT_RELAY_UP) from a pxmx spoke.
 
         The spoke forwards ``original_payload`` from a unified agent. We branch on
@@ -3501,6 +3583,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # and resolve the tenant from the per-agent store.
         _orig_type = original_msg.get("payload", {}).get("type")
         if _orig_type and _orig_type.startswith("CS_"):
+            # H4 (refinement #2): the spoke's _encode_frame encrypted the NESTED
+            # original_payload.payload (e.g. CS_TOKEN_RESULT, whose data carries a
+            # Proxmox API token) while leaving the AGENT_RELAY_UP envelope
+            # plaintext (so the hub can read agent_id/hostname routing fields).
+            # Decrypt the inner payload (with the same verify-source secret)
+            # BEFORE reading _cs_data — a tampered/undecryptable inner is dropped
+            # (return True: AGENT_RELAY_UP matched, do not fall through).
+            _inner_payload = original_msg.get("payload")
+            if is_encrypted(_inner_payload):
+                if _dec_secret is None:
+                    logger.warning("Encrypted nested CS payload from %s but no decrypt key — dropping", spoke_id)
+                    return True
+                try:
+                    from security.frame_crypto import unwrap
+                    unwrap(_dec_secret, _inner_payload)
+                except (InvalidTag, ValueError) as e:
+                    logger.warning("Dropping tampered/undecryptable nested CS payload from %s: %s", spoke_id, e)
+                    return True
+                _orig_type = _inner_payload.get("type", _orig_type)
             _cs_data = original_msg.get("payload", {}).get("data", {}) or {}
             # Fire-and-forget — do NOT ``await``. ``_relay_cs_event`` dispatches to
             # the tenant's cs spoke via ``request_response`` (up to 30s) and a cs
@@ -3764,6 +3865,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # (has the local nginx cert helper) advertises this so the hub can
             # route the NetBox cert to it. Recorded post-auth below.
             netbox_server_cap = bool(auth_data.get("netbox_server"))
+            # H4 app-layer-encryption capability: the spoke advertises ``enc="v1"``
+            # in its auth frame. Combined with encryption_enabled() so
+            # LM_APP_ENCRYPTION=0 makes a new spoke behave as legacy (don't
+            # encrypt to it). Recorded post-auth below (unconditional — covers
+            # zero-touch / secret-less connects too, mirroring netbox_server_cap).
+            spoke_enc_capable = bool(auth_data.get("enc") == ENC_MARKER) and encryption_enabled()
 
             # DEBUG-only + length-only: a 64-char session key's 4+4 prefix/suffix
             # is a 12.5% entropy reduction, and this fires on EVERY connect
@@ -3866,6 +3973,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     "challenge": challenge,
                     "signature": signature
                 }
+                # H4: advertise app-layer-encryption capability to the spoke. The
+                # spoke verifies the signature over ``challenge`` ONLY (it never
+                # re-serializes or re-signs this proof dict), so adding an
+                # additive ``enc`` field is signature-safe. A new spoke reads it
+                # and encrypts its outbound secret frames to the hub; a legacy
+                # spoke ignores the unknown field (fail-safe → plaintext).
+                if encryption_enabled():
+                    proof["enc"] = ENC_MARKER
                 await websocket.send(json.dumps(proof))
 
                 # If the spoke has a secret, it will respond. If not, it might just ignore or respond HUB_OK.
@@ -3986,6 +4101,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.netbox_server_agents.add(spoke_id)
             else:
                 self.netbox_server_agents.discard(spoke_id)
+            # H4: record encryption capability unconditionally (covers the
+            # zero-touch / secret-less connect path too). A non-capable or
+            # kill-switched spoke records False → outbound frames stay plaintext.
+            self.spoke_enc_capable[spoke_id] = spoke_enc_capable
             if parent_spoke_id:
                 self.spoke_parent_map[spoke_id] = parent_spoke_id
                 if not self.approved_modules.get(spoke_id, False):
@@ -4115,6 +4234,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     continue
 
                 signature = sig or None
+                # H4: the AEAD-decrypt secret for an inbound secret-bearing
+                # frame. Resolved (and the payload decrypted) only on signed
+                # frames after HMAC verify + freshness pass; None for unsigned
+                # heartbeats (never encrypted). Threaded into _handle_agent_relay_up
+                # for the nested CS_TOKEN_RESULT decrypt (refinement #2).
+                _dec_secret = None
                 if signature:
                     src = self.key_manager.verify_signature_source(spoke_id, body_str.encode(), sig)
                     if src is None:
@@ -4146,6 +4271,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # only on signed frames, after verification, so unsigned
                     # heartbeats cost nothing and it's not an unauth flood vector.
                     if not self._check_freshness_and_replay(spoke_id, msg_data):
+                        continue
+                    # H4: AEAD-decrypt payload.data of secret-bearing inbound
+                    # frames (after HMAC verify + freshness pass) BEFORE dispatch
+                    # reads data. _decrypt_inbound_payload resolves the AEAD key
+                    # from src (history → previous_session_secret, else current),
+                    # is a no-op on plaintext/legacy frames, and returns _H4_DROP
+                    # on tamper / wrong key / marked-encrypted-with-no-decrypt-key
+                    # (the frame is dropped — ciphertext is never dispatched).
+                    _dec_secret = await self._decrypt_inbound_payload(spoke_id, src, msg_data)
+                    if _dec_secret is _H4_DROP:
                         continue
                 else:
                     # No signature provided. Allow ONLY heartbeats for unauthenticated spokes.
@@ -4479,7 +4614,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # log, matching the pre-extraction behavior. Do not add a `continue`
                 # on the False path.
                 if payload.get("type") == "AGENT_RELAY_UP":
-                    if await self._handle_agent_relay_up(spoke_id, msg_data, payload):
+                    if await self._handle_agent_relay_up(spoke_id, msg_data, payload,
+                                                        _dec_secret=_dec_secret):
                         continue
                 # --- End Relay Logic ---
 
@@ -4536,6 +4672,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.spoke_parent_map.pop(spoke_id, None)
                 self.netbox_server_agents.discard(spoke_id)
                 self.spoke_authenticated.pop(spoke_id, None)
+                self.spoke_enc_capable.pop(spoke_id, None)
                 # Drop the per-connection "never authenticated" diagnosis state
                 # so a reconnect that's still broken re-emits the ERROR once
                 # past the grace window (instead of staying suppressed).

@@ -24,6 +24,9 @@ import contextlib
 import concurrent.futures
 from typing import Dict, Any, Optional
 from ..security.signer import MessageSigner, encode_frame, split_frame
+from ..security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
+                                     encryption_enabled, is_encrypted, wrap, unwrap)
+from cryptography.exceptions import InvalidTag
 
 try:  # shared helper (lm/core/src); falls back if imported off a stale path
     from logging_setup import set_log_level, truncate_log_files
@@ -192,6 +195,14 @@ class BaseControlPlane:
         self.tenant_id_hint = (tenant_id_hint or os.environ.get("LM_TENANT_ID_HINT", "")).strip()
         self.modules: Dict[str, Any] = {} # { module_name: BaseSpoke instance }
         self.signer = MessageSigner(secret) if secret else None
+        # H4: True once the hub advertised ``enc="v1"`` in its HUB_VERIFIED proof
+        # AND app-layer encryption is enabled — the spoke may AEAD-encrypt its
+        # outbound secret-bearing frames to the hub. Reset to False before each
+        # HUB_VERIFIED attempt (downgrade safety: a reconnect to a legacy hub
+        # must not keep a stale True from a prior new-hub session). Read with
+        # getattr() in _encode_frame so harnesses that bypass __init__ default
+        # to plaintext (False), never AttributeError.
+        self.hub_enc_capable: bool = False
         # Subclasses set this to a logical type string (e.g. "hypervisor", "firewall")
         # so the hub can route by capability instead of by spoke ID prefix.
         self.module_type: str = None
@@ -1558,11 +1569,19 @@ class BaseControlPlane:
             # — notably ``parent_spoke_id`` so the hub auto-approves a multi-role
             # agent's role sub-spokes via the (already-approved) base agent.
             auth_payload.update(self._extra_auth_fields())
+            # H4: advertise app-layer-encryption capability to the hub. A new
+            # hub reads it and encrypts its outbound secret frames to this spoke;
+            # a legacy hub ignores the unknown field (fail-safe → plaintext).
+            # LM_APP_ENCRYPTION=0 → don't advertise (behave as legacy).
+            if encryption_enabled():
+                auth_payload["enc"] = ENC_MARKER
 
             await websocket.send(json.dumps(auth_payload, separators=(',', ':')))
             logger.info(f"Connected to Lab Manager Hub as {self.spoke_id}. Performing mutual authentication...")
 
             # 2. Hub Mutual Authentication (Verify Hub's identity)
+            # H4: reset capability before each attempt (downgrade safety).
+            self.hub_enc_capable = False
             try:
                 hub_proof_json = await asyncio.wait_for(websocket.recv(), timeout=5.0)
                 hub_proof = json.loads(hub_proof_json)
@@ -1585,6 +1604,13 @@ class BaseControlPlane:
 
                         if verified:
                             logger.info("Hub identity verified successfully.")
+                            # H4: parse the hub's encryption capability. Combined
+                            # with encryption_enabled() so LM_APP_ENCRYPTION=0
+                            # makes a new spoke behave as legacy (don't encrypt
+                            # outbound). A legacy hub sends no ``enc`` field →
+                            # False → plaintext (fail-safe).
+                            self.hub_enc_capable = bool(
+                                hub_proof.get("enc") == ENC_MARKER) and encryption_enabled()
                             # New code booted AND authed with the hub → mark healthy.
                             # The external update watchdog treats this marker as the
                             # "new version is good" signal; its absence past the
@@ -2787,7 +2813,31 @@ class BaseControlPlane:
     def _encode_frame(self, msg) -> str:
         """Serialize + sign ``msg`` into the wire form ``<sig>.<body>`` (body
         serialized ONCE, signed over those exact bytes). Unsigned (empty sig)
-        during bootstrap (no signer yet)."""
+        during bootstrap (no signer yet).
+
+        H4: before signing, AEAD-encrypt ``payload.data`` of secret-bearing
+        outbound frames when the hub is encryption-capable (encrypt data → build
+        body → HMAC-sign the encrypted body → send). The AEAD key is
+        ``self.secret`` (the same key that signs). For an ``AGENT_RELAY_UP``
+        envelope, the OUTER payload stays plaintext (the hub reads its routing
+        fields) but a NESTED ``original_payload.payload`` whose type is secret-
+        bearing is encrypted in place (refinement #2 — CS_TOKEN_RESULT, whose
+        data carries a Proxmox API token, rides inside AGENT_RELAY_UP). ``enc``
+        is additive; a legacy hub ignores it. ``getattr`` so harnesses that
+        bypass ``__init__`` (no ``hub_enc_capable``) default to plaintext."""
+        if isinstance(msg, dict):
+            payload = msg.get("payload")
+            if (isinstance(payload, dict) and getattr(self, "hub_enc_capable", False)
+                    and self.secret and encryption_enabled()):
+                ptype = payload.get("type")
+                if ptype in ENCRYPTED_TYPES:
+                    wrap(self.secret, payload)
+                elif ptype == "AGENT_RELAY_UP":
+                    _orig = (payload.get("data") or {}).get("original_payload") or {}
+                    inner = _orig.get("payload")
+                    if (isinstance(inner, dict)
+                            and inner.get("type") in ENCRYPTED_TYPES):
+                        wrap(self.secret, inner)
         return encode_frame(self.signer, msg)
 
     def _decode_frame(self, wire: str):
@@ -2827,6 +2877,25 @@ class BaseControlPlane:
                 return None, False
             return preview, True
         try:
-            return json.loads(body), True
+            msg = json.loads(body)
         except Exception:
             return None, False
+        # H4: AEAD-decrypt payload.data of an inbound secret-bearing frame
+        # after HMAC verify, before dispatch reads data. ``self.secret`` is the
+        # AEAD key — for SPOKE_UPDATE_SESSION_KEY it is still the PRE-rotation
+        # key at decode time (the new key is installed later in dispatch), which
+        # is exactly the key the hub encrypted the push with. A marked-encrypted
+        # frame with no secret, or one that won't decrypt (tamper / wrong key /
+        # malformed b64/JSON → InvalidTag or ValueError), is dropped — ciphertext
+        # is never dispatched. Plaintext/legacy frames pass through untouched.
+        _payload = msg.get("payload", {})
+        if is_encrypted(_payload):
+            if not self.secret:
+                logger.debug("Encrypted frame from hub but no session secret — dropping")
+                return None, False
+            try:
+                unwrap(self.secret, _payload)
+            except (InvalidTag, ValueError) as e:
+                logger.debug("Dropping tampered/undecryptable frame from hub: %s", e)
+                return None, False
+        return msg, True
