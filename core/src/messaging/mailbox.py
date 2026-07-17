@@ -488,6 +488,53 @@ class Mailbox:
             await self._asave()
         return dropped
 
+    async def rename_spoke(self, old_id: str, new_id: str) -> None:
+        """Re-key a spoke's mailbox state from ``old_id`` → ``new_id``.
+
+        The guid-primary migration counterpart to
+        KeyManager.rename_spoke_keys / StateManager.rename_module: when a
+        spoke is lazily re-keyed to its guid, its queued + pending-ack
+        messages + per-spoke cooldown / last-ack tracking must move with it
+        so delivery survives the rename. Idempotent (no-op if
+        ``old_id == new_id`` or ``old_id`` has no state). Best-effort,
+        non-raising."""
+        if old_id == new_id:
+            return
+        moved = False
+        # Offline queue. Re-point each queued message's destination_id too so
+        # a later flush delivers to the new id even before send_to_spoke
+        # resolves the destination via _primary_key.
+        if old_id in self.spoke_queues:
+            queued = self.spoke_queues.pop(old_id)
+            for _q in queued:
+                if getattr(_q.header, "destination_id", None) == old_id:
+                    _q.header.destination_id = new_id
+            self.spoke_queues[new_id] = queued
+            moved = True
+        # Per-spoke last-ack time (drives the supersession expiry).
+        if old_id in self._last_ack_ts:
+            self._last_ack_ts[new_id] = self._last_ack_ts.pop(old_id)
+            moved = True
+        # SPOKE_UPDATE delivery-cooldown keys are "{spoke}|{repo}|{branch}".
+        old_prefix = f"{old_id}|"
+        for key in list(self._spoke_update_delivered.keys()):
+            if key.startswith(old_prefix):
+                self._spoke_update_delivered[f"{new_id}|{key[len(old_prefix):]}"] = \
+                    self._spoke_update_delivered.pop(key)
+                moved = True
+        # pending_ack: re-point each pending message's destination_id so the
+        # retry loop + send_to_spoke route to the new id (mirrors clear_spoke's
+        # iteration). MessageHeader is a mutable dataclass → in-place setattr.
+        # message_id keys are global (not per-spoke), so only the embedded
+        # header destination moves.
+        for _mid, (msg, _ts, _retries) in list(self.pending_ack.items()):
+            if getattr(msg.header, "destination_id", None) == old_id:
+                msg.header.destination_id = new_id
+                moved = True
+        if moved:
+            logger.info(f"Re-keyed mailbox for spoke {old_id} → {new_id}")
+            await self._asave()
+
     def get_all_pending(self) -> list:
         """
         Returns a list of all messages currently awaiting acknowledgement

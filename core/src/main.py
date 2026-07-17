@@ -557,6 +557,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # approval/tenant binding/config instead of treating it as a stranger.
         self.install_uuid_index: Dict[str, str] = {}
         self._rebuild_install_uuid_index()
+        # Phase 2 guid-primary: once a spoke is lazily migrated to
+        # guid-primary, spoke_id_alias maps the spoke_id it CONNECTS with →
+        # the guid its routing/approval/crypto/mailbox state lives under.
+        # _primary_key consults this first. Empty until the Phase 2b
+        # migration trigger fires → _primary_key returns spoke_id for every
+        # spoke (legacy, zero behavior change).
+        self.spoke_id_alias: Dict[str, str] = {}
 
         # { spoke_id: str } tracking spoke versions
         self.spoke_versions: Dict[str, str] = {}

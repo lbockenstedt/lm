@@ -36,6 +36,20 @@ class HubIdentityMixin:
                 idx[iu] = aid
         self.install_uuid_index = idx
 
+    def _primary_key(self, spoke_id: str) -> str:
+        """The key this spoke's routing/approval/crypto/mailbox state lives
+        under.
+
+        Returns the guid once the spoke has been lazily migrated to
+        guid-primary (recorded in ``spoke_id_alias``), else ``spoke_id``
+        (legacy — the fail-safe). A spoke still CONNECTS by its
+        operator-chosen spoke_id (the auth-frame id), so this is the single
+        resolve point mapping that connect-id to the guid-keyed state. With
+        ``spoke_id_alias`` empty (before the Phase 2b migration trigger arms)
+        this returns ``spoke_id`` for every spoke → identical to today.
+        """
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
+
     def _reconcile_spoke_identity(self, new_id: str, install_uuid: str,
                                   hostname: str, is_agent: bool = False,
                                   parent_spoke_id: Optional[str] = None,
