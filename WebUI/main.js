@@ -12571,11 +12571,14 @@ function pxmxNodeKey(cluster, node) {
     return `${cluster || ''}::${node || ''}`;
 }
 
-function pxmxTableWrap(html) {
+// Shared table scaffolding — horizontal-scroll wrapper + uppercase header row.
+// Used by the PXMX, NetBox, DNS, DHCP, LE and CPPM views (was six byte-identical
+// local th/tw copies).
+function tableWrap(html) {
     return `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
 }
 
-function pxmxTh(cols) {
+function tableHead(cols) {
     return `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
 }
 
@@ -12631,7 +12634,7 @@ function pxmxVmTableHtml(vms) {
             </tr>
         </tbody>`;
     }).join('');
-    return pxmxBulkBar() + pxmxTableWrap(pxmxTh(cols) + rows);
+    return pxmxBulkBar() + tableWrap(tableHead(cols) + rows);
 }
 
 // Bulk VM actions — operate on the checked rows. Reuses /api/pxmx/vm-action per
@@ -13928,7 +13931,7 @@ function renderPxmxNodes() {
             <td class="px-4 py-2 text-xs text-slate-400">${pxmxShortVer(n.proxmox_version) || '—'}</td>
         </tr>`;
     }).join('');
-    wrap.innerHTML = pxmxTableWrap(pxmxTh(cols) + `<tbody>${rows}</tbody>`);
+    wrap.innerHTML = tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`);
 }
 
 // Clicking a node on the Nodes tab sets it as the VM filter and navigates to the
@@ -13975,8 +13978,7 @@ async function loadPxmxData(subMenu) {
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
-    const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
-    const tableWrap = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
+    const th = tableHead;  // shared helpers (tableWrap used directly)
 
     try {
         if (subMenu === 'Settings') {
@@ -14151,8 +14153,7 @@ async function loadNetboxData(subMenu) {
         }
     }
 
-    const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
-    const tw = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
+    const th = tableHead, tw = tableWrap;  // shared table helpers
     const escAttr = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
@@ -15231,8 +15232,7 @@ async function loadDNSData(subMenu) {
     // Add-record only applies to the Records tab; Statistics/Forwarders are read-only.
     if (addBtn) addBtn.classList.toggle('hidden', !(subMenu === 'Records' || !subMenu));
 
-    const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
-    const tw = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
+    const th = tableHead, tw = tableWrap;  // shared table helpers
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
@@ -15378,8 +15378,7 @@ async function loadLEData(subMenu) {
     // Hub-level failed-distribution retry interval (hours; default 1).
     loadLeRetryInterval();
 
-    const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
-    const tw = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
+    const th = tableHead, tw = tableWrap;  // shared table helpers
     // The le spoke returns nested {status, data:{...}}; unwrap to the inner data
     // so both the nested le shape and a flat sibling shape resolve the same way.
     const inner = b => (b && typeof b.data === 'object' && b.data !== null) ? b.data : (b || {});
@@ -17063,8 +17062,7 @@ async function loadDHCPData(subMenu) {
     const addBtn = document.getElementById('dhcp-add-btn');
     if (addBtn) addBtn.classList.toggle('hidden', subMenu !== 'Reservations');
 
-    const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
-    const tw = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
+    const th = tableHead, tw = tableWrap;  // shared table helpers
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
@@ -17420,8 +17418,7 @@ async function loadCPPMData(subMenu) {
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
-    const th = cols => `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${cols.map(c => `<th class="px-4 py-2 text-left font-medium">${c}</th>`).join('')}</tr></thead>`;
-    const tableWrap = html => `<div class="overflow-x-auto"><table class="w-full text-sm">${html}</table></div>`;
+    const th = tableHead;  // shared helpers (tableWrap used directly)
 
     try {
         if (subMenu === 'NAC Status' || subMenu === 'Access Tracker') {
