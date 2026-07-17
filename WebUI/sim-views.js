@@ -2091,6 +2091,7 @@ async function csRenderCentral() {
     if (!sites.length) { csSet(`${warn}${csEmpty('No Central sites returned.', 'Verify the Central API token/mode in Setup → Central API and that the account has sites.')}`); return; }
     const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
     const monitored = new Set(Object.values(sm).map(v => String(v)));  // Central-site names enrolled
+    const minBySite = (sitesCfg && sitesCfg.site_min_clients && typeof sitesCfg.site_min_clients === 'object') ? sitesCfg.site_min_clients : {};  // per-site min-client floor
     // Per-site alert/insight counts from the browse data. Insights tagged
     // "All Sites" (global) count toward every site.
     const alertsBySite = {}, insightsBySite = {}; let globalInsights = 0;
@@ -2101,9 +2102,10 @@ async function csRenderCentral() {
         const isMon = monitored.has(String(name));
         const nAlerts = alertsBySite[name] || 0;
         const nInsights = (insightsBySite[name] || 0) + globalInsights;
+        const _minLbl = minBySite[name] ? ` · min ${csEscape(String(minBySite[name]))}` : '';
         const btn = isMon
-            ? `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(name))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this site's client count">✓ Monitored</button>`
-            : `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(name))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count for change (shows on the dashboard)">Monitor</button>`;
+            ? `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(name))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(name))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count (set a min-client floor)">Monitor</button>`;
         return { name, health: st.health_score, clients: st.wireless_clients != null ? st.wireless_clients : 0,
                  alerts: nAlerts, insights: nInsights, monitored: isMon, btn: name ? btn : '' };
     });
@@ -2118,31 +2120,106 @@ async function csRenderCentral() {
     csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-sites', siteCols, rows, { monitorOf: r => r.monitored, caption: `${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard` })}</div></div>`);
 }
 
-// Enroll / un-enroll a Central site for client-count monitoring by toggling it in
-// central_sites_config.site_mappings (key=value=Central site name), preserving the
-// monitored alert/insight + hardware checks. Once enrolled the hub/spoke poller
-// tracks its client count (7-day baseline) and it appears on the dashboard.
-window.csToggleMonitorSite = async function (siteName, monitor, rerender) {
+// Open the Monitor dialog for a Central site. Enrolls/stops client-count
+// monitoring AND sets an optional per-site minimum-client floor: if the live
+// count drops below the floor the poller raises a "Minimum Client Threshold"
+// error check on the dashboard, IN ADDITION to the existing % drop check.
+// ``rerender`` is 'clients' when opened from the Clients view so the save
+// re-renders the right pane.
+window.csMonitorSiteModal = async function (siteName, rerender) {
+    const existing = document.getElementById('cs-monitor-site-modal');
+    if (existing) { existing.remove(); return; }
+    let cfg = {};
+    try { cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {}; } catch (e) { /* tolerate, defaults below */ }
+    const sm = (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {};
+    const isMon = Object.values(sm).some(v => String(v) === String(siteName));
+    const minBySite = (cfg.site_min_clients && typeof cfg.site_min_clients === 'object') ? cfg.site_min_clients : {};
+    const curMin = minBySite[siteName] || '';
+    const rr = rerender === 'clients' ? 'clients' : 'sites';
+    const esc = s => (s == null ? '' : String(s)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+    const modal = document.createElement('div');
+    modal.id = 'cs-monitor-site-modal';
+    modal.dataset.rerender = rr;
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">${isMon ? 'Monitored' : 'Monitor'} — ${esc(siteName)}</h3>
+                <button onclick="this.closest('#cs-monitor-site-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Minimum clients <span class="font-normal normal-case text-slate-400">(optional floor)</span></label>
+                    <input id="cs-monitor-min" type="number" min="0" step="1" value="${esc(curMin)}" placeholder="blank = no floor (drop-based only)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <p class="text-[11px] text-slate-400 leading-relaxed">If this site's live client count drops below this number, an error is raised on the dashboard — in addition to the existing % drop check. Leave blank to monitor for change only.</p>
+                </div>
+                <div id="cs-monitor-status" class="text-xs text-slate-500 hidden"></div>
+                <div class="pt-2 flex justify-between gap-3">
+                    ${isMon ? `<button onclick="csSaveMonitorSite(${csEscape(JSON.stringify(siteName))}, false, null)" class="px-4 py-2 text-sm font-medium text-rose-600 hover:text-rose-800 border border-rose-200 rounded-md">Stop monitoring</button>` : `<span></span>`}
+                    <div class="flex gap-3">
+                        <button onclick="this.closest('#cs-monitor-site-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                        <button id="cs-monitor-save" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${isMon ? 'Save' : 'Start monitoring'}</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    const inp = document.getElementById('cs-monitor-min');
+    if (inp) { inp.focus(); inp.select(); }
+    const saveBtn = document.getElementById('cs-monitor-save');
+    if (saveBtn) saveBtn.addEventListener('click', () => {
+        const raw = ((inp || {}).value || '').trim();
+        const n = raw === '' ? 0 : parseInt(raw, 10);
+        if (raw !== '' && (!Number.isFinite(n) || n < 0)) {
+            if (typeof showToast === 'function') showToast('Minimum clients must be a non-negative integer', 'error');
+            return;
+        }
+        csSaveMonitorSite(siteName, true, n);
+    });
+};
+
+// Worker for the monitor dialog: writes site_mappings (+ site_min_clients) into
+// central_sites_config, preserving the monitored alert/insight + hardware
+// checks. ``minClients``: null = leave the floor untouched (Stop), 0 = clear it,
+// >0 = set it. Reads data-rerender on the modal to re-render the opening pane.
+window.csSaveMonitorSite = async function (siteName, monitor, minClients) {
+    const modal = document.getElementById('cs-monitor-site-modal');
+    const statusEl = modal ? modal.querySelector('#cs-monitor-status') : null;
+    const saveBtn = modal ? modal.querySelector('#cs-monitor-save') : null;
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+    if (statusEl) { statusEl.textContent = 'Saving…'; statusEl.classList.remove('hidden'); }
     try {
         const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
         const sm = (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? { ...cfg.site_mappings } : {};
+        const minBySite = (cfg.site_min_clients && typeof cfg.site_min_clients === 'object') ? { ...cfg.site_min_clients } : {};
         if (monitor) {
             sm[siteName] = siteName;
+            if (minClients === null) { /* keep existing floor */ }
+            else if (minClients > 0) { minBySite[siteName] = minClients; }
+            else { delete minBySite[siteName]; }
         } else {
             Object.keys(sm).forEach(k => { if (String(sm[k]) === String(siteName) || k === siteName) delete sm[k]; });
+            delete minBySite[siteName];
         }
         const body = {
             site_mappings: sm,
+            site_min_clients: minBySite,
             monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
             hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
         };
         const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`);
         else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`, 'success');
-        (rerender === 'clients' ? csRenderCentralClients : csRenderCentral)();
+        if (modal) modal.remove();
+        ((modal && modal.dataset.rerender) === 'clients' ? csRenderCentralClients : csRenderCentral)();
     } catch (e) {
-        console.error('csToggleMonitorSite failed', e);
+        console.error('csSaveMonitorSite failed', e);
         if (typeof showToast === 'function') showToast(e.message, 'error');
+        if (statusEl) { statusEl.textContent = (e.message || 'Save failed'); statusEl.classList.remove('hidden'); }
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
     }
 };
 
@@ -2263,12 +2340,14 @@ async function csRenderCentralClients() {
     if (!clients.length) { csSet(`${warn}${csEmpty('No Central clients returned.')}`); return; }
     const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
     const monitored = new Set(Object.values(sm).map(v => String(v)));
+    const minBySite = (sitesCfg && sitesCfg.site_min_clients && typeof sitesCfg.site_min_clients === 'object') ? sitesCfg.site_min_clients : {};
     const rows = clients.map(cl => {
         const site = cl.site || '';
         const isMon = site && monitored.has(String(site));
+        const _minLbl = site && minBySite[site] ? ` · min ${csEscape(String(minBySite[site]))}` : '';
         const btn = !site ? '—' : (isMon
-            ? `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(site))}, false, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this client's site">✓ Site monitored</button>`
-            : `<button onclick="csToggleMonitorSite(${csEscape(JSON.stringify(site))}, true, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (client-count on the dashboard)">Monitor</button>`);
+            ? `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
         return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
                  site: cl.site || '—', status: cl.status || 'unknown', monitored: !!isMon, btn };
     });

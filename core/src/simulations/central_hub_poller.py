@@ -25,12 +25,25 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .aruba import ArubaClient
 from .check_eval import count_for_check, normalize_counts
 
 logger = logging.getLogger("CentralHubPoller")
+
+
+def min_client_check(current: int, min_floor: Optional[int]) -> Optional[Dict[str, Any]]:
+    """Build the per-site ``Minimum Client Threshold`` check, or ``None`` when no
+    floor is set. Direct semantics: ``current`` below ``min_floor`` is an error
+    (an absolute client-count floor — some sites should always have at least N
+    clients), IN ADDITION to the % drop check. A floor of ``None``/``0`` means
+    "monitor for change only" and emits no check (the site behaves as before)."""
+    if not min_floor or min_floor <= 0:
+        return None
+    if current < min_floor:
+        return {"status": "error", "message": f"{current} clients — below minimum {min_floor}"}
+    return {"status": "ok", "message": f"{current} clients (min {min_floor}) — OK"}
 
 _POLL_INTERVAL_S = 300  # 5 min — default; matches the spoke poller + aruba.py cache TTLs
 _POLL_INTERVAL_FLOOR_S = 60  # min allowed per-tenant interval (protect the Central API)
@@ -396,6 +409,15 @@ class CentralHubPoller:
         site_mappings: Dict[str, str] = sites_cfg.get("site_mappings") or {}
         monitored: list = sites_cfg.get("monitored_checks") or []
         hw_checks: list = sites_cfg.get("hardware_checks") or []
+        # Per-site minimum client count threshold (site name -> int). When set,
+        # the poller raises a "Minimum Client Threshold" check (direct semantics:
+        # below the floor = error) IN ADDITION to the drop-based client-count
+        # check — some sites should always have at least N clients (a floor),
+        # independent of the % drop from the rolling average.
+        site_min_clients: Dict[str, int] = {
+            str(k): int(v) for k, v in (sites_cfg.get("site_min_clients") or {}).items()
+            if isinstance(v, (int, float)) and int(v) > 0
+        }
         hw_check_ids = {str(h.get("id")) for h in hw_checks if h.get("id")}
         hw_names = {str(h.get("id")): h for h in hw_checks if h.get("id")}
 
@@ -464,6 +486,16 @@ class CentralHubPoller:
                 "status": cc_entry["status"],
                 "message": f"{cc_entry['current']} clients vs {cc_entry['hourly_avg']} hr-avg (down {cc_entry['drop_pct']}%)",
             }
+            # Per-site minimum client floor. Direct semantics: current below the
+            # configured min = error (clients died below an absolute floor, not
+            # just a relative drop). Only emitted when a min is set for THIS site
+            # — sites without a threshold are unchanged. The floor lookup matches
+            # on the wireless site name OR the central site name so a threshold
+            # saved against either form applies.
+            min_floor = site_min_clients.get(wireless_site) or site_min_clients.get(central_site)
+            _mc = min_client_check(current, min_floor)
+            if _mc:
+                checks["Minimum Client Threshold"] = _mc
             central_clients_by_site[wireless_site] = current
             for alert_id, devices in (data.get("hw_devices") or {}).items():
                 hw_totals[alert_id] = hw_totals.get(alert_id, 0) + sum(devices.values())

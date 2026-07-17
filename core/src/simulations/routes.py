@@ -3245,6 +3245,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception:  # noqa: BLE001
             existing = {}
         cfg = {**existing, **body}
+        # Sanitize the per-site minimum client floor: coerce to a {site: int>0}
+        # dict, dropping anything malformed. Sent whole by the WebUI toggle
+        # (shallow top-level merge), like site_mappings.
+        _smc = cfg.get("site_min_clients") or {}
+        if isinstance(_smc, dict):
+            clean_smc: dict = {}
+            for k, v in _smc.items():
+                try:
+                    n = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if n > 0:
+                    clean_smc[str(k)] = n
+            cfg["site_min_clients"] = clean_smc
+        else:
+            cfg.pop("site_min_clients", None)
         sim_quota_errors: list[str] = []
         clean: list = list(cfg.get("sim_quotas") or [])
         try:
