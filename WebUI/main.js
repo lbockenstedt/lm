@@ -11243,6 +11243,32 @@ function escJsAttr(s) {
     return escapeHtml(String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
 }
 
+/**
+ * Shared modal shell — dimmed full-screen overlay + centered white card.
+ * Removes any existing element with the same id first (idempotent re-open),
+ * then appends to <body>. Callers wire their own buttons/handlers on the
+ * returned overlay element (querySelector into it).
+ *
+ * @param {string} id       DOM id for the overlay (also used to close it).
+ * @param {string} bodyHtml Card contents (everything inside the white card).
+ * @param {object} [opts]
+ *   card:          card classes after 'bg-white rounded-xl shadow-xl '
+ *                  (default 'w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto').
+ *   overlay:       extra classes appended to the overlay (e.g. 'overflow-y-auto py-6').
+ *   backdropClose: true → clicking the dimmed backdrop closes the modal.
+ * @returns {HTMLElement} The overlay element.
+ */
+function openModal(id, bodyHtml, opts = {}) {
+    document.getElementById(id)?.remove();
+    const modal = document.createElement('div');
+    modal.id = id;
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50' + (opts.overlay ? ' ' + opts.overlay : '');
+    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl ${opts.card || 'w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto'}">${bodyHtml}</div>`;
+    if (opts.backdropClose) modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    document.body.appendChild(modal);
+    return modal;
+}
+
 // Watchdog recovery badge for a spoke. The hub's run_spoke_recovery_loop
 // restarts stranded units (reset-failed + restart, backoff 60/120/180s) and
 // exposes per-spoke state via GET_SPOKE_STATUS + /setup/diagnostics. This maps
@@ -14324,13 +14350,7 @@ function showNetboxAddModal() {
 // data orphaned by a tenant rename. Backed by GET /setup/tenants (LM tenant
 // list) + POST /api/tenant/migrate (admin-gated cross-module orchestrator).
 async function showNetboxMigrateTenantModal() {
-    document.getElementById('netbox-migrate-modal')?.remove();
-    const modal = document.createElement('div');
-    modal.id = 'netbox-migrate-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    const inner = document.createElement('div');
-    inner.className = 'bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto';
-    inner.innerHTML = `
+    const modal = openModal('netbox-migrate-modal', `
         <div class="flex justify-between items-start">
             <div>
               <p class="font-bold text-base text-[#263040]">Migrate Data to new Tenant</p>
@@ -14338,13 +14358,10 @@ async function showNetboxMigrateTenantModal() {
             </div>
             <button class="nbmig-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
         </div>
-        <div class="nbmig-body"><p class="text-xs text-slate-400 italic">Loading tenants…</p></div>`;
-    modal.appendChild(inner);
-    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
-    inner.querySelector('.nbmig-close').addEventListener('click', () => modal.remove());
-    document.body.appendChild(modal);
+        <div class="nbmig-body"><p class="text-xs text-slate-400 italic">Loading tenants…</p></div>`, { backdropClose: true });
+    modal.querySelector('.nbmig-close').addEventListener('click', () => modal.remove());
 
-    const body = inner.querySelector('.nbmig-body');
+    const body = modal.querySelector('.nbmig-body');
     let tenants = [];
     try {
         tenants = (await apiJson('/setup/tenants')).tenants || [];
@@ -14379,7 +14396,7 @@ async function showNetboxMigrateTenantModal() {
           <button class="nbmig-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Cancel</button>
           <button id="nbmig-go" class="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-md text-sm font-bold">Migrate</button>
         </div>`;
-    inner.querySelector('.nbmig-cancel').addEventListener('click', () => modal.remove());
+    modal.querySelector('.nbmig-cancel').addEventListener('click', () => modal.remove());
     document.getElementById('nbmig-target').selectedIndex = 1;  // default target ≠ source
     document.getElementById('nbmig-go').addEventListener('click', () => netboxMigrateTenant(modal));
 }
@@ -14424,26 +14441,15 @@ async function netboxMigrateTenant(modal) {
 }
 
 async function showCPPMDeviceDetail(mac) {
-    document.getElementById('cppm-device-modal')?.remove();
-
-    const modal = document.createElement('div');
-    modal.id = 'cppm-device-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-
-    const inner = document.createElement('div');
-    inner.className = 'bg-white rounded-xl shadow-xl w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto';
-    inner.innerHTML = `
+    const modal = openModal('cppm-device-modal', `
         <div class="flex justify-between items-start">
             <p class="font-mono text-base font-bold text-[#263040]">${mac}</p>
             <button class="cppm-modal-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
         </div>
-        <div class="cppm-modal-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>`;
-    modal.appendChild(inner);
-    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
-    inner.querySelector('.cppm-modal-close').addEventListener('click', () => modal.remove());
-    document.body.appendChild(modal);
+        <div class="cppm-modal-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>`, { card: 'w-full max-w-xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
+    modal.querySelector('.cppm-modal-close').addEventListener('click', () => modal.remove());
 
-    const body = inner.querySelector('.cppm-modal-body');
+    const body = modal.querySelector('.cppm-modal-body');
     try {
         const tparam = currentTenant && currentTenant !== 'default' ? `&tenant=${encodeURIComponent(currentTenant)}` : '';
         const [enrichRes, sessRes] = await Promise.all([
@@ -14544,10 +14550,7 @@ async function showClaimDeviceModal(mac) {
         `<option value="${esc(o.slug)}" ${o.slug === slug ? 'selected' : ''}>${esc(label(o))}</option>`).join('');
     const nameDefault = dev.hostname || `endpoint-${(mac || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase()}`;
 
-    const modal = document.createElement('div');
-    modal.id = 'nb-claim-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+    const modal = openModal('nb-claim-modal', `
         <h3 class="text-lg font-bold text-[#263040]">Claim in NetBox</h3>
         <p class="text-xs text-slate-500">Creates a NetBox device owned by a tenant and attaches this endpoint's IP. After a sync, the device leaves Unknown Devices and appears under My Devices.</p>
         <div class="rounded-md bg-slate-50 border border-slate-100 p-3 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
@@ -14568,10 +14571,7 @@ async function showClaimDeviceModal(mac) {
         <div class="flex justify-end gap-2 pt-2">
             <button id="cl-submit" onclick="submitClaimDevice('${encodeURIComponent(mac)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Claim Device</button>
             <button onclick="document.getElementById('nb-claim-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>
-    </div>`;
-    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
-    document.body.appendChild(modal);
+        </div>`, { backdropClose: true });
 }
 
 async function submitClaimDevice(mac) {
@@ -14627,11 +14627,7 @@ function showNetboxAddDeviceModal(editItem) {
     const editing = !!editItem;
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
-    const modal = document.createElement('div');
-    modal.id = 'nb-device-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    if (editing) modal.dataset.deviceId = editItem.id;
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-4">
+    const modal = openModal('nb-device-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} Device</h3>
         <div class="grid grid-cols-2 gap-3">
             <div class="col-span-2 space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Device Name</label><input id="nb-d-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="router-01"></div>
@@ -14646,9 +14642,8 @@ function showNetboxAddDeviceModal(editItem) {
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAddDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Device'}</button>
             <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>
-    </div>`;
-    document.body.appendChild(modal);
+        </div>`, { card: 'w-full max-w-lg p-6 space-y-4' });
+    if (editing) modal.dataset.deviceId = editItem.id;
     if (editing && editItem.status) {
         const st = document.getElementById('nb-d-status');
         if (st) st.value = editItem.status;
@@ -14709,11 +14704,7 @@ function showNetboxRackModal(editItem) {
     const editing = !!editItem;
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
-    const modal = document.createElement('div');
-    modal.id = 'nb-rack-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    if (editing) modal.dataset.rackId = editItem.id;
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+    const modal = openModal('nb-rack-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} Rack</h3>
         <div class="space-y-3">
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Rack Name</label><input id="nb-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="Rack-01"></div>
@@ -14724,9 +14715,8 @@ function showNetboxRackModal(editItem) {
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxRack()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Rack'}</button>
             <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>
-    </div>`;
-    document.body.appendChild(modal);
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    if (editing) modal.dataset.rackId = editItem.id;
 }
 
 async function submitNetboxRack() {
@@ -14771,10 +14761,6 @@ async function showNetboxAllocatePrefixModal(editItem) {
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const selectCls = inputCls;
-    const modal = document.createElement('div');
-    modal.id = 'nb-prefix-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    if (editing) modal.dataset.prefixId = editItem.id;
     const allocFields = editing ? '' : `
         <div class="space-y-1">
             <label class="text-xs text-slate-500 font-bold uppercase">Parent Prefix</label>
@@ -14784,7 +14770,7 @@ async function showNetboxAllocatePrefixModal(editItem) {
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet (optional)</label><input id="nb-p-prefix" class="${inputCls}" placeholder="10.0.0.16/28 — exact subnet to create; blank = auto"></div>`;
     const statusOpts = ['active', 'container', 'reserved', 'deprecated'].map(s =>
         `<option value="${s}"${editing && editItem.status === s ? ' selected' : ''}>${s}</option>`).join('');
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+    const modal = openModal('nb-prefix-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} Subnet${editing ? ` — <span class="font-mono text-sm">${val(editItem.prefix)}</span>` : ''}</h3>
         <div class="space-y-3">
             ${allocFields}
@@ -14795,9 +14781,8 @@ async function showNetboxAllocatePrefixModal(editItem) {
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>
-    </div>`;
-    document.body.appendChild(modal);
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    if (editing) modal.dataset.prefixId = editItem.id;
 
     if (editing) return;
 
@@ -14892,10 +14877,7 @@ async function showFindSubnetModal() {
     const existing = document.getElementById('nb-find-modal');
     if (existing) { existing.remove(); return; }
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
-    const modal = document.createElement('div');
-    modal.id = 'nb-find-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+    const modal = openModal('nb-find-modal', `
         <h3 class="text-lg font-bold text-[#263040]">New Subnet</h3>
         <p class="text-xs text-slate-500 -mt-2">Finds the closest available subnet to one you already have (RFC1918 only; free = not in NetBox or unassigned).</p>
         <div class="space-y-3">
@@ -14931,10 +14913,7 @@ async function showFindSubnetModal() {
         <div class="flex justify-end gap-2 pt-2">
             <button id="nb-f-assign-btn" onclick="submitFindSubnetAssign()" disabled class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">Assign</button>
             <button onclick="document.getElementById('nb-find-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>
-    </div>`;
-    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
-    document.body.appendChild(modal);
+        </div>`, { backdropClose: true });
     window._nbFindAvail = [];
     window._nbFindSelected = null;
 
@@ -15087,16 +15066,12 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
     const editing = !!editItem;
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
-    const modal = document.createElement('div');
-    modal.id = 'nb-ip-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    if (editing) modal.dataset.ipId = editItem.id;
     const allocFields = editing ? '' : `
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Prefix</label><input id="nb-ip-prefix" value="${prefixHint}" class="${inputCls}" placeholder="10.0.0.0/24"></div>
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">IP Address (optional)</label><input id="nb-ip-address" class="${inputCls}" placeholder="10.0.0.5 — exact address; blank = auto"></div>`;
     const statusOpts = ['active', 'reserved', 'deprecated', 'dhcp'].map(s =>
         `<option value="${s}"${editing && editItem.status === s ? ' selected' : ''}>${s}</option>`).join('');
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+    const modal = openModal('nb-ip-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} IP Address${editing ? ` — <span class="font-mono text-sm">${val(editItem.address)}</span>` : ''}</h3>
         <div class="space-y-3">
             ${allocFields}
@@ -15107,9 +15082,8 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>
-    </div>`;
-    document.body.appendChild(modal);
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    if (editing) modal.dataset.ipId = editItem.id;
 }
 
 async function submitNetboxAllocateIP() {
@@ -15988,10 +15962,7 @@ async function showLeTargetsModal(domain) {
         </tr>`;
     };
     const mtOpts = leModuleOptions();
-    const modal = document.createElement('div');
-    modal.id = 'le-targets-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6">
+    const modal = openModal('le-targets-modal', `
         <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
         <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device. Only installed modules with at least one device are listed.</p>
         <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
@@ -16016,9 +15987,7 @@ async function showLeTargetsModal(domain) {
             <button onclick="addLeTarget('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
             <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Distribute now</button>
             <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
-        </div>
-    </div>`;
-    document.body.appendChild(modal);
+        </div>`, { card: 'max-w-2xl w-full p-6' });
     leTgtMtChange('le-tgt-mt', 'le-tgt-id');  // seed the device list for the first module
 }
 
@@ -16394,10 +16363,7 @@ async function showLeIssueModal() {
     const dnsOpts = LE_DNS_PROVIDERS.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('');
     // Remove any prior modal (e.g. left over from a previous open).
     document.getElementById('le-issue-modal')?.remove();
-    const modal = document.createElement('div');
-    modal.id = 'le-issue-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50 overflow-y-auto py-6';
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl max-w-2xl w-full p-6 my-auto">
+    const modal = openModal('le-issue-modal', `
         <h3 class="text-lg font-bold mb-1">Issue a certificate</h3>
         <p class="text-xs text-slate-500 mb-4">Runs <code>certbot certonly</code> on the le spoke. The ACME account email below is registered with Let's Encrypt on first use and reused after. Staging issues an untrusted cert — use it to validate the flow before going live.</p>
         <div class="space-y-3">
@@ -16535,9 +16501,7 @@ async function showLeIssueModal() {
         <div class="flex justify-end gap-2 mt-5">
             <button onclick="document.getElementById('le-issue-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Cancel</button>
             <button id="le-issue-submit" onclick="leIssueCert()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Issue certificate</button>
-        </div>
-    </div>`;
-    document.body.appendChild(modal);
+        </div>`, { card: 'max-w-2xl w-full p-6 my-auto', overlay: 'overflow-y-auto py-6' });
     leIssuePopulateDomains();
     leIssueRenderTargets();
     leIssueUpdateDnsFields();
@@ -16998,11 +16962,7 @@ function showDnsRecordModal(editItem) {
     const selectCls = inputCls;
     const typeOpts = ['A', 'AAAA', 'CNAME', 'PTR'].map(t =>
         `<option value="${t}"${editing && editItem.type === t ? ' selected' : ''}>${t}</option>`).join('');
-    const modal = document.createElement('div');
-    modal.id = 'dns-record-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+    const modal = openModal('dns-record-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} DNS Record</h3>
         <div class="space-y-3">
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="dns-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
@@ -17013,9 +16973,8 @@ function showDnsRecordModal(editItem) {
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveDnsRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
             <button onclick="document.getElementById('dns-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>
-    </div>`;
-    document.body.appendChild(modal);
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
 }
 
 async function saveDnsRecord() {
@@ -17197,11 +17156,7 @@ function showDhcpReservationModal(editItem) {
     const editing = !!editItem;
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
-    const modal = document.createElement('div');
-    modal.id = 'dhcp-res-modal';
-    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
-    if (editing) modal.dataset.editIp = editItem.ip;
-    modal.innerHTML = `<div class="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+    const modal = openModal('dhcp-res-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} DHCP Reservation</h3>
         <div class="space-y-3">
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet</label><select id="dhcp-res-subnet" class="${inputCls}"><option value="">Loading…</option></select></div>
@@ -17212,9 +17167,8 @@ function showDhcpReservationModal(editItem) {
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Reservation'}</button>
             <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>
-    </div>`;
-    document.body.appendChild(modal);
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    if (editing) modal.dataset.editIp = editItem.ip;
     _loadDhcpSubnetOptions('dhcp-res-subnet').then(() => {
         if (editing && editItem.subnet_id != null) {
             const sel = document.getElementById('dhcp-res-subnet');
