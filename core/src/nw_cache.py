@@ -57,12 +57,18 @@ class NwCacheMixin:
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
+    # Coalescing window: a poll burst of N devices marks dirty N times but
+    # produces ONE full-file dump at most every this many seconds (previously
+    # every nw_cache_set_* fire-and-forgot its own full persist).
+    _NW_CACHE_FLUSH_DELAY_S = 5.0
+
     def nw_cache_init(self) -> None:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
         self.nw_fleet_cache: Dict[str, Any] = {}
         self.nw_device_cache: Dict[str, Dict[str, Any]] = {}
         self._nw_cache_lock = asyncio.Lock()
         self._nw_cache_save_tasks: set = set()
+        self._nw_cache_dirty = False
 
     def _nw_cache_path(self) -> str:
         return os.path.join(getattr(self, "cache_dir", "."), self.NW_CACHE_FILE)
@@ -174,15 +180,40 @@ class NwCacheMixin:
     # ── persist ───────────────────────────────────────────────────────────────
 
     def _nw_cache_schedule_save(self) -> None:
-        """Fire-and-forget an atomic persist (coalesced under the lock)."""
+        """Mark the cache dirty + ensure ONE delayed flusher is pending.
+
+        Dirty-flag + coalesced writer: a poll burst of N devices used to
+        fire-and-forget N full-file dumps; now the burst marks dirty N times
+        and the single flusher task writes once after
+        ``_NW_CACHE_FLUSH_DELAY_S``. Single-threaded w.r.t. the event loop, so
+        the flag needs no lock; the file write itself stays serialized under
+        ``_nw_cache_lock`` in ``_nw_cache_persist`` (unchanged)."""
+        self._nw_cache_dirty = True
+        if any(not t.done() for t in self._nw_cache_save_tasks):
+            return  # a flusher is already pending — it will pick this up
         try:
-            task = asyncio.create_task(self._nw_cache_persist())
+            task = asyncio.create_task(self._nw_cache_flush_after_delay())
             self._nw_cache_save_tasks.add(task)
             task.add_done_callback(self._nw_cache_save_tasks.discard)
         except RuntimeError:  # pragma: no cover - no running loop (startup path)
             # Called outside an event loop (e.g. a sync init test) — skip the
             # async persist; the next live fetch under a loop will persist.
             logger.debug("nw cache: skipping async persist (no running loop)")
+
+    async def _nw_cache_flush_after_delay(self) -> None:
+        """Debounced flusher: wait out the coalescing window, then persist.
+        Loops in the rare case a mutation lands while the write is in flight
+        (the snapshot in _nw_cache_persist is taken at write time, so a
+        re-marked dirty during the delay is already covered by that write)."""
+        while self._nw_cache_dirty:
+            self._nw_cache_dirty = False
+            await asyncio.sleep(self._NW_CACHE_FLUSH_DELAY_S)
+            await self._nw_cache_persist()
+
+    async def nw_cache_flush_now(self) -> None:
+        """Immediate persist (shutdown path) — skips the coalescing delay."""
+        self._nw_cache_dirty = False
+        await self._nw_cache_persist()
 
     async def _nw_cache_persist(self) -> None:
         """Serialize the cache off the event loop + atomically replace the file."""

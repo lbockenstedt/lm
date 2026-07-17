@@ -1108,6 +1108,21 @@ def create_app(hub):
     if hub.state.ensure_admin_lockout():
         hub.state.save_state()
 
+    async def _persist_on_shutdown():
+        """Graceful-shutdown flush: the nw cache write is debounced (~5s) and
+        state mutations are dirty-flagged (60s persistence loop) — persist
+        both now so a clean stop loses no coalesced writes."""
+        try:
+            await hub.nw_cache_flush_now()
+        except Exception as e:  # noqa: BLE001 — best-effort on the way out
+            logger.warning("shutdown nw-cache flush failed: %s", e)
+        try:
+            await hub.state._flush_if_dirty()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("shutdown state flush failed: %s", e)
+
+    app.add_event_handler("shutdown", _persist_on_shutdown)
+
     @app.middleware("http")
     async def access_control_middleware(request, call_next):
         """Per-request access control.

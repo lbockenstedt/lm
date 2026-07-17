@@ -35,9 +35,11 @@ def _envelope(data):
 
 
 async def _flush(hub):
-    """Wait for any fire-and-forget persist tasks to finish."""
-    if hub._nw_cache_save_tasks:
-        await asyncio.gather(*hub._nw_cache_save_tasks)
+    """Force the debounced persist NOW (tests must not wait out the ~5s
+    coalescing window): cancel any pending delayed flusher and write."""
+    for t in list(hub._nw_cache_save_tasks):
+        t.cancel()
+    await hub.nw_cache_flush_now()
 
 
 async def test_set_fleet_then_get_and_persist(tmp_path):
@@ -131,3 +133,16 @@ async def test_atomic_write_uses_tmp_then_replace(tmp_path):
     assert os.path.exists(os.path.join(str(tmp_path), "nw_data.json"))
     # No leftover .tmp once the replace completes.
     assert not os.path.exists(os.path.join(str(tmp_path), "nw_data.json.tmp"))
+
+
+async def test_write_burst_coalesces_to_one_pending_flusher(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    for i in range(10):
+        await hub.nw_cache_set_device(f"sw{i}", "info", _envelope({"n": i}))
+    # A burst marks dirty repeatedly but schedules exactly ONE delayed flusher.
+    assert len(hub._nw_cache_save_tasks) == 1
+    assert hub._nw_cache_dirty is True
+    await _flush(hub)
+    with open(os.path.join(str(tmp_path), "nw_data.json")) as f:
+        on_disk = json.load(f)
+    assert len(on_disk["devices"]) == 10  # single write carried the whole burst
