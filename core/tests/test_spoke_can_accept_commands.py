@@ -221,6 +221,12 @@ class _DiagHub:
     def __init__(self):
         self.spoke_telemetry = {}
         self._unauth_warned_spokes = set()
+        # Phase 2: _maybe_log_unauthenticated_agent resolves state keys via
+        # _primary_key. Alias empty -> returns spoke_id (pre-2b2-trigger).
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def _maybe_log_unauthenticated_agent(self, spoke_id):
         return main.LabManagerHub._maybe_log_unauthenticated_agent(self, spoke_id)

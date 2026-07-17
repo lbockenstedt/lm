@@ -30,7 +30,7 @@ Hub = main.LabManagerHub
 
 _BOUND = ("_apply_backpressure_ladder", "_signal_backoff", "_backpressure_params",
           "_classify_message", "_disconnect_and_quarantine", "_is_quarantined",
-          "_protect_source_shed")
+          "_protect_source_shed", "_primary_key")
 
 _CFG = {
     "per_spoke_soft_mps": 50, "per_spoke_clear_mps": 25,
@@ -63,6 +63,7 @@ def _make(bp_cfg=None):
     h.spoke_mps = {}
     h.mps = 0.0
     h.active_connections = {}
+    h.spoke_id_alias = {}  # Phase 2: _disconnect_and_quarantine / _protect_source_shed resolve via _primary_key
     h._backoff_signaled = {}; h._backoff_interval = {}; h._fleet_interval = 0.0
     h._backoff_since = {}
     h._spoke_backoff = set()

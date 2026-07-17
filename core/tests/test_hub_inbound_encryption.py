@@ -50,6 +50,12 @@ class _Hub:
         self.agent_logs = {}
         self.max_log_size = 100
         self.heartbeat = type("HB", (), {"update_heartbeat": lambda *a, **k: None})()
+        # Phase 2: _decrypt_inbound_payload / _handle_agent_relay_up resolve
+        # state keys via _primary_key. Alias empty -> spoke_id (pre-2b2).
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def _reconcile_spoke_identity(self, *a, **k):
         pass

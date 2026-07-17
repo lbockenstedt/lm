@@ -1693,7 +1693,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         This is the DISPLAY notion of 'online' — decoupled from instantaneous WS
         membership so a few-second stall doesn't drop the tile. Command routing
         still uses ``active_connections`` directly (must be live-accurate)."""
-        if spoke_id in self.active_connections:
+        if self._primary_key(spoke_id) in self.active_connections:
             return True
         ts = self.heartbeat.last_seen.get(spoke_id)
         if not ts:
@@ -1724,11 +1724,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         needed by the watchdog if the spoke is flapping. Reconnect re-creates
         rate_limiters / re-pushes simulations_cache, so eviction on delete is safe.
         """
+        pk = self._primary_key(spoke_id)
         self.simulations_cache.pop(spoke_id, None)
-        self.spoke_telemetry.pop(spoke_id, None)
-        self.rate_limiters.pop(spoke_id, None)
+        self.spoke_telemetry.pop(pk, None)
+        self.rate_limiters.pop(pk, None)
         self.spoke_events.pop(spoke_id, None)
-        self.spoke_recovery.pop(spoke_id, None)
+        self.spoke_recovery.pop(pk, None)
         self.agent_logs.pop(spoke_id, None)
         self.heartbeat.last_seen.pop(spoke_id, None)  # else grows unbounded across delete/recreate
         # Also drop the persisted last-seen so a deleted spoke doesn't keep a
@@ -1828,7 +1829,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         info = self.agent_info.get(agent_id)
         if info:
             sid = info.get("spoke_id")
-            if sid and sid in self.active_connections:
+            if sid and self._primary_key(sid) in self.active_connections:
                 return sid
         if fallback_hypervisor:
             return self.get_hypervisor_spoke()
@@ -1860,8 +1861,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     return sid
             for info in (self.agent_info or {}).values():
                 sid = (info or {}).get("spoke_id")
-                if (sid and sid in self.active_connections
-                        and self.spoke_module_types.get(sid) in ("hypervisor", "simulation")):
+                pk = self._primary_key(sid)
+                if (sid and pk in self.active_connections
+                        and self.spoke_module_types.get(pk) in ("hypervisor", "simulation")):
                     return sid
             return (self.get_spoke_by_type("simulation")
                     or self.get_spoke_by_type("hypervisor"))
@@ -1869,8 +1871,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # The cert target is a generic agent that ran the netbox-server
             # deploy (has the local nginx cert helper + root). A specific
             # identifier picks that agent; empty picks any connected one.
-            if identifier and identifier in self.netbox_server_agents \
-                    and identifier in self.active_connections:
+            if identifier and self._primary_key(identifier) in self.netbox_server_agents \
+                    and self._primary_key(identifier) in self.active_connections:
                 return identifier
             return next((sid for sid in self.netbox_server_agents
                          if sid in self.active_connections), None)
@@ -2402,7 +2404,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # first, then fall back to a spoke_id prefix match for legacy spokes.
             # See _PUSH_CONFIG_MODULE_KEY / _PUSH_CONFIG_PREFIX_MAP (branch-tag
             # space — NOT the update-source config-key space).
-            mtype = self.spoke_module_types.get(spoke_id, "")
+            pk = self._primary_key(spoke_id)
+            mtype = self.spoke_module_types.get(pk, "")
             module_key = _PUSH_CONFIG_MODULE_KEY.get(mtype)
             if not module_key:
                 # Legacy prefix-based fallback: module_key = the matching KEY in
@@ -2867,12 +2870,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         is accepted via the history window, then is pushed the new key). Returns
         ``{"status", "spoke_id", "connected", "pushed", "message"}``.
         """
-        if spoke_id not in self.key_manager.keys:
+        pk = self._primary_key(spoke_id)
+        if pk not in self.key_manager.keys:
             return {"status": "ERROR", "spoke_id": spoke_id, "connected": False,
                     "pushed": False, "message": "no key for this spoke — nothing to rotate"}
-        prev_secret = self.key_manager.current_session_secret(spoke_id)
-        new_key = self.key_manager.rotate_key(spoke_id)
-        connected = spoke_id in self.active_connections
+        prev_secret = self.key_manager.current_session_secret(pk)
+        new_key = self.key_manager.rotate_key(pk)
+        connected = pk in self.active_connections
         pushed = False
         if connected and prev_secret:
             msg = Message(
@@ -2917,10 +2921,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         now = time.time()
         if now - self._rotation_repush_at.get(spoke_id, 0.0) < 60:
             return
-        if spoke_id not in self.active_connections:
+        pk = self._primary_key(spoke_id)
+        if pk not in self.active_connections:
             return
-        current = self.key_manager.current_session_secret(spoke_id)
-        prev = self.key_manager.previous_session_secret(spoke_id)
+        current = self.key_manager.current_session_secret(pk)
+        prev = self.key_manager.previous_session_secret(pk)
         if not current or not prev:
             return
         self._rotation_repush_at[spoke_id] = now
@@ -3258,9 +3263,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         ``GenericAgent`` logger (``genAgentLogger``) so it's distinguishable
         from generic Hub WARNING noise and surfaceable in the WebUI logs view.
         """
-        if spoke_id in self._unauth_warned_spokes:
+        pk = self._primary_key(spoke_id)
+        if pk in self._unauth_warned_spokes:
             return
-        tel = self.spoke_telemetry.get(spoke_id) or {}
+        tel = self.spoke_telemetry.get(pk) or {}
         last_attempt = tel.get("last_attempt")
         if last_attempt is None:
             return
@@ -3270,7 +3276,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return
         if conn_age < self._UNAUTH_DIAGNOSIS_THRESHOLD_S:
             return
-        self._unauth_warned_spokes.add(spoke_id)
+        self._unauth_warned_spokes.add(pk)
         genAgentLogger.error(
             f"Agent {spoke_id} has been connected for {int(conn_age)}s without "
             f"adopting its session key — it never verified a signature, so it "
@@ -3483,10 +3489,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         """
         from security.frame_crypto import unwrap
         payload = msg_data.get("payload", {})
+        pk = self._primary_key(spoke_id)
         if src == "history":
-            dec_secret = self.key_manager.previous_session_secret(spoke_id)
+            dec_secret = self.key_manager.previous_session_secret(pk)
         else:
-            dec_secret = self.key_manager.current_session_secret(spoke_id)
+            dec_secret = self.key_manager.current_session_secret(pk)
         if not is_encrypted(payload):
             return dec_secret  # plaintext / legacy passthrough (may be None)
         if dec_secret is None:
@@ -3582,9 +3589,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
         # Otherwise, process the original payload as if it came from the agent
         if original_msg.get("payload", {}).get("type") == "AGENT_TELEMETRY":
-            if spoke_id not in self.spoke_telemetry:
-                self.spoke_telemetry[spoke_id] = {}
-            self.spoke_telemetry[spoke_id][agent_id] = original_msg.get("payload", {}).get("data")
+            pk = self._primary_key(spoke_id)
+            if pk not in self.spoke_telemetry:
+                self.spoke_telemetry[pk] = {}
+            self.spoke_telemetry[pk][agent_id] = original_msg.get("payload", {}).get("data")
             return True
 
         # --- Client-Simulation event relay (Phase D1) ---
@@ -3902,6 +3910,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 await websocket.close(1008, "Missing spoke_id")
                 return
 
+            pk = self._primary_key(spoke_id)
+
             # DDoS quarantine: a spoke disconnected for ignoring the slow-down
             # signal and flooding is refused reconnect until its cooldown expires
             # — so it can't just reconnect and immediately resume the flood. 1013
@@ -3928,7 +3938,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             if install_uuid and secret:
                 _old_id = self.install_uuid_index.get(install_uuid)
                 if _old_id and _old_id != spoke_id \
-                        and self.key_manager.get_valid_key(_old_id, secret):
+                        and self.key_manager.get_valid_key(self._primary_key(_old_id), secret):
                     rename_proven = True
             self._reconcile_spoke_identity(spoke_id, install_uuid, spoke_hostname,
                                            migrate_if=rename_proven)
@@ -3936,13 +3946,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # If secret is provided, verify it. If not, the spoke is in 'pending secret' state.
             is_authenticated = False
             if secret:
-                key_id = self.key_manager.get_valid_key(spoke_id, secret)
+                key_id = self.key_manager.get_valid_key(pk, secret)
                 if key_id:
                     is_authenticated = True
-                    self.spoke_authenticated[spoke_id] = True
+                    self.spoke_authenticated[pk] = True
                     # It adopted its key — clear any prior "never authenticated"
                     # diagnosis so a future regression re-triggers a fresh ERROR.
-                    self._unauth_warned_spokes.discard(spoke_id)
+                    self._unauth_warned_spokes.discard(pk)
                     logger.info(f"Spoke {spoke_id} authenticated successfully with secret.")
                     self.record_spoke_event(spoke_id, "auth_ok", "secret verified")
                 else:
@@ -3959,7 +3969,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     self.known_modules = self.state.system_state["known_modules"]
 
                 # Update telemetry
-                self.spoke_telemetry[spoke_id] = {
+                self.spoke_telemetry[pk] = {
                     "last_attempt": time.time(),
                     "status": "PENDING_SECRET" if not secret else "AUTH_FAILED",
                     "error": None if not secret else "Invalid secret"
@@ -4038,7 +4048,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 remote_ip = websocket.remote_address[0] if websocket.remote_address else None
             except Exception:
                 pass
-            self.spoke_telemetry[spoke_id] = {
+            self.spoke_telemetry[pk] = {
                 "last_attempt": time.time(),
                 "status": "CONNECTED",
                 "error": None,
@@ -4059,7 +4069,6 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # fleet/scale grows. Aggregate overload is the fleet layer's job, not
             # this bucket. See docs/backpressure-throttling.md §4.
             _rl_cap, _rl_rate = self._rate_limit_params()
-            pk = self._primary_key(spoke_id)
             self.rate_limiters[pk] = TokenBucket(capacity=_rl_cap, fill_rate=_rl_rate)
             if module_type:
                 self.spoke_module_types[pk] = module_type
@@ -4259,7 +4268,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # for the nested CS_TOKEN_RESULT decrypt (refinement #2).
                 _dec_secret = None
                 if signature:
-                    src = self.key_manager.verify_signature_source(spoke_id, body_str.encode(), sig)
+                    src = self.key_manager.verify_signature_source(pk, body_str.encode(), sig)
                     if src is None:
                         logger.warning(f"Invalid signature from spoke {spoke_id}")
                         continue
@@ -4268,7 +4277,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # when a secret was presented). A spoke that never reaches here
                     # (legacy/incompatible agent that can't adopt a key) stays
                     # unauthenticated, so command routes can fail fast.
-                    self.spoke_authenticated[spoke_id] = True
+                    self.spoke_authenticated[pk] = True
                     # The spoke is signing with a PREVIOUS (rotated-out) key — it
                     # authenticated via the history window but never adopted the
                     # current key (missed the SPOKE_UPDATE_SESSION_KEY push). That
@@ -4282,7 +4291,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         await self._maybe_redeliver_session_key(spoke_id)
                     # First signed frame clears any prior "never authenticated"
                     # diagnosis (idempotent with the connect-time discard).
-                    self._unauth_warned_spokes.discard(spoke_id)
+                    self._unauth_warned_spokes.discard(pk)
                     # Replay/freshness gate (item 8B): drop a captured/delayed
                     # signed frame that replays verbatim (same bytes → same HMAC)
                     # or whose timestamp is outside the freshness window. Runs
@@ -4425,7 +4434,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     if payload.get("type") == "COMMAND_RESULT":
                         data = payload.get("data", {})
                         if isinstance(data, dict) and "version" in data:
-                            self.spoke_versions[spoke_id] = data["version"]
+                            self.spoke_versions[pk] = data["version"]
 
                     # Store in response cache for API request bridging — but
                     # only if a waiter is still outstanding for this msg_id, so
@@ -4474,7 +4483,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                             and self._spoke_offered.get(spoke_id, 0) >= self._protect_shed_min_mps):
                         self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
                         continue
-                    limiter = self.rate_limiters.get(spoke_id)
+                    limiter = self.rate_limiters.get(pk)
                     if limiter:
                         ok = limiter.consume()
                         # SOFT WATERMARK (default 80% of burst consumed): flag the
@@ -5926,7 +5935,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         logger.error("[backpressure] DDoS DEFENSE — spoke %s ignored the slow-down "
                      "and kept flooding (%d hard-drops/s); DISCONNECTED + quarantined "
                      "for %.0fs.", spoke_id, hard_drops, quarantine_s)
-        ws = self.active_connections.get(spoke_id)
+        ws = self.active_connections.get(self._primary_key(spoke_id))
         if ws is not None:
             try:
                 await ws.close(1013, "Flooding after slow-down — quarantined")
@@ -5959,7 +5968,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return
         floor = p["protect_shed_min_mps"]
         cands = [(sid, n) for sid, n in (self._spoke_offered or {}).items()
-                 if n >= floor and sid in self.active_connections
+                 if n >= floor and self._primary_key(sid) in self.active_connections
                  and not self._is_quarantined(sid)]
         if not cands:
             return
@@ -5972,7 +5981,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self.record_spoke_event(sid, "protect_shed",
                                     f"protect: loudest talker (~{n}/s) disconnected to "
                                     f"relieve the loop; quarantined {q:.0f}s")
-            ws = self.active_connections.get(sid)
+            ws = self.active_connections.get(self._primary_key(sid))
             if ws is not None:
                 try:
                     await ws.close(1013, "Hub overloaded — shedding loudest talkers")
@@ -6608,7 +6617,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             spoke_id = opn_spoke
 
         # CRITICAL FIX: Only attempt polling if the spoke is actually connected
-        if spoke_id not in self.active_connections:
+        if self._primary_key(spoke_id) not in self.active_connections:
             logger.warning(f"Skipping OPNsense polling: Spoke {spoke_id} is not currently connected")
             return False
 
@@ -7246,7 +7255,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # (which resolves the live websocket itself), so retries always
                 # hit the current connection rather than a stale send_func.
                 hub = self.hub_instance
-                if spoke_id not in hub.active_connections:
+                if hub._primary_key(spoke_id) not in hub.active_connections:
                     return None
                 async def _send(msg):
                     await hub.send_to_spoke(msg)

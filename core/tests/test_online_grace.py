@@ -24,7 +24,8 @@ def _make(active, last_seen, grace=180):
     h.state = FakeState(global_config={"display": {"online_grace_s": grace}})
     h.active_connections = {sid: object() for sid in active}
     h.heartbeat = _HB(last_seen)
-    for n in ("_online_grace_s", "is_spoke_in_contact", "spokes_in_contact"):
+    h.spoke_id_alias = {}  # Phase 2: is_spoke_in_contact resolves via _primary_key
+    for n in ("_online_grace_s", "is_spoke_in_contact", "spokes_in_contact", "_primary_key"):
         setattr(h, n, types.MethodType(getattr(Hub, n), h))
     return h
 
