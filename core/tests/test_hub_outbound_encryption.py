@@ -66,6 +66,13 @@ class _Hub:
         self.spoke_enc_capable = {}
         self.bytes_count = 0
         self.message_count = 0
+        # Phase 2: send_to_spoke resolves state keys via _primary_key. The
+        # alias is empty here → _primary_key returns spoke_id, matching the
+        # real hub before the 2b2 migration trigger arms.
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
 
 def _msg(ptype, data, dest):

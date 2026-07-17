@@ -1236,7 +1236,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         key as usual.
         """
         spoke_id = message.header.destination_id
-        ws = self.active_connections.get(spoke_id)
+        pk = self._primary_key(spoke_id)  # state key (guid once 2b2 migrates; == spoke_id until then)
+        ws = self.active_connections.get(pk)
 
         if ws:
             # Sign the message before sending
@@ -1259,13 +1260,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # — the gate is cheap (a frozenset membership + dict get) and the hot
             # path (heartbeats/commands/replies) is untouched on the wire.
             _ptype = payload_dict.get("type")
-            if (encryption_enabled() and self.spoke_enc_capable.get(spoke_id)
+            if (encryption_enabled() and self.spoke_enc_capable.get(pk)
                     and _ptype in ENCRYPTED_TYPES):
                 if _ptype == "SPOKE_UPDATE_SESSION_KEY":
                     _aead_secret = signing_secret  # None on first-ever push → skip
                 else:
                     _aead_secret = (signing_secret if signing_secret is not None
-                                    else self.key_manager.current_session_secret(spoke_id))
+                                    else self.key_manager.current_session_secret(pk))
                 if _aead_secret is not None:
                     wrap(_aead_secret, payload_dict)
 
@@ -1276,7 +1277,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             if signing_secret is not None:
                 wire = self.key_manager.encode_frame_with_secret(signing_secret, body)
             else:
-                wire = self.key_manager.encode_frame(spoke_id, body)
+                wire = self.key_manager.encode_frame(pk, body)
             self.bytes_count += len(wire.encode())
             try:
                 # Bound the send: a half-open (black-holed ESTAB) socket makes
@@ -1307,9 +1308,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # that already replaced the slot is NOT evicted (we drop only OUR
                 # dead ws); handle_connection's finally then sees owns_slot=False
                 # and leaves the live replacement's sibling state intact.
-                if self.active_connections.get(spoke_id) is ws:
-                    self.active_connections.pop(spoke_id, None)
-                    self.active_connection_key_ids.pop(spoke_id, None)
+                if self.active_connections.get(pk) is ws:
+                    self.active_connections.pop(pk, None)
+                    self.active_connection_key_ids.pop(pk, None)
                     try:
                         await ws.close()
                     except Exception:
