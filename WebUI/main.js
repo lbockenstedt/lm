@@ -15727,6 +15727,10 @@ async function loadLEData(subMenu) {
                 <td class="px-4 py-2 whitespace-nowrap">
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
+                        <label class="flex items-center gap-1 text-xs text-slate-600 cursor-pointer select-none" title="H1: pin this cert as the BugFixer identity. A connection presenting it over mTLS is authorized to use the reverse HUB_REQUEST channel (fleet updates + cross-tenant logs). Keep OFF unless this is the dedicated bugfixer cert.">
+                            <input type="checkbox" ${c.bugfixer ? 'checked' : ''} onchange="leToggleBugfixer('${dEsc}', this.checked)" class="accent-green-600" />
+                            BugFixer cert
+                        </label>
                         <button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Manage distribution targets">Manage</button>
                         <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
                         <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
@@ -17092,6 +17096,22 @@ async function leRevokeCert(domain) {
         showToast(`Revoked ${domain}.`, 'success');
         await loadLEData();
     } catch (e) { showToast('Revoke failed: ' + e.message, 'error'); }
+}
+
+async function leToggleBugfixer(domain, enabled) {
+    // H1: label (or un-label) this cert as the BugFixer cert. The hub pins the
+    // domain in global_config['bugfixer_cert_identities']; only a connection
+    // presenting that cert over mTLS may use the reverse HUB_REQUEST channel.
+    try {
+        const { ok, detail } = await _spokeFetch(
+            `/api/le/certs/${encodeURIComponent(domain)}/bugfixer`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled }),
+        });
+        if (!ok) { showToast('BugFixer label failed: ' + (detail || ''), 'error'); await loadLEData(); return; }
+        showToast(`${enabled ? 'Pinned' : 'Unpinned'} ${domain} as the BugFixer cert.`, 'success');
+        await loadLEData();
+    } catch (e) { showToast('BugFixer label failed: ' + e.message, 'error'); await loadLEData(); }
 }
 
 function editDnsRecord(name, rtype) {

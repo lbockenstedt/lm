@@ -343,6 +343,33 @@ def register(app, hub, ctx):
 
         return {**data, "certs": [c for c in (data.get("certs") or []) if _match(c)]}
 
+    def _bugfixer_pinned():
+        """The set of DNS names designated as BugFixer certs (H1) —
+        ``global_config['bugfixer_cert_identities']``. The HUB_REQUEST channel
+        is gated to a connection presenting one of these over mTLS."""
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        return {str(n) for n in (gc.get("bugfixer_cert_identities") or [])}
+
+    def _tag_bugfixer(data):
+        """Tag each cert with ``bugfixer: bool`` (its domain / any SAN is in the
+        pinned BugFixer list) so the LE-module UI can show the BugFixer toggle's
+        state. Runs on both live + cached-stale paths."""
+        if not isinstance(data, dict):
+            return data
+        pinned = _bugfixer_pinned()
+        certs = data.get("certs") or []
+        tagged = []
+        for c in certs:
+            if not isinstance(c, dict):
+                tagged.append(c)
+                continue
+            names = {str(c.get("domain") or "")}
+            for san in (c.get("domains") or []):
+                names.add(str(san or ""))
+            is_bf = any(n and n in pinned for n in names)
+            tagged.append({**c, "bugfixer": is_bf})
+        return {**data, "certs": tagged}
+
     @app.get("/api/le/certs")
     async def le_list_certs(request: Request):
         """List managed certificates from the le spoke.
@@ -351,7 +378,9 @@ def register(app, hub, ctx):
         when the le spoke is offline or a live fetch overruns, so the
         Certificates page renders instantly instead of blocking/503-ing. A
         successful live fetch refreshes + persists the cache. Tenant subnet
-        filtering (``_filter_le_certs``) runs per request on the UNFILTERED cache."""
+        filtering (``_filter_le_certs``) runs per request on the UNFILTERED cache.
+        Each cert is also tagged ``bugfixer: bool`` (H1) from the pinned
+        ``global_config['bugfixer_cert_identities']`` list."""
         logger.debug("relay GET /api/le/certs")
         hub = app.state.hub
         le_sid = hub.get_spoke_by_type("certificates")
@@ -360,18 +389,18 @@ def register(app, hub, ctx):
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return await _filter_le_certs(request, out)
+                return await _filter_le_certs(request, _tag_bugfixer(out))
             raise HTTPException(status_code=503, detail="Certificate spoke not connected")
         try:
             data = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_list_certs")
             await hub.le_cache_set("certs", data)
-            return await _filter_le_certs(request, data)
+            return await _filter_le_certs(request, _tag_bugfixer(data))
         except HTTPException:
             cached = hub.le_cache_get("certs")
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return await _filter_le_certs(request, out)
+                return await _filter_le_certs(request, _tag_bugfixer(out))
             raise
 
     @app.get("/api/le/eligible-domains")
@@ -654,6 +683,39 @@ def register(app, hub, ctx):
         return await _relay_spoke(_get_le_spoke(hub), "LE_ADD_TARGET",
                                   {"domain": domain, "target": body},
                                   log_name="le_add_target")
+
+    @app.post("/api/le/certs/{domain}/bugfixer")
+    async def le_set_bugfixer(domain: str, request: Request):
+        """H1: label a managed cert as the BugFixer cert. Toggles membership of
+        ``domain`` in ``global_config['bugfixer_cert_identities']`` — the pinned
+        list the HUB_REQUEST channel authorizes on (a connection must present one
+        of these certs over mTLS, see ``LabManagerHub._hub_request_authorized``).
+        ``enabled:true`` adds the domain (dedup, order-stable); ``false`` removes
+        it. Admin-only. The cert itself is issued/managed via the normal LE flow;
+        this just records which domain's cert is the BugFixer identity."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        data = await request.json()
+        enabled = bool(data.get("enabled")) if isinstance(data, dict) else False
+        domain = (domain or "").strip().lower()
+        if not domain:
+            raise HTTPException(status_code=400, detail="domain required")
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        pinned = [str(n).strip().lower() for n in (gc.get("bugfixer_cert_identities") or [])]
+        if enabled:
+            if domain not in pinned:
+                pinned.append(domain)
+        else:
+            pinned = [n for n in pinned if n != domain]
+        gc["bugfixer_cert_identities"] = pinned
+        hub.state.system_state["global_config"] = gc
+        hub.state.save_state()
+        logger.info("[H1] BugFixer cert label for %s -> %s (pinned=%s)",
+                    domain, enabled, pinned)
+        return {"status": "ok", "domain": domain, "bugfixer": enabled,
+                "pinned": pinned}
 
     @app.get("/api/le/certs/{domain}/devices")
     async def le_target_devices(domain: str, module_type: str = "", identifier: str = ""):

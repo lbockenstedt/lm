@@ -2,6 +2,7 @@
 from api import (
     StarletteWSAdapter, WebSocket, WebSocketDisconnect, asyncio, logger, os, websockets,
 )
+from security.peer_cert_ws import peer_cert_identity_from_getpeercert
 
 
 def register(app, hub, ctx):
@@ -21,7 +22,20 @@ def register(app, hub, ctx):
         """
         hub = app.state.hub
         await websocket.accept()
-        await hub.handle_connection(StarletteWSAdapter(websocket))
+        adapter = StarletteWSAdapter(websocket)
+        # H1: capture the verified peer (client) cert identity for this
+        # connection. ``PeerCertWebSocketProtocol`` injected the parsed
+        # ``getpeercert()`` dict into ``scope["extensions"]["x_peer_cert"]``
+        # (None when mTLS off / no cert presented / extraction failed). Derive
+        # the renewal-stable SAN-DNS identity and stash it on the adapter so the
+        # HUB_REQUEST gate (``_hub_request_authorized``) can pin it to the
+        # designated BugFixer cert. ``None`` here → gate denies (fail-closed).
+        try:
+            raw_peer_cert = (websocket.scope.get("extensions") or {}).get("x_peer_cert")
+            adapter.peer_cert_identity = peer_cert_identity_from_getpeercert(raw_peer_cert)
+        except Exception:  # noqa: BLE001 - never drop a connection on a read hiccup
+            adapter.peer_cert_identity = None
+        await hub.handle_connection(adapter)
 
     @app.websocket("/ws/agent")
     async def agent_ws_proxy(websocket: WebSocket):

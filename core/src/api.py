@@ -157,6 +157,14 @@ class StarletteWSAdapter:
         # contract the test fakes already model: ``pong_waiter = await ws.ping()``.
         self._probe_sender = None  # async (nonce) -> None, set by hub._arm_liveness_probe
         self._pending_pongs: Dict[str, asyncio.Future] = {}
+        # H1: the verified peer (client) cert identity for this connection, as a
+        # tuple of SAN DNS names (subject-CN fallback) — populated by the
+        # ``/ws/spoke`` route from the peer-cert injected into scope by
+        # ``PeerCertWebSocketProtocol`` (see security/peer_cert_ws.py). ``None``
+        # means mTLS off / no cert presented / extraction failed; the H1 gate
+        # treats ``None`` as "no cert → deny HUB_REQUEST" (fail-closed). Defaults
+        # to ``None`` so adapters created outside the route (test fakes) are safe.
+        self.peer_cert_identity = None
 
     @property
     def remote_address(self):
@@ -1896,6 +1904,18 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     # materially delayed. Mirrored on the spoke side in control_plane.run().
     cfg_kwargs["ws_ping_interval"] = _ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0)
     cfg_kwargs["ws_ping_timeout"] = _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0)
+    # H1: use the peer-cert-capturing WS protocol so the /ws/spoke route can read
+    # which client cert a connection presented (gates HUB_REQUEST to a pinned
+    # BugFixer cert). Best-effort: if the uvicorn internal API moved on upgrade,
+    # _PeerCertProtocol is None → fall back to the default protocol (ws="auto"),
+    # and the H1 gate simply sees no peer cert → denies HUB_REQUEST. Orthogonal
+    # to ssl_ca_certs/ssl_cert_reqs (protocol class vs SSLContext).
+    try:
+        from security import peer_cert_ws as _peer_cert_ws
+        if _peer_cert_ws._PeerCertProtocol is not None:
+            cfg_kwargs["ws"] = _peer_cert_ws._PeerCertProtocol
+    except Exception:  # noqa: BLE001 - never brick the boot on a peer-cert-ws hiccup
+        pass
     return uvicorn.Server(uvicorn.Config(app, **cfg_kwargs))
 
 
@@ -1913,6 +1933,14 @@ def run_api_server(hub, port=443):
         "ws_ping_interval": _ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0),
         "ws_ping_timeout": _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0),
     }
+    # H1: peer-cert-capturing WS protocol (see build_server()). Best-effort;
+    # falls back to the default protocol if the uvicorn internal API moved.
+    try:
+        from security import peer_cert_ws as _peer_cert_ws
+        if _peer_cert_ws._PeerCertProtocol is not None:
+            _ws_kw["ws"] = _peer_cert_ws._PeerCertProtocol
+    except Exception:  # noqa: BLE001
+        pass
     if cert and key:
         _mtls_kw = {}
         # mTLS hub↔spoke server leg — PERMISSIVE (see build_server()): request +

@@ -3485,7 +3485,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # to the HUB_REQUEST check and catch-all INFO log (see docstring).
         return False
 
-    async def _handle_hub_request(self, spoke_id: str, msg_data, payload) -> None:
+    async def _handle_hub_request(self, spoke_id: str, msg_data, payload,
+                                 peer_cert_identity=None) -> None:
         """Dispatch a spoke/agent-initiated HUB_REQUEST and reply with a signed
         HUB_RESPONSE.
 
@@ -3495,10 +3496,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         ack in the correlation_id branch of ``handle_connection``; we reply with a
         HUB_RESPONSE carrying that message_id as ``correlation_id``. Only approved
         senders reach here, so ``key_manager.sign_message`` will succeed.
+
+        ``peer_cert_identity`` is the verified client-cert identity (SAN DNS
+        names) captured for this connection by the ``/ws/spoke`` route (H1); it
+        is the only thing ``handle_hub_request`` authorizes the channel on.
         """
         req = payload.get("data", {}) or {}
         req_id = msg_data.get("header", {}).get("message_id")
-        result = await self.handle_hub_request(spoke_id, req)
+        result = await self.handle_hub_request(spoke_id, req, peer_cert_identity)
         resp_msg = Message(
             header=MessageHeader(
                 message_id=str(uuid.uuid4()),
@@ -4383,7 +4388,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # trigger updates). See _handle_hub_request for the dispatch +
                 # signed HUB_RESPONSE reply.
                 if payload.get("type") == "HUB_REQUEST":
-                    await self._handle_hub_request(spoke_id, msg_data, payload)
+                    await self._handle_hub_request(
+                        spoke_id, msg_data, payload,
+                        getattr(websocket, "peer_cert_identity", None))
                     continue
 
                 # Fallback for verified-but-unhandled message types: every known
@@ -4578,15 +4585,71 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             deduped.append(line)
         return {"logs": deduped}
 
-    async def handle_hub_request(self, spoke_id: str, req: Dict[str, Any]) -> Dict[str, Any]:
+    def _hub_request_authorized(self, spoke_id: str,
+                                peer_cert_identity=None) -> bool:
+        """H1: is this connection allowed to use the reverse HUB_REQUEST channel?
+
+        The channel is BugFixer's tool — it finds problems and fixes them, so it
+        legitimately needs every tenant's logs (GET_LOGS), the full fleet roster
+        (GET_SPOKE_STATUS), the bug-report handoff, and the fleet TRIGGER_*
+        update actions (to push fixes). But "approved + signed" was the ONLY
+        gate, so ANY approved spoke — a malicious tenant-added one, or a
+        compromised box — inherited fleet-wide RCE (TRIGGER_ALL_UPDATES fans
+        SPOKE_UPDATE to every spoke/agent) and cross-tenant log harvest.
+
+        The gate is **cert-bound**, not ``spoke_id``-bound. ``spoke_id`` is
+        hostname-derived and spoofable (name a box ``bugfixer``), and casing is a
+        nuisance; identity is the verified TLS client cert instead. An operator
+        labels a specific Let's Encrypt-issued cert as "the BugFixer cert" (the
+        LE-module checkbox → ``global_config['bugfixer_cert_identities']``, a
+        list of DNS names); the hub pins that cert's identity; a HUB_REQUEST is
+        authorized **only** when the calling connection presented that cert over
+        mTLS. mTLS off / no cert / extraction failed / mismatch → denied.
+
+        Rule: ``BugFixer rights ⟺ mTLS on AND the connection's verified client
+        cert matches the pinned BugFixer cert. Anything else → denied.``
+
+        ``peer_cert_identity`` is the tuple of SAN DNS names (subject-CN fallback)
+        captured for this connection by the ``/ws/spoke`` route (None when mTLS
+        off / no cert presented / extraction failed). Fail-closed: None or no
+        pinned cert → deny. Everything else is denied and logged so attempted
+        abuse surfaces in diagnostics."""
+        pinned = (self.state.get_global_config() or {}).get(
+            "bugfixer_cert_identities", []) or []
+        if not pinned:
+            # No cert designated as BugFixer → the channel is closed (fail-closed
+            # default). BugFixer is dormant until the operator issues + labels a
+            # dedicated cert.
+            return False
+        if not peer_cert_identity:
+            # mTLS off / no client cert presented / extraction failed → deny.
+            return False
+        return any(name in pinned for name in peer_cert_identity)
+
+    async def handle_hub_request(self, spoke_id: str, req: Dict[str, Any],
+                                 peer_cert_identity=None) -> Dict[str, Any]:
         """Dispatch a HUB_REQUEST from an approved agent and return a result dict.
 
         This is the reverse of the normal Hub->spoke command direction: an
         approved agent (e.g. BugFixer) asks the Hub to do something and
         receives a correlated, signed HUB_RESPONSE. Only approved, signed
-        senders reach this method (the message loop drops everyone else).
+        senders reach this method (the message loop drops everyone else),
+        and only a connection presenting the pinned BugFixer client cert over
+        mTLS is authorized to use the channel (H1) — see _hub_request_authorized.
         """
         req_type = req.get("type", "") if isinstance(req, dict) else ""
+        # H1: the whole reverse channel (fleet RCE + cross-tenant logs + roster)
+        # is BugFixer's tool. Deny every other approved spoke before dispatch so
+        # a malicious/compromised spoke can't escalate to fleet-wide action.
+        if not self._hub_request_authorized(spoke_id, peer_cert_identity):
+            logger.warning(
+                f"[H1] denied HUB_REQUEST '{req_type}' from {spoke_id}: not "
+                f"authorized (BugFixer client cert required; label a cert in the "
+                f"LE module and present it over mTLS).")
+            self.record_spoke_event(spoke_id, "hub_request_denied",
+                                    f"type={req_type} — BugFixer client cert required")
+            return {"status": "error",
+                    "message": "not authorized for HUB_REQUEST (BugFixer role required)"}
         try:
             if req_type == "GET_LOGS":
                 return await asyncio.to_thread(self.collect_all_logs)
