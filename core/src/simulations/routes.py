@@ -2497,6 +2497,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             "source": src,
             "recipients": [str(r).strip() for r in (body.get("recipients") or []) if str(r).strip()][:20],
             "enabled": bool(body.get("enabled", True)),
+            # 'human' = formatted dashboard-style email; 'raw' = JSON body for automation.
+            "format": "raw" if str(body.get("format") or "human").lower() == "raw" else "human",
         }
 
     @app.get("/api/alerts/rules")

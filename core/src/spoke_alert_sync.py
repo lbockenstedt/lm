@@ -178,25 +178,15 @@ class SpokeAlertMixin:
 
     def _schedule_alert_email(self, sid: str, tier: str, detail: str,
                               since_ts: Optional[float], duration: float) -> None:
-        """Fire-and-forget an email on a tier TRANSITION (not every cycle).
-        ``notifications`` is a leaf module like this one; the import is lazy so
-        a notifications-module failure can never break the alert loop, and the
-        dispatch is wrapped so a send error never escapes into the loop."""
-        try:
-            import notifications as _n  # leaf; lazy import keeps the loop robust
-            subject = f"[LM Hub] Spoke {sid} out of contact ({tier})"
-            body = (f"Spoke: {sid}\nTier: {tier}\n"
-                    f"Out-of-contact: {int(duration)}s\n"
-                    f"Since: {since_ts}\nDetail: {detail}\n"
-                    f"Hub time: {time.time()}")
-            # ensure_future → non-blocking; a slow SMTP/API send never stalls
-            # the 30s loop. send_email itself swallows errors (logs at error).
-            # spoke_id=sid so send_email resolves THIS spoke's tenant and uses
-            # that tenant's recipients (cs tenant Notifications card) instead
-            # of the hub's global list.
-            asyncio.ensure_future(_n.send_email(self, subject, body, spoke_id=sid))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[spoke-alert] email dispatch failed: %s", e)
+        """No-op: spoke/agent out-of-contact emails are now OPT-IN via the tenant's
+        realtime Alert Rules (source ``spoke_offline`` / ``vm_offline``), which the
+        AlertEngine evaluates off the very tiers this loop records. The old
+        unconditional auto-email is removed — it flooded recipients the moment
+        notifications got configured (emailing every spoke transition whether or
+        not the operator wanted it). The tier is still recorded by the caller, so
+        the dashboard Infrastructure-Status tile + the alert-rule engine keep
+        working; only the automatic send is gone."""
+        return
 
     # ── loop ────────────────────────────────────────────────────────────────
 
