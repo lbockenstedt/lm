@@ -553,9 +553,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # { spoke_id: parent_spoke_id } — for multi-role generic agents: each
         # loaded role opens a sub-spoke under {base}-{role} that claims the base
         # agent as its parent in the WS auth frame. The hub auto-approves such a
-        # sub-spoke when its parent agent is already approved + connected (see
-        # _can_parent_auto_approve / _auto_approve_pending_subspokes), binding it
-        # to the parent's tenant so a Generic Node hosting N roles needs only the
+        # sub-spoke only when the parent signs a vouch for it (see
+        # _parent_vouches / _auto_approve_pending_subspokes, H3), binding it to
+        # the parent's tenant so a Generic Node hosting N roles needs only the
         # one base-agent approval.
         self.spoke_parent_map: Dict[str, str] = {}
 
@@ -2995,29 +2995,106 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 "message": f"revoked; old secret invalidated, approval dropped — "
                            f"re-onboard + re-approve to return"}
 
-    def _can_parent_auto_approve(self, spoke_id: str, parent_spoke_id: str) -> bool:
-        """True if ``spoke_id`` may be auto-approved via ``parent_spoke_id``:
-        the sub-spoke id is prefix-tied to the claimed parent (``{parent}-…``,
-        the agent's own id-construction convention), the parent is approved +
-        currently connected, and the parent is a generic agent
-        (module_type ``"agent"``). Same deploy-claim trust class as PSK
-        (the claim transits the WS but is never logged as a secret)."""
+    async def _parent_vouches(self, spoke_id: str, parent_spoke_id: str) -> Tuple[bool, str]:
+        """Signed parent attestation for parent-auto-approve (H3).
+
+        Replaces the claim-based ``_can_parent_auto_approve`` gate. Instead of
+        trusting the child's unsigned ``parent_spoke_id`` WS-auth claim, the hub
+        asks the claimed parent — over the signed ``request_response`` channel —
+        to vouch that ``spoke_id`` is one of the role sub-spokes it actually
+        spawned (the parent's ``VOUCH_SUBSPOKE`` handler checks its in-memory
+        role registry). The parent's reply is cryptographically authenticated by
+        the existing inbound signature verification (HMAC-SHA256 session key),
+        so a verified affirmative vouch binds auto-approve to the parent's
+        identity — not the child's string claim. This closes the hostname-spoof
+        sub-issue: an attacker who merely learns an approved base agent's
+        observable spoke_id and connects as ``{base}-evil`` is NOT vouched for
+        by the parent, so it stays pending admin approval (no session key, no
+        tenant bind).
+
+        Only a verified affirmative vouch authorizes auto-approve: status
+        SUCCESS + ``vouched`` True + ``sub_spoke_id`` echo match. The echo match
+        prevents a generic/replayed "yes" authorizing a different child. Anything
+        else falls through to pending admin approval (today's non-auto path) —
+        the connection is NOT closed. A parent that doesn't implement
+        ``VOUCH_SUBSPOKE`` (older agent) returns ERROR/timeout → pending, so
+        rolling this out doesn't break existing sub-spoke onboarding (they just
+        need manual approval until upgraded); no fleet-wide break.
+
+        Returns ``(True, "")`` on a verified vouch, else ``(False, reason)``
+        where reason is one of ``prefix_mismatch`` / ``not_agent`` /
+        ``not_connected`` / ``unauthenticated`` / ``timeout`` / ``denied`` /
+        ``mismatch`` — surfaced as a ``parent_vouch_failed`` event for Setup
+        diagnostics. The short 3s timeout is safe because the pre-flight guard
+        already confirmed the parent can sign; it only blocks the child's
+        ``handle_connection`` coroutine briefly.
+        """
+        # Fast local pre-filters (avoid a pointless round-trip): the child id
+        # must be prefix-tied to the claimed parent (the agent's own
+        # ``{parent}-{role}`` id-construction convention), and the parent must be
+        # a generic agent — only agents implement VOUCH_SUBSPOKE. These no longer
+        # authorize on their own; they only short-circuit an ask that can't
+        # succeed.
         if not parent_spoke_id or not spoke_id.startswith(parent_spoke_id + "-"):
-            return False
-        return (parent_spoke_id in self.approved_modules
-                and parent_spoke_id in self.active_connections
-                and self.spoke_module_types.get(parent_spoke_id) == "agent")
+            return False, "prefix_mismatch"
+        if self.spoke_module_types.get(parent_spoke_id) != "agent":
+            return False, "not_agent"
+        # Pre-flight: the parent must be connected AND hold its session key (can
+        # sign a reply). A parent that structurally can't respond → immediate
+        # fall-through (no 3s hang). A fresh parent still in its <10s grace
+        # window passes and lets the round-trip timeout absorb a genuine failure.
+        ok, reason = self.spoke_can_accept_commands(parent_spoke_id)
+        if not ok:
+            return False, reason  # "not_connected" or "unauthenticated"
+        try:
+            res = await self.request_response(
+                parent_spoke_id, "VOUCH_SUBSPOKE",
+                {"sub_spoke_id": spoke_id}, timeout=3.0)
+        except Exception as e:  # noqa: BLE001 - never block onboarding on a vouch error
+            logger.warning("VOUCH_SUBSPOKE round-trip to %s for %s raised: %s",
+                           parent_spoke_id, spoke_id, e)
+            return False, "timeout"
+        # request_response returns the full wire frame on success, or
+        # {"status":"ERROR","message":"Timed out..."} on timeout (no payload).
+        # Distinguish the two: a timeout (no payload — the round-trip itself
+        # failed, or an older agent that never implemented VOUCH_SUBSPOKE and
+        # never replied) vs a real spoke ERROR reply (payload present, status
+        # ERROR — e.g. a handler that ran but refused). unwrap_spoke extracts
+        # payload.data (the handler's return dict) when the envelope is present.
+        has_payload = isinstance(res, dict) and isinstance(res.get("payload"), dict)
+        if not has_payload:
+            return False, "timeout"
+        try:
+            import access as _access
+            body = _access.unwrap_spoke(res)
+        except Exception:  # noqa: BLE001 - never block onboarding on an unwrap error
+            body = {}
+        if not isinstance(body, dict) or body.get("status") != "SUCCESS":
+            # Older agent without a VOUCH_SUBSPOKE handler → ERROR → pending.
+            return False, "denied"
+        d = body.get("data") or {}
+        if d.get("vouched") is True and d.get("sub_spoke_id") == spoke_id:
+            return True, ""
+        return False, "mismatch"
 
     async def _auto_approve_pending_subspokes(self, parent_spoke_id: str) -> None:
         """Approve every still-pending role sub-spoke of an approved base agent.
 
         Called from ``approve_and_bind_spoke`` when a base agent (module_type
         ``"agent"``) is approved. Each pending sub-spoke that claimed this parent
-        (``spoke_parent_map[sid] == parent``) and is prefix-tied to it gets
+        (``spoke_parent_map[sid] == parent``) and is **vouched for by the parent**
+        (``_parent_vouches`` — a signed ``VOUCH_SUBSPOKE`` round-trip, H3) gets
         approved + bound to the parent's tenant on its already-open connection
         (``approve_and_bind_spoke`` pushes the session key + APPROVED + config
-        to the live ws). Sub-spokes whose parent isn't this one — or that share
-        the prefix by coincidence — are left untouched."""
+        to the live ws). Sub-spokes whose parent isn't this one — or that the
+        parent doesn't vouch for — are left pending (a ``parent_vouch_failed``
+        event records why). This sweep runs right after the parent's own
+        ``approve_and_bind_spoke`` pushed its session key, so the parent is
+        authenticated and can sign; the 3s vouch timeout absorbs the small race
+        between key-push and the vouch request landing. This is the path that
+        covers sub-before-parent connect order AND boot-seeded roles (the parent
+        re-spawns roles at boot without a hub ``LOAD_ROLE`` — the live round-trip
+        handles these with no prior hub state)."""
         tenant = self.state.get_spoke_tenant(parent_spoke_id) or ""
         for sid in list(self.active_connections.keys()):
             if sid == parent_spoke_id:
@@ -3026,7 +3103,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 continue
             if self.spoke_parent_map.get(sid) != parent_spoke_id:
                 continue
-            if not self._can_parent_auto_approve(sid, parent_spoke_id):
+            vouched, reason = await self._parent_vouches(sid, parent_spoke_id)
+            if not vouched:
+                self.record_spoke_event(sid, "parent_vouch_failed",
+                                        f"parent={parent_spoke_id} reason={reason}")
                 continue
             logger.info(f"Parent auto-approve (sweep): {sid} via parent "
                         f"{parent_spoke_id} (tenant={tenant or 'unassigned'}).")
@@ -3904,15 +3984,30 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.netbox_server_agents.discard(spoke_id)
             if parent_spoke_id:
                 self.spoke_parent_map[spoke_id] = parent_spoke_id
-                if (not self.approved_modules.get(spoke_id, False)
-                        and self._can_parent_auto_approve(spoke_id, parent_spoke_id)):
-                    tenant = self.state.get_spoke_tenant(parent_spoke_id) or ""
-                    logger.info(f"Parent auto-approve: {spoke_id} via parent "
-                                f"{parent_spoke_id} (tenant={tenant or 'unassigned'}).")
-                    await self.approve_and_bind_spoke(spoke_id, tenant)
-                    self.known_modules = self.state.system_state["known_modules"]
-                    self.record_spoke_event(spoke_id, "parent_auto_approve",
-                                            f"parent={parent_spoke_id}")
+                if not self.approved_modules.get(spoke_id, False):
+                    # Parent attestation (H3): ask the claimed parent to sign a
+                    # vouch that this sub-spoke is one it spawned, instead of
+                    # trusting the child's unsigned parent_spoke_id claim. On a
+                    # verified vouch → auto-approve + tenant-bind (zero-touch
+                    # preserved). On any failure (parent not connected /
+                    # unauthenticated / timeout / denied / echo mismatch / not
+                    # an agent / prefix mismatch) → fall through to pending admin
+                    # approval below; do NOT close the connection. Record the
+                    # parent claim either way so a later base-agent approval can
+                    # sweep up waiting sub-spokes (the sweep covers the
+                    # sub-before-parent connect order).
+                    vouched, reason = await self._parent_vouches(spoke_id, parent_spoke_id)
+                    if vouched:
+                        tenant = self.state.get_spoke_tenant(parent_spoke_id) or ""
+                        logger.info(f"Parent auto-approve: {spoke_id} via parent "
+                                    f"{parent_spoke_id} (tenant={tenant or 'unassigned'}).")
+                        await self.approve_and_bind_spoke(spoke_id, tenant)
+                        self.known_modules = self.state.system_state["known_modules"]
+                        self.record_spoke_event(spoke_id, "parent_auto_approve",
+                                                f"parent={parent_spoke_id}")
+                    else:
+                        self.record_spoke_event(spoke_id, "parent_vouch_failed",
+                                                f"parent={parent_spoke_id} reason={reason}")
 
             # Check if the module is already approved
             if not self.approved_modules.get(spoke_id, False):
