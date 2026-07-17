@@ -93,6 +93,48 @@ def register(app, hub, ctx):
         counts = await _compute_tenant_counts(hub, scoping)
         return {"tenant": scoping["tenant_id"], **counts}
 
+    @app.get("/api/dashboard/infra-status")
+    async def infra_status(request: Request, tenant: str = None):
+        """Hub + spoke/agent up-down summary (green/yellow/red) for the Overview.
+        Tenant-scoped: a Global Admin sees ALL (or a chosen tenant); a tenant user
+        sees only spokes bound to its tenant (module_metadata.tenant_id) plus
+        untagged shared infra. green = connected + healthy; yellow = out-of-contact
+        WARNING tier; red = offline or ERROR tier. Hub is always green (it served
+        this request)."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        is_admin = _is_admin(sess)
+        tid = _resolve_tenant(request, tenant)
+        want_all = is_admin and (tenant in (None, "", "all"))
+        md = hub.state.system_state.get("module_metadata", {}) or {}
+        connected = set((hub.active_connections or {}).keys())
+        try:
+            alerts = {a["spoke_id"]: a.get("tier") for a in hub.get_active_spoke_alerts()}
+        except Exception:  # noqa: BLE001
+            alerts = {}
+        items = []
+        for sid, meta in md.items():
+            meta = meta or {}
+            stid = meta.get("tenant_id")
+            if not want_all and tid and stid and stid != tid:
+                continue  # bound to another tenant (untagged = shared infra → shown)
+            tier = alerts.get(sid, "none")
+            online = sid in connected
+            status = ("red" if (not online or tier == "error")
+                      else "yellow" if tier == "warning" else "green")
+            items.append({
+                "id": sid,
+                "name": meta.get("display_name") or meta.get("name") or sid,
+                "type": hub.spoke_module_types.get(sid) or meta.get("module_type") or "",
+                "role": meta.get("role") or "",
+                "tenant": stid or "",
+                "online": online, "tier": tier, "status": status,
+            })
+        items.sort(key=lambda i: ({"red": 0, "yellow": 1, "green": 2}.get(i["status"], 3), i["name"]))
+        counts = {c: sum(1 for i in items if i["status"] == c) for c in ("green", "yellow", "red")}
+        return {"hub": {"status": "green", "name": "Hub"}, "items": items,
+                "counts": counts, "tenant": tid, "all_tenants": bool(want_all)}
+
     # Admin all-tenants overview: memoized 60s so repeated renders don't re-fan-out.
     _all_tenants_summary_cache: dict = {"ts": 0.0, "data": None}
 

@@ -3102,6 +3102,10 @@ function _viewTemplate(viewId) {
         case 'dashboard':
             if (isAdmin()) {
                 return `<div class="space-y-6">
+  <div class="${card}" id="infra-status-card">
+    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Infrastructure Status</h3>
+    <div id="infra-status-body"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+  </div>
   <div class="${card}" id="all-tenants-card">
     <div class="flex justify-between items-center mb-3">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">All Tenants ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
@@ -3111,6 +3115,10 @@ function _viewTemplate(viewId) {
 </div>`;
             }
             return `<div class="space-y-6">
+  <div class="${card}" id="infra-status-card">
+    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Infrastructure Status</h3>
+    <div id="infra-status-body"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+  </div>
   <div class="${card}" id="tenant-summary-card">
     <div class="flex justify-between items-center mb-3">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Summary — <span id="dash-tenant-name" class="text-[#01A982] font-mono normal-case"></span> ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
@@ -3596,6 +3604,7 @@ function initView(viewId, subView) {
             updateStatus();
             if (isAdmin()) loadAllTenantsOverview();
             else loadDashboardSummary();
+            loadInfraStatus();
             break;
         case 'opnsense':
             _loadFirewallData();
@@ -19993,6 +20002,36 @@ async function loadDashboardSummary() {
         ['dash-devices','dash-vms','dash-sessions','dash-prefixes','dash-ips'].forEach(id => set(id, '—'));
         console.warn('Dashboard summary unavailable:', err.message);
     }
+}
+
+// Hub/spoke/agent up-down summary tile on the Dashboard Overview. Tenant-scoped:
+// a Global Admin sees ALL; a tenant user sees its own spokes + shared infra.
+async function loadInfraStatus() {
+    const el = document.getElementById('infra-status-body');
+    if (!el) return;
+    const tenantParam = isAdmin() ? 'all' : encodeURIComponent(currentTenant || 'default');
+    let d = {};
+    try {
+        const r = await fetch(`/api/dashboard/infra-status?tenant=${tenantParam}`);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        d = await r.json();
+    } catch (e) { el.innerHTML = '<p class="text-xs text-slate-400 italic">Status unavailable</p>'; return; }
+    const c = d.counts || {};
+    const items = d.items || [];
+    const dot = s => `<span class="inline-block w-2.5 h-2.5 rounded-full ${s === 'green' ? 'bg-green-500' : s === 'yellow' ? 'bg-amber-400' : 'bg-red-500'}"></span>`;
+    const pill = (label, n, cls) => `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full ${cls} text-xs font-bold">${label} ${n}</span>`;
+    const rows = items.map(i => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
+        <span class="flex items-center gap-2 min-w-0">${dot(i.status)}<span class="font-mono text-xs text-slate-600 truncate">${escapeHtml(i.name)}</span>${i.type ? `<span class="text-[10px] text-slate-400">${escapeHtml(i.type)}</span>` : ''}</span>
+        <span class="text-[10px] ${i.online ? (i.tier === 'warning' ? 'text-amber-600' : 'text-slate-400') : 'text-red-500'}">${i.online ? (i.tier === 'warning' ? 'warning' : 'online') : 'offline'}</span></div>`).join('');
+    el.innerHTML = `
+      <div class="flex flex-wrap items-center gap-2 mb-3">
+        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-100 text-green-700 text-xs font-bold">${dot('green')} Hub online</span>
+        ${pill('Healthy', c.green || 0, 'bg-green-100 text-green-700')}
+        ${pill('Warning', c.yellow || 0, 'bg-amber-100 text-amber-700')}
+        ${pill('Down', c.red || 0, 'bg-red-100 text-red-700')}
+        <span class="text-[11px] text-slate-400 ml-auto">${items.length} spoke/agent(s)${d.all_tenants ? ' · all tenants' : ''}</span>
+      </div>
+      <div class="max-h-56 overflow-y-auto">${items.length ? rows : '<p class="text-xs text-slate-400 italic">No spokes/agents in scope.</p>'}</div>`;
 }
 
 // ─── Global Cross-System Search ──────────────────────────────────────────────
