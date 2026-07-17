@@ -86,6 +86,54 @@ def register(app, hub, ctx):
                                 detail="Not authorized to create into that tenant")
         return requested_slug
 
+
+    async def _netbox_write(request, cmd, refresh_keys, *, log_name,
+                            id_field=None, obj_id=None, verify_key=None,
+                            tenant_mode="always", sync_body=None, timeout=None):
+        """Shared body of the 12 NetBox write (POST/PUT/DELETE) handlers:
+        spoke-check → ownership verify → body/id build → tenant-enforce →
+        relay → cache-refresh → optional endpoint-sync trigger → unwrap
+        (mirrors net_services._relay_spoke). Shapes:
+
+        - create (``tenant_mode="always"``): body = JSON; tenant always clamped
+          via _enforce_body_tenant.
+        - update (``tenant_mode="if_present"``): body = JSON + ``{id_field:
+          obj_id}``; tenant clamped only when the body carries one.
+        - delete (``tenant_mode=None``): no body — payload ``{id_field:
+          obj_id}``.
+
+        ``sync_body`` drives _trigger_endpoint_sync_after_ipam_edit: "data"
+        (pass the written body), "null" (pass None), None (no trigger).
+        ``verify_key`` runs the cross-tenant ownership gate against that cache
+        module BEFORE the mutation (unchanged order: spoke 503 first)."""
+        hub = app.state.hub
+        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
+        if verify_key:
+            await _verify_owns(request, verify_key, obj_id)
+        try:
+            if tenant_mode is None:
+                data = {id_field: obj_id}
+            else:
+                data = await request.json()
+                if id_field is not None:
+                    data[id_field] = obj_id
+                if tenant_mode == "always" or "tenant" in data:
+                    data["tenant"] = _enforce_body_tenant(request, data)
+            kw = {"timeout": timeout} if timeout else {}
+            result = await hub.request_response(spoke_id, cmd, data, **kw)
+            for key in refresh_keys:
+                _refresh_module_all_tenants(hub, key)
+            if sync_body == "data":
+                _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
+            elif sync_body == "null":
+                _trigger_endpoint_sync_after_ipam_edit(hub, request, None)
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("%s failed", log_name)
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/setup/netbox-config")
     async def get_netbox_config():
         hub = app.state.hub
@@ -271,55 +319,25 @@ def register(app, hub, ctx):
     @app.post("/api/netbox/racks")
     async def netbox_add_rack(request: Request):
         """Create a NetBox rack; invalidates the racks cache on success."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        try:
-            data = await request.json()
-            data["tenant"] = _enforce_body_tenant(request, data)
-            result = await hub.request_response(spoke_id, "NETBOX_ADD_RACK", data)
-            _refresh_module_all_tenants(hub, "netbox_racks")
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_add_rack failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_ADD_RACK", ["netbox_racks"],
+                                   log_name="netbox_add_rack")
 
     @app.put("/api/netbox/racks/{rack_id}")
     async def netbox_update_rack(rack_id: int, request: Request):
         """Update a NetBox rack; invalidates the racks cache on success."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        await _verify_owns(request, "netbox_racks", rack_id)
-        try:
-            data = await request.json()
-            data["rack_id"] = rack_id
-            if "tenant" in data:
-                data["tenant"] = _enforce_body_tenant(request, data)
-            result = await hub.request_response(spoke_id, "NETBOX_UPDATE_RACK", data)
-            _refresh_module_all_tenants(hub, "netbox_racks")
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_update_rack failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_UPDATE_RACK", ["netbox_racks"],
+                                   log_name="netbox_update_rack",
+                                   id_field="rack_id", obj_id=rack_id,
+                                   verify_key="netbox_racks",
+                                   tenant_mode="if_present")
 
     @app.delete("/api/netbox/racks/{rack_id}")
     async def netbox_delete_rack(rack_id: int, request: Request):
         """Delete a NetBox rack; invalidates the racks cache on success."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        await _verify_owns(request, "netbox_racks", rack_id)
-        try:
-            result = await hub.request_response(spoke_id, "NETBOX_DELETE_RACK", {"rack_id": rack_id})
-            _refresh_module_all_tenants(hub, "netbox_racks")
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_delete_rack failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_DELETE_RACK", ["netbox_racks"],
+                                   log_name="netbox_delete_rack",
+                                   id_field="rack_id", obj_id=rack_id,
+                                   verify_key="netbox_racks", tenant_mode=None)
 
     @app.get("/api/netbox/devices")
     async def netbox_get_devices(request: Request, site: str = None, rack: str = None, tenant: str = None):
@@ -331,20 +349,8 @@ def register(app, hub, ctx):
     @app.post("/api/netbox/devices")
     async def netbox_add_device(request: Request):
         """Create a NetBox device; invalidates the device cache and triggers an endpoint sync."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        try:
-            data = await request.json()
-            data["tenant"] = _enforce_body_tenant(request, data)
-            result = await hub.request_response(spoke_id, "NETBOX_ADD_DEVICE", data)
-            _refresh_module_all_tenants(hub, "netbox_devices")
-            _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_add_device failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_ADD_DEVICE", ["netbox_devices"],
+                                   log_name="netbox_add_device", sync_body="data")
 
     @app.get("/api/netbox/claim-device/options")
     async def netbox_claim_device_options(request: Request):
@@ -443,40 +449,20 @@ def register(app, hub, ctx):
     @app.delete("/api/netbox/devices/{device_id}")
     async def netbox_delete_device(device_id: int, request: Request):
         """Delete a NetBox device; invalidates the device cache and triggers an endpoint sync."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        await _verify_owns(request, "netbox_devices", device_id)
-        try:
-            result = await hub.request_response(spoke_id, "NETBOX_DELETE_DEVICE", {"device_id": device_id})
-            _refresh_module_all_tenants(hub, "netbox_devices")
-            _trigger_endpoint_sync_after_ipam_edit(hub, request, None)
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_delete_device failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_DELETE_DEVICE", ["netbox_devices"],
+                                   log_name="netbox_delete_device",
+                                   id_field="device_id", obj_id=device_id,
+                                   verify_key="netbox_devices", tenant_mode=None,
+                                   sync_body="null")
 
     @app.put("/api/netbox/devices/{device_id}")
     async def netbox_update_device(device_id: int, request: Request):
         """Update a NetBox device; invalidates the device cache and triggers an endpoint sync."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        await _verify_owns(request, "netbox_devices", device_id)
-        try:
-            data = await request.json()
-            data["device_id"] = device_id
-            if "tenant" in data:
-                data["tenant"] = _enforce_body_tenant(request, data)
-            result = await hub.request_response(spoke_id, "NETBOX_UPDATE_DEVICE", data)
-            _refresh_module_all_tenants(hub, "netbox_devices")
-            _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_update_device failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_UPDATE_DEVICE", ["netbox_devices"],
+                                   log_name="netbox_update_device",
+                                   id_field="device_id", obj_id=device_id,
+                                   verify_key="netbox_devices",
+                                   tenant_mode="if_present", sync_body="data")
 
     @app.get("/api/netbox/prefixes")
     async def netbox_get_prefixes(request: Request, site: str = None, tenant: str = None):
@@ -488,57 +474,27 @@ def register(app, hub, ctx):
     @app.post("/api/netbox/prefixes")
     async def netbox_allocate_prefix(request: Request):
         """Allocate a NetBox prefix; invalidates the prefix + IP caches (30s timeout)."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        try:
-            data = await request.json()
-            data["tenant"] = _enforce_body_tenant(request, data)
-            result = await hub.request_response(spoke_id, "NETBOX_ALLOCATE_PREFIX", data, timeout=30.0)
-            _refresh_module_all_tenants(hub, "netbox_prefixes")
-            _refresh_module_all_tenants(hub, "netbox_ips")
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_allocate_prefix failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_ALLOCATE_PREFIX",
+                                   ["netbox_prefixes", "netbox_ips"],
+                                   log_name="netbox_allocate_prefix", timeout=30.0)
 
     @app.put("/api/netbox/prefixes/{prefix_id}")
     async def netbox_update_prefix(prefix_id: int, request: Request):
         """Update a NetBox prefix; invalidates the prefix cache on success."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        await _verify_owns(request, "netbox_prefixes", prefix_id)
-        try:
-            data = await request.json()
-            data["prefix_id"] = prefix_id
-            if "tenant" in data:
-                data["tenant"] = _enforce_body_tenant(request, data)
-            result = await hub.request_response(spoke_id, "NETBOX_UPDATE_PREFIX", data)
-            _refresh_module_all_tenants(hub, "netbox_prefixes")
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_update_prefix failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_UPDATE_PREFIX", ["netbox_prefixes"],
+                                   log_name="netbox_update_prefix",
+                                   id_field="prefix_id", obj_id=prefix_id,
+                                   verify_key="netbox_prefixes",
+                                   tenant_mode="if_present")
 
     @app.delete("/api/netbox/prefixes/{prefix_id}")
     async def netbox_delete_prefix(prefix_id: int, request: Request):
         """Delete a NetBox prefix; invalidates the prefix + IP caches on success."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        await _verify_owns(request, "netbox_prefixes", prefix_id)
-        try:
-            result = await hub.request_response(spoke_id, "NETBOX_DELETE_PREFIX", {"prefix_id": prefix_id})
-            _refresh_module_all_tenants(hub, "netbox_prefixes")
-            _refresh_module_all_tenants(hub, "netbox_ips")
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_delete_prefix failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_DELETE_PREFIX",
+                                   ["netbox_prefixes", "netbox_ips"],
+                                   log_name="netbox_delete_prefix",
+                                   id_field="prefix_id", obj_id=prefix_id,
+                                   verify_key="netbox_prefixes", tenant_mode=None)
 
     @app.get("/api/netbox/available-subnets")
     async def netbox_find_available_subnets(request: Request, near: str = None,
@@ -630,57 +586,26 @@ def register(app, hub, ctx):
     @app.post("/api/netbox/ips")
     async def netbox_allocate_ip(request: Request):
         """Allocate a NetBox IP address; invalidates the IP cache and triggers an endpoint sync (30s timeout)."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        try:
-            data = await request.json()
-            data["tenant"] = _enforce_body_tenant(request, data)
-            result = await hub.request_response(spoke_id, "NETBOX_ALLOCATE_IP", data, timeout=30.0)
-            _refresh_module_all_tenants(hub, "netbox_ips")
-            _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_allocate_ip failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_ALLOCATE_IP", ["netbox_ips"],
+                                   log_name="netbox_allocate_ip",
+                                   sync_body="data", timeout=30.0)
 
     @app.delete("/api/netbox/ips/{ip_id}")
     async def netbox_release_ip(ip_id: int, request: Request):
         """Release a NetBox IP back to the pool; invalidates the IP cache and triggers an endpoint sync."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        await _verify_owns(request, "netbox_ips", ip_id)
-        try:
-            result = await hub.request_response(spoke_id, "NETBOX_RELEASE_IP", {"ip_id": ip_id})
-            _refresh_module_all_tenants(hub, "netbox_ips")
-            _trigger_endpoint_sync_after_ipam_edit(hub, request, None)
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_release_ip failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_RELEASE_IP", ["netbox_ips"],
+                                   log_name="netbox_release_ip",
+                                   id_field="ip_id", obj_id=ip_id,
+                                   verify_key="netbox_ips", tenant_mode=None,
+                                   sync_body="null")
 
     @app.put("/api/netbox/ips/{ip_id}")
     async def netbox_update_ip(ip_id: int, request: Request):
         """Update a NetBox IP address; invalidates the IP cache and triggers an endpoint sync."""
-        hub = app.state.hub
-        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        await _verify_owns(request, "netbox_ips", ip_id)
-        try:
-            data = await request.json()
-            data["ip_id"] = ip_id
-            if "tenant" in data:
-                data["tenant"] = _enforce_body_tenant(request, data)
-            result = await hub.request_response(spoke_id, "NETBOX_UPDATE_IP_ADDR", data)
-            _refresh_module_all_tenants(hub, "netbox_ips")
-            _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
-            return _unwrap_netbox(result)
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("netbox_update_ip failed")
-            raise HTTPException(status_code=500, detail=str(e))
+        return await _netbox_write(request, "NETBOX_UPDATE_IP_ADDR", ["netbox_ips"],
+                                   log_name="netbox_update_ip",
+                                   id_field="ip_id", obj_id=ip_id,
+                                   verify_key="netbox_ips",
+                                   tenant_mode="if_present", sync_body="data")
 
     # ── Update trigger + module install (/setup/update, /setup/modules/*) ─────
