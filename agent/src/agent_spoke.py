@@ -193,6 +193,10 @@ class GenericAgent(BaseSpoke):
         self._deploy_role: Optional[str] = None
         self._deploy_task: Optional[asyncio.Task] = None
         self._deploy_status: Dict[str, Any] = {"state": "idle"}
+        # Roles with an _install_role currently running (installs are offloaded
+        # to threads, so a second LOAD_ROLE for the same role could otherwise
+        # start a concurrent apt/pip run mid-install → double-spawn).
+        self._role_installs_inflight: set = set()
 
     # ── Role loading ──────────────────────────────────────────────────────────
 
@@ -252,9 +256,25 @@ class GenericAgent(BaseSpoke):
         return inst
 
     async def _install_role(self, role_name: str) -> dict:
-        """Clone the role repo (if external) and install its system + Python deps."""
+        """Clone the role repo (if external) and install its system + Python deps.
+
+        The clone/apt/pip/installer subprocesses are offloaded via
+        asyncio.to_thread — inline they froze the agent's event loop (and its
+        heartbeats) for up to 600s on heavy roles. An in-progress guard rejects
+        a second install of the same role while one runs (the offload means a
+        concurrent LOAD_ROLE can now actually interleave here)."""
         if role_name not in _ROLE_MAP:
             return {"status": "ERROR", "message": f"Unknown role '{role_name}'"}
+        if role_name in self._role_installs_inflight:
+            return {"status": "ERROR",
+                    "message": f"Install of role '{role_name}' already in progress"}
+        self._role_installs_inflight.add(role_name)
+        try:
+            return await self._install_role_inner(role_name)
+        finally:
+            self._role_installs_inflight.discard(role_name)
+
+    async def _install_role_inner(self, role_name: str) -> dict:
         rel_path, _, _, repo_url = _ROLE_MAP[role_name]
         role_file = self._lm_root() / rel_path
 
@@ -267,7 +287,8 @@ class GenericAgent(BaseSpoke):
             if not clone_dir.exists():
                 logger.info("Cloning role repo '%s' into %s…", role_name, clone_dir)
                 try:
-                    subprocess.run(
+                    await asyncio.to_thread(
+                        subprocess.run,
                         ["git", "clone", "--depth", "1", repo_url, str(clone_dir)],
                         check=True, timeout=300,
                     )
@@ -299,7 +320,7 @@ class GenericAgent(BaseSpoke):
         if cmds:
             logger.info("Installing system packages for role '%s'…", role_name)
             try:
-                subprocess.run(cmds, check=True, timeout=180)
+                await asyncio.to_thread(subprocess.run, cmds, check=True, timeout=180)
             except subprocess.CalledProcessError as e:
                 return {"status": "ERROR", "message": f"Package install failed: {e}"}
 
@@ -308,7 +329,8 @@ class GenericAgent(BaseSpoke):
         #     (dns needs unbound remote-control enabled+started; dhcp needs a
         #     non-interactive kea-ctrl-agent config + the kea daemons started).
         #     Idempotent + best-effort; a config hiccup must not fail the load.
-        self._role_post_install(role_name)
+        #     Offloaded whole: it shells out (up to 600s for --infra-only).
+        await asyncio.to_thread(self._role_post_install, role_name)
 
         # 3. Python deps. requirements.txt sits at role_file.parent.parent for
         #    every role (repo root for most; cs/lm-spoke/ for simulation).
@@ -317,7 +339,8 @@ class GenericAgent(BaseSpoke):
             logger.info("Installing Python deps for role '%s'…", role_name)
             venv_pip = self._lm_root() / "agent" / "venv" / "bin" / "pip"
             try:
-                subprocess.run(
+                await asyncio.to_thread(
+                    subprocess.run,
                     [str(venv_pip), "install", "--quiet", "-r", str(req_file)],
                     check=True, timeout=120,
                 )
