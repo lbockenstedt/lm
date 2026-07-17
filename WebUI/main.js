@@ -7145,7 +7145,7 @@ async function pullAcsResources() {
         const d = await r.json().catch(() => ({}));
         if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
         const items = d.acs_resources || [];
-        if (!items.length) { if (out) out.textContent = 'no Communication Services resources in this RG'; showToast('No ACS resources in this resource group.', 'error'); return; }
+        if (!items.length) { const _m = 'No Azure Communication Services resource here. Note: an "Email Communication Service" is a DIFFERENT resource type — LM sends via a Communication Services (ACS) resource. Create one and connect your email domain to it, then re-pull. (If it exists, the app needs read + listKeys on it.)'; if (out) out.textContent = _m; showToast('No Communication Services (ACS) resource in this RG — see the note.', 'error'); return; }
         nameSel.innerHTML = items.map(i => `<option value="${i.name}" data-from="${escapeHtml(i.fromEmail || '')}" data-endpoint="${escapeHtml(i.endpoint || '')}" data-state="${escapeHtml(i.provisioningState || '')}">${escapeHtml(i.name)}${i.location ? ' — ' + escapeHtml(i.location) : ''}</option>`).join('');
         if (cur && items.some(i => i.name === cur)) nameSel.value = cur;
         else if (items.length === 1) nameSel.value = items[0].name;  // auto-select the only resource
