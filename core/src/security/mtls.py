@@ -64,6 +64,12 @@ def set_runtime_materials(ca=None, client_cert=None, client_key=None) -> None:
 def mtls_enabled() -> bool:
     """Master switch. Default OFF. Turn on only when every spoke/agent has the
     wildcard (see the readiness check) so enabling can't orphan a node."""
+    # HARD kill-switch — wins over the runtime override AND global_config. Lets an
+    # operator force mTLS fully OFF from the systemd env when the WebUI is locked
+    # out (e.g. client-cert auth armed the unified :443 socket) WITHOUT editing the
+    # Fernet-encrypted hub state or reaching the (now-unreachable) WebUI knob.
+    if str(os.getenv("LM_MTLS_DISABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
+        return False
     if _runtime_enabled is not None:
         return _runtime_enabled
     return str(os.getenv("LM_MTLS_ENABLED", "")).strip().lower() in ("1", "true", "yes", "on")
