@@ -97,7 +97,7 @@ def test_agent_proxy_pipes_both_ways_and_dials_loopback(monkeypatch):
     upstream = _FakeUpstream(replies=["hello-from-spoke"])
     dialed = {}
 
-    async def _connect(uri):
+    async def _connect(uri, **kwargs):
         dialed["uri"] = uri
         return upstream
 
@@ -120,7 +120,7 @@ def test_agent_proxy_pipes_binary_frames(monkeypatch):
     _ensure_loop()
     upstream = _FakeUpstream(replies=[b"\x01\x02\x03"])
 
-    async def _connect(uri):
+    async def _connect(uri, **kwargs):
         return upstream
 
     monkeypatch.setattr(api_mod.websockets, "connect", _connect)
@@ -139,7 +139,7 @@ def test_agent_proxy_closes_1011_when_loopback_unreachable(monkeypatch):
     agent WS closes 1011 with a clear reason instead of hanging."""
     _ensure_loop()
 
-    async def _connect(uri):
+    async def _connect(uri, **kwargs):
         raise ConnectionRefusedError("loopback down")
 
     monkeypatch.setattr(api_mod.websockets, "connect", _connect)

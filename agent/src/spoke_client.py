@@ -174,7 +174,10 @@ class SpokeClient:
                 # fallback attempt ALSO failed, go back to mTLS next (avoid
                 # sticking in plain mode).
                 try:
-                    from security.mtls import mtls_enabled as _me
+                    try:
+                        from core.src.security.mtls import mtls_enabled as _me
+                    except ImportError:
+                        from security.mtls import mtls_enabled as _me
                     mtls_on = _me()
                 except Exception:  # noqa: BLE001
                     mtls_on = False
