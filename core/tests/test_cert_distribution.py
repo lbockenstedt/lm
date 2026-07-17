@@ -505,6 +505,40 @@ def test_wildcard_fans_out_to_every_capable_spoke():
     assert len(marks) == 3 and all(m["data"].get("wildcard") for m in marks)
 
 
+def test_build_claimed_targets_ignores_wildcard_cert():
+    """_build_claimed_targets: a non-wildcard cert claims its targets (by
+    identifier, or wholesale by module_type when the identifier is blank); a
+    WILDCARD cert claims nothing (it doesn't exclude against itself)."""
+    ids, groups = cd._build_claimed_targets([
+        {"domain": "*.lab.example.com", "targets": [{"module_type": "firewall", "identifier": "opn-9"}]},
+        {"domain": "hub.lab.example.com", "targets": [{"module_type": "hub", "identifier": "hub"}]},
+        {"domain": "dns1.lab.example.com", "targets": [{"module_type": "dns", "identifier": ""}]},
+    ])
+    assert ids == {"hub"} and groups == {"dns"}
+
+
+def test_wildcard_skips_spokes_with_unique_cert():
+    """A spoke/agent that already owns a unique (non-wildcard) LE cert is excluded
+    from the wildcard fan-out — by spoke_id (claimed_ids) or wholesale by
+    module_type (claimed_group_types)."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        ("opn-1", "INSTALL_CERT"): _install_ok(),
+    })
+    get_all = _wc_all_by_type({"firewall": ["opn-1", "opn-2"],
+                               "hypervisor": ["hv-1"]})
+    push_state = {}
+    summary = _run(cd.distribute_wildcard_to_all_spokes(
+        rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
+        None, push_state, install_on_hub=None,
+        claimed_ids={"opn-2"}, claimed_group_types={"hypervisor"}))
+    installs = [c["spoke"] for c in calls if c["cmd"] == "INSTALL_CERT"]
+    assert installs == ["opn-1"]  # opn-2 (claimed id) + hv-1 (claimed type) skipped
+    assert "*.lab.example.com|opn-2" not in push_state
+    assert "*.lab.example.com|hv-1" not in push_state
+    assert all(s.get("wildcard") for s in summary)
+
+
 def test_wildcard_skips_all_current_no_pull(caplog):
     """When push_state shows every spoke at the current hash, no LE_GET_CERT
     pull + no INSTALL_CERT — the operator sees 'all N current' (not silence)."""
