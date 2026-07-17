@@ -3643,6 +3643,33 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._arm_liveness_probe(spoke_id, websocket)
         return True
 
+    def _zero_touch_rekey_proven(self, spoke_id: str, install_uuid: str,
+                                 psk_proven: bool) -> bool:
+        """CC3: may an approved spoke that connected with NO secret be
+        zero-touch re-keyed?
+
+        True only if the box proves it is the original — the ``install_uuid`` it
+        presents is the one we indexed for this ``spoke_id`` (a box that lost its
+        session secret but kept its ``.env`` ``INSTALL_UUID``), OR it presented
+        a valid tenant onboarding PSK this connection (``psk_proven``). A bare
+        approved ``spoke_id`` claim with neither proof is refused: ``spoke_id``s
+        are hostname-derived and predictable, so such a claim is
+        indistinguishable from an attacker taking the slot while the real spoke
+        is briefly offline, and a re-key would hand that attacker a freshly
+        minted session key + the victim's tenant binding.
+
+        The reverse index (not ``module_metadata``) is the proof source: an
+        empty-``install_uuid`` connection overwrites the metadata field but
+        never touches the index, so the real box can still reclaim after an
+        empty-uuid probe. Residual weakness: an attacker who has copied the
+        victim's ``INSTALL_UUID`` (out of its ``.env``) passes the uuid proof —
+        accepted as the (b)/(c) tradeoff (raises the bar from a predictable
+        hostname to the box's private UUID)."""
+        if psk_proven:
+            return True
+        return bool(install_uuid) and \
+            self.install_uuid_index.get(install_uuid) == spoke_id
+
     async def handle_connection(self, websocket):
         """Handle the full lifecycle of a single Spoke/Agent connection.
 
@@ -3871,9 +3898,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # and BEFORE the approval check so the approved branch handles
             # session-key/config push. A wrong/missing PSK is not fatal — the
             # spoke simply falls through to pending admin approval as today.
+            # CC3: a valid tenant PSK presented this connection is one of the two
+            # accepted proofs for the zero-touch re-key below (the other is the
+            # install_uuid matching the one we indexed for this spoke_id). Tracked
+            # here so the approved-but-no-secret branch can re-key a PSK-onboarded
+            # spoke — approve_and_bind_spoke only mints a key when the spoke is
+            # already in active_connections, which a no-secret connect never is.
+            psk_proven = False
             if onboarding_psk and tenant_id_hint:
                 if await self._try_psk_self_provision(spoke_id, tenant_id_hint, onboarding_psk):
                     self.known_modules = self.state.system_state["known_modules"]
+                    psk_proven = True
                 else:
                     logger.warning(
                         f"PSK self-provision failed for {spoke_id} "
@@ -3932,39 +3967,88 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # We don't return; we enter the loop but the loop will filter messages
             else:
                 # MODULE IS APPROVED
-                # If the spoke connected without a secret (zero-touch, already approved),
-                # generate and push its session key before sending config.
+                # If the spoke connected without a secret (zero-touch, already
+                # approved), generate and push its session key before sending
+                # config — but ONLY if it proves it is the original box (CC3).
+                rekey_refused = False
                 if not secret:
-                    # Sign the key-delivery push with the secret the spoke
-                    # currently holds (None here = pending, it accepts anyway)
-                    # so it can verify and install the new secret.
-                    prev_secret = self.key_manager.current_session_secret(spoke_id)
-                    session_secret = self.key_manager.generate_first_secret(spoke_id)
-                    key_msg = Message(
-                        header=MessageHeader(
-                            message_id=str(uuid.uuid4()), timestamp=time.time(),
-                            sender_id="hub", destination_id=spoke_id),
-                        payload=MessagePayload(
-                            type="SPOKE_UPDATE_SESSION_KEY",
-                            data={"secret": session_secret}))
-                    await self.send_to_spoke(key_msg, signing_secret=prev_secret)
-                await self.push_config_to_spoke(spoke_id)
+                    # CC3: spoke_ids are hostname-derived and predictable, so a
+                    # bare approved-id claim with no secret is indistinguishable
+                    # from an attacker taking the slot while the real spoke is
+                    # briefly offline (restart / SPOKE_UPDATE / watchdog reboot).
+                    # Such an attacker would receive this freshly minted session
+                    # key and impersonate the spoke until evicted. Re-key only on
+                    # proof: the install_uuid the spoke presents is the one we
+                    # indexed for this spoke_id (the original box that lost its
+                    # secret but kept its .env UUID), OR it presented a valid
+                    # tenant onboarding PSK this connection. Otherwise REFUSE:
+                    # send no key (and no config — nothing to sign with), record
+                    # the refusal, and send APPROVAL_REQUIRED so the spoke stops
+                    # expecting a key and the admin is flagged. Approval is left
+                    # intact so the real box can still reclaim the slot on a
+                    # uuid-matching reconnect — de-approving would let an attacker
+                    # grief the real box into forced re-approval. The index is
+                    # the proof source, not module_metadata, because an empty-uuid
+                    # connection overwrites metadata but never touches the index.
+                    if self._zero_touch_rekey_proven(spoke_id, install_uuid,
+                                                    psk_proven):
+                        # Sign the key-delivery push with the secret the spoke
+                        # currently holds (None here = pending, it accepts anyway)
+                        # so it can verify and install the new secret.
+                        prev_secret = self.key_manager.current_session_secret(spoke_id)
+                        session_secret = self.key_manager.generate_first_secret(spoke_id)
+                        key_msg = Message(
+                            header=MessageHeader(
+                                message_id=str(uuid.uuid4()), timestamp=time.time(),
+                                sender_id="hub", destination_id=spoke_id),
+                            payload=MessagePayload(
+                                type="SPOKE_UPDATE_SESSION_KEY",
+                                data={"secret": session_secret}))
+                        await self.send_to_spoke(key_msg, signing_secret=prev_secret)
+                    else:
+                        rekey_refused = True
+                        self.record_spoke_event(spoke_id, "zero_touch_rekey_refused",
+                                                 "no secret + no install_uuid/PSK proof "
+                                                 "— re-key refused (CC3); re-onboard via "
+                                                 "PSK or admin approval to recover")
+                        logger.warning(
+                            f"[CC3] refused zero-touch re-key for approved spoke "
+                            f"{spoke_id}: no secret and install_uuid not proven "
+                            f"(presented={(install_uuid or '')[:8] or '<none>'}, "
+                            f"psk_proven={psk_proven}). Slot left approved-but-keyless "
+                            f"for the real box to reclaim.")
+                        approval_msg = {
+                            "header": {"message_id": str(uuid.uuid4()),
+                                       "timestamp": time.time(),
+                                       "sender_id": "hub",
+                                       "destination_id": spoke_id},
+                            "payload": {"type": "APPROVAL_REQUIRED", "data": {}}
+                        }
+                        try:
+                            approval_msg["signature"] = self.key_manager.sign_message(
+                                spoke_id, {"header": approval_msg["header"],
+                                           "payload": approval_msg["payload"]})
+                        except Exception:
+                            approval_msg["signature"] = None
+                        await websocket.send(json.dumps(approval_msg))
+                if not rekey_refused:
+                    await self.push_config_to_spoke(spoke_id)
 
-                # Request version AFTER the session key is established so the spoke
-                # can sign its response and the hub can verify it.
-                try:
-                    version_msg = Message(
-                        header=MessageHeader(
-                            message_id=str(uuid.uuid4()),
-                            timestamp=time.time(),
-                            sender_id="hub",
-                            destination_id=spoke_id
-                        ),
-                        payload=MessagePayload(type="get_version", data={})
-                    )
-                    await self.send_to_spoke(version_msg)
-                except Exception as e:
-                    logger.error(f"Failed to request version from {spoke_id}: {e}")
+                    # Request version AFTER the session key is established so the
+                    # spoke can sign its response and the hub can verify it.
+                    try:
+                        version_msg = Message(
+                            header=MessageHeader(
+                                message_id=str(uuid.uuid4()),
+                                timestamp=time.time(),
+                                sender_id="hub",
+                                destination_id=spoke_id
+                            ),
+                            payload=MessagePayload(type="get_version", data={})
+                        )
+                        await self.send_to_spoke(version_msg)
+                    except Exception as e:
+                        logger.error(f"Failed to request version from {spoke_id}: {e}")
 
             # 2. Flush Mailbox
             await self.mailbox.flush_mailbox(spoke_id, self.send_to_spoke)
