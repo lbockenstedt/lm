@@ -203,6 +203,56 @@ def register(app, hub, ctx):
             logger.exception("netbox_health failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.get("/api/netbox/tenants")
+    async def netbox_get_tenants(request: Request):
+        """Full NetBox tenant list (id/name/slug) — for the Migrate Data picker.
+        Admin-only: it exposes every tenant, and its only consumer is the
+        admin-gated migrate action below."""
+        sess = _session_user(request)
+        if not (sess and _is_admin(sess)):
+            raise HTTPException(status_code=403, detail="Admin only")
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        result = await hub.request_response(spoke_id, "NETBOX_GET_TENANTS", {}, timeout=15.0)
+        return _unwrap_netbox(result)
+
+    @app.post("/api/netbox/migrate-tenant")
+    async def netbox_migrate_tenant(request: Request):
+        """Migrate Data to new Tenant — reassign every NetBox object owned by the
+        SOURCE tenant to the TARGET tenant, then (by default) delete the source.
+        ADMIN-ONLY: this is a destructive cross-tenant operation. Body:
+        ``{source, target, delete_source=true, create_target=false}`` where
+        source/target are a tenant id, slug, or name."""
+        sess = _session_user(request)
+        if not (sess and _is_admin(sess)):
+            raise HTTPException(status_code=403, detail="Admin only")
+        body = await request.json()
+        source = body.get("source")
+        target = body.get("target")
+        if not source or not target:
+            raise HTTPException(status_code=400, detail="source and target are required")
+        spoke_id = get_netbox_spoke(hub)
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        logger.info("netbox migrate-tenant: %s -> %s (delete_source=%s) by %s",
+                    source, target, body.get("delete_source", True),
+                    (sess.get("user", {}) or {}).get("username"))
+        result = await hub.request_response(
+            spoke_id, "NETBOX_MIGRATE_TENANT",
+            {"source": source, "target": target,
+             "delete_source": body.get("delete_source", True),
+             "create_target": body.get("create_target", False)},
+            timeout=300.0)
+        out = _unwrap_netbox(result)
+        # A big reassignment stales every cached NetBox list across tenants.
+        for mk in ("netbox_devices", "netbox_prefixes", "netbox_ips", "netbox_racks"):
+            try:
+                _refresh_module_all_tenants(hub, mk)
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
     @app.get("/api/netbox/sites")
     async def netbox_get_sites():
         """List NetBox sites (admin sees all; unfiltered spoke round-trip)."""
