@@ -243,6 +243,16 @@ class HubCertDistributionMixin:
             return {"status": "ERROR",
                     "message": "hub TLS paths not configured — set LM_TLS_CERT + "
                                "LM_TLS_KEY env on the hub to a writable location"}
+        # The WILDCARD is NEVER the hub's own server cert. The hub keeps its own
+        # (non-wildcard) cert; a wildcard reaching here via ANY path — an explicit
+        # "hub" target in distribute_cert_to_targets OR a wildcard fan-out — is a
+        # no-op for the server cert (no LM_TLS_CERT overwrite, no self-restart).
+        # Last-line guard that stops the hub self-restart loop regardless of caller.
+        if _is_wildcard(domain):
+            cert_log.info("[cert] %s → hub: SKIPPED — wildcard is not installed as the "
+                          "hub's server cert (the hub keeps its own cert; no restart)", domain)
+            return {"status": "SKIPPED",
+                    "message": "wildcard not installed on the hub (hub keeps its own cert)"}
         if not fullchain or not privkey:
             cert_log.warning("[cert] %s → hub: FAILED — missing cert material", domain)
             return {"status": "ERROR", "message": "missing cert material"}

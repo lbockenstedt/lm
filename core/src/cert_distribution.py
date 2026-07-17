@@ -331,7 +331,12 @@ async def distribute_wildcard_to_all_spokes(
             continue
         for sid in get_all_by_type(mt):
             spoke_targets.append({"module_type": mt, "identifier": sid, "spoke_id": sid})
-    include_hub = "hub" in capable and install_on_hub is not None
+    # The wildcard is deployed to SPOKES + AGENTS only — the hub keeps its OWN
+    # (non-wildcard) cert, so it is NEVER a wildcard target (was overwriting
+    # hub.crt + self-restarting lm.service every distribution cycle). The hub's
+    # mTLS CA bundle, when needed, goes via a separate path — never the wildcard
+    # server cert.
+    include_hub = False
 
     if not spoke_targets and not include_hub:
         logger.info("[cert] wildcard %s: no connected cert-capable spokes — nothing to fan out", domain)

@@ -575,9 +575,12 @@ def test_wildcard_get_cert_failure_returns_error():
     assert not [c for c in calls if c["cmd"] == "INSTALL_CERT"]
 
 
-def test_wildcard_includes_hub_self_install():
-    """The hub (one TLS endpoint) gets the cert via install_on_hub, tagged
-    module_type 'hub', and is tracked in push_state under '<domain>|hub'."""
+def test_wildcard_excludes_hub_self_install():
+    """The wildcard is deployed to SPOKES + AGENTS only — the hub keeps its OWN
+    (non-wildcard) cert, so the wildcard fan-out NEVER calls install_on_hub for
+    the hub (was overwriting hub.crt + self-restarting lm.service every cycle).
+    Spokes still get the cert; the hub gets no entry, no push_state key, no
+    install_on_hub call."""
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok(),
                            ("opn-1", "INSTALL_CERT"): _install_ok()})
     get_all = _wc_all_by_type({"firewall": ["opn-1"]})
@@ -592,12 +595,33 @@ def test_wildcard_includes_hub_self_install():
         rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
         None, push_state, install_on_hub=install_on_hub))
     hub_entries = [s for s in summary if s["module_type"] == "hub"]
-    assert len(hub_entries) == 1 and hub_entries[0]["status"] == "SUCCESS"
-    assert hub_installs == ["hub"]  # identifier "hub" for the single TLS endpoint
-    assert push_state["*.lab.example.com|hub"] == _H
-    # hub is NOT treated as a spoke — no INSTALL_CERT relay for it.
-    assert not [c for c in calls if c["cmd"] == "INSTALL_CERT"
-                and c["spoke"] not in ("opn-1",)]
+    assert hub_entries == []                       # hub is NOT a wildcard target
+    assert hub_installs == []                      # install_on_hub never called
+    assert "_.lab.example.com|hub" not in push_state and \
+        "*.lab.example.com|hub" not in push_state
+    # The spoke still got the wildcard.
+    spoke_entries = [s for s in summary if s["module_type"] == "firewall"]
+    assert len(spoke_entries) == 1 and spoke_entries[0]["status"] == "SUCCESS"
+
+
+def test_install_cert_on_hub_skips_wildcard(tmp_path, monkeypatch):
+    """Last-line guard: a wildcard reaching _install_cert_on_hub via ANY path
+    (an explicit 'hub' target in distribute_cert_to_targets) is SKIPPED — no
+    LM_TLS_CERT overwrite, no self-restart — so the hub keeps its own cert.
+    hub_cert_distribution is a light mixin (stdlib + cert_distribution only) and
+    the guard uses no instance state, so a bare instance suffices."""
+    import hub_cert_distribution as hcd
+    cert_path = tmp_path / "hub.crt"
+    key_path = tmp_path / "hub.key"
+    cert_path.write_text("ORIGINAL")               # pre-existing hub cert
+    monkeypatch.setenv("LM_TLS_CERT", str(cert_path))
+    monkeypatch.setenv("LM_TLS_KEY", str(key_path))
+    mixin = hcd.HubCertDistributionMixin()
+    ret = _run(mixin._install_cert_on_hub(
+        "*.lab.example.com", _PEM, _PEM,
+        "-----BEGIN CERTIFICATE-----\nchain\n-----END CERTIFICATE-----\n"))
+    assert ret["status"] == "SKIPPED"              # guard fired
+    assert cert_path.read_text() == "ORIGINAL"     # hub cert NOT overwritten
 
 
 def test_wildcard_non_wildcard_domain_is_noop():
