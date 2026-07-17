@@ -269,6 +269,67 @@ def test_empty_install_uuid_records_hostname_only(tmp_path):
     assert state.system_state["module_metadata"]["noid-spoke"]["hostname"] == "host"
 
 
+# ── Phase 2b: CC2 guard — migration gated on proof of the old id's secret ─────
+
+def _seed_approved_victim(state, km, hub):
+    """An approved, tenant-bound spoke 'old-spoke' owning UUID-1 + a secret."""
+    km.keys["old-spoke"] = _key("k1", "the-secret")
+    state.system_state["approved_modules"]["old-spoke"] = True
+    state.system_state["known_modules"].append("old-spoke")
+    state.update_module_metadata("old-spoke", {"tenant_id": "tenant-A",
+                                               "install_uuid": "UUID-1",
+                                               "hostname": "oldhost"})
+    hub.install_uuid_index["UUID-1"] = "old-spoke"
+
+
+def test_proven_rename_migrates(tmp_path):
+    """migrate_if=True (caller proved it holds old-spoke's secret) → migrate."""
+    state = _fresh_state(tmp_path)
+    km = _make_km()
+    hub = _ReconcileHub(state, km)
+    _seed_approved_victim(state, km, hub)
+
+    reconcile(hub, "new-spoke", "UUID-1", "newhost", migrate_if=True)
+
+    assert state.system_state["approved_modules"].get("new-spoke") is True
+    assert "old-spoke" not in state.system_state["approved_modules"]
+    assert km.get_valid_key("new-spoke", "the-secret") == "k1"
+    assert hub.install_uuid_index["UUID-1"] == "new-spoke"
+    assert _events_of(hub, "new-spoke", "identity_changed")
+
+
+def test_unproven_rename_refuses_migration(tmp_path):
+    """CC2: a known install_uuid under a NEW id with NO proof of the old id's
+    secret is NOT migrated. The victim keeps its approval/keys/identity; the
+    new id is left unapproved and does NOT inherit the uuid (so a reload can't
+    drift the index onto it)."""
+    state = _fresh_state(tmp_path)
+    km = _make_km()
+    hub = _ReconcileHub(state, km)
+    _seed_approved_victim(state, km, hub)
+
+    # An attacker (or a keyless reinstall) presents a new id + the victim's UUID
+    # but has NOT proven the old id's secret → handle_connection passes
+    # migrate_if=False.
+    reconcile(hub, "evil-spoke", "UUID-1", "evilhost", migrate_if=False)
+
+    # Victim untouched: still approved, still owns its key + the uuid index entry.
+    assert state.system_state["approved_modules"].get("old-spoke") is True
+    assert "old-spoke" in state.system_state["known_modules"]
+    assert km.get_valid_key("old-spoke", "the-secret") == "k1"
+    assert hub.install_uuid_index["UUID-1"] == "old-spoke"
+    # Attacker's id did NOT inherit approval or the victim's key.
+    assert state.system_state["approved_modules"].get("evil-spoke") is None
+    assert km.get_valid_key("evil-spoke", "the-secret") is None
+    # The uuid is NOT recorded under the attacker's id.
+    assert state.system_state["module_metadata"]["evil-spoke"]["install_uuid"] == ""
+    # Refusal is surfaced as a lifecycle event (visible in Setup → diagnostics).
+    assert _events_of(hub, "evil-spoke", "identity_rename_unproven")
+    assert not _events_of(hub, "evil-spoke", "identity_changed")
+    assert not _events_of(hub, "old-spoke", "identity_changed")
+
+
+
 # ── Phase 3: agent reconcile (relay migration) ───────────────────────────────
 
 def test_agent_same_uuid_new_id_migrates_agent_config(tmp_path):

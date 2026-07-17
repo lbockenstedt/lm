@@ -38,14 +38,23 @@ class HubIdentityMixin:
 
     def _reconcile_spoke_identity(self, new_id: str, install_uuid: str,
                                   hostname: str, is_agent: bool = False,
-                                  parent_spoke_id: Optional[str] = None) -> None:
+                                  parent_spoke_id: Optional[str] = None,
+                                  migrate_if: bool = True) -> None:
         """Detect a clone-and-rename on connect and migrate state to the new id.
 
-        Called from handle_connection (spokes) and _handle_agent_relay_up (agents)
-        BEFORE the auth verify, so a migrated spoke's re-keyed material is in place
-        for ``get_valid_key``. Emits ``identity_changed`` / ``hostname_changed`` /
-        ``reimaged`` lifecycle events. Safe to call with an empty install_uuid
-        (.env unwritable): it only records hostname when known, no correlation.
+        Called from handle_connection (spokes) and _handle_agent_relay_up (agents).
+        Emits ``identity_changed`` / ``hostname_changed`` / ``reimaged`` lifecycle
+        events. Safe to call with an empty install_uuid (.env unwritable): it only
+        records hostname when known, no correlation.
+
+        CC2 guard: the spoke path passes ``migrate_if`` set by the caller ONLY
+        when the connecting box proved it owns the OLD id's secret (verified in
+        handle_connection via ``get_valid_key(old_id, secret)`` before this call).
+        A known install_uuid under a NEW id WITHOUT that proof is NOT migrated —
+        new_id is recorded as a fresh spoke (pending approval / PSK) and the index
+        stays on the real (old) id, so a bare UUID + new spoke_id can no longer
+        inherit the victim's approval + a freshly minted session key. The agent
+        relay path is post-auth and migrates unconditionally (default True).
         """
         if not new_id:
             return
@@ -57,17 +66,37 @@ class HubIdentityMixin:
         prev_hostname = meta.get("hostname")
         prev_uuid = meta.get("install_uuid")
 
+        # owns_uuid: whether new_id is allowed to claim this install_uuid (and
+        # thus whether we record it into new_id's metadata + repoint the index).
+        # False only in the unproven-rename branch below.
+        owns_uuid = True
         if install_uuid:
             old_id = self.install_uuid_index.get(install_uuid)
             if old_id and old_id != new_id:
-                # Same install UUID, new id → cloned+renamed spoke. Migrate so the
-                # renamed box keeps its approval/tenant binding + key material.
-                self.record_spoke_event(old_id, "identity_changed",
-                                        f"was {old_id}, now {new_id} (hostname={hostname or '?'})")
-                self._migrate_spoke_identity(old_id, new_id)
-                self.record_spoke_event(new_id, "identity_changed",
-                                        f"migrated from {old_id} (hostname={hostname or '?'})")
-                self.install_uuid_index[install_uuid] = new_id
+                if migrate_if:
+                    # Same install UUID, new id → cloned+renamed spoke WITH proof of
+                    # the old id's secret. Migrate so the renamed box keeps its
+                    # approval/tenant binding + key material.
+                    self.record_spoke_event(old_id, "identity_changed",
+                                            f"was {old_id}, now {new_id} (hostname={hostname or '?'})")
+                    self._migrate_spoke_identity(old_id, new_id)
+                    self.record_spoke_event(new_id, "identity_changed",
+                                            f"migrated from {old_id} (hostname={hostname or '?'})")
+                    self.install_uuid_index[install_uuid] = new_id
+                else:
+                    # CC2 guard: known install_uuid under a NEW id with NO proof
+                    # of the old id's secret. Do NOT migrate approval/keys and do
+                    # NOT repoint the index — the real (old) id keeps its identity.
+                    # new_id is left as a fresh spoke (pending approval / PSK),
+                    # never an inheritance. The uuid is not recorded under new_id
+                    # so a reload can't drift the index onto it.
+                    self.record_spoke_event(new_id, "identity_rename_unproven",
+                                            f"install_uuid seen under {old_id} but no valid secret "
+                                            f"for it — migration to {new_id} refused")
+                    logger.warning("[identity] %s claimed install_uuid of %s without a "
+                                   "valid secret for it — migration refused (CC2 guard).",
+                                   new_id, old_id)
+                    owns_uuid = False
             elif not old_id:
                 # Fresh UUID. If this id slot already had a different UUID, the box
                 # was re-imaged (prep-for-imaging wiped the UUID) reusing the id.
@@ -81,14 +110,17 @@ class HubIdentityMixin:
 
         # Hostname-change detection (independent of id/uuid change). Covers the
         # pinned-id case where the id is frozen but the OS host was renamed.
-        if hostname and prev_hostname and prev_hostname != hostname:
+        # Skip in the unproven-rename case — we're refusing to recognize new_id,
+        # so a fabricated hostname_changed would be misleading.
+        if owns_uuid and hostname and prev_hostname and prev_hostname != hostname:
             self.record_spoke_event(new_id, "hostname_changed",
                                     f"was {prev_hostname}, now {hostname}")
 
         # Persist current hostname + install_uuid so the next reconnect can diff.
+        # install_uuid is recorded only when new_id actually owns it.
         self.state.update_module_metadata(new_id, {
             "hostname": hostname or "",
-            "install_uuid": install_uuid or "",
+            "install_uuid": (install_uuid or "") if owns_uuid else "",
         })
 
     def _migrate_spoke_identity(self, old_id: str, new_id: str) -> None:

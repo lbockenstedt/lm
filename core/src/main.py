@@ -3700,8 +3700,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 return
 
             # Detect a clone-and-rename (same install UUID, new id) and migrate
-            # approval/tenant binding + key material to the new id BEFORE auth.
-            self._reconcile_spoke_identity(spoke_id, install_uuid, spoke_hostname)
+            # approval/tenant binding + key material to the new id — but ONLY if
+            # the caller proves it owns the OLD id's secret (CC2: a bare
+            # install_uuid + a new spoke_id with NO secret used to migrate the
+            # victim's approval + key material BEFORE any auth verify, then the
+            # zero-touch re-key path minted the attacker a fresh session key —
+            # full spoke/tenant takeover with no secret knowledge). Verify the
+            # presented secret against the OLD id (the UUID's current owner)
+            # first; only a proven rename is allowed to migrate. An unproven
+            # rename is left as a fresh spoke (pending approval / PSK), never an
+            # inheritance. get_valid_key is a pure constant-time compare — safe
+            # to call on old_id as a proof check without consuming/rotating it.
+            rename_proven = False
+            if install_uuid and secret:
+                _old_id = self.install_uuid_index.get(install_uuid)
+                if _old_id and _old_id != spoke_id \
+                        and self.key_manager.get_valid_key(_old_id, secret):
+                    rename_proven = True
+            self._reconcile_spoke_identity(spoke_id, install_uuid, spoke_hostname,
+                                           migrate_if=rename_proven)
 
             # If secret is provided, verify it. If not, the spoke is in 'pending secret' state.
             is_authenticated = False
