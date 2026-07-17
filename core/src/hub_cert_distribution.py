@@ -502,12 +502,15 @@ class HubCertDistributionMixin:
         """Phase B: when ``mtls.auto_provision`` is ON and the fleet is ready
         (hub CA + server cert AND every connected primary spoke has its mTLS
         materials) but mTLS isn't enabled yet, flip it on — set
-        ``global_config.mtls_enabled``, ``mtls.set_runtime_enabled(True)``, and
-        schedule ``lm-self-restart`` so uvicorn arms client-cert verification
-        (see api.build_server). Idempotent: a no-op when auto-provision is off,
-        mTLS is already on, or the fleet isn't ready yet. The readiness gate
-        (hub + spokes) means this never orphans a spoke — the manual 409 guard
-        and this auto path share the same _mtls_fleet_ready() check.
+        ``global_config.mtls_enabled`` + ``mtls.set_runtime_enabled(True)``. No
+        self-restart: the spoke/agent WS legs arm on their next reconnect, and
+        enabling is SAFE because verification is PERMISSIVE (CERT_OPTIONAL, see
+        api.build_server + mtls.server_verify_mode) — a peer with a cert is
+        verified, a peer without one (every browser) falls back and still
+        connects, so auto-enable can never lock the WebUI out. Idempotent: a
+        no-op when auto-provision is off, mTLS is already on, or the fleet isn't
+        ready. The readiness gate (hub + spokes) means this never orphans a
+        spoke — the manual 409 guard and this auto path share _mtls_fleet_ready().
 
         This removes the human checkpoint the operator opted out of by turning
         auto-provision on; the auto_enabled_at timestamp is persisted for audit.
