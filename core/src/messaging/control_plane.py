@@ -23,9 +23,14 @@ import fcntl
 import contextlib
 import concurrent.futures
 from typing import Dict, Any, Optional
-from ..security.signer import MessageSigner, encode_frame, split_frame
-from ..security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
-                                     encryption_enabled, is_encrypted, wrap, unwrap)
+try:
+    from ..security.signer import MessageSigner, encode_frame, split_frame
+    from ..security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
+                                         encryption_enabled, is_encrypted, wrap, unwrap)
+except ImportError:  # imported off a stale path (messaging.* top-level, no repo root on sys.path)
+    from security.signer import MessageSigner, encode_frame, split_frame  # type: ignore
+    from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
+                                       encryption_enabled, is_encrypted, wrap, unwrap)  # type: ignore
 from cryptography.exceptions import InvalidTag
 
 try:  # shared helper (lm/core/src); falls back if imported off a stale path
