@@ -1657,6 +1657,91 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     except Exception:  # noqa: BLE001
         pass
 
+    # ── config-value learner (knob-floor search over simulation.conf knobs) ──
+    # A SECOND control axis, orthogonal to the count controller above. Where the
+    # adaptive controller tunes how MANY clients run a sim, this tunes how HARD
+    # each one hits — the sim's [simulation] intensity knobs (SIM_KNOBS) — by a
+    # coordinate-descent search that ratchets one knob at a time DOWN to the
+    # floor that still fires the alert. State lives in a separate store key
+    # (knob_learn_state) so the two never clobber each other, and is keyed by the
+    # same alert_type:alert_id:site (`_adaptive_key`). Reuses `_alert_firing`.
+    # The pure floor-search step lives in sim_quota.knob_step (shared with the cs
+    # twin + unit-tested); the sweep below drives it with the live firing signal.
+
+    async def _knob_overrides_for_tenant(tenant_id: str) -> dict:
+        """The tenant-wide ``[simulation]`` knob values the learner currently
+        wants delivered = per-knob MIN across all this tenant's ``learn_knobs``
+        quota states (most conservative floor when several quotas tune the same
+        global knob). Empty when nothing is learning."""
+        from .sim_quota import normalize_quota, knobs_for_sim
+        try:
+            csc = await store.get_central_sites_config(tenant_id) or {}
+            learn = [q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
+                     if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
+            if not learn:
+                return {}
+            state = await store.get_knob_learn_state(tenant_id)
+        except Exception:  # noqa: BLE001
+            return {}
+        out: dict = {}
+        for q in learn:
+            vals = (state.get(_adaptive_key(q)) or {}).get("values") or {}
+            for kk, vv in vals.items():
+                try:
+                    iv = int(vv)
+                except (TypeError, ValueError):
+                    continue
+                out[kk] = iv if kk not in out else min(out[kk], iv)
+        return out
+
+    async def _run_knob_learner() -> None:
+        """One learner pass over every tenant's ``learn_knobs`` quotas — advance
+        the floor search and re-push the delivered knob values when they move."""
+        import time as _t
+        from .sim_quota import normalize_quota, knobs_for_sim, knob_step
+        now = _t.time()
+        for tid in _all_tenant_ids():
+            try:
+                csc = await store.get_central_sites_config(tid) or {}
+                learn = [q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
+                         if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
+                if not learn:
+                    continue
+                state = await store.get_knob_learn_state(tid)
+                changed = False
+                live = set()
+                for q in learn:
+                    k = _adaptive_key(q); live.add(k)
+                    firing = await _alert_firing(tid, q)
+                    before = dict(state.get(k) or {})
+                    after = knob_step(before, knobs_for_sim(q.get("sim_id")), firing, now)
+                    if after != before:
+                        state[k] = after; changed = True
+                for k in list(state.keys()):
+                    if k not in live:
+                        state.pop(k, None); changed = True
+                if changed:
+                    await store.set_knob_learn_state(tid, state)
+                    await _push_sim_quotas(tid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("knob learner (%s): %s", tid, exc)
+
+    async def _knob_learner_loop() -> None:
+        """Periodic knob-floor learner sweep. Started from main.py."""
+        while True:
+            try:
+                await _run_knob_learner()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a sweep must not kill the loop
+                logger.warning("knob learner loop: %s", exc)
+            await asyncio.sleep(45)
+
+    try:
+        hub._knob_learner_loop = _knob_learner_loop
+    except Exception:  # noqa: BLE001
+        pass
+
     async def _sim_shareable(tenant_id: str = "") -> dict:
         """The GLOBAL (all-tenant) per-simulation shareable/stackable overrides
         (authoritative — a sim set non-shareable can NEVER be stacked by any
@@ -1777,6 +1862,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return await _push_config(tenant_id, {
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
+            "sim_knob_overrides": await _knob_overrides_for_tenant(tenant_id),
             **await _pool_config(tenant_id),
         })
 

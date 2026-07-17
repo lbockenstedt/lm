@@ -422,6 +422,20 @@ class SimulationsStore:
             self._tenant(tenant_id)["adaptive_quota_state"] = dict(state) if isinstance(state, dict) else {}
             await self._asave()
 
+    # ── knob-floor learner state (config-value learner) ──────────────────────
+    # Per-tenant {quota_key: {values, floors, active, mode, last_change}} — the
+    # running state of the coordinate-descent floor search over a sim's
+    # [simulation] intensity knobs (SIM_KNOBS). Separate from adaptive_state so
+    # the count controller and the knob learner never clobber each other.
+    async def get_knob_learn_state(self, tenant_id: str) -> Dict[str, Any]:
+        v = self._data.get(tenant_id, {}).get("knob_learn_state")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_knob_learn_state(self, tenant_id: str, state: Dict[str, Any]) -> None:
+        with self._lock:
+            self._tenant(tenant_id)["knob_learn_state"] = dict(state) if isinstance(state, dict) else {}
+            await self._asave()
+
     # ── realtime alert rules (per-tenant; the AlertEngine matches on these) ─────
     async def get_alert_rules(self, tenant_id: str) -> List[Dict[str, Any]]:
         """[{id, name, source, recipients:[...], enabled}] — the tenant's realtime

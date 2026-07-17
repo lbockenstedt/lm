@@ -7136,6 +7136,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         _adaptive_loop = getattr(self, "_adaptive_controller_loop", None)
         if _adaptive_loop is not None:
             asyncio.create_task(_adaptive_loop())
+        # Config-value learner: for each learn_knobs quota, ratchets the sim's
+        # [simulation] intensity knobs (e.g. dns_fail_rate/duration) down to the
+        # floor that still fires the alert. Registered by register_simulations_routes.
+        _knob_loop = getattr(self, "_knob_learner_loop", None)
+        if _knob_loop is not None:
+            asyncio.create_task(_knob_loop())
         # Certificate distribution: the hub is the transport for cert material
         # from the le (Let's Encrypt) spoke to each cert's target spokes. For
         # every managed cert with stale targets it pulls fullchain+key from le
