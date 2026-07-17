@@ -47,6 +47,7 @@ try:
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
     norm_mac = None  # type: ignore
+from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 
 logger = logging.getLogger("Hub")
 
@@ -213,7 +214,7 @@ class NwDiscoverySyncMixin:
                     async with fetch_sem:
                         r = await self.request_response(sid, cmd, {"device_id": did},
                                                         timeout=30.0)
-                    d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
+                    d = unwrap_spoke(r) if isinstance(r, dict) else {}
                     if isinstance(d, dict) and d.get("status") == "ERROR":
                         errors.append(f"{cmd}({dname}@{sid}): "
                                       f"{d.get('message', 'error')}")
@@ -305,7 +306,7 @@ class NwDiscoverySyncMixin:
         try:
             rr = await self.request_response(netbox, self._NW_DISCOVERY_PUSH_COMMAND,
                                              payload, timeout=120.0)
-            rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", 0) or 0)
             errors = int((rd or {}).get("errors", 0) or 0)
@@ -365,7 +366,7 @@ class NwDiscoverySyncMixin:
         try:
             rr = await self.request_response(netbox, self._NW_DISCOVERY_PUSH_COMMAND,
                                              payload, timeout=120.0)
-            rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", len(devices)) or 0)
             errors = int((rd or {}).get("errors", 0) or 0)
@@ -455,7 +456,7 @@ class NwDiscoverySyncMixin:
         try:
             rr = await self.request_response(netbox, self._NW_DEVICE_PUSH_COMMAND,
                                              payload, timeout=120.0)
-            rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             netbox_push = {
                 "status": str((rd or {}).get("status") or "").upper(),
                 "pushed": int((rd or {}).get("pushed", 0) or 0),
@@ -545,7 +546,7 @@ class NwDiscoverySyncMixin:
         try:
             rr = await self.request_response(spoke_id, self._NW_POLL_COMMAND,
                                              {"device_id": device_id}, timeout=60.0)
-            poll_res = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            poll_res = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             if isinstance(poll_res, dict) and poll_res.get("status") == "ERROR":
                 errors.append(f"poll: {poll_res.get('message', 'error')}")
                 poll_res = {"data": {}}
@@ -751,7 +752,7 @@ class NwDiscoverySyncMixin:
             return {"status": "ERROR", "message": "NetBox (ipam) spoke not connected"}
 
         rr = await self.request_response(netbox, "NETBOX_GET_DEVICES", {}, timeout=60.0)
-        data = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+        data = unwrap_spoke(rr) if isinstance(rr, dict) else {}
         devices = data.get("devices") if isinstance(data, dict) else []
         if not isinstance(devices, list):
             devices = []

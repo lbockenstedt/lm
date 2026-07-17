@@ -19,6 +19,8 @@ wrappers that pass ``self.request_response`` / ``self.get_spoke_by_type`` /
 import logging
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+
 # Hub-side cert distribution logs to the "le.distribution" logger so they surface
 # under the WebUI Logs → Certificates tab (the hub routes le.* loggers into a
 # dedicated buffer merged into /setup/logs/le; see main.py CertDistLogHandler +
@@ -45,11 +47,6 @@ logger = logging.getLogger("le.distribution")
 # the spoke (external-key / SSH-SFTP plumbing not yet built). Both are fast
 # REST targets → 120s install tier (no pvenode wait).
 CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation", "nac", "nw", "netbox-server"}
-
-
-def _unwrap(result: Any) -> Dict[str, Any]:
-    """Pull the spoke's return dict out of a request_response result."""
-    return result.get("payload", {}).get("data", result) if isinstance(result, dict) else {}
 
 
 async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
@@ -87,7 +84,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
         return summary
     logger.info("[cert] distributing %s to %d target(s)", domain, len(targets))
     mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
-    mat_ret = _unwrap(mat)
+    mat_ret = unwrap_spoke(mat)
     if not (isinstance(mat_ret, dict) and mat_ret.get("status") == "SUCCESS"):
         msg = mat_ret.get("message") if isinstance(mat_ret, dict) else "LE_GET_CERT failed"
         logger.warning("[cert] %s: LE_GET_CERT failed — %s", domain, msg)
@@ -175,7 +172,7 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                     "privkey": privkey, "chain": chain, "identifier": ident,
                     "module_type": mt,
                 }, timeout=install_timeout)
-                rret = _unwrap(res)
+                rret = unwrap_spoke(res)
                 # Fleet spokes (nw) return a per-device breakdown — carry it so the
                 # hub can stash it for the drill-down report.
                 if isinstance(rret, dict) and rret.get("devices") is not None:
@@ -247,7 +244,7 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
     callable). No-op when disabled."""
     aggregate: List[Dict[str, Any]] = []
     res = await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0)
-    ret = _unwrap(res)
+    ret = unwrap_spoke(res)
     if not (isinstance(ret, dict) and ret.get("status") == "SUCCESS"):
         # The last silent skip: if the le spoke can't enumerate certs, there's
         # nothing to distribute — surface it instead of returning an empty list
@@ -256,7 +253,7 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
         return aggregate
     # The le spoke returns ``{"status":"SUCCESS", "data":{"certs":[...]}}`` —
     # certs are nested under ``data`` (the table path's _le_inner unwraps it;
-    # _unwrap only strips the request_response payload envelope, NOT the spoke's
+    # unwrap_spoke only strips the request_response payload envelope, NOT the spoke's
     # own ``data`` wrapper). Without this unwrap the loop saw ``ret.get("certs")``
     # == None → zero iterations → "no certs to distribute" + no per-cert logs,
     # even though the cert table (which DOES unwrap) showed the certs.
@@ -401,7 +398,7 @@ async def distribute_mtls_materials_to_all_spokes(
 
     # Pull material (only when something is stale).
     mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
-    mat_ret = _unwrap(mat)
+    mat_ret = unwrap_spoke(mat)
     if not (isinstance(mat_ret, dict) and mat_ret.get("status") == "SUCCESS"):
         msg = mat_ret.get("message") if isinstance(mat_ret, dict) else "LE_GET_CERT failed"
         logger.warning("[mtls] %s: LE_GET_CERT failed — %s", domain, msg)
@@ -435,7 +432,7 @@ async def distribute_mtls_materials_to_all_spokes(
         res = await push(sid, "SPOKE_SET_MTLS_MATERIALS", payload, timeout=120.0)
         queued = bool(isinstance(res, dict) and res.get("queued"))
         rret = res.get("result") if isinstance(res, dict) else None
-        rret = _unwrap(rret) if rret is not None else {}
+        rret = unwrap_spoke(rret) if rret is not None else {}
         if queued:
             # Pushed to the durable mailbox — will land on the spoke's next
             # reconnect. Not an error and not yet confirmed-installed: don't
@@ -557,7 +554,7 @@ async def distribute_wildcard_to_all_spokes(
     # Pull material (only when something is stale). material_hash from the list
     # avoids the pull when every target is current; here at least one is stale.
     mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
-    mat_ret = _unwrap(mat)
+    mat_ret = unwrap_spoke(mat)
     if not (isinstance(mat_ret, dict) and mat_ret.get("status") == "SUCCESS"):
         msg = mat_ret.get("message") if isinstance(mat_ret, dict) else "LE_GET_CERT failed"
         logger.warning("[cert] wildcard %s: LE_GET_CERT failed — %s", domain, msg)
@@ -587,7 +584,7 @@ async def distribute_wildcard_to_all_spokes(
             "domain": domain, "fullchain": fullchain, "privkey": privkey,
             "chain": chain, "identifier": sid, "module_type": mt,
         }, timeout=install_timeout)
-        rret = _unwrap(res)
+        rret = unwrap_spoke(res)
         if isinstance(rret, dict) and rret.get("devices") is not None:
             entry["devices"] = rret["devices"]
         if isinstance(rret, dict) and rret.get("status") == "SUCCESS":

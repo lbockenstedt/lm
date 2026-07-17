@@ -31,6 +31,8 @@ import asyncio
 import logging
 from typing import Any, Dict
 
+from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+
 logger = logging.getLogger("Hub")
 
 
@@ -129,7 +131,7 @@ class StalenessSweepMixin:
         try:
             rr = await self.request_response(
                 ipam, self._STALENESS_PUSH_COMMAND, thresholds, timeout=180.0)
-            rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             scanned = int((rd or {}).get("scanned", 0) or 0)
             decommissioned = int((rd or {}).get("decommissioned", 0) or 0)

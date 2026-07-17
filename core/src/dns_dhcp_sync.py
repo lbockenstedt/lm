@@ -32,17 +32,12 @@ import logging
 import time
 from typing import Any, Dict, List, Tuple
 
+from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+
 logger = logging.getLogger("Hub")
 
 _CFG_KEY = "dns_dhcp_sync"
 _DEFAULT_INTERVAL = 300  # seconds
-
-
-def _unwrap(resp: Any) -> Dict[str, Any]:
-    """Pull the spoke payload ``data`` dict out of a request_response envelope."""
-    if isinstance(resp, dict):
-        return resp.get("payload", {}).get("data", resp)
-    return {}
 
 
 def build_dns_records(ips_data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -142,7 +137,7 @@ class DnsDhcpSyncMixin:
         # "Request Timeout from lm-svcs-netbox after 5.0s" in the hub log. The
         # other IPAM read loops (endpoint_sync/vm_sync/staleness_sweep/...) all
         # pass 30s+; this loop was the lone outlier. 30s matches them.
-        return _unwrap(await self.request_response(nb, "NETBOX_GET_IPS", {}, timeout=30.0))
+        return unwrap_spoke(await self.request_response(nb, "NETBOX_GET_IPS", {}, timeout=30.0))
 
     async def _netbox_prefixes_and_ips(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         nb = self.get_spoke_by_type("ipam")
@@ -152,7 +147,7 @@ class DnsDhcpSyncMixin:
             self.request_response(nb, "NETBOX_GET_PREFIXES", {}, timeout=30.0),
             self.request_response(nb, "NETBOX_GET_IPS", {}, timeout=30.0),
         )
-        return _unwrap(pfx_raw), _unwrap(ips_raw)
+        return unwrap_spoke(pfx_raw), unwrap_spoke(ips_raw)
 
     async def sync_dns_from_netbox(self) -> Dict[str, Any]:
         """Reconcile Unbound to NetBox DNS names. Returns a status dict.
@@ -170,7 +165,7 @@ class DnsDhcpSyncMixin:
             result = await self.request_response(dns_spoke, "DNS_SYNC", {"records": records}, timeout=30.0)
             return self._record_status("dns", status="ok",
                                        records_synced=len(records),
-                                       spoke_result=_unwrap(result))
+                                       spoke_result=unwrap_spoke(result))
         except Exception as e:  # noqa: BLE001 — best-effort loop must not die
             logger.warning("DNS auto-sync failed: %s", e)
             return self._record_status("dns", status="error", error=str(e))
@@ -190,7 +185,7 @@ class DnsDhcpSyncMixin:
             return self._record_status("dhcp", status="ok",
                                        subnets_synced=len(subnets),
                                        reservations_synced=len(reservations),
-                                       spoke_result=_unwrap(result))
+                                       spoke_result=unwrap_spoke(result))
         except Exception as e:  # noqa: BLE001
             logger.warning("DHCP auto-sync failed: %s", e)
             return self._record_status("dhcp", status="error", error=str(e))
@@ -265,7 +260,7 @@ class DnsDhcpSyncMixin:
                 self._record_status("dns", status="error", error=str(r))
             else:
                 self._record_status("dns", status="ok", records_synced=len(records),
-                                    spoke_result=_unwrap(r))
+                                    spoke_result=unwrap_spoke(r))
         else:
             self._record_status("dns", status="ok", records_synced=len(records),
                                 skipped_unchanged=True)
@@ -277,7 +272,7 @@ class DnsDhcpSyncMixin:
             else:
                 self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
                                     reservations_synced=len(reservations),
-                                    spoke_result=_unwrap(r))
+                                    spoke_result=unwrap_spoke(r))
         else:
             self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
                                 reservations_synced=len(reservations),

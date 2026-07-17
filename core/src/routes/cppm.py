@@ -1,6 +1,6 @@
 """ClearPass (CPPM/NAC) device/session/enrichment routes."""
 from api import (
-    HTTPException, Request, _cache_entry, get_tenant_scoping, logger,
+    HTTPException, Request, _cache_entry, _unwrap_spoke, get_tenant_scoping, logger,
 )
 
 
@@ -61,7 +61,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "TEST_AUTH", {})
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            data = _unwrap_spoke(result)
             return data
         except Exception as e:
             logger.exception("test_cppm_auth failed")
@@ -75,7 +75,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "PROBE_API", {"path": path, "method": method})
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            data = _unwrap_spoke(result)
             return data
         except Exception as e:
             logger.exception("probe_cppm failed")
@@ -238,7 +238,7 @@ def register(app, hub, ctx):
             if not spoke:
                 return None
             r = await hub.request_response(spoke, cmd, data)
-            d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
+            d = _unwrap_spoke(r)
             return d
 
         spoke_nac  = hub.get_spoke_by_type("nac")
@@ -387,7 +387,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "LIST_ROLES", {})
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            data = _unwrap_spoke(result)
             return data
         except Exception as e:
             logger.error(f"API: Error fetching CPPM roles: {e}", exc_info=True)
@@ -405,7 +405,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "GET_LOGS", {"start": start, "end": end})
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            data = _unwrap_spoke(result)
             return await _filter_tenant(request, data, "nac", ["ip", "nas_ip_address"], tenant)
         except Exception as e:
             logger.error(f"API: Error fetching CPPM logs: {e}", exc_info=True)
@@ -413,7 +413,7 @@ def register(app, hub, ctx):
 
     def _cppm_unwrap(result):
         """Extract spoke payload data and raise HTTPException if spoke reported an error."""
-        data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        data = _unwrap_spoke(result)
         if isinstance(data, dict) and data.get("status") == "ERROR":
             raise HTTPException(status_code=502, detail=data.get("message", "CPPM API error"))
         return data

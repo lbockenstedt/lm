@@ -1,6 +1,6 @@
 """Dashboard summary/all-tenants + cross-system search routes."""
 from api import (
-    HTTPException, Request, access, filter_items_by_prefixes, get_tenant_scoping, logger,
+    HTTPException, Request, _unwrap_spoke, access, filter_items_by_prefixes, get_tenant_scoping, logger,
 )
 
 
@@ -38,7 +38,7 @@ def register(app, hub, ctx):
             try:
                 timeout = 30.0 if isinstance(cmd, str) and cmd.startswith("NETBOX_") else 5.0
                 r = await hub.request_response(spoke, cmd, payload or {}, timeout=timeout)
-                return r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
+                return _unwrap_spoke(r) if isinstance(r, dict) else {}
             except Exception:
                 return {}
 
@@ -192,7 +192,7 @@ def register(app, hub, ctx):
                 return []
             try:
                 r = await hub.request_response(spoke, cmd, payload)
-                d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
+                d = _unwrap_spoke(r)
                 return d.get("results", []) if isinstance(d, dict) else []
             except Exception as e:
                 return [{"source": cmd, "type": "error", "name": str(e)}]

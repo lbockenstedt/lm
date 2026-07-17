@@ -34,6 +34,8 @@ import datetime as _dt
 import logging
 from typing import Any, Dict, List, Optional
 
+from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+
 logger = logging.getLogger("Hub")
 
 
@@ -296,7 +298,7 @@ class VmSyncMixin:
             r = await self.request_response(
                 hyp, se.get("list_command", "PXMX_LIST_VMS"),
                 list_payload, timeout=30.0)
-            data = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
+            data = unwrap_spoke(r) if isinstance(r, dict) else {}
             if isinstance(data, dict) and data.get("status") == "ERROR":
                 msg = f"{label}: {data.get('message', 'error')}"
                 logger.info("vm sync ALL SKIP: %s returned ERROR: %s",
@@ -376,7 +378,7 @@ class VmSyncMixin:
         try:
             rr = await self.request_response(netbox, self._VM_SYNC_PUSH_COMMAND,
                                              payload, timeout=180.0)
-            rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", len(vms)) or 0)
             errors = int((rd or {}).get("errors", 0) or 0)

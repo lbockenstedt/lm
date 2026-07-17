@@ -26,6 +26,8 @@ import datetime as _dt
 import logging
 from typing import Any, Dict, List, Optional
 
+from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+
 logger = logging.getLogger("Hub")
 
 
@@ -195,7 +197,7 @@ class EndpointSyncMixin:
         try:
             r = await self.request_response(ipam, se.get("get_ips_command", "NETBOX_GET_IPS"),
                                              {"tenant": scope}, timeout=30.0)
-            data = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
+            data = unwrap_spoke(r) if isinstance(r, dict) else {}
             if isinstance(data, dict) and data.get("status") == "ERROR":
                 logger.info("endpoint sync tenant=%s(%s) SKIP tenant: %s returned ERROR: %s",
                             tenant_id, tenant_name, se.get('label', 'IPAM'),
@@ -229,7 +231,7 @@ class EndpointSyncMixin:
             # sent=185 pushed=185 but reported status=error). 180s matches the
             # vm-sync push budget (vm_sync.py) so a full tenant batch completes.
             rr = await self.request_response(nac, "CPPM_SYNC_ENDPOINTS", payload, timeout=180.0)
-            rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", len(endpoints)) or 0)
             errors = int((rd or {}).get("errors", 0) or 0)

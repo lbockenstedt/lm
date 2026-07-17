@@ -44,6 +44,7 @@ try:
     from access import attribute_by_prefix  # sibling leaf (no main/api back-import)
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
+from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 
 logger = logging.getLogger("Hub")
 
@@ -151,7 +152,7 @@ class RealtimeIpamNacSyncMixin:
             r = await self.request_response(nac, self._RT_NAC_PULL_COMMAND,
                                             {"lookback_minutes": lookback},
                                             timeout=30.0)
-            d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else {}
+            d = unwrap_spoke(r) if isinstance(r, dict) else {}
             if isinstance(d, dict) and d.get("status") == "ERROR":
                 errors.append(f"CPPM({nac}): {d.get('message', 'error')}")
                 return [], {"errors": errors, "total": 0}
@@ -227,7 +228,7 @@ class RealtimeIpamNacSyncMixin:
         try:
             rr = await self.request_response(netbox, self._RT_NAC_PUSH_COMMAND,
                                              payload, timeout=120.0)
-            rd = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+            rd = unwrap_spoke(rr) if isinstance(rr, dict) else {}
             rstatus = str((rd or {}).get("status") or "").upper()
             pushed = int((rd or {}).get("pushed", 0) or 0)
             errors = int((rd or {}).get("errors", 0) or 0)
