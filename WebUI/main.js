@@ -7176,18 +7176,43 @@ function onAcsRgChanged() {
 // from_email (the resource's default AzureManaged MailFrom domain) — only
 // when the admin hasn't already typed a custom verified domain — and shows
 // the data-plane endpoint + provisioning state as confirmation.
-function onAcsResourceChanged() {
+async function onAcsResourceChanged() {
     const nameSel = document.getElementById('notif-acs-name');
     if (!nameSel) return;
     const opt = nameSel.options[nameSel.selectedIndex];
     if (!opt) return;
     const fromEl = document.getElementById('notif-from');
     const from = opt.getAttribute('data-from') || '';
-    if (fromEl && from && !(fromEl.value || '').trim()) fromEl.value = from;
+    if (fromEl && from && !(fromEl.value || '').trim()) fromEl.value = from;  // provisional guess
     const out = document.getElementById('notif-action-out');
     const ep = opt.getAttribute('data-endpoint') || '';
     const st = opt.getAttribute('data-state') || '';
     if (out && ep) out.textContent = `${ep}${st ? ' [' + st + ']' : ''}`;
+
+    // Look up the email domains ACTUALLY LINKED to this ACS resource — the only
+    // valid senders. Fixes the guessed From (which is usually wrong) and, when
+    // NONE are linked, explains the DomainNotLinked send failure directly.
+    const sub = (document.getElementById('notif-acs-sub')?.value || '').trim();
+    const rg = (document.getElementById('notif-acs-rg')?.value || '').trim();
+    const name = (nameSel.value || '').trim();
+    if (!sub || !rg || !name) return;
+    try {
+        const r = await setupFetch(`/setup/notifications/azure-acs-domains?subscription_id=${encodeURIComponent(sub)}&resource_group=${encodeURIComponent(rg)}&acs_name=${encodeURIComponent(name)}`);
+        const d = await r.json().catch(() => ({}));
+        if (d.status !== 'ok') { if (out) out.textContent = 'Linked-domain lookup: ' + (d.message || 'failed'); return; }
+        const doms = d.domains || [];
+        if (!doms.length) {
+            const m = `⚠ No email domain is LINKED to "${name}" — this is exactly why sending fails with DomainNotLinked. Fix in Azure: Communication Services (${name}) → Email → Domains → Connect domain → pick the domain from your Email Communication Service.`;
+            if (out) out.textContent = m;
+            showToast('No email domain linked to this ACS resource — see the note.', 'error');
+            return;
+        }
+        const senders = doms.map(x => x.sender);
+        if (fromEl && (!(fromEl.value || '').trim() || !senders.includes((fromEl.value || '').trim()))) {
+            fromEl.value = senders[0];  // replace the guess with a REAL linked sender
+        }
+        if (out) out.textContent = `${doms.length} linked domain(s): ${senders.join(', ')}`;
+    } catch (e) { /* non-fatal — the manual From field still works */ }
 }
 
 async function downloadKeyVaultMin() {

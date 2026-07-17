@@ -336,6 +336,45 @@ async def list_acs_resources(hub, subscription_id: str, resource_group: str,
     return out
 
 
+async def list_acs_sender_domains(hub, subscription_id: str, resource_group: str,
+                                  acs_name: str,
+                                  http: Optional[httpx.AsyncClient] = None
+                                  ) -> List[Dict[str, str]]:
+    """Sender MailFrom addresses for the email domains actually LINKED to the
+    given Communication Services resource. GETs the ACS resource and reads
+    ``properties.linkedDomains`` (email-domain resource IDs), deriving
+    ``DoNotReply@<domain>`` from each. An EMPTY list is the ``DomainNotLinked``
+    cause: the ACS resource has no CONNECTED domain, so nothing can send from it
+    until one is linked (Azure → Communication Services → Email → Domains →
+    Connect domain). Only needs resource READ (not listKeys)."""
+    sub = (subscription_id or "").strip()
+    rg = (resource_group or "").strip()
+    name = (acs_name or "").strip()
+    if not (sub and rg and name):
+        raise NotificationsError("subscription, resource group, and ACS resource are required")
+    oidc_cfg = get_oidc_config(hub)
+    token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
+    url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
+           f"/providers/Microsoft.Communication/communicationServices/{name}"
+           f"?api-version={_ACS_ARM_API}")
+    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        raise NotificationsError(
+            f"ACS resource GET failed: HTTP {resp.status_code} — {resp.text[:300]}")
+    props = (resp.json() or {}).get("properties", {}) or {}
+    linked = props.get("linkedDomains") or []
+    out = []
+    for dom_id in linked:
+        # resource id: .../emailServices/<email>/domains/<domain> — the last
+        # segment is the domain name (a GUID .azurecomm.net or a custom domain).
+        domain = str(dom_id or "").rstrip("/").split("/")[-1].strip()
+        if domain:
+            out.append({"domain": domain, "sender": f"DoNotReply@{domain}"})
+    out.sort(key=lambda e: e["domain"].lower())
+    return out
+
+
 async def _resolve(hub, cfg: Dict[str, Any],
                    http: Optional[httpx.AsyncClient] = None
                    ) -> Tuple[str, Any]:
