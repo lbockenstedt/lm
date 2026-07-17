@@ -1000,12 +1000,10 @@ async function submitBugReport() {
 
     setBusy('Submitting to hub…');
     try {
-        const res = await setupFetch('/api/bug-report', {
+        const data = await apiJson('/api/bug-report', {
             method: 'POST',
             body: JSON.stringify(payload),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
         showToast(`Bug report submitted (id ${data.id || ''}) — bugfixer will file an issue`, 'success');
         document.getElementById('file-bug-modal')?.remove();
     } catch (err) {
@@ -1304,9 +1302,7 @@ function logsSubmenu() {
 
 async function loadFirewalls() {
     try {
-        const response = await setupFetch('/setup/firewalls');
-        if (!response.ok) throw new Error('Failed to fetch firewalls');
-        const data = await response.json();
+        const data = await apiJson('/setup/firewalls');
         return data.firewalls || [];
     } catch (err) {
         console.error('Error loading firewalls:', err);
@@ -1369,9 +1365,7 @@ async function scanGitHubRepos() {
     const origText = btn?.textContent;
     if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
     try {
-        const response = await setupFetch('/setup/github-repos');
-        if (!response.ok) throw new Error('Failed to fetch repos');
-        const data = await response.json();
+        const data = await apiJson('/setup/github-repos');
         const repos = data.repos;
 
         if (repos.length === 0) {
@@ -1674,9 +1668,7 @@ async function loadTenantConfig() {
     if (!listEl) return;
 
     try {
-        const response = await setupFetch('/setup/tenants');
-        if (!response.ok) throw new Error('Failed to fetch tenants');
-        const data = await response.json();
+        const data = await apiJson('/setup/tenants');
         window._sharedTenantId = data.shared_tenant_id || null;  // for the shared badge / gate
         const tenants = data.tenants || [];
 
@@ -2263,9 +2255,7 @@ async function resetRateLimitDrops() {
     const btn = document.getElementById('reset-drops-btn');
     if (btn) { btn.disabled = true; btn.textContent = 'Resetting…'; }
     try {
-        const res = await fetch('/setup/rate-limit-drops/reset', { method: 'POST' });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        const data = await apiJson('/setup/rate-limit-drops/reset', { method: 'POST' });
         if (typeof showToast === 'function') showToast('Rate-limit drop counters reset.', 'success');
         updateStatus();
     } catch (e) {
@@ -2281,9 +2271,7 @@ async function dropHubBacklog() {
                + 'In-flight commands will not be retried. This is a diagnostic action.')) return;
     if (btn) { btn.disabled = true; btn.textContent = 'Dropping…'; }
     try {
-        const res = await fetch('/setup/hub-backlog/purge', { method: 'POST' });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        const data = await apiJson('/setup/hub-backlog/purge', { method: 'POST' });
         if (typeof showToast === 'function') showToast(`Dropped ${data.dropped} backlog message(s).`, 'success');
         updateStatus();  // refresh the tiles/detail
     } catch (e) {
@@ -2325,8 +2313,7 @@ const _UG_DEFAULTS = { mode: 'window', window_hour: 2, window_duration_h: 2 };
 
 async function loadUpdateGateConfig() {
     try {
-        const res = await setupFetch('/setup/config');
-        const data = await res.json();
+        const data = await apiJson('/setup/config');
         const g = (data.global_config && data.global_config.update_gate) || {};
         window.__lmUpdateGateCfg = g;
         const setv = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v; };
@@ -2384,8 +2371,7 @@ async function saveUpdateGateConfig() {
 
 async function loadBackpressureConfig() {
     try {
-        const res = await setupFetch('/setup/config');
-        const data = await res.json();
+        const data = await apiJson('/setup/config');
         const bp = (data.global_config && data.global_config.backpressure) || {};
         window.__lmBackpressureCfg = bp;   // keep the full subtree so Save doesn't wipe unshown knobs
         for (const [id, key] of _BP_FIELDS) {
@@ -2432,12 +2418,10 @@ async function saveBackpressureConfig() {
     }
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     try {
-        const res = await fetch('/setup/config', {
+        const data = await apiJson('/setup/config', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ config: { backpressure: merged } }),
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         window.__lmBackpressureCfg = merged;
         if (typeof showToast === 'function')
             showToast('Backpressure tuning saved — applies live on the next tick.', 'success');
@@ -2462,13 +2446,11 @@ async function saveRateLimit() {
     }
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     try {
-        const res = await fetch('/setup/config', {
+        const data = await apiJson('/setup/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ config: { rate_limit: { capacity, fill_rate } } }),
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         if (typeof showToast === 'function')
             showToast(`Rate limit saved (burst ${capacity}, ${fill_rate}/s). Applies as spokes reconnect.`, 'success');
     } catch (e) {
@@ -3287,9 +3269,7 @@ async function loadReportsData() {
     const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
     let c = {};
     try {
-        const res = await setupFetch('/api/reports/email-report?' + tq);
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || ('HTTP ' + res.status));
-        c = (await res.json()) || {};
+        c = (await apiJson('/api/reports/email-report?' + tq)) || {};
     } catch (e) { el.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load report settings: ${escapeHtml(e.message || String(e))}</div>`; return; }
     const sec = c.sections || {}, sch = c.schedule || {};
     const toggle = (id, on, label, hint) => `
@@ -3345,8 +3325,7 @@ async function saveReportConfig() {
     };
     const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
     try {
-        const res = await setupFetch('/api/reports/email-report?' + tq, { method: 'PUT', body: JSON.stringify(body) });
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || ('HTTP ' + res.status));
+        await apiJson('/api/reports/email-report?' + tq, { method: 'PUT', body: JSON.stringify(body) });
         showToast('Report settings saved.', 'success');
     } catch (e) { console.error('saveReportConfig', e); showToast(e.message || 'Save failed', 'error'); }
 }
@@ -3354,9 +3333,7 @@ async function saveReportConfig() {
 async function testReportNow() {
     const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
     try {
-        const res = await setupFetch('/api/reports/email-report/test?' + tq, { method: 'POST' });
-        const r = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(r.detail || ('HTTP ' + res.status));
+        const r = await apiJson('/api/reports/email-report/test?' + tq, { method: 'POST' });
         showToast('Test report sent to ' + ((r.to || []).join(', ') || 'the configured recipients'), 'success');
     } catch (e) { console.error('testReportNow', e); showToast(e.message || 'Send failed — check SMTP + recipients', 'error'); }
 }
@@ -3469,6 +3446,37 @@ async function setupFetch(url, options = {}) {
     const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
     return fetch(url, { ...options, headers });
 }
+
+/**
+ * JSON-first wrapper over setupFetch, modeled on sim-views.js csFetch. Checks
+ * res.ok, surfaces the server's JSON error detail ({detail|message|error}) in
+ * the thrown Error, and parses the body (JSON when the Content-Type says so,
+ * text otherwise). 401s never reach this: the global fetch override (lmFetch)
+ * calls handleSessionExpired() and throws 'Session expired' first.
+ *
+ * Prefer this over raw setupFetch for any call that just wants the parsed
+ * body — it replaces the hand-rolled `.ok` check + `.json()` + detail
+ * extraction at each call site. Use raw setupFetch only when you need the
+ * Response itself (status branching, headers, blobs).
+ *
+ * @param {string} url  Request URL (absolute path, e.g. '/setup/tenants').
+ * @param {RequestInit} [options] Standard fetch options; headers are merged.
+ * @returns {Promise<any>} Parsed JSON (object/array), or text for non-JSON.
+ * @throws {Error} On any non-ok status, with the server's detail surfaced.
+ */
+async function apiJson(url, options = {}) {
+    const res = await setupFetch(url, options);
+    if (!res.ok) {
+        let detail = '';
+        try {
+            const j = await res.json();
+            detail = (j && (j.detail || j.message || j.error)) || '';
+        } catch (_e) { detail = ''; }
+        throw new Error(detail ? `${res.status} ${detail}` : `${res.status} ${res.statusText}`);
+    }
+    const ct = res.headers.get('content-type') || '';
+    return ct.includes('application/json') ? res.json() : res.text();
+}
 // ──────────────────────────────────────────────────────────────────
 
 function _renderLogsSection(subMenu) {
@@ -3524,9 +3532,7 @@ async function loadRecoveryLogs() {
     if (!container) return;
     container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching recovery logs...</div>`;
     try {
-        const response = await fetch('/setup/logs');
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
+        const data = await apiJson('/setup/logs');
         const logs = (data.logs || []).slice().reverse();
         const rec = logs.filter(l => typeof l === 'string' && l.includes('[recovery]'));
         if (rec.length === 0) {
@@ -3568,9 +3574,7 @@ async function loadBugReports() {
     if (!container) return;
     container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching bug reports...</div>`;
     try {
-        const resp = await fetch('/setup/bug-reports');
-        if (!resp.ok) throw new Error(`HTTP error! status: ${resp.status}`);
-        const data = await resp.json();
+        const data = await apiJson('/setup/bug-reports');
         const reports = data.reports || [];
         if (reports.length === 0) {
             container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No bug reports yet. Use the 🐞 File a Bug button in the footer to capture the console, page HTML, and a screenshot.</div>`;
@@ -3617,9 +3621,7 @@ async function showBugReport(rid) {
     document.body.appendChild(overlay);
     const body = overlay.querySelector('#bug-detail-body');
     try {
-        const resp = await fetch(`/setup/bug-reports/${encodeURIComponent(rid)}`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const r = await resp.json();
+        const r = await apiJson(`/setup/bug-reports/${encodeURIComponent(rid)}`);
         const ctx = r.context || {};
         let report = {};
         try { report = JSON.parse(r.report_json || '{}'); } catch { report = {}; }
@@ -4012,9 +4014,7 @@ window.purgeLoadtestSpokes = async function () {
     if (!confirm("Remove ALL spokes/agents whose id starts with 'loadtest-'? "
                + "For cleaning up synthetic load-test spokes.")) return;
     try {
-        const res = await setupFetch('/setup/spokes/purge-prefix?prefix=loadtest-', { method: 'POST' });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        const data = await apiJson('/setup/spokes/purge-prefix?prefix=loadtest-', { method: 'POST' });
         if (typeof showToast === 'function') showToast(`Purged ${data.removed} load-test spoke(s).`, 'success');
         loadSpokesAndAgents();
     } catch (e) {
@@ -4641,9 +4641,7 @@ function _sbFmtTs(ts) {
 async function loadSelfBackupStatus() {
     let data;
     try {
-        const r = await setupFetch('/setup/backup/status');
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/setup/backup/status');
     } catch (e) {
         const st = document.getElementById('sb-status');
         if (st) st.innerHTML = `<p class="text-xs text-red-600">Failed to load status: ${escapeHtml(e.message)}</p>`;
@@ -4724,9 +4722,7 @@ async function uploadSelfBackup(input) {
     try {
         const fd = new FormData();
         fd.append('file', file, file.name);
-        const r = await setupFetch('/setup/backup/upload', { method: 'POST', body: fd });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson('/setup/backup/upload', { method: 'POST', body: fd });
         showToast(`Uploaded ${d.name} (${_sbFmtBytes(d.size)}). It now lists as a local archive.`, 'success');
         loadSelfBackupStatus();
     } catch (e) { showToast('Upload failed: ' + (e.message || e), 'error'); }
@@ -5640,11 +5636,10 @@ async function addGlobalTierPci(tier) {
         const r = await fetch(_tierPciEndpoint(tier), { credentials: 'same-origin' });
         const cur = r.ok ? (await r.json()).vidpids || [] : [];
         if (!cur.includes(vp)) cur.push(vp);
-        const pr = await fetch(_tierPciEndpoint(tier), {
+        await apiJson(_tierPciEndpoint(tier), {
             method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ vidpids: cur }),
         });
-        if (!pr.ok) throw new Error(`${pr.status}`);
         inp.value = '';
         loadGlobalTierPci();
     } catch (e) { if (typeof showToast === 'function') showToast('Failed: ' + e.message, 'error'); }
@@ -5873,9 +5868,7 @@ async function loadSimQuotaDefaults() {
     const rowsEl = document.getElementById('sim-quota-defaults-rows');
     if (!rowsEl) return;
     try {
-        const r = await fetch(SIM_QUOTA_DEFAULTS_URL, { credentials: 'same-origin' });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
+        const data = await apiJson(SIM_QUOTA_DEFAULTS_URL, { credentials: 'same-origin' });
         _simQuotaDefaultsCatalog = data.catalog || { sims: [], sites: [], suggested: {}, meta: {} };
         _simQuotaDefaults = (data.defaults || []).map(_simQuotaDefaultFromServer);
         const cat = _simQuotaDefaultsCatalog;
@@ -5990,12 +5983,10 @@ function removeSimQuotaDefault(i) {
 async function saveSimQuotaDefaults() {
     const rows = _simQuotaDefaultsSyncFromDom();
     try {
-        const r = await fetch(SIM_QUOTA_DEFAULTS_URL, {
+        const data = await apiJson(SIM_QUOTA_DEFAULTS_URL, {
             method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ defaults: rows }),
         });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
         _simQuotaDefaults = (data.defaults || rows).map(_simQuotaDefaultFromServer);
         _renderSimQuotaDefaultsEditor();
         const errs = data.errors || [];
@@ -6326,9 +6317,7 @@ async function provisionCloudNac() {
     if (!user) { showToast('Enter a username', 'info'); return; }
     if (out) out.textContent = 'Provisioning…';
     try {
-        const r = await setupFetch('/setup/cloud-nac/provision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user }) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson('/setup/cloud-nac/provision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: user }) });
         const grp = d.group_warning ? `  ⚠ group: ${d.group_warning}` : (d.group_added ? '  ✓ added to group' : '');
         if (out) out.textContent = `${d.created ? 'Created' : 'Reset'} ${d.upn} — password: ${d.password}  (shown once)${grp}`;
         showToast(`${d.created ? 'Created' : 'Reset'} ${d.upn}${d.group_added ? ' (+group)' : ''}`, 'success');
@@ -6339,9 +6328,7 @@ async function provisionCloudNac() {
 async function deprovisionCloudNac(username) {
     if (!window.confirm(`Delete the Entra account for ${username}?`)) return;
     try {
-        const r = await setupFetch('/setup/cloud-nac/deprovision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson('/setup/cloud-nac/deprovision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username }) });
         showToast(`Deleted ${username}`, 'success');
         loadCloudNac();
     } catch (e) { showToast('Delete failed: ' + (e.message || e), 'error'); }
@@ -6351,9 +6338,7 @@ async function sweepCloudNac() {
     const msg = document.getElementById('cn-msg');
     if (msg) msg.textContent = 'Sweeping…';
     try {
-        const r = await setupFetch('/setup/cloud-nac/sweep', { method: 'POST' });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson('/setup/cloud-nac/sweep', { method: 'POST' });
         showToast(`Sweep: ${d.deleted || 0} idle account(s) deleted.`, 'success');
         if (msg) msg.textContent = `Swept — ${d.deleted || 0} deleted of ${(d.results || []).length}`;
         loadCloudNac();
@@ -6655,8 +6640,7 @@ async function saveKeyVault() {
     const btn = document.getElementById('kv-save-btn');
     if (btn) btn.disabled = true;
     try {
-        const r = await setupFetch('/setup/key-vault', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _keyVaultFormConfig() }) });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
+        await apiJson('/setup/key-vault', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _keyVaultFormConfig() }) });
         showToast('Key Vault settings saved.', 'success');
         loadKeyVault();
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
@@ -6679,9 +6663,7 @@ async function _kvAction(path, label, confirmMsg) {
     const out = document.getElementById('kv-action-out');
     if (out) out.textContent = label + '…';
     try {
-        const r = await setupFetch(path, { method: 'POST' });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson(path, { method: 'POST' });
         if (out) out.textContent = `${label}: ${d.secret || 'ok'}${d.size ? ' (' + d.size + 'b)' : ''}`;
         showToast(`${label} — done.`, 'success');
         loadKeyVault();
@@ -6900,8 +6882,7 @@ async function saveNotifications() {
     const out = document.getElementById('notif-action-out');
     if (out) out.textContent = 'Saving…';
     try {
-        const r = await setupFetch('/setup/notifications', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _notifFormConfig() }) });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
+        await apiJson('/setup/notifications', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _notifFormConfig() }) });
         showToast('Notifications settings saved.', 'success');
         if (out) out.textContent = 'saved';
         loadNotifications();
@@ -7060,9 +7041,7 @@ async function _kvRestore(bodyObj) {
     const out = document.getElementById('kv-restore-out');
     if (out) out.textContent = 'Restoring…';
     try {
-        const r = await setupFetch('/setup/key-vault/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyObj) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson('/setup/key-vault/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyObj) });
         _kvRestoreReport(d);
     } catch (e) { if (out) out.textContent = ''; showToast('Restore failed: ' + (e.message || e), 'error'); }
 }
@@ -7213,9 +7192,7 @@ async function testNetboxSso() {
     if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
     if (out) { out.className = 'text-xs rounded-md p-2 mt-3 mb-1 border border-slate-200 bg-slate-50 text-slate-500'; out.classList.remove('hidden'); out.textContent = 'Probing NetBox login → Entra…'; }
     try {
-        const r = await setupFetch('/setup/netbox-sso/test', { method: 'POST' });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson('/setup/netbox-sso/test', { method: 'POST' });
         const good = !!d.ok;
         const f = d.found || {}, m = d.matches || {};
         const tick = b => b ? '✓' : '✗';
@@ -7303,9 +7280,7 @@ async function saveNetboxSso() {
     if (secret) cfg.client_secret = secret;  // blank = keep stored
     if (btn) btn.disabled = true;
     try {
-        const r = await setupFetch('/setup/netbox-sso', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson('/setup/netbox-sso', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
         const msg = document.getElementById('nbsso-msg');
         if (d.no_target) { if (msg) msg.textContent = 'Saved — queued (no netbox-server host online yet).'; showToast('Saved; will apply when the netbox-server host connects.', 'success'); }
         else { if (msg) msg.textContent = `Applied to ${(d.pushed || []).length} host(s)${(d.queued || []).length ? ', queued ' + d.queued.length : ''}.`; showToast('NetBox SSO pushed to the netbox-server host.', 'success'); }
@@ -7443,9 +7418,7 @@ async function saveAzureNsg() {
     const btn = document.getElementById('nsg-save-btn'); const msg = document.getElementById('nsg-msg');
     if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
     try {
-        const r = await setupFetch('/setup/azure-nsg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _azureNsgFormConfig() }) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson('/setup/azure-nsg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _azureNsgFormConfig() }) });
         if (d.warning) { showToast('Saved, but Azure apply failed: ' + d.warning, 'error'); if (msg) msg.textContent = d.warning; }
         else {
             const a = d.applied;
@@ -7523,9 +7496,7 @@ function _renderSettingsSsoTile(content) {
 
 async function loadOidcConfig() {
     try {
-        const res = await setupFetch('/setup/oidc-config');
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
+        const data = await apiJson('/setup/oidc-config');
         const cfg = data.config || {};
         const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
         const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
@@ -7581,12 +7552,10 @@ async function generateOidcCert() {
     if (regenerating && !window.confirm('Overwrite the existing OIDC private key? Any cert already uploaded to Entra will stop working until you upload the new one.')) return;
     if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
     try {
-        const res = await setupFetch('/setup/oidc-config/generate-cert', {
+        const d = await apiJson('/setup/oidc-config/generate-cert', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ force: !!regenerating }),
         });
-        const d = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(d.detail || ('HTTP ' + res.status));
         // Reveal the cert to upload + thumbprint; refresh paths in the form.
         const out = document.getElementById('oidc-cert-output');
         if (out) out.classList.remove('hidden');
@@ -7746,11 +7715,9 @@ async function publishGlv(alertKey, op, floor, sourceTenant) {
     const next = { ..._glvPublished };
     next[alertKey] = { op, floor: floor != null ? floor : null, source_tenant: sourceTenant, published_at: Date.now() / 1000 };
     try {
-        const res = await setupFetch('/sim/api/superadmin/global-learned-values', {
+        const data = await apiJson('/sim/api/superadmin/global-learned-values', {
             method: 'PUT', body: JSON.stringify({ values: next }),
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         _glvPublished = data.values || next;
         if (typeof showToast === 'function') showToast(`Published op ${op} for ${alertKey} (pushed to ${data.pushed_to_spokes ?? 0} spokes)`, 'success');
         renderGlvPublished();
@@ -7764,11 +7731,9 @@ async function unpublishGlv(alertKey) {
     const next = { ..._glvPublished };
     delete next[alertKey];
     try {
-        const res = await setupFetch('/sim/api/superadmin/global-learned-values', {
+        const data = await apiJson('/sim/api/superadmin/global-learned-values', {
             method: 'PUT', body: JSON.stringify({ values: next }),
         });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
         _glvPublished = data.values || next;
         if (typeof showToast === 'function') showToast(`Unpublished ${alertKey}`, 'success');
         renderGlvPublished();
@@ -7821,9 +7786,7 @@ async function loadDhcpServerStatus() {
     if (!wrap) return;
     let data;
     try {
-        const r = await fetch('/sim/api/superadmin/dhcp-status', { credentials: 'same-origin' });
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/sim/api/superadmin/dhcp-status', { credentials: 'same-origin' });
     } catch (e) {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
@@ -7982,12 +7945,10 @@ async function runEndpointSyncNow() {
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
     try {
-        const r = await setupFetch('/setup/endpoint-sync/run', {
+        const data = await apiJson('/setup/endpoint-sync/run', {
             method: 'POST',
             body: JSON.stringify({})
         });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
         const s = data.summary || {};
         showToast(`Synced ${s.tenants || 0} tenant(s): ${s.pushed || 0} pushed, ${s.errors || 0} errors.`, (s.errors || 0) ? 'info' : 'success');
         await loadEndpointSyncStatus();
@@ -8040,9 +8001,7 @@ async function loadRealtimeNacSyncStatus() {
     if (!wrap) return;
     let data;
     try {
-        const r = await setupFetch('/setup/realtime-nac-sync/status');
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/setup/realtime-nac-sync/status');
     } catch (e) {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
@@ -8079,12 +8038,10 @@ async function runRealtimeNacNow() {
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
     try {
-        const r = await setupFetch('/setup/realtime-nac-sync/run', {
+        const data = await apiJson('/setup/realtime-nac-sync/run', {
             method: 'POST',
             body: JSON.stringify({})
         });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
         const s = data.summary || {};
         showToast(`Synced ${s.tenants || 0} tenant(s): ${s.pushed || 0} added, ${s.errors || 0} errors.`, (s.errors || 0) ? 'info' : 'success');
         await loadRealtimeNacSyncStatus();
@@ -8137,9 +8094,7 @@ async function loadStalenessSweepStatus() {
     if (!wrap) return;
     let data;
     try {
-        const r = await setupFetch('/setup/staleness-sweep/status');
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/setup/staleness-sweep/status');
     } catch (e) {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
@@ -8167,12 +8122,10 @@ async function runStalenessSweepNow() {
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Sweeping…'; }
     try {
-        const r = await setupFetch('/setup/staleness-sweep/run', {
+        const data = await apiJson('/setup/staleness-sweep/run', {
             method: 'POST',
             body: JSON.stringify({})
         });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
         const s = data.summary || {};
         showToast(`Sweep: ${s.decommissioned || 0} decommissioned, ${s.deleted || 0} deleted, ${s.ip_freed || 0} IPs freed${(s.errors || 0) ? `, ${s.errors} errors` : ''}.`,
                   (s.errors || 0) ? 'info' : 'success');
@@ -8303,12 +8256,10 @@ async function runRepoSyncNow() {
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
     try {
-        const r = await setupFetch('/setup/repo-sync/run', {
+        const data = await apiJson('/setup/repo-sync/run', {
             method: 'POST',
             body: JSON.stringify({})
         });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
         const s = data.summary || {};
         const restarting = /restart/i.test(String((data.result || {}).message || ''));
         showToast(`Repo sync: ${s.provisioning_repos_ok || 0} repos ok, ${s.provisioning_repos_error || 0} errors${restarting ? ' — hub restarting' : ''}.`,
@@ -8439,9 +8390,7 @@ async function saveHubWatchdog() {
     };
     if (btn) btn.disabled = true;
     try {
-        const r = await setupFetch('/setup/hub-watchdog', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        const d = await apiJson('/setup/hub-watchdog', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
         const f = d.fanout || {};
         const msg = document.getElementById('hcw-msg');
         if (msg) msg.textContent = cfg.enabled
@@ -8458,9 +8407,7 @@ async function loadSpokeAlerts() {
     if (!wrap) return;
     let data;
     try {
-        const r = await setupFetch('/setup/spoke-alerts');
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/setup/spoke-alerts');
     } catch (e) {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
@@ -8550,9 +8497,7 @@ async function loadVmSyncStatus() {
     if (!wrap) return;
     let data;
     try {
-        const r = await setupFetch('/setup/vm-sync/status');
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/setup/vm-sync/status');
     } catch (e) {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
@@ -8592,12 +8537,10 @@ async function runVmSyncNow() {
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
     try {
-        const r = await setupFetch('/setup/vm-sync/run', {
+        const data = await apiJson('/setup/vm-sync/run', {
             method: 'POST',
             body: JSON.stringify({})
         });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
         const s = data.summary || {};
         showToast(`Synced ${s.tenants || 0} tenant(s): ${s.pushed || 0} pushed, ${s.deleted || 0} deleted, ${s.errors || 0} errors.`, (s.errors || 0) ? 'info' : 'success');
         await loadVmSyncStatus();
@@ -8690,9 +8633,7 @@ async function loadFwDiscoveryStatus() {
     if (!wrap) return;
     let data;
     try {
-        const r = await setupFetch('/setup/fw-discovery-sync/status');
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/setup/fw-discovery-sync/status');
     } catch (e) {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
@@ -8730,12 +8671,10 @@ async function runFwDiscoveryNow() {
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
     try {
-        const r = await setupFetch('/setup/fw-discovery-sync/run', {
+        const data = await apiJson('/setup/fw-discovery-sync/run', {
             method: 'POST',
             body: JSON.stringify({})
         });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
         const s = data.summary || {};
         showToast(`Synced ${s.tenants || 0} tenant(s): ${s.pushed || 0} pushed, ${s.deleted || 0} deleted, ${s.dropped_unattributed || 0} dropped, ${s.errors || 0} errors.`, (s.errors || 0) ? 'info' : 'success');
         await loadFwDiscoveryStatus();
@@ -8819,9 +8758,7 @@ async function loadNwDiscoveryStatus() {
     if (!wrap) return;
     let data;
     try {
-        const r = await setupFetch('/setup/nw-discovery-sync/status');
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/setup/nw-discovery-sync/status');
     } catch (e) {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
@@ -8859,12 +8796,10 @@ async function runNwDiscoveryNow() {
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
     try {
-        const r = await setupFetch('/setup/nw-discovery-sync/run', {
+        const data = await apiJson('/setup/nw-discovery-sync/run', {
             method: 'POST',
             body: JSON.stringify({})
         });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
         const s = data.summary || {};
         showToast(`Synced ${s.tenants || 0} tenant(s): ${s.pushed || 0} pushed, ${s.deleted || 0} deleted, ${s.dropped_unattributed || 0} dropped, ${s.errors || 0} errors.`, (s.errors || 0) ? 'info' : 'success');
         await loadNwDiscoveryStatus();
@@ -8882,12 +8817,10 @@ async function pollNwDevice(deviceId, name, btn) {
     const orig = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = 'Polling…'; }
     try {
-        const r = await setupFetch(`/api/nw/${encodeURIComponent(deviceId)}/poll`, {
+        const d = await apiJson(`/api/nw/${encodeURIComponent(deviceId)}/poll`, {
             method: 'POST',
             body: JSON.stringify({})
         });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const d = await r.json();
         const up = d.reachable ? 'up' : 'down';
         const nif = Array.isArray(d.interfaces) ? d.interfaces.length : 0;
         const narp = Array.isArray(d.arp) ? d.arp.length : 0;
@@ -8939,9 +8872,7 @@ async function loadSubnetFilterToggles() {
     const wrap = document.getElementById('subnet-filter-toggles');
     if (!wrap) return;
     try {
-        const r = await fetch('/admin/subnet-filter-config', { credentials: 'same-origin' });
-        if (!r.ok) throw new Error(`${r.status}`);
-        const d = await r.json();
+        const d = await apiJson('/admin/subnet-filter-config', { credentials: 'same-origin' });
         _subnetFilterState = d.modules || {};
         wrap.innerHTML = _SUBNET_FILTER_MODULES.map(m => {
             const on = !!_subnetFilterState[m.key];
@@ -8961,12 +8892,11 @@ async function toggleSubnetFilter(module) {
     const next = !(_subnetFilterState[module] || false);
     _subnetFilterState[module] = next;
     try {
-        const r = await fetch('/admin/subnet-filter-config', {
+        await apiJson('/admin/subnet-filter-config', {
             method: 'PUT', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ modules: _subnetFilterState }),
         });
-        if (!r.ok) throw new Error(`${r.status}`);
         if (typeof showToast === 'function') showToast(`${module} subnet filter ${next ? 'enabled' : 'disabled'}`, 'success');
     } catch (e) {
         if (typeof showToast === 'function') showToast('Failed to update: ' + e.message, 'error');
@@ -8982,9 +8912,7 @@ function _usbChip(vp, label, onRemove, extra) {
 async function loadUsbOverview() {
     let data;
     try {
-        const r = await fetch('/sim/api/superadmin/tenants/usb', { credentials: 'same-origin' });
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/sim/api/superadmin/tenants/usb', { credentials: 'same-origin' });
     } catch (e) {
         document.getElementById('global-usb-certified').innerHTML = `<span class="text-xs text-red-500">Failed: ${e.message}</span>`;
         return;
@@ -9044,9 +8972,7 @@ async function loadDiscoveredUsb() {
     if (!wrap) return;
     let data;
     try {
-        const r = await fetch('/sim/api/superadmin/discovered-usb-vidpids', { credentials: 'same-origin' });
-        if (!r.ok) throw new Error(`${r.status}`);
-        data = await r.json();
+        data = await apiJson('/sim/api/superadmin/discovered-usb-vidpids', { credentials: 'same-origin' });
     } catch (e) {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
@@ -9102,11 +9028,10 @@ async function addGlobalUsbCert() {
         const r = await fetch('/sim/api/superadmin/global-usb-vidpids', { credentials: 'same-origin' });
         const cur = r.ok ? (await r.json()).usb_vidpids || [] : [];
         const next = [...cur.filter(d => d.vidpid !== vp), { vidpid: vp, type, label: label || vp }];
-        const pr = await fetch('/sim/api/superadmin/global-usb-vidpids', {
+        await apiJson('/sim/api/superadmin/global-usb-vidpids', {
             method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ usb_vidpids: next }),
         });
-        if (!pr.ok) throw new Error(`${pr.status}`);
         document.getElementById('gusbc-vp').value = ''; document.getElementById('gusbc-label').value = '';
         loadUsbOverview();
     } catch (e) { if (typeof showToast === 'function') showToast('Failed: ' + e.message, 'error'); }
@@ -9167,11 +9092,10 @@ async function approveGlobalUsb(vp) {
         const rc = await fetch('/sim/api/superadmin/global-usb-vidpids', { credentials: 'same-origin' });
         const cert = rc.ok ? (await rc.json()).usb_vidpids || [] : [];
         const next = [...cert.filter(d => d.vidpid !== vp), { vidpid: vp, type, label: label || vp }];
-        const pc = await fetch('/sim/api/superadmin/global-usb-vidpids', {
+        await apiJson('/sim/api/superadmin/global-usb-vidpids', {
             method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ usb_vidpids: next }),
         });
-        if (!pc.ok) throw new Error(`${pc.status}`);
         const ri = await fetch('/sim/api/superadmin/global-usb-ignored-vidpids', { credentials: 'same-origin' });
         const ign = ri.ok ? (await ri.json()).usb_vidpids || [] : [];
         const ignNext = ign.filter(x => x !== vp);
@@ -9195,11 +9119,10 @@ async function ignoreGlobalUsb(vp) {
         const ri = await fetch('/sim/api/superadmin/global-usb-ignored-vidpids', { credentials: 'same-origin' });
         const ign = ri.ok ? (await ri.json()).usb_vidpids || [] : [];
         const ignNext = ign.includes(vp) ? ign : [...ign, vp];
-        const pi = await fetch('/sim/api/superadmin/global-usb-ignored-vidpids', {
+        await apiJson('/sim/api/superadmin/global-usb-ignored-vidpids', {
             method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ usb_vidpids: ignNext }),
         });
-        if (!pi.ok) throw new Error(`${pi.status}`);
         const rc = await fetch('/sim/api/superadmin/global-usb-vidpids', { credentials: 'same-origin' });
         const cert = rc.ok ? (await rc.json()).usb_vidpids || [] : [];
         const certNext = cert.filter(d => d.vidpid !== vp);
@@ -9233,11 +9156,10 @@ async function _tenantUsbPost(tid, vid, pid, action, inp, type) {
     try {
         const body = { vid, pid, action };
         if (action === 'certify' && type) body.type = type;
-        const r = await fetch(`/sim/api/${tid}/usb-vidpids?tenant_id=${tid}`, {
+        await apiJson(`/sim/api/${tid}/usb-vidpids?tenant_id=${tid}`, {
             method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
-        if (!r.ok) throw new Error(`${r.status}`);
         if (inp) inp.value = '';
         if (typeof showToast === 'function') showToast(`${action} queued for ${vid}:${pid}`, 'success');
         loadUsbOverview();
@@ -9281,12 +9203,11 @@ async function saveCacheConfig() {
     });
     const maxConcurrent = parseInt(document.getElementById('cache-max-concurrent')?.value || '3', 10);
     try {
-        const r = await fetch('/admin/cache/config', {
+        await apiJson('/admin/cache/config', {
             method: 'PUT', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ config: configPayload, max_concurrent_tenants: maxConcurrent }),
         });
-        if (!r.ok) throw new Error(await r.text());
         showToast('Cache configuration saved', 'success');
     } catch (e) {
         showToast('Save failed: ' + e.message, 'error');
@@ -9296,8 +9217,7 @@ async function saveCacheConfig() {
 async function purgeAllCaches() {
     if (!await showConfirmToast('Purge all tenant caches and re-warm from live data?')) return;
     try {
-        const r = await fetch('/admin/cache/purge', { method: 'POST', credentials: 'same-origin' });
-        if (!r.ok) throw new Error(await r.text());
+        await apiJson('/admin/cache/purge', { method: 'POST', credentials: 'same-origin' });
         showToast('Cache purged — re-warming in background', 'success');
     } catch (e) {
         showToast('Purge failed: ' + e.message, 'error');
@@ -9329,8 +9249,7 @@ async function loadFirewallsList() {
 async function deleteFirewallEntry(id) {
     if (!await showConfirmToast(`Delete firewall ${id}?`)) return;
     try {
-        const r = await setupFetch(`/setup/firewalls/${id}`, { method: 'DELETE' });
-        if (!r.ok) throw new Error(await r.text());
+        await apiJson(`/setup/firewalls/${id}`, { method: 'DELETE' });
         loadFirewallsList();
         loadFirewalls();
     } catch (e) {
@@ -9344,9 +9263,7 @@ async function deleteFirewallEntry(id) {
 let _nwDevicesCache = [];
 async function loadNwDevices() {
     try {
-        const r = await setupFetch('/setup/nw-devices');
-        if (!r.ok) throw new Error(`${r.status}`);
-        const data = await r.json();
+        const data = await apiJson('/setup/nw-devices');
         _nwDevicesCache = Array.isArray(data.nw_devices) ? data.nw_devices : [];
         return _nwDevicesCache;
     } catch (e) {
@@ -9391,8 +9308,7 @@ async function loadNwDevicesList() {
 async function deleteNwDeviceEntry(id) {
     if (!await showConfirmToast(`Delete network device ${id}?`)) return;
     try {
-        const r = await setupFetch(`/setup/nw-devices/${id}`, { method: 'DELETE' });
-        if (!r.ok) throw new Error(await r.text());
+        await apiJson(`/setup/nw-devices/${id}`, { method: 'DELETE' });
         loadNwDevicesList();
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
@@ -10495,12 +10411,11 @@ function _reloadActiveMgmtView() {
 
 async function approveSpoke(spokeId) {
     try {
-        const response = await setupFetch('/setup/approve_spoke', {
+        await apiJson('/setup/approve_spoke', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ spoke_id: spokeId, action: 'approve' })
         });
-        if (!response.ok) throw new Error('Approval failed');
 
         _reloadActiveMgmtView();
         updateStatus();
@@ -10511,12 +10426,11 @@ async function approveSpoke(spokeId) {
 
 async function unapproveSpoke(spokeId) {
     try {
-        const response = await setupFetch('/setup/approve_spoke', {
+        await apiJson('/setup/approve_spoke', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ spoke_id: spokeId, action: 'unapprove' })
         });
-        if (!response.ok) throw new Error('Un-approval failed');
 
         _reloadActiveMgmtView();
         updateStatus();
@@ -10530,8 +10444,7 @@ async function resetSpokeSecret(spokeId) {
         return;
     }
     try {
-        const response = await setupFetch(`/setup/spokes/${spokeId}/reset-secret`, { method: 'POST' });
-        if (!response.ok) throw new Error('Secret reset failed');
+        await apiJson(`/setup/spokes/${spokeId}/reset-secret`, { method: 'POST' });
 
         showToast(`Secret for ${spokeId} has been reset. Restart the agent install or trigger a new handshake.`, 'success');
         _reloadActiveMgmtView();
@@ -10548,9 +10461,7 @@ async function loadUsers() {
         // Tenant Admins manage their CURRENT tenant's users via the tenant-
         // scoped route; Global Admins see the whole fleet via /setup/users.
         const base = _taUsersBase();
-        const response = await setupFetch(base ? base : '/setup/users');
-        if (!response.ok) throw new Error('Failed to fetch users');
-        const data = await response.json();
+        const data = await apiJson(base ? base : '/setup/users');
         const users = data.users || {};
         const viewerIsTadm = !!isTenantAdmin();
 
@@ -10684,9 +10595,7 @@ const _RBAC_RIGHT_LABELS = {
 async function loadGroups() {
     const bodyEl = document.getElementById('permission-groups-body');
     try {
-        const resp = await setupFetch('/setup/groups');
-        if (!resp.ok) throw new Error('Failed to fetch groups');
-        const data = await resp.json();
+        const data = await apiJson('/setup/groups');
         const groups = data.groups || {};
         // Cache for the users table Groups column + the modal checklists.
         window._permGroups = groups;
@@ -10976,8 +10885,7 @@ async function loadApiTokens() {
     const body = document.getElementById('apitok-table-body');
     if (!body) return;
     try {
-        const res = await fetch('/auth/tokens', { credentials: 'same-origin' });
-        const data = await res.json();
+        const data = await apiJson('/auth/tokens', { credentials: 'same-origin' });
         const toks = data.tokens || [];
         if (!toks.length) {
             body.innerHTML = '<tr><td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">No API tokens.</td></tr>';
@@ -11001,13 +10909,11 @@ async function createApiToken() {
     const name = (document.getElementById('apitok-name') || {}).value || '';
     if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
     try {
-        const res = await fetch('/auth/token', {
+        const data = await apiJson('/auth/token', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name }),
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || res.status);
         const box = document.getElementById('apitok-new');
         if (box) {
             box.className = 'rounded-md border border-green-300 bg-green-50 p-4 space-y-2 text-xs';
@@ -11354,11 +11260,10 @@ function recoveryBadge(rec) {
 
 async function setRecoveryPause(spokeId, pause) {
     try {
-        const res = await setupFetch(`/setup/spoke/${encodeURIComponent(spokeId)}/recovery`, {
+        await apiJson(`/setup/spoke/${encodeURIComponent(spokeId)}/recovery`, {
             method: 'POST',
             body: JSON.stringify({ pause }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         await loadSpokesAndAgents();  // refresh to reflect new badge
     } catch (err) {
         showToast(`Failed to ${pause ? 'pause' : 'resume'} recovery for ${spokeId}: ${err.message}`, 'error');
@@ -11678,9 +11583,7 @@ async function loadModuleLogs(module, isRefresh = false) {
 
     try {
         const endpoint = module === 'hub' ? '/setup/logs' : `/setup/logs/${module}`;
-        const response = await fetch(endpoint);
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-        const data = await response.json();
+        const data = await apiJson(endpoint);
         // Reverse so newest entries are at the top (log files are oldest-first on disk)
         const logs = (data.logs || []).slice().reverse();
 
@@ -11779,8 +11682,7 @@ async function copyLogs() {
 
 async function toggleDebugLogging() {
     try {
-        const statusRes = await setupFetch('/setup/debug-mode');
-        const statusData = await statusRes.json();
+        const statusData = await apiJson('/setup/debug-mode');
         const newState = !statusData.enabled;
 
         const response = await setupFetch('/setup/debug-mode', {
@@ -11830,9 +11732,7 @@ async function loadApprovedSpokes() {
         // Global Admins read the full roster (/setup/pending_spokes, admin-only);
         // tenant-admins read only the spokes they may bind to via the
         // session-scoped /tenant/devices/spokes (same row shape).
-        const response = await setupFetch(isAdmin() ? '/setup/pending_spokes' : '/tenant/devices/spokes');
-        if (!response.ok) throw new Error('Failed to fetch spokes');
-        const data = await response.json();
+        const data = await apiJson(isAdmin() ? '/setup/pending_spokes' : '/tenant/devices/spokes');
         return (data.spokes || []).filter(s => s.approved);
     } catch (err) {
         console.error('Error loading approved spokes:', err);
@@ -12137,8 +12037,7 @@ async function executeProbe() {
 
     responseEl.textContent = 'Probing...';
     try {
-        const res = await setupFetch(`/setup/api-probe?spoke_id=${spokeId}&path=${encodeURIComponent(path)}`);
-        const data = await res.json();
+        const data = await apiJson(`/setup/api-probe?spoke_id=${spokeId}&path=${encodeURIComponent(path)}`);
         responseEl.textContent = JSON.stringify(data, null, 2);
     } catch (err) {
         responseEl.textContent = `Error: ${err.message}`;
@@ -12951,8 +12850,7 @@ async function savePxmxSettings() {
 async function pxmxHvConfig(force) {
     if (!force && window._pxmxHvConfig) return window._pxmxHvConfig;
     try {
-        const r = await setupFetch(`/sim/api/tenant/${currentTenant}/hypervisors-config?tenant_id=${encodeURIComponent(currentTenant)}`);
-        const d = await r.json();
+        const d = await apiJson(`/sim/api/tenant/${currentTenant}/hypervisors-config?tenant_id=${encodeURIComponent(currentTenant)}`);
         window._pxmxHvConfig = (d && d.hypervisors_config) || {};
     } catch (e) { window._pxmxHvConfig = window._pxmxHvConfig || {}; }
     return window._pxmxHvConfig;
@@ -14448,9 +14346,7 @@ async function showNetboxMigrateTenantModal() {
     const body = inner.querySelector('.nbmig-body');
     let tenants = [];
     try {
-        const r = await fetch('/setup/tenants');
-        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-        tenants = (await r.json()).tenants || [];
+        tenants = (await apiJson('/setup/tenants')).tenants || [];
     } catch (e) {
         body.innerHTML = `<p class="text-sm text-red-500">Failed to load tenants: ${escapeHtml(e.message)}</p>`;
         return;
@@ -14506,12 +14402,10 @@ async function netboxMigrateTenant(modal) {
     goBtn.disabled = true; goBtn.textContent = 'Migrating…';
     resEl.innerHTML = `<span class="text-slate-400 italic">Working…</span>`;
     try {
-        const r = await fetch('/api/tenant/migrate', {
+        const d = await apiJson('/api/tenant/migrate', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source, target, delete_source: del, modules }),
         });
-        const d = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(d.detail || r.statusText);
         const mods = d.modules || {};
         const rows = Object.entries(mods).map(([k, v]) => {
             const st = v.status || '?';
@@ -14773,8 +14667,7 @@ async function submitNetboxAddDevice() {
             rack_unit: get('nb-d-unit') ? parseInt(get('nb-d-unit')) : '',
         };
         try {
-            const r = await fetch(`/api/netbox/devices/${deviceId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-            const d = await r.json();
+            const d = await apiJson(`/api/netbox/devices/${deviceId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('Devices'); }
             else showToast('Error: ' + (d.message || 'Update failed'), 'error');
         } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -14786,8 +14679,7 @@ async function submitNetboxAddDevice() {
         device_type: get('nb-d-type'), role: get('nb-d-role'), status: get('nb-d-status') || 'active',
     };
     try {
-        const r = await fetch('/api/netbox/devices', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-        const d = await r.json();
+        const d = await apiJson('/api/netbox/devices', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         if (d.status === 'SUCCESS') {
             document.getElementById('nb-device-modal')?.remove();
             loadNetboxData('Devices');
@@ -14800,8 +14692,7 @@ async function submitNetboxAddDevice() {
 async function deleteNetboxDevice(deviceId) {
     if (!await showConfirmToast('Delete this device from NetBox?')) return;
     try {
-        const r = await fetch(`/api/netbox/devices/${deviceId}`, { method: 'DELETE' });
-        const d = await r.json();
+        const d = await apiJson(`/api/netbox/devices/${deviceId}`, { method: 'DELETE' });
         if (d.status === 'SUCCESS') loadNetboxData('Devices');
         else showToast('Error: ' + (d.message || 'Delete failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -14853,8 +14744,7 @@ async function submitNetboxRack() {
     }
     try {
         const url = editing ? `/api/netbox/racks/${modal.dataset.rackId}` : '/api/netbox/racks';
-        const r = await fetch(url, { method: editing ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-        const d = await r.json();
+        const d = await apiJson(url, { method: editing ? 'PUT' : 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('Racks'); }
         else showToast('Error: ' + (d.message || 'Operation failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -14863,8 +14753,7 @@ async function submitNetboxRack() {
 async function deleteNetboxRack(rackId) {
     if (!await showConfirmToast('Delete this rack from NetBox?')) return;
     try {
-        const r = await fetch(`/api/netbox/racks/${rackId}`, { method: 'DELETE' });
-        const d = await r.json();
+        const d = await apiJson(`/api/netbox/racks/${rackId}`, { method: 'DELETE' });
         if (d.status === 'SUCCESS') loadNetboxData('Racks');
         else showToast('Error: ' + (d.message || 'Delete failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -14943,8 +14832,7 @@ async function submitNetboxAllocatePrefix() {
             site: get('nb-p-site') || undefined,
         };
         try {
-            const r = await fetch(`/api/netbox/prefixes/${modal.dataset.prefixId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-            const d = await r.json();
+            const d = await apiJson(`/api/netbox/prefixes/${modal.dataset.prefixId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('Prefixes'); }
             else showToast('Error: ' + (d.message || 'Update failed'), 'error');
         } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -14960,8 +14848,7 @@ async function submitNetboxAllocatePrefix() {
         tenant: (currentTenant && currentTenant !== 'default') ? currentTenant : undefined,
     };
     try {
-        const r = await fetch('/api/netbox/prefixes', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-        const d = await r.json();
+        const d = await apiJson('/api/netbox/prefixes', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         if (d.status === 'SUCCESS') {
             document.getElementById('nb-prefix-modal')?.remove();
             showToast(`Allocated: ${d.prefix}`, 'success');
@@ -14975,8 +14862,7 @@ async function submitNetboxAllocatePrefix() {
 async function deleteNetboxPrefix(prefixId) {
     if (!await showConfirmToast('Delete this prefix from NetBox? Any IP addresses under it may also be removed.')) return;
     try {
-        const r = await fetch(`/api/netbox/prefixes/${prefixId}`, { method: 'DELETE' });
-        const d = await r.json();
+        const d = await apiJson(`/api/netbox/prefixes/${prefixId}`, { method: 'DELETE' });
         if (d.status === 'SUCCESS') loadNetboxData('Prefixes');
         else showToast('Error: ' + (d.message || 'Delete failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -15157,12 +15043,11 @@ async function submitFindSubnetAssign() {
     if (!prefix) { showToast('Search and pick a subnet first.', 'success'); return; }
     const desc = document.getElementById('nb-f-desc')?.value?.trim() || '';
     try {
-        const r = await fetch('/api/netbox/subnet-assign', {
+        const d = await apiJson('/api/netbox/subnet-assign', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prefix, description: desc, status: 'active' }),
             credentials: 'same-origin',
         });
-        const d = await r.json();
         if (d.status === 'SUCCESS') {
             document.getElementById('nb-find-modal')?.remove();
             showToast(`Subnet assigned: ${d.prefix}`, 'success');
@@ -15185,8 +15070,7 @@ async function releaseSubnetToPool(prefixId, prefixStr) {
         : `Return ${prefixStr} to the pool? This removes the subnet from NetBox.`;
     if (!await showConfirmToast(msg)) return;
     try {
-        const r = await fetch(`/api/netbox/prefixes/${prefixId}`, { method: 'DELETE' });
-        const d = await r.json();
+        const d = await apiJson(`/api/netbox/prefixes/${prefixId}`, { method: 'DELETE' });
         if (d.status === 'SUCCESS') { showToast('Returned to pool', 'success'); loadNetboxData('Prefixes'); }
         else showToast('Error: ' + (d.message || 'Release failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -15238,8 +15122,7 @@ async function submitNetboxAllocateIP() {
             status: get('nb-ip-status') || 'active',
         };
         try {
-            const r = await fetch(`/api/netbox/ips/${modal.dataset.ipId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-            const d = await r.json();
+            const d = await apiJson(`/api/netbox/ips/${modal.dataset.ipId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
             if (d.status === 'SUCCESS') { modal.remove(); loadNetboxData('IP Addresses'); }
             else showToast('Error: ' + (d.message || 'Update failed'), 'error');
         } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -15247,8 +15130,7 @@ async function submitNetboxAllocateIP() {
     }
     const payload = { prefix: get('nb-ip-prefix'), address: get('nb-ip-address') || undefined, dns_name: get('nb-ip-dns'), description: get('nb-ip-desc'), status: 'active' };
     try {
-        const r = await fetch('/api/netbox/ips', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
-        const d = await r.json();
+        const d = await apiJson('/api/netbox/ips', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         if (d.status === 'SUCCESS') {
             document.getElementById('nb-ip-modal')?.remove();
             showToast(`Allocated: ${d.address}`, 'success');
@@ -15262,8 +15144,7 @@ async function submitNetboxAllocateIP() {
 async function releaseNetboxIP(ipId) {
     if (!await showConfirmToast('Release this IP address? This will delete it from NetBox.')) return;
     try {
-        const r = await fetch(`/api/netbox/ips/${ipId}`, { method: 'DELETE' });
-        const d = await r.json();
+        const d = await apiJson(`/api/netbox/ips/${ipId}`, { method: 'DELETE' });
         if (d.status === 'SUCCESS') loadNetboxData('IP Addresses');
         else showToast('Error: ' + (d.message || 'Release failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -17852,9 +17733,7 @@ async function loadLDAPData(subMenu) {
         headEl.innerHTML = `<tr>${headers.map(h => `<th class="px-4 py-3 font-bold">${h}</th>`).join('')}</tr>`;
         bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">Fetching ${subMenu}...</td></tr>`;
 
-        const response = await fetch(endpoint);
-        if (!response.ok) throw new Error(`Failed to fetch ${subMenu}`);
-        const data = await response.json();
+        const data = await apiJson(endpoint);
         const items = data.data || [];
         // Cache rows so the Edit button can look up the entity by DN without
         // encoding all fields into the onclick handler.
@@ -18374,15 +18253,13 @@ async function saveUserEdits(userId) {
         const groupCheckboxes = document.querySelectorAll('input[id^="edit-grp-"]');
         const selectedGroups = Array.from(groupCheckboxes).filter(cb => cb.checked).map(cb => cb.value);
 
-        const updateResp = await setupFetch('/setup/users', {
+        await apiJson('/setup/users', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ user_id: userId, permissions: permissions, groups: selectedGroups })
         });
-        if (!updateResp.ok) throw new Error('Failed to update user permissions');
 
-        const userResp = await setupFetch('/setup/users');
-        const userData = await userResp.json();
+        const userData = await apiJson('/setup/users');
         const currentTenants = userData.users[userId].tenants || [];
 
         const tenantsToAssign = selectedTenants.filter(t => !currentTenants.includes(t));
@@ -18830,9 +18707,7 @@ async function loadInstances(productKey) {
     const listEl = document.getElementById(p.listId);
     if (!listEl) return;
     try {
-        const r = await setupFetch(p.endpoint);
-        if (!r.ok) throw new Error('Failed to fetch instances');
-        const instances = (await r.json()).instances || [];
+        const instances = (await apiJson(p.endpoint)).instances || [];
         window._instances = window._instances || {};
         window._instances[productKey] = instances;
         if (instances.length === 0) {
@@ -18968,8 +18843,7 @@ async function deleteInstance(productKey, id) {
     if (!p) return;
     if (!await showConfirmToast(`Delete this ${p.title.toLowerCase()}?`)) return;
     try {
-        const r = await setupFetch(`${p.endpoint}/${id}`, { method: 'DELETE' });
-        if (!r.ok) throw new Error(await r.text());
+        await apiJson(`${p.endpoint}/${id}`, { method: 'DELETE' });
         loadInstances(productKey);
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
@@ -19202,8 +19076,7 @@ async function deleteDevice(typeKey, id) {
     if (!t) return;
     if (!await showConfirmToast(`Delete this ${t.title.toLowerCase()} (${id})?`)) return;
     try {
-        const r = await setupFetch(`${_devEndpoint(t)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
-        if (!r.ok) throw new Error(await r.text().catch(() => r.status));
+        await apiJson(`${_devEndpoint(t)}/${encodeURIComponent(id)}`, { method: 'DELETE' });
         loadAllDevices();
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
@@ -19723,9 +19596,7 @@ async function loadDashboardSummary() {
     ['dash-devices','dash-vms','dash-sessions','dash-prefixes','dash-ips'].forEach(id => set(id, '…'));
 
     try {
-        const r = await fetch(`/api/dashboard/summary?tenant=${encodeURIComponent(currentTenant)}`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const d = await r.json();
+        const d = await apiJson(`/api/dashboard/summary?tenant=${encodeURIComponent(currentTenant)}`);
 
         set('dash-devices',  d.devices  ?? '—');
         set('dash-vms',      d.vms      ?? '—');
@@ -19846,9 +19717,7 @@ async function showDeviceDashboard(item) {
     if (nameAsHostname) params.set('hostname', item.name);
 
     try {
-        const r = await fetch(`/api/device-detail?${params}`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const d = await r.json();
+        const d = await apiJson(`/api/device-detail?${params}`);
 
         const id = d.identity || {};
         const identParts = [id.mac, id.ip, id.hostname].filter(Boolean);
