@@ -122,6 +122,12 @@ class _AutoApproveHub:
         # Configurable vouch replies keyed by sub_spoke_id. Absent → timeout.
         self._vouch_replies = {}
         self.request_response_calls = 0
+        # Phase 2: forwarded real methods resolve state keys via _primary_key.
+        # Alias empty -> _primary_key returns spoke_id (pre-2b2-trigger).
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def record_spoke_event(self, spoke_id, event, detail=""):
         if not spoke_id:

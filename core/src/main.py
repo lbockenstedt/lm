@@ -1745,9 +1745,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         than ``KeyError`` on the index. A transient disconnect (entry still
         present) just updates the status in place.
         """
-        tel = self.spoke_telemetry.get(spoke_id)
+        pk = self._primary_key(spoke_id)
+        tel = self.spoke_telemetry.get(pk)
         if tel is None:
-            self.spoke_telemetry[spoke_id] = {
+            self.spoke_telemetry[pk] = {
                 "last_attempt": time.time(),
                 "status": "DISCONNECTED",
             }
@@ -1776,8 +1777,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         (same as before this helper existed) rather than tearing down a working
         live connection.
         """
-        prior_authed = self.spoke_authenticated.get(spoke_id, False)
-        prior_ws = self.active_connections.get(spoke_id)
+        pk = self._primary_key(spoke_id)
+        prior_authed = self.spoke_authenticated.get(pk, False)
+        prior_ws = self.active_connections.get(pk)
         if prior_ws is not None and prior_ws is not websocket and prior_authed:
             # An authenticated connection owns the slot — leave it. The new
             # pending ws runs on as a ghost (no slot); it can't receive hub
@@ -1793,8 +1795,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 await prior_ws.close(1008, "Replaced by a newer connection")
             except Exception:
                 pass
-        self.active_connections[spoke_id] = websocket
-        self.active_connection_key_ids[spoke_id] = None
+        self.active_connections[pk] = websocket
+        self.active_connection_key_ids[pk] = None
 
     def get_spoke_by_type(self, module_type: str) -> Optional[str]:
         """Return the first connected, approved spoke that advertised the given module_type."""
@@ -2813,14 +2815,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         in api.py approve_spoke (561-592)."""
         self.state.register_module(spoke_id, approved=True)
         self.state.set_spoke_tenant(spoke_id, tenant_id)
-        self.approved_modules[spoke_id] = True
+        pk = self._primary_key(spoke_id)
+        self.approved_modules[pk] = True
         self.state.save_state()
-        if spoke_id in self.active_connections:
+        if pk in self.active_connections:
             # Capture the secret the spoke currently holds BEFORE generating the
             # new one, then sign the key-delivery push with it — the spoke can't
             # verify a frame signed with the new secret it hasn't installed yet.
-            prev_secret = self.key_manager.current_session_secret(spoke_id)
-            session_secret = self.key_manager.generate_first_secret(spoke_id)
+            prev_secret = self.key_manager.current_session_secret(pk)
+            session_secret = self.key_manager.generate_first_secret(pk)
             key_msg = Message(
                 header=MessageHeader(
                     message_id=str(uuid.uuid4()), timestamp=time.time(),
@@ -2840,7 +2843,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # its role sub-spokes that connected first and are still pending. Covers
         # the sub-before-parent connect ordering; sub-after-parent is handled at
         # the sub-spoke's connect (parent-auto-approve block in handle_connection).
-        if self.spoke_module_types.get(spoke_id) == "agent":
+        if self.spoke_module_types.get(pk) == "agent":
             await self._auto_approve_pending_subspokes(spoke_id)
 
     async def rotate_spoke_secret_now(self, spoke_id: str) -> Dict[str, Any]:
@@ -3029,17 +3032,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         spoke can't verify signed frames). Returns ``{"status", "spoke_id",
         "was_connected", "message"}``.
         """
-        was_connected = spoke_id in self.active_connections
-        ws = self.active_connections.get(spoke_id)
+        pk = self._primary_key(spoke_id)
+        was_connected = pk in self.active_connections
+        ws = self.active_connections.get(pk)
         if ws is not None:
             try:
                 await ws.close(code=1008, reason="Revoked by admin")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"revoke_spoke: could not close live WS for {spoke_id}: {e}")
-        self.approved_modules[spoke_id] = False
+        self.approved_modules[pk] = False
         self.state.register_module(spoke_id, approved=False)
         self.state.save_state()
-        self.key_manager.delete_spoke_key(spoke_id)
+        self.key_manager.delete_spoke_key(pk)
         await self.mailbox.clear_spoke(spoke_id)
         self.record_spoke_event(spoke_id, "revoked",
                                 f"admin revoke; was_connected={was_connected}")
@@ -3092,7 +3096,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # succeed.
         if not parent_spoke_id or not spoke_id.startswith(parent_spoke_id + "-"):
             return False, "prefix_mismatch"
-        if self.spoke_module_types.get(parent_spoke_id) != "agent":
+        if self.spoke_module_types.get(self._primary_key(parent_spoke_id)) != "agent":
             return False, "not_agent"
         # Pre-flight: the parent must be connected AND hold its session key (can
         # sign a reply). A parent that structurally can't respond → immediate
@@ -3197,11 +3201,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         key + send its first signed frame before we declare it unauthenticated,
         so a just-approved spoke isn't falsely rejected.
         """
-        if spoke_id not in self.active_connections:
+        pk = self._primary_key(spoke_id)
+        if pk not in self.active_connections:
             return False, self._CMD_NOT_CONNECTED
-        if self.spoke_authenticated.get(spoke_id):
+        if self.spoke_authenticated.get(pk):
             return True, ""
-        tel = self.spoke_telemetry.get(spoke_id) or {}
+        tel = self.spoke_telemetry.get(pk) or {}
         last_attempt = tel.get("last_attempt")
         if last_attempt is None:
             # No connect timestamp recorded -> treat as fresh (grace window),
@@ -3307,7 +3312,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return False
         self.state.register_module(spoke_id, approved=True)
         self.state.set_spoke_tenant(spoke_id, tenant_hint)
-        self.approved_modules[spoke_id] = True
+        self.approved_modules[self._primary_key(spoke_id)] = True
         self.state.save_state()
         logger.info(f"PSK self-provision: {spoke_id} auto-approved + bound to tenant {tenant_hint}.")
         self.record_spoke_event(spoke_id, "psk_self_provision", f"tenant={tenant_hint}")
@@ -3732,14 +3737,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         Returns True if ``websocket`` is now the active connection, False if it
         was rejected as a stale-key reconnect (caller should return).
         """
-        existing = self.active_connections.get(spoke_id)
+        pk = self._primary_key(spoke_id)
+        existing = self.active_connections.get(pk)
         if existing is not None and existing is not websocket:
-            current = self.key_manager.keys.get(spoke_id)
+            current = self.key_manager.keys.get(pk)
             current_kid = current.key_id if current else None
             new_is_current = key_id is not None and key_id == current_kid
             old_is_current = (
                 current_kid is not None
-                and self.active_connection_key_ids.get(spoke_id) == current_kid
+                and self.active_connection_key_ids.get(pk) == current_kid
             )
             if old_is_current and not new_is_current:
                 # Live current-key connection already active; this socket auth'd
@@ -3831,16 +3837,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 spoke_id, "replaced_connection",
                 "newer connection took over (previous was unresponsive)",
             )
-            self.active_connections[spoke_id] = websocket
-            self.active_connection_key_ids[spoke_id] = key_id
+            self.active_connections[pk] = websocket
+            self.active_connection_key_ids[pk] = key_id
             self._arm_liveness_probe(spoke_id, websocket)
             try:
                 await existing.close(1008, "Replaced by newer connection")
             except Exception:
                 pass
             return True
-        self.active_connections[spoke_id] = websocket
-        self.active_connection_key_ids[spoke_id] = key_id
+        self.active_connections[pk] = websocket
+        self.active_connection_key_ids[pk] = key_id
         self._arm_liveness_probe(spoke_id, websocket)
         return True
 
@@ -4053,9 +4059,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # fleet/scale grows. Aggregate overload is the fleet layer's job, not
             # this bucket. See docs/backpressure-throttling.md §4.
             _rl_cap, _rl_rate = self._rate_limit_params()
-            self.rate_limiters[spoke_id] = TokenBucket(capacity=_rl_cap, fill_rate=_rl_rate)
+            pk = self._primary_key(spoke_id)
+            self.rate_limiters[pk] = TokenBucket(capacity=_rl_cap, fill_rate=_rl_rate)
             if module_type:
-                self.spoke_module_types[spoke_id] = module_type
+                self.spoke_module_types[pk] = module_type
                 # Persist the type into module_metadata so the Spoke Management
                 # list can show a cs/simulation spoke's type even while it is
                 # offline (the in-memory spoke_module_types dict is popped on
@@ -4109,16 +4116,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # so a later base-agent approval can sweep up waiting sub-spokes
             # (_auto_approve_pending_subspokes covers the sub-before-parent order).
             if netbox_server_cap:
-                self.netbox_server_agents.add(spoke_id)
+                self.netbox_server_agents.add(pk)
             else:
-                self.netbox_server_agents.discard(spoke_id)
+                self.netbox_server_agents.discard(pk)
             # H4: record encryption capability unconditionally (covers the
             # zero-touch / secret-less connect path too). A non-capable or
             # kill-switched spoke records False → outbound frames stay plaintext.
-            self.spoke_enc_capable[spoke_id] = spoke_enc_capable
+            self.spoke_enc_capable[pk] = spoke_enc_capable
             if parent_spoke_id:
-                self.spoke_parent_map[spoke_id] = parent_spoke_id
-                if not self.approved_modules.get(spoke_id, False):
+                self.spoke_parent_map[pk] = parent_spoke_id
+                if not self.approved_modules.get(pk, False):
                     # Parent attestation (H3): ask the claimed parent to sign a
                     # vouch that this sub-spoke is one it spawned, instead of
                     # trusting the child's unsigned parent_spoke_id claim. On a
@@ -4144,7 +4151,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                                                 f"parent={parent_spoke_id} reason={reason}")
 
             # Check if the module is already approved
-            if not self.approved_modules.get(spoke_id, False):
+            if not self.approved_modules.get(pk, False):
                 logger.info(f"Module {spoke_id} is pending approval.")
                 self.record_spoke_event(spoke_id, "pending_approval", "awaiting admin approval")
                 # Send Approval Required message
@@ -4155,7 +4162,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 }
                 # Only sign if we have a key
                 try:
-                    approval_msg["signature"] = self.key_manager.sign_message(spoke_id, {
+                    approval_msg["signature"] = self.key_manager.sign_message(pk, {
                         "header": approval_msg["header"],
                         "payload": approval_msg["payload"]
                     })
@@ -4172,8 +4179,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # Sign the key-delivery push with the secret the spoke
                     # currently holds (None here = pending, it accepts anyway)
                     # so it can verify and install the new secret.
-                    prev_secret = self.key_manager.current_session_secret(spoke_id)
-                    session_secret = self.key_manager.generate_first_secret(spoke_id)
+                    prev_secret = self.key_manager.current_session_secret(pk)
+                    session_secret = self.key_manager.generate_first_secret(pk)
                     key_msg = Message(
                         header=MessageHeader(
                             message_id=str(uuid.uuid4()), timestamp=time.time(),
@@ -4335,7 +4342,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     continue
 
                 # If the module is not approved, ignore all other messages
-                if not self.approved_modules.get(spoke_id, False):
+                if not self.approved_modules.get(pk, False):
                     logger.debug(f"Dropping message from unapproved module {spoke_id}")
                     continue
 
@@ -4350,7 +4357,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # waiter (it echoed the nonce we sent it on that socket).
                     if corr_id in self._pending_liveness_nonces:
                         self._pending_liveness_nonces.discard(corr_id)
-                        adapter = self.active_connections.get(spoke_id)
+                        adapter = self.active_connections.get(pk)
                         if adapter is not None and hasattr(adapter, "resolve_pong"):
                             adapter.resolve_pong(corr_id)
                         self.message_count += 1
@@ -4654,13 +4661,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # ConnectionClosed/accept-first exception must not clobber the live
             # replacement connection's just-written CONNECTED telemetry. Same
             # guard as the `finally` cleanup below.
-            if spoke_id and self.active_connections.get(spoke_id) is websocket:
+            if spoke_id and self.active_connections.get(self._primary_key(spoke_id)) is websocket:
                 self._mark_spoke_disconnected(spoke_id)
                 self.record_spoke_event(spoke_id, "connection_closed", "clean websocket close")
         except Exception as e:
             logger.error(f"Error handling connection for {spoke_id}: {e}")
-            if spoke_id and self.active_connections.get(spoke_id) is websocket:
-                self.spoke_telemetry[spoke_id] = {
+            if spoke_id and self.active_connections.get(self._primary_key(spoke_id)) is websocket:
+                pk = self._primary_key(spoke_id)
+                self.spoke_telemetry[pk] = {
                     "last_attempt": time.time(),
                     "status": "ERROR",
                     "error": str(e)
@@ -4675,19 +4683,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # `is websocket` guard below (previously only on active_connections)
             # now covers the sibling state too. Capture ownership BEFORE deleting
             # the entry (the delete would otherwise make the later check False).
-            owns_slot = bool(spoke_id and self.active_connections.get(spoke_id) is websocket)
+            owns_slot = bool(spoke_id and self.active_connections.get(self._primary_key(spoke_id)) is websocket)
             if owns_slot:
-                del self.active_connections[spoke_id]
-                self.active_connection_key_ids.pop(spoke_id, None)
-                self.spoke_module_types.pop(spoke_id, None)
-                self.spoke_parent_map.pop(spoke_id, None)
-                self.netbox_server_agents.discard(spoke_id)
-                self.spoke_authenticated.pop(spoke_id, None)
-                self.spoke_enc_capable.pop(spoke_id, None)
+                pk = self._primary_key(spoke_id)
+                del self.active_connections[pk]
+                self.active_connection_key_ids.pop(pk, None)
+                self.spoke_module_types.pop(pk, None)
+                self.spoke_parent_map.pop(pk, None)
+                self.netbox_server_agents.discard(pk)
+                self.spoke_authenticated.pop(pk, None)
+                self.spoke_enc_capable.pop(pk, None)
                 # Drop the per-connection "never authenticated" diagnosis state
                 # so a reconnect that's still broken re-emits the ERROR once
                 # past the grace window (instead of staying suppressed).
-                self._unauth_warned_spokes.discard(spoke_id)
+                self._unauth_warned_spokes.discard(pk)
                 # Evict every agent hosted by this spoke from the agent→spoke
                 # index. They'll re-index on reconnect (next AGENT_RELAY_UP).
                 # Iterate over a snapshot — mutating the dict during iteration
