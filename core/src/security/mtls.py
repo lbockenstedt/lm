@@ -38,6 +38,12 @@ def set_runtime_enabled(value) -> None:
 def mtls_enabled() -> bool:
     """Master switch. Default OFF. Turn on only when every spoke/agent has the
     wildcard (see the readiness check) so enabling can't orphan a node."""
+    # HARD kill-switch — wins over the runtime override AND the env master switch.
+    # Lets an operator force mTLS fully OFF from the systemd env when the WebUI is
+    # locked out (e.g. strict client-cert auth armed the unified :443 socket)
+    # WITHOUT editing the Fernet-encrypted hub state or reaching the WebUI knob.
+    if str(os.getenv("LM_MTLS_DISABLE", "")).strip().lower() in ("1", "true", "yes", "on"):
+        return False
     if _runtime_enabled is not None:
         return _runtime_enabled
     return str(os.getenv("LM_MTLS_ENABLED", "")).strip().lower() in ("1", "true", "yes", "on")
@@ -73,11 +79,34 @@ def client_context(is_wss: bool):
         return ssl._create_unverified_context()
 
 
+def server_verify_mode():
+    """Client-cert verify mode for a server listener when mTLS is on.
+
+    PERMISSIVE by default (``CERT_OPTIONAL``): the listener REQUESTS a client
+    cert and VERIFIES it against the CA when a peer presents one (spokes/agents
+    present the LE wildcard → authenticated), but does NOT reject a peer that
+    presents none. This is deliberate — the unified :443 socket also serves the
+    browser WebUI, and browsers have no client cert; permissive keeps them in
+    FALLBACK (they still connect) so enabling mTLS can never lock the WebUI out.
+    It also lets the agent cert self-heal fallback (a cert-refresh reconnect that
+    presents no client cert) reach the spoke's custodian. mTLS is an EXTRA layer
+    here, not a gate; the spoke/agent still use a cert whenever one is available.
+
+    STRICT (``CERT_REQUIRED``) is opt-in via ``LM_MTLS_STRICT`` — turn it on ONLY
+    for a dedicated, non-WebUI listener (a separate spoke-only port), because on
+    a shared socket it locks out every cert-less browser/fallback."""
+    if str(os.getenv("LM_MTLS_STRICT", "")).strip().lower() in ("1", "true", "yes", "on"):
+        return ssl.CERT_REQUIRED
+    return ssl.CERT_OPTIONAL
+
+
 def apply_server_client_auth(ctx: ssl.SSLContext):
-    """Arm a server SSL context (hub WS, spoke /ws/agent) to require+verify a
-    client cert — ONLY when mTLS is enabled and a CA is configured. Default:
-    leaves the context as-is (no client-cert requirement). Call after the server
-    context loads its own cert/key."""
+    """Arm a server SSL context (hub WS, spoke /ws/agent) to verify a client
+    cert — ONLY when mTLS is enabled and a CA is configured. PERMISSIVE by
+    default (verify-if-presented, fall back otherwise; see server_verify_mode);
+    strict is opt-in via LM_MTLS_STRICT. Default (mTLS off): leaves the context
+    as-is (no client-cert request). Call after the server context loads its
+    own cert/key."""
     if ctx is None or not mtls_enabled():
         return ctx
     ca, _cert, _key = _paths()
@@ -85,7 +114,7 @@ def apply_server_client_auth(ctx: ssl.SSLContext):
         return ctx
     try:
         ctx.load_verify_locations(cafile=ca)
-        ctx.verify_mode = ssl.CERT_REQUIRED
+        ctx.verify_mode = server_verify_mode()
     except Exception:  # noqa: BLE001 - don't brick the listener
         pass
     return ctx
