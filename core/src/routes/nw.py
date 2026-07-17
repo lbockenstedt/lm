@@ -349,7 +349,7 @@ def register(app, hub, ctx):
             netbox_pushed = False
             if new_dev.get("source") != "netbox":
                 try:
-                    push, _errs = await hub.push_nw_device_inventory(new_dev, {}, [])
+                    push, _errs, _slug = await hub.push_nw_device_inventory(new_dev, {}, [])
                     netbox_pushed = str((push or {}).get("status", "")).upper() in ("SUCCESS", "PARTIAL")
                 except Exception as e:
                     logger.debug("add_nw_device NetBox write-back skipped: %s", e)

@@ -401,7 +401,7 @@ class NwDiscoverySyncMixin:
     async def push_nw_device_inventory(self, device_cfg: Dict[str, Any],
                                        device_info: Dict[str, Any],
                                        interfaces: List[Dict[str, Any]]
-                                       ) -> "tuple[Dict[str, Any], List[str]]":
+                                       ) -> "tuple[Dict[str, Any], List[str], str]":
         """Push one nw device + its interfaces to NetBox as a dcim.device
         inventory record from **already-gathered** poll data (no re-poll).
 
@@ -409,7 +409,9 @@ class NwDiscoverySyncMixin:
         auto-poll (NW_POLL_RESULT handler) so a device's inventory syncs to
         NetBox on its own ``poll_interval`` cadence. Tenant is attributed by the
         device's mgmt-address prefix containment. Returns
-        ``(netbox_push_summary, errors)``; best-effort — never raises.
+        ``(netbox_push_summary, errors, tenant_slug)`` — the resolved slug is
+        threaded back so callers (poll_nw_device) can report it without
+        re-attributing; best-effort — never raises.
         """
         errors: List[str] = []
         device_info = device_info or {}
@@ -433,7 +435,7 @@ class NwDiscoverySyncMixin:
         netbox = self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE)
         if not netbox:
             errors.append("NetBox spoke not connected — poll only (no push)")
-            return {}, errors
+            return {}, errors, tenant_slug
 
         payload = {
             "device": {
@@ -465,10 +467,10 @@ class NwDiscoverySyncMixin:
             }
             if netbox_push["status"] == "ERROR" or netbox_push["errors"]:
                 errors.append(f"netbox: {netbox_push['message'] or 'error'}")
-            return netbox_push, errors
+            return netbox_push, errors, tenant_slug
         except Exception as e:
             errors.append(f"netbox push: {e}")
-            return {"status": "ERROR", "message": str(e)}, errors
+            return {"status": "ERROR", "message": str(e)}, errors, tenant_slug
 
     async def apply_nw_auto_poll(self, device_id: str,
                                  pdata: Dict[str, Any]) -> None:
@@ -491,7 +493,7 @@ class NwDiscoverySyncMixin:
         if not device_cfg:
             return
         try:
-            _push, errs = await self.push_nw_device_inventory(
+            _push, errs, _slug = await self.push_nw_device_inventory(
                 device_cfg, pdata.get("device_info") or {},
                 pdata.get("interfaces") or [])
             if errs:
@@ -567,8 +569,9 @@ class NwDiscoverySyncMixin:
             errors.extend(poll_errors)
 
         # 2+3) Attribute tenant + push the device inventory to NetBox (shared
-        # with the spoke-driven auto-poll via push_nw_device_inventory).
-        netbox_push, push_errors = await self.push_nw_device_inventory(
+        # with the spoke-driven auto-poll via push_nw_device_inventory, which
+        # also returns the resolved tenant_slug for the poll report).
+        netbox_push, push_errors, tenant_slug = await self.push_nw_device_inventory(
             device_cfg, device_info, interfaces)
         errors.extend(push_errors)
 
