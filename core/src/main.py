@@ -63,6 +63,7 @@ from simulations.broadcaster import SimulationsBroadcaster
 from simulations.store import SimulationsStore
 from simulations.central_hub_poller import CentralHubPoller
 from security.auth_manager import AuthManager, LDAPAuthProvider
+from security.threat_monitor import ThreatMonitor
 from api import (build_server, _refresh_module_all_tenants,
                  _invalidate_tenant_module, _fetch_module)
 from update_pipeline import UpdatePipelineMixin
@@ -899,6 +900,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Simulations module: tenant-scoped browser broadcast + slim cs-config store.
         self.simulations_broadcaster = SimulationsBroadcaster()
         self.simulations_store = SimulationsStore(self.state.data_dir)
+        # API threat monitor: brute-force / faked-credential detection, security
+        # audit log, and (opt-in) Azure NSG deny-rule auto-block.
+        self.threat_monitor = ThreatMonitor(self)
         # Hub-local Proxmox template-backup repository (vzdump archives + metadata
         # on the hub's own disk). Populated by a Global-Admin-triggered backup
         # that the owning node's agent streams up. See routes/templates.py.
@@ -6842,6 +6846,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         coalesce_drain_task = asyncio.create_task(self.run_coalesce_drain_loop())
         opnsense_poll_task = asyncio.create_task(self.run_opnsense_polling_loop())
         rotation_task = asyncio.create_task(self.run_key_rotation_loop())
+        threat_sweep_task = asyncio.create_task(self.run_threat_sweep_loop())
         tenant_sync_task = asyncio.create_task(self.run_tenant_sync_loop())
         # NetBox → CPPM endpoint sync: pulls each tenant's endpoints from the
         # NetBox spoke and pushes them to the CPPM (ClearPass) spoke so
@@ -7060,6 +7065,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if not getattr(self, "cs_bridge", None):
             self.cs_bridge = CSBridgePoller(self)
         await self.cs_bridge.run()
+
+    async def run_threat_sweep_loop(self):
+        """Every 60s: expire TTL blocks in the threat monitor and reconcile the
+        Azure NSG deny rule with the current blocked-IP set (a no-op when nothing
+        changed / auto-block is off). Boot re-pushes once so Azure matches state."""
+        while True:
+            try:
+                self.threat_monitor.sweep()
+                await self.threat_monitor.reconcile_nsg()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("threat sweep loop: %s", e)
+            await asyncio.sleep(60)
 
     async def run_retry_loop(self):
         class ConnectionMap(dict):

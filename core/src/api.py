@@ -584,6 +584,10 @@ def _login_fail(hub, user_id: str, ip: str) -> int:
         rec["locked_until"] = now + growth
     _login_attempts[user_id] = rec
     _save_login_attempts(hub)
+    try:
+        hub.threat_monitor.record_failure(ip, "login", username=user_id)
+    except Exception:  # noqa: BLE001 - the monitor must never break login handling
+        pass
     return max(0, int(_math.ceil(rec.get("locked_until", 0) - now)))
 
 
@@ -599,6 +603,11 @@ def _login_success(hub, user_id: str, ip: str = None) -> None:
         _login_ip_attempts.pop(ip, None)
     if changed:
         _save_login_attempts(hub)
+    try:
+        if ip:
+            hub.threat_monitor.record_success(ip)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _save_sessions(hub) -> None:
@@ -1158,6 +1167,15 @@ def create_app(hub):
 
         sess = _session_user(request)
         if not sess:
+            # A present-but-invalid lm_session cookie is a forged/tampered
+            # credential ("faked key") → feed the threat monitor. A MISSING
+            # cookie is just an unauthenticated request and is NOT counted (so
+            # ordinary logged-out page loads don't accrue toward a block).
+            if request.cookies.get("lm_session"):
+                try:
+                    hub.threat_monitor.record_failure(_client_ip(request), "session", detail=path)
+                except Exception:  # noqa: BLE001
+                    pass
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
         # Touch the session's last_seen so the idle-timeout window (access.py)
@@ -1664,8 +1682,9 @@ def create_app(hub):
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
         setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes, notifications as notifications_routes, collab,
-    hub_watchdog as hub_watchdog_routes, netbox_sso as netbox_sso_routes,
+    hub_watchdog as hub_watchdog_routes, netbox_sso as netbox_sso_routes, security as security_routes,
     )
+    security_routes.register(app, hub, ctx)
     setup.register(app, hub, ctx)
     firewall.register(app, hub, ctx)
     nw.register(app, hub, ctx)
