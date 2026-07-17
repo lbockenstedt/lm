@@ -184,6 +184,13 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                     entry.update(status="SUCCESS",
                                  message=rret.get("message") or "installed")
                     logger.info("[cert] %s → %s: installed — %s", domain, tgt_label, entry["message"])
+                elif isinstance(rret, dict) and rret.get("status") == "DEFERRED":
+                    # Target's agent(s) offline — not a failure: the sweep retries
+                    # (last_status != SUCCESS re-attempts) and it installs on
+                    # reconnect. Surfaced as DEFERRED so the UI doesn't cry FAILED.
+                    entry.update(status="DEFERRED",
+                                 message=rret.get("message") or "deferred — target offline, retries on reconnect")
+                    logger.info("[cert] %s → %s: deferred — %s", domain, tgt_label, entry["message"])
                 else:
                     entry.update(status="ERROR",
                                  message=(rret.get("message") if isinstance(rret, dict)
@@ -589,6 +596,13 @@ async def distribute_wildcard_to_all_spokes(
                 push_state[f"{domain}|{sid}"] = cur_hash
             logger.info("[cert] wildcard %s → %s/%s: installed — %s",
                          domain, mt, sid, entry["message"])
+        elif isinstance(rret, dict) and rret.get("status") == "DEFERRED":
+            # Target's agent(s) offline — deferred, not failed; retried next sweep
+            # (hash NOT stamped, so it re-attempts) and installs on reconnect.
+            entry.update(status="DEFERRED",
+                         message=rret.get("message") or "deferred — target offline, retries on reconnect")
+            logger.info("[cert] wildcard %s → %s/%s: deferred — %s",
+                        domain, mt, sid, entry["message"])
         else:
             entry.update(status="ERROR",
                          message=(rret.get("message") if isinstance(rret, dict)

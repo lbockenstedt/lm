@@ -15956,11 +15956,13 @@ async function leDistributeNow() {
         if (dist.length) {
             const okN = dist.filter(d => d.status === 'SUCCESS').length;
             const skipN = dist.filter(d => d.skipped || d.status === 'SKIPPED').length;
+            const defN = dist.filter(d => d.status === 'DEFERRED').length;
             const failN = dist.filter(d => d.status === 'ERROR').length;
-            failed = failN > 0;
+            failed = failN > 0;  // deferred (offline, retries on reconnect) is NOT a failure
             const firstErr = dist.find(d => d.status === 'ERROR');
             msg = ` · ${okN} OK` +
                   (skipN ? ` · ${skipN} skipped` : '') +
+                  (defN ? ` · ${defN} deferred` : '') +
                   (failN ? ` — ${failN} FAILED` + (firstErr && firstErr.message ? `: ${firstErr.message}` : '') : '');
         } else {
             msg = ' · no certs to distribute';
