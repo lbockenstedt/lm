@@ -44,6 +44,18 @@ It owns the state that ties the lab together — which spokes/agents exist and w
 
 `install_all.sh`: `--reinstall`, `--reset-secrets`, `--reset-users`, `--exclude <csv>`, `--tls-verify` (optional `--tls-ca-cert <path>`; defaults CA to the hub's own `$TLS_CERT`). `install_menu.sh`: top menu `1) Hub` (spoke checklist → `install_all.sh --exclude …`) or `2) Generic agent` (→ `agent/install_agent.sh`). Env `LM_BRANCH` (default `main`).
 
+## Mutual TLS (mTLS)
+
+mTLS (mutual client-cert verification on the hub↔spoke↔agent legs) is **off by default and intentionally optional** — it cannot be the fleet's initial state.
+
+**Why it can't be on by default (chicken-and-egg).** mTLS requires the LE wildcard certificate + its CA bundle present on the hub *and* on every spoke. Spokes receive those materials *through their connection to the hub* (`SPOKE_SET_MTLS_MATERIALS`, brokered by the hub from the `le` spoke). So the fleet must first come up under plain TLS, the hub distributes the wildcard + CA, and only then can mTLS be switched on. There is no way to bootstrap the fleet already pinned to mTLS — the first connection has to succeed without it.
+
+**Risk of enabling too early.** If `mtls_enabled` is flipped on before every connected spoke holds the wildcard + CA, that spoke can no longer authenticate to the hub and is **orphaned** — and because it can't reach the hub, it can't be repaired remotely (manual on-box file placement / re-onboard). The per-spoke readiness view (`/setup/mtls-readiness`, rendered in the WebUI card) exists to prevent this: enable only when the hub + every connected spoke is green. **Auto-provision** (`global_config.mtls.auto_provision`) automates the whole sequence — distribute materials, wait for fleet-green, then enable — and is the recommended path.
+
+**This does not replace `LM_HUB_TLS_VERIFY`.** mTLS authenticates fleet members to each other once on. `LM_HUB_TLS_VERIFY` (default off) is the spoke verifying the *hub's* TLS cert on the `wss://` dial — a separate, earlier hop. Enabling mTLS without also setting `LM_HUB_TLS_VERIFY=1` (or serving a publicly-trusted cert) leaves the first auth frame exposed to an on-path attacker. For a full close, both must be on: materials everywhere *and* hub-cert verification.
+
+**Knobs.** `LM_MTLS_ENABLED` (master switch), `LM_MTLS_CA` / `LM_MTLS_CLIENT_CERT` / `LM_MTLS_CLIENT_KEY` (spoke materials — written by the hub under auto-provision, runtime registry takes precedence over env), `LM_TLS_CERT` / `LM_TLS_KEY` (hub server cert = the wildcard), `LM_HUB_TLS_VERIFY` / `LM_HUB_CA_CERT` (spoke-side hub-cert verify). See [environment-variables.md](environment-variables.md).
+
 ## Key components (core/src/)
 
 - **`main.py::LabManagerHub`** — the hub object. Mixins: `UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SpokeAlertMixin, RepoSyncMixin`. Connection handshake (`handle_connection` — spoke sends `{spoke_id, secret, module_type, onboarding_psk, tenant_id_hint, install_uuid, hostname}`; hub sends `HUB_VERIFIED` signed challenge; spoke replies `HUB_OK`). `_install_active_connection`/`_evict_spoke`/`send_to_spoke`/`send_to_agent`/`request_response`/`send_to_spoke_command`. Identity reconciliation (`_rebuild_install_uuid_index`, `_reconcile_spoke_identity`, `_reconcile_agent_identity`). Background loops: retry, state persistence, repo sync, mps, opnsense polling, key rotation, tenant sync, endpoint sync, vm sync, fw-discovery sync, nw-discovery sync, realtime NAC, staleness sweep, pxmx diag, hub heartbeat, spoke recovery, spoke alert, cs bridge, cert distribution. mDNS broadcast (`_start_mdns_broadcast`).

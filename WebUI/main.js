@@ -3825,7 +3825,9 @@ function _renderSettingsSection(subMenu) {
                 </div>
                 <div class="${card} p-6">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Mutual TLS (Hub ⇄ Spoke ⇄ Agent)</h3>
-                    <p class="text-xs text-slate-400 mb-3">Every leg is TLS-encrypted. Mutual authentication (client-cert verification) is <b>off by default</b> — enable it only once the LE wildcard is on the hub + all spokes, so no spoke gets orphaned.</p>
+                    <p class="text-xs text-slate-400 mb-3">Every leg is TLS-encrypted. Mutual authentication (client-cert verification) is <b>off by default</b>.</p>
+                    <p class="text-xs text-slate-400 mb-3"><b>Why optional (chicken-and-egg):</b> mTLS needs the LE wildcard + CA on the hub <i>and</i> on every spoke, but spokes receive those materials <i>through</i> their hub connection. The fleet must first come up without mTLS, the hub distributes the wildcard + CA, then mTLS can be switched on — there's no way to start already pinned to mTLS.</p>
+                    <p class="text-xs text-amber-600 mb-3"><b>Don't enable too early:</b> a spoke that doesn't yet hold the wildcard + CA can't authenticate and is <b>orphaned</b> — and can't be fixed through the hub (manual on-box recovery). Use <b>Auto-provision</b> (or wait for every per-spoke dot below to turn green) before flipping Enable. Enabling mTLS also doesn't by itself verify the hub's cert — set <b>LM_HUB_TLS_VERIFY=1</b> (or serve a publicly-trusted cert) to close the dial-time hop too.</p>
                     <div id="mtls-readiness" class="flex items-center gap-3 mb-3 text-sm text-slate-500">Checking readiness…</div>
                     <div id="mtls-spokes" class="mb-3 hidden"></div>
                     <div class="flex items-center gap-3 mb-3 pb-3 border-b border-slate-100">

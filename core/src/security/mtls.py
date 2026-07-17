@@ -10,6 +10,23 @@ Activation flips two things with zero code change:
   * clients verify the server against the CA and present a client cert;
   * servers require + verify a client cert.
 
+Why this is OFF by default and intentionally optional (chicken-and-egg):
+mTLS needs the LE wildcard + its CA bundle present on the hub AND on every
+spoke, but spokes receive those materials THROUGH their connection to the hub
+(``SPOKE_SET_MTLS_MATERIALS``, brokered from the ``le`` spoke). The fleet
+therefore has to come up first under plain TLS, the hub distributes the
+wildcard + CA, and only then can mTLS be switched on — there is no way to
+bootstrap the fleet already pinned to mTLS (the first connection must succeed
+without it). Do NOT enable mTLS before every connected spoke holds the
+materials: a spoke without the wildcard + CA can no longer authenticate and is
+orphaned, and because it can't reach the hub it can't be fixed remotely
+(manual on-box recovery). Use Auto-provision (``global_config.mtls.auto_provision``)
+or wait for per-spoke readiness green (``/setup/mtls-readiness``) before
+flipping ``LM_MTLS_ENABLED``. mTLS authenticates fleet members to each other
+once on; it does NOT replace ``LM_HUB_TLS_VERIFY`` (spoke verifying the hub's
+cert on the wss dial) — for a full close both must be on: materials everywhere
+AND hub-cert verification.
+
 Env knobs (all optional; the runtime registry set by distribution takes
 precedence over env for the material paths — see set_runtime_materials):
   LM_MTLS_ENABLED=1        master switch (default off)
