@@ -64,6 +64,7 @@ from simulations.store import SimulationsStore
 from simulations.central_hub_poller import CentralHubPoller
 from security.auth_manager import AuthManager, LDAPAuthProvider
 from security.threat_monitor import ThreatMonitor
+from alert_engine import AlertEngine, run_alert_loop
 from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
                                    encryption_enabled, is_encrypted, wrap)
 from cryptography.exceptions import InvalidTag
@@ -920,6 +921,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # API threat monitor: brute-force / faked-credential detection, security
         # audit log, and (opt-in) Azure NSG deny-rule auto-block.
         self.threat_monitor = ThreatMonitor(self)
+        # Realtime alert engine (edge-triggered per-tenant alert-rule routing).
+        self.alert_engine = AlertEngine(self)
         # Hub-local Proxmox template-backup repository (vzdump archives + metadata
         # on the hub's own disk). Populated by a Global-Admin-triggered backup
         # that the owning node's agent streams up. See routes/templates.py.
@@ -6984,6 +6987,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         opnsense_poll_task = asyncio.create_task(self.run_opnsense_polling_loop())
         rotation_task = asyncio.create_task(self.run_key_rotation_loop())
         threat_sweep_task = asyncio.create_task(self.run_threat_sweep_loop())
+        alert_engine_task = asyncio.create_task(run_alert_loop(self))
         tenant_sync_task = asyncio.create_task(self.run_tenant_sync_loop())
         # NetBox → CPPM endpoint sync: pulls each tenant's endpoints from the
         # NetBox spoke and pushes them to the CPPM (ClearPass) spoke so

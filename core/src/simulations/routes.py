@@ -2485,6 +2485,73 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             raise HTTPException(status_code=400, detail=f"Send failed: {exc}")
         return {"sent": True, "to": rep.get("recipients") or []}
 
+    # ── realtime alert rules (per-tenant; the AlertEngine matches on these) ──
+    from alert_engine import SOURCES as _ALERT_SOURCES
+
+    def _clean_rule(body, existing=None):
+        src = str(body.get("source") or "")
+        src = src if src in _ALERT_SOURCES else _ALERT_SOURCES[0]
+        return {
+            "id": (existing or {}).get("id") or _uuid.uuid4().hex[:12],
+            "name": (str(body.get("name") or "").strip() or src)[:80],
+            "source": src,
+            "recipients": [str(r).strip() for r in (body.get("recipients") or []) if str(r).strip()][:20],
+            "enabled": bool(body.get("enabled", True)),
+        }
+
+    @app.get("/api/alerts/rules")
+    async def list_alert_rules(tenant_id: str = Depends(get_tenant_id)):
+        return {"rules": await store.get_alert_rules(tenant_id), "sources": list(_ALERT_SOURCES)}
+
+    @app.post("/api/alerts/rules")
+    async def create_alert_rule(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        body = await request.json()
+        rules = await store.get_alert_rules(tenant_id)
+        rule = _clean_rule(body if isinstance(body, dict) else {})
+        rules.append(rule)
+        await store.set_alert_rules(tenant_id, rules)
+        return {"saved": True, "rule": rule}
+
+    @app.put("/api/alerts/rules/{rid}")
+    async def update_alert_rule(rid: str, request: Request, tenant_id: str = Depends(get_tenant_id)):
+        body = await request.json()
+        rules = await store.get_alert_rules(tenant_id)
+        for i, r in enumerate(rules):
+            if r.get("id") == rid:
+                rules[i] = _clean_rule(body if isinstance(body, dict) else {}, r)
+                await store.set_alert_rules(tenant_id, rules)
+                return {"saved": True, "rule": rules[i]}
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    @app.delete("/api/alerts/rules/{rid}")
+    async def delete_alert_rule(rid: str, tenant_id: str = Depends(get_tenant_id)):
+        rules = await store.get_alert_rules(tenant_id)
+        keep = [r for r in rules if r.get("id") != rid]
+        removed = len(keep) != len(rules)
+        if removed:
+            await store.set_alert_rules(tenant_id, keep)
+        return {"removed": removed}
+
+    @app.post("/api/alerts/rules/{rid}/test")
+    async def test_alert_rule(rid: str, tenant_id: str = Depends(get_tenant_id)):
+        rule = next((r for r in await store.get_alert_rules(tenant_id) if r.get("id") == rid), None)
+        if not rule:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        recips = rule.get("recipients") or []
+        if not recips:
+            raise HTTPException(status_code=400, detail="This rule has no recipients")
+        import notifications as _n
+        _src = str(rule.get("source") or "").replace("<", "").replace(">", "")
+        _tid = str(tenant_id).replace("<", "").replace(">", "")
+        ok = await _n.send_email(
+            hub, f"[LM TEST] alert rule '{rule.get('name')}'",
+            f"Test alert for source '{_src}' (tenant {_tid}).",
+            to_emails=recips,
+            html=f"<p>Test alert for <b>{_src}</b> (tenant {_tid}).</p>")
+        if not ok:
+            raise HTTPException(status_code=400, detail="Send failed — check Setup → Notifications")
+        return {"sent": True, "to": recips}
+
     # ── hub tenant processing-modes (literal "hub" first segment) ──────────
     @app.patch("/sim/api/hub/tenants/{tenant}/processing-modes")
     async def set_processing_mode(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):

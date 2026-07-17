@@ -3289,10 +3289,10 @@ function _viewTemplate(viewId) {
         case 'reports':
             return `<div class="space-y-4">
   <div>
-    <h2 class="text-xl font-bold text-slate-800">Reports</h2>
-    <p class="text-sm text-slate-500">Tenant-scoped health reports — schedule the Dashboard Checks &amp; Client Count out by email.</p>
+    <h2 class="text-xl font-bold text-slate-800">Reports &amp; Alerts</h2>
+    <p class="text-sm text-slate-500">Scheduled email reports (per-tenant dashboard digests) and realtime alert rules (breach + recovery), delivered via Setup → Notifications.</p>
   </div>
-  <div id="reports-content" class="${card}"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
+  <div id="reports-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
 
         case 'security':
@@ -3342,7 +3342,90 @@ async function loadReportsData() {
         <button onclick="editReport('')" class="shrink-0 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold">+ Add report</button>
       </div>
       <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-400"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Tenant</th><th class="px-3 py-1 text-left">Sections</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">Schedule</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-    </div>`;
+    </div>
+    <div id="alerts-content" class="hpe-card rounded-lg p-5 shadow-sm mt-4"><p class="text-sm text-slate-400 italic">Loading alert rules…</p></div>`;
+    loadAlertRules();
+}
+
+// ── Realtime Alert Rules (per-tenant; edge-triggered breach + recovery) ──────
+async function loadAlertRules() {
+    const el = document.getElementById('alerts-content');
+    if (!el) return;
+    let d = {};
+    try {
+        const r = await setupFetch('/api/alerts/rules?tenant=' + encodeURIComponent(currentTenant || 'default'));
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ('HTTP ' + r.status));
+        d = await r.json();
+    } catch (e) { el.innerHTML = `<p class="text-sm text-red-500">Could not load alert rules: ${escapeHtml(e.message)}</p>`; return; }
+    window._alertSources = d.sources || [];
+    window._alertRulesCache = d.rules || [];
+    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline' };
+    const rules = d.rules || [];
+    const rows = rules.length ? rules.map(r => `<tr class="border-b border-slate-100">
+        <td class="px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(r.name || '')}</span></td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml(SRCL[r.source] || r.source || '')}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml((r.recipients || []).join(', ')) || '—'}</td>
+        <td class="px-3 py-2">${r.enabled ? '<span class="text-green-600 text-xs font-bold">on</span>' : '<span class="text-slate-400 text-xs">off</span>'}</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap"><button onclick="testAlertRule('${r.id}')" class="text-xs text-slate-500 hover:text-slate-700 mr-2">Test</button><button onclick="editAlertRule('${r.id}')" class="text-xs text-[#01A982] hover:underline mr-2">Edit</button><button onclick="deleteAlertRule('${r.id}')" class="text-xs text-red-500 hover:text-red-700">Delete</button></td></tr>`).join('') : '<tr><td colspan="5" class="px-3 py-4 text-slate-400 italic">No alert rules — click "Add alert".</td></tr>';
+    el.innerHTML = `
+      <div class="flex items-center justify-between mb-3">
+        <div><p class="text-sm font-bold text-slate-600">Realtime Alert Rules <span class="text-slate-400 font-normal">— ${escapeHtml(currentTenant || 'default')}</span></p><p class="text-xs text-slate-400 max-w-xl">One email when a monitored source breaches, one on recovery. Pick a source + who to notify. Delivered via Setup → Notifications.</p></div>
+        <button onclick="editAlertRule('')" class="shrink-0 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-3 py-1.5 rounded-md text-sm font-bold">+ Add alert</button>
+      </div>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-400"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Source</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function editAlertRule(id) {
+    const existing = (window._alertRulesCache || []).find(r => r.id === id) || null;
+    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline' };
+    const sources = (window._alertSources && window._alertSources.length) ? window._alertSources : ['dashboard_check', 'vm_offline', 'quota_unmet', 'spoke_offline'];
+    document.getElementById('alert-edit-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'alert-edit-modal';
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
+    const srcOpts = sources.map(s => `<option value="${escapeHtml(s)}" ${existing && existing.source === s ? 'selected' : ''}>${escapeHtml(SRCL[s] || s)}</option>`).join('');
+    const inner = document.createElement('div');
+    inner.className = 'bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-3';
+    inner.innerHTML = `
+      <div class="flex justify-between items-start"><p class="font-bold text-base text-[#263040]">${existing ? 'Edit alert rule' : 'New alert rule'}</p><button class="alr-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+      <label class="block text-xs text-slate-500">Name<input id="alr-name" value="${escapeHtml(existing ? existing.name : '')}" placeholder="VM offline → NOC" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <label class="block text-xs text-slate-500">Source (what to watch)<select id="alr-source" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">${srcOpts}</select></label>
+      <label class="block text-xs text-slate-500">Recipients <span class="text-slate-400">(comma-separated)</span><input id="alr-recips" value="${escapeHtml(existing ? (existing.recipients || []).join(', ') : '')}" placeholder="noc@acme.com" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <label class="flex items-center gap-2 text-xs text-slate-600 pt-1"><input type="checkbox" id="alr-enabled" ${!existing || existing.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Enabled</label>
+      <div id="alr-result" class="text-xs"></div>
+      <div class="flex justify-end gap-2 pt-1"><button class="alr-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded text-sm font-bold">Cancel</button><button id="alr-save" class="bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-4 py-2 rounded text-sm font-bold">Save</button></div>`;
+    modal.appendChild(inner);
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    inner.querySelector('.alr-close').addEventListener('click', () => modal.remove());
+    inner.querySelector('.alr-cancel').addEventListener('click', () => modal.remove());
+    document.body.appendChild(modal);
+    document.getElementById('alr-save').addEventListener('click', () => saveAlertRule(existing ? existing.id : ''));
+}
+async function saveAlertRule(id) {
+    const v = x => document.getElementById(x);
+    const resEl = v('alr-result');
+    const body = { name: (v('alr-name').value || '').trim(), source: v('alr-source').value, recipients: (v('alr-recips').value || '').split(',').map(x => x.trim()).filter(Boolean), enabled: v('alr-enabled').checked };
+    const t = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try {
+        const r = await setupFetch((id ? ('/api/alerts/rules/' + id) : '/api/alerts/rules') + '?' + t, { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        document.getElementById('alert-edit-modal')?.remove();
+        showToast('Alert rule saved.', 'success');
+        loadAlertRules();
+    } catch (e) { if (resEl) resEl.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`; }
+}
+async function deleteAlertRule(id) {
+    if (!confirm('Delete this alert rule?')) return;
+    const t = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try { const r = await setupFetch('/api/alerts/rules/' + id + '?' + t, { method: 'DELETE' }); if (!r.ok) throw new Error('HTTP ' + r.status); showToast('Alert rule deleted.', 'success'); loadAlertRules(); }
+    catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
+}
+async function testAlertRule(id) {
+    showToast('Sending test…', 'info');
+    const t = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try { const r = await setupFetch('/api/alerts/rules/' + id + '/test?' + t, { method: 'POST' }); const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); showToast('Test alert sent to ' + ((d.to || []).join(', ') || 'recipients'), 'success'); }
+    catch (e) { showToast('Send failed: ' + e.message, 'error'); }
 }
 
 async function editReport(id) {
