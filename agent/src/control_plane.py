@@ -27,6 +27,29 @@ _LM_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 if _LM_ROOT not in sys.path:
     sys.path.insert(0, _LM_ROOT)
 
+# Runtime dep self-heal BEFORE the heavy core import below. The agent entry
+# imports core.src.messaging.control_plane (→ frame_crypto → cryptography); if a
+# transitive core dep is missing, that import crashes HERE and systemd
+# restart-loops the unit BEFORE any later dep_guard could run (the spoke_client
+# guard only fires once a connection is up — unreachable while the entry import
+# fails). Ensure BOTH the agent's and core's requirements.txt here so a missing
+# dep (e.g. cryptography after the frame_crypto change) self-installs into the
+# venv (sys.executable) on the next restart instead of crash-looping. dep_guard
+# is stdlib-only and core has no heavy __init__, so importing it here is safe
+# even when every third-party dep is absent. Best-effort: never raise — a pip
+# failure surfaces as the real ImportError below, which Restart=always retries.
+try:
+    from core.src.dep_guard import ensure_requirements as _ensure_requirements
+    _agent_req = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "requirements.txt")
+    _ensure_requirements(_agent_req)
+    _core_req = os.path.join(_LM_ROOT, "core", "requirements.txt")
+    if os.path.isfile(_core_req):
+        _ensure_requirements(_core_req)
+    del _ensure_requirements, _agent_req, _core_req
+except Exception:  # noqa: BLE001
+    pass
+
 try:
     from core.src.messaging.control_plane import BaseControlPlane
     from core.src.messaging.agent_hosting import AgentHostingControlPlane
