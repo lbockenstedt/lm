@@ -95,6 +95,23 @@ def _cc_thresholds(central_config):
     return {"warn_pct": warn, "error_pct": err, "die_off_frac": die, "min_peak": peak}
 
 
+_CC_SEVERITY = {"error": 3, "warning": 2, "ok": 1}  # else (no_data/pending/…) -> 0
+
+
+def _cc_worst(*statuses):
+    """Worst (most severe) of a set of client-count statuses — for the overall
+    site check when wired + wireless are tracked separately (error > warning >
+    ok > no_data). So a wired-only or wireless-only die-off reddens the site even
+    if the other half is healthy. All-empty → the first status (usually
+    no_data). Mirror of the cs central_poller copy."""
+    worst, rank = None, -1
+    for s in statuses:
+        r = _CC_SEVERITY.get(s, 0)
+        if r > rank:
+            rank, worst = r, s
+    return worst or "ok"
+
+
 class ClientCountTracker:
     """Per-(scope, wsite) client-count baseline + drop detection, ported
     faithfully from the source webui-spoke (server.py ``_client_count_payload`` /
@@ -127,8 +144,9 @@ class ClientCountTracker:
         self._load()
 
     @staticmethod
-    def _key(scope: str, wsite: str) -> str:
-        return f"{scope}{_CC_KEYSEP}{wsite}"
+    def _key(scope: str, wsite: str, kind: str = "") -> str:
+        base = f"{scope}{_CC_KEYSEP}{wsite}"
+        return f"{base}{_CC_KEYSEP}{kind}" if kind else base
 
     def _load(self) -> None:
         now = time.time()
@@ -168,16 +186,16 @@ class ClientCountTracker:
         except Exception:  # noqa: BLE001 — absent/corrupt → keep synthetic seed
             pass
 
-    def record(self, scope: str, wsite: str, current: int) -> None:
+    def record(self, scope: str, wsite: str, current: int, kind: str = "") -> None:
         """Append a raw sample and trim to the 1-hour window."""
         now = time.time()
-        key = self._key(scope, wsite)
+        key = self._key(scope, wsite, kind)
         samples = self._samples.setdefault(key, [])
         samples.append((now, int(current)))
         cutoff = now - _CC_WINDOW
         self._samples[key] = [s for s in samples if s[0] >= cutoff]
 
-    def entry(self, scope: str, wsite: str, central_site: str, thresholds=None) -> Dict[str, Any]:
+    def entry(self, scope: str, wsite: str, central_site: str, thresholds=None, kind: str = "") -> Dict[str, Any]:
         """Per-site client-count status (doubles as a dashboard CHECK). Tiered:
           - WITHIN-HOUR drop (current vs the last-hour average): WARNING / ERROR
             at ``warn_pct`` / ``error_pct`` below — catches sim-client die-off
@@ -194,7 +212,7 @@ class ClientCountTracker:
         die_off_frac = _t.get("die_off_frac", _CC_MAX_FRACTION)
         min_peak = _t.get("min_peak", _CC_MAX_MIN_PEAK)
         now = time.time()
-        key = self._key(scope, wsite)
+        key = self._key(scope, wsite, kind)
         samples = self._samples.get(key, [])
         hist = self._hourly.get(key, [])
         # Rolling peaks over each window (include the live hour so a fresh spike counts).
@@ -511,19 +529,35 @@ class CentralHubPoller:
                                "message": f"{n} active (as expected)" if n else "Expected error NOT detected"}
             status[wireless_site] = checks
             current = int(data.get("client_count", 0) or 0)
+            wired = int(data.get("wired_clients", 0) or 0)
+            wireless = int(data.get("wireless_clients", 0) or 0)
+            # Track total, wired, and wireless as SEPARATE series so each is
+            # evaluated on its own baseline/peak with the same thresholds — a
+            # wired-only or wireless-only die-off is caught even when the total is
+            # masked (e.g. wired collapses while wireless spikes).
             self._cc.record(tenant_id, wireless_site, current)
+            self._cc.record(tenant_id, wireless_site, wired, kind="wired")
+            self._cc.record(tenant_id, wireless_site, wireless, kind="wireless")
             cc_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh)
-            # Break out wired vs wireless (Central reports both; total = their sum).
-            cc_entry["wired"] = int(data.get("wired_clients", 0) or 0)
-            cc_entry["wireless"] = int(data.get("wireless_clients", 0) or 0)
+            w_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh, kind="wired")
+            wl_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh, kind="wireless")
+            cc_entry["wired"] = wired
+            cc_entry["wireless"] = wireless
+            cc_entry["wired_status"] = w_entry["status"]
+            cc_entry["wired_drop_pct"] = w_entry["drop_pct"]
+            cc_entry["wireless_status"] = wl_entry["status"]
+            cc_entry["wireless_drop_pct"] = wl_entry["drop_pct"]
+            # Overall = worst of total/wired/wireless.
+            cc_entry["status"] = _cc_worst(cc_entry["status"], w_entry["status"], wl_entry["status"])
             client_count_status[wireless_site] = cc_entry
             # Surface the site's client-count monitor as a CHECK so "everything
             # monitored" shows on the dashboard Checks view. Direct (NOT inverted)
-            # semantics: a DROP in clients means the sim clients died -> warning
-            # (>20% below the hour average) / error (>50%). See ClientCountTracker.
+            # semantics: a DROP in clients means the sim clients died -> warning / error.
             checks["Steady Client Count 1hr Average"] = {
                 "status": cc_entry["status"],
-                "message": f"{cc_entry['current']} clients vs {cc_entry['hourly_avg']} hr-avg (down {cc_entry['drop_pct']}%)",
+                "message": (f"{cc_entry['current']} clients vs {cc_entry['hourly_avg']} hr-avg "
+                            f"(down {cc_entry['drop_pct']}%) · wired {wired} (down {w_entry['drop_pct']}%) "
+                            f"· wireless {wireless} (down {wl_entry['drop_pct']}%)"),
             }
             # Per-site minimum client floor. Direct semantics: current below the
             # configured min = error (clients died below an absolute floor, not
