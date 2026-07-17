@@ -1825,7 +1825,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             sess = session_user_fn(request)
             if is_admin_fn(sess):
                 data["_usb_debug"] = [
-                    {"spoke_id": sid, "online": sid in getattr(hub, "active_connections", {}),
+                    {"spoke_id": sid, "online": hub._primary_key(sid) in getattr(hub, "active_connections", {}),
                      **_usb_structure_dump(raw)}
                     for sid, raw in service._spokes_for_tenant(tenant_id)
                 ]
@@ -1844,7 +1844,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             "tenant_id": tenant_id,
             "spokes": [
                 {"spoke_id": sid,
-                 "online": sid in getattr(hub, "active_connections", {}),
+                 "online": hub._primary_key(sid) in getattr(hub, "active_connections", {}),
                  **_usb_structure_dump(raw)}
                 for sid, raw in service._spokes_for_tenant(tenant_id)
             ],
@@ -2026,7 +2026,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             out.append({
                 "spoke_id": sid,
                 "spoke_name": (data or {}).get("spoke_name") or sid,
-                "online": sid in getattr(hub, "active_connections", {}),
+                "online": hub._primary_key(sid) in getattr(hub, "active_connections", {}),
                 "last_seen": (data or {}).get("timestamp"),
                 "telemetry_keys": sorted((data or {}).keys()),
             })
@@ -2085,7 +2085,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             t_id = m.get("tenant_id")
             if not admin:
                 # Non-admin: only their own tenant's approved spokes.
-                if t_id not in user_tenants or not approved.get(sid, False):
+                if t_id not in user_tenants or not approved.get(hub._primary_key(sid), False):
                     continue
             vm_count = None
             cdata = cache.get(sid) or {}
@@ -2108,8 +2108,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "spoke_id": sid,
                 "display_name": m.get("display_name") or sid,
                 "module_type": _spoke_type(sid, live_types, m),
-                "connected": sid in conns,
-                "approved": bool(approved.get(sid, False)),
+                "connected": hub._primary_key(sid) in conns,
+                "approved": bool(approved.get(hub._primary_key(sid), False)),
                 "tenant_id": t_id,
                 "vm_count": vm_count,
             })
@@ -2311,7 +2311,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         action = (body or {}).get("action", "approve")
         approved = action != "unapprove"
         hub.state.register_module(spoke_id, approved=approved)
-        hub.approved_modules[spoke_id] = approved
+        hub.approved_modules[hub._primary_key(spoke_id)] = approved
         if (body or {}).get("tenant_id"):
             hub.state.set_spoke_tenant(spoke_id, body["tenant_id"])
         hub.state.save_state()
@@ -2333,7 +2333,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                               tenant_id: str = Depends(get_tenant_id)):
         _require_admin(request)
         # Close the live WS (if any) then drop registration + metadata + keys.
-        ws = hub.active_connections.get(spoke_id)
+        ws = hub.active_connections.get(hub._primary_key(spoke_id))
         if ws is not None:
             try:
                 await ws.close(code=1008, reason="Removed by admin")
@@ -2344,7 +2344,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception as exc:
             logger.warning("cs_spoke_delete: remove_module %s failed: %s", spoke_id, exc)
         try:
-            hub.key_manager.delete_spoke_key(spoke_id)
+            hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
         except Exception as exc:
             logger.warning("cs_spoke_delete: delete_spoke_key %s failed: %s", spoke_id, exc)
         return {"removed": True, "spoke_id": spoke_id}
@@ -2871,7 +2871,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         spoke_connected = False
         try:
             _sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
-            spoke_connected = bool(_sid and _sid in getattr(hub, "active_connections", {}))
+            spoke_connected = bool(_sid and hub._primary_key(_sid) in getattr(hub, "active_connections", {}))
         except Exception:
             spoke_connected = False
         return {"sections": _parse_ini_sections(raw), "raw": raw,
@@ -3885,7 +3885,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         for sid, meta in md.items():
             if not isinstance(meta, dict) or meta.get("module_type") not in cs_types:
                 continue
-            if not getattr(hub, "approved_modules", {}).get(sid, False):
+            if not getattr(hub, "approved_modules", {}).get(hub._primary_key(sid), False):
                 continue
             tid = meta.get("tenant_id")
             if tid == tenant_id or not tid:

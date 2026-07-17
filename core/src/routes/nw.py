@@ -54,7 +54,7 @@ def register(app, hub, ctx):
 
     async def _nw_push_fleet(hub, spoke_id: str):
         """Re-push the bound device slice to a connected nw spoke."""
-        if not spoke_id or spoke_id not in hub.active_connections:
+        if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return False
         payload = {"devices": _project_nw_devices_for_push(_nw_devices_for_spoke(hub, spoke_id)),
                    "default_poll_interval":
@@ -425,7 +425,7 @@ def register(app, hub, ctx):
         if not payload_fn:
             return False
         spoke_id = instance.get("spoke_id")
-        if not spoke_id or spoke_id not in hub.active_connections:
+        if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return False
         payload = payload_fn(instance)
         if not payload:

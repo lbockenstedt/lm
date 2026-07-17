@@ -478,7 +478,7 @@ def register(app, hub, ctx):
     @app.get("/setup/api-probe")
     async def probe_spoke_api(spoke_id: str, path: str):
         hub = app.state.hub
-        if spoke_id not in hub.active_connections:
+        if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Spoke {spoke_id} not connected")
 
         try:
@@ -550,8 +550,8 @@ def register(app, hub, ctx):
         for sid in known_spokes:
             if sid in relay_ids:
                 continue  # relayed node agent — surfaced via /api/pxmx/agents, not here
-            ws = hub.active_connections.get(sid)
-            telemetry = hub.spoke_telemetry.get(sid, {})
+            ws = hub.active_connections.get(hub._primary_key(sid))
+            telemetry = hub.spoke_telemetry.get(hub._primary_key(sid), {})
             events = hub.get_spoke_events(sid, limit=50)
             log_events = hub.get_spoke_log_events(sid, limit=30)
 
@@ -580,7 +580,7 @@ def register(app, hub, ctx):
             # the spoke has never been stranded/recovered. The WebUI renders a
             # badge + attempt counter + last action/error from this; bugfixer
             # also reads it via GET_SPOKE_STATUS to suppress/escalate.
-            rec = hub.spoke_recovery.get(sid, {}) or {}
+            rec = hub.spoke_recovery.get(hub._primary_key(sid), {}) or {}
 
             # Out-of-contact alert (SpokeAlertMixin) — separate from the realtime
             # heartbeat_status traffic-light above. tier is "warning" (>=5 min out
@@ -588,7 +588,7 @@ def register(app, hub, ctx):
             # contact. Drives the diagnostics badge.
             alert = (getattr(hub, "_spoke_alerts", {}) or {}).get(sid, {}) or {}
 
-            spoke_version = hub.spoke_versions.get(sid, "unknown")
+            spoke_version = hub.spoke_versions.get(hub._primary_key(sid), "unknown")
             # version_skew: True when a connected spoke reports a version that
             # is NOT in the new per-repo ".NN" numbering (e.g. a stale X.Y.Z /
             # v-tag / pre-reset value). Each repo has an INDEPENDENT .NN
@@ -610,19 +610,19 @@ def register(app, hub, ctx):
             # module_type or no local checkout) → version_behind stays False so
             # we NEVER false-positive. This is orthogonal to version_skew, which
             # flags a stale non-.NN reported version. Both mean "out of date".
-            module_type = hub.spoke_module_types.get(sid, "")
+            module_type = hub.spoke_module_types.get(hub._primary_key(sid), "")
             latest_version = hub.latest_version_for_module(module_type)
             version_behind = _version_behind(spoke_version, latest_version)
 
             diagnostics.append({
                 "spoke_id": sid,
                 "display_name": hub.state.get_module_name(sid),
-                "authenticated": sid in hub.active_connections,
+                "authenticated": hub._primary_key(sid) in hub.active_connections,
                 # Grace-based display status: connected now OR seen within the
                 # grace window. The WebUI header dots use this so a transient
                 # stall / brief reconnect doesn't flip a module offline.
                 "in_contact": hub.is_spoke_in_contact(sid),
-                "approved": hub.approved_modules.get(sid, False),
+                "approved": hub.approved_modules.get(hub._primary_key(sid), False),
                 "heartbeat_status": hub.heartbeat.get_status(sid),
                 "heartbeat_age_s": heartbeat_age_s,
                 # Forgiving out-of-contact alert (separate from heartbeat_status):
@@ -705,7 +705,7 @@ def register(app, hub, ctx):
             data = {}
         pause = bool(data.get("pause", False))
 
-        st = hub.spoke_recovery.setdefault(spoke_id, {"attempts": 0})
+        st = hub.spoke_recovery.setdefault(hub._primary_key(spoke_id), {"attempts": 0})
         if pause:
             st["manual_pause"] = True
             st["in_progress"] = False

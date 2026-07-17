@@ -141,7 +141,7 @@ def register(app, hub, ctx):
     async def reset_spoke_secret(spoke_id: str):
         hub = app.state.hub
         try:
-            hub.key_manager.delete_spoke_key(spoke_id)
+            hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
             # Drop any queued/pending messages for this spoke — without its key
             # they can no longer be signed and would retry against the keyless
             # spoke (log flood). Re-onboarding generates a fresh key + pushes.
@@ -208,15 +208,15 @@ def register(app, hub, ctx):
         """
         hub = app.state.hub
         try:
-            ws = hub.active_connections.get(spoke_id)
+            ws = hub.active_connections.get(hub._primary_key(spoke_id))
             if ws is not None:
                 try:
                     await ws.close(code=1008, reason="Removed by admin")
                 except Exception as e:
                     logger.warning(f"Could not close live WS for {spoke_id} during delete: {e}")
-            hub.approved_modules.pop(spoke_id, None)
+            hub.approved_modules.pop(hub._primary_key(spoke_id), None)
             hub.state.remove_module(spoke_id)
-            hub.key_manager.delete_spoke_key(spoke_id)
+            hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
             # Drop queued/pending messages for the deleted spoke — its key is
             # gone, so they can no longer be signed and would retry against the
             # keyless spoke (log flood). The spoke must fully re-onboard to
@@ -269,15 +269,15 @@ def register(app, hub, ctx):
         removed = 0
         for spoke_id in sorted(targets):
             try:
-                ws = hub.active_connections.get(spoke_id)
+                ws = hub.active_connections.get(hub._primary_key(spoke_id))
                 if ws is not None:
                     try:
                         await ws.close(code=1008, reason="load-test purge")
                     except Exception:
                         pass
-                hub.approved_modules.pop(spoke_id, None)
+                hub.approved_modules.pop(hub._primary_key(spoke_id), None)
                 hub.state.remove_module(spoke_id)
-                hub.key_manager.delete_spoke_key(spoke_id)
+                hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
                 await hub.mailbox.clear_spoke(spoke_id)
                 hub._evict_spoke(spoke_id)
                 removed += 1
@@ -292,7 +292,7 @@ def register(app, hub, ctx):
     async def rotate_spoke_secret(spoke_id: str):
         hub = app.state.hub
         try:
-            new_key = hub.key_manager.rotate_key(spoke_id)
+            new_key = hub.key_manager.rotate_key(hub._primary_key(spoke_id))
             return {"status": "ok", "new_secret": new_key.secret}
         except Exception as e:
             logger.exception("rotate_spoke_secret failed")
@@ -336,11 +336,11 @@ def register(app, hub, ctx):
             # Capture the secret the spoke currently holds BEFORE rotating, so
             # the key-delivery push is signed with it — the spoke can't verify a
             # frame signed with the new secret it hasn't installed yet.
-            prev_secret = hub.key_manager.current_session_secret(spoke_id)
-            new_key = hub.key_manager.rotate_key(spoke_id)
+            prev_secret = hub.key_manager.current_session_secret(hub._primary_key(spoke_id))
+            new_key = hub.key_manager.rotate_key(hub._primary_key(spoke_id))
             new_secret = new_key.secret
 
-            spoke_conn = hub.active_connections.get(spoke_id)
+            spoke_conn = hub.active_connections.get(hub._primary_key(spoke_id))
             if spoke_conn:
                 try:
                     result = await hub.request_response(
@@ -423,7 +423,7 @@ def register(app, hub, ctx):
                     agent_cfg_store[agent_id] = entry
                     hub.state.save_state()
 
-            if target_spoke in hub.active_connections:
+            if hub._primary_key(target_spoke) in hub.active_connections:
                 msg = _hub_msg(target_spoke, "SPOKE_RELAY", {
                     "target_agent_id": agent_id,
                     "command": "APPROVAL_SUCCESS",
@@ -461,7 +461,7 @@ def register(app, hub, ctx):
             # read is what lets a disconnected generic agent (module_type
             # "agent") or a role sub-spoke "{base}-{role}" keep its category
             # instead of falling through to "—" or a wrong prefix guess.
-            mt = hub.spoke_module_types.get(sid)
+            mt = hub.spoke_module_types.get(hub._primary_key(sid))
             if mt:
                 return mt
             meta = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
@@ -479,7 +479,7 @@ def register(app, hub, ctx):
             spokes_status.append({
                 "spoke_id": sid,
                 "display_name": module_names.get(sid, sid),
-                "approved": hub.approved_modules.get(sid, False),
+                "approved": hub.approved_modules.get(hub._primary_key(sid), False),
                 "module_type": _module_type_for(sid),
                 # Install-UUID identity tracking: current OS hostname + the latest
                 # unacknowledged rename/hostname-change event (for the UI banner).
@@ -526,14 +526,14 @@ def register(app, hub, ctx):
 
             if action == "unapprove":
                 hub.state.register_module(spoke_id, approved=False)
-                hub.approved_modules[spoke_id] = False
+                hub.approved_modules[hub._primary_key(spoke_id)] = False
                 # An un-approved spoke's session key is no longer valid for
                 # outbound commands; drop queued messages so they don't retry
                 # against it. Re-approval generates a fresh key + pushes.
                 await hub.mailbox.clear_spoke(spoke_id)
             else:
                 hub.state.register_module(spoke_id, approved=True)
-                hub.approved_modules[spoke_id] = True
+                hub.approved_modules[hub._primary_key(spoke_id)] = True
 
             # Spoke→tenant binding (admin assigns at approval time). Omitting
             # tenant_id leaves any existing binding untouched.
@@ -543,13 +543,13 @@ def register(app, hub, ctx):
 
             hub.state.save_state()
 
-            if spoke_id in hub.active_connections:
+            if hub._primary_key(spoke_id) in hub.active_connections:
                 if action != "unapprove":
                     # Generate a session secret for the spoke (idempotent — reuses existing key if present).
                     # Sign the key-delivery push with the secret the spoke currently holds (None = pending,
                     # it accepts anyway) so it can verify and install the new secret.
-                    prev_secret = hub.key_manager.current_session_secret(spoke_id)
-                    session_secret = hub.key_manager.generate_first_secret(spoke_id)
+                    prev_secret = hub.key_manager.current_session_secret(hub._primary_key(spoke_id))
+                    session_secret = hub.key_manager.generate_first_secret(hub._primary_key(spoke_id))
                     key_msg = _hub_msg(spoke_id, "SPOKE_UPDATE_SESSION_KEY", {"secret": session_secret})
                     await hub.send_to_spoke(key_msg, signing_secret=prev_secret)
 
@@ -881,7 +881,7 @@ def register(app, hub, ctx):
                 "id": fw.get("id", "") if isinstance(fw, dict) else "",
                 "name": fw.get("name", fw.get("id", "")) if isinstance(fw, dict) else "",
                 "spoke_id": sid or "",
-                "connected": bool(sid and sid in getattr(hub, "active_connections", {})),
+                "connected": bool(sid and hub._primary_key(sid) in getattr(hub, "active_connections", {})),
             })
         return {"active": active, "sources": sources, "firewalls": firewalls,
                 "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}
@@ -1152,7 +1152,7 @@ def register(app, hub, ctx):
                 "id": d.get("id", "") if isinstance(d, dict) else "",
                 "name": d.get("name", d.get("id", "")) if isinstance(d, dict) else "",
                 "spoke_id": sid or "",
-                "connected": bool(sid and sid in getattr(hub, "active_connections", {})),
+                "connected": bool(sid and hub._primary_key(sid) in getattr(hub, "active_connections", {})),
             })
         return {"active": active, "sources": sources, "devices": devices,
                 "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}

@@ -31,7 +31,11 @@ class _Hub:
     def __init__(self, cache, agent_config, spoke_tenants=None):
         self.simulations_cache = cache
         self.active_connections = {}  # spoke_online reads this; empty = offline is fine
+        self.spoke_id_alias = {}  # Phase 2: _is_online resolves state keys via _primary_key
         self.state = _State(agent_config, spoke_tenants or {})
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
 
 def _run(coro):

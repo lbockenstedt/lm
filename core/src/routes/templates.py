@@ -372,7 +372,7 @@ def register(app, hub, ctx):
 
         for aid, info in (getattr(hub, "agent_info", {}) or {}).items():
             info = info or {}
-            if _match(info.get("hostname")) and info.get("spoke_id") in hub.active_connections:
+            if _match(info.get("hostname")) and hub._primary_key(info.get("spoke_id")) in hub.active_connections:
                 return aid
         return None
 

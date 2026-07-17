@@ -1081,7 +1081,7 @@ async def _fw_alias_map(hub, firewall_id) -> "dict | None":
         if not fw:
             return None
         spoke_id = fw.get("spoke_id")
-        if not spoke_id or spoke_id not in getattr(hub, "active_connections", {}):
+        if not spoke_id or hub._primary_key(spoke_id) not in getattr(hub, "active_connections", {}):
             return None
         now = time.monotonic()
         memo = _FW_ALIAS_MEMO.get((spoke_id, firewall_id))

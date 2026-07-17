@@ -191,7 +191,7 @@ def register(app, hub, ctx):
             hub.state.save_state()
 
             if new_hostname:
-                if spoke_id in hub.active_connections:
+                if hub._primary_key(spoke_id) in hub.active_connections:
                     msg = _hub_msg(spoke_id, "SPOKE_SET_HOSTNAME", {"hostname": new_hostname})
                     await hub.send_to_spoke(msg)
                     hostname_status = "Hostname update triggered."
@@ -460,7 +460,7 @@ def register(app, hub, ctx):
             if not spoke_id:
                 raise HTTPException(status_code=400, detail="Missing spoke_id")
 
-            secret = hub.key_manager.generate_first_secret(spoke_id)
+            secret = hub.key_manager.generate_first_secret(hub._primary_key(spoke_id))
             return {"spoke_id": spoke_id, "secret": secret}
         except HTTPException:
             raise  # 400 must propagate as-is, not be re-wrapped as 500

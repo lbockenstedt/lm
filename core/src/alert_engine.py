@@ -202,7 +202,7 @@ async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set)
             meta = meta or {}
             if (meta.get("tenant_id") or "") not in ("", tenant):
                 continue  # bound to a different tenant
-            mtype = (hub.spoke_module_types.get(sid) or meta.get("module_type") or "").lower()
+            mtype = (hub.spoke_module_types.get(hub._primary_key(sid)) or meta.get("module_type") or "").lower()
             source = "vm_offline" if mtype in _HYPERVISOR_TYPES else "spoke_offline"
             if source not in needed:
                 continue

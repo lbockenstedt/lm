@@ -831,7 +831,7 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
             if not fw:
                 _set_cache_status(tenant_id, cache_key, "error"); return False
             spoke_id = fw.get("spoke_id")
-            if not spoke_id or spoke_id not in hub.active_connections:
+            if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
                 _set_cache_status(tenant_id, cache_key, "error"); return False
             result = await hub.request_response(spoke_id, _FW_CMD_MAP[module_key], {})
         elif module_key == "cppm_sessions":

@@ -119,13 +119,13 @@ def register(app, hub, ctx):
             if not want_all and tid and stid and stid != tid:
                 continue  # bound to another tenant (untagged = shared infra → shown)
             tier = alerts.get(sid, "none")
-            online = sid in connected
+            online = hub._primary_key(sid) in connected
             status = ("red" if (not online or tier == "error")
                       else "yellow" if tier == "warning" else "green")
             items.append({
                 "id": sid,
                 "name": meta.get("display_name") or meta.get("name") or sid,
-                "type": hub.spoke_module_types.get(sid) or meta.get("module_type") or "",
+                "type": hub.spoke_module_types.get(hub._primary_key(sid)) or meta.get("module_type") or "",
                 "role": meta.get("role") or "",
                 "tenant": stid or "",
                 "online": online, "tier": tier, "status": status,

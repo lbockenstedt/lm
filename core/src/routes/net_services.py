@@ -285,7 +285,7 @@ def register(app, hub, ctx):
         except Exception:  # noqa: BLE001
             firewalls = []
         for sid in {fw.get("spoke_id") for fw in firewalls if fw.get("spoke_id")}:
-            if sid not in getattr(hub, "active_connections", {}):
+            if hub._primary_key(sid) not in getattr(hub, "active_connections", {}):
                 continue
             try:
                 fres = await hub.request_response(sid, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=10.0)
@@ -595,7 +595,7 @@ def register(app, hub, ctx):
         nb_servers = set(getattr(hub, "netbox_server_agents", set()))
 
         def _mt(sid):
-            return (hub.spoke_module_types.get(sid)
+            return (hub.spoke_module_types.get(hub._primary_key(sid))
                     or (module_metadata.get(sid, {}) or {}).get("module_type"))
 
         eligible = [{"spoke_id": "hub", "module_type": "hub",
@@ -603,9 +603,9 @@ def register(app, hub, ctx):
         ineligible = []
         for sid in known:
             mt = _mt(sid)
-            connected = sid in hub.active_connections
+            connected = hub._primary_key(sid) in hub.active_connections
             label = module_names.get(sid, sid) or sid
-            is_nb_server = sid in nb_servers
+            is_nb_server = hub._primary_key(sid) in nb_servers
             eff_mt = "netbox-server" if (is_nb_server and mt not in capable) else mt
             eff_capable = (mt in capable) or is_nb_server
             entry = {"spoke_id": sid, "module_type": eff_mt or mt or "—",

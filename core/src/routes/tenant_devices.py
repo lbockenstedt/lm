@@ -98,7 +98,7 @@ def register(app, hub, ctx):
         bound fleet slice; instance → UPDATE_CONFIG(payload_fn(record)); dns/dhcp
         → save-only (no push). Returns True when a message was sent."""
         spoke_id = (record or {}).get("spoke_id")
-        if not spoke_id or spoke_id not in hub.active_connections:
+        if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return False
         mode = prod.get("push")
         if mode == "firewall":
@@ -145,7 +145,7 @@ def register(app, hub, ctx):
     }
 
     def _module_type_for(sid):
-        mt = hub.spoke_module_types.get(sid)
+        mt = hub.spoke_module_types.get(hub._primary_key(sid))
         if mt:
             return mt
         meta = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
@@ -168,7 +168,7 @@ def register(app, hub, ctx):
         names = hub.state.system_state.get("module_names", {}) or {}
         out = []
         for sid in known:
-            if not hub.approved_modules.get(sid, False):
+            if not hub.approved_modules.get(hub._primary_key(sid), False):
                 continue
             if not access.can_bind_spoke(hub, sess, sid):
                 continue
@@ -266,7 +266,7 @@ def register(app, hub, ctx):
             _save(_prod, records)
             # nw: re-push the (now-smaller) fleet so the bound spoke drops it.
             pushed = False
-            if _prod.get("push") == "nw" and spoke_id and spoke_id in hub.active_connections:
+            if _prod.get("push") == "nw" and spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
                 pushed = await _push_record(_prod, {"spoke_id": spoke_id})
             return {"status": "ok", "message": f"{_prod['kind']} deleted.", "pushed": pushed}
 

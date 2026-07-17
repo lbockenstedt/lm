@@ -36,7 +36,7 @@ def register(app, hub, ctx):
             if display_name and not valid_display_name(display_name):
                 raise HTTPException(status_code=400, detail="Invalid display_name")
 
-            if agent_id not in hub.active_connections:
+            if hub._primary_key(agent_id) not in hub.active_connections:
                 raise HTTPException(status_code=503, detail=f"Generic agent {agent_id} not connected")
 
             # Unified model: provisioning a module on an agent = loading its ROLE
@@ -89,7 +89,7 @@ def register(app, hub, ctx):
     async def send_agent_command(spoke_id: str, request: Request):
         """Send any command to a connected generic agent."""
         hub = app.state.hub
-        if spoke_id not in hub.active_connections:
+        if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Agent {spoke_id} not connected")
         # Fail fast on a connected-but-unauthenticated agent (see
         # LabManagerHub.spoke_can_accept_commands). The Load Role modal's
@@ -140,7 +140,7 @@ def register(app, hub, ctx):
         its module_type so hub APIs can route to it.
         """
         hub = app.state.hub
-        if spoke_id not in hub.active_connections:
+        if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Agent {spoke_id} not connected")
         # Fail fast on a connected-but-unauthenticated agent (see
         # LabManagerHub.spoke_can_accept_commands). A protocol-incompatible
@@ -182,7 +182,7 @@ def register(app, hub, ctx):
                         pl = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
                         if isinstance(pl, dict) and pl.get("status") == "SUCCESS" \
                                 and pl.get("morph") is True and pl.get("module_type"):
-                            hub.spoke_module_types[spoke_id] = pl["module_type"]
+                            hub.spoke_module_types[hub._primary_key(spoke_id)] = pl["module_type"]
                             logger.info("Agent %s morphed to module_type %s",
                                         spoke_id, pl["module_type"])
                         results.append({"role": rname,
@@ -214,7 +214,7 @@ def register(app, hub, ctx):
                 if payload.get("morph") is True:
                     new_mtype = payload.get("module_type")
                     if new_mtype:
-                        hub.spoke_module_types[spoke_id] = new_mtype
+                        hub.spoke_module_types[hub._primary_key(spoke_id)] = new_mtype
                         logger.info("Agent %s morphed to module_type %s", spoke_id, new_mtype)
                 else:
                     sub_id = payload.get("sub_spoke_id")
