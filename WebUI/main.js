@@ -3825,7 +3825,7 @@ function _renderSettingsSection(subMenu) {
                 </div>
                 <div class="${card} p-6">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Mutual TLS (Hub ⇄ Spoke ⇄ Agent)</h3>
-                    <p class="text-xs text-slate-400 mb-3">Every leg is TLS-encrypted. Mutual authentication (client-cert verification) is <b>plumbed but off</b> — enable it only once the LE wildcard is on the hub + all spokes, so no spoke gets orphaned.</p>
+                    <p class="text-xs text-slate-400 mb-3">Every leg is TLS-encrypted. Mutual authentication (client-cert verification) is <b>off by default</b> — enable it only once the LE wildcard is on the hub + all spokes, so no spoke gets orphaned.</p>
                     <div id="mtls-readiness" class="flex items-center gap-3 mb-3 text-sm text-slate-500">Checking readiness…</div>
                     <div id="mtls-spokes" class="mb-3 hidden"></div>
                     <div class="flex items-center gap-3 mb-3 pb-3 border-b border-slate-100">
