@@ -455,12 +455,14 @@ async def distribute_mtls_materials_to_all_spokes(
             logger.warning("[mtls] %s → %s/%s: FAILED — %s", domain, mt, sid, msg)
         summary.append(entry)
 
-    # Hub self-install (the wildcard as the hub server cert + the chain as
-    # LM_MTLS_CA). One hub TLS endpoint; identifier "hub".
+    # Hub install: CA-BUNDLE-ONLY. The wildcard is NEVER deployed to the hub as
+    # its server cert (the hub keeps its own cert); the hub only needs the LE
+    # chain as LM_MTLS_CA to verify spoke client certs. ca_only=True → no server-
+    # cert overwrite, no self-restart (was the wildcard-on-hub self-restart loop).
     if include_hub and not hub_current:
         hentry = {"domain": domain, "module_type": "hub", "identifier": "hub", "mtls": True}
         try:
-            hret = await install_on_hub(domain, fullchain, privkey, chain, "hub")
+            hret = await install_on_hub(domain, fullchain, privkey, chain, "hub", ca_only=True)
         except Exception as e:  # never let a self-install crash the fan-out
             hret = {"status": "ERROR", "message": str(e)}
         if isinstance(hret, dict) and hret.get("status") == "SUCCESS":
@@ -519,7 +521,11 @@ async def distribute_wildcard_to_all_spokes(
             continue
         for sid in get_all_by_type(mt):
             spoke_targets.append({"module_type": mt, "identifier": sid, "spoke_id": sid})
-    include_hub = "hub" in capable and install_on_hub is not None
+    # The wildcard is deployed to SPOKES + AGENTS only — the hub keeps its OWN
+    # cert, so it is NEVER a wildcard target (was overwriting hub.crt + self-
+    # restarting). mTLS materials for the hub (the CA bundle) go via the separate
+    # CA-only path in distribute_mtls_materials_to_all_spokes.
+    include_hub = False
 
     if not spoke_targets and not include_hub:
         logger.info("[cert] wildcard %s: no connected cert-capable spokes — nothing to fan out", domain)

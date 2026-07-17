@@ -272,8 +272,14 @@ class HubCertDistributionMixin:
 
     async def _install_cert_on_hub(self, domain: str, fullchain: str,
                                    privkey: str, chain: str,
-                                   identifier: str = "") -> dict:
+                                   identifier: str = "", ca_only: bool = False) -> dict:
         """Install a cert on the HUB ITSELF (module_type == "hub" target).
+
+        ``ca_only=True`` (the mTLS-materials fan-out): install ONLY the mTLS CA
+        bundle so the hub can verify spoke client certs — the WILDCARD is never
+        deployed as the hub's server cert (the hub keeps its own cert), and there
+        is NO self-restart (the CA registers at runtime). This is the fix for the
+        wildcard-on-hub self-restart loop.
 
         Writes fullchain → ``LM_TLS_CERT`` and privkey → ``LM_TLS_KEY`` (the
         paths the hub's uvicorn + WS TLS context already read at startup), then
@@ -302,6 +308,23 @@ class HubCertDistributionMixin:
             return {"status": "ERROR",
                     "message": "hub TLS paths not configured — set LM_TLS_CERT + "
                                "LM_TLS_KEY env on the hub to a writable location"}
+        # CA-bundle-only: the hub keeps its OWN server cert; write only the mTLS
+        # CA bundle (next to LM_TLS_CERT) + register it at runtime. No wildcard
+        # server-cert overwrite, no self-restart → this is what breaks the loop.
+        if ca_only:
+            if not (chain and "BEGIN CERTIFICATE" in chain):
+                return {"status": "SUCCESS", "message": "no CA chain to install — hub unchanged"}
+            ca_path = os.path.join(os.path.dirname(os.path.abspath(cert_path)), "mtls-ca.pem")
+            try:
+                self._atomic_write(ca_path, chain, 0o644)
+                self._register_hub_mtls_ca(ca_path)
+                cert_log.info("[mtls] %s → hub: CA bundle → %s (hub keeps its own cert; no restart)",
+                              domain, ca_path)
+                return {"status": "SUCCESS",
+                        "message": f"mTLS CA bundle → {ca_path} (hub keeps its own cert)"}
+            except Exception as e:  # noqa: BLE001
+                cert_log.warning("[mtls] %s → hub: CA bundle write to %s failed: %s", domain, ca_path, e)
+                return {"status": "ERROR", "message": f"CA bundle write failed: {e}"}
         if not fullchain or not privkey:
             cert_log.warning("[cert] %s → hub: FAILED — missing cert material", domain)
             return {"status": "ERROR", "message": "missing cert material"}
@@ -498,18 +521,15 @@ class HubCertDistributionMixin:
             self.state.system_state["global_config"] = gc
             self.state.save_state()
             _mtls.set_runtime_enabled(True)
-            cert_log.info("[mtls] auto-provision: fleet ready — enabling mTLS "
-                           "(arms on the next restart).")
-            # Schedule the self-restart so uvicorn arms client-cert verification
-            # against the CA. Best-effort, non-blocking (same helper as a cert
-            # install); a missing helper still leaves mTLS enabled for the spoke
-            # client legs on their next reconnect.
-            try:
-                subprocess.Popen(["sudo", "-n", _LM_SELF_RESTART],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception as e:  # noqa: BLE001
-                cert_log.warning("[mtls] auto-enable: scheduled self-restart failed "
-                                  "(%s) — restart lm.service to arm uvicorn.", e)
+            # NO self-restart. mTLS applies to the spoke↔hub / agent↔spoke WS legs
+            # (armed on the spokes' next reconnect); the browser-facing WebUI on the
+            # unified :443 never requires client certs (api.build_server). The old
+            # self-restart here didn't arm anything the WebUI serves and — because
+            # mtls_enabled didn't reliably persist across the restart — re-fired
+            # every distribution cycle, bouncing the hub every ~3 min. The runtime
+            # flag is set now; a natural restart re-applies it from global_config.
+            cert_log.info("[mtls] auto-provision: fleet ready — mTLS enabled "
+                           "(spoke/agent legs arm on reconnect; no hub restart).")
         except Exception as e:  # noqa: BLE001
             cert_log.warning("[mtls] auto-provision: auto-enable failed: %s", e)
 
