@@ -485,6 +485,9 @@ def register(app, hub, ctx):
                 # unacknowledged rename/hostname-change event (for the UI banner).
                 "hostname": meta.get("hostname", ""),
                 "install_uuid": meta.get("install_uuid", ""),
+                # Canonical guid identity (alias of install_uuid; becomes the
+                # primary key in Phase 2). Additive — WebUI ignores until opt-in.
+                "spoke_guid": meta.get("install_uuid", ""),
                 "identity_change": _identity_change_for(hub, sid, meta),
                 "tenant_id": hub.state.get_spoke_tenant(sid) or "",
                 # Whether this spoke's tenant is the shared tenant (visible to

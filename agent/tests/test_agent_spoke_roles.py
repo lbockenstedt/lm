@@ -439,10 +439,17 @@ class _FakeRoleInstance:
         self.config = config
 
 
-def test_role_connection_identity_and_auth_fields():
+def test_role_connection_identity_and_auth_fields(monkeypatch):
     """A RoleConnection speaks as {base}-{role}, claims parent_spoke_id, and
-    sends NO install_uuid (so the clone-rename reconciler won't clobber the
-    base). Its module_type is the role's; secret persistence + updater are no-ops."""
+    derives a deterministic per-role guid (uuid5 from the base install_uuid) —
+    NOT the base's own uuid4, so the clone-rename reconciler won't clobber the
+    base. Its module_type is the role's; secret persistence + updater are no-ops."""
+    import uuid as _uuid
+    BASE = "11111111-1111-1111-1111-111111111111"
+    # Freeze the base install_uuid so the derivation is deterministic regardless
+    # of .env state in the test env.
+    monkeypatch.setattr(cp_module.BaseControlPlane, "_ensure_install_uuid",
+                        lambda self: BASE)
     inst = _FakeRoleInstance("agent-1-network", {})
     conn = cp_module.RoleConnection(
         "network", base_id="agent-1", hub_url="ws://hub:8765",
@@ -450,7 +457,21 @@ def test_role_connection_identity_and_auth_fields():
     assert conn.spoke_id == "agent-1-network"
     assert conn.module_type == "nw"
     assert conn.parent_spoke_id == "agent-1"
-    assert conn.install_uuid == ""               # critical: no install_uuid
+    # Per-role guid: deterministic uuid5 from the base uuid, distinct from the
+    # base's own uuid4 and distinct per role.
+    expected = str(_uuid.uuid5(_uuid.UUID(BASE), "role:network"))
+    assert conn.install_uuid == expected
+    assert conn.install_uuid != BASE
+    assert conn.parent_install_uuid == BASE
+    inst_dns = _FakeRoleInstance("agent-1-dns", {})
+    conn_dns = cp_module.RoleConnection(
+        "dns", base_id="agent-1", hub_url="ws://hub:8765", role_instance=inst_dns)
+    assert conn_dns.install_uuid == str(_uuid.uuid5(_uuid.UUID(BASE), "role:dns"))
+    assert conn_dns.install_uuid != conn.install_uuid      # role-distinct
+    inst_net2 = _FakeRoleInstance("agent-1-network", {})
+    conn_net2 = cp_module.RoleConnection(
+        "network", base_id="agent-1", hub_url="ws://hub:8765", role_instance=inst_net2)
+    assert conn_net2.install_uuid == conn.install_uuid    # deterministic
     assert conn._extra_auth_fields() == {"parent_spoke_id": "agent-1"}
     # Sub-spokes re-provision via parent-auto-approve each boot — persist + the
     # redundant per-role updater are suppressed (base agent handles self-update).

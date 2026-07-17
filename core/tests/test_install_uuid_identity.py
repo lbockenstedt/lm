@@ -330,6 +330,38 @@ def test_unproven_rename_refuses_migration(tmp_path):
 
 
 
+# ── Phase 1: sub-spoke uuid5 guid does not clobber the base ────────────────
+
+def test_sub_spoke_uuid5_guid_does_not_clobber_base(tmp_path):
+    """A sub-spoke now carries a per-role guid (uuid5 derived from the base
+    agent's install uuid, sent by RoleConnection instead of ""). The guid is
+    distinct from the base's uuid4, so the reconciler records it as its OWN
+    install_uuid_index entry — it does NOT rename or clobber the base agent.
+    (Phase 1: sub-spokes carry a guid; the hub still keys state by spoke_id.)"""
+    import uuid as _uuid
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    base_uuid = str(_uuid.uuid4())
+    # Base agent approved + indexed by its own uuid4.
+    state.system_state["approved_modules"]["agent-1"] = True
+    state.system_state["known_modules"].append("agent-1")
+    state.update_module_metadata("agent-1", {"install_uuid": base_uuid,
+                                             "hostname": "agent-1"})
+    hub.install_uuid_index[base_uuid] = "agent-1"
+
+    # Sub-spoke connects with a uuid5 derived from the base uuid (role: network).
+    sub_uuid = str(_uuid.uuid5(_uuid.UUID(base_uuid), "role:network"))
+    assert sub_uuid != base_uuid                  # uuid5 != base uuid4
+    reconcile(hub, "agent-1-network", sub_uuid, "agent-1")
+
+    # Base entry is INTACT (not renamed/clobbered); sub-spoke has its own entry.
+    assert hub.install_uuid_index[base_uuid] == "agent-1"
+    assert hub.install_uuid_index[sub_uuid] == "agent-1-network"
+    assert state.system_state["approved_modules"].get("agent-1") is True
+    # No identity_changed migration fired on the base (it wasn't renamed).
+    assert _events_of(hub, "agent-1", "identity_changed") == []
+
+
 # ── Phase 3: agent reconcile (relay migration) ───────────────────────────────
 
 def test_agent_same_uuid_new_id_migrates_agent_config(tmp_path):

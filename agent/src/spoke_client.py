@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 import ssl as _ssl
 
 import websockets
@@ -53,15 +54,22 @@ class SpokeClient:
     """A generic dumb executor that dials a spoke and runs primitives."""
 
     def __init__(self, agent_id: str, spoke_url: str, secret: str = "",
-                 secret_path: str = ""):
+                 secret_path: str = "", install_uuid_path: str = ""):
         self.agent_id = agent_id
         self.spoke_url = normalize_spoke_url(spoke_url)
         self.secret = secret or ""
         self.secret_path = secret_path or os.path.expanduser("~/.lm-agent-secret")
+        self.install_uuid_path = install_uuid_path or os.path.expanduser(
+            "~/.lm-agent-install-uuid")
         self.signer = MessageSigner(self.secret)
         self.hostname = os.uname().nodename if hasattr(os, "uname") else ""
         self.websocket = None
         self._stop = False
+        # Stable per-install guid (Phase 1): lets the hub address this node
+        # agent by guid, not its observable agent_id/hostname. Minted on first
+        # start, persisted next to the secret (chmod 600); "" on write failure
+        # (legacy — hub treats an absent guid as spoke_id-keyed, no flip).
+        self.install_uuid = self._ensure_install_uuid()
         # Cert self-heal fallback: if an mTLS connect fails (the wildcard cert is
         # expired/broken so verification can't complete), the NEXT attempt drops
         # to the plain PSK-authenticated channel (encrypted, unverified) purely to
@@ -88,6 +96,48 @@ class SpokeClient:
             os.chmod(self.secret_path, 0o600)
         except Exception as e:  # noqa: BLE001
             logger.warning("could not persist provisioned secret: %s", e)
+
+    def _ensure_install_uuid(self) -> str:
+        """Stable per-install guid for a device-mode node agent — minted on
+        first start and persisted next to the agent secret (chmod 600), so a
+        process restart reuses the SAME guid and the hub can address it by guid
+        instead of its observable agent_id/hostname. Re-imaging clears it (a
+        fresh identity), mirroring spokes' INSTALL_UUID semantics. Returns ''
+        on write failure so the identity never flips per boot (hub treats ''
+        as legacy spoke_id-keyed)."""
+        path = self.install_uuid_path
+        try:
+            if os.path.exists(path):
+                with open(path) as f:
+                    val = f.read().strip()
+                if val:
+                    return val
+            new_uuid = str(uuid.uuid4())
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(new_uuid)
+            os.replace(tmp, path)
+            try:
+                os.chmod(path, 0o600)
+            except Exception:  # noqa: BLE001
+                pass
+            return new_uuid
+        except Exception as e:  # noqa: BLE001
+            logger.debug("install_uuid persist skipped: %s", e)
+            return ""
+
+    def _build_handshake(self) -> dict:
+        """The /ws/agent auth frame: agent_id + optional secret/hostname +
+        the per-install guid (so the hub's AGENT_RELAY_UP carries a stable,
+        non-observable identity, not just the agent_id/hostname)."""
+        hs = {"agent_id": self.agent_id}
+        if self.secret:
+            hs["secret"] = self.secret
+        if self.hostname:
+            hs["hostname"] = self.hostname
+        if self.install_uuid:
+            hs["install_uuid"] = self.install_uuid
+        return hs
 
     def _ssl_ctx(self):
         # mTLS-aware (plumbed, default-off): today's unverified-but-encrypted
@@ -139,12 +189,7 @@ class SpokeClient:
         logger.info("Agent (device mode) → dialing spoke %s", self.spoke_url)
         async with websockets.connect(self.spoke_url, ssl=self._ssl_ctx()) as ws:
             self.websocket = ws
-            handshake = {"agent_id": self.agent_id}
-            if self.secret:
-                handshake["secret"] = self.secret
-            if self.hostname:
-                handshake["hostname"] = self.hostname
-            await ws.send(json.dumps(handshake))
+            await ws.send(json.dumps(self._build_handshake()))
 
             proof = json.loads(await asyncio.wait_for(ws.recv(), timeout=5.0))
             status = proof.get("status")

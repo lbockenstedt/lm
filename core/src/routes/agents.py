@@ -74,9 +74,15 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         agents = []
+        _meta = hub.state.system_state.get("module_metadata", {})
         for sid, mtype in hub.spoke_module_types.items():
             if mtype == "agent" and sid in hub.active_connections:
-                agents.append({"spoke_id": sid, "module_type": mtype})
+                agents.append({
+                    "spoke_id": sid,
+                    "module_type": mtype,
+                    # Canonical guid (alias of install_uuid; primary key in Phase 2).
+                    "spoke_guid": ((_meta.get(sid) or {}).get("install_uuid", "")),
+                })
         return {"agents": agents}
 
     @app.post("/api/agent/{spoke_id}/command")
