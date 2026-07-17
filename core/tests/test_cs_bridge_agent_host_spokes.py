@@ -127,6 +127,12 @@ class _MiniState:
     def save_state(self):
         self.saved += 1
 
+    def _mark_dirty(self):  # parity with StateManager dirty-flag persistence
+        pass
+
+    async def save_state_now(self):
+        self.save_state()
+
 
 class _MiniHub:
     def __init__(self, agent_config):

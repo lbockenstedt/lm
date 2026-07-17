@@ -55,6 +55,12 @@ class _FakeState:
     def save_state(self):
         self.save_calls += 1
 
+    def _mark_dirty(self):  # parity with StateManager dirty-flag persistence
+        pass
+
+    async def save_state_now(self):
+        self.save_state()
+
 
 class _FakeKeyManager:
     def __init__(self, keys_dir):

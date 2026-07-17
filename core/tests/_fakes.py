@@ -34,6 +34,12 @@ class FakeState:
     def save_state(self) -> None:
         pass
 
+    def _mark_dirty(self):  # parity with StateManager dirty-flag persistence
+        pass
+
+    async def save_state_now(self):
+        self.save_state()
+
     def get_tenant(self, tid: str) -> Optional[dict]:
         return self._tenants.get(tid)
 

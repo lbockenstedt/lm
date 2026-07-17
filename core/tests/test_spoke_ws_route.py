@@ -36,6 +36,12 @@ class _FakeState:
     def save_state(self):
         pass
 
+    def _mark_dirty(self):  # parity with StateManager dirty-flag persistence
+        pass
+
+    async def save_state_now(self):
+        self.save_state()
+
 
 class _FakeHub:
     """Minimal hub whose ``handle_connection`` echoes one frame then closes.
