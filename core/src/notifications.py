@@ -55,7 +55,11 @@ import key_vault
 
 logger = logging.getLogger("Notifications")
 
-_ACS_API_VERSION = "2023-07-01-preview"
+# ACS Email data-plane (emails:send). Use the GA version — the 2023-07-01-preview
+# it was on has been retired by Azure ("UnsupportedApiVersion"). The GA payload
+# (senderAddress / recipients.to[].address / content.subject/plainText) matches
+# what _acs_api_send already builds, so this is a drop-in bump.
+_ACS_API_VERSION = "2023-03-31"
 _ACS_SMTP_HOST = "smtp.azurecomm.net"
 _ACS_SMTP_PORT = 587
 _ACS_ARM_API = "2023-04-01"
