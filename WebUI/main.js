@@ -3309,43 +3309,119 @@ async function loadReportsData() {
     const el = document.getElementById('reports-content');
     if (!el) return;
     el.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
-    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
-    let c = {};
+    let reports = [];
     try {
-        const res = await setupFetch('/api/reports/email-report?' + tq);
-        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || ('HTTP ' + res.status));
-        c = (await res.json()) || {};
-    } catch (e) { el.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load report settings: ${escapeHtml(e.message || String(e))}</div>`; return; }
-    const sec = c.sections || {}, sch = c.schedule || {};
-    const toggle = (id, on, label, hint) => `
-      <label class="flex items-center justify-between gap-3 py-2.5 border-t border-slate-100">
-        <span><span class="text-sm font-semibold text-slate-700">${label}</span>${hint ? `<span class="block text-[11px] text-slate-400">${hint}</span>` : ''}</span>
-        <input type="checkbox" id="${id}" ${on ? 'checked' : ''} class="w-5 h-5 accent-[#01A982]"></label>`;
-    const freqSel = ['daily', 'weekly', 'monthly'].map(f => `<option value="${f}" ${sch.freq === f ? 'selected' : ''}>${f[0].toUpperCase() + f.slice(1)}</option>`).join('');
-    const dows = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => `<option value="${i}" ${sch.dow == i ? 'selected' : ''}>${d}</option>`).join('');
-    const hours = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${sch.hour == h ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
-    const inp = 'w-full bg-white border border-slate-300 rounded-md px-2 py-2 text-sm mt-1';
-    el.innerHTML = `<div class="p-5">
-      <p class="text-xs text-slate-400 mb-1">Emails the Dashboard <span class="font-semibold">Checks</span> and <span class="font-semibold">Client Count</span> for
-        <span class="font-semibold text-slate-600">${escapeHtml(currentTenant || 'default')}</span> on a schedule, via the SMTP under Notifications.
-        Each tenant only receives its own sites; a Global Admin can switch tenant in the header to manage any tenant's report.</p>
-      ${toggle('rp-enabled', c.enabled, 'Email this report', 'Master on/off — nothing is sent while off')}
-      ${toggle('rp-checks', sec.checks !== false, 'Include Dashboard Checks')}
-      ${toggle('rp-clients', sec.clients !== false, 'Include Client Count')}
-      <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-3">
-        <label class="text-xs text-slate-500">Frequency<select id="rp-freq" onchange="_reportsToggleWhen()" class="${inp}">${freqSel}</select></label>
-        <label class="text-xs text-slate-500" id="rp-dow-w">Day of week<select id="rp-dow" class="${inp}">${dows}</select></label>
-        <label class="text-xs text-slate-500" id="rp-dom-w" style="display:none">Day of month<input id="rp-dom" type="number" min="1" max="28" value="${escapeHtml(sch.dom || 1)}" class="${inp}"></label>
-        <label class="text-xs text-slate-500">Hour<select id="rp-hour" class="${inp}">${hours}</select></label>
+        const r = await setupFetch('/api/reports/list');
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ('HTTP ' + r.status));
+        reports = ((await r.json()).reports) || [];
+    } catch (e) { el.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load reports: ${escapeHtml(e.message || String(e))}</div>`; return; }
+    window._reportsCache = reports;
+    const freqLabel = s => { s = s || {}; const f = s.freq || 'weekly'; const when = f === 'weekly' ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][s.dow || 0] : (f === 'monthly' ? ('day ' + (s.dom || 1)) : ''); return `${f}${when ? ' ' + when : ''} @ ${String(s.hour != null ? s.hour : 7).padStart(2, '0')}:00`; };
+    const rows = reports.length ? reports.map(r => `<tr class="border-b border-slate-100">
+        <td class="px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(r.name || '')}</span></td>
+        <td class="px-3 py-2 text-slate-500">${escapeHtml(r.tenant || '')}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${[r.sections && r.sections.checks ? 'Checks' : '', r.sections && r.sections.clients ? 'Client Count' : ''].filter(Boolean).join(', ') || '—'}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml((r.recipients || []).join(', ')) || '—'}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml(freqLabel(r.schedule))}</td>
+        <td class="px-3 py-2">${r.enabled ? '<span class="text-green-600 text-xs font-bold">on</span>' : '<span class="text-slate-400 text-xs">off</span>'}</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap">
+          <button onclick="testReport('${r.id}')" class="text-xs text-slate-500 hover:text-slate-700 mr-2">Test</button>
+          <button onclick="editReport('${r.id}')" class="text-xs text-[#01A982] hover:underline mr-2">Edit</button>
+          <button onclick="deleteReport('${r.id}')" class="text-xs text-red-500 hover:text-red-700">Delete</button></td></tr>`).join('') : '<tr><td colspan="7" class="px-3 py-4 text-slate-400 italic">No reports yet — click "Add report".</td></tr>';
+    el.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <div class="flex items-center justify-between mb-3">
+        <p class="text-xs text-slate-400 max-w-2xl">Emailed reports — each sends a tenant's Dashboard <b>Checks</b> + <b>Client Count</b> to its recipients on a schedule (via the provider under Setup → Notifications). A Global Admin can target any tenant; a tenant user sees only its own.</p>
+        <button onclick="editReport('')" class="shrink-0 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold">+ Add report</button>
       </div>
-      <label class="text-xs text-slate-500 block mt-3">Recipients <span class="text-slate-400">(comma-separated)</span>
-        <input id="rp-to" value="${escapeHtml((c.recipients || []).join(', '))}" placeholder="noc@acme.com, ops@acme.com" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>
-      <div class="flex justify-end gap-2 mt-4">
-        <button onclick="testReportNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Send test now</button>
-        <button onclick="saveReportConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
-      </div>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-400"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Tenant</th><th class="px-3 py-1 text-left">Sections</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">Schedule</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
     </div>`;
-    _reportsToggleWhen();
+}
+
+async function editReport(id) {
+    const existing = (window._reportsCache || []).find(r => r.id === id) || null;
+    let tenants = [];
+    try { const r = await setupFetch('/api/reports/tenants'); tenants = ((await r.json()).tenants) || []; } catch (e) { }
+    document.getElementById('report-edit-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'report-edit-modal';
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
+    const s = (existing && existing.schedule) || { freq: 'weekly', dow: 0, dom: 1, hour: 7 };
+    const sec = (existing && existing.sections) || { checks: true, clients: true };
+    const tOpts = tenants.map(t => `<option value="${escapeHtml(t.id)}" ${existing && existing.tenant === t.id ? 'selected' : ''}>${escapeHtml(t.name)} (${escapeHtml(t.id)})</option>`).join('') || '<option value="default">Default (default)</option>';
+    const freqOpts = ['daily', 'weekly', 'monthly'].map(f => `<option value="${f}" ${s.freq === f ? 'selected' : ''}>${f}</option>`).join('');
+    const dowOpts = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => `<option value="${i}" ${s.dow == i ? 'selected' : ''}>${d}</option>`).join('');
+    const hourOpts = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${s.hour == h ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
+    const inner = document.createElement('div');
+    inner.className = 'bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto';
+    inner.innerHTML = `
+      <div class="flex justify-between items-start"><p class="font-bold text-base text-[#263040]">${existing ? 'Edit report' : 'New report'}</p><button class="rpt-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+      <label class="block text-xs text-slate-500">Name<input id="rpt-name" value="${escapeHtml(existing ? existing.name : '')}" placeholder="Weekly Acme dashboard" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <label class="block text-xs text-slate-500">Tenant dashboard to email<select id="rpt-tenant" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">${tOpts}</select></label>
+      <div class="flex gap-4 text-xs text-slate-600 pt-1">
+        <label class="flex items-center gap-2"><input type="checkbox" id="rpt-checks" ${sec.checks !== false ? 'checked' : ''} class="w-4 h-4 rounded"> Dashboard Checks</label>
+        <label class="flex items-center gap-2"><input type="checkbox" id="rpt-clients" ${sec.clients !== false ? 'checked' : ''} class="w-4 h-4 rounded"> Client Count</label>
+      </div>
+      <label class="block text-xs text-slate-500">Recipients <span class="text-slate-400">(comma-separated)</span><input id="rpt-recips" value="${escapeHtml(existing ? (existing.recipients || []).join(', ') : '')}" placeholder="noc@acme.com, ops@acme.com" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <div class="grid grid-cols-3 gap-2 text-xs text-slate-500">
+        <label>Frequency<select id="rpt-freq" onchange="_rptWhen()" class="w-full mt-1 border border-slate-300 rounded px-2 py-2">${freqOpts}</select></label>
+        <label id="rpt-dow-w">Day of week<select id="rpt-dow" class="w-full mt-1 border border-slate-300 rounded px-2 py-2">${dowOpts}</select></label>
+        <label id="rpt-dom-w" style="display:none">Day of month<input id="rpt-dom" type="number" min="1" max="28" value="${s.dom || 1}" class="w-full mt-1 border border-slate-300 rounded px-2 py-2"></label>
+        <label>Hour<select id="rpt-hour" class="w-full mt-1 border border-slate-300 rounded px-2 py-2">${hourOpts}</select></label>
+      </div>
+      <label class="flex items-center gap-2 text-xs text-slate-600 pt-1"><input type="checkbox" id="rpt-enabled" ${existing && existing.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Enabled (send on the schedule)</label>
+      <div id="rpt-result" class="text-xs"></div>
+      <div class="flex justify-end gap-2 pt-1"><button class="rpt-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded text-sm font-bold">Cancel</button><button id="rpt-save" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded text-sm font-bold">Save</button></div>`;
+    modal.appendChild(inner);
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    inner.querySelector('.rpt-close').addEventListener('click', () => modal.remove());
+    inner.querySelector('.rpt-cancel').addEventListener('click', () => modal.remove());
+    document.body.appendChild(modal);
+    _rptWhen();
+    document.getElementById('rpt-save').addEventListener('click', () => saveReport(existing ? existing.id : ''));
+}
+function _rptWhen() {
+    const f = document.getElementById('rpt-freq') && document.getElementById('rpt-freq').value;
+    const dw = document.getElementById('rpt-dow-w'), dm = document.getElementById('rpt-dom-w');
+    if (dw) dw.style.display = f === 'weekly' ? '' : 'none';
+    if (dm) dm.style.display = f === 'monthly' ? '' : 'none';
+}
+async function saveReport(id) {
+    const v = x => document.getElementById(x);
+    const resEl = v('rpt-result');
+    const body = {
+        name: (v('rpt-name').value || '').trim(),
+        tenant: v('rpt-tenant').value,
+        sections: { checks: v('rpt-checks').checked, clients: v('rpt-clients').checked },
+        recipients: (v('rpt-recips').value || '').split(',').map(x => x.trim()).filter(Boolean),
+        schedule: { freq: v('rpt-freq').value, dow: parseInt(v('rpt-dow').value, 10) || 0, dom: parseInt(v('rpt-dom').value, 10) || 1, hour: parseInt(v('rpt-hour').value, 10) || 7 },
+        enabled: v('rpt-enabled').checked,
+    };
+    try {
+        const r = await setupFetch(id ? ('/api/reports/' + id) : '/api/reports', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        document.getElementById('report-edit-modal')?.remove();
+        showToast('Report saved.', 'success');
+        loadReportsData();
+    } catch (e) { if (resEl) resEl.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`; }
+}
+async function deleteReport(id) {
+    if (!confirm('Delete this report?')) return;
+    try {
+        const r = await setupFetch('/api/reports/' + id, { method: 'DELETE' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        showToast('Report deleted.', 'success');
+        loadReportsData();
+    } catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
+}
+async function testReport(id) {
+    showToast('Sending test…', 'info');
+    try {
+        const r = await setupFetch('/api/reports/' + id + '/test', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        showToast('Test sent to ' + ((d.to || []).join(', ') || 'recipients'), 'success');
+    } catch (e) { showToast('Send failed: ' + e.message, 'error'); }
 }
 
 // ── Security / Threat Monitor (admin-only nav) ───────────────────────────────

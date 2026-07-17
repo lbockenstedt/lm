@@ -2373,45 +2373,117 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         "recipients": [],
     }
 
-    @app.get("/api/reports/email-report")
-    async def get_email_report(tenant_id: str = Depends(get_tenant_id)):
-        cfg = await store.get_email_report(tenant_id)
-        out = {**_EMAIL_REPORT_DEFAULTS, **(cfg or {})}
-        out["sections"] = {**_EMAIL_REPORT_DEFAULTS["sections"], **(out.get("sections") or {})}
-        out["schedule"] = {**_EMAIL_REPORT_DEFAULTS["schedule"], **(out.get("schedule") or {})}
-        return out
+    # ── Reports: a global LIST of emailed reports (each with a target tenant) ──
+    # Global Admin sees/manages all; a non-admin (reports right) sees only reports
+    # for their own tenant and can only create for it. Stored in global_config via
+    # email_report.get_reports / save_reports.
+    import uuid as _uuid
 
-    @app.put("/api/reports/email-report")
-    async def set_email_report_cfg(request: Request, tenant_id: str = Depends(get_tenant_id)):
-        body = await request.json()
-        body = body if isinstance(body, dict) else {}
+    def _user_tenant(sess):
+        u = (sess or {}).get("user", {}) or {}
+        return u.get("tenant_id") or ((u.get("tenants") or [None])[0])
+
+    def _clean_report(body, sess, existing=None):
         sch = body.get("schedule") or {}
         freq = str(sch.get("freq", "weekly"))
-        existing = await store.get_email_report(tenant_id) or {}
-        cfg = {
-            "enabled": bool(body.get("enabled")),
+        tenant = str(body.get("tenant") or "default")
+        if not is_admin_fn(sess):
+            tenant = _user_tenant(sess) or "default"  # non-admin can only target own
+        return {
+            "id": (existing or {}).get("id") or _uuid.uuid4().hex[:12],
+            "name": (str(body.get("name") or "Report").strip() or "Report")[:80],
+            "tenant": tenant,
             "sections": {"checks": bool((body.get("sections") or {}).get("checks", True)),
                          "clients": bool((body.get("sections") or {}).get("clients", True))},
+            "recipients": [str(r).strip() for r in (body.get("recipients") or []) if str(r).strip()][:20],
             "schedule": {
                 "freq": freq if freq in ("daily", "weekly", "monthly") else "weekly",
                 "dow": max(0, min(6, int(sch.get("dow", 0) or 0))),
                 "dom": max(1, min(28, int(sch.get("dom", 1) or 1))),
                 "hour": max(0, min(23, int(sch.get("hour", 7) or 7))),
             },
-            "recipients": [str(r).strip() for r in (body.get("recipients") or []) if str(r).strip()][:20],
-            "last_sent": existing.get("last_sent"),  # preserve the period marker
+            "enabled": bool(body.get("enabled")),
+            "last_sent": (existing or {}).get("last_sent"),
         }
-        await store.set_email_report(tenant_id, cfg)
-        return {"saved": True}
 
-    @app.post("/api/reports/email-report/test")
-    async def test_email_report(tenant_id: str = Depends(get_tenant_id)):
-        cfg = {**_EMAIL_REPORT_DEFAULTS, **(await store.get_email_report(tenant_id) or {})}
+    def _may_touch(sess, rep):
+        return is_admin_fn(sess) or (rep.get("tenant") == _user_tenant(sess))
+
+    @app.get("/api/reports/list")
+    async def list_reports(request: Request):
+        sess = session_user_fn(request)
+        reports = email_report.get_reports(hub)
+        if not is_admin_fn(sess):
+            tid = _user_tenant(sess)
+            reports = [r for r in reports if r.get("tenant") == tid]
+        return {"reports": reports}
+
+    @app.get("/api/reports/tenants")
+    async def reports_tenants(request: Request):
+        """Tenants selectable as a report's dashboard (admin: all; else own only)."""
+        sess = session_user_fn(request)
+        tenants = hub.state.tenant_state.get("tenants", {}) or {}
+        out = [{"id": tid, "name": (cfg or {}).get("name") or tid} for tid, cfg in tenants.items()]
+        if "default" not in [t["id"] for t in out]:
+            out.insert(0, {"id": "default", "name": "Default"})
+        if not is_admin_fn(sess):
+            mine = _user_tenant(sess)
+            out = [t for t in out if t["id"] == mine]
+        return {"tenants": out}
+
+    @app.post("/api/reports")
+    async def create_report(request: Request):
+        sess = session_user_fn(request)
+        body = await request.json()
+        reports = email_report.get_reports(hub)
+        rep = _clean_report(body if isinstance(body, dict) else {}, sess)
+        reports.append(rep)
+        email_report.save_reports(hub, reports)
+        return {"saved": True, "report": rep}
+
+    @app.put("/api/reports/{rid}")
+    async def update_report(rid: str, request: Request):
+        sess = session_user_fn(request)
+        body = await request.json()
+        reports = email_report.get_reports(hub)
+        for i, r in enumerate(reports):
+            if r.get("id") == rid:
+                if not _may_touch(sess, r):
+                    raise HTTPException(status_code=403, detail="Not authorized for this report")
+                reports[i] = _clean_report(body if isinstance(body, dict) else {}, sess, r)
+                email_report.save_reports(hub, reports)
+                return {"saved": True, "report": reports[i]}
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    @app.delete("/api/reports/{rid}")
+    async def delete_report(rid: str, request: Request):
+        sess = session_user_fn(request)
+        reports = email_report.get_reports(hub)
+        keep, removed = [], False
+        for r in reports:
+            if r.get("id") == rid:
+                if not _may_touch(sess, r):
+                    raise HTTPException(status_code=403, detail="Not authorized for this report")
+                removed = True
+                continue
+            keep.append(r)
+        if removed:
+            email_report.save_reports(hub, keep)
+        return {"removed": removed}
+
+    @app.post("/api/reports/{rid}/test")
+    async def test_report(rid: str, request: Request):
+        sess = session_user_fn(request)
+        rep = next((r for r in email_report.get_reports(hub) if r.get("id") == rid), None)
+        if not rep:
+            raise HTTPException(status_code=404, detail="Report not found")
+        if not _may_touch(sess, rep):
+            raise HTTPException(status_code=403, detail="Not authorized for this report")
         try:
-            await email_report.send_now(hub, tenant_id, cfg)
+            await email_report.send_now(hub, rep.get("tenant") or "default", rep)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"Send failed: {exc}")
-        return {"sent": True, "to": cfg.get("recipients") or []}
+        return {"sent": True, "to": rep.get("recipients") or []}
 
     # ── hub tenant processing-modes (literal "hub" first segment) ──────────
     @app.patch("/sim/api/hub/tenants/{tenant}/processing-modes")
