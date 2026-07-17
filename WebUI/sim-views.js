@@ -2136,7 +2136,7 @@ window.csMonitorSiteModal = async function (siteName, rerender) {
     const minBySite = (cfg.site_min_clients && typeof cfg.site_min_clients === 'object') ? cfg.site_min_clients : {};
     const curMin = minBySite[siteName] || '';
     const rr = rerender === 'clients' ? 'clients' : 'sites';
-    const esc = s => (s == null ? '' : String(s)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const esc = csEscape;  // shared escaper (escapes &<>"')
 
     const modal = document.createElement('div');
     modal.id = 'cs-monitor-site-modal';
@@ -3062,7 +3062,7 @@ function csRenderSimQuotaEditor() {
 // appear (weights are relative integers, default 1).
 function csAmbientDistHtml() {
     const pc = window._csPoolCfg || {};
-    const esc = s => csEscape(String(s == null ? '' : s));
+    const esc = csEscape;  // shared escaper (escapes &<>"')
     const pct = (pc.ambient_pct != null) ? pc.ambient_pct : 50;
     const control = !!pc.ambient_control;
     const rsims = pc.randomizable_sims || [];
@@ -3139,7 +3139,7 @@ function csPoolConfigCardHtml() {
     const placement = pc.ssid_placement || {};
     const randPool = pc.random_pool || {};
     const flags = (typeof CS_CONTROL_FLAGS !== 'undefined' ? CS_CONTROL_FLAGS : []);
-    const esc = s => csEscape(String(s == null ? '' : s));
+    const esc = csEscape;  // shared escaper (escapes &<>"')
     const simChecks = flags.map(f =>
         `<label class="flex items-center gap-1 text-xs"><input type="checkbox" data-cs-rand="${esc(f)}" ${rsims.indexOf(f) >= 0 ? 'checked' : ''}> ${esc(f)}</label>`).join('');
     // SSID matrix = cell DEFINITIONS only: Site, SSID/Auth, Password.
@@ -3836,7 +3836,7 @@ function csRenderPxmxSiteMapEditor() {
 // (e.g. Miami). The link's Name shows in the PXMX assignment dropdown; the link
 // lets alert-driven quotas match where the alert actually fires in Central.
 function csSiteLinksCardHtml() {
-    const esc = s => csEscape(String(s == null ? '' : s));
+    const esc = csEscape;  // shared escaper (escapes &<>"')
     // wsite is DEFINED here (typed, e.g. "MIA") — the Site Links are the source of
     // truth for wsites. It used to be a dropdown sourced from the sim-quota catalog
     // sites list, which merged simulation.conf wsites WITH Central site names; once
@@ -5640,7 +5640,7 @@ window.csFleetRefreshTemplates = async function () {
             .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
     } catch (e) { /* leave empty; modal explains */ }
 
-    const esc = s => (s == null ? '' : String(s)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const esc = csEscape;  // shared escaper (escapes &<>"')
     const fmtWhen = s => s ? new Date(s).toLocaleString() : '';
     const srcOpt = t => `<option value="${esc(t.id)}">${esc(t.name || t.id)} · ${esc(t.source_node || '—')} · vmid ${esc(String(t.source_vmid == null ? '—' : t.source_vmid))} · ${esc(fmtWhen(t.created_at))}</option>`;
     const none = !templates.length;

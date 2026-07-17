@@ -2165,7 +2165,7 @@ function _updateMetrics(statusData) {
         const bs = m.backlog_stats || {};
         const rl = m.rate_limit || {};
         const drops = m.rate_limit_drops || {};
-        const esc = (s) => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+        const esc = escapeHtml;  // shared escaper (escapes &<>"')
         const kv = (obj) => Object.keys(obj || {}).length
             ? Object.entries(obj).sort((a,b)=>b[1]-a[1])
                 .map(([k,v]) => `<span class="inline-block bg-slate-100 rounded px-2 py-0.5 mr-1 mb-1">${esc(k)}: <b>${v}</b></span>`).join('')
@@ -2846,7 +2846,7 @@ function renderSpokeIndicators() {
         const hasErr = alerts.some(a => String(a.tier) === 'error');
         if (hasErr) overallColor = 'bg-red-500';
         moduleDot.className = `w-2 h-2 rounded-full ${overallColor} transition-all`;
-        const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        const esc = escapeHtml;  // shared escaper (escapes &<>"')
         alertHtml = `<div class="mt-2 pt-2 border-t border-white/15">
             <div class="text-[9px] uppercase opacity-60 mb-1">Out-of-contact alerts</div>
             ${alerts.map(a => `<div class="flex items-center justify-between gap-4 py-0.5"><span class="font-mono opacity-80">${esc(a.spoke_id)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${a.tier === 'error' ? 'bg-red-400' : 'bg-amber-400'}"></div><span class="text-[9px]">${a.tier}</span></div></div>`).join('')}
@@ -4192,7 +4192,7 @@ function _spokesAgentsLegend() {
 async function _populateSaTenantFilter() {
     const sel = document.getElementById('sa-tenant-filter');
     if (!sel) return;
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const current = sel.value || 'default';
     try {
         const res = await setupFetch('/setup/tenants');
@@ -5709,7 +5709,7 @@ function _simQuotaDefaultSimOptions(selected, simIds) {
 function _simQuotaDefaultIdControl(r, ctlCls) {
     const cat = _simQuotaDefaultsCatalog || {};
     const list = (r.alert_type === 'insight' ? cat.insights : cat.alerts) || [];
-    const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const opts = ['<option value="">— pick from history —</option>'].concat(
         list.map(it => {
             const id = it.id || it.name || '';
@@ -5908,7 +5908,7 @@ function _renderSimSharing() {
     const naVal = f => Object.prototype.hasOwnProperty.call(_simSharingNA, f) ? !!_simSharingNA[f] : false;
     const list = sims.filter(f => !_simSharingHideNA || !naVal(f));
     if (!list.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No simulations found.</p>'; return; }
-    const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     el.innerHTML = list.map(f => {
         const na = naVal(f);
         const def = !!(meta[f] && meta[f].multi_capable);
@@ -7791,7 +7791,7 @@ async function loadDhcpServerStatus() {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     // Flatten tenant → spoke rows (each row carries its cached Kea status block).
     const rows = [];
     for (const t of (data.tenants || [])) {
@@ -7899,7 +7899,7 @@ async function loadEndpointSyncStatus() {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
         wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
@@ -8006,7 +8006,7 @@ async function loadRealtimeNacSyncStatus() {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
         wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
@@ -8103,7 +8103,7 @@ async function loadStalenessSweepStatus() {
         wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No sweep recorded yet. Click “Sweep now” to run one.</p>';
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const st = String(data.status || '');
     const pill = st === 'success' ? 'bg-green-100 text-green-700'
         : st === 'error' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500';
@@ -8192,7 +8192,7 @@ async function loadRepoSyncStatus() {
         wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No sync recorded yet. Click “Sync now” to run one.</p>';
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const hub = data.hub || {};
     const hs = String(hub.status || '');
     const pill = hs === 'success' ? 'bg-green-100 text-green-700'
@@ -8417,7 +8417,7 @@ async function loadSpokeAlerts() {
         wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No active alerts — every approved spoke is in contact.</p>';
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     wrap.innerHTML = alerts.map(a => {
         const isErr = String(a.tier) === 'error';
         const pill = isErr ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700';
@@ -8502,7 +8502,7 @@ async function loadVmSyncStatus() {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
         wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
@@ -8638,7 +8638,7 @@ async function loadFwDiscoveryStatus() {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
         wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
@@ -8763,7 +8763,7 @@ async function loadNwDiscoveryStatus() {
         wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const rows = data.tenants || [];
     if (!rows.length) {
         wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No syncs recorded yet. Click “Sync now” to run one.</p>';
@@ -8982,7 +8982,7 @@ async function loadDiscoveredUsb() {
         wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No USB devices discovered yet.</p>';
         return;
     }
-    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     _discoveredUsbByName = {};
     wrap.innerHTML = devs.map(d => {
         const vp = d.vidpid;
@@ -13085,7 +13085,7 @@ function _templateRepoRow(t) {
 function templateRepoEdit(id) {
     const t = (window._templateRepo || []).find(x => x.id === id);
     if (!t) return;
-    const esc = s => (s == null ? '' : String(s)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const modal = document.createElement('div');
     modal.id = 'template-edit-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -14525,7 +14525,7 @@ async function showCPPMDeviceDetail(mac) {
 
 async function showClaimDeviceModal(mac) {
     const dev = (window._cppmDeviceMap || {})[mac] || {};
-    const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const selCls = inputCls;
 
@@ -16379,7 +16379,7 @@ async function leIssuePopulateDomains() {
     try {
         const { ok, data } = await _spokeFetch('/api/le/eligible-domains');
         if (!ok || !data) return;
-        const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        const esc = escapeHtml;  // shared escaper (escapes &<>"')
         const opts = [...(data.hosts || []), ...(data.wildcards || [])];
         dl.innerHTML = opts.map(h => `<option value="${esc(h)}"></option>`).join('');
     } catch (e) { /* best-effort — the field is still free-text */ }
@@ -17371,7 +17371,7 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
     // tenant tags render first so the tenant is visible at a glance; the
     // rest follow. Capped with a scroll so profiler-heavy endpoints don't
     // blow out the row height.
-    const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     // Tenant identity is NOT shown in the list — the list is filtered
     // server-side by the logged-in user's tenant ID (/api/cppm/devices),
     // so showing the tenant tags here would be noise for a user (only
@@ -19543,7 +19543,7 @@ async function loadAllTenantsOverview(forceRefresh = false) {
             container.innerHTML = '<p class="text-sm text-slate-400 italic">No tenants configured.</p>';
             return;
         }
-        const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+        const esc = escapeHtml;  // shared escaper (escapes &<>"')
         const num = v => (v == null || v === '' ? '—' : v);
         const cell = 'px-4 py-2 text-sm text-slate-700';
         const rows = tenants.map(t => {
