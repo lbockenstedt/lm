@@ -325,6 +325,16 @@ class HubCertDistributionMixin:
             except Exception as e:  # noqa: BLE001
                 cert_log.warning("[mtls] %s → hub: CA bundle write to %s failed: %s", domain, ca_path, e)
                 return {"status": "ERROR", "message": f"CA bundle write failed: {e}"}
+        # The WILDCARD is NEVER the hub's own server cert. The hub keeps its own
+        # (non-wildcard) cert; a wildcard reaching here via ANY path — explicit
+        # "hub" target in distribute_cert_to_targets OR a fan-out — is a no-op for
+        # the server cert (no LM_TLS_CERT overwrite, no self-restart). This is the
+        # last-line guard that stops the restart loop regardless of caller.
+        if _is_wildcard(domain):
+            cert_log.info("[cert] %s → hub: SKIPPED — wildcard is not installed as the hub's "
+                          "server cert (the hub keeps its own cert; no restart)", domain)
+            return {"status": "SKIPPED",
+                    "message": "wildcard not installed on the hub (hub keeps its own cert)"}
         if not fullchain or not privkey:
             cert_log.warning("[cert] %s → hub: FAILED — missing cert material", domain)
             return {"status": "ERROR", "message": "missing cert material"}
