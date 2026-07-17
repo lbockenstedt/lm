@@ -2688,6 +2688,12 @@ function _rebuildMainNav(allSpokes, connections) {
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8 17V11m4 6V7m4 10v-4M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg></div>
             <span>Reports</span>
         </div>`;
+    // Security (threat monitor) — admin-only hub-side view; static like Reports.
+    const _securityNavHtml = () => `
+        <div onclick="setView('security')" id="nav-security" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg></div>
+            <span>Security</span>
+        </div>`;
 
     mainNav.innerHTML = `
         ${dashboardNav}
@@ -2697,6 +2703,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminSetup : ''}
         ${isAdmin() ? adminSettings : ''}
         ${isAdmin() ? adminLogs : ''}
+        ${isAdmin() ? _securityNavHtml() : ''}
         ${isAdmin() ? _templateRepoNavHtml() : ''}
         ${isAdmin() ? _bugReportNavHtml() : ''}
         ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
@@ -3280,6 +3287,15 @@ function _viewTemplate(viewId) {
   <div id="reports-content" class="${card}"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
 
+        case 'security':
+            return `<div class="space-y-4">
+  <div>
+    <h2 class="text-xl font-bold text-slate-800">Security — Threat Monitor</h2>
+    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via an Azure NSG deny rule.</p>
+  </div>
+  <div id="security-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
+</div>`;
+
         default:
             return `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500 italic">Loading…</p></div>`;
     }
@@ -3330,6 +3346,134 @@ async function loadReportsData() {
       </div>
     </div>`;
     _reportsToggleWhen();
+}
+
+// ── Security / Threat Monitor (admin-only nav) ───────────────────────────────
+// Policy config, the auth-failure audit log, and SEPARATE tiles for permanent
+// blocks / 24h-TTL blocks / manual blocks / never-block allow list — each its
+// own tile so long lists stay manageable. Backed by admin-only /api/security/*.
+async function loadSecurityData() {
+    const el = document.getElementById('security-content');
+    if (!el) return;
+    el.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    let d = {};
+    try {
+        const r = await setupFetch('/api/security/overview');
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ('HTTP ' + r.status));
+        d = await r.json();
+    } catch (e) {
+        el.innerHTML = `<div class="hpe-card rounded-lg p-5"><p class="text-sm text-red-500">Failed to load: ${escapeHtml(e.message)}</p></div>`;
+        return;
+    }
+    const c = d.config || {};
+    const card = 'hpe-card rounded-lg p-5 shadow-sm';
+    const fmtTs = ts => { try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return ''; } };
+    const expIn = b => { if (b.permanent) return 'never'; if (!b.expires_at) return '—'; const s = Math.max(0, b.expires_at - Date.now() / 1000); return s > 3600 ? Math.round(s / 3600) + 'h' : Math.round(s / 60) + 'm'; };
+
+    const cfg = `
+      <div class="${card}">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Policy</h3>
+          <button onclick="securityReconcile()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Push the current blocked-IP set onto the Azure NSG deny rule now">Sync NSG now</button>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+          <label class="flex items-center gap-2 text-slate-600 col-span-2"><input type="checkbox" id="sec-enabled" ${c.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Detection enabled (log invalid attempts)</label>
+          <label class="flex items-center gap-2 text-amber-700 font-bold col-span-2"><input type="checkbox" id="sec-autoblock" ${c.auto_block ? 'checked' : ''} class="w-4 h-4 rounded"> Auto-block via Azure NSG (off = log-only)</label>
+          <label class="text-slate-500">Block after &gt; N fails<input type="number" id="sec-threshold" min="1" value="${c.threshold != null ? c.threshold : 5}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">Window (min)<input type="number" id="sec-window" min="1" value="${Math.round((c.window_s || 600) / 60)}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">TTL (hours)<input type="number" id="sec-ttl" min="1" value="${Math.round((c.ttl_s || 86400) / 3600)}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">Permanent after N re-blocks<input type="number" id="sec-permafter" min="1" value="${c.permanent_after != null ? c.permanent_after : 3}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">NSG deny rule name<input type="text" id="sec-rule" value="${escapeHtml(c.block_rule_name || 'lm-threat-block')}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">NSG deny priority<input type="number" id="sec-priority" min="100" max="4096" value="${c.block_priority != null ? c.block_priority : 200}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+        </div>
+        <div class="flex justify-end mt-3"><button onclick="saveSecurityConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save</button></div>
+      </div>`;
+
+    const blockRow = b => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
+        <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(b.ip)}</span>
+          <div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(b.reason || '')}">${escapeHtml(b.reason || '')}${b.permanent ? '' : ` · expires ${expIn(b)}`}</div></div>
+        <button onclick="securityUnblock('${escapeHtml(b.ip)}')" class="text-[11px] text-red-500 hover:text-red-700 font-medium shrink-0">Unblock</button>
+      </div>`;
+    const tile = (title, items, tone) => `<div class="${card}">
+        <h3 class="text-sm font-bold ${tone} mb-2">${title} <span class="text-slate-400 font-normal">(${items.length})</span></h3>
+        <div class="text-xs max-h-64 overflow-y-auto">${items.length ? items.map(blockRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
+      </div>`;
+
+    const nb = d.never_block || [];
+    const neverRow = x => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
+        <span class="font-mono text-slate-700">${escapeHtml(x)}</span>
+        <button onclick="securityNeverRemove('${escapeHtml(x)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium">Remove</button></div>`;
+    const neverTile = `<div class="${card}">
+        <h3 class="text-sm font-bold text-green-600 mb-2">Never-block allow list <span class="text-slate-400 font-normal">(${nb.length})</span></h3>
+        <div class="flex gap-2 mb-2"><input id="sec-never-ip" placeholder="IP or CIDR" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs"><button onclick="securityNeverAdd()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded text-xs font-medium">Add</button></div>
+        <div class="text-xs max-h-56 overflow-y-auto">${nb.length ? nb.map(neverRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
+      </div>`;
+
+    const manualBlock = `<div class="${card}">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Manual block</h3>
+        <div class="flex flex-wrap gap-2 items-center text-xs">
+          <input id="sec-mb-ip" placeholder="IP" class="border border-slate-300 rounded px-2 py-1 w-40">
+          <input id="sec-mb-reason" placeholder="reason (optional)" class="border border-slate-300 rounded px-2 py-1 flex-1">
+          <label class="flex items-center gap-1 text-slate-600"><input type="checkbox" id="sec-mb-perm" class="w-4 h-4 rounded"> permanent</label>
+          <button onclick="securityBlock()" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded font-bold">Block</button>
+        </div></div>`;
+
+    const evts = d.events || [];
+    const evtRows = evts.slice(0, 60).map(e => `<tr class="border-b border-slate-100">
+        <td class="px-2 py-1 text-slate-400 whitespace-nowrap">${fmtTs(e.ts)}</td>
+        <td class="px-2 py-1 font-mono">${escapeHtml(e.ip)}</td>
+        <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] uppercase">${escapeHtml(e.kind)}</span></td>
+        <td class="px-2 py-1 text-slate-500">${escapeHtml(e.username || '')}</td>
+        <td class="px-2 py-1 text-slate-400 truncate max-w-[180px]" title="${escapeHtml(e.detail || '')}">${escapeHtml(e.detail || '')}</td></tr>`).join('');
+    const events = `<div class="${card}">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Recent invalid attempts <span class="text-slate-400 font-normal">(${evts.length})</span></h3>
+        <div class="overflow-x-auto max-h-72 overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-400 text-[10px] uppercase"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${evtRows || '<tr><td colspan="5" class="px-2 py-3 text-slate-400 italic">no events yet</td></tr>'}</tbody></table></div></div>`;
+
+    el.innerHTML = `
+      ${cfg}
+      ${manualBlock}
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${tile('Blocked — forever', d.permanent || [], 'text-red-700')}
+        ${tile('Blocked — 24h TTL', d.temporary || [], 'text-amber-600')}
+        ${tile('Manual blocks', d.manual || [], 'text-slate-700')}
+      </div>
+      ${neverTile}
+      ${events}`;
+}
+
+async function saveSecurityConfig() {
+    const num = id => parseInt(document.getElementById(id).value, 10);
+    const body = {
+        enabled: document.getElementById('sec-enabled').checked,
+        auto_block: document.getElementById('sec-autoblock').checked,
+        threshold: num('sec-threshold'),
+        window_s: Math.max(60, num('sec-window') * 60),
+        ttl_s: Math.max(300, num('sec-ttl') * 3600),
+        permanent_after: num('sec-permafter'),
+        block_rule_name: (document.getElementById('sec-rule').value || '').trim(),
+        block_priority: num('sec-priority'),
+    };
+    await _securityReq('/api/security/config', 'PUT', body, 'Policy saved');
+    loadSecurityData();
+}
+async function securityBlock() {
+    const ip = (document.getElementById('sec-mb-ip').value || '').trim();
+    if (!ip) { showToast('Enter an IP.', 'error'); return; }
+    await _securityReq('/api/security/block', 'POST',
+        { ip, reason: (document.getElementById('sec-mb-reason').value || '').trim(), permanent: document.getElementById('sec-mb-perm').checked }, `Blocked ${ip}`);
+    loadSecurityData();
+}
+async function securityUnblock(ip) { await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`); loadSecurityData(); }
+async function securityNeverAdd() { const cidr = (document.getElementById('sec-never-ip').value || '').trim(); if (!cidr) return; await _securityReq('/api/security/never-block', 'POST', { cidr }, `Added ${cidr}`); loadSecurityData(); }
+async function securityNeverRemove(cidr) { await _securityReq('/api/security/never-block', 'DELETE', { cidr }, `Removed ${cidr}`); loadSecurityData(); }
+async function securityReconcile() { await _securityReq('/api/security/reconcile', 'POST', {}, 'NSG sync requested'); }
+async function _securityReq(url, method, body, okMsg) {
+    try {
+        const r = await setupFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || d.message || ('HTTP ' + r.status));
+        showToast(d.message || okMsg, (d.status === 'ERROR') ? 'error' : 'success');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 function _reportsToggleWhen() {
@@ -3427,6 +3571,9 @@ function initView(viewId, subView) {
             break;
         case 'cs':
             loadCSData(subView || 'Dashboard', currentSubChild);
+            break;
+        case 'security':
+            loadSecurityData();
             break;
         case 'reports':
             loadReportsData();
