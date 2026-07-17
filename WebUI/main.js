@@ -670,6 +670,43 @@ window.fetch = async function lmFetch(input, init) {
     return res;
 };
 
+// ── pollManager — visibility-aware recurring timers ─────────────────────────
+// Central registry for the UI's polling/render timers. Every registered poll
+// SUSPENDS while the tab is hidden (document.hidden) and RESUMES with an
+// immediate tick when it becomes visible again, so background tabs stop
+// hammering the hub and re-rendering the DOM. Use pollManager.register(fn, ms)
+// instead of a raw setInterval for any recurring poll; keep the returned id
+// and call pollManager.unregister(id) where you would have clearInterval'd.
+const pollManager = (() => {
+    const polls = new Map();   // id -> { fn, ms, timer }
+    let seq = 0;
+    const start = p => { if (p.timer == null) p.timer = setInterval(p.fn, p.ms); };
+    const stop = p => { if (p.timer != null) { clearInterval(p.timer); p.timer = null; } };
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            polls.forEach(stop);
+        } else {
+            polls.forEach(p => {
+                try { p.fn(); } catch (e) { console.error('pollManager: resume tick failed', e); }
+                start(p);
+            });
+        }
+    });
+    return {
+        register(fn, ms) {
+            const id = ++seq;
+            const p = { fn, ms, timer: null };
+            polls.set(id, p);
+            if (!document.hidden) start(p);
+            return id;
+        },
+        unregister(id) {
+            const p = polls.get(id);
+            if (p) { stop(p); polls.delete(id); }
+        },
+    };
+})();
+
 // Module visibility: admins see every module; a non-admin sees a module only if
 // granted its explicit right. Today only the Simulations (cs) module is gated
 // this way; other modules remain product-driven (visible when their spoke is
@@ -1166,7 +1203,7 @@ const _CACHE_MODULE_LABELS = {
 
 function _startCacheStatusPolling() {
     if (isAdmin() || _cacheStatusPoller) return;
-    _cacheStatusPoller = setInterval(async () => {
+    _cacheStatusPoller = pollManager.register(async () => {
         try {
             const r = await fetch('/auth/cache-status', { credentials: 'same-origin' });
             if (!r.ok) { _stopCacheStatusPolling(); return; }
@@ -1178,7 +1215,7 @@ function _startCacheStatusPolling() {
 }
 
 function _stopCacheStatusPolling() {
-    clearInterval(_cacheStatusPoller);
+    pollManager.unregister(_cacheStatusPoller);
     _cacheStatusPoller = null;
     setTimeout(() => {
         const bar = document.getElementById('cache-status-bar');
@@ -15678,14 +15715,14 @@ function updateLeInflightTimers() {
 }
 
 function clearLeInflightPollers() {
-    if (_leInflightPoller) { clearInterval(_leInflightPoller); _leInflightPoller = null; }
-    if (_leInflightTicker) { clearInterval(_leInflightTicker); _leInflightTicker = null; }
+    if (_leInflightPoller) { pollManager.unregister(_leInflightPoller); _leInflightPoller = null; }
+    if (_leInflightTicker) { pollManager.unregister(_leInflightTicker); _leInflightTicker = null; }
 }
 
 function startLeInflightPollers() {
     if (_leInflightPoller) return;  // idempotent — don't stack intervals
-    _leInflightTicker = setInterval(updateLeInflightTimers, 1000);
-    _leInflightPoller = setInterval(() => {
+    _leInflightTicker = pollManager.register(updateLeInflightTimers, 1000);
+    _leInflightPoller = pollManager.register(() => {
         if (window._leLoading) return;  // don't overlap a manual load
         if (!document.getElementById('le-content')) { clearLeInflightPollers(); return; }
         // Only auto-refresh while a cert distribution is IN FLIGHT (there's a
@@ -19321,12 +19358,12 @@ async function _initApp() {
         loadTenantPrefixes();  // background — prefixes used for filtering, not dashboard render
         setView('dashboard');
         _startCacheStatusPolling();
-        setInterval(updateStatus, 10000);
+        pollManager.register(updateStatus, 10000);
         // Re-validate the session periodically. /status (above) is public and
         // stays 200 even after auth expires, so it can't signal expiry on its
         // own. A 401 here is caught by the global fetch override, which sends
         // the user back to login instead of leaving a cached view rendering.
-        setInterval(_pingSession, 60000);
+        pollManager.register(_pingSession, 60000);
         console.log("Lab Manager UI: Initialization complete.");
     } catch (err) {
         console.error("Lab Manager UI: Critical initialization error:", err);

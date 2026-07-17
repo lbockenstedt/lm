@@ -477,7 +477,7 @@ function csHandleLiveOp(d) {
     if (st === 'completed' || st === 'failed') { delete window._csLiveOps[key]; }
     else { window._csLiveOps[key] = { vmid: d.vmid, action: d.action, step: d.step, pct: d.pct, ts: Date.now() }; }
     csRenderLiveOps();
-    if (!window._csLiveOpsTicker) window._csLiveOpsTicker = setInterval(csRenderLiveOps, 2000);
+    if (!window._csLiveOpsTicker) window._csLiveOpsTicker = pollManager.register(csRenderLiveOps, 2000);
 }
 function csRenderLiveOps() {
     const el = document.getElementById('cs-live-ops');
@@ -1722,12 +1722,12 @@ function _csFmtCountdown(secs) {
 let _csDemoTicker = null;
 function csDemoStartTicker() {
     if (_csDemoTicker) return;
-    _csDemoTicker = setInterval(csDemoTickCountdowns, 1000);
+    _csDemoTicker = pollManager.register(csDemoTickCountdowns, 1000);
     csDemoTickCountdowns();
 }
 function csDemoTickCountdowns() {
     const spans = document.querySelectorAll('.cs-demo-countdown[data-demo-expires]');
-    if (!spans.length) { if (_csDemoTicker) { clearInterval(_csDemoTicker); _csDemoTicker = null; } return; }
+    if (!spans.length) { if (_csDemoTicker) { pollManager.unregister(_csDemoTicker); _csDemoTicker = null; } return; }
     const now = Date.now() / 1000;
     spans.forEach(el => {
         const exp = parseFloat(el.getAttribute('data-demo-expires')) || 0;
@@ -5987,7 +5987,7 @@ function csFmtDuration(s) {
 // counting them down between pulses so the timer is live, not stepwise.
 function csStartShedTicker() {
     if (window._csShedTicker) return;
-    window._csShedTicker = setInterval(() => {
+    window._csShedTicker = pollManager.register(() => {
         const now = Date.now() / 1000;
         document.querySelectorAll('.cs-shed-countdown').forEach(el => {
             const at = Number(el.getAttribute('data-shed-at'));
@@ -6242,7 +6242,7 @@ function csVmOpFastRefresh(windowMs) {
     window._csVmOpUntil = Date.now() + (windowMs || 60000);
     if (window._csVmOpTicker) return;   // already bursting — window extended above
     const stop = () => {
-        if (window._csVmOpTicker) { clearInterval(window._csVmOpTicker); window._csVmOpTicker = null; }
+        if (window._csVmOpTicker) { pollManager.unregister(window._csVmOpTicker); window._csVmOpTicker = null; }
     };
     const tick = async () => {
         if (currentSubView !== 'VM Server') { stop(); return; }   // operator left the page
@@ -6250,7 +6250,7 @@ function csVmOpFastRefresh(windowMs) {
         const opsActive = !!(window._csLiveOps && Object.keys(window._csLiveOps).length);
         if (Date.now() > window._csVmOpUntil && !opsActive) stop();  // settled → stop
     };
-    window._csVmOpTicker = setInterval(tick, 15000);
+    window._csVmOpTicker = pollManager.register(tick, 15000);
     tick();   // fire immediately so the first update is prompt
 }
 
