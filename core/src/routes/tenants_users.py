@@ -1,7 +1,7 @@
 """Setup: updates, modules, tenants, users routes."""
 from api import (
     HTTPException, Request, _hash_password, _hub_msg, _invalidate_user_sessions,
-    _unwrap_spoke, get_tenant_scoping, logger, time,
+    _unwrap_spoke, get_netbox_spoke, get_tenant_scoping, logger, time,
 )
 from access import (
     ENFORCED_RIGHTS, resolve_effective_permissions, refresh_shared_tenant,
@@ -336,6 +336,75 @@ def register(app, hub, ctx):
             return {"status": "ok", "message": f"Tenant {tenant_id} updated."}
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid request: {str(e)}")
+
+    @app.post("/api/tenant/migrate")
+    async def migrate_tenant_all(request: Request):
+        """Migrate Data to new Tenant — CROSS-MODULE, keyed by LM tenant_id.
+
+        Copies tenant SOURCE's data to TARGET across modules and (by default)
+        purges the source's data. Phase 1 covers ``cs`` (all simulations store
+        blobs) + ``netbox`` (reassign objects via each tenant's
+        netbox_tenant_slug, delete the source NetBox tenant). ``pxmx``/``ldap``
+        are accepted but report TODO until Phase 2. ADMIN-ONLY (destructive,
+        cross-tenant). Body: ``{source, target, delete_source=true, modules=[…]}``
+        where source/target are LM tenant_ids. NOTE: the source LM tenant *shell*
+        (registry entry + user assignments) is intentionally NOT deleted here —
+        only its per-module data is moved/cleared; remove the empty tenant via
+        tenant management if desired."""
+        hub = app.state.hub
+        sess = ctx._session_user(request)
+        if not (sess and ctx._is_admin(sess)):
+            raise HTTPException(status_code=403, detail="Admin only")
+        body = await request.json()
+        source = (body.get("source") or "").strip()
+        target = (body.get("target") or "").strip()
+        if not source or not target:
+            raise HTTPException(status_code=400, detail="source and target tenant are required")
+        if source == target:
+            raise HTTPException(status_code=400, detail="source and target must differ")
+        purge = bool(body.get("delete_source", True))
+        mods = set(body.get("modules") or ["cs", "netbox"])
+        out = {"source": source, "target": target, "modules": {}}
+
+        # ── CS / Simulations: one deep-merge of _data[source] → _data[target] ──
+        if "cs" in mods:
+            try:
+                out["modules"]["cs"] = await hub.simulations_store.migrate_tenant_data(
+                    source, target, purge_source=purge)
+            except Exception as e:  # noqa: BLE001
+                out["modules"]["cs"] = {"status": "ERROR", "message": str(e)}
+
+        # ── NetBox: reassign objects via each tenant's netbox_tenant_slug ──
+        if "netbox" in mods:
+            src_slug = (get_tenant_scoping(hub, source) or {}).get("netbox_tenant_slug") or source
+            tgt_slug = (get_tenant_scoping(hub, target) or {}).get("netbox_tenant_slug") or target
+            spoke_id = get_netbox_spoke(hub)
+            if not spoke_id:
+                out["modules"]["netbox"] = {"status": "SKIPPED", "message": "NetBox spoke not connected"}
+            else:
+                try:
+                    r = await hub.request_response(
+                        spoke_id, "NETBOX_MIGRATE_TENANT",
+                        {"source": src_slug, "target": tgt_slug, "delete_source": purge},
+                        timeout=300.0)
+                    out["modules"]["netbox"] = (_unwrap_spoke(r) if r is not None
+                                                else {"status": "ERROR", "message": "no response from NetBox spoke"})
+                except Exception as e:  # noqa: BLE001
+                    out["modules"]["netbox"] = {"status": "ERROR", "message": str(e)}
+
+        # ── pxmx / ldap: Phase 2 (re-tag by proxmox_tag / migrate by ldap_base_dn) ──
+        for m in ("pxmx", "ldap"):
+            if m in mods:
+                out["modules"][m] = {"status": "TODO", "message": "not yet implemented (Phase 2)"}
+
+        statuses = [v.get("status") for v in out["modules"].values()]
+        out["status"] = ("ERROR" if any(s == "ERROR" for s in statuses)
+                         else "PARTIAL" if any(s in ("SKIPPED", "TODO", "PARTIAL") for s in statuses)
+                         else "SUCCESS")
+        logger.info("tenant migrate %s → %s (purge=%s, modules=%s) by %s: %s",
+                    source, target, purge, sorted(mods),
+                    (sess.get("user", {}) or {}).get("username"), out["status"])
+        return out
 
     @app.post("/setup/generate-secret")
     async def generate_secret(request: Request):

@@ -243,6 +243,37 @@ class SimulationsStore:
             self._data[tenant_id] = t
         return t
 
+    async def migrate_tenant_data(self, source: str, target: str,
+                                  purge_source: bool = False) -> Dict[str, Any]:
+        """Copy ALL of a tenant's simulations data from ``source`` to ``target``.
+
+        Every per-tenant blob (central config + sites, sim conf, adaptive/quota
+        state, per-user overrides, github config, notifications, email report,
+        source-of-truth, processing modes, PSKs, settings, and every sync-status
+        record) lives under the single ``_data[tenant_id]`` dict, so migrating is
+        a per-key merge of that dict — source values overwrite the target's on a
+        key clash, and the target's other keys are preserved. Optionally purge
+        (clear) the source afterward. Returns the keys copied. Used by the
+        cross-module tenant migration (Migrate Data to new Tenant)."""
+        import copy as _copy
+        if source == target:
+            return {"status": "ERROR", "message": "source and target are the same tenant"}
+        with self._lock:
+            src = self._data.get(source)
+            if not src:
+                return {"status": "SUCCESS", "copied_keys": [],
+                        "message": f"no simulations data for '{source}' — nothing to copy"}
+            copied = sorted(src.keys())
+            tgt = self._tenant(target)
+            for k, v in src.items():
+                tgt[k] = _copy.deepcopy(v)
+            if purge_source:
+                self._data.pop(source, None)
+            await self._asave()
+        return {"status": "SUCCESS", "copied_keys": copied, "purged_source": bool(purge_source),
+                "message": (f"copied {len(copied)} config blob(s) to '{target}'"
+                            + (f", purged '{source}'" if purge_source else ""))}
+
     # ── simulation / user overrides (legacy buckets, kept for compat) ──────
     async def get_user_overrides(self, tenant_id: str) -> Dict[str, Any]:
         """Return the tenant's legacy user-override bucket (empty if unset)."""

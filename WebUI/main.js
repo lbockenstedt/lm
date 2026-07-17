@@ -14419,11 +14419,11 @@ function showNetboxAddModal() {
     else if (subMenu === 'IP Addresses') showNetboxAllocateIPModal('');
 }
 
-// Migrate Data to new Tenant — admin-only. Reassigns every NetBox object owned
-// by a source tenant to a target tenant, then deletes the source. Recovers data
-// orphaned when a tenant is renamed in the NetBox UI (LM keys tenants by name,
-// so the rename leaves the old data under a now-unreferenced tenant). Backed by
-// GET /api/netbox/tenants + POST /api/netbox/migrate-tenant (both admin-gated).
+// Migrate Data to new Tenant — admin-only, CROSS-MODULE, keyed by LM tenant_id.
+// Copies a source tenant's data to a target across modules (CS/simulations +
+// NetBox now; pxmx/ldap are Phase 2), then purges the source's data. Recovers
+// data orphaned by a tenant rename. Backed by GET /setup/tenants (LM tenant
+// list) + POST /api/tenant/migrate (admin-gated cross-module orchestrator).
 async function showNetboxMigrateTenantModal() {
     document.getElementById('netbox-migrate-modal')?.remove();
     const modal = document.createElement('div');
@@ -14435,7 +14435,7 @@ async function showNetboxMigrateTenantModal() {
         <div class="flex justify-between items-start">
             <div>
               <p class="font-bold text-base text-[#263040]">Migrate Data to new Tenant</p>
-              <p class="text-xs text-slate-400 mt-1">Reassign every NetBox object owned by the source tenant to the target, then delete the source. Use this to recover data orphaned by a tenant rename.</p>
+              <p class="text-xs text-slate-400 mt-1">Move a tenant's data to another tenant across modules, then purge the source. Recovers data orphaned by a tenant rename. (The source tenant's shell — its registry entry + user assignments — is left in place; delete it via tenant management if you want it gone.)</p>
             </div>
             <button class="nbmig-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
         </div>
@@ -14448,7 +14448,7 @@ async function showNetboxMigrateTenantModal() {
     const body = inner.querySelector('.nbmig-body');
     let tenants = [];
     try {
-        const r = await fetch('/api/netbox/tenants');
+        const r = await fetch('/setup/tenants');
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
         tenants = (await r.json()).tenants || [];
     } catch (e) {
@@ -14456,19 +14456,26 @@ async function showNetboxMigrateTenantModal() {
         return;
     }
     if (tenants.length < 2) {
-        body.innerHTML = `<p class="text-sm text-slate-500">Need at least two tenants in NetBox to migrate between.</p>`;
+        body.innerHTML = `<p class="text-sm text-slate-500">Need at least two tenants to migrate between.</p>`;
         return;
     }
-    const opts = () => tenants.map(t => `<option value="${escapeHtml(String(t.id))}">${escapeHtml(t.name)} (${escapeHtml(t.slug)})</option>`).join('');
+    const opts = () => tenants.map(t => `<option value="${escapeHtml(String(t.id))}">${escapeHtml(t.name)} (${escapeHtml(String(t.id))})</option>`).join('');
     body.innerHTML = `
-        <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider">Source — data moves FROM here, then it's deleted
+        <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider">Source — data moves FROM here, then it's cleared
           <select id="nbmig-source" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm">${opts()}</select>
         </label>
         <label class="block text-xs font-bold text-slate-500 uppercase tracking-wider">Target — data moves TO here
           <select id="nbmig-target" class="w-full mt-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm">${opts()}</select>
         </label>
+        <div class="text-xs">
+          <p class="font-bold text-slate-500 uppercase tracking-wider mb-1">Modules to migrate</p>
+          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-cs" type="checkbox" checked class="w-4 h-4 rounded"> CS / Simulations — all per-tenant config (central, sim conf, quotas, overrides, notifications, …)</label>
+          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-netbox" type="checkbox" checked class="w-4 h-4 rounded"> NetBox — reassign objects, delete the source NetBox tenant</label>
+          <label class="flex items-center gap-2 text-slate-400"><input id="nbmig-m-pxmx" type="checkbox" class="w-4 h-4 rounded"> pxmx / Hypervisors <span class="text-[10px]">(Phase 2 — reports not-yet-applied)</span></label>
+          <label class="flex items-center gap-2 text-slate-400"><input id="nbmig-m-ldap" type="checkbox" class="w-4 h-4 rounded"> LDAP / Directory <span class="text-[10px]">(Phase 2 — reports not-yet-applied)</span></label>
+        </div>
         <label class="flex items-center gap-2 text-xs text-slate-600">
-          <input id="nbmig-delete" type="checkbox" checked class="w-4 h-4 rounded"> Delete the source tenant after migrating (uncheck to keep it empty)
+          <input id="nbmig-delete" type="checkbox" checked class="w-4 h-4 rounded"> Purge the source after migrating (clear its CS data + delete its NetBox tenant)
         </label>
         <div id="nbmig-result" class="text-xs"></div>
         <div class="flex justify-end gap-2 pt-2">
@@ -14484,31 +14491,35 @@ async function netboxMigrateTenant(modal) {
     const source = document.getElementById('nbmig-source').value;
     const target = document.getElementById('nbmig-target').value;
     const del = document.getElementById('nbmig-delete').checked;
+    const modules = [];
+    if (document.getElementById('nbmig-m-cs').checked) modules.push('cs');
+    if (document.getElementById('nbmig-m-netbox').checked) modules.push('netbox');
+    if (document.getElementById('nbmig-m-pxmx').checked) modules.push('pxmx');
+    if (document.getElementById('nbmig-m-ldap').checked) modules.push('ldap');
     const resEl = document.getElementById('nbmig-result');
     const goBtn = document.getElementById('nbmig-go');
     if (source === target) { resEl.innerHTML = `<span class="text-red-500">Source and target must differ.</span>`; return; }
+    if (!modules.length) { resEl.innerHTML = `<span class="text-red-500">Pick at least one module.</span>`; return; }
     const srcName = document.querySelector(`#nbmig-source option[value="${source}"]`)?.textContent || source;
     const tgtName = document.querySelector(`#nbmig-target option[value="${target}"]`)?.textContent || target;
-    if (!confirm(`Migrate ALL NetBox objects from "${srcName}" to "${tgtName}"${del ? `, then DELETE "${srcName}"` : ''}?\n\nThis cannot be undone.`)) return;
+    if (!confirm(`Migrate ${modules.join(', ')} data from "${srcName}" to "${tgtName}"${del ? `, then PURGE "${srcName}"` : ''}?\n\nThis cannot be undone.`)) return;
     goBtn.disabled = true; goBtn.textContent = 'Migrating…';
     resEl.innerHTML = `<span class="text-slate-400 italic">Working…</span>`;
     try {
-        const r = await fetch('/api/netbox/migrate-tenant', {
+        const r = await fetch('/api/tenant/migrate', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source, target, delete_source: del }),
+            body: JSON.stringify({ source, target, delete_source: del, modules }),
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || r.statusText);
-        const moved = d.moved || {};
-        const rows = Object.keys(moved).length
-            ? Object.entries(moved).map(([k, v]) => `<div>${escapeHtml(k)}: <b>${v}</b></div>`).join('')
-            : '<div>No objects were owned by the source.</div>';
-        const errs = d.errors && Object.keys(d.errors).length
-            ? `<div class="text-red-500 mt-1">${Object.keys(d.errors).length} error(s) — source kept.</div>` : '';
-        resEl.innerHTML = `<div class="font-bold ${d.status === 'SUCCESS' ? 'text-green-600' : 'text-amber-600'}">${escapeHtml(d.message || 'Done')}</div>
-            <div class="mt-1 text-slate-600">${rows}</div>${errs}`;
-        showToast(d.message || 'Migration complete', d.status === 'SUCCESS' ? 'success' : 'error');
-        setTimeout(() => { if (typeof loadNetboxData === 'function') loadNetboxData('Overview'); }, 1400);
+        const mods = d.modules || {};
+        const rows = Object.entries(mods).map(([k, v]) => {
+            const st = v.status || '?';
+            const color = st === 'SUCCESS' ? 'text-green-600' : st === 'ERROR' ? 'text-red-600' : 'text-amber-600';
+            return `<div><b>${escapeHtml(k)}</b>: <span class="${color}">${escapeHtml(st)}</span> — ${escapeHtml(v.message || '')}</div>`;
+        }).join('');
+        resEl.innerHTML = `<div class="font-bold ${d.status === 'SUCCESS' ? 'text-green-600' : d.status === 'ERROR' ? 'text-red-600' : 'text-amber-600'}">Overall: ${escapeHtml(d.status || '?')}</div><div class="mt-1">${rows}</div>`;
+        showToast('Tenant migration: ' + (d.status || 'done'), d.status === 'ERROR' ? 'error' : 'success');
     } catch (e) {
         resEl.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
         showToast(e.message, 'error');
@@ -15727,10 +15738,6 @@ async function loadLEData(subMenu) {
                 <td class="px-4 py-2 whitespace-nowrap">
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
-                        <label class="flex items-center gap-1 text-xs text-slate-600 cursor-pointer select-none" title="H1: pin this cert as the BugFixer identity. A connection presenting it over mTLS is authorized to use the reverse HUB_REQUEST channel (fleet updates + cross-tenant logs). Keep OFF unless this is the dedicated bugfixer cert.">
-                            <input type="checkbox" ${c.bugfixer ? 'checked' : ''} onchange="leToggleBugfixer('${dEsc}', this.checked)" class="accent-green-600" />
-                            BugFixer cert
-                        </label>
                         <button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Manage distribution targets">Manage</button>
                         <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
                         <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
@@ -17096,22 +17103,6 @@ async function leRevokeCert(domain) {
         showToast(`Revoked ${domain}.`, 'success');
         await loadLEData();
     } catch (e) { showToast('Revoke failed: ' + e.message, 'error'); }
-}
-
-async function leToggleBugfixer(domain, enabled) {
-    // H1: label (or un-label) this cert as the BugFixer cert. The hub pins the
-    // domain in global_config['bugfixer_cert_identities']; only a connection
-    // presenting that cert over mTLS may use the reverse HUB_REQUEST channel.
-    try {
-        const { ok, detail } = await _spokeFetch(
-            `/api/le/certs/${encodeURIComponent(domain)}/bugfixer`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled }),
-        });
-        if (!ok) { showToast('BugFixer label failed: ' + (detail || ''), 'error'); await loadLEData(); return; }
-        showToast(`${enabled ? 'Pinned' : 'Unpinned'} ${domain} as the BugFixer cert.`, 'success');
-        await loadLEData();
-    } catch (e) { showToast('BugFixer label failed: ' + e.message, 'error'); await loadLEData(); }
 }
 
 function editDnsRecord(name, rtype) {
