@@ -2680,10 +2680,19 @@ function _rebuildMainNav(allSpokes, connections) {
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg></div>
             <span>My Devices</span>
         </div>`;
+    // Reports is a hub-side feature (no product spoke), so it never enters the
+    // spoke-driven activeClasses list — it's a STATIC nav item gated by the
+    // 'reports' right (canSeeModule), NOT admin-only.
+    const _reportsNavHtml = () => `
+        <div onclick="setView('reports')" id="nav-reports" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8 17V11m4 6V7m4 10v-4M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg></div>
+            <span>Reports</span>
+        </div>`;
 
     mainNav.innerHTML = `
         ${dashboardNav}
         ${dynamicHtml}
+        ${canSeeModule('Reports') ? _reportsNavHtml() : ''}
         <div class="pt-4 mt-4 border-t border-slate-200"></div>
         ${isAdmin() ? adminSetup : ''}
         ${isAdmin() ? adminSettings : ''}
@@ -6965,7 +6974,7 @@ async function pullAzureRgs() {
         const d = await r.json().catch(() => ({}));
         if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
         const rgs = d.resource_groups || [];
-        if (!rgs.length) { if (out) out.textContent = 'no resource groups in this subscription'; showToast('No resource groups in this subscription.', 'error'); return; }
+        if (!rgs.length) { const _m = 'No resource groups visible — the Entra app likely needs the Reader role on this subscription (Network Contributor scoped to one RG does not allow listing).'; if (out) out.textContent = _m; showToast(_m, 'error'); return; }
         rgSel.innerHTML = rgs.map(g => `<option value="${g.name}">${escapeHtml(g.name)}</option>`).join('');
         if (cur && rgs.some(g => g.name === cur)) rgSel.value = cur;
         if (out) out.textContent = `${rgs.length} resource group(s) listed`;
