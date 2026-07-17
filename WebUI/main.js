@@ -14471,8 +14471,8 @@ async function showNetboxMigrateTenantModal() {
           <p class="font-bold text-slate-500 uppercase tracking-wider mb-1">Modules to migrate</p>
           <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-cs" type="checkbox" checked class="w-4 h-4 rounded"> CS / Simulations — all per-tenant config (central, sim conf, quotas, overrides, notifications, …)</label>
           <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-netbox" type="checkbox" checked class="w-4 h-4 rounded"> NetBox — reassign objects, delete the source NetBox tenant</label>
-          <label class="flex items-center gap-2 text-slate-400"><input id="nbmig-m-pxmx" type="checkbox" class="w-4 h-4 rounded"> pxmx / Hypervisors <span class="text-[10px]">(Phase 2 — reports not-yet-applied)</span></label>
-          <label class="flex items-center gap-2 text-slate-400"><input id="nbmig-m-ldap" type="checkbox" class="w-4 h-4 rounded"> LDAP / Directory <span class="text-[10px]">(Phase 2 — reports not-yet-applied)</span></label>
+          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-pxmx" type="checkbox" class="w-4 h-4 rounded"> pxmx / Hypervisors — re-tag VMs from the source proxmox_tag to the target's</label>
+          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-ldap" type="checkbox" class="w-4 h-4 rounded"> LDAP / Directory — re-home the directory subtree (ldap_base_dn)</label>
         </div>
         <label class="flex items-center gap-2 text-xs text-slate-600">
           <input id="nbmig-delete" type="checkbox" checked class="w-4 h-4 rounded"> Purge the source after migrating (clear its CS data + delete its NetBox tenant)

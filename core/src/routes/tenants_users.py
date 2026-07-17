@@ -392,10 +392,55 @@ def register(app, hub, ctx):
                 except Exception as e:  # noqa: BLE001
                     out["modules"]["netbox"] = {"status": "ERROR", "message": str(e)}
 
-        # ── pxmx / ldap: Phase 2 (re-tag by proxmox_tag / migrate by ldap_base_dn) ──
-        for m in ("pxmx", "ldap"):
-            if m in mods:
-                out["modules"][m] = {"status": "TODO", "message": "not yet implemented (Phase 2)"}
+        # ── pxmx: re-tag VMs from the source tenant's proxmox_tag to the target's.
+        # pxmx agents may be hosted by a 'hypervisor' spoke (direct) OR a
+        # 'simulation'/cs spoke (split) — relay to whichever is connected + sum. ──
+        if "pxmx" in mods:
+            old_tag = (get_tenant_scoping(hub, source) or {}).get("proxmox_tag") or source
+            new_tag = (get_tenant_scoping(hub, target) or {}).get("proxmox_tag") or target
+            legs, total, errs = [], 0, []
+            for mt in ("hypervisor", "simulation"):
+                sid = hub.get_spoke_by_type(mt)
+                if not sid:
+                    continue
+                try:
+                    r = await hub.request_response(
+                        sid, "PXMX_RETAG_TENANT", {"old_tag": old_tag, "new_tag": new_tag}, timeout=180.0)
+                    u = _unwrap_spoke(r) if r is not None else {}
+                    total += int((u or {}).get("count", 0) or 0)
+                    legs.append(mt)
+                    if (u or {}).get("status") not in ("SUCCESS", None):
+                        errs.append(f"{mt}: {(u or {}).get('message', '?')}")
+                except Exception as e:  # noqa: BLE001
+                    errs.append(f"{mt}: {e}")
+            if not legs:
+                out["modules"]["pxmx"] = {"status": "SKIPPED", "message": "no hypervisor/simulation spoke connected"}
+            else:
+                out["modules"]["pxmx"] = {
+                    "status": "PARTIAL" if errs else "SUCCESS", "count": total,
+                    "message": f"re-tagged {total} VM(s) {old_tag}→{new_tag}"
+                               + (f"; {'; '.join(errs)}" if errs else "")}
+
+        # ── ldap: re-home the source tenant's directory subtree to the target's ──
+        if "ldap" in mods:
+            src_dn = (get_tenant_scoping(hub, source) or {}).get("ldap_base_dn") or ""
+            tgt_dn = (get_tenant_scoping(hub, target) or {}).get("ldap_base_dn") or ""
+            sid = hub.get_spoke_by_type("directory")
+            if not sid:
+                out["modules"]["ldap"] = {"status": "SKIPPED", "message": "no directory (LDAP) spoke connected"}
+            elif not src_dn or not tgt_dn:
+                out["modules"]["ldap"] = {"status": "SKIPPED",
+                                          "message": "source/target tenant has no ldap_base_dn configured"}
+            else:
+                try:
+                    r = await hub.request_response(
+                        sid, "LDAP_MIGRATE_TENANT",
+                        {"source_base_dn": src_dn, "target_base_dn": tgt_dn, "purge_source": purge},
+                        timeout=180.0)
+                    out["modules"]["ldap"] = (_unwrap_spoke(r) if r is not None
+                                              else {"status": "ERROR", "message": "no response from LDAP spoke"})
+                except Exception as e:  # noqa: BLE001
+                    out["modules"]["ldap"] = {"status": "ERROR", "message": str(e)}
 
         statuses = [v.get("status") for v in out["modules"].values()]
         out["status"] = ("ERROR" if any(s == "ERROR" for s in statuses)
