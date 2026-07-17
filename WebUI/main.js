@@ -3827,6 +3827,16 @@ function _renderSettingsSection(subMenu) {
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Mutual TLS (Hub ⇄ Spoke ⇄ Agent)</h3>
                     <p class="text-xs text-slate-400 mb-3">Every leg is TLS-encrypted. Mutual authentication (client-cert verification) is <b>plumbed but off</b> — enable it only once the LE wildcard is on the hub + all spokes, so no spoke gets orphaned.</p>
                     <div id="mtls-readiness" class="flex items-center gap-3 mb-3 text-sm text-slate-500">Checking readiness…</div>
+                    <div id="mtls-spokes" class="mb-3 hidden"></div>
+                    <div class="flex items-center gap-3 mb-3 pb-3 border-b border-slate-100">
+                        <label class="flex items-center gap-2 text-sm text-slate-600">
+                            <input type="checkbox" id="mtls-auto-provision" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
+                            Auto-provision mTLS
+                        </label>
+                        <button onclick="saveMtlsAutoProvision(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm ml-auto">Save</button>
+                        <span id="mtls-auto-provision-hint" class="text-xs text-slate-400"></span>
+                    </div>
+                    <p class="text-xs text-slate-400 mb-3"><b>Auto-provision</b> = the hub distributes the LE wildcard + CA bundle to the hub and every spoke, then enables mTLS once the whole fleet is ready. No manual file copying.</p>
                     <div class="flex items-center gap-3">
                         <label class="flex items-center gap-2 text-sm text-slate-600">
                             <input type="checkbox" id="mtls-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500">
@@ -11031,22 +11041,48 @@ async function revokeApiToken(id) {
     }
 }
 
-// mTLS readiness + enable (Settings → Active Sessions area). Green when ready.
+// mTLS readiness + enable (System → Hub Status). Green when ready; per-spoke
+// dots show which spokes already have the wildcard + CA bundle. Auto-provision
+// toggles hub-brokered distribution + auto-enable once the fleet is ready.
 async function loadMtlsReadiness() {
     const ind = document.getElementById('mtls-readiness');
     const chk = document.getElementById('mtls-enabled');
+    const autoChk = document.getElementById('mtls-auto-provision');
+    const spokesEl = document.getElementById('mtls-spokes');
+    const hint = document.getElementById('mtls-auto-provision-hint');
     if (!ind) return;
     try {
         const r = await setupFetch('/setup/mtls-readiness');
         if (!r.ok) { ind.textContent = 'Readiness unavailable.'; return; }
         const d = await r.json();
         if (chk) chk.checked = !!d.enabled;
+        if (autoChk) autoChk.checked = !!d.auto_provision;
         const green = !!d.ready;
         const dot = `<span class="inline-block w-2.5 h-2.5 rounded-full ${green ? 'bg-green-500' : 'bg-amber-500'}"></span>`;
         const label = green
             ? `<span class="text-green-600 font-semibold">System ready for mTLS</span> · ${d.connected_spokes} spoke(s) connected`
             : `<span class="text-amber-600 font-semibold">Not ready</span> — ${(d.blockers || []).join('; ') || 'distribute the LE wildcard first'}`;
         ind.innerHTML = `${dot} ${label}`;
+        // Per-spoke breakdown: a dot + label per connected primary spoke.
+        if (spokesEl) {
+            const spokes = d.spokes || [];
+            if (spokes.length) {
+                spokesEl.classList.remove('hidden');
+                spokesEl.innerHTML = `<div class="text-xs text-slate-400 mb-1.5 uppercase tracking-wider font-semibold">Per-spoke readiness</div>` +
+                    spokes.map(s => {
+                        const c = s.ready ? 'bg-green-500' : (s.online ? 'bg-amber-500' : 'bg-slate-300');
+                        const t = s.ready ? 'ready' : (s.online ? 'missing materials' : 'offline — will receive on reconnect');
+                        return `<div class="flex items-center gap-2 text-xs text-slate-600 py-0.5"><span class="inline-block w-2 h-2 rounded-full ${c}"></span><span class="font-mono">${escapeHtml(s.id)}</span><span class="text-slate-400">· ${escapeHtml(s.type || '')} · ${t}</span></div>`;
+                    }).join('');
+            } else {
+                spokesEl.classList.add('hidden');
+            }
+        }
+        if (hint) {
+            hint.textContent = d.auto_provision
+                ? (d.ready ? 'fleet ready' : 'distributing…')
+                : '';
+        }
     } catch (e) { ind.textContent = 'Readiness check failed.'; }
 }
 
@@ -11062,6 +11098,22 @@ async function saveMtlsEnable(btn) {
         const d = await r.json().catch(() => ({}));
         if (r.ok) { showToast(d.message || 'Saved.', 'success'); loadMtlsReadiness(); }
         else if (r.status === 409) showToast(d.detail || 'Not ready for mTLS.', 'error');
+        else showToast('Failed: ' + (d.detail || r.status), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
+}
+
+async function saveMtlsAutoProvision(btn) {
+    const chk = document.getElementById('mtls-auto-provision');
+    if (!chk) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const r = await setupFetch('/setup/mtls-auto-provision', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: chk.checked }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) { showToast(d.message || 'Saved.', 'success'); loadMtlsReadiness(); }
         else showToast('Failed: ' + (d.detail || r.status), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }

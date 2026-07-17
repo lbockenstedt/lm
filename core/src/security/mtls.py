@@ -10,7 +10,8 @@ Activation flips two things with zero code change:
   * clients verify the server against the CA and present a client cert;
   * servers require + verify a client cert.
 
-Env knobs (all optional):
+Env knobs (all optional; the runtime registry set by distribution takes
+precedence over env for the material paths — see set_runtime_materials):
   LM_MTLS_ENABLED=1        master switch (default off)
   LM_MTLS_CA=<path>        trusted CA bundle (the LE chain) for verification
   LM_MTLS_CLIENT_CERT      client cert this node presents (the wildcard)
@@ -28,11 +29,36 @@ import ssl
 # so enabling doesn't require an env change + restart. None → fall back to the env.
 _runtime_enabled = None
 
+# Runtime material paths set by the hub/spoke when cert distribution writes the
+# CA bundle + client cert/key to disk (see HubCertDistributionMixin.
+# _install_cert_on_hub / the SPOKE_SET_MTLS_MATERIALS handler). Lets the readiness
+# check go green the moment the files land — without waiting for an env reload on
+# the next restart — and lets distribution choose the on-disk path by convention
+# (next to LM_TLS_CERT) instead of requiring the operator to pre-set env vars.
+# Each entry is None → fall back to the env for that path. Set via
+# set_runtime_materials(); persisted by the hub into global_config["mtls"] so a
+# restart re-registers them (mirrors set_runtime_enabled).
+_runtime_materials = {"ca": None, "client_cert": None, "client_key": None}
+
 
 def set_runtime_enabled(value) -> None:
     """Hub applies global_config.mtls_enabled here (startup + on the WebUI knob)."""
     global _runtime_enabled
     _runtime_enabled = None if value is None else bool(value)
+
+
+def set_runtime_materials(ca=None, client_cert=None, client_key=None) -> None:
+    """Hub/spoke applies the on-disk mTLS material paths here (startup from
+    global_config["mtls"], and after distribution writes the files). Any arg
+    left None keeps its current value, so a caller can set just the CA bundle
+    (the hub — it has no client leg) without clobbering client paths. Pass an
+    empty string to explicitly clear a path back to the env fallback."""
+    if ca is not None:
+        _runtime_materials["ca"] = ca or None
+    if client_cert is not None:
+        _runtime_materials["client_cert"] = client_cert or None
+    if client_key is not None:
+        _runtime_materials["client_key"] = client_key or None
 
 
 def mtls_enabled() -> bool:
@@ -44,9 +70,13 @@ def mtls_enabled() -> bool:
 
 
 def _paths():
-    return (os.getenv("LM_MTLS_CA", "").strip(),
-            os.getenv("LM_MTLS_CLIENT_CERT", "").strip(),
-            os.getenv("LM_MTLS_CLIENT_KEY", "").strip())
+    # Runtime registry first (set by distribution at run time), then env (the
+    # operator's static knobs). A runtime path wins even if the env is unset, so
+    # the readiness check reflects a just-distributed bundle immediately.
+    ca = _runtime_materials.get("ca") or os.getenv("LM_MTLS_CA", "").strip()
+    cert = _runtime_materials.get("client_cert") or os.getenv("LM_MTLS_CLIENT_CERT", "").strip()
+    key = _runtime_materials.get("client_key") or os.getenv("LM_MTLS_CLIENT_KEY", "").strip()
+    return (ca or "", cert or "", key or "")
 
 
 def client_context(is_wss: bool):
@@ -93,13 +123,19 @@ def apply_server_client_auth(ctx: ssl.SSLContext):
 
 def status() -> dict:
     """Introspection for the readiness check / UI: is mTLS on, and are the
-    materials present so it *would* work?"""
+    materials present so it *would* work? The ``*_path`` fields expose the
+    resolved paths (runtime registry or env) so an operator can see WHICH file
+    each check is looking at, not just whether it exists."""
     ca, cert, key = _paths()
+    server = os.getenv("LM_TLS_CERT", "").strip()
     return {
         "enabled": mtls_enabled(),
         "ca_present": bool(ca and os.path.exists(ca)),
         "client_cert_present": bool(cert and os.path.exists(cert)),
         "client_key_present": bool(key and os.path.exists(key)),
-        "server_cert_present": bool(os.getenv("LM_TLS_CERT") and
-                                    os.path.exists(os.getenv("LM_TLS_CERT", ""))),
+        "server_cert_present": bool(server and os.path.exists(server)),
+        "ca_path": ca,
+        "client_cert_path": cert,
+        "client_key_path": key,
+        "server_cert_path": server,
     }

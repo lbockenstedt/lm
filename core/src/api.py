@@ -84,6 +84,7 @@ a bare ``raise HTTPException(500, detail=str(e))`` so hub logs capture the trace
 
 import os
 import re
+import ssl
 import asyncio
 import base64
 import json
@@ -1861,6 +1862,22 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     if tls_cert and tls_key:
         cfg_kwargs["ssl_certfile"] = tls_cert
         cfg_kwargs["ssl_keyfile"] = tls_key
+    # mTLS — hub↔spoke SERVER leg: when mTLS is enabled AND a CA bundle is
+    # configured (the LE chain written by _install_cert_on_hub), require +
+    # verify a client cert so the hub authenticates each spoke. Spokes present
+    # the LE wildcard; the hub verifies it against the CA. Without this the hub
+    # verifies nothing on its 443 surface even with mTLS "on". Read at startup,
+    # so the cert-install / auto-enable self-restart applies it; toggling mTLS
+    # at runtime without a restart arms only the spoke side (client_context).
+    try:
+        from security import mtls as _mtls
+        if _mtls.mtls_enabled():
+            _ca = _mtls._paths()[0]
+            if _ca and os.path.exists(_ca):
+                cfg_kwargs["ssl_ca_certs"] = _ca
+                cfg_kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
+    except Exception:  # noqa: BLE001 - never brick the hub boot on an mtls hiccup
+        pass
     # WebSocket keepalive: uvicorn's defaults (ping every 20s, pong timeout 5s)
     # are too tight for spokes that do any sync I/O on their shared event loop
     # (cs telemetry relay's dhcp subprocess + config load + persist; dns
@@ -1893,7 +1910,19 @@ def run_api_server(hub, port=443):
         "ws_ping_timeout": _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0),
     }
     if cert and key:
+        _mtls_kw = {}
+        # mTLS hub↔spoke server leg — see build_server() for the rationale.
+        try:
+            from security import mtls as _mtls
+            if _mtls.mtls_enabled():
+                _ca = _mtls._paths()[0]
+                if _ca and os.path.exists(_ca):
+                    _mtls_kw = {"ssl_ca_certs": _ca,
+                                "ssl_cert_reqs": ssl.CERT_REQUIRED}
+        except Exception:  # noqa: BLE001
+            _mtls_kw = {}
         uvicorn.run(app, host="0.0.0.0", port=port, ssl_certfile=cert,
-                    ssl_keyfile=key, log_config=_uvicorn_log_config(), **_ws_kw)
+                    ssl_keyfile=key, log_config=_uvicorn_log_config(),
+                    **_ws_kw, **_mtls_kw)
     else:
         uvicorn.run(app, host="0.0.0.0", port=port, log_config=_uvicorn_log_config(), **_ws_kw)

@@ -210,6 +210,9 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
                                wildcard_enabled: bool = False,
                                get_all_by_type: Optional[Callable] = None,
                                push_state: Optional[Dict[str, str]] = None,
+                               mtls_auto_provision: bool = False,
+                               get_primary_spokes: Optional[Callable] = None,
+                               push: Optional[Callable] = None,
                                ) -> List[Dict[str, Any]]:
     """Distribute every managed cert whose targets are stale. Skips the
     ``LE_GET_CERT`` pull entirely when every target of a cert is current.
@@ -225,7 +228,16 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
     is also pushed to EVERY connected cert-capable spoke (see
     ``distribute_wildcard_to_all_spokes``) in addition to its explicit targets.
     False → the wildcard path is never invoked (no-op while the operator is
-    still testing cert distribution)."""
+    still testing cert distribution).
+
+    ``mtls_auto_provision`` (default False — ``global_config["mtls"][
+    "auto_provision"]``) gates a SEPARATE mTLS-materials fan-out: when True AND
+    a cert's domain is a wildcard, the cert's chain + client cert/key are
+    pushed to every connected PRIMARY spoke (all types) + the hub as
+    ``SPOKE_SET_MTLS_MATERIALS`` (see ``distribute_mtls_materials_to_all_spokes``)
+    so the fleet can mutually verify once mTLS is enabled. Requires
+    ``get_primary_spokes`` + ``push`` (a durable push_or_queue_to_spoke-style
+    callable). No-op when disabled."""
     aggregate: List[Dict[str, Any]] = []
     res = await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0)
     ret = _unwrap(res)
@@ -247,6 +259,9 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
         targets = cert.get("targets") or []
         cur_hash = cert.get("material_hash")
         is_wc = wildcard_enabled and _is_wildcard(domain)
+        is_mtls = (mtls_auto_provision and _is_wildcard(domain)
+                   and get_primary_spokes is not None and push is not None
+                   and push_state is not None)
 
         # Explicit-target path (skip the LE_GET_CERT pull when all current).
         explicit_summary: List[Dict[str, Any]] = []
@@ -282,6 +297,18 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
                 rr, get_all_by_type, capable, le_spoke_id, domain, cur_hash,
                 push_state, install_on_hub=install_on_hub)
             aggregate.extend(wc_summary)
+
+        # mTLS-materials fan-out (gated; no-op when disabled). Separate from the
+        # wildcard fan-out above: that pushes the per-DEVICE cert (INSTALL_CERT)
+        # to cert-capable spokes; this pushes the TRANSPORT mTLS materials
+        # (SPOKE_SET_MTLS_MATERIALS) to every PRIMARY spoke (all types) so the
+        # fleet can mutually verify once mTLS is enabled. Shares push_state
+        # (keyed "mtls|…" so the two flows don't collide).
+        if is_mtls:
+            mtls_summary = await distribute_mtls_materials_to_all_spokes(
+                rr, push, get_primary_spokes, le_spoke_id, domain, cur_hash,
+                push_state, install_on_hub=install_on_hub)
+            aggregate.extend(mtls_summary)
     return aggregate
 
 
@@ -291,6 +318,167 @@ def _is_wildcard(domain: str) -> bool:
     subdomain, so the hub can fan it out to ALL cert-capable spokes without each
     one being an explicit target."""
     return bool(domain) and domain.lstrip().startswith("*.")
+
+
+# Push-state key prefix for mTLS-materials distribution (kept separate from the
+# wildcard server-cert push_state so the two flows — device-serving cert vs mTLS
+# client cert — don't shadow each other's per-spoke hash).
+_MTLS_PUSH_PREFIX = "mtls"
+
+
+async def distribute_mtls_materials_to_all_spokes(
+        rr: Callable, push: Callable, get_primary_spokes: Callable,
+        le_spoke_id: str, domain: str,
+        material_hash: Optional[str],
+        push_state: Dict[str, str],
+        install_on_hub: Optional[Callable] = None,
+        ) -> List[Dict[str, Any]]:
+    """Fan the LE wildcard's mTLS materials (the chain as the CA bundle + the
+    wildcard as the client cert/key) to EVERY connected PRIMARY spoke (all
+    module types — every spoke dials the hub, so every spoke needs them, not
+    just CERT_CAPABLE_MODULES) plus the hub itself. Gated hub-side by
+    ``global_config["mtls"]["auto_provision"]``; the caller only invokes this
+    for a wildcard domain when auto-provision is on.
+
+    Why a separate flow from ``distribute_wildcard_to_all_spokes``: that flow
+    pushes ``INSTALL_CERT`` (a per-DEVICE cert install, only to cert-capable
+    spokes) so each spoke's webui/agent listener serves the LE cert. This flow
+    pushes ``SPOKE_SET_MTLS_MATERIALS`` (a TRANSPORT-LAYER material install, to
+    every primary spoke) so each spoke can mutually verify with the hub once
+    mTLS is enabled. Role sub-spokes are excluded (the hub's
+    ``get_primary_spokes`` filters by ``spoke_parent_map``); they share their
+    parent agent's process + cert, so the parent's push covers them.
+
+    ``push`` is a durable ``push_or_queue_to_spoke``-style callable so an
+    offline spoke is queued (mailbox) and provisioned on reconnect — never
+    orphaned. ``install_on_hub`` is the hub self-install (writes the wildcard
+    to LM_TLS_CERT/KEY + the chain to LM_MTLS_CA via _install_cert_on_hub); the
+    hub is the hub↔spoke SERVER so it needs the CA (to verify spokes) + the
+    wildcard as its server cert (so spokes can verify it), NOT a client cert.
+
+    Skip: ``push_state`` keyed ``f"mtls|{spoke_id}"`` / ``"mtls|hub"``; when a
+    target's recorded hash already equals ``material_hash`` it's skipped (no
+    re-push storm on the hourly loop). ``material_hash`` from ``LE_LIST_CERTS``
+    skips the LE_GET_CERT pull when every target is current; pass None to force.
+
+    Returns a per-target summary (each entry tagged with ``domain`` + ``mtls``
+    so the UI can distinguish this flow from a cert push).
+    """
+    summary: List[Dict[str, Any]] = []
+    if not _is_wildcard(domain):
+        return summary
+
+    primary = list(get_primary_spokes() or [])
+    include_hub = install_on_hub is not None
+    if not primary and not include_hub:
+        logger.info("[mtls] %s: no connected primary spokes — nothing to fan out",
+                    domain)
+        return summary
+
+    def _key(sid: str) -> str:
+        return f"{_MTLS_PUSH_PREFIX}|{sid}"
+
+    def _current(sid: str) -> bool:
+        return bool(material_hash) and push_state.get(_key(sid)) == material_hash
+
+    stale_spokes = [(sid, mt) for (sid, mt) in primary if not _current(sid)]
+    hub_current = (not include_hub) or (bool(material_hash)
+                                        and push_state.get(_key("hub")) == material_hash)
+    if not stale_spokes and hub_current:
+        logger.info("[mtls] %s: all %d target(s) current — skipping",
+                    domain, len(primary) + (1 if include_hub else 0))
+        return [{"domain": domain, "module_type": None, "identifier": None,
+                 "status": "SUCCESS",
+                 "message": f"all {len(primary) + (1 if include_hub else 0)} mTLS target(s) current",
+                 "skipped": True, "mtls": True}]
+
+    # Pull material (only when something is stale).
+    mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
+    mat_ret = _unwrap(mat)
+    if not (isinstance(mat_ret, dict) and mat_ret.get("status") == "SUCCESS"):
+        msg = mat_ret.get("message") if isinstance(mat_ret, dict) else "LE_GET_CERT failed"
+        logger.warning("[mtls] %s: LE_GET_CERT failed — %s", domain, msg)
+        return [{"domain": domain, "module_type": None, "identifier": None,
+                 "status": "ERROR", "message": msg, "mtls": True}]
+    cert = mat_ret.get("data") or {}
+    fullchain = cert.get("fullchain", "")
+    privkey = cert.get("privkey", "")
+    chain = cert.get("chain", "")
+    cur_hash = material_hash or cert.get("material_hash")
+
+    if not fullchain or not privkey or not chain:
+        logger.warning("[mtls] %s: LE_GET_CERT returned incomplete material "
+                       "(fullchain/privkey/chain) — cannot provision mTLS", domain)
+        return [{"domain": domain, "module_type": None, "identifier": None,
+                 "status": "ERROR",
+                 "message": "incomplete cert material (need fullchain+privkey+chain)",
+                 "mtls": True}]
+
+    logger.info("[mtls] %s: fanning out mTLS materials to %d primary spoke(s)%s",
+                domain, len(stale_spokes),
+                " + hub" if (include_hub and not hub_current) else "")
+
+    payload = {"ca_bundle": chain, "client_cert": fullchain, "client_key": privkey}
+
+    for sid, mt in stale_spokes:
+        entry = {"domain": domain, "module_type": mt, "identifier": sid, "mtls": True}
+        # Durable push: an offline spoke is queued (mailbox) and provisioned on
+        # reconnect instead of orphaned. 120s upper bound for the live path; a
+        # queued push returns immediately.
+        res = await push(sid, "SPOKE_SET_MTLS_MATERIALS", payload, timeout=120.0)
+        queued = bool(isinstance(res, dict) and res.get("queued"))
+        rret = res.get("result") if isinstance(res, dict) else None
+        rret = _unwrap(rret) if rret is not None else {}
+        if queued:
+            # Pushed to the durable mailbox — will land on the spoke's next
+            # reconnect. Not an error and not yet confirmed-installed: don't
+            # stamp the push-state hash (so the next loop re-attempts the live
+            # push once the spoke is back, then stamps it on a live SUCCESS).
+            entry.update(status="QUEUED",
+                         message=(res.get("message") if isinstance(res, dict)
+                                  else "queued for delivery on reconnect"),
+                         queued=True)
+            logger.info("[mtls] %s → %s/%s: queued (offline) — delivers on reconnect",
+                        domain, mt, sid)
+        elif isinstance(rret, dict) and rret.get("status") == "SUCCESS":
+            entry.update(status="SUCCESS",
+                         message=(rret.get("message") or "installed"),
+                         queued=False)
+            if cur_hash:
+                push_state[_key(sid)] = cur_hash
+            logger.info("[mtls] %s → %s/%s: installed — %s",
+                        domain, mt, sid, entry["message"])
+        else:
+            msg = (rret.get("message") if isinstance(rret, dict)
+                   else (res.get("message") if isinstance(res, dict) else "push failed"))
+            entry.update(status="ERROR", message=msg, queued=False)
+            logger.warning("[mtls] %s → %s/%s: FAILED — %s", domain, mt, sid, msg)
+        summary.append(entry)
+
+    # Hub self-install (the wildcard as the hub server cert + the chain as
+    # LM_MTLS_CA). One hub TLS endpoint; identifier "hub".
+    if include_hub and not hub_current:
+        hentry = {"domain": domain, "module_type": "hub", "identifier": "hub", "mtls": True}
+        try:
+            hret = await install_on_hub(domain, fullchain, privkey, chain, "hub")
+        except Exception as e:  # never let a self-install crash the fan-out
+            hret = {"status": "ERROR", "message": str(e)}
+        if isinstance(hret, dict) and hret.get("status") == "SUCCESS":
+            hentry.update(status="SUCCESS", message=hret.get("message") or "installed on hub")
+            if cur_hash:
+                push_state[_key("hub")] = cur_hash
+            logger.info("[mtls] %s → hub: %s", domain, hentry["message"])
+        else:
+            hentry.update(status="ERROR",
+                          message=(hret.get("message") if isinstance(hret, dict)
+                                   else "hub self-install failed"))
+            logger.warning("[mtls] %s → hub: FAILED — %s", domain, hentry["message"])
+        summary.append(hentry)
+
+    ok = sum(1 for s in summary if s.get("status") == "SUCCESS")
+    logger.info("[mtls] %s: fanned out mTLS materials %d/%d target(s) OK",
+                domain, ok, len(summary))
+    return summary
 
 
 async def distribute_wildcard_to_all_spokes(

@@ -6,6 +6,15 @@ from api import (
 from update_pipeline import _version_behind
 
 
+async def _compute_mtls_readiness(hub) -> dict:
+    """Delegate to ``hub.mtls_readiness()`` (HubCertDistributionMixin) so the
+    route, the enable guard, and the auto-enable loop share ONE implementation.
+    See ``GET /setup/mtls-readiness`` for the rationale (primary spokes only,
+    offline spokes don't block, ready = hub CA + server cert + every connected
+    primary spoke has materials)."""
+    return await hub.mtls_readiness()
+
+
 def register(app, hub, ctx):
     """Register setup_admin routes on the Hub app."""
 
@@ -142,25 +151,17 @@ def register(app, hub, ctx):
     async def get_mtls_readiness():
         """mTLS readiness: is the system safe to enable mutual TLS without
         orphaning a spoke/agent? Reports the master switch, the hub's cert
-        materials, and the connected spokes. Green when the hub has the wildcard
-        + CA in place (the transport endpoints can verify). Per-spoke deep-check
-        is a follow-up refinement; until then this gates on the hub materials +
-        surfaces the connected-spoke count so an admin enables deliberately."""
-        from security import mtls
-        hub = app.state.hub
-        st = mtls.status()
-        spokes = [{"id": sid, "type": mt}
-                  for sid, mt in getattr(hub, "spoke_module_types", {}).items()
-                  if sid in getattr(hub, "active_connections", {})]
-        blockers = []
-        if not st["ca_present"]:
-            blockers.append("no CA bundle (LM_MTLS_CA) — distribute the LE wildcard chain")
-        if not st["server_cert_present"]:
-            blockers.append("hub server cert (LM_TLS_CERT) not present")
-        ready = not blockers
-        return {"enabled": st["enabled"], "ready": ready, "status": st,
-                "connected_spokes": len(spokes), "spokes": spokes,
-                "blockers": blockers}
+        materials, AND each connected PRIMARY spoke's mTLS materials (queried
+        via SPOKE_GET_MTLS_STATUS) so the card renders a per-spoke green/amber
+        dot and the operator can see exactly which spoke isn't ready before
+        enabling. Role sub-spokes are excluded — they share their parent
+        agent's process + cert, so the parent's dot covers them.
+
+        ``ready`` = hub has the CA + server cert AND every connected primary
+        spoke has the CA + client cert/key. Offline spokes do NOT block —
+        distribution is mailbox-durable, so a spoke temporarily mid-reconnect
+        gets its materials on reconnect (and is shown amber, not red)."""
+        return await _compute_mtls_readiness(app.state.hub)
 
     @app.post("/setup/mtls-enable")
     async def set_mtls_enable(request: Request):
@@ -171,14 +172,17 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="admin required")
         data = await request.json()
         enable = bool(data.get("enabled"))
-        # Guard: refuse to enable if not ready (would orphan spokes), unless the
-        # caller explicitly forces it.
+        # Guard: refuse to enable if not ready (would orphan a spoke), unless
+        # the caller explicitly forces it. Readiness now covers the per-spoke
+        # deep-check (hub CA + server cert AND every connected primary spoke has
+        # its materials), not just the hub's own files.
         if enable and not bool(data.get("force")):
-            st = mtls.status()
-            if not (st["ca_present"] and st["server_cert_present"]):
+            rdy = await _compute_mtls_readiness(hub)
+            if not rdy["ready"]:
                 raise HTTPException(status_code=409,
-                    detail="System not ready for mTLS — distribute the LE wildcard "
-                           "to the hub + spokes first (or pass force=true).")
+                    detail="System not ready for mTLS — "
+                           + "; ".join(rdy["blockers"])
+                           + " (or pass force=true).")
         gc = hub.state.system_state.get("global_config", {})
         gc["mtls_enabled"] = enable
         hub.state.system_state["global_config"] = gc
@@ -188,6 +192,36 @@ def register(app, hub, ctx):
                 "message": ("mTLS enabled — verification arms on the next "
                             "reconnect of each leg." if enable
                             else "mTLS disabled (encrypted, unverified).")}
+
+    @app.post("/setup/mtls-auto-provision")
+    async def set_mtls_auto_provision(request: Request):
+        """Toggle ``global_config["mtls"]["auto_provision"]`` — the master
+        switch for auto-deploying the LE wildcard + CA bundle to the hub + every
+        primary spoke (and auto-enabling mTLS once the fleet is ready). When ON,
+        the cert-distribution loop + the LE_CERT_RENEWED event path fan the
+        mTLS materials out to every primary spoke; when OFF, distribution and
+        auto-enable are both inert (the manual Enable button + 409 guard still
+        behave as before)."""
+        hub = app.state.hub
+        sess = ctx._session_user(request)
+        if not sess or not ctx._is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        data = await request.json()
+        enabled = bool(data.get("enabled"))
+        gc = hub.state.system_state.get("global_config", {})
+        mtls_cfg = gc.get("mtls", {}) or {}
+        mtls_cfg["auto_provision"] = enabled
+        gc["mtls"] = mtls_cfg
+        hub.state.system_state["global_config"] = gc
+        hub.state.save_state()
+        return {"status": "ok", "auto_provision": enabled,
+                "message": ("mTLS auto-provision ON — the hub will distribute the "
+                             "LE wildcard + CA bundle to every spoke and enable "
+                             "mTLS once the fleet is ready."
+                             if enabled
+                             else "mTLS auto-provision OFF — distribution + "
+                                  "auto-enable are inert; use the manual Enable "
+                                  "button.")}
 
     @app.get("/setup/session-timeout")
     async def get_session_timeout():

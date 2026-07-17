@@ -954,6 +954,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 (self.state.get_global_config() or {}).get("mtls_enabled"))
         except Exception as _e:  # noqa: BLE001
             logger.debug("apply mtls_enabled at startup: %s", _e)
+        # Re-register the hub's mTLS material paths written by cert distribution
+        # (the CA bundle path persisted into global_config["mtls"] by
+        # _install_cert_on_hub) so the readiness check sees them immediately
+        # after a restart, without waiting for the next distribution sweep.
+        try:
+            from security import mtls as _mtls
+            _mcfg = ((self.state.get_global_config() or {}).get("mtls", {}) or {})
+            if _mcfg.get("ca_path") or _mcfg.get("client_cert_path") or _mcfg.get("client_key_path"):
+                _mtls.set_runtime_materials(
+                    ca=_mcfg.get("ca_path"),
+                    client_cert=_mcfg.get("client_cert_path"),
+                    client_key=_mcfg.get("client_key_path"))
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("re-register mtls materials at startup: %s", _e)
         # File-a-Bug artifact store: each report's console.log / dom.html /
         # screenshot.png / report.json live under data_dir/bugs/<id>/ so the
         # large payloads never bloat the 500-line self.logs deque or the hub

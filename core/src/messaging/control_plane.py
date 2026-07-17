@@ -15,6 +15,7 @@ import threading
 import queue
 import random
 import os
+import tempfile
 import socket
 import ssl
 import sys
@@ -792,22 +793,22 @@ class BaseControlPlane:
         except Exception as e:
             logger.debug("Pre-exit async log flush failed: %s", e)
 
-    async def _deferred_repoint_exit(self) -> None:
-        """Scheduled by the ``SPOKE_SET_HUB_URL`` handler ~0.5s after it returns.
-
-        The handler persists the new ``HUB_URL`` to ``.env`` and returns a
+    async def _deferred_restart_exit(self) -> None:
+        """Scheduled ~0.5s after a handler that needs a process restart to apply
+        its change returns (``SPOKE_SET_HUB_URL`` repoint, ``SPOKE_SET_MTLS_MATERIALS``
+        mTLS arming). The caller persists its change to ``.env`` and returns a
         SUCCESS ack so the hub's mailbox clears the push (vs. SPOKE_UPDATE,
         which exits before acking and relies on idempotent re-delivery). This
-        task then flushes the log relay — so the "repointing … restarting" line
-        actually reaches the hub — and exits NON-ZERO (3) so systemd
+        task then flushes the log relay — so the "… restarting" line actually
+        reaches the hub — and exits NON-ZERO (3) so systemd
         ``Restart=always``/``on-failure`` relaunches the process, which on boot
-        reads the now-persisted ``HUB_URL`` and dials the new hub address. The
-        short sleep lets the ack + any final relay frames land first."""
+        re-reads the now-persisted ``.env``. The short sleep lets the ack + any
+        final relay frames land first."""
         try:
             await asyncio.sleep(0.5)
             await self._flush_log_relay_async()
         except Exception as e:  # noqa: BLE001
-            logger.debug("Deferred repoint-exit pre-flush failed: %s", e)
+            logger.debug("Deferred restart-exit pre-flush failed: %s", e)
         finally:
             os._exit(3)
 
@@ -2493,7 +2494,7 @@ class BaseControlPlane:
             self._persist_secret_to_env("HUB_URL", new_norm)
             self.hub_url = new_norm  # in case the deferred exit is interrupted
             self._draining = True  # hub queues request/reply pushes during the exit window
-            asyncio.create_task(self._deferred_repoint_exit())
+            asyncio.create_task(self._deferred_restart_exit())
             return {"status": "SUCCESS",
                     "message": f"repointing to {new_norm}; restarting to reconnect"}
 
@@ -2531,7 +2532,149 @@ class BaseControlPlane:
                 logger.error(f"SPOKE_SET_HOSTNAME failed: {e}")
                 return {"status": "ERROR", "message": str(e)}
 
+        if cmd_type == "SPOKE_GET_MTLS_STATUS":
+            # Hub queries this spoke's mTLS material presence for the readiness
+            # card (System → Hub Status). Returns mtls.status() — the same dict
+            # the hub's own readiness check uses, so the card can render a
+            # per-spoke green/amber dot. Read-only; no side effects.
+            try:
+                from security import mtls as _mtls
+                return {"status": "SUCCESS", "mtls": _mtls.status()}
+            except Exception as e:  # noqa: BLE001
+                return {"status": "ERROR", "message": f"mtls status unavailable: {e}"}
+
+        if cmd_type == "SPOKE_SET_MTLS_MATERIALS":
+            # Hub-pushed mTLS materials: the LE chain (CA bundle) + the wildcard
+            # client cert/key, so this spoke can mutually verify with the hub
+            # once mTLS is enabled. Transport-layer (like SPOKE_SET_HUB_SECRET /
+            # SPOKE_SET_HUB_URL), so handled here on the base — EVERY spoke dials
+            # the hub, so every spoke needs these, not just cert-capable ones
+            # (the per-device INSTALL_CERT only reaches CERT_CAPABLE_MODULES).
+            # Writes to the spoke's cert dir (next to LM_TLS_CERT), persists the
+            # paths to .env, registers them in the runtime registry (so the
+            # spoke→hub client leg picks them up on the NEXT reconnect, no
+            # restart needed for that leg), and restarts ONLY if material
+            # changed so the /ws/agent SERVER leg re-arms apply_server_client_auth
+            # (its SSL context is built once at startup). Carries a private key,
+            # same as INSTALL_CERT already does over this signed channel — no
+            # new exposure. Push-state idempotency (material_hash) keeps restarts
+            # to cert-renewal cadence (~60–90 days), not hourly.
+            return await self._handle_set_mtls_materials(data)
+
         return None
+
+    async def _handle_set_mtls_materials(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply ``SPOKE_SET_MTLS_MATERIALS``: write CA + client cert/key to the
+        spoke's cert dir, persist paths to .env, register runtime materials, and
+        restart only on a real change. See the handler comment for the rationale."""
+        # Role sub-spokes (RoleConnection) share their parent agent's process,
+        # .env, cert dir, and /ws/agent listener — the parent agent IS the mTLS
+        # transport endpoint and receives its own push. Applying here would
+        # write the same files the parent already wrote AND os._exit(3) the
+        # whole shared agent (once per loaded role). The hub excludes role
+        # sub-spokes from the fan-out (spoke_parent_map); this guard is the
+        # belt-and-suspenders so a stray push can't restart a shared agent.
+        if getattr(self, "parent_spoke_id", ""):
+            logger.debug("SPOKE_SET_MTLS_MATERIALS: skipping role sub-spoke %s "
+                          "(parent %s carries the materials)", self.spoke_id,
+                          self.parent_spoke_id)
+            return {"status": "SUCCESS",
+                    "message": "skipped — role sub-spoke; parent agent carries mTLS materials"}
+        ca_bundle = (data.get("ca_bundle") or "").strip()
+        client_cert = (data.get("client_cert") or "").strip()
+        client_key = (data.get("client_key") or "").strip()
+        if not ca_bundle:
+            return {"status": "ERROR", "message": "missing ca_bundle"}
+        cert_dir = self._mtls_material_dir()
+        ca_path = os.path.join(cert_dir, "mtls-ca.pem")
+        cc_path = os.path.join(cert_dir, "mtls-client.crt")
+        ck_path = os.path.join(cert_dir, "mtls-client.key")
+        changed = False
+        try:
+            changed |= self._mtls_write_if_changed(ca_path, ca_bundle, 0o644)
+            self._persist_secret_to_env("LM_MTLS_CA", ca_path)
+            if client_cert and client_key:
+                changed |= self._mtls_write_if_changed(cc_path, client_cert, 0o644)
+                changed |= self._mtls_write_if_changed(ck_path, client_key, 0o600)
+                self._persist_secret_to_env("LM_MTLS_CLIENT_CERT", cc_path)
+                self._persist_secret_to_env("LM_MTLS_CLIENT_KEY", ck_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("SPOKE_SET_MTLS_MATERIALS: write to %s failed: %s",
+                           cert_dir, e)
+            return {"status": "ERROR", "message": f"write failed: {e}"}
+        # Register with the runtime registry so the next client_context() call
+        # (the next spoke→hub reconnect) uses the new paths immediately, even
+        # before .env is re-read on restart.
+        try:
+            from security import mtls as _mtls
+            _mtls.set_runtime_materials(
+                ca=ca_path,
+                client_cert=cc_path if (client_cert and client_key) else None,
+                client_key=ck_path if (client_cert and client_key) else None)
+        except Exception:  # noqa: BLE001
+            pass
+        what = "CA + client cert/key" if (client_cert and client_key) else "CA bundle"
+        if changed:
+            logger.info("SPOKE_SET_MTLS_MATERIALS: installed %s for %s — restarting "
+                        "to arm the /ws/agent server leg", what, self.spoke_id)
+            self._draining = True  # hub queues request/reply during the exit window
+            asyncio.create_task(self._deferred_restart_exit())
+            return {"status": "SUCCESS",
+                    "message": f"mTLS {what} installed; restarting to arm verification"}
+        logger.info("SPOKE_SET_MTLS_MATERIALS: %s up to date for %s (no change)",
+                    what, self.spoke_id)
+        return {"status": "SUCCESS",
+                "message": f"mTLS {what} up to date (no change)"}
+
+    def _mtls_material_dir(self) -> str:
+        """Directory to write mTLS materials into — the same dir as the spoke's
+        ``LM_TLS_CERT`` (its server cert, e.g. /opt/lm/cs/certs), so the CA +
+        client cert/key live alongside the cert they verify. Falls back to a
+        ``certs`` dir under the repo root when the spoke has no server cert
+        (loopback / cert-less spokes), creating it (0700)."""
+        cert = os.environ.get("LM_TLS_CERT", "").strip()
+        if cert:
+            d = os.path.dirname(os.path.abspath(cert)) or "."
+            os.makedirs(d, exist_ok=True)
+            return d
+        d = os.path.join(self._repo_root(), "certs")
+        os.makedirs(d, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
+        return d
+
+    @staticmethod
+    def _mtls_write_if_changed(path: str, content: str, mode: int) -> bool:
+        """Atomically write ``content`` to ``path`` at ``mode`` ONLY when it
+        differs from the current file (returns True if changed / created).
+        Same-dir temp + os.replace for atomicity; same-dir required for
+        os.replace to stay on one filesystem. Skips the write (returns False)
+        when the file already has this exact content — so an idempotent re-push
+        (hourly loop before push-state catches up, or a reconnect re-trigger)
+        doesn't trigger a needless restart."""
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    if f.read() == content:
+                        return False
+            except OSError:
+                pass  # unreadable → treat as changed and overwrite
+        d = os.path.dirname(os.path.abspath(path)) or "."
+        fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(content)
+            os.chmod(tmp, mode)
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        return True
 
     async def _get_module_status(self) -> Dict[str, Any]:
         """

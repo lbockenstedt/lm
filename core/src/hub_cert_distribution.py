@@ -21,6 +21,7 @@ from cert_distribution import (
     distribute_cert_to_targets as _distribute_cert_to_targets,
     distribute_all_certs as _distribute_all_certs_impl,
     distribute_wildcard_to_all_spokes as _distribute_wildcard_to_all_spokes,
+    distribute_mtls_materials_to_all_spokes as _distribute_mtls_materials_impl,
 )
 
 logger = logging.getLogger("Hub")
@@ -58,40 +59,91 @@ class HubCertDistributionMixin:
         When the hub's ``wildcard_all_spokes`` flag is ON and ``domain`` is a
         wildcard, ALSO fan the cert out to every connected cert-capable spoke
         (plus the hub). The flag is OFF by default so this is a no-op while the
-        operator is still testing cert distribution."""
+        operator is still testing cert distribution.
+
+        When ``mtls.auto_provision`` is ON and ``domain`` is a wildcard, ALSO
+        fan the mTLS materials (CA + client cert/key) to every connected primary
+        spoke + the hub (see _distribute_mtls_materials)."""
         explicit = await _distribute_cert_to_targets(
             self._inflight_rr(self.request_response), self._cert_target_spoke,
             self.CERT_CAPABLE_MODULES, le_spoke_id, domain, targets,
             install_on_hub=self._install_cert_on_hub)
+        out = list(explicit or [])
+        pushed_state = False
         if self._wildcard_all_spokes_enabled() and _is_wildcard(domain):
             wc = await _distribute_wildcard_to_all_spokes(
                 self.request_response, self.get_all_spokes_by_type,
                 self.CERT_CAPABLE_MODULES, le_spoke_id, domain, material_hash,
                 self._wildcard_push_state(),
                 install_on_hub=self._install_cert_on_hub)
+            out += (wc or [])
+            pushed_state = True
+        if self._mtls_auto_provision_enabled() and _is_wildcard(domain):
+            mtls = await self._distribute_mtls_materials(le_spoke_id, domain, material_hash)
+            out += (mtls or [])
+            pushed_state = True
+        if pushed_state:
             self._save_wildcard_push_state()
-            combined = (explicit or []) + (wc or [])
-            self._stash_cert_device_reports(combined)
-            return combined
-        self._stash_cert_device_reports(explicit)
-        return explicit
+        self._stash_cert_device_reports(out)
+        return out
 
     async def _distribute_all_certs(self, le_spoke_id: str) -> list:
         """Distribute every managed cert whose targets are stale. Returns a
         flat per-target summary (see _distribute_all_certs_impl) so the
         /api/le/distribute route can show a per-target toast. Passes the
         wildcard fan-out params (gated by the hub flag — OFF by default →
-        no-op while the operator is testing)."""
+        no-op while the operator is testing) and the mTLS-materials fan-out
+        params (gated by ``mtls.auto_provision`` — OFF by default)."""
         out = await _distribute_all_certs_impl(
             self._inflight_rr(self.request_response), self._cert_target_spoke,
             self.CERT_CAPABLE_MODULES, le_spoke_id,
             install_on_hub=self._install_cert_on_hub,
             wildcard_enabled=self._wildcard_all_spokes_enabled(),
             get_all_by_type=self.get_all_spokes_by_type,
-            push_state=self._wildcard_push_state())
+            push_state=self._wildcard_push_state(),
+            mtls_auto_provision=self._mtls_auto_provision_enabled(),
+            get_primary_spokes=self._get_primary_spokes,
+            push=self.push_or_queue_to_spoke)
         self._save_wildcard_push_state()
         self._stash_cert_device_reports(out)
         return out
+
+    async def _distribute_mtls_materials(self, le_spoke_id: str, domain: str,
+                                         material_hash: Optional[str] = None) -> list:
+        """Fan the LE wildcard's mTLS materials (CA + client cert/key) to every
+        connected primary spoke + the hub. Thin wrapper over the pure helper
+        (see _distribute_mtls_materials_impl) so the transport is unit-testable.
+        Gated by ``mtls.auto_provision``; the caller checks the flag + wildcard
+        domain, so this is a no-op unless auto-provision is on."""
+        return await _distribute_mtls_materials_impl(
+            self._inflight_rr(self.request_response),
+            self.push_or_queue_to_spoke, self._get_primary_spokes,
+            le_spoke_id, domain, material_hash,
+            self._wildcard_push_state(),
+            install_on_hub=self._install_cert_on_hub)
+
+    def _get_primary_spokes(self) -> list:
+        """Connected spokes that are PRIMARY transport endpoints — i.e. NOT
+        role sub-spokes (which share their parent agent's process, .env, and
+        cert dir; the parent's mTLS push covers them). Used by
+        distribute_mtls_materials_to_all_spokes so a multi-role generic agent
+        gets ONE push (to its base spoke_id), not one per loaded role (each of
+        which would os._exit(3) the shared agent). Returns ``[(spoke_id,
+        module_type)]``."""
+        out = []
+        for sid, mt in getattr(self, "spoke_module_types", {}).items():
+            if sid in getattr(self, "active_connections", {}) and not getattr(
+                    self, "spoke_parent_map", {}).get(sid):
+                out.append((sid, mt))
+        return out
+
+    def _mtls_auto_provision_enabled(self) -> bool:
+        """``global_config["mtls"]["auto_provision"]`` — the master switch for
+        auto-deploying the LE wildcard + CA bundle to the hub + every primary
+        spoke (and, in Phase B, auto-enabling mTLS once the fleet is ready).
+        Default OFF; the operator turns it on from System → Hub Status."""
+        gc = (self.state.get_global_config() or {}).get("mtls", {}) or {}
+        return bool(gc.get("auto_provision", False))
 
     # ── per-device cert reports (fleet spokes: nw switch fleet) ──────────────
     # A fleet spoke (nw) installs the cert on N devices and returns a per-device
@@ -230,6 +282,13 @@ class HubCertDistributionMixin:
         cert can't brick the hub — uvicorn's ``ssl_certfile`` has no plaintext
         fallback at boot, unlike the WS context's try/except.
 
+        Also writes the LE ``chain`` → ``<certdir>/mtls-ca.pem`` and registers it
+        as the hub's ``LM_MTLS_CA`` (via the runtime registry + global_config),
+        so the hub can verify spoke client certs once mTLS is enabled — the hub
+        is the hub↔spoke server, so it needs the CA, not a client cert. Best-
+        effort: a missing/empty chain leaves the existing CA untouched and the
+        server-cert install still succeeds.
+
         Returns ``{"status", "message"}``. Best-effort restart: if the helper is
         missing or sudo denies, the cert is still written (next hub restart
         picks it up) and the message notes the restart didn't schedule.
@@ -279,7 +338,34 @@ class HubCertDistributionMixin:
             return {"status": "ERROR",
                     f"message": f"write to {cert_path}/{key_path} failed: {e}"}
 
-        # Schedule a non-blocking self-restart so uvicorn reloads the cert.
+        # Also write the LE chain → the mTLS CA bundle (LM_MTLS_CA) so the hub
+        # can verify spoke client certs once mTLS is enabled. The hub is the
+        # hub↔spoke SERVER (spokes dial it), so it needs the CA — NOT a client
+        # cert. The path is by convention next to LM_TLS_CERT so the operator
+        # never has to set LM_MTLS_CA by hand; the runtime registry (set below)
+        # makes the readiness check see it immediately, no restart required.
+        # A best-effort write: a missing/empty chain leaves the existing CA (if
+        # any) untouched — the server cert install above still succeeds.
+        ca_msg = ""
+        if chain and "BEGIN CERTIFICATE" in chain:
+            ca_path = os.path.join(os.path.dirname(os.path.abspath(cert_path)),
+                                   "mtls-ca.pem")
+            try:
+                self._atomic_write(ca_path, chain, 0o644)
+                self._register_hub_mtls_ca(ca_path)
+                ca_msg = f"; CA bundle → {ca_path}"
+                cert_log.info("[cert] %s → hub: mTLS CA bundle installed on %s",
+                              domain, ca_path)
+            except Exception as e:
+                ca_msg = f"; CA bundle write FAILED ({e})"
+                cert_log.warning("[cert] %s → hub: CA bundle write to %s failed: %s",
+                                  domain, ca_path, e)
+        elif chain:
+            cert_log.debug("[cert] %s → hub: chain present but not PEM — CA bundle not written", domain)
+
+        # Schedule a non-blocking self-restart so uvicorn reloads the cert (and,
+        # if mTLS is on, arms client-cert verification against the new CA — see
+        # api.build_server).
         restart_msg = "lm.service restarting to apply"
         try:
             subprocess.Popen(["sudo", "-n", _LM_SELF_RESTART],
@@ -287,7 +373,30 @@ class HubCertDistributionMixin:
         except Exception as e:
             restart_msg = f"cert written; could not schedule self-restart ({e}) — restart lm.service manually"
         cert_log.info("[cert] %s → hub: installed on %s — %s", domain, cert_path, restart_msg)
-        return {"status": "SUCCESS", "message": f"installed to {cert_path}; {restart_msg}"}
+        return {"status": "SUCCESS", "message": f"installed to {cert_path}{ca_msg}; {restart_msg}"}
+
+    def _register_hub_mtls_ca(self, ca_path: str) -> None:
+        """Register the hub's mTLS CA bundle path with the runtime registry AND
+        persist it into ``global_config["mtls"]`` so a hub restart re-registers
+        it (mirrors mtls.set_runtime_enabled). Best-effort persistence: a state
+        save failure is logged but never blocks the cert install."""
+        try:
+            from security import mtls
+            mtls.set_runtime_materials(ca=ca_path)
+        except Exception as e:  # noqa: BLE001
+            cert_log.warning("[cert] hub: mtls.set_runtime_materials failed: %s", e)
+            return
+        try:
+            gc = (self.state.get_global_config() or {})
+            mtls_cfg = gc.get("mtls", {}) or {}
+            mtls_cfg["ca_path"] = ca_path
+            gc["mtls"] = mtls_cfg
+            # state.system_state["global_config"] is the persisted backing store
+            # (see setup_admin.set_mtls_enable). Update both views + save.
+            self.state.system_state["global_config"] = gc
+            self.state.save_state()
+        except Exception as e:  # noqa: BLE001
+            cert_log.debug("[cert] hub: persist mtls.ca_path failed: %s", e)
 
     @staticmethod
     def _atomic_write(path: str, content: str, mode: int) -> None:
@@ -330,6 +439,9 @@ class HubCertDistributionMixin:
                             await self.le_cache_set("certs", certs)
                     except Exception as e:
                         logger.debug("le cache refresh (distribution loop) skipped: %s", e)
+                    # Phase B: when auto-provision is on, try to auto-enable mTLS
+                    # once the fleet is ready (hub + every connected primary spoke).
+                    await self._maybe_auto_enable_mtls()
             except Exception as e:
                 logger.warning("[sync-error] cert-distribution loop failed: %s", e)
             await asyncio.sleep(self._cert_distribution_retry_seconds())
@@ -346,6 +458,134 @@ class HubCertDistributionMixin:
             ok = sum(1 for s in (summary or []) if s.get("status") == "SUCCESS")
             logger.info("[cert] LE_CERT_RENEWED %s from %s: %d/%d target(s) pushed",
                         domain, le_spoke_id, ok, len(summary or []))
+            # Event-driven auto-enable too — don't wait up to 1h after a renew.
+            if self._mtls_auto_provision_enabled() and _is_wildcard(domain):
+                await self._maybe_auto_enable_mtls()
         except Exception as e:
             logger.warning("[sync-error] LE_CERT_RENEWED distribution for %s "
                            "failed: %s", domain, e)
+
+    async def _maybe_auto_enable_mtls(self) -> None:
+        """Phase B: when ``mtls.auto_provision`` is ON and the fleet is ready
+        (hub CA + server cert AND every connected primary spoke has its mTLS
+        materials) but mTLS isn't enabled yet, flip it on — set
+        ``global_config.mtls_enabled``, ``mtls.set_runtime_enabled(True)``, and
+        schedule ``lm-self-restart`` so uvicorn arms client-cert verification
+        (see api.build_server). Idempotent: a no-op when auto-provision is off,
+        mTLS is already on, or the fleet isn't ready yet. The readiness gate
+        (hub + spokes) means this never orphans a spoke — the manual 409 guard
+        and this auto path share the same _mtls_fleet_ready() check.
+
+        This removes the human checkpoint the operator opted out of by turning
+        auto-provision on; the auto_enabled_at timestamp is persisted for audit.
+        """
+        if not self._mtls_auto_provision_enabled():
+            return
+        try:
+            from security import mtls as _mtls
+        except Exception:  # noqa: BLE001
+            return
+        if _mtls.mtls_enabled():
+            return
+        if not await self._mtls_fleet_ready():
+            return
+        try:
+            gc = self.state.system_state.get("global_config", {}) or {}
+            gc["mtls_enabled"] = True
+            import datetime as _dt
+            (gc.setdefault("mtls", {}) or {})["auto_enabled_at"] = \
+                _dt.datetime.now(_dt.timezone.utc).isoformat()
+            self.state.system_state["global_config"] = gc
+            self.state.save_state()
+            _mtls.set_runtime_enabled(True)
+            cert_log.info("[mtls] auto-provision: fleet ready — enabling mTLS "
+                           "(arms on the next restart).")
+            # Schedule the self-restart so uvicorn arms client-cert verification
+            # against the CA. Best-effort, non-blocking (same helper as a cert
+            # install); a missing helper still leaves mTLS enabled for the spoke
+            # client legs on their next reconnect.
+            try:
+                subprocess.Popen(["sudo", "-n", _LM_SELF_RESTART],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception as e:  # noqa: BLE001
+                cert_log.warning("[mtls] auto-enable: scheduled self-restart failed "
+                                  "(%s) — restart lm.service to arm uvicorn.", e)
+        except Exception as e:  # noqa: BLE001
+            cert_log.warning("[mtls] auto-provision: auto-enable failed: %s", e)
+
+    async def _mtls_fleet_ready(self) -> bool:
+        """True when the fleet is ready for mTLS (see mtls_readiness). Thin bool
+        wrapper used by the auto-enable loop so it doesn't allocate the per-spoke
+        breakdown dict."""
+        return (await self.mtls_readiness())["ready"]
+
+    async def mtls_readiness(self) -> dict:
+        """Shared mTLS readiness computation (used by ``GET /setup/mtls-
+        readiness`` via setup_admin and by the auto-enable loop). Returns the
+        hub's material status + a per-connected-PRIMARY-spoke breakdown (queried
+        via SPOKE_GET_MTLS_STATUS) + the auto_provision flag + blockers.
+
+        ``ready`` = hub CA + server cert present AND every connected primary
+        spoke has CA + client cert/key. Role sub-spokes are excluded (they share
+        their parent agent's cert; the parent's dot covers them). A spoke that's
+        mid-reconnect (no reply) is NOT ready — it must have the materials before
+        mTLS is armed, else enabling would orphan it. An empty fleet is ready
+        (mTLS on a hub with zero spokes can't orphan anyone)."""
+        try:
+            from security import mtls as _mtls
+        except Exception:  # noqa: BLE001
+            _mtls = None
+        st = _mtls.status() if _mtls else {
+            "enabled": False, "ca_present": False, "client_cert_present": False,
+            "client_key_present": False, "server_cert_present": False,
+            "ca_path": "", "client_cert_path": "", "client_key_path": "",
+            "server_cert_path": ""}
+
+        primary = self._get_primary_spokes()
+
+        async def _query(sid):
+            try:
+                rr = await self.request_response(sid, "SPOKE_GET_MTLS_STATUS",
+                                                {}, timeout=4.0)
+                d = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else {}
+                if isinstance(d, dict) and d.get("status") == "SUCCESS" and isinstance(d.get("mtls"), dict):
+                    return d["mtls"]
+            except Exception:
+                pass
+            return None
+
+        results = (await asyncio.gather(*[_query(sid) for sid, _ in primary])
+                   if primary else [])
+        spoke_status = []
+        spokes_ready = True
+        for (sid, mt), mstat in zip(primary, results):
+            online = isinstance(mstat, dict)
+            ca = bool(mstat.get("ca_present")) if online else False
+            cc = bool(mstat.get("client_cert_present")) if online else False
+            ck = bool(mstat.get("client_key_present")) if online else False
+            spoke_ready = online and ca and cc and ck
+            spokes_ready = spokes_ready and spoke_ready
+            spoke_status.append({
+                "id": sid, "type": mt, "online": online,
+                "ca_present": ca, "client_cert_present": cc,
+                "client_key_present": ck, "ready": spoke_ready,
+                "status": "ready" if spoke_ready
+                          else ("offline" if not online else "missing materials"),
+            })
+
+        blockers = []
+        if not st["ca_present"]:
+            blockers.append("no CA bundle (LM_MTLS_CA) — distribute the LE wildcard chain")
+        if not st["server_cert_present"]:
+            blockers.append("hub server cert (LM_TLS_CERT) not present")
+        if primary and not spokes_ready:
+            not_ready = sum(1 for s in spoke_status if not s["ready"])
+            blockers.append(f"{not_ready} connected spoke(s) missing mTLS materials")
+        hub_ready = bool(st["ca_present"] and st["server_cert_present"])
+        ready = hub_ready and (spokes_ready if primary else True)
+        gc_mtls = ((self.state.get_global_config() or {}).get("mtls", {}) or {})
+        return {"enabled": st["enabled"], "ready": ready,
+                "auto_provision": bool(gc_mtls.get("auto_provision", False)),
+                "status": st,
+                "connected_spokes": len(primary), "spokes": spoke_status,
+                "blockers": blockers}
