@@ -392,9 +392,19 @@ class SpokeClient:
             return
         try:
             # agent/src/spoke_client.py → agent/requirements.txt
-            req = os.path.join(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))), "requirements.txt")
+            agent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            req = os.path.join(agent_dir, "requirements.txt")
             _ensure_requirements(req)
+            # The agent imports /opt/lm/core (BaseControlPlane, frame_crypto, …),
+            # so ALSO ensure core's deps. A core change that adds a third-party
+            # import (e.g. frame_crypto → cryptography) otherwise crashes an agent
+            # whose venv predates it — the check above only covers the agent's own
+            # requirements.txt. /opt/lm/core is co-located with the agent (same
+            # clone); guard the path so a standalone agent without core degrades
+            # to the agent-only check rather than raising.
+            core_req = os.path.join(os.path.dirname(agent_dir), "core", "requirements.txt")
+            if os.path.isfile(core_req):
+                _ensure_requirements(core_req)
         except Exception as e:  # noqa: BLE001 — never block startup
             logger.debug("dep_guard skipped: %s", e)
 
