@@ -262,7 +262,7 @@ class SpokeAlertMixin:
                         self.state.system_state["known_modules"] = cleaned
                         self.known_modules = cleaned
                         try:
-                            self.state.save_state()
+                            self.state._mark_dirty()
                         except Exception as e:
                             logger.debug("[spoke-alert] self-heal save failed: %s", e)
                     logger.info("[spoke-alert] skipped relayed agent id(s) "

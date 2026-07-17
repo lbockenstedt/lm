@@ -54,7 +54,7 @@ def register(app, hub, ctx):
         clean = {k: cur[k] for k in _FIELDS}
         gc = hub.state.get_global_config()
         gc["hub_contact_watchdog"] = clean
-        hub.state.save_state()
+        hub.state._mark_dirty()
         # Fan out to every approved spoke now; later-connecting spokes reconcile
         # via push_config_to_spoke.
         fanout = {}

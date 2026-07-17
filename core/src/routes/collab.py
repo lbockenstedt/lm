@@ -71,7 +71,7 @@ def register(app, hub, ctx):
                            for a in COLLAB_APP_PORTS}
         gc["collab"] = {k: cur[k] for k in _CFG_FIELDS}
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
         logger.info("collab config saved: enabled=%s app=%s bw=%s",
                     cur["enabled"], cur["default_app"], cur["default_bw"])
         return {"status": "ok", "config": cur}

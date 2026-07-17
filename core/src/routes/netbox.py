@@ -101,7 +101,7 @@ def register(app, hub, ctx):
             global_config = hub.state.system_state.get("global_config", {})
             global_config["netbox"] = config
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
             spoke_id = get_netbox_spoke(hub)
             if spoke_id:
                 msg = _hub_msg(spoke_id, "UPDATE_CONFIG", {"netbox_url": config.get("url"), "api_token": config.get("api_token"), "netbox_verify_ssl": config.get("verify_ssl")})

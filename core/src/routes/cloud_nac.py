@@ -55,7 +55,7 @@ def register(app, hub, ctx):
         gc = hub.state.system_state.get("global_config", {})
         gc["cloud_nac"] = {k: cur[k] for k in _CFG_FIELDS}
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
         return {"status": "ok", "config": cur}
 
     @app.post("/setup/cloud-nac/provision")
@@ -78,7 +78,7 @@ def register(app, hub, ctx):
         except _cn.CloudNacError as e:
             raise HTTPException(status_code=502, detail=str(e))
         _cn.record_account(hub.state.system_state, res)
-        hub.state.save_state()
+        await hub.state.save_state_now()
         # Auto-add to the configured Entra group (best-effort — surfaced as a
         # warning so the account+password still succeed if group-add is misconfig).
         group_warn = ""
@@ -107,7 +107,7 @@ def register(app, hub, ctx):
         except _cn.CloudNacError as e:
             raise HTTPException(status_code=502, detail=str(e))
         _cn.forget_account(hub.state.system_state, username)
-        hub.state.save_state()
+        hub.state._mark_dirty()
         return {"status": "ok", "deleted": username}
 
     @app.post("/setup/cloud-nac/sweep")
@@ -148,7 +148,7 @@ def register(app, hub, ctx):
                 results.append({"username": username, "action": "deleted", "last": last})
             except _cn.CloudNacError as e:
                 results.append({"username": username, "action": "error", "reason": str(e)})
-        hub.state.save_state()
+        hub.state._mark_dirty()
         deleted = sum(1 for r in results if r["action"] == "deleted")
         logger.info("Cloud NAC sweep: deleted %d idle account(s) of %d", deleted, len(results))
         return {"status": "ok", "deleted": deleted, "results": results}

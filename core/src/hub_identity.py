@@ -132,7 +132,7 @@ class HubIdentityMixin:
         # self.approved_modules + self.known_modules are the SAME objects as the
         # system_state dicts, so rename_module mutates them in place.
         self.state.rename_module(old_id, new_id)
-        self.state.save_state()
+        self.state._mark_dirty()
         # In-memory-only mirrors (not in system_state).
         if old_id in self.spoke_module_types:
             self.spoke_module_types[new_id] = self.spoke_module_types.pop(old_id)
@@ -202,7 +202,7 @@ class HubIdentityMixin:
             return
         # Persisted per-agent config (client_simulation/tenant binding/display_name).
         self.state.rename_agent(old_id, new_id)
-        self.state.save_state()
+        self.state._mark_dirty()
         # Legacy display-name override.
         adn = self.state.system_state.get("agent_display_names", {})
         if old_id in adn:

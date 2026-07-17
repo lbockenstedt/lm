@@ -711,7 +711,7 @@ def register(app, hub, ctx):
             pinned = [n for n in pinned if n != domain]
         gc["bugfixer_cert_identities"] = pinned
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        await hub.state.save_state_now()
         logger.info("[H1] BugFixer cert label for %s -> %s (pinned=%s)",
                     domain, enabled, pinned)
         return {"status": "ok", "domain": domain, "bugfixer": enabled,

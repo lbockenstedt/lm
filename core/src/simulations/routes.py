@@ -2283,7 +2283,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not label or not str(label).strip():
             raise HTTPException(status_code=400, detail="label required")
         hub.state.set_module_name(spoke_id, str(label).strip())
-        hub.state.save_state()
+        hub.state._mark_dirty()
         return {"saved": True, "spoke_id": spoke_id, "label": str(label).strip()}
 
     @app.patch("/sim/api/{tenant}/spokes/{spoke_id}/assigned-site")
@@ -2293,7 +2293,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         body = await request.json()
         site = (body or {}).get("site", "")
         hub.state.update_module_metadata(spoke_id, {"assigned_site": site or ""})
-        hub.state.save_state()
+        hub.state._mark_dirty()
         return {"saved": True, "spoke_id": spoke_id, "assigned_site": site or ""}
 
     @app.post("/sim/api/{tenant}/spokes/{spoke_id}/approve")
@@ -2314,7 +2314,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         hub.approved_modules[spoke_id] = approved
         if (body or {}).get("tenant_id"):
             hub.state.set_spoke_tenant(spoke_id, body["tenant_id"])
-        hub.state.save_state()
+        await hub.state.save_state_now()
         return {"saved": True, "spoke_id": spoke_id, "approved": approved}
 
     @app.patch("/sim/api/{tenant}/spokes/{spoke_id}/config")

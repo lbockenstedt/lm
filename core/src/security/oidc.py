@@ -660,7 +660,7 @@ def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,
             "updated_at": now,
         }
         users[oid] = record
-        hub.state.save_state()
+        hub.state._mark_dirty()
         logger.info("Entra auto-provisioned user %s (groups=%s tenants=%s)",
                     oid, group_ids, tenant_ids)
         return record
@@ -674,7 +674,7 @@ def provision_or_sync_entra_user(hub, oid: str, email: str, name: str,
     existing["auth_type"] = "entra"
     existing["updated_at"] = now
     if changed:
-        hub.state.save_state()
+        hub.state._mark_dirty()
         # Reuse the hub's session-invalidation helper so a dropped group/tenant
         # takes effect immediately (matches every other perm/tenant change).
         try:

@@ -333,7 +333,7 @@ class CSBridgePoller:
             if cs:
                 merged["client_simulation"] = cs
             store[new_key] = merged
-            self.hub.state.save_state()
+            self.hub.state._mark_dirty()
             logger.info("[cs-bridge] migrated agent_config key %r → %r "
                         "(runtime agent_id) — hostname-keyed enable normalized",
                         old_key, new_key)

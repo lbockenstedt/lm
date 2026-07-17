@@ -260,7 +260,7 @@ def register(app, hub, ctx):
         gc = hub.state.system_state.get("global_config", {})
         gc["nw_poll_default_interval"] = val
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
         # Re-push every connected nw spoke so the new module default takes effect.
         pushed = 0
         for sid in (hub.get_all_spokes_by_type("nw") or []):
@@ -298,7 +298,7 @@ def register(app, hub, ctx):
         gc = hub.state.system_state.get("global_config", {})
         gc["nw_netbox_import"] = clean
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
         return {"status": "ok", "nw_netbox_import": clean}
 
     @app.post("/setup/nw-netbox-import/run")
@@ -337,7 +337,7 @@ def register(app, hub, ctx):
             devices.append(new_dev)
             global_config["nw_devices"] = devices
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             # New device → push the bound slice so the spoke knows about it now.
             spoke_id = new_dev.get("spoke_id")
@@ -377,7 +377,7 @@ def register(app, hub, ctx):
 
             devices[idx].update(update_data)
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             spoke_id = devices[idx].get("spoke_id")
             pushed = await _nw_push_fleet(hub, spoke_id) if spoke_id else False
@@ -406,7 +406,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404, detail="Network device not found")
 
         hub.state.system_state["global_config"] = global_config
-        hub.state.save_state()
+        hub.state._mark_dirty()
         # Re-push so the spoke drops the deleted device from its fleet.
         spoke_id = victim.get("spoke_id") if isinstance(victim, dict) else None
         pushed = await _nw_push_fleet(hub, spoke_id) if spoke_id else False
@@ -472,7 +472,7 @@ def register(app, hub, ctx):
                         # instance doesn't re-migrate it on the next page load.
                         global_config[legacy_key] = {}
                         hub.state.system_state["global_config"] = global_config
-                        hub.state.save_state()
+                        hub.state._mark_dirty()
             # Tenant-scope the LIST: a non-admin sees only instances in the shared
             # tenant or their own tenant(s); other-tenant / unassigned instances
             # are admin-only. Object-level filtering + the add/write gates are
@@ -499,7 +499,7 @@ def register(app, hub, ctx):
                 instances.append(new_inst)
                 global_config[storage_key] = instances
                 hub.state.system_state["global_config"] = global_config
-                hub.state.save_state()
+                hub.state._mark_dirty()
                 pushed = await _push_instance_config(hub, new_inst, payload_fn)
                 status = "ok" if pushed else "partial_success"
                 msg = "Instance added and pushed to spoke." if pushed else "Instance added; spoke not connected."
@@ -523,7 +523,7 @@ def register(app, hub, ctx):
                     raise HTTPException(status_code=404, detail="Instance not found")
                 instances[idx].update(update_data)
                 hub.state.system_state["global_config"] = global_config
-                hub.state.save_state()
+                hub.state._mark_dirty()
                 pushed = await _push_instance_config(hub, instances[idx], payload_fn)
                 if pushed:
                     return {"status": "ok", "message": "Instance updated and pushed to spoke.", "pushed": True}
@@ -544,7 +544,7 @@ def register(app, hub, ctx):
             if len(instances) == before:
                 raise HTTPException(status_code=404, detail="Instance not found")
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
             return {"status": "ok", "message": f"Instance {instance_id} deleted."}
 
     _instance_crud(

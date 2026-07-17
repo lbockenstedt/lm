@@ -400,7 +400,7 @@ def register(app, hub, ctx):
             firewalls.append(new_fw)
             global_config["firewalls"] = firewalls
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             return {"status": "ok", "firewall": new_fw}
         except HTTPException:
@@ -425,7 +425,7 @@ def register(app, hub, ctx):
 
             firewalls[fw_index].update(update_data)
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             spoke_id = firewalls[fw_index].get("spoke_id")
             if spoke_id and spoke_id in hub.active_connections:
@@ -453,7 +453,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404, detail="Firewall not found")
 
         hub.state.system_state["global_config"] = global_config
-        hub.state.save_state()
+        hub.state._mark_dirty()
         # Drop orphaned per-firewall cache entries ({rules,nat,dhcp,dns,
         # interfaces}:{firewall_id}) from every tenant's cache so a deleted
         # firewall doesn't leave stale data that would render until the 300s

@@ -98,7 +98,7 @@ def register(app, hub, ctx):
         if "max_concurrent_tenants" in data:
             stored["max_concurrent_tenants"] = int(data["max_concurrent_tenants"])
         hub.state.system_state["cache_config"] = stored
-        hub.state.save_state()
+        hub.state._mark_dirty()
         return {"status": "ok"}
 
     @app.post("/admin/cache/purge")

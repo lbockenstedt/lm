@@ -441,7 +441,6 @@ def register(app, hub, ctx):
             cfg = hub.state.system_state.setdefault("agent_config", {}).setdefault(agent_id, {})
             cfg["change_acked_ts"] = time.time()
             hub.state._mark_dirty()
-            hub.state.save_state()
             return {"status": "ok", "agent_id": agent_id}
         except Exception as e:
             logger.exception("ack_agent_identity_change failed")
@@ -455,7 +454,7 @@ def register(app, hub, ctx):
         if not display_name:
             raise HTTPException(status_code=400, detail="display_name required")
         hub.state.system_state.setdefault("agent_display_names", {})[agent_id] = display_name
-        hub.state.save_state()
+        hub.state._mark_dirty()
         return {"status": "ok", "message": f"Agent '{agent_id}' renamed to '{display_name}'"}
 
     @app.get("/api/pxmx/agents/{agent_id}/config")
@@ -504,7 +503,7 @@ def register(app, hub, ctx):
             if has_cron:
                 entry["managed_crontab"] = cron_val
             store[agent_id] = entry
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             # The config pushed down to the agent — include managed_crontab only
             # when this save carried it (the agent applies it on UPDATE_CONFIG).
@@ -619,7 +618,7 @@ def register(app, hub, ctx):
         names = hub.state.system_state.get("agent_display_names", {})
         if agent_id in names:
             names.pop(agent_id, None)
-            hub.state.save_state()
+            hub.state._mark_dirty()
         msg = ("Agent disconnected and removed." if relayed else "Agent removed (was not connected).")
         return {"status": "ok", "message": msg}
 

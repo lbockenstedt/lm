@@ -316,7 +316,7 @@ def register(app, hub, ctx):
                 "updated_at": time.time(),
             }
             hub.state.system_state.setdefault("users", {})[username] = entry
-            hub.state.save_state()
+            await hub.state.save_state_now()
             user_data = {
                 "user_id": username,
                 "auth_type": "local",

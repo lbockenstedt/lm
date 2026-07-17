@@ -34,7 +34,7 @@ def register(app, hub, ctx):
         gc = hub.state.system_state.get("global_config", {})
         gc["azure_nsg"] = cfg
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
 
     @app.get("/setup/azure-nsg")
     async def get_azure_nsg():

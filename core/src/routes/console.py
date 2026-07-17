@@ -262,7 +262,7 @@ def register(app, hub, ctx):
         from security.encryption import hub_encryption
         hub.state.system_state["console_credentials_enc"] = \
             hub_encryption.encrypt(json.dumps(creds)).decode()
-        hub.state.save_state()
+        hub.state._mark_dirty()
 
     def _console_mark_seeded(hub, sid):
         s = getattr(hub, "_console_creds_seeded", None)

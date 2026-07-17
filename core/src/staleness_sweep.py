@@ -78,7 +78,7 @@ class StalenessSweepMixin:
                                               "interval_seconds": 3600,
                                               "stale_days": 7,
                                               "delete_days": 30}
-                self.state.save_state()
+                self.state._mark_dirty()
                 logger.info("staleness_sweep: seeded defaults (enabled=True, "
                             "hourly, 7d→offline, 30d→delete) — registry cleanup "
                             "job now active; disable in Setup→Staleness Sweep")

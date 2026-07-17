@@ -129,7 +129,7 @@ def save_config(hub, cfg: Dict[str, Any]) -> None:
     gc = hub.state.system_state.get("global_config", {})
     gc["notifications"] = cfg
     hub.state.system_state["global_config"] = gc
-    hub.state.save_state()
+    hub.state._mark_dirty()
 
 
 # ---------------------------------------------------------------------------

@@ -798,7 +798,7 @@ class NwDiscoverySyncMixin:
 
         gc["nw_devices"] = fleet
         self.state.system_state["global_config"] = gc
-        self.state.save_state()
+        self.state._mark_dirty()
 
         pushed = 0
         for sid in nw_spokes:

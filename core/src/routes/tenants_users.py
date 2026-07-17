@@ -188,7 +188,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=404, detail="Spoke not found")
 
             hub.state.set_module_name(spoke_id, new_name)
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             if new_hostname:
                 if spoke_id in hub.active_connections:
@@ -264,7 +264,7 @@ def register(app, hub, ctx):
                 })
                 (updated if exists else added).append(slug)
 
-            hub.state.save_state()
+            hub.state._mark_dirty()
             return {
                 "status": "ok",
                 "added": added, "updated": updated,
@@ -302,7 +302,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="Missing tenant_id")
 
             hub.state.update_tenant(tenant_id, {})
-            hub.state.save_state()
+            hub.state._mark_dirty()
             return {"status": "ok", "message": f"Tenant {tenant_id} created."}
         except Exception as e:
             logger.exception("create_tenant failed")
@@ -328,7 +328,7 @@ def register(app, hub, ctx):
             if config.get("active"):
                 hub.state.set_active_tenant(tenant_id)
 
-            hub.state.save_state()
+            hub.state._mark_dirty()
             # Refresh the cached shared-tenant id so the visibility gate is
             # correct on the very next request.
             refresh_shared_tenant(hub)
@@ -620,7 +620,7 @@ def register(app, hub, ctx):
                     detail="Tenant Admin requires at least one assigned tenant",
                 )
             users[user_id] = entry
-            hub.state.save_state()
+            await hub.state.save_state_now()
             # Drop this user's existing sessions so the change (password, perms,
             # tenant, group membership) takes effect immediately rather than being
             # honored from a stale cookie until the 8h TTL / idle timeout. An
@@ -647,7 +647,7 @@ def register(app, hub, ctx):
             if user_id not in users:
                 raise HTTPException(status_code=404, detail="User not found")
             users[user_id]["password_hash"] = _hash_password(password)
-            hub.state.save_state()
+            await hub.state.save_state_now()
             # Force re-login: the old credential is no longer valid, so any
             # session minted under it must not remain usable.
             _invalidate_user_sessions(hub, user_id)
@@ -779,7 +779,7 @@ def register(app, hub, ctx):
             if password:
                 entry["password_hash"] = _hash_password(password)
             users[user_id] = entry
-            hub.state.save_state()
+            await hub.state.save_state_now()
             _invalidate_user_sessions(hub, user_id)
             logger.info("tenant admin %s created user %s in tenant %s",
                         (sess.get("user") or {}).get("user_id", "?"), user_id, tenant)
@@ -862,7 +862,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400,
                                     detail="Tenant Admin requires at least one assigned tenant")
             users[user_id] = entry
-            hub.state.save_state()
+            await hub.state.save_state_now()
             _invalidate_user_sessions(hub, user_id)
             return {"status": "ok", "message": f"User {user_id} updated."}
         except HTTPException:
@@ -898,7 +898,7 @@ def register(app, hub, ctx):
                                     detail="Tenant admin cannot reset an admin-tier user's password")
             existing["password_hash"] = _hash_password(password)
             existing["updated_at"] = time.time()
-            hub.state.save_state()
+            await hub.state.save_state_now()
             _invalidate_user_sessions(hub, user_id)
             return {"status": "ok"}
         except HTTPException:
@@ -1006,7 +1006,7 @@ def register(app, hub, ctx):
                     status_code=400,
                     detail="No editable fields supplied (a tenant admin may only set name, description, quotas)")
             hub.state.update_tenant(tenant, merged)
-            hub.state.save_state()
+            hub.state._mark_dirty()
             return {"status": "ok", "message": f"Tenant {tenant} updated.",
                     "updated": merged}
         except HTTPException:
@@ -1100,7 +1100,7 @@ def register(app, hub, ctx):
                 "tenants": granted_tenants,
                 "updated_at": time.time(),
             }
-            hub.state.save_state()
+            hub.state._mark_dirty()
             # A group's permissions feed every member's effective permission set
             # (union of group bundles + per-user rights). Invalidate members'
             # sessions so a permission/demotion change takes effect immediately
@@ -1133,7 +1133,7 @@ def register(app, hub, ctx):
                     u["groups"] = [g for g in u["groups"] if g != group_id]
                     member_ids.append(uid)
             del groups[group_id]
-            hub.state.save_state()
+            hub.state._mark_dirty()
             # Detaching the group changes each member's effective permissions —
             # invalidate their sessions so the loss takes effect immediately
             # (was evadable up to the 8h session TTL).

@@ -139,7 +139,7 @@ class SelfBackupMixin:
                     "last_copy_at": 0.0,
                     "last_error": "",
                 }
-                self.state.save_state()
+                self.state._mark_dirty()
                 logger.info("self-backup: seeded defaults (disabled by default) — "
                             "enable + schedule in Setup → Self-Backup")
         except Exception as e:  # noqa: BLE001
@@ -218,7 +218,7 @@ class SelfBackupMixin:
                 sb["last_copy_at"] = float(last_copy_at)
             if last_error is not None:
                 sb["last_error"] = last_error
-            self.state.save_state()
+            self.state._mark_dirty()
         except Exception as e:  # noqa: BLE001
             logger.debug("self-backup: status persist skipped: %s", e)
 
@@ -308,7 +308,7 @@ class SelfBackupMixin:
             # Flush the in-memory state so the archive captures the latest
             # writes (not just the last 60s persistence-loop tick).
             try:
-                self.state.save_state()
+                await self.state.save_state_now()
             except Exception as e:  # noqa: BLE001
                 logger.debug("self-backup: pre-flush state skipped: %s", e)
             os.makedirs(root, exist_ok=True)

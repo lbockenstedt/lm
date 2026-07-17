@@ -344,6 +344,25 @@ class StateManager:
             logger.error(f"Failed to save state to disk: {e}")
             raise
 
+    async def save_state_now(self):
+        """Immediate durable persist, offloaded to a thread (async callers).
+
+        RULE — which persist to use from a request handler / async task:
+        - ``_mark_dirty()`` (via a mutator, or directly): the default. The 60s
+          persistence_loop flushes it; a crash may lose up to one interval of
+          in-memory-only changes. Use for config toggles, cache stamps,
+          telemetry, display names — anything trivially re-doable.
+        - ``await save_state_now()``: durability-critical writes where a 60s
+          loss window is unacceptable — secrets/PSKs/tokens just issued or
+          rotated, onboarding/approval records the counterparty now depends
+          on, key rotation. Same durability as save_state() but the
+          encrypt+fsync+backup runs in a worker thread so the event loop
+          (heartbeats, WS traffic) never stalls behind it.
+        - sync ``save_state()``: shutdown paths and synchronous (non-async)
+          contexts only.
+        """
+        await asyncio.to_thread(self.save_state)
+
     async def persistence_loop(self, interval=60):
         """Background task that persists state to disk — but only when dirty.
 

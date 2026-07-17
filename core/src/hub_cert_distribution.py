@@ -266,7 +266,7 @@ class HubCertDistributionMixin:
 
     def _save_wildcard_push_state(self) -> None:
         try:
-            self.state.save_state()
+            self.state._mark_dirty()
         except Exception as e:  # never block distribution on a state-save
             cert_log.debug("wildcard push-state save failed: %s", e)
 
@@ -427,7 +427,7 @@ class HubCertDistributionMixin:
             # state.system_state["global_config"] is the persisted backing store
             # (see setup_admin.set_mtls_enable). Update both views + save.
             self.state.system_state["global_config"] = gc
-            self.state.save_state()
+            self.state._mark_dirty()
         except Exception as e:  # noqa: BLE001
             cert_log.debug("[cert] hub: persist mtls.ca_path failed: %s", e)
 
@@ -532,7 +532,7 @@ class HubCertDistributionMixin:
             (gc.setdefault("mtls", {}) or {})["auto_enabled_at"] = \
                 _dt.datetime.now(_dt.timezone.utc).isoformat()
             self.state.system_state["global_config"] = gc
-            self.state.save_state()
+            await self.state.save_state_now()
             _mtls.set_runtime_enabled(True)
             # NO self-restart. mTLS applies to the spoke↔hub / agent↔spoke WS legs
             # (armed on the spokes' next reconnect); the browser-facing WebUI on the

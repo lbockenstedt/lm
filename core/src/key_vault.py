@@ -174,7 +174,7 @@ def save_config(hub, cfg: dict) -> None:
     gc = hub.state.system_state.get("global_config", {})
     gc["key_vault"] = cfg
     hub.state.system_state["global_config"] = gc
-    hub.state.save_state()
+    hub.state._mark_dirty()
 
 
 def admin_uid(hub) -> Optional[str]:

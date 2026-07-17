@@ -2759,7 +2759,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.state.register_module(spoke_id, approved=True)
         self.state.set_spoke_tenant(spoke_id, tenant_id)
         self.approved_modules[spoke_id] = True
-        self.state.save_state()
+        await self.state.save_state_now()
         if spoke_id in self.active_connections:
             # Capture the secret the spoke currently holds BEFORE generating the
             # new one, then sign the key-delivery push with it — the spoke can't
@@ -2983,7 +2983,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 logger.warning(f"revoke_spoke: could not close live WS for {spoke_id}: {e}")
         self.approved_modules[spoke_id] = False
         self.state.register_module(spoke_id, approved=False)
-        self.state.save_state()
+        await self.state.save_state_now()
         self.key_manager.delete_spoke_key(spoke_id)
         await self.mailbox.clear_spoke(spoke_id)
         self.record_spoke_event(spoke_id, "revoked",
@@ -3173,7 +3173,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.state.register_module(spoke_id, approved=True)
         self.state.set_spoke_tenant(spoke_id, tenant_hint)
         self.approved_modules[spoke_id] = True
-        self.state.save_state()
+        await self.state.save_state_now()
         logger.info(f"PSK self-provision: {spoke_id} auto-approved + bound to tenant {tenant_hint}.")
         self.record_spoke_event(spoke_id, "psk_self_provision", f"tenant={tenant_hint}")
         return True
@@ -3314,7 +3314,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             if cs_cfg.get("tenant_id") != spoke_tenant:
                 cs_cfg["tenant_id"] = spoke_tenant
                 entry["client_simulation"] = cs_cfg
-                self.state.save_state()
+                self.state._mark_dirty()
         except Exception as _e:  # noqa: BLE001 — best-effort; never break relay
             logger.debug("agent tenant-inheritance write failed: %s", _e)
 
@@ -5811,7 +5811,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                                 "description": t.get("description", ""),
                                 **{k: v for k, v in cfg.items() if k not in ("name", "netbox_tenant_slug", "netbox_id", "description")},
                             })
-                        self.state.save_state()
+                        self.state._mark_dirty()
                         logger.debug(f"Tenant sync: {len(data.get('tenants', []))} tenant(s) from NetBox")
             except Exception as e:
                 logger.debug(f"Tenant sync skipped: {e}")
@@ -6460,7 +6460,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
                     global_config["last_hub_root_rotation"] = time.time()
                     self.state.system_state["global_config"] = global_config
-                    self.state.save_state()
+                    await self.state.save_state_now()
 
                     root_msgs = [
                         (sid, Message(

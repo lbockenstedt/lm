@@ -1200,7 +1200,7 @@ class UpdatePipelineMixin:
         # files cannot permanently lock out the initial admin or leave an
         # admin's "System Admin" checkbox unset in the WebUI.
         if self.state.ensure_admin_lockout():
-            self.state.save_state()
+            await self.state.save_state_now()
 
         logger.info(f"Running update check (force={force})...")
         local_v = await self.get_local_version()
@@ -1243,7 +1243,7 @@ class UpdatePipelineMixin:
         )
 
         self.state.update_global_config({"last_update_ts": time.time()})
-        self.state.save_state()
+        self.state._mark_dirty()
 
         hub_updated = False
         stale_reload = False  # git current but the running process is older than on-disk
@@ -1316,7 +1316,7 @@ class UpdatePipelineMixin:
                             applied = remote_commit
                         if applied != "unknown":
                             self.state.update_global_config({"last_update_commit": applied})
-                            self.state.save_state()
+                            await self.state.save_state_now()
                         # Local now equals remote → no update is pending. Clear
                         # the footer-dot flag so a post-restart dot isn't stale-
                         # yellow for up to a cycle (the next check_update_health
@@ -1500,7 +1500,7 @@ class UpdatePipelineMixin:
         if commits_changed:
             self.state.update_global_config({"spoke_update_commits": last_pushed,
                                              "spoke_update_pushed_ts": pushed_ts})
-            self.state.save_state()
+            await self.state.save_state_now()
 
         logger.info(f"Spoke update results: {update_results}")
 

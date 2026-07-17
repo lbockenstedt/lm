@@ -98,7 +98,7 @@ def register(app, hub, ctx):
             if m in incoming:
                 stored[m] = bool(incoming[m])
         app.state.hub.state.system_state["subnet_filter_modules"] = stored
-        app.state.hub.state.save_state()
+        app.state.hub.state._mark_dirty()
         return {"status": "ok", "modules": _filter_config(app.state.hub)}
 
     @app.delete("/setup/users/{user_id}")
@@ -110,7 +110,7 @@ def register(app, hub, ctx):
         if users[user_id].get("protected"):
             raise HTTPException(status_code=403, detail="This account is protected and cannot be deleted")
         del users[user_id]
-        hub.state.save_state()
+        await hub.state.save_state_now()
         # Revoke any sessions the deleted user still holds so a saved cookie
         # can't keep hitting the API as a now-nonexistent account.
         _invalidate_user_sessions(hub, user_id)
@@ -233,7 +233,7 @@ def register(app, hub, ctx):
 
             gc = hub.state.system_state.setdefault("global_config", {})
             gc.update(config)
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             return {"status": "ok", "message": "Global configuration updated."}
         except HTTPException:
@@ -264,7 +264,7 @@ def register(app, hub, ctx):
         if url == "":
             gc = hub.state.system_state.setdefault("global_config", {})
             gc.setdefault("hub", {})["url"] = ""
-            hub.state.save_state()
+            hub.state._mark_dirty()
             return {"status": "ok", "message": "Hub URL override cleared.",
                     "pushed": [], "queued": [], "failed": []}
         if not _HUB_URL_RE.match(url):
@@ -274,7 +274,7 @@ def register(app, hub, ctx):
                        "(e.g. wss://hub.example.com:443 or 172.16.1.31).")
         gc = hub.state.system_state.setdefault("global_config", {})
         gc.setdefault("hub", {})["url"] = url
-        hub.state.save_state()
+        hub.state._mark_dirty()
         result = await hub.push_hub_url_to_all_spokes(url)
         return {"status": "ok",
                 "message": (f"Hub URL set to {url}; pushed to "

@@ -90,7 +90,7 @@ def register(app, hub, ctx):
         gc = hub.state.system_state.get("global_config", {})
         gc[prod["key"]] = records
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
 
     async def _push_record(prod, record):
         """Push a record's config to its bound spoke when connected. Mirrors each

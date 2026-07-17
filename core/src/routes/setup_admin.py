@@ -34,7 +34,7 @@ def register(app, hub, ctx):
             global_config = hub.state.get_global_config()
             global_config["debug_mode"] = enabled
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             # Flip the HUB's own root + named loggers (not just the broadcast
             # targets) so the hub's logger.debug(...) lines actually emit.
@@ -186,7 +186,7 @@ def register(app, hub, ctx):
         gc = hub.state.system_state.get("global_config", {})
         gc["mtls_enabled"] = enable
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
         mtls.set_runtime_enabled(enable)  # applies to new SSL contexts (reconnects)
         return {"status": "ok", "enabled": enable,
                 "message": ("mTLS enabled — verification arms on the next "
@@ -213,7 +213,7 @@ def register(app, hub, ctx):
         mtls_cfg["auto_provision"] = enabled
         gc["mtls"] = mtls_cfg
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
         return {"status": "ok", "auto_provision": enabled,
                 "message": ("mTLS auto-provision ON — the hub will distribute the "
                              "LE wildcard + CA bundle to every spoke and enable "
@@ -252,7 +252,7 @@ def register(app, hub, ctx):
         gc = hub.state.system_state.get("global_config", {})
         gc["session_idle_timeout_minutes"] = mins
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
         access.set_session_idle_timeout(mins * 60)  # apply live
         return {"status": "ok", "minutes": mins,
                 "message": ("Idle timeout disabled." if mins == 0
@@ -281,7 +281,7 @@ def register(app, hub, ctx):
             global_config = hub.state.system_state.get("global_config", {})
             global_config["appearance"] = config
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             return {"status": "ok", "message": "Appearance settings updated."}
         except Exception as e:
@@ -304,7 +304,7 @@ def register(app, hub, ctx):
             # keep one on screen for more than 5 minutes.
             seconds = max(1, min(300, int(data.get("toast_duration_s", 10))))
             hub.state.system_state["toast_duration_s"] = seconds
-            hub.state.save_state()
+            hub.state._mark_dirty()
             return {"status": "ok", "toast_duration_s": seconds}
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="toast_duration_s must be a number")
@@ -543,7 +543,7 @@ def register(app, hub, ctx):
                 hub.known_modules = cleaned
                 for aid in leaked:
                     hub.approved_modules.pop(aid, None)
-                hub.state.save_state()
+                hub.state._mark_dirty()
                 logger.info("[diag] removed leaked relay-agent id(s) from "
                             "known_modules/approved_modules: %s", leaked)
 

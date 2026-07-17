@@ -284,7 +284,7 @@ def register(app, hub, ctx):
         oidc["cert_path"] = res["cert_path"]
         gc["oidc"] = oidc
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
         return {"status": "ok", "key_path": res["key_path"], "cert_path": res["cert_path"],
                 "thumbprint": res["thumbprint"], "cert_pem": res["cert_pem"]}
 
@@ -345,7 +345,7 @@ def register(app, hub, ctx):
             global_config = hub.state.system_state.get("global_config", {})
             global_config["oidc"] = clean
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
             # OIDC is hub-side only — no spoke push (unlike ldap-config).
             return {"status": "ok"}
         except Exception as e:  # noqa: BLE001

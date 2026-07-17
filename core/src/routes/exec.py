@@ -60,7 +60,7 @@ def register(app, hub, ctx):
             cur["allow_shell"] = False
         gc["remote_exec"] = cur
         hub.state.system_state["global_config"] = gc
-        hub.state.save_state()
+        hub.state._mark_dirty()
         logger.warning("[remote-exec] config changed by %s → enabled=%s allow_shell=%s",
                        _who(sess), cur.get("enabled"), cur.get("allow_shell"))
         return {"status": "ok", "enabled": bool(cur.get("enabled")),

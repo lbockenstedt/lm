@@ -311,7 +311,7 @@ def register(app, hub, ctx):
             hub.state.update_module_metadata(
                 spoke_id, {"change_acked_ts": time.time()}
             )
-            hub.state.save_state()
+            hub.state._mark_dirty()
             return {"status": "ok", "spoke_id": spoke_id}
         except Exception as e:
             logger.exception("ack_identity_change failed")
@@ -392,7 +392,7 @@ def register(app, hub, ctx):
             known = hub.state.system_state.get("known_modules", [])
             if agent_id in known:
                 known.remove(agent_id)
-            hub.state.save_state()
+            await hub.state.save_state_now()
 
             # Resolve the spoke that actually owns this agent rather than
             # trusting the path's spoke_id blindly — the WebUI's approve
@@ -421,7 +421,7 @@ def register(app, hub, ctx):
                     cs_cfg["tenant_id"] = spoke_tenant
                     entry["client_simulation"] = cs_cfg
                     agent_cfg_store[agent_id] = entry
-                    hub.state.save_state()
+                    hub.state._mark_dirty()
 
             if target_spoke in hub.active_connections:
                 msg = _hub_msg(target_spoke, "SPOKE_RELAY", {
@@ -538,7 +538,7 @@ def register(app, hub, ctx):
             if tenant_id is not None:
                 hub.state.set_spoke_tenant(spoke_id, tenant_id)
 
-            hub.state.save_state()
+            await hub.state.save_state_now()
 
             if spoke_id in hub.active_connections:
                 if action != "unapprove":
@@ -590,7 +590,7 @@ def register(app, hub, ctx):
             global_config = hub.state.system_state.get("global_config", {})
             global_config["cppm"] = config
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             cppm_spoke = hub.get_spoke_by_type("nac")
             if cppm_spoke:
@@ -1173,7 +1173,7 @@ def register(app, hub, ctx):
             global_config = hub.state.system_state.get("global_config", {})
             global_config["pxmx"] = config
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             pxmx_spoke = hub.get_hypervisor_spoke()
             if pxmx_spoke:
@@ -1211,7 +1211,7 @@ def register(app, hub, ctx):
             global_config = hub.state.system_state.get("global_config", {})
             global_config["ldap"] = config
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             ldap_spoke = hub.get_spoke_by_type("directory")
             if ldap_spoke:
@@ -1240,7 +1240,7 @@ def register(app, hub, ctx):
             global_config = hub.state.system_state.get("global_config", {})
             global_config["dns"] = config
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
             return {"status": "ok"}
         except Exception as e:
             logger.exception("update_dns_config failed")
@@ -1262,7 +1262,7 @@ def register(app, hub, ctx):
             global_config = hub.state.system_state.get("global_config", {})
             global_config["dhcp"] = config
             hub.state.system_state["global_config"] = global_config
-            hub.state.save_state()
+            hub.state._mark_dirty()
             return {"status": "ok"}
         except Exception as e:
             logger.exception("update_dhcp_config failed")
@@ -1284,7 +1284,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=404, detail=f"Spoke '{spoke_id}' not found in known_modules: {known_modules}")
 
             hub.state.update_module_metadata(spoke_id, metadata)
-            hub.state.save_state()
+            hub.state._mark_dirty()
 
             return {"status": "ok", "message": f"Metadata for spoke {spoke_id} updated."}
         except HTTPException:

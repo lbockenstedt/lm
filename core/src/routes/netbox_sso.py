@@ -29,7 +29,7 @@ def register(app, hub, ctx):
     def _save(cfg: dict) -> None:
         gc = hub.state.system_state.setdefault("global_config", {})
         gc["netbox_sso"] = {k: cfg[k] for k in _FIELDS}
-        hub.state.save_state()
+        hub.state._mark_dirty()
 
     def _suggested_group_map() -> dict:
         """{entra-group-obj-id: netbox-group-name} seeded from Permission Groups
