@@ -1973,6 +1973,29 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 cfg["poll_interval_s"] = max(60, int(cfg["poll_interval_s"] or 300))
             except (TypeError, ValueError):
                 cfg["poll_interval_s"] = 300
+        # Client-count CHECK thresholds (Dashboard Checks colouring, Setup →
+        # Central API). Coerce + clamp so a bad value can't be stored; the pollers
+        # (_cc_thresholds) also clamp defensively on read. error can't sit below
+        # warn (red before amber). die_off_pct=0 disables the sustained-die-off rule.
+        if isinstance(cfg.get("cc_thresholds"), dict):
+            _t = cfg["cc_thresholds"]
+
+            def _cnum(val, dflt, lo, hi):
+                try:
+                    return max(lo, min(hi, float(val)))
+                except (TypeError, ValueError):
+                    return dflt
+
+            _warn = _cnum(_t.get("warn_pct"), 20.0, 0.0, 100.0)
+            _err = _cnum(_t.get("error_pct"), 50.0, 0.0, 100.0)
+            if _err < _warn:
+                _err = _warn
+            cfg["cc_thresholds"] = {
+                "warn_pct": _warn,
+                "error_pct": _err,
+                "die_off_pct": _cnum(_t.get("die_off_pct"), 20.0, 0.0, 100.0),
+                "min_peak": int(_cnum(_t.get("min_peak"), 5, 1, 1_000_000)),
+            }
         await store.set_central_config(tenant_id, cfg)
         # Push ``cfg`` (NOT ``hub_cc``): cfg carries ``mode`` on top of the
         # cluster creds, and the spoke's poller (_build_config) needs ``mode`` to
