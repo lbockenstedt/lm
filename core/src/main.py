@@ -852,8 +852,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # replays within a TTL-bounded seen-set. Applied AFTER signature
         # verification, only to signed frames, so unsigned heartbeats cost
         # nothing and an attacker can't use it as an unauth flood vector.
-        # { msg_id: expire_ts }; bounded by _prune_seen_message_ids each add.
+        # { msg_id: expire_ts }; bounded by _prune_seen_message_ids (time-gated
+        # to at most once per second — see _seen_prune_last_mono).
         self._seen_message_ids: Dict[str, float] = {}
+        self._seen_prune_last_mono = 0.0  # monotonic ts of last seen-set prune
         self._REPLAY_WINDOW_S = float(os.environ.get("LM_REPLAY_WINDOW_S", "120"))
         self._REPLAY_FUTURE_SKEW_S = 5.0  # accept up to Ns clock skew into the future
         self._REPLAY_SEEN_TTL = self._REPLAY_WINDOW_S  # seen-set lives for the window
@@ -1531,10 +1533,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
     def _prune_seen_message_ids(self) -> None:
         """Drop expired entries from ``_seen_message_ids`` (called on each new
         addition so the replay seen-set stays bounded — it never grows past the
-        number of distinct message_ids received within the replay window)."""
-        now = time.time()
+        number of distinct message_ids received within the replay window).
+
+        Time-gated to at most once per second: the rebuild is O(seen-set) and
+        ran on the event loop for every inbound signed frame, which at scale
+        was pure per-frame overhead. Worst case the set now carries one extra
+        second of expired ids; replay-dedupe semantics are unchanged."""
+        now = time.monotonic()
+        if now - self._seen_prune_last_mono < 1.0:
+            return
+        self._seen_prune_last_mono = now
+        wall = time.time()
         self._seen_message_ids = {k: v for k, v in self._seen_message_ids.items()
-                                  if v > now}
+                                  if v > wall}
 
     def _replay_warn(self, spoke_id: str, reason: str) -> None:
         """Emit a replay/stale WARNING at most once per
