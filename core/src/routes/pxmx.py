@@ -2,8 +2,8 @@
 import asyncio
 
 from api import (
-    HTTPException, Request, _cache_entry, access, get_tenant_scoping, logger, secrets, time,
-    uuid,
+    HTTPException, Request, _cache_entry, access, get_tenant_scoping, logger, secrets,
+    spoke_or_503, time, uuid,
 )
 
 # ── /api/pxmx/agents cache (stale-while-revalidate) ─────────────────────────
@@ -581,9 +581,7 @@ def register(app, hub, ctx):
         action = (body.get("action") or "").strip()
         if not action:
             raise HTTPException(status_code=400, detail="missing 'action'")
-        pxmx_spoke = hub.get_hypervisor_spoke()
-        if not pxmx_spoke:
-            raise HTTPException(status_code=503, detail="hypervisor spoke not connected")
+        pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "hypervisor")
         try:
             result = await hub.request_response(pxmx_spoke, "SPOKE_RELAY", {
                 "target_agent_id": agent_id,
@@ -721,10 +719,9 @@ def register(app, hub, ctx):
             body = {}
         agent_id = str((body or {}).get("agent_id") or "").strip()
         unique_id = str((body or {}).get("unique_id") or "").strip()
-        pxmx_spoke = (hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
-                      if agent_id else None) or hub.get_hypervisor_spoke()
-        if not pxmx_spoke:
-            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        pxmx_spoke = spoke_or_503((hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
+                                   if agent_id else None) or hub.get_hypervisor_spoke(),
+                                  "Hypervisor")
         tenant_id = sess.get("tenant_id") or ""
         spoke_tenant = hub.state.get_spoke_tenant(pxmx_spoke) or ""
         if not is_ga and spoke_tenant and spoke_tenant != tenant_id:
@@ -802,10 +799,9 @@ def register(app, hub, ctx):
         # payload so a multi-agent spoke relays to the right agent. Falls back to
         # the global hypervisor spoke when agent_id is absent (single-host).
         agent_id = str((body or {}).get("agent_id") or "").strip()
-        pxmx_spoke = (hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
-                      if agent_id else None) or hub.get_hypervisor_spoke()
-        if not pxmx_spoke:
-            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        pxmx_spoke = spoke_or_503((hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
+                                   if agent_id else None) or hub.get_hypervisor_spoke(),
+                                  "Hypervisor")
         session_id = str(uuid.uuid4())
         ws_token = secrets.token_urlsafe(32)
         tenant_id = sess.get("tenant_id") or ""

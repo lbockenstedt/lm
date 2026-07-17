@@ -1,7 +1,8 @@
 """Setup: updates, modules, tenants, users routes."""
 from api import (
     HTTPException, Request, _hash_password, _hub_msg, _invalidate_user_sessions,
-    _unwrap_spoke, get_netbox_spoke, get_tenant_scoping, logger, time,
+    _unwrap_spoke, get_netbox_spoke, get_spoke_or_503, get_tenant_scoping,
+    logger, time,
 )
 from access import (
     ENFORCED_RIGHTS, resolve_effective_permissions, refresh_shared_tenant,
@@ -237,9 +238,7 @@ def register(app, hub, ctx):
     async def sync_tenants_from_netbox():
         """Pull tenants from NetBox and upsert them into hub tenant state."""
         hub = app.state.hub
-        spoke_id = hub.get_spoke_by_type("ipam")
-        if not spoke_id:
-            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
         try:
             result = await hub.request_response(spoke_id, "NETBOX_GET_TENANTS", {})
             data = _unwrap_spoke(result)

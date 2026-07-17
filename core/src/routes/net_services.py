@@ -1,6 +1,7 @@
 """DNS/LE/DHCP spoke-relay routes and shared spoke helpers."""
 from api import (
-    HTTPException, Request, _spoke_payload_or_raise, access, logger,
+    HTTPException, Request, _spoke_payload_or_raise, access, get_spoke_or_503,
+    logger,
 )
 from cert_distribution import build_available_targets
 
@@ -26,16 +27,10 @@ def register(app, hub, ctx):
                 detail=f"On the shared DNS/DHCP server you may only modify a {kind} whose address is in your tenant's subnets")
 
     def _get_dns_spoke(hub):
-        spoke_id = hub.get_spoke_by_type("dns")
-        if not spoke_id:
-            raise HTTPException(status_code=503, detail="DNS spoke not connected")
-        return spoke_id
+        return get_spoke_or_503(hub, "dns", "DNS")
 
     def _get_le_spoke(hub):
-        spoke_id = hub.get_spoke_by_type("certificates")
-        if not spoke_id:
-            raise HTTPException(status_code=503, detail="Certificate spoke not connected")
-        return spoke_id
+        return get_spoke_or_503(hub, "certificates", "Certificate")
 
     async def _relay_spoke(spoke_id, command, payload=None, log_name="", timeout=None):
         """Relay ``command`` to a spoke and return its SUCCESS payload.
@@ -769,9 +764,7 @@ def register(app, hub, ctx):
         material from le and sends INSTALL_CERT to the nw spoke with the device's
         id, then records that device's per-device status."""
         hub = app.state.hub
-        spoke_id = hub.get_spoke_by_type("nw")
-        if not spoke_id:
-            raise HTTPException(status_code=503, detail="Network Devices spoke not connected")
+        spoke_id = get_spoke_or_503(hub, "nw", "Network Devices")
         le_spoke = _get_le_spoke(hub)
         mat = await hub.request_response(le_spoke, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
         m = access.unwrap_spoke(mat) or {}
@@ -799,10 +792,7 @@ def register(app, hub, ctx):
     # ─── DHCP API ─────────────────────────────────────────────────────────────
 
     def _get_dhcp_spoke(hub):
-        spoke_id = hub.get_spoke_by_type("dhcp")
-        if not spoke_id:
-            raise HTTPException(status_code=503, detail="DHCP spoke not connected")
-        return spoke_id
+        return get_spoke_or_503(hub, "dhcp", "DHCP")
 
     @app.get("/api/dhcp/subnets")
     async def dhcp_list_subnets(request: Request):

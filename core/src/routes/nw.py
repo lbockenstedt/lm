@@ -1,6 +1,7 @@
 """Network-devices routes + multi-instance product CRUD (_instance_crud)."""
 from api import (
-    HTTPException, Request, _hub_msg, _unwrap_spoke, access, logger, uuid,
+    HTTPException, Request, _hub_msg, _unwrap_spoke, access, get_spoke_or_503,
+    logger, uuid,
 )
 
 
@@ -32,10 +33,7 @@ def register(app, hub, ctx):
 
     def _get_nw_spoke(hub):
         """The connected nw spoke id, or raise 503 (single-instance resolver)."""
-        spoke_id = hub.get_spoke_by_type("nw")
-        if not spoke_id:
-            raise HTTPException(status_code=503, detail="Network Devices spoke not connected")
-        return spoke_id
+        return get_spoke_or_503(hub, "nw", "Network Devices")
 
     def _nw_devices_for_spoke(hub, spoke_id: str):
         """The device slice a spoke should receive (bound-to-it, else unbound)."""
@@ -596,9 +594,7 @@ def register(app, hub, ctx):
         (status/total/present/created/attached/already_attached/warnings).
         """
         hub = app.state.hub
-        spoke_id = hub.get_spoke_by_type("ipam")
-        if not spoke_id:
-            raise HTTPException(status_code=503, detail="NetBox spoke not connected")
+        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
         try:
             # NETBOX_PROVISION_CUSTOM_FIELDS runs _ensure_custom_fields(force=True)
             # over the full CUSTOM_FIELDS_SPEC — get-or-creating each field then

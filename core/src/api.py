@@ -1005,6 +1005,32 @@ def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
     return access.get_tenant_scoping(hub, tenant_id)
 
 
+def spoke_or_503(spoke_id, label: str) -> str:
+    """Guard an already-resolved spoke id: raise the standard 503 when empty.
+
+    The shared tail of every "spoke not connected → 503" route preamble.
+    Use this form when the resolver isn't a plain by-type lookup (e.g.
+    ``hub.get_hypervisor_spoke()``); use ``get_spoke_or_503`` for the common
+    by-type case."""
+    if not spoke_id:
+        raise HTTPException(status_code=503, detail=f"{label} spoke not connected")
+    return spoke_id
+
+
+def get_spoke_or_503(hub, module_type: str, label: str) -> str:
+    """The connected spoke id of ``module_type``, or the standard 503."""
+    return spoke_or_503(hub.get_spoke_by_type(module_type), label)
+
+
+def require_spoke(module_type: str, label: str):
+    """FastAPI dependency factory for the by-type spoke preamble:
+    ``spoke_id: str = Depends(require_spoke("nw", "Network Devices"))``
+    resolves the connected spoke id or 503s with the standard message."""
+    def _dep(request: Request) -> str:
+        return get_spoke_or_503(request.app.state.hub, module_type, label)
+    return _dep
+
+
 # mtime-cached WebUI VERSION — drives the index.html ?v= cache-bust so a
 # version-bump (version-bump.yml bumps WebUI/VERSION on every push to main)
 # invalidates cached JS without anyone touching index.html by hand. The

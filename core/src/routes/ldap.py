@@ -1,6 +1,6 @@
 """LDAP directory (OU/user/group) routes."""
 from api import (
-    HTTPException, Request, _invalidate_user_sessions, logger,
+    HTTPException, Request, _invalidate_user_sessions, get_spoke_or_503, logger,
 )
 
 
@@ -92,10 +92,7 @@ def register(app, hub, ctx):
         return result
 
     async def get_ldap_spoke(hub):
-        spoke_id = hub.get_spoke_by_type("directory")
-        if not spoke_id:
-            raise HTTPException(status_code=503, detail="LDAP spoke not connected")
-        return spoke_id
+        return get_spoke_or_503(hub, "directory", "LDAP")
 
     async def _ldap_warm(hub, cmd):
         """Warm-cached LDAP list read: cache the raw (scope-independent) result

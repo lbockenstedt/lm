@@ -1,7 +1,7 @@
 """Proxmox VM lifecycle routes: action, pools, ISOs, storages, create, clone."""
 from api import (
     HTTPException, Request, _cache_entry, _refresh_module_all_tenants,
-    access, get_tenant_scoping, logger, vmid_alloc,
+    access, get_tenant_scoping, logger, spoke_or_503, vmid_alloc,
 )
 
 
@@ -74,9 +74,7 @@ def register(app, hub, ctx):
         await _assert_vm_control(request, vmid=body.get("vmid"),
                                  node=body.get("node"), unique_id=body.get("unique_id"))
         hub = app.state.hub
-        pxmx_spoke = hub.get_hypervisor_spoke()
-        if not pxmx_spoke:
-            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
         node = str(body.get("node", "") or "")
         payload = {
             "unique_id": body.get("unique_id", ""),
@@ -153,9 +151,7 @@ def register(app, hub, ctx):
         if not isinstance(items, list) or not items:
             raise HTTPException(status_code=400, detail="items must be a non-empty list")
         hub = app.state.hub
-        pxmx_spoke = hub.get_hypervisor_spoke()
-        if not pxmx_spoke:
-            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
         tenant_id = sess.get("tenant_id") or ""
         # Backup/snapshot config is per-host but read from ONE tenant config.
         hv = None
@@ -349,9 +345,7 @@ def register(app, hub, ctx):
         if not volid:
             raise HTTPException(status_code=400, detail="volid (ISO) is required")
         hub = app.state.hub
-        pxmx_spoke = hub.get_hypervisor_spoke()
-        if not pxmx_spoke:
-            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
         # Resolve the acting tenant's labels (display name + proxmox_tag) —
         # same model as clone so the new VM is visible to the tenant and synced.
         tid = _resolve_tenant(request, None)
@@ -446,9 +440,7 @@ def register(app, hub, ctx):
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
         hub = app.state.hub
-        pxmx_spoke = hub.get_hypervisor_spoke()
-        if not pxmx_spoke:
-            raise HTTPException(status_code=503, detail="Hypervisor spoke not connected")
+        pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
 
         # Resolve the acting tenant's labels for the new VM: the tenant display
         # NAME (the visible "label" the user wants on the VM) AND the
