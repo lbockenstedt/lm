@@ -141,3 +141,37 @@ async def test_record_alert_insight_seen_catalog_dedup_and_enrichment(tmp_path):
         {"type": "alert", "id": "AP_DOWN", "name": "AP_DOWN", "site": "LHR"}])
     assert added3 == 1
     assert len(await s.get_alert_insight_history()) == 3
+
+
+async def test_record_alert_insight_seen_count_increments_and_rides_along(tmp_path):
+    """``count`` bumps on every sighting but never triggers a write by itself —
+    it rides along on the write a new entry / name / enrichment change causes, so
+    it is approximate across restarts but non-decreasing across a live session."""
+    s = SimulationsStore(str(tmp_path))
+    # New entry → count starts at 1 (and this write persists it).
+    await s.record_alert_insight_seen([
+        {"type": "alert", "id": "AP_DOWN", "name": "AP_DOWN", "site": "MIA"}])
+    hist = {f"{e['type']}:{e['id']}": e for e in await s.get_alert_insight_history()}
+    assert hist["alert:AP_DOWN"]["count"] == 1
+
+    # Second sighting, nothing else changed → count bumps in memory to 2.
+    added = await s.record_alert_insight_seen([
+        {"type": "alert", "id": "AP_DOWN", "name": "AP_DOWN", "site": "MIA"}])
+    assert added == 0
+    hist = {f"{e['type']}:{e['id']}": e for e in await s.get_alert_insight_history()}
+    assert hist["alert:AP_DOWN"]["count"] == 2
+
+    # Legacy entry written before ``count`` existed reads back as 1.
+    import time as _t
+    s._data[s._AIH_KEY]["alert:LEGACY"] = {
+        "type": "alert", "id": "LEGACY", "name": "LEGACY", "site": "",
+        "first_seen": _t.time(), "last_seen": _t.time()}
+    hist = {f"{e['type']}:{e['id']}": e for e in await s.get_alert_insight_history()}
+    assert hist["alert:LEGACY"]["count"] == 1
+
+    # A sighting that DOES cause a write (name change) persists the bumped count.
+    await s.record_alert_insight_seen([
+        {"type": "alert", "id": "AP_DOWN", "name": "Access Point Down", "site": "MIA"}])
+    hist = {f"{e['type']}:{e['id']}": e for e in await s.get_alert_insight_history()}
+    assert hist["alert:AP_DOWN"]["count"] == 3
+    assert hist["alert:AP_DOWN"]["name"] == "Access Point Down"

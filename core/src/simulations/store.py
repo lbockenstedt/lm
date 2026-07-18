@@ -459,11 +459,19 @@ class SimulationsStore:
 
     async def get_alert_insight_history(self) -> List[Dict[str, Any]]:
         """Return the shared alert/insight history as a list of
-        {type, id, name, site, first_seen, last_seen}."""
+        {type, id, name, site, first_seen, last_seen, count}. Legacy entries
+        written before ``count`` existed default to 1."""
         hist = self._data.get(self._AIH_KEY)
         if not isinstance(hist, dict):
             return []
-        return [dict(v) for v in hist.values() if isinstance(v, dict)]
+        out = []
+        for v in hist.values():
+            if not isinstance(v, dict):
+                continue
+            row = dict(v)
+            row.setdefault("count", 1)
+            out.append(row)
+        return out
 
     async def record_alert_insight_seen(self, items: List[Dict[str, Any]]) -> int:
         """Upsert observed alerts/insights into the shared history. Each item:
@@ -503,11 +511,17 @@ class SimulationsStore:
                     if entry is None:
                         hist[key] = {"type": typ, "id": ident, "name": name,
                                      "site": site, "first_seen": now, "last_seen": now,
-                                     **extra}
+                                     "count": 1, **extra}
                         added += 1
                         changed = True
                     else:
                         entry["last_seen"] = now  # in-memory; not worth a write alone
+                        # Occurrence count bumps on EVERY sighting, but in memory
+                        # only — like last_seen, it rides along on a write that
+                        # happens for another reason (new entry / name / enrichment
+                        # change) rather than triggering one itself, so a steady
+                        # poll adds no disk churn. Approximate across restarts.
+                        entry["count"] = int(entry.get("count") or 1) + 1
                         if name and entry.get("name") != name:
                             entry["name"] = name
                             changed = True
