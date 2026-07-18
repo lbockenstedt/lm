@@ -151,9 +151,11 @@ genAgentLogger = logging.getLogger("GenericAgent")
 # log_redaction.py (pure, framework-free, no ``self``); imported back here so
 # behavior is unchanged. ``_redact``/``_REDACT_COMMANDS`` gate secret-hygiene
 # for DEBUG request_response logging; see that module for the full policy.
-from log_redaction import (_redact, _REDACT_COMMANDS, _is_secret_field,
-                           _scrub_secret_fields, _project_nw_devices,
-                           TokenBucket, _fit_log_payload)
+from log_redaction import (_redact, _REDACT_COMMANDS, _REDACT_FIELDS,
+                           _LOGSAFE_COMMANDS, _FULLY_REDACT_COMMANDS,
+                           _FULLY_REDACT_SUBSTRINGS, _SECRET_SUBSTRINGS,
+                           _is_secret_field, _scrub_secret_fields,
+                           _project_nw_devices, TokenBucket, _fit_log_payload)
 
 # H4 sentinel: ``_decrypt_inbound_payload`` returns this (instead of a secret)
 # to signal "drop this frame" — an encrypted payload that won't AEAD-decrypt
