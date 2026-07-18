@@ -294,6 +294,11 @@ _sessions: dict = {}  # token → {user_id, expires, created, last_seen, sid, us
 from api_login_ratelimit import (  # noqa: F401
     _lockout_key, _login_check, _login_fail, _login_success,
     _load_login_attempts,
+    # Re-exported so ``api._login_attempts`` still resolves (routes + tests poke
+    # them). Safe: these dicts are only ever MUTATED in place (update/pop/clear/
+    # [k]=), never reassigned — this binding stays the same object the rate-limit
+    # functions mutate.
+    _login_attempts, _login_ip_attempts,
 )
 
 
