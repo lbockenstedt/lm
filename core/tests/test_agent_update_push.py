@@ -49,7 +49,10 @@ class _Host(AgentHostingControlPlane):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # asyncio.run() — fresh loop per call, robust against other tests leaving
+    # the default event loop closed (get_event_loop().run_until_complete reuses
+    # a stale loop across the session).
+    return asyncio.run(coro)
 
 
 def test_push_fans_agent_update_to_all_connected_devices():

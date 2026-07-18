@@ -33,8 +33,10 @@ def _client(tmp_path):
 
 
 def _dispatch(c, data):
-    return asyncio.get_event_loop().run_until_complete(
-        c._dispatch("AGENT_UPDATE", data))
+    # asyncio.run() creates a FRESH loop per call + closes it — robust against
+    # other tests in the same session leaving the default event loop closed
+    # (get_event_loop().run_until_complete would reuse a stale loop).
+    return asyncio.run(c._dispatch("AGENT_UPDATE", data))
 
 
 def test_missing_repo_url_returns_error(tmp_path):
