@@ -1260,7 +1260,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
-    setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
+    setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['Users', 'Groups'],
@@ -5646,6 +5646,107 @@ function _renderSetupLdapTile(content) {
     loadInstances('ldap');
 }
 
+// Setup → Directory (LDAP) — SERVER connection config (Global Admin only).
+// GET/POST /setup/ldap-config (core/src/routes/ldap.py) store the connection
+// under global_config["ldap"]; Save re-pushes UPDATE_CONFIG to every connected
+// directory spoke via hub.push_ldap_config_all(). This is the SERVER connection
+// (base DN + admin bind account + URL + mirror peers) that the spoke used to get
+// only from install flags/defaults — NOT per-tenant (TENANT == OU is unchanged).
+function _renderSetupLdapConfigTile(content) {
+    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Directory (LDAP) — server connection</h3>
+                    <span id="ldapcfg-spokes-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">The directory <b>server connection</b> the hub pushes to the Directory (LDAP) spoke(s): base DN, the admin bind account, the server URL, and any mirror peers. Saving stores it and pushes <code>UPDATE_CONFIG</code> to every connected directory spoke immediately — these values take precedence over the install-time defaults. <b>Global Admin only.</b> This is the server config, not per-tenant: each tenant is still its own OU under the base DN.</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="space-y-1"><label class="${labelCls}">Base DN</label><input id="ldapcfg-base-dn" type="text" placeholder="dc=example,dc=org" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Admin DN</label><input id="ldapcfg-admin-dn" type="text" placeholder="cn=admin,dc=example,dc=org" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Admin Password <span class="text-slate-400 normal-case font-normal">(blank = keep existing)</span></label><input id="ldapcfg-admin-pw" type="password" placeholder="•••••••• (unset)" autocomplete="new-password" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Server URL</label><input id="ldapcfg-server-url" type="text" placeholder="ldap://localhost:389" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1"><label class="${labelCls}">Server ID <span class="text-slate-400 normal-case font-normal">(mirror replication id, optional)</span></label><input id="ldapcfg-server-id" type="text" placeholder="1" autocomplete="off" class="${inputCls} font-mono text-xs"></div>
+                    <div class="space-y-1 md:col-span-2"><label class="${labelCls}">Mirror Peers <span class="text-slate-400 normal-case font-normal">(other node URLs — comma or newline separated; blank for a single node)</span></label><textarea id="ldapcfg-peers" rows="2" placeholder="ldap://ldap-2.example.org:389" class="${inputCls} font-mono text-xs"></textarea></div>
+                </div>
+                <div class="mt-4 flex items-center justify-between gap-3">
+                    <span id="ldapcfg-msg" class="text-xs text-slate-400"></span>
+                    <div class="flex items-center gap-2">
+                        <button type="button" onclick="pushLdapConfig()" id="ldapcfg-push-btn" class="${btnSecCls}">Push to spokes now</button>
+                        <button type="button" onclick="saveLdapConfig()" id="ldapcfg-save-btn" class="${btnCls}">Save</button>
+                    </div>
+                </div>
+            </div>`;
+    loadLdapConfig();
+}
+
+async function loadLdapConfig() {
+    try {
+        const data = await apiJson('/setup/ldap-config');
+        const c = data.config || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v == null ? '' : v; };
+        set('ldapcfg-base-dn', c.base_dn);
+        set('ldapcfg-admin-dn', c.admin_dn);
+        set('ldapcfg-server-url', c.server_url);
+        set('ldapcfg-server-id', c.server_id);
+        set('ldapcfg-peers', (c.mirror_peers || []).map(p => (p && p.url) || p).filter(Boolean).join('\n'));
+        const pw = document.getElementById('ldapcfg-admin-pw');
+        if (pw) pw.placeholder = c.admin_pw_set ? '•••••••• (stored — leave blank to keep)' : '•••••••• (unset)';
+        const pill = document.getElementById('ldapcfg-spokes-pill');
+        if (pill) {
+            const n = data.spokes_connected || 0;
+            pill.textContent = n ? `${n} SPOKE${n === 1 ? '' : 'S'} CONNECTED` : 'NO SPOKE CONNECTED';
+            pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (n ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500');
+        }
+    } catch (e) { console.error('loadLdapConfig failed', e); }
+}
+
+function _ldapConfigForm() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    const cfg = {
+        base_dn: v('ldapcfg-base-dn'),
+        admin_dn: v('ldapcfg-admin-dn'),
+        server_url: v('ldapcfg-server-url'),
+        server_id: v('ldapcfg-server-id'),
+        mirror_peers: v('ldapcfg-peers'),
+    };
+    const pw = document.getElementById('ldapcfg-admin-pw')?.value || '';
+    if (pw) cfg.admin_pw = pw;  // blank = keep stored
+    return cfg;
+}
+
+async function saveLdapConfig() {
+    const btn = document.getElementById('ldapcfg-save-btn');
+    const msg = document.getElementById('ldapcfg-msg');
+    const config = _ldapConfigForm();
+    if (!config.base_dn) { showToast('Base DN is required', 'error'); return; }
+    if (!config.admin_dn) { showToast('Admin DN is required', 'error'); return; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const d = await apiJson('/setup/ldap-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config }) });
+        const n = d.pushed_to_spokes || 0;
+        if (msg) msg.textContent = `Saved. Pushed to ${n} spoke${n === 1 ? '' : 's'}.`;
+        showToast(`Directory config saved${n ? ` — pushed to ${n} spoke${n === 1 ? '' : 's'}` : ' (no directory spoke connected)'}.`, 'success');
+        loadLdapConfig();
+    } catch (e) {
+        showToast('Save failed: ' + (e.message || e), 'error');
+        if (msg) msg.textContent = 'Save failed.';
+    } finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
+}
+
+async function pushLdapConfig() {
+    const btn = document.getElementById('ldapcfg-push-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Pushing…'; }
+    try {
+        const d = await apiJson('/setup/ldap-config/push', { method: 'POST' });
+        const n = d.pushed_to_spokes || 0;
+        showToast(n ? `Pushed to ${n} spoke${n === 1 ? '' : 's'}.` : 'No directory spoke connected.', n ? 'success' : 'info');
+    } catch (e) {
+        showToast('Push failed: ' + (e.message || e), 'error');
+    } finally { if (btn) { btn.disabled = false; btn.textContent = 'Push to spokes now'; } }
+}
+window.saveLdapConfig = saveLdapConfig; window.pushLdapConfig = pushLdapConfig;
+
 // Setup → DNS tile. GET /api/instances/dns (core/src/api.py get_instances).
 function _renderSetupDnsTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
@@ -8167,6 +8268,7 @@ async function saveOidcConfig() {
 const SETUP_TILES = {
     'Spokes & Agents':  _renderSetupSpokesTile,
     'Module Management': _renderSetupModuleMgmtTile,
+    'Directory (LDAP)': _renderSetupLdapConfigTile,
     'Tenant Config':    _renderSetupTenantTile,
     'User Access':      _renderSetupUserAccessTile,
     'Simulations':      _renderSetupSimulationsTile,
