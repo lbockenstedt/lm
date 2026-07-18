@@ -12,7 +12,7 @@ def register(app, hub, ctx):
     _resolve_prefixes_for_tenant = ctx._resolve_prefixes_for_tenant
     _filter_enabled = ctx._filter_enabled
 
-    async def _compute_tenant_counts(hub, scoping: dict) -> dict:
+    async def _compute_tenant_counts(hub, scoping: dict, failed_spokes: set = None) -> dict:
         """Per-tenant aggregate counts across all connected spokes, scoped by
         the tenant's netbox_tenant_slug / proxmox_tag. Returns
         {devices, vms, sessions, prefixes, ips_used}. Shared by the single-tenant
@@ -35,11 +35,23 @@ def register(app, hub, ctx):
         async def _req(spoke, cmd, payload=None):
             if not spoke:
                 return {}
+            # A connected-but-WEDGED spoke (WS open but not answering) makes each
+            # call wait out the full timeout. The ipam/hypervisor spoke is the
+            # SAME for every tenant, so once it fails for one tenant, skip it for
+            # the rest of this fan-out rather than re-waiting the timeout N times
+            # (the all-tenants "several minutes, page never completes" hang).
+            if failed_spokes is not None and spoke in failed_spokes:
+                return {}
             try:
-                timeout = 30.0 if isinstance(cmd, str) and cmd.startswith("NETBOX_") else 5.0
+                # Overview counts don't warrant the 30s heavy-op budget — an 8s cap
+                # keeps the dashboard responsive; a slow NetBox shows a stale/0 count
+                # (memoized 60s) instead of hanging the whole page.
+                timeout = 8.0 if isinstance(cmd, str) and cmd.startswith("NETBOX_") else 5.0
                 r = await hub.request_response(spoke, cmd, payload or {}, timeout=timeout)
                 return _unwrap_spoke(r) if isinstance(r, dict) else {}
             except Exception:
+                if failed_spokes is not None:
+                    failed_spokes.add(spoke)
                 return {}
 
         devices_r, prefixes_r, ips_r, vms_r, sessions_r = await _asyncio.gather(
@@ -157,12 +169,19 @@ def register(app, hub, ctx):
         tids = [tid for tid in tenants.keys() if tid != "default"]
 
         sem = _asyncio.Semaphore(5)
+        # Shared across the fan-out: a spoke that times out for one tenant is
+        # skipped for the rest (it's the same ipam/hypervisor spoke for all), so a
+        # wedged spoke costs ~one timeout total instead of one per tenant.
+        failed_spokes: set = set()
 
         async def _one(tid):
             cfg = tenants.get(tid) or {}
             scoping = get_tenant_scoping(hub, tid)
             async with sem:
-                counts = await _compute_tenant_counts(hub, scoping)
+                # Hard per-tenant ceiling so nothing can hang the endpoint even if
+                # a spoke call ignores its own timeout — degrades to the zeros row.
+                counts = await _asyncio.wait_for(
+                    _compute_tenant_counts(hub, scoping, failed_spokes), timeout=12)
             return {
                 "id":          tid,
                 "name":        cfg.get("name") or tid,
