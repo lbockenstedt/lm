@@ -44,9 +44,17 @@ def register(app, hub, ctx):
         return access.ldap_tenant_slug(hub, tid)
 
     async def _relay(cmd: str, payload: dict):
-        """Relay an LDAP_* command to the directory spoke and unwrap its data."""
+        """Relay an LDAP_* command to the directory spoke and unwrap its data.
+
+        SURFACES spoke-side failures: if the spoke returns an ERROR envelope
+        (e.g. slapd unreachable → SERVER_DOWN) this raises 502 with the message
+        instead of returning the envelope with a 200 — otherwise the WebUI shows
+        a false 'created' toast for an op that actually failed."""
         spoke_id = get_spoke_or_503(hub, "directory", "LDAP")
         result = await hub.request_response(spoke_id, cmd, payload, timeout=20.0)
+        if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
+            raise HTTPException(status_code=502,
+                                detail=result.get("message") or f"{cmd} failed on the LDAP server")
         return result.get("data", result) if isinstance(result, dict) else result
 
     async def _relay_list(cmd: str, slug: str):
@@ -62,6 +70,11 @@ def register(app, hub, ctx):
         try:
             result = await hub.request_response(spoke_id, cmd, {"tenant_slug": slug},
                                                 timeout=20.0)
+            # Don't cache/return an ERROR envelope as if it were data (a
+            # SERVER_DOWN would otherwise poison the warm cache with junk and
+            # hide the outage) — fall through to stale cache / raise.
+            if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
+                raise RuntimeError(result.get("message") or f"{cmd} failed on the LDAP server")
             data = result.get("data", result) if isinstance(result, dict) else result
             await hub.warm_set(key, slug, data)
             return data

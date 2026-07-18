@@ -5784,7 +5784,7 @@ async function loadNwNetboxImport() {
         if (sel) {
             const nwSpokes = spokes.filter(s => s.module_type === 'nw' || /^(nw|network)/.test(s.spoke_id));
             sel.innerHTML = '<option value="">Auto (first nw spoke)</option>' +
-                nwSpokes.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('');
+                nwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('');
         }
     } catch (e) { /* keep Auto */ }
     try {
@@ -18431,6 +18431,7 @@ function showLDAPModal(subMenu, editItem) {
     const editing = !!editItem;
     const modal = document.createElement('div');
     modal.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50';
+    modal.id = 'ldap-modal';  // close by id after save (querySelector('.fixed') grabbed the wrong element)
     const inp = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
 
@@ -18521,7 +18522,7 @@ async function saveLDAPUser(editing) {
             } else {
                 showToast(editing ? 'User updated.' : 'User created.', 'success');
             }
-            document.querySelector('.fixed')?.remove();
+            document.getElementById('ldap-modal')?.remove();
             loadLDAPData('Users');
         } else {
             const err = await res.json().catch(() => ({}));
@@ -18543,7 +18544,7 @@ async function saveLDAPGroup() {
         });
         if (res.ok) {
             showToast('Group created.', 'success');
-            document.querySelector('.fixed')?.remove();
+            document.getElementById('ldap-modal')?.remove();
             loadLDAPData('Groups');
         } else {
             const err = await res.json().catch(() => ({}));
@@ -18583,6 +18584,7 @@ async function deleteLDAPGroup(cn) {
 function showLDAPPasswordModal(uid) {
     const modal = document.createElement('div');
     modal.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50';
+    modal.id = 'ldap-pw-modal';
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const eUid = String(uid).replace(/'/g, "\\'");
     modal.innerHTML = `
@@ -18617,7 +18619,7 @@ async function changeUserPassword(uid) {
         });
         if (r.ok) {
             showToast('Password changed.', 'success');
-            document.querySelector('.fixed')?.remove();
+            document.getElementById('ldap-pw-modal')?.remove();
         } else {
             const err = await r.json().catch(() => ({}));
             showToast('Error: ' + (err.detail || err.message || 'Failed to change password'), 'error');
@@ -19107,7 +19109,7 @@ function showAddFirewallModal() {
                 && _spokeBindable(s)
             );
             selector.innerHTML = fwSpokes.length > 0
-                ? '<option value="">— select spoke —</option>' + fwSpokes.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('')
+                ? '<option value="">— select spoke —</option>' + fwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('')
                 : '<option value="">No firewall spokes found</option>';
         }
     });
@@ -19240,7 +19242,7 @@ function showAddNwDeviceModal() {
                 s.module_type === 'nw' || /^(nw|network)/.test(s.spoke_id)
             );
             selector.innerHTML = nwSpokes.length > 0
-                ? '<option value="">— select spoke —</option>' + nwSpokes.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('')
+                ? '<option value="">— select spoke —</option>' + nwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('')
                 : '<option value="">No network spokes found</option>';
         }
     });
@@ -19539,7 +19541,7 @@ ${schemaBtnHtml}
         if (!selector) return;
         const matched = spokes.filter(s => s.module_type === p.moduleType && _spokeBindable(s));
         selector.innerHTML = matched.length > 0
-            ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}">${s.spoke_id}</option>`).join('')
+            ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('')
             : `<option value="">No ${p.moduleType} spokes found</option>`;
         if (editItem) selector.value = editItem.spoke_id || '';
     });
@@ -19771,7 +19773,7 @@ function _renderDeviceModalFields(typeKey, values) {
                               .filter(_spokeBindable);
         const current = values ? values.spoke_id : '';
         selector.innerHTML = matched.length > 0
-            ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}"${s.spoke_id === current ? ' selected' : ''}>${s.spoke_id}</option>`).join('')
+            ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}"${s.spoke_id === current ? ' selected' : ''} title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('')
             : `<option value="">No ${t.moduleType || ''} spokes found</option>`;
     });
 }
