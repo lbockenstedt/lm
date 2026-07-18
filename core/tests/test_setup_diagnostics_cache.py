@@ -154,16 +154,27 @@ def test_compute_failure_serves_last_known_not_blank():
     assert served is good  # stale serve of last-known, not None
 
 
-def test_bust_marks_cache_unservable():
+def test_bust_debounces_cache_to_stale():
     _reset_diag_cache()
     hub = _FakeHub()
     asyncio.run(setup_admin._maybe_refresh_diagnostics(hub, force=True))
     assert setup_admin._DIAG_CACHE["ts"] > 0.0
     setup_admin._bust_diag_cache()
-    assert setup_admin._DIAG_CACHE["ts"] == 0.0
+    # Debounce (not cold-bust): last-known payload retained, ts demoted so the
+    # cache is at least fresh-TTL stale — next GET serves stale + kicks one
+    # background refresh instead of forcing a blocking recompute per mutation.
+    assert setup_admin._DIAG_CACHE["data"] is not None
+    assert setup_admin._DIAG_CACHE["ts"] <= time.time() - setup_admin._DIAG_FRESH_S
     before = hub.metrics_calls
     asyncio.run(setup_admin._maybe_refresh_diagnostics(hub, force=True))
     assert hub.metrics_calls > before
+
+
+def test_bust_cold_cache_stays_unservable():
+    # No servable payload yet (data is None) → bust keeps cold-bust (ts=0.0).
+    _reset_diag_cache()
+    setup_admin._bust_diag_cache()
+    assert setup_admin._DIAG_CACHE["ts"] == 0.0
 
 
 def test_self_heal_removes_leaked_relay_agent_id():

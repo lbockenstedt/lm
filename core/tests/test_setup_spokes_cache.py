@@ -123,18 +123,31 @@ def test_compute_failure_serves_last_known_not_blank():
     assert served is good
 
 
-def test_bust_marks_cache_unservable():
+def test_bust_debounces_cache_to_stale():
     _reset_spokes_cache()
     hub = _hub_with_two_spokes()
     asyncio.run(setup._maybe_refresh_spokes(hub, force=True))
     age_before = setup._SPOKES_CACHE["ts"]
     assert age_before > 0.0
     setup._bust_spokes_cache()
-    assert setup._SPOKES_CACHE["ts"] == 0.0
-    # Next read forced-refreshes (recompute runs again).
+    # Debounce (not cold-bust): the last-known payload is RETAINED and ts is
+    # demoted so the cache is at least fresh-TTL stale — the next GET serves the
+    # stale payload instantly + kicks one background refresh, instead of forcing
+    # a blocking recompute on every mutation (admin churn no longer bypasses SWR).
+    assert setup._SPOKES_CACHE["data"] is not None
+    assert setup._SPOKES_CACHE["ts"] <= time.time() - setup._SPOKES_FRESH_S
+    # A forced refresh still recomputes.
     before = hub.compute_count
     asyncio.run(setup._maybe_refresh_spokes(hub, force=True))
     assert hub.compute_count > before
+
+
+def test_bust_cold_cache_stays_unservable():
+    # With no servable payload yet (data is None), bust keeps the cold-bust
+    # semantics (ts=0.0) so the next GET forced-refreshes.
+    _reset_spokes_cache()
+    setup._bust_spokes_cache()
+    assert setup._SPOKES_CACHE["ts"] == 0.0
 
 
 def test_aggregate_payload_shape():
