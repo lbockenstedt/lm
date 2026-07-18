@@ -258,6 +258,11 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
     # == None → zero iterations → "no certs to distribute" + no per-cert logs,
     # even though the cert table (which DOES unwrap) showed the certs.
     list_data = ret.get("data") if isinstance(ret.get("data"), dict) else ret
+    # Spokes/agents that already hold their OWN unique (non-wildcard) LE cert must
+    # NOT receive the wildcard — a dedicated cert claims that target. Computed once
+    # from the full ledger; ledger-derived so it auto-toggles (deploy a unique cert
+    # → excluded next run; remove it → wildcard resumes).
+    _claimed_ids, _claimed_group_types = _build_claimed_targets(list_data.get("certs") or [])
     for cert in list_data.get("certs") or []:
         domain = cert.get("domain") or ""
         targets = cert.get("targets") or []
@@ -299,7 +304,8 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
         if is_wc and get_all_by_type is not None and push_state is not None:
             wc_summary = await distribute_wildcard_to_all_spokes(
                 rr, get_all_by_type, capable, le_spoke_id, domain, cur_hash,
-                push_state, install_on_hub=install_on_hub)
+                push_state, install_on_hub=install_on_hub,
+                claimed_ids=_claimed_ids, claimed_group_types=_claimed_group_types)
             aggregate.extend(wc_summary)
 
         # mTLS-materials fan-out (gated; no-op when disabled). Separate from the
@@ -487,12 +493,38 @@ async def distribute_mtls_materials_to_all_spokes(
     return summary
 
 
+def _build_claimed_targets(certs: List[Dict[str, Any]]):
+    """From the LE cert list, the set of targets ‘claimed’ by a UNIQUE
+    (non-wildcard) cert — spokes/agents that already have their own dedicated
+    cert, so the wildcard must NOT be pushed to them. Returns
+    ``(claimed_ids, claimed_group_types)``: ``claimed_ids`` = identifiers
+    (spoke/agent ids) named by a non-wildcard cert's target; ``claimed_group_types``
+    = module_types a non-wildcard cert claims wholesale (empty identifier = the
+    ‘all nodes of this type’ target). A WILDCARD cert's own targets are ignored
+    (it doesn't claim anything against itself)."""
+    claimed_ids: Set[str] = set()
+    claimed_group_types: Set[str] = set()
+    for cert in certs or []:
+        if _is_wildcard(cert.get("domain") or ""):
+            continue
+        for t in cert.get("targets") or []:
+            mt = (t.get("module_type") or "").strip()
+            ident = (t.get("identifier") or "").strip()
+            if ident:
+                claimed_ids.add(ident)
+            elif mt:
+                claimed_group_types.add(mt)
+    return claimed_ids, claimed_group_types
+
+
 async def distribute_wildcard_to_all_spokes(
         rr: Callable, get_all_by_type: Callable, capable: Set[str],
         le_spoke_id: str, domain: str,
         material_hash: Optional[str],
         push_state: Dict[str, str],
         install_on_hub: Optional[Callable] = None,
+        claimed_ids: Optional[Set[str]] = None,
+        claimed_group_types: Optional[Set[str]] = None,
         ) -> List[Dict[str, Any]]:
     """Fan a wildcard cert out to EVERY connected cert-capable spoke (resolved
     directly by ``spoke_id`` — so multiple spokes of the same module_type each
@@ -525,6 +557,33 @@ async def distribute_wildcard_to_all_spokes(
             continue
         for sid in get_all_by_type(mt):
             spoke_targets.append({"module_type": mt, "identifier": sid, "spoke_id": sid})
+
+    # Exclude spokes/agents that already hold their OWN unique (non-wildcard) LE
+    # cert — a dedicated cert claims that target, so the wildcard must never be
+    # pushed there (the hub is already excluded above; this generalizes it to any
+    # node with its own cert, e.g. bugfixer). Ledger-derived + recomputed each
+    # run: deploying a unique cert later auto-excludes the target (and its
+    # INSTALL_CERT already replaced the wildcard on disk), so future wildcard
+    # pushes skip it; removing that cert re-enables the wildcard. The caller
+    # (distribute_all_certs) passes the claim-set; a direct caller that omits it
+    # gets a one-shot LE_LIST_CERTS lookup here.
+    if claimed_ids is None or claimed_group_types is None:
+        try:
+            _res = _unwrap(await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0))
+            _ld = (_res.get("data") if isinstance(_res, dict) and isinstance(_res.get("data"), dict)
+                   else _res) or {}
+            claimed_ids, claimed_group_types = _build_claimed_targets(_ld.get("certs") or [])
+        except Exception:  # noqa: BLE001 - never block the fan-out on a claim-set lookup
+            claimed_ids, claimed_group_types = set(), set()
+    _excluded = [t for t in spoke_targets
+                 if t["spoke_id"] in claimed_ids or t["module_type"] in claimed_group_types]
+    if _excluded:
+        logger.info("[cert] wildcard %s: skipping %d spoke(s) with their own unique cert: %s",
+                    domain, len(_excluded), ", ".join(t["spoke_id"] for t in _excluded))
+        spoke_targets = [t for t in spoke_targets
+                         if t["spoke_id"] not in claimed_ids
+                         and t["module_type"] not in claimed_group_types]
+
     # The wildcard is deployed to SPOKES + AGENTS only — the hub keeps its OWN
     # cert, so it is NEVER a wildcard target (was overwriting hub.crt + self-
     # restarting). mTLS materials for the hub (the CA bundle) go via the separate

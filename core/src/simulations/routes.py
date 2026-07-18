@@ -1657,6 +1657,91 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     except Exception:  # noqa: BLE001
         pass
 
+    # ── config-value learner (knob-floor search over simulation.conf knobs) ──
+    # A SECOND control axis, orthogonal to the count controller above. Where the
+    # adaptive controller tunes how MANY clients run a sim, this tunes how HARD
+    # each one hits — the sim's [simulation] intensity knobs (SIM_KNOBS) — by a
+    # coordinate-descent search that ratchets one knob at a time DOWN to the
+    # floor that still fires the alert. State lives in a separate store key
+    # (knob_learn_state) so the two never clobber each other, and is keyed by the
+    # same alert_type:alert_id:site (`_adaptive_key`). Reuses `_alert_firing`.
+    # The pure floor-search step lives in sim_quota.knob_step (shared with the cs
+    # twin + unit-tested); the sweep below drives it with the live firing signal.
+
+    async def _knob_overrides_for_tenant(tenant_id: str) -> dict:
+        """The tenant-wide ``[simulation]`` knob values the learner currently
+        wants delivered = per-knob MIN across all this tenant's ``learn_knobs``
+        quota states (most conservative floor when several quotas tune the same
+        global knob). Empty when nothing is learning."""
+        from .sim_quota import normalize_quota, knobs_for_sim
+        try:
+            csc = await store.get_central_sites_config(tenant_id) or {}
+            learn = [q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
+                     if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
+            if not learn:
+                return {}
+            state = await store.get_knob_learn_state(tenant_id)
+        except Exception:  # noqa: BLE001
+            return {}
+        out: dict = {}
+        for q in learn:
+            vals = (state.get(_adaptive_key(q)) or {}).get("values") or {}
+            for kk, vv in vals.items():
+                try:
+                    iv = int(vv)
+                except (TypeError, ValueError):
+                    continue
+                out[kk] = iv if kk not in out else min(out[kk], iv)
+        return out
+
+    async def _run_knob_learner() -> None:
+        """One learner pass over every tenant's ``learn_knobs`` quotas — advance
+        the floor search and re-push the delivered knob values when they move."""
+        import time as _t
+        from .sim_quota import normalize_quota, knobs_for_sim, knob_step
+        now = _t.time()
+        for tid in _all_tenant_ids():
+            try:
+                csc = await store.get_central_sites_config(tid) or {}
+                learn = [q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
+                         if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
+                if not learn:
+                    continue
+                state = await store.get_knob_learn_state(tid)
+                changed = False
+                live = set()
+                for q in learn:
+                    k = _adaptive_key(q); live.add(k)
+                    firing = await _alert_firing(tid, q)
+                    before = dict(state.get(k) or {})
+                    after = knob_step(before, knobs_for_sim(q.get("sim_id")), firing, now)
+                    if after != before:
+                        state[k] = after; changed = True
+                for k in list(state.keys()):
+                    if k not in live:
+                        state.pop(k, None); changed = True
+                if changed:
+                    await store.set_knob_learn_state(tid, state)
+                    await _push_sim_quotas(tid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("knob learner (%s): %s", tid, exc)
+
+    async def _knob_learner_loop() -> None:
+        """Periodic knob-floor learner sweep. Started from main.py."""
+        while True:
+            try:
+                await _run_knob_learner()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a sweep must not kill the loop
+                logger.warning("knob learner loop: %s", exc)
+            await asyncio.sleep(45)
+
+    try:
+        hub._knob_learner_loop = _knob_learner_loop
+    except Exception:  # noqa: BLE001
+        pass
+
     async def _sim_shareable(tenant_id: str = "") -> dict:
         """The GLOBAL (all-tenant) per-simulation shareable/stackable overrides
         (authoritative — a sim set non-shareable can NEVER be stacked by any
@@ -1777,6 +1862,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return await _push_config(tenant_id, {
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
+            "sim_knob_overrides": await _knob_overrides_for_tenant(tenant_id),
             **await _pool_config(tenant_id),
         })
 
@@ -1825,7 +1911,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             sess = session_user_fn(request)
             if is_admin_fn(sess):
                 data["_usb_debug"] = [
-                    {"spoke_id": sid, "online": sid in getattr(hub, "active_connections", {}),
+                    {"spoke_id": sid, "online": hub._primary_key(sid) in getattr(hub, "active_connections", {}),
                      **_usb_structure_dump(raw)}
                     for sid, raw in service._spokes_for_tenant(tenant_id)
                 ]
@@ -1844,7 +1930,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             "tenant_id": tenant_id,
             "spokes": [
                 {"spoke_id": sid,
-                 "online": sid in getattr(hub, "active_connections", {}),
+                 "online": hub._primary_key(sid) in getattr(hub, "active_connections", {}),
                  **_usb_structure_dump(raw)}
                 for sid, raw in service._spokes_for_tenant(tenant_id)
             ],
@@ -2026,7 +2112,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             out.append({
                 "spoke_id": sid,
                 "spoke_name": (data or {}).get("spoke_name") or sid,
-                "online": sid in getattr(hub, "active_connections", {}),
+                "online": hub._primary_key(sid) in getattr(hub, "active_connections", {}),
                 "last_seen": (data or {}).get("timestamp"),
                 "telemetry_keys": sorted((data or {}).keys()),
             })
@@ -2085,7 +2171,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             t_id = m.get("tenant_id")
             if not admin:
                 # Non-admin: only their own tenant's approved spokes.
-                if t_id not in user_tenants or not approved.get(sid, False):
+                if t_id not in user_tenants or not approved.get(hub._primary_key(sid), False):
                     continue
             vm_count = None
             cdata = cache.get(sid) or {}
@@ -2108,8 +2194,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "spoke_id": sid,
                 "display_name": m.get("display_name") or sid,
                 "module_type": _spoke_type(sid, live_types, m),
-                "connected": sid in conns,
-                "approved": bool(approved.get(sid, False)),
+                "connected": hub._primary_key(sid) in conns,
+                "approved": bool(approved.get(hub._primary_key(sid), False)),
                 "tenant_id": t_id,
                 "vm_count": vm_count,
             })
@@ -2311,7 +2397,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         action = (body or {}).get("action", "approve")
         approved = action != "unapprove"
         hub.state.register_module(spoke_id, approved=approved)
-        hub.approved_modules[spoke_id] = approved
+        hub.approved_modules[hub._primary_key(spoke_id)] = approved
         if (body or {}).get("tenant_id"):
             hub.state.set_spoke_tenant(spoke_id, body["tenant_id"])
         await hub.state.save_state_now()
@@ -2333,7 +2419,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                               tenant_id: str = Depends(get_tenant_id)):
         _require_admin(request)
         # Close the live WS (if any) then drop registration + metadata + keys.
-        ws = hub.active_connections.get(spoke_id)
+        ws = hub.active_connections.get(hub._primary_key(spoke_id))
         if ws is not None:
             try:
                 await ws.close(code=1008, reason="Removed by admin")
@@ -2344,7 +2430,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception as exc:
             logger.warning("cs_spoke_delete: remove_module %s failed: %s", spoke_id, exc)
         try:
-            hub.key_manager.delete_spoke_key(spoke_id)
+            hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
         except Exception as exc:
             logger.warning("cs_spoke_delete: delete_spoke_key %s failed: %s", spoke_id, exc)
         return {"removed": True, "spoke_id": spoke_id}
@@ -2373,45 +2459,186 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         "recipients": [],
     }
 
-    @app.get("/api/reports/email-report")
-    async def get_email_report(tenant_id: str = Depends(get_tenant_id)):
-        cfg = await store.get_email_report(tenant_id)
-        out = {**_EMAIL_REPORT_DEFAULTS, **(cfg or {})}
-        out["sections"] = {**_EMAIL_REPORT_DEFAULTS["sections"], **(out.get("sections") or {})}
-        out["schedule"] = {**_EMAIL_REPORT_DEFAULTS["schedule"], **(out.get("schedule") or {})}
-        return out
+    # ── Reports: a global LIST of emailed reports (each with a target tenant) ──
+    # Global Admin sees/manages all; a non-admin (reports right) sees only reports
+    # for their own tenant and can only create for it. Stored in global_config via
+    # email_report.get_reports / save_reports.
+    import uuid as _uuid
 
-    @app.put("/api/reports/email-report")
-    async def set_email_report_cfg(request: Request, tenant_id: str = Depends(get_tenant_id)):
-        body = await request.json()
-        body = body if isinstance(body, dict) else {}
+    def _user_tenant(sess):
+        u = (sess or {}).get("user", {}) or {}
+        return u.get("tenant_id") or ((u.get("tenants") or [None])[0])
+
+    def _clean_report(body, sess, existing=None):
         sch = body.get("schedule") or {}
         freq = str(sch.get("freq", "weekly"))
-        existing = await store.get_email_report(tenant_id) or {}
-        cfg = {
-            "enabled": bool(body.get("enabled")),
+        tenant = str(body.get("tenant") or "default")
+        if not is_admin_fn(sess):
+            tenant = _user_tenant(sess) or "default"  # non-admin can only target own
+        return {
+            "id": (existing or {}).get("id") or _uuid.uuid4().hex[:12],
+            "name": (str(body.get("name") or "Report").strip() or "Report")[:80],
+            "tenant": tenant,
             "sections": {"checks": bool((body.get("sections") or {}).get("checks", True)),
                          "clients": bool((body.get("sections") or {}).get("clients", True))},
+            "recipients": [str(r).strip() for r in (body.get("recipients") or []) if str(r).strip()][:20],
             "schedule": {
                 "freq": freq if freq in ("daily", "weekly", "monthly") else "weekly",
                 "dow": max(0, min(6, int(sch.get("dow", 0) or 0))),
                 "dom": max(1, min(28, int(sch.get("dom", 1) or 1))),
                 "hour": max(0, min(23, int(sch.get("hour", 7) or 7))),
             },
-            "recipients": [str(r).strip() for r in (body.get("recipients") or []) if str(r).strip()][:20],
-            "last_sent": existing.get("last_sent"),  # preserve the period marker
+            "enabled": bool(body.get("enabled")),
+            "last_sent": (existing or {}).get("last_sent"),
         }
-        await store.set_email_report(tenant_id, cfg)
-        return {"saved": True}
 
-    @app.post("/api/reports/email-report/test")
-    async def test_email_report(tenant_id: str = Depends(get_tenant_id)):
-        cfg = {**_EMAIL_REPORT_DEFAULTS, **(await store.get_email_report(tenant_id) or {})}
+    def _may_touch(sess, rep):
+        return is_admin_fn(sess) or (rep.get("tenant") == _user_tenant(sess))
+
+    @app.get("/api/reports/list")
+    async def list_reports(request: Request):
+        sess = session_user_fn(request)
+        reports = email_report.get_reports(hub)
+        if not is_admin_fn(sess):
+            tid = _user_tenant(sess)
+            reports = [r for r in reports if r.get("tenant") == tid]
+        return {"reports": reports}
+
+    @app.get("/api/reports/tenants")
+    async def reports_tenants(request: Request):
+        """Tenants selectable as a report's dashboard (admin: all; else own only)."""
+        sess = session_user_fn(request)
+        tenants = hub.state.tenant_state.get("tenants", {}) or {}
+        out = [{"id": tid, "name": (cfg or {}).get("name") or tid} for tid, cfg in tenants.items()]
+        if "default" not in [t["id"] for t in out]:
+            out.insert(0, {"id": "default", "name": "Default"})
+        if not is_admin_fn(sess):
+            mine = _user_tenant(sess)
+            out = [t for t in out if t["id"] == mine]
+        return {"tenants": out}
+
+    @app.post("/api/reports")
+    async def create_report(request: Request):
+        sess = session_user_fn(request)
+        body = await request.json()
+        reports = email_report.get_reports(hub)
+        rep = _clean_report(body if isinstance(body, dict) else {}, sess)
+        reports.append(rep)
+        email_report.save_reports(hub, reports)
+        return {"saved": True, "report": rep}
+
+    @app.put("/api/reports/{rid}")
+    async def update_report(rid: str, request: Request):
+        sess = session_user_fn(request)
+        body = await request.json()
+        reports = email_report.get_reports(hub)
+        for i, r in enumerate(reports):
+            if r.get("id") == rid:
+                if not _may_touch(sess, r):
+                    raise HTTPException(status_code=403, detail="Not authorized for this report")
+                reports[i] = _clean_report(body if isinstance(body, dict) else {}, sess, r)
+                email_report.save_reports(hub, reports)
+                return {"saved": True, "report": reports[i]}
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    @app.delete("/api/reports/{rid}")
+    async def delete_report(rid: str, request: Request):
+        sess = session_user_fn(request)
+        reports = email_report.get_reports(hub)
+        keep, removed = [], False
+        for r in reports:
+            if r.get("id") == rid:
+                if not _may_touch(sess, r):
+                    raise HTTPException(status_code=403, detail="Not authorized for this report")
+                removed = True
+                continue
+            keep.append(r)
+        if removed:
+            email_report.save_reports(hub, keep)
+        return {"removed": removed}
+
+    @app.post("/api/reports/{rid}/test")
+    async def test_report(rid: str, request: Request):
+        sess = session_user_fn(request)
+        rep = next((r for r in email_report.get_reports(hub) if r.get("id") == rid), None)
+        if not rep:
+            raise HTTPException(status_code=404, detail="Report not found")
+        if not _may_touch(sess, rep):
+            raise HTTPException(status_code=403, detail="Not authorized for this report")
         try:
-            await email_report.send_now(hub, tenant_id, cfg)
+            await email_report.send_now(hub, rep.get("tenant") or "default", rep)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"Send failed: {exc}")
-        return {"sent": True, "to": cfg.get("recipients") or []}
+        return {"sent": True, "to": rep.get("recipients") or []}
+
+    # ── realtime alert rules (per-tenant; the AlertEngine matches on these) ──
+    from alert_engine import SOURCES as _ALERT_SOURCES
+
+    def _clean_rule(body, existing=None):
+        src = str(body.get("source") or "")
+        src = src if src in _ALERT_SOURCES else _ALERT_SOURCES[0]
+        return {
+            "id": (existing or {}).get("id") or _uuid.uuid4().hex[:12],
+            "name": (str(body.get("name") or "").strip() or src)[:80],
+            "source": src,
+            "recipients": [str(r).strip() for r in (body.get("recipients") or []) if str(r).strip()][:20],
+            "enabled": bool(body.get("enabled", True)),
+            # 'human' = formatted dashboard-style email; 'raw' = JSON body for automation.
+            "format": "raw" if str(body.get("format") or "human").lower() == "raw" else "human",
+        }
+
+    @app.get("/api/alerts/rules")
+    async def list_alert_rules(tenant_id: str = Depends(get_tenant_id)):
+        return {"rules": await store.get_alert_rules(tenant_id), "sources": list(_ALERT_SOURCES)}
+
+    @app.post("/api/alerts/rules")
+    async def create_alert_rule(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        body = await request.json()
+        rules = await store.get_alert_rules(tenant_id)
+        rule = _clean_rule(body if isinstance(body, dict) else {})
+        rules.append(rule)
+        await store.set_alert_rules(tenant_id, rules)
+        return {"saved": True, "rule": rule}
+
+    @app.put("/api/alerts/rules/{rid}")
+    async def update_alert_rule(rid: str, request: Request, tenant_id: str = Depends(get_tenant_id)):
+        body = await request.json()
+        rules = await store.get_alert_rules(tenant_id)
+        for i, r in enumerate(rules):
+            if r.get("id") == rid:
+                rules[i] = _clean_rule(body if isinstance(body, dict) else {}, r)
+                await store.set_alert_rules(tenant_id, rules)
+                return {"saved": True, "rule": rules[i]}
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    @app.delete("/api/alerts/rules/{rid}")
+    async def delete_alert_rule(rid: str, tenant_id: str = Depends(get_tenant_id)):
+        rules = await store.get_alert_rules(tenant_id)
+        keep = [r for r in rules if r.get("id") != rid]
+        removed = len(keep) != len(rules)
+        if removed:
+            await store.set_alert_rules(tenant_id, keep)
+        return {"removed": removed}
+
+    @app.post("/api/alerts/rules/{rid}/test")
+    async def test_alert_rule(rid: str, tenant_id: str = Depends(get_tenant_id)):
+        rule = next((r for r in await store.get_alert_rules(tenant_id) if r.get("id") == rid), None)
+        if not rule:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        recips = rule.get("recipients") or []
+        if not recips:
+            raise HTTPException(status_code=400, detail="This rule has no recipients")
+        import notifications as _n
+        _src = str(rule.get("source") or "").replace("<", "").replace(">", "")
+        _tid = str(tenant_id).replace("<", "").replace(">", "")
+        ok = await _n.send_email(
+            hub, f"[LM TEST] alert rule '{rule.get('name')}'",
+            f"Test alert for source '{_src}' (tenant {_tid}).",
+            to_emails=recips,
+            html=f"<p>Test alert for <b>{_src}</b> (tenant {_tid}).</p>")
+        if not ok:
+            raise HTTPException(status_code=400, detail="Send failed — check Setup → Notifications")
+        return {"sent": True, "to": recips}
 
     # ── hub tenant processing-modes (literal "hub" first segment) ──────────
     @app.patch("/sim/api/hub/tenants/{tenant}/processing-modes")
@@ -2730,7 +2957,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         spoke_connected = False
         try:
             _sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
-            spoke_connected = bool(_sid and _sid in getattr(hub, "active_connections", {}))
+            spoke_connected = bool(_sid and hub._primary_key(_sid) in getattr(hub, "active_connections", {}))
         except Exception:
             spoke_connected = False
         return {"sections": _parse_ini_sections(raw), "raw": raw,
@@ -3744,7 +3971,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         for sid, meta in md.items():
             if not isinstance(meta, dict) or meta.get("module_type") not in cs_types:
                 continue
-            if not getattr(hub, "approved_modules", {}).get(sid, False):
+            if not getattr(hub, "approved_modules", {}).get(hub._primary_key(sid), False):
                 continue
             tid = meta.get("tenant_id")
             if tid == tenant_id or not tid:

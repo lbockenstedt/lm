@@ -82,7 +82,7 @@ def register(app, hub, ctx):
         constrained delete/edit on a shared firewall."""
         hub = app.state.hub
         spoke_id = fw.get("spoke_id")
-        if not spoke_id or spoke_id not in hub.active_connections:
+        if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return None
         cmd = {"rules": "OPNSENSE_GET_ALL_RULES", "nat": "OPNSENSE_GET_NAT_POLICIES",
                "dns": "OPNSENSE_GET_DNS_RECORDS", "aliases": "OPNSENSE_GET_ALIASES"}.get(endpoint)
@@ -218,7 +218,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail=f"Endpoint {endpoint} not supported for model {model}")
 
         spoke_id = fw.get("spoke_id")
-        if not spoke_id or spoke_id not in hub.active_connections:
+        if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             # Spoke offline — serve last known cache for any authenticated user
             if sess:
                 tenant_id = sess.get("user", {}).get("tenant_id")
@@ -263,7 +263,7 @@ def register(app, hub, ctx):
         if not fw:
             raise HTTPException(status_code=404, detail="Firewall not found")
         spoke_id = fw.get("spoke_id")
-        if not spoke_id or spoke_id not in hub.active_connections:
+        if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Firewall spoke {spoke_id} not connected")
         try:
             result = await hub.request_response(spoke_id, command, data, timeout=_FW_WRITE_TIMEOUT)
@@ -428,7 +428,7 @@ def register(app, hub, ctx):
             hub.state._mark_dirty()
 
             spoke_id = firewalls[fw_index].get("spoke_id")
-            if spoke_id and spoke_id in hub.active_connections:
+            if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
                 msg = _hub_msg(spoke_id, "UPDATE_CONFIG", firewalls[fw_index])
                 await hub.send_to_spoke(msg)
                 return {"status": "ok", "message": "Firewall configuration updated and pushed to spoke.", "pushed": True}

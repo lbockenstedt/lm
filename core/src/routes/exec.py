@@ -81,7 +81,7 @@ def register(app, hub, ctx):
         conns = getattr(hub, "active_connections", {}) or {}
         for aid, info in sorted((getattr(hub, "agent_info", {}) or {}).items()):
             sid = (info or {}).get("spoke_id", "")
-            if not sid or sid not in conns:
+            if not sid or hub._primary_key(sid) not in conns:
                 continue
             host = (info or {}).get("hostname", aid) or aid
             targets.append({"id": f"agent:{sid}:{aid}", "label": f"{host} · agent", "kind": "agent"})
@@ -126,7 +126,7 @@ def register(app, hub, ctx):
                 sid, _, aid = rest.partition(":")
                 if not sid or not aid:
                     raise HTTPException(status_code=400, detail="bad agent target")
-                if sid not in conns:
+                if hub._primary_key(sid) not in conns:
                     raise HTTPException(status_code=404, detail=f"agent's spoke '{sid}' not connected")
                 resp = await hub.request_response(
                     sid, "AGENT_RUN_COMMAND",
@@ -134,7 +134,7 @@ def register(app, hub, ctx):
                     timeout=50.0)
                 res = _unwrap(resp)
             else:
-                if target not in conns:
+                if hub._primary_key(target) not in conns:
                     raise HTTPException(status_code=404, detail=f"spoke '{target}' not connected")
                 resp = await hub.request_response(
                     target, "RUN_COMMAND",

@@ -146,6 +146,9 @@ def _fake_hub():
             self.sent = []  # (msg, signing_secret)
             # _maybe_redeliver_session_key rate-limit dict (instance-local).
             self._rotation_repush_at = {}
+            # Phase 2: inherited _primary_key reads spoke_id_alias; empty ->
+            # returns spoke_id (pre-2b2-trigger behavior).
+            self.spoke_id_alias = {}
 
         async def send_to_spoke(self, msg, signing_secret=None):
             self.sent.append((msg, signing_secret))

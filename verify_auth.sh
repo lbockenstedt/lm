@@ -26,7 +26,7 @@ fi
 
 log_c "🔍 Scanning Hub logs for authentication status..."
 
-# Unified agent-spoke model: one generic agent hosts every module as a role, so
+# Unified agent-spoke model: one agent hosts every module as a role, so
 # we verify the agent's auth (its role sub-spokes auth+approve via the parent).
 SPOKES=("agent-$(hostname -s)")
 ANY_FAILURES=false

@@ -23,7 +23,7 @@ def register(app, hub, ctx):
         as spoke_id 'bugfixer' (config HUB_AGENT_ID); match that, else any
         connected id containing 'bugfixer'."""
         conns = getattr(hub, "active_connections", {}) or {}
-        if "bugfixer" in conns:
+        if hub._primary_key("bugfixer") in conns:
             return "bugfixer"
         for sid in conns:
             if "bugfixer" in str(sid).lower():
@@ -69,9 +69,9 @@ def register(app, hub, ctx):
         for sid in known:
             out.append({
                 "spoke_id": sid,
-                "connected": sid in conns,
-                "approved": hub.approved_modules.get(sid, False),
-                "module_type": hub.spoke_module_types.get(sid)
+                "connected": hub._primary_key(sid) in conns,
+                "approved": hub.approved_modules.get(hub._primary_key(sid), False),
+                "module_type": hub.spoke_module_types.get(hub._primary_key(sid))
                 or (meta.get(sid, {}) or {}).get("module_type"),
             })
         return {"spokes": out, "connected_count": sum(1 for s in out if s["connected"])}

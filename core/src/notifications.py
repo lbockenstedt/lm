@@ -55,7 +55,11 @@ import key_vault
 
 logger = logging.getLogger("Notifications")
 
-_ACS_API_VERSION = "2023-07-01-preview"
+# ACS Email data-plane (emails:send). Use the GA version — the 2023-07-01-preview
+# it was on has been retired by Azure ("UnsupportedApiVersion"). The GA payload
+# (senderAddress / recipients.to[].address / content.subject/plainText) matches
+# what _acs_api_send already builds, so this is a drop-in bump.
+_ACS_API_VERSION = "2023-03-31"
 _ACS_SMTP_HOST = "smtp.azurecomm.net"
 _ACS_SMTP_PORT = 587
 _ACS_ARM_API = "2023-04-01"
@@ -332,6 +336,45 @@ async def list_acs_resources(hub, subscription_id: str, resource_group: str,
     return out
 
 
+async def list_acs_sender_domains(hub, subscription_id: str, resource_group: str,
+                                  acs_name: str,
+                                  http: Optional[httpx.AsyncClient] = None
+                                  ) -> List[Dict[str, str]]:
+    """Sender MailFrom addresses for the email domains actually LINKED to the
+    given Communication Services resource. GETs the ACS resource and reads
+    ``properties.linkedDomains`` (email-domain resource IDs), deriving
+    ``DoNotReply@<domain>`` from each. An EMPTY list is the ``DomainNotLinked``
+    cause: the ACS resource has no CONNECTED domain, so nothing can send from it
+    until one is linked (Azure → Communication Services → Email → Domains →
+    Connect domain). Only needs resource READ (not listKeys)."""
+    sub = (subscription_id or "").strip()
+    rg = (resource_group or "").strip()
+    name = (acs_name or "").strip()
+    if not (sub and rg and name):
+        raise NotificationsError("subscription, resource group, and ACS resource are required")
+    oidc_cfg = get_oidc_config(hub)
+    token = await fetch_app_token(oidc_cfg, _ARM_SCOPE, http=http)
+    url = (f"https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}"
+           f"/providers/Microsoft.Communication/communicationServices/{name}"
+           f"?api-version={_ACS_ARM_API}")
+    async with (http or httpx.AsyncClient(timeout=20.0)) as c:
+        resp = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+    if resp.status_code != 200:
+        raise NotificationsError(
+            f"ACS resource GET failed: HTTP {resp.status_code} — {resp.text[:300]}")
+    props = (resp.json() or {}).get("properties", {}) or {}
+    linked = props.get("linkedDomains") or []
+    out = []
+    for dom_id in linked:
+        # resource id: .../emailServices/<email>/domains/<domain> — the last
+        # segment is the domain name (a GUID .azurecomm.net or a custom domain).
+        domain = str(dom_id or "").rstrip("/").split("/")[-1].strip()
+        if domain:
+            out.append({"domain": domain, "sender": f"DoNotReply@{domain}"})
+    out.sort(key=lambda e: e["domain"].lower())
+    return out
+
+
 async def _resolve(hub, cfg: Dict[str, Any],
                    http: Optional[httpx.AsyncClient] = None
                    ) -> Tuple[str, Any]:
@@ -407,15 +450,20 @@ def _smtp_send(host: str, port: int, user: str, password: str,
 
 async def _acs_api_send(endpoint: str, accesskey: str, sender: str,
                         recipients: List[str], subject: str, body: str,
+                        html: str = "",
                         http: Optional[httpx.AsyncClient] = None) -> None:
     """POST {endpoint}/emails:send signed with the ACS access key
     (HMAC-SHA256). No Entra token/permission needed — the key is parsed from
-    the same Key Vault connection string."""
+    the same Key Vault connection string. ``html`` (optional) adds an HTML body
+    alongside the plain-text one (used by the scheduled report / alert emails)."""
     url = f"{endpoint}/emails:send?api-version={_ACS_API_VERSION}"
+    content = {"subject": subject, "plainText": body}
+    if html:
+        content["html"] = html
     payload = {
         "senderAddress": sender,
         "recipients": {"to": [{"address": a} for a in recipients]},
-        "content": {"subject": subject, "plainText": body},
+        "content": content,
     }
     body_bytes = json.dumps(payload).encode()
     parts = urlsplit(url)
@@ -494,6 +542,7 @@ async def _tenant_recipients(hub, spoke_id: str) -> List[str]:
 async def send_email(hub, subject: str, body: str,
                      to_emails: Any = None,
                      spoke_id: Optional[str] = None,
+                     html: str = "",
                      http: Optional[httpx.AsyncClient] = None) -> bool:
     """Send one email using the hub's notifications config. Returns False (and
     logs) when notifications are disabled or there are no recipients — never
@@ -529,7 +578,7 @@ async def send_email(hub, subject: str, body: str,
         if mode == "acs_api":
             endpoint, _resourcename, accesskey = payload
             await _acs_api_send(endpoint, accesskey, sender,
-                                recipients, subject, body, http=http)
+                                recipients, subject, body, html=html, http=http)
         else:
             host, port, user, password, starttls = payload
             msg = EmailMessage()
@@ -537,6 +586,8 @@ async def send_email(hub, subject: str, body: str,
             msg["To"] = ", ".join(recipients)
             msg["Subject"] = subject
             msg.set_content(body)
+            if html:
+                msg.add_alternative(html, subtype="html")
             await asyncio.to_thread(_smtp_send, host, port, user, password,
                                     starttls, msg)
         logger.info("notifications: sent '%s' to %d recipient(s) via %s",

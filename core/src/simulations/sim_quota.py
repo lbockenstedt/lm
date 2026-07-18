@@ -22,7 +22,7 @@ logger = logging.getLogger("SimQuota")
 
 # ── Schema (byte-identical to cs/lm-spoke/src/sim_quota.py) ───────────────
 SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
-                  "multi_capable", "rehome", "enabled", "learning")
+                  "multi_capable", "rehome", "enabled", "learning", "learn_knobs")
 ALERT_TYPES = ("alert", "insight")
 
 SIM_META: Dict[str, Dict[str, object]] = {
@@ -46,6 +46,92 @@ SUGGESTED_ALERT_SIM: Dict[str, str] = {
     "DHCP_POOL_EXHAUSTED": "dhcp_fail",
     "CLIENT_DNS_FAILURE": "dns_fail",
 }
+
+# ── Tunable intensity knobs per sim (config-value learner) ────────────────
+# The knob-floor learner (hub ``_knob_step``) ratchets these ``[simulation]``-
+# section values DOWN one at a time to discover the minimum that still fires the
+# sim's alert. Each entry: ``key`` (the simulation.conf ``[simulation]`` name the
+# client reads), ``min``/``max`` sweep bounds, ``step``, and ``start`` (the
+# known-firing high end the learner begins at). Only sims listed here can be
+# knob-learned; add a sim by declaring its 1–4 numeric knobs. The client reads
+# these unchanged (e.g. ``dns_fail.sh`` already reads ``dns_fail_rate`` /
+# ``dns_fail_duration`` and clamps rate ≥200). Byte-identical to the cs twin.
+SIM_KNOBS: Dict[str, List[Dict[str, int]]] = {
+    "dns_fail": [
+        {"key": "dns_fail_rate",     "min": 200, "max": 3000, "step": 200, "start": 3000},
+        {"key": "dns_fail_duration", "min": 120, "max": 600,  "step": 60,  "start": 600},
+    ],
+}
+
+
+def knobs_for_sim(sim_id: str) -> List[Dict[str, int]]:
+    """The ordered tunable knob specs for a sim (empty list if it has none)."""
+    return [dict(k) for k in SIM_KNOBS.get(str(sim_id or "").strip(), [])]
+
+
+KNOB_SETTLE_S = 1800.0  # ≥30 min — Central alert latency floor (see adaptive_step)
+
+
+def knob_step(st: Dict[str, Any], knobs: List[Dict[str, int]], firing,
+              now: float, settle: float = KNOB_SETTLE_S) -> Dict[str, Any]:
+    """Advance one tick of the coordinate-descent floor search over ``knobs``
+    (``SIM_KNOBS[sim]``). Pure — returns a NEW state dict so the caller can diff
+    before/after. Shared by the hub controller and the unit test.
+
+    One knob moves per settle window. Ratchet the ACTIVE knob DOWN while
+    ``firing`` is True (probe lower); when a down-step loses the alert
+    (``firing`` False) step back UP one and record that recovered value as the
+    knob's floor, then advance to the next knob; hitting ``min`` while still
+    firing floors it at ``min`` and advances. ``firing`` None → hold (never move
+    blind). Once every knob is floored it keeps cycling — the same up/down logic
+    re-seeks the floor as conditions drift, and a floored knob that loses the
+    alert simply ramps back UP to recover.
+
+    State shape: ``{values:{key:int}, floors:{key:int|None}, active:int,
+    mode:str, last_change:float}``, keyed per quota by the caller."""
+    if not knobs:
+        return dict(st)
+    st = dict(st)
+    values = dict(st.get("values") or {})
+    floors = dict(st.get("floors") or {})
+    # Cold start: seed each knob at its known-firing high end and arm the settle
+    # clock so even the first move waits a full window (let Central confirm firing
+    # at the start level).
+    if not values:
+        for kn in knobs:
+            values[kn["key"]] = int(kn.get("start", kn.get("max", kn["min"])))
+            floors.setdefault(kn["key"], None)
+        return {"values": values, "floors": floors, "active": 0,
+                "mode": "learning", "last_change": now}
+    active = int(st.get("active") or 0) % len(knobs)
+    last = float(st.get("last_change") or 0)
+    _all_floored = all(floors.get(kn["key"]) is not None for kn in knobs)
+    if firing is None or (now - last) < settle:  # hold
+        st.update(values=values, floors=floors, active=active,
+                  mode=("stable" if _all_floored else "learning"))
+        return st
+    kn = knobs[active]
+    key = kn["key"]
+    mn, mx, step = int(kn["min"]), int(kn["max"]), max(1, int(kn["step"]))
+    cur = int(values.get(key, kn.get("start", mx)))
+    if firing is True:
+        nv = cur - step
+        if nv < mn:                     # min still fires → that's the floor
+            values[key] = mn
+            floors[key] = mn
+            active = (active + 1) % len(knobs)
+        else:                           # keep probing lower on this knob
+            values[key] = nv
+    else:                               # firing False → this value lost the alert
+        rv = min(mx, cur + step)        # step back up to the last firing level
+        values[key] = rv
+        prev = floors.get(key)
+        floors[key] = rv if prev is None else min(int(prev), rv)
+        active = (active + 1) % len(knobs)
+    st.update(values=values, floors=floors, active=active, last_change=now,
+              mode=("stable" if all(floors.get(k2["key"]) is not None
+                                    for k2 in knobs) else "learning"))
+    return st
 
 
 # ── Coercion + validation (byte-identical to the cs twin) ─────────────────
@@ -97,6 +183,11 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         # from the tenant/global learned operating point, never down-ratchets (never
         # risks stopping a firing alert). See design doc §9 / adaptive_step.
         "learning": _as_bool(raw.get("learning"), False),
+        # `learn_knobs` ON = the config-value learner tunes this sim's
+        # [simulation] intensity knobs (SIM_KNOBS[sim_id]) one at a time, DOWN to
+        # the floor that still fires the alert. Orthogonal to `learning` (which
+        # modulates client count); a no-op for a sim with no declared knobs.
+        "learn_knobs": _as_bool(raw.get("learn_knobs"), False),
     }
     # Adaptive-controller fields (design doc §9) — carried through only when the
     # quota declares them, so a fixed-count quota stays exactly as before. The
@@ -519,7 +610,8 @@ def available_sims_from_ini(sim_conf_text: str) -> List[Dict[str, Any]]:
     return [
         {"sim_id": f,
          "category": SIM_META.get(f, {}).get("category", "failure"),
-         "multi_capable": bool(SIM_META.get(f, {}).get("multi_capable", False))}
+         "multi_capable": bool(SIM_META.get(f, {}).get("multi_capable", False)),
+         "has_knobs": f in SIM_KNOBS}
         for f in ordered
     ]
 

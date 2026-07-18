@@ -70,7 +70,7 @@ class SimulationsService:
         return getattr(self.hub, "simulations_cache", {}) or {}
 
     def _is_online(self, spoke_id: str) -> bool:
-        return spoke_id in getattr(self.hub, "active_connections", {})
+        return self.hub._primary_key(spoke_id) in getattr(self.hub, "active_connections", {})
 
     def _spokes_for_tenant(self, tenant_id: str) -> List[Tuple[str, dict]]:
         """Cached Client-Sim spokes bound to this tenant (by module_metadata

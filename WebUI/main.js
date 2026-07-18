@@ -2699,14 +2699,30 @@ function _rebuildMainNav(allSpokes, connections) {
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg></div>
             <span>My Devices</span>
         </div>`;
+    // Reports is a hub-side feature (no product spoke), so it never enters the
+    // spoke-driven activeClasses list — it's a STATIC nav item gated by the
+    // 'reports' right (canSeeModule), NOT admin-only.
+    const _reportsNavHtml = () => `
+        <div onclick="setView('reports')" id="nav-reports" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8 17V11m4 6V7m4 10v-4M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg></div>
+            <span>Reports</span>
+        </div>`;
+    // Security (threat monitor) — admin-only hub-side view; static like Reports.
+    const _securityNavHtml = () => `
+        <div onclick="setView('security')" id="nav-security" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg></div>
+            <span>Security</span>
+        </div>`;
 
     mainNav.innerHTML = `
         ${dashboardNav}
         ${dynamicHtml}
+        ${canSeeModule('Reports') ? _reportsNavHtml() : ''}
         <div class="pt-4 mt-4 border-t border-slate-200"></div>
         ${isAdmin() ? adminSetup : ''}
         ${isAdmin() ? adminSettings : ''}
         ${isAdmin() ? adminLogs : ''}
+        ${isAdmin() ? _securityNavHtml() : ''}
         ${isAdmin() ? _templateRepoNavHtml() : ''}
         ${isAdmin() ? _bugReportNavHtml() : ''}
         ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
@@ -3105,6 +3121,10 @@ function _viewTemplate(viewId) {
         case 'dashboard':
             if (isAdmin()) {
                 return `<div class="space-y-6">
+  <div class="${card}" id="infra-status-card">
+    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Infrastructure Status</h3>
+    <div id="infra-status-body"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+  </div>
   <div class="${card}" id="all-tenants-card">
     <div class="flex justify-between items-center mb-3">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">All Tenants ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
@@ -3114,6 +3134,10 @@ function _viewTemplate(viewId) {
 </div>`;
             }
             return `<div class="space-y-6">
+  <div class="${card}" id="infra-status-card">
+    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-3">Infrastructure Status</h3>
+    <div id="infra-status-body"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+  </div>
   <div class="${card}" id="tenant-summary-card">
     <div class="flex justify-between items-center mb-3">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Tenant Summary — <span id="dash-tenant-name" class="text-[#01A982] font-mono normal-case"></span> ${helpIcon('architecture-topology', null, 'Dashboard help')}</h3>
@@ -3284,10 +3308,19 @@ function _viewTemplate(viewId) {
         case 'reports':
             return `<div class="space-y-4">
   <div>
-    <h2 class="text-xl font-bold text-slate-800">Reports</h2>
-    <p class="text-sm text-slate-500">Tenant-scoped health reports — schedule the Dashboard Checks &amp; Client Count out by email.</p>
+    <h2 class="text-xl font-bold text-slate-800">Reports &amp; Alerts</h2>
+    <p class="text-sm text-slate-500">Scheduled email reports (per-tenant dashboard digests) and realtime alert rules (breach + recovery), delivered via Setup → Notifications.</p>
   </div>
-  <div id="reports-content" class="${card}"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
+  <div id="reports-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
+</div>`;
+
+        case 'security':
+            return `<div class="space-y-4">
+  <div>
+    <h2 class="text-xl font-bold text-slate-800">Security — Threat Monitor</h2>
+    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via an Azure NSG deny rule.</p>
+  </div>
+  <div id="security-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
 
         default:
@@ -3303,41 +3336,333 @@ async function loadReportsData() {
     const el = document.getElementById('reports-content');
     if (!el) return;
     el.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
-    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
-    let c = {};
+    let reports = [];
     try {
-        c = (await apiJson('/api/reports/email-report?' + tq)) || {};
-    } catch (e) { el.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load report settings: ${escapeHtml(e.message || String(e))}</div>`; return; }
-    const sec = c.sections || {}, sch = c.schedule || {};
-    const toggle = (id, on, label, hint) => `
-      <label class="flex items-center justify-between gap-3 py-2.5 border-t border-slate-100">
-        <span><span class="text-sm font-semibold text-slate-700">${label}</span>${hint ? `<span class="block text-[11px] text-slate-400">${hint}</span>` : ''}</span>
-        <input type="checkbox" id="${id}" ${on ? 'checked' : ''} class="w-5 h-5 accent-[#01A982]"></label>`;
-    const freqSel = ['daily', 'weekly', 'monthly'].map(f => `<option value="${f}" ${sch.freq === f ? 'selected' : ''}>${f[0].toUpperCase() + f.slice(1)}</option>`).join('');
-    const dows = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => `<option value="${i}" ${sch.dow == i ? 'selected' : ''}>${d}</option>`).join('');
-    const hours = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${sch.hour == h ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
-    const inp = 'w-full bg-white border border-slate-300 rounded-md px-2 py-2 text-sm mt-1';
-    el.innerHTML = `<div class="p-5">
-      <p class="text-xs text-slate-400 mb-1">Emails the Dashboard <span class="font-semibold">Checks</span> and <span class="font-semibold">Client Count</span> for
-        <span class="font-semibold text-slate-600">${escapeHtml(currentTenant || 'default')}</span> on a schedule, via the SMTP under Notifications.
-        Each tenant only receives its own sites; a Global Admin can switch tenant in the header to manage any tenant's report.</p>
-      ${toggle('rp-enabled', c.enabled, 'Email this report', 'Master on/off — nothing is sent while off')}
-      ${toggle('rp-checks', sec.checks !== false, 'Include Dashboard Checks')}
-      ${toggle('rp-clients', sec.clients !== false, 'Include Client Count')}
-      <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-3">
-        <label class="text-xs text-slate-500">Frequency<select id="rp-freq" onchange="_reportsToggleWhen()" class="${inp}">${freqSel}</select></label>
-        <label class="text-xs text-slate-500" id="rp-dow-w">Day of week<select id="rp-dow" class="${inp}">${dows}</select></label>
-        <label class="text-xs text-slate-500" id="rp-dom-w" style="display:none">Day of month<input id="rp-dom" type="number" min="1" max="28" value="${escapeHtml(sch.dom || 1)}" class="${inp}"></label>
-        <label class="text-xs text-slate-500">Hour<select id="rp-hour" class="${inp}">${hours}</select></label>
+        reports = ((await apiJson('/api/reports/list')) || {}).reports || [];
+    } catch (e) { el.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load reports: ${escapeHtml(e.message || String(e))}</div>`; return; }
+    window._reportsCache = reports;
+    const freqLabel = s => { s = s || {}; const f = s.freq || 'weekly'; const when = f === 'weekly' ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][s.dow || 0] : (f === 'monthly' ? ('day ' + (s.dom || 1)) : ''); return `${f}${when ? ' ' + when : ''} @ ${String(s.hour != null ? s.hour : 7).padStart(2, '0')}:00`; };
+    const rows = reports.length ? reports.map(r => `<tr class="border-b border-slate-100">
+        <td class="px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(r.name || '')}</span></td>
+        <td class="px-3 py-2 text-slate-500">${escapeHtml(r.tenant || '')}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${[r.sections && r.sections.checks ? 'Checks' : '', r.sections && r.sections.clients ? 'Client Count' : ''].filter(Boolean).join(', ') || '—'}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml((r.recipients || []).join(', ')) || '—'}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml(freqLabel(r.schedule))}</td>
+        <td class="px-3 py-2">${r.enabled ? '<span class="text-green-600 text-xs font-bold">on</span>' : '<span class="text-slate-400 text-xs">off</span>'}</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap">
+          <button onclick="testReport('${r.id}')" class="text-xs text-slate-500 hover:text-slate-700 mr-2">Test</button>
+          <button onclick="editReport('${r.id}')" class="text-xs text-[#01A982] hover:underline mr-2">Edit</button>
+          <button onclick="deleteReport('${r.id}')" class="text-xs text-red-500 hover:text-red-700">Delete</button></td></tr>`).join('') : '<tr><td colspan="7" class="px-3 py-4 text-slate-400 italic">No reports yet — click "Add report".</td></tr>';
+    el.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <div class="flex items-center justify-between mb-3">
+        <p class="text-xs text-slate-400 max-w-2xl">Emailed reports — each sends a tenant's Dashboard <b>Checks</b> + <b>Client Count</b> to its recipients on a schedule (via the provider under Setup → Notifications). A Global Admin can target any tenant; a tenant user sees only its own.</p>
+        <button onclick="editReport('')" class="shrink-0 bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold">+ Add report</button>
       </div>
-      <label class="text-xs text-slate-500 block mt-3">Recipients <span class="text-slate-400">(comma-separated)</span>
-        <input id="rp-to" value="${escapeHtml((c.recipients || []).join(', '))}" placeholder="noc@acme.com, ops@acme.com" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>
-      <div class="flex justify-end gap-2 mt-4">
-        <button onclick="testReportNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Send test now</button>
-        <button onclick="saveReportConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-5 py-2 rounded-md text-sm font-bold shadow-sm">Save</button>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-400"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Tenant</th><th class="px-3 py-1 text-left">Sections</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">Schedule</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    </div>
+    <div id="alerts-content" class="hpe-card rounded-lg p-5 shadow-sm mt-4"><p class="text-sm text-slate-400 italic">Loading alert rules…</p></div>`;
+    loadAlertRules();
+}
+
+// ── Realtime Alert Rules (per-tenant; edge-triggered breach + recovery) ──────
+async function loadAlertRules() {
+    const el = document.getElementById('alerts-content');
+    if (!el) return;
+    let d = {};
+    try {
+        const r = await setupFetch('/api/alerts/rules?tenant=' + encodeURIComponent(currentTenant || 'default'));
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ('HTTP ' + r.status));
+        d = await r.json();
+    } catch (e) { el.innerHTML = `<p class="text-sm text-red-500">Could not load alert rules: ${escapeHtml(e.message)}</p>`; return; }
+    window._alertSources = d.sources || [];
+    window._alertRulesCache = d.rules || [];
+    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline' };
+    const rules = d.rules || [];
+    const rows = rules.length ? rules.map(r => `<tr class="border-b border-slate-100">
+        <td class="px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(r.name || '')}</span></td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml(SRCL[r.source] || r.source || '')}</td>
+        <td class="px-3 py-2 text-xs">${r.format === 'raw' ? '<span class="text-purple-600 font-mono">raw/JSON</span>' : '<span class="text-slate-500">human</span>'}</td>
+        <td class="px-3 py-2 text-slate-500 text-xs">${escapeHtml((r.recipients || []).join(', ')) || '—'}</td>
+        <td class="px-3 py-2">${r.enabled ? '<span class="text-green-600 text-xs font-bold">on</span>' : '<span class="text-slate-400 text-xs">off</span>'}</td>
+        <td class="px-3 py-2 text-right whitespace-nowrap"><button onclick="testAlertRule('${r.id}')" class="text-xs text-slate-500 hover:text-slate-700 mr-2">Test</button><button onclick="editAlertRule('${r.id}')" class="text-xs text-[#01A982] hover:underline mr-2">Edit</button><button onclick="deleteAlertRule('${r.id}')" class="text-xs text-red-500 hover:text-red-700">Delete</button></td></tr>`).join('') : '<tr><td colspan="6" class="px-3 py-4 text-slate-400 italic">No alert rules — click "Add alert".</td></tr>';
+    el.innerHTML = `
+      <div class="flex items-center justify-between mb-3">
+        <div><p class="text-sm font-bold text-slate-600">Realtime Alert Rules <span class="text-slate-400 font-normal">— ${escapeHtml(currentTenant || 'default')}</span></p><p class="text-xs text-slate-400 max-w-xl">One email when a monitored source breaches, one on recovery. Pick a source + who to notify. Delivered via Setup → Notifications.</p></div>
+        <button onclick="editAlertRule('')" class="shrink-0 bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-3 py-1.5 rounded-md text-sm font-bold">+ Add alert</button>
       </div>
-    </div>`;
-    _reportsToggleWhen();
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead class="text-[10px] uppercase text-slate-400"><tr><th class="px-3 py-1 text-left">Name</th><th class="px-3 py-1 text-left">Source</th><th class="px-3 py-1 text-left">Format</th><th class="px-3 py-1 text-left">Recipients</th><th class="px-3 py-1 text-left">On</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function editAlertRule(id) {
+    const existing = (window._alertRulesCache || []).find(r => r.id === id) || null;
+    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline' };
+    const sources = (window._alertSources && window._alertSources.length) ? window._alertSources : ['dashboard_check', 'vm_offline', 'quota_unmet', 'spoke_offline'];
+    document.getElementById('alert-edit-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'alert-edit-modal';
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
+    const srcOpts = sources.map(s => `<option value="${escapeHtml(s)}" ${existing && existing.source === s ? 'selected' : ''}>${escapeHtml(SRCL[s] || s)}</option>`).join('');
+    const inner = document.createElement('div');
+    inner.className = 'bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-3';
+    inner.innerHTML = `
+      <div class="flex justify-between items-start"><p class="font-bold text-base text-[#263040]">${existing ? 'Edit alert rule' : 'New alert rule'}</p><button class="alr-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+      <label class="block text-xs text-slate-500">Name<input id="alr-name" value="${escapeHtml(existing ? existing.name : '')}" placeholder="VM offline → NOC" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <label class="block text-xs text-slate-500">Source (what to watch)<select id="alr-source" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">${srcOpts}</select></label>
+      <label class="block text-xs text-slate-500">Format<select id="alr-format" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">
+        <option value="human" ${!existing || existing.format !== 'raw' ? 'selected' : ''}>Human — formatted email (dashboard-style, status + 30-day trend)</option>
+        <option value="raw" ${existing && existing.format === 'raw' ? 'selected' : ''}>Raw — JSON body (for automation to ingest)</option>
+      </select><span class="block text-[11px] text-slate-400 mt-1">Human = a person; Raw = a system/automation mailbox. Add two rules on one source to send both.</span></label>
+      <label class="block text-xs text-slate-500">Recipients <span class="text-slate-400">(comma-separated)</span><input id="alr-recips" value="${escapeHtml(existing ? (existing.recipients || []).join(', ') : '')}" placeholder="noc@acme.com" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <label class="flex items-center gap-2 text-xs text-slate-600 pt-1"><input type="checkbox" id="alr-enabled" ${!existing || existing.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Enabled</label>
+      <div id="alr-result" class="text-xs"></div>
+      <div class="flex justify-end gap-2 pt-1"><button class="alr-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded text-sm font-bold">Cancel</button><button id="alr-save" class="bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 border border-amber-500 px-4 py-2 rounded text-sm font-bold">Save</button></div>`;
+    modal.appendChild(inner);
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    inner.querySelector('.alr-close').addEventListener('click', () => modal.remove());
+    inner.querySelector('.alr-cancel').addEventListener('click', () => modal.remove());
+    document.body.appendChild(modal);
+    document.getElementById('alr-save').addEventListener('click', () => saveAlertRule(existing ? existing.id : ''));
+}
+async function saveAlertRule(id) {
+    const v = x => document.getElementById(x);
+    const resEl = v('alr-result');
+    const body = { name: (v('alr-name').value || '').trim(), source: v('alr-source').value, format: v('alr-format').value, recipients: (v('alr-recips').value || '').split(',').map(x => x.trim()).filter(Boolean), enabled: v('alr-enabled').checked };
+    const t = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try {
+        const r = await setupFetch((id ? ('/api/alerts/rules/' + id) : '/api/alerts/rules') + '?' + t, { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        document.getElementById('alert-edit-modal')?.remove();
+        showToast('Alert rule saved.', 'success');
+        loadAlertRules();
+    } catch (e) { if (resEl) resEl.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`; }
+}
+async function deleteAlertRule(id) {
+    if (!confirm('Delete this alert rule?')) return;
+    const t = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try { const r = await setupFetch('/api/alerts/rules/' + id + '?' + t, { method: 'DELETE' }); if (!r.ok) throw new Error('HTTP ' + r.status); showToast('Alert rule deleted.', 'success'); loadAlertRules(); }
+    catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
+}
+async function testAlertRule(id) {
+    showToast('Sending test…', 'info');
+    const t = 'tenant=' + encodeURIComponent(currentTenant || 'default');
+    try { const r = await setupFetch('/api/alerts/rules/' + id + '/test?' + t, { method: 'POST' }); const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status)); showToast('Test alert sent to ' + ((d.to || []).join(', ') || 'recipients'), 'success'); }
+    catch (e) { showToast('Send failed: ' + e.message, 'error'); }
+}
+
+async function editReport(id) {
+    const existing = (window._reportsCache || []).find(r => r.id === id) || null;
+    let tenants = [];
+    try { const r = await setupFetch('/api/reports/tenants'); tenants = ((await r.json()).tenants) || []; } catch (e) { }
+    document.getElementById('report-edit-modal')?.remove();
+    const modal = document.createElement('div');
+    modal.id = 'report-edit-modal';
+    modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
+    const s = (existing && existing.schedule) || { freq: 'weekly', dow: 0, dom: 1, hour: 7 };
+    const sec = (existing && existing.sections) || { checks: true, clients: true };
+    const tOpts = tenants.map(t => `<option value="${escapeHtml(t.id)}" ${existing && existing.tenant === t.id ? 'selected' : ''}>${escapeHtml(t.name)} (${escapeHtml(t.id)})</option>`).join('') || '<option value="default">Default (default)</option>';
+    const freqOpts = ['daily', 'weekly', 'monthly'].map(f => `<option value="${f}" ${s.freq === f ? 'selected' : ''}>${f}</option>`).join('');
+    const dowOpts = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => `<option value="${i}" ${s.dow == i ? 'selected' : ''}>${d}</option>`).join('');
+    const hourOpts = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${s.hour == h ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
+    const inner = document.createElement('div');
+    inner.className = 'bg-white rounded-xl shadow-xl w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto';
+    inner.innerHTML = `
+      <div class="flex justify-between items-start"><p class="font-bold text-base text-[#263040]">${existing ? 'Edit report' : 'New report'}</p><button class="rpt-close text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button></div>
+      <label class="block text-xs text-slate-500">Name<input id="rpt-name" value="${escapeHtml(existing ? existing.name : '')}" placeholder="Weekly Acme dashboard" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <label class="block text-xs text-slate-500">Tenant dashboard to email<select id="rpt-tenant" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm">${tOpts}</select></label>
+      <div class="flex gap-4 text-xs text-slate-600 pt-1">
+        <label class="flex items-center gap-2"><input type="checkbox" id="rpt-checks" ${sec.checks !== false ? 'checked' : ''} class="w-4 h-4 rounded"> Dashboard Checks</label>
+        <label class="flex items-center gap-2"><input type="checkbox" id="rpt-clients" ${sec.clients !== false ? 'checked' : ''} class="w-4 h-4 rounded"> Client Count</label>
+      </div>
+      <label class="block text-xs text-slate-500">Recipients <span class="text-slate-400">(comma-separated)</span><input id="rpt-recips" value="${escapeHtml(existing ? (existing.recipients || []).join(', ') : '')}" placeholder="noc@acme.com, ops@acme.com" class="w-full mt-1 border border-slate-300 rounded px-3 py-2 text-sm"></label>
+      <div class="grid grid-cols-3 gap-2 text-xs text-slate-500">
+        <label>Frequency<select id="rpt-freq" onchange="_rptWhen()" class="w-full mt-1 border border-slate-300 rounded px-2 py-2">${freqOpts}</select></label>
+        <label id="rpt-dow-w">Day of week<select id="rpt-dow" class="w-full mt-1 border border-slate-300 rounded px-2 py-2">${dowOpts}</select></label>
+        <label id="rpt-dom-w" style="display:none">Day of month<input id="rpt-dom" type="number" min="1" max="28" value="${s.dom || 1}" class="w-full mt-1 border border-slate-300 rounded px-2 py-2"></label>
+        <label>Hour<select id="rpt-hour" class="w-full mt-1 border border-slate-300 rounded px-2 py-2">${hourOpts}</select></label>
+      </div>
+      <label class="flex items-center gap-2 text-xs text-slate-600 pt-1"><input type="checkbox" id="rpt-enabled" ${existing && existing.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Enabled (send on the schedule)</label>
+      <div id="rpt-result" class="text-xs"></div>
+      <div class="flex justify-end gap-2 pt-1"><button class="rpt-cancel bg-slate-200 text-slate-700 px-4 py-2 rounded text-sm font-bold">Cancel</button><button id="rpt-save" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded text-sm font-bold">Save</button></div>`;
+    modal.appendChild(inner);
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+    inner.querySelector('.rpt-close').addEventListener('click', () => modal.remove());
+    inner.querySelector('.rpt-cancel').addEventListener('click', () => modal.remove());
+    document.body.appendChild(modal);
+    _rptWhen();
+    document.getElementById('rpt-save').addEventListener('click', () => saveReport(existing ? existing.id : ''));
+}
+function _rptWhen() {
+    const f = document.getElementById('rpt-freq') && document.getElementById('rpt-freq').value;
+    const dw = document.getElementById('rpt-dow-w'), dm = document.getElementById('rpt-dom-w');
+    if (dw) dw.style.display = f === 'weekly' ? '' : 'none';
+    if (dm) dm.style.display = f === 'monthly' ? '' : 'none';
+}
+async function saveReport(id) {
+    const v = x => document.getElementById(x);
+    const resEl = v('rpt-result');
+    const body = {
+        name: (v('rpt-name').value || '').trim(),
+        tenant: v('rpt-tenant').value,
+        sections: { checks: v('rpt-checks').checked, clients: v('rpt-clients').checked },
+        recipients: (v('rpt-recips').value || '').split(',').map(x => x.trim()).filter(Boolean),
+        schedule: { freq: v('rpt-freq').value, dow: parseInt(v('rpt-dow').value, 10) || 0, dom: parseInt(v('rpt-dom').value, 10) || 1, hour: parseInt(v('rpt-hour').value, 10) || 7 },
+        enabled: v('rpt-enabled').checked,
+    };
+    try {
+        const r = await setupFetch(id ? ('/api/reports/' + id) : '/api/reports', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        document.getElementById('report-edit-modal')?.remove();
+        showToast('Report saved.', 'success');
+        loadReportsData();
+    } catch (e) { if (resEl) resEl.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`; }
+}
+async function deleteReport(id) {
+    if (!confirm('Delete this report?')) return;
+    try {
+        const r = await setupFetch('/api/reports/' + id, { method: 'DELETE' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        showToast('Report deleted.', 'success');
+        loadReportsData();
+    } catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
+}
+async function testReport(id) {
+    showToast('Sending test…', 'info');
+    try {
+        const r = await setupFetch('/api/reports/' + id + '/test', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+        showToast('Test sent to ' + ((d.to || []).join(', ') || 'recipients'), 'success');
+    } catch (e) { showToast('Send failed: ' + e.message, 'error'); }
+}
+
+// ── Security / Threat Monitor (admin-only nav) ───────────────────────────────
+// Policy config, the auth-failure audit log, and SEPARATE tiles for permanent
+// blocks / 24h-TTL blocks / manual blocks / never-block allow list — each its
+// own tile so long lists stay manageable. Backed by admin-only /api/security/*.
+async function loadSecurityData() {
+    const el = document.getElementById('security-content');
+    if (!el) return;
+    el.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    let d = {};
+    try {
+        const r = await setupFetch('/api/security/overview');
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || ('HTTP ' + r.status));
+        d = await r.json();
+    } catch (e) {
+        el.innerHTML = `<div class="hpe-card rounded-lg p-5"><p class="text-sm text-red-500">Failed to load: ${escapeHtml(e.message)}</p></div>`;
+        return;
+    }
+    const c = d.config || {};
+    const card = 'hpe-card rounded-lg p-5 shadow-sm';
+    const fmtTs = ts => { try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return ''; } };
+    const expIn = b => { if (b.permanent) return 'never'; if (!b.expires_at) return '—'; const s = Math.max(0, b.expires_at - Date.now() / 1000); return s > 3600 ? Math.round(s / 3600) + 'h' : Math.round(s / 60) + 'm'; };
+
+    const cfg = `
+      <div class="${card}">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Policy</h3>
+          <button onclick="securityReconcile()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Push the current blocked-IP set onto the Azure NSG deny rule now">Sync NSG now</button>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+          <label class="flex items-center gap-2 text-slate-600 col-span-2"><input type="checkbox" id="sec-enabled" ${c.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Detection enabled (log invalid attempts)</label>
+          <label class="flex items-center gap-2 text-amber-700 font-bold col-span-2"><input type="checkbox" id="sec-autoblock" ${c.auto_block ? 'checked' : ''} class="w-4 h-4 rounded"> Auto-block via Azure NSG (off = log-only)</label>
+          <label class="text-slate-500">Block after &gt; N fails<input type="number" id="sec-threshold" min="1" value="${c.threshold != null ? c.threshold : 5}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">Window (min)<input type="number" id="sec-window" min="1" value="${Math.round((c.window_s || 600) / 60)}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">TTL (hours)<input type="number" id="sec-ttl" min="1" value="${Math.round((c.ttl_s || 86400) / 3600)}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">Permanent after N re-blocks<input type="number" id="sec-permafter" min="1" value="${c.permanent_after != null ? c.permanent_after : 3}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">NSG deny rule name<input type="text" id="sec-rule" value="${escapeHtml(c.block_rule_name || 'lm-threat-block')}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">NSG deny priority<input type="number" id="sec-priority" min="100" max="4096" value="${c.block_priority != null ? c.block_priority : 200}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+        </div>
+        <div class="flex justify-end mt-3"><button onclick="saveSecurityConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save</button></div>
+      </div>`;
+
+    const blockRow = b => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
+        <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(b.ip)}</span>
+          <div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(b.reason || '')}">${escapeHtml(b.reason || '')}${b.permanent ? '' : ` · expires ${expIn(b)}`}</div></div>
+        <button onclick="securityUnblock('${escapeHtml(b.ip)}')" class="text-[11px] text-red-500 hover:text-red-700 font-medium shrink-0">Unblock</button>
+      </div>`;
+    const tile = (title, items, tone) => `<div class="${card}">
+        <h3 class="text-sm font-bold ${tone} mb-2">${title} <span class="text-slate-400 font-normal">(${items.length})</span></h3>
+        <div class="text-xs max-h-64 overflow-y-auto">${items.length ? items.map(blockRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
+      </div>`;
+
+    const nb = d.never_block || [];
+    const neverRow = x => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
+        <span class="font-mono text-slate-700">${escapeHtml(x)}</span>
+        <button onclick="securityNeverRemove('${escapeHtml(x)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium">Remove</button></div>`;
+    const neverTile = `<div class="${card}">
+        <h3 class="text-sm font-bold text-green-600 mb-2">Never-block allow list <span class="text-slate-400 font-normal">(${nb.length})</span></h3>
+        <div class="flex gap-2 mb-2"><input id="sec-never-ip" placeholder="IP or CIDR" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs"><button onclick="securityNeverAdd()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded text-xs font-medium">Add</button></div>
+        <div class="text-xs max-h-56 overflow-y-auto">${nb.length ? nb.map(neverRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
+      </div>`;
+
+    const manualBlock = `<div class="${card}">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Manual block</h3>
+        <div class="flex flex-wrap gap-2 items-center text-xs">
+          <input id="sec-mb-ip" placeholder="IP" class="border border-slate-300 rounded px-2 py-1 w-40">
+          <input id="sec-mb-reason" placeholder="reason (optional)" class="border border-slate-300 rounded px-2 py-1 flex-1">
+          <label class="flex items-center gap-1 text-slate-600"><input type="checkbox" id="sec-mb-perm" class="w-4 h-4 rounded"> permanent</label>
+          <button onclick="securityBlock()" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded font-bold">Block</button>
+        </div></div>`;
+
+    const evts = d.events || [];
+    const evtRows = evts.slice(0, 60).map(e => `<tr class="border-b border-slate-100">
+        <td class="px-2 py-1 text-slate-400 whitespace-nowrap">${fmtTs(e.ts)}</td>
+        <td class="px-2 py-1 font-mono">${escapeHtml(e.ip)}</td>
+        <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] uppercase">${escapeHtml(e.kind)}</span></td>
+        <td class="px-2 py-1 text-slate-500">${escapeHtml(e.username || '')}</td>
+        <td class="px-2 py-1 text-slate-400 truncate max-w-[180px]" title="${escapeHtml(e.detail || '')}">${escapeHtml(e.detail || '')}</td></tr>`).join('');
+    const events = `<div class="${card}">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Recent invalid attempts <span class="text-slate-400 font-normal">(${evts.length})</span></h3>
+        <div class="overflow-x-auto max-h-72 overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-400 text-[10px] uppercase"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${evtRows || '<tr><td colspan="5" class="px-2 py-3 text-slate-400 italic">no events yet</td></tr>'}</tbody></table></div></div>`;
+
+    el.innerHTML = `
+      ${cfg}
+      ${manualBlock}
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${tile('Blocked — forever', d.permanent || [], 'text-red-700')}
+        ${tile('Blocked — 24h TTL', d.temporary || [], 'text-amber-600')}
+        ${tile('Manual blocks', d.manual || [], 'text-slate-700')}
+      </div>
+      ${neverTile}
+      ${events}`;
+}
+
+async function saveSecurityConfig() {
+    const num = id => parseInt(document.getElementById(id).value, 10);
+    const body = {
+        enabled: document.getElementById('sec-enabled').checked,
+        auto_block: document.getElementById('sec-autoblock').checked,
+        threshold: num('sec-threshold'),
+        window_s: Math.max(60, num('sec-window') * 60),
+        ttl_s: Math.max(300, num('sec-ttl') * 3600),
+        permanent_after: num('sec-permafter'),
+        block_rule_name: (document.getElementById('sec-rule').value || '').trim(),
+        block_priority: num('sec-priority'),
+    };
+    await _securityReq('/api/security/config', 'PUT', body, 'Policy saved');
+    loadSecurityData();
+}
+async function securityBlock() {
+    const ip = (document.getElementById('sec-mb-ip').value || '').trim();
+    if (!ip) { showToast('Enter an IP.', 'error'); return; }
+    await _securityReq('/api/security/block', 'POST',
+        { ip, reason: (document.getElementById('sec-mb-reason').value || '').trim(), permanent: document.getElementById('sec-mb-perm').checked }, `Blocked ${ip}`);
+    loadSecurityData();
+}
+async function securityUnblock(ip) { await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`); loadSecurityData(); }
+async function securityNeverAdd() { const cidr = (document.getElementById('sec-never-ip').value || '').trim(); if (!cidr) return; await _securityReq('/api/security/never-block', 'POST', { cidr }, `Added ${cidr}`); loadSecurityData(); }
+async function securityNeverRemove(cidr) { await _securityReq('/api/security/never-block', 'DELETE', { cidr }, `Removed ${cidr}`); loadSecurityData(); }
+async function securityReconcile() { await _securityReq('/api/security/reconcile', 'POST', {}, 'NSG sync requested'); }
+async function _securityReq(url, method, body, okMsg) {
+    try {
+        const r = await setupFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.detail || d.message || ('HTTP ' + r.status));
+        showToast(d.message || okMsg, (d.status === 'ERROR') ? 'error' : 'success');
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 function _reportsToggleWhen() {
@@ -3381,6 +3706,7 @@ function initView(viewId, subView) {
             updateStatus();
             if (isAdmin()) loadAllTenantsOverview();
             else loadDashboardSummary();
+            loadInfraStatus();
             break;
         case 'opnsense':
             _loadFirewallData();
@@ -3432,6 +3758,9 @@ function initView(viewId, subView) {
             break;
         case 'cs':
             loadCSData(subView || 'Dashboard', currentSubChild);
+            break;
+        case 'security':
+            loadSecurityData();
             break;
         case 'reports':
             loadReportsData();
@@ -6983,7 +7312,7 @@ async function pullAzureRgs() {
         const d = await r.json().catch(() => ({}));
         if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
         const rgs = d.resource_groups || [];
-        if (!rgs.length) { if (out) out.textContent = 'no resource groups in this subscription'; showToast('No resource groups in this subscription.', 'error'); return; }
+        if (!rgs.length) { const _m = 'No resource groups visible — the Entra app likely needs the Reader role on this subscription (Network Contributor scoped to one RG does not allow listing).'; if (out) out.textContent = _m; showToast(_m, 'error'); return; }
         rgSel.innerHTML = rgs.map(g => `<option value="${g.name}">${escapeHtml(g.name)}</option>`).join('');
         if (cur && rgs.some(g => g.name === cur)) rgSel.value = cur;
         if (out) out.textContent = `${rgs.length} resource group(s) listed`;
@@ -7007,7 +7336,7 @@ async function pullAcsResources() {
         const d = await r.json().catch(() => ({}));
         if (d.status !== 'ok') { if (out) out.textContent = d.message || 'failed'; showToast('Pull failed: ' + (d.message || ''), 'error'); return; }
         const items = d.acs_resources || [];
-        if (!items.length) { if (out) out.textContent = 'no Communication Services resources in this RG'; showToast('No ACS resources in this resource group.', 'error'); return; }
+        if (!items.length) { const _m = 'No Azure Communication Services resource here. Note: an "Email Communication Service" is a DIFFERENT resource type — LM sends via a Communication Services (ACS) resource. Create one and connect your email domain to it, then re-pull. (If it exists, the app needs read + listKeys on it.)'; if (out) out.textContent = _m; showToast('No Communication Services (ACS) resource in this RG — see the note.', 'error'); return; }
         nameSel.innerHTML = items.map(i => `<option value="${i.name}" data-from="${escapeHtml(i.fromEmail || '')}" data-endpoint="${escapeHtml(i.endpoint || '')}" data-state="${escapeHtml(i.provisioningState || '')}">${escapeHtml(i.name)}${i.location ? ' — ' + escapeHtml(i.location) : ''}</option>`).join('');
         if (cur && items.some(i => i.name === cur)) nameSel.value = cur;
         else if (items.length === 1) nameSel.value = items[0].name;  // auto-select the only resource
@@ -7038,18 +7367,43 @@ function onAcsRgChanged() {
 // from_email (the resource's default AzureManaged MailFrom domain) — only
 // when the admin hasn't already typed a custom verified domain — and shows
 // the data-plane endpoint + provisioning state as confirmation.
-function onAcsResourceChanged() {
+async function onAcsResourceChanged() {
     const nameSel = document.getElementById('notif-acs-name');
     if (!nameSel) return;
     const opt = nameSel.options[nameSel.selectedIndex];
     if (!opt) return;
     const fromEl = document.getElementById('notif-from');
     const from = opt.getAttribute('data-from') || '';
-    if (fromEl && from && !(fromEl.value || '').trim()) fromEl.value = from;
+    if (fromEl && from && !(fromEl.value || '').trim()) fromEl.value = from;  // provisional guess
     const out = document.getElementById('notif-action-out');
     const ep = opt.getAttribute('data-endpoint') || '';
     const st = opt.getAttribute('data-state') || '';
     if (out && ep) out.textContent = `${ep}${st ? ' [' + st + ']' : ''}`;
+
+    // Look up the email domains ACTUALLY LINKED to this ACS resource — the only
+    // valid senders. Fixes the guessed From (which is usually wrong) and, when
+    // NONE are linked, explains the DomainNotLinked send failure directly.
+    const sub = (document.getElementById('notif-acs-sub')?.value || '').trim();
+    const rg = (document.getElementById('notif-acs-rg')?.value || '').trim();
+    const name = (nameSel.value || '').trim();
+    if (!sub || !rg || !name) return;
+    try {
+        const r = await setupFetch(`/setup/notifications/azure-acs-domains?subscription_id=${encodeURIComponent(sub)}&resource_group=${encodeURIComponent(rg)}&acs_name=${encodeURIComponent(name)}`);
+        const d = await r.json().catch(() => ({}));
+        if (d.status !== 'ok') { if (out) out.textContent = 'Linked-domain lookup: ' + (d.message || 'failed'); return; }
+        const doms = d.domains || [];
+        if (!doms.length) {
+            const m = `⚠ No email domain is LINKED to "${name}" — this is exactly why sending fails with DomainNotLinked. Fix in Azure: Communication Services (${name}) → Email → Domains → Connect domain → pick the domain from your Email Communication Service.`;
+            if (out) out.textContent = m;
+            showToast('No email domain linked to this ACS resource — see the note.', 'error');
+            return;
+        }
+        const senders = doms.map(x => x.sender);
+        if (fromEl && (!(fromEl.value || '').trim() || !senders.includes((fromEl.value || '').trim()))) {
+            fromEl.value = senders[0];  // replace the guess with a REAL linked sender
+        }
+        if (out) out.textContent = `${doms.length} linked domain(s): ${senders.join(', ')}`;
+    } catch (e) { /* non-fatal — the manual From field still works */ }
 }
 
 async function downloadKeyVaultMin() {
@@ -9618,7 +9972,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     // skips (querySelector returns null) if it has since dropped off.
 
     if (all.length === 0) {
-        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected yet. Install the generic agent on a node (it appears here to be approved, then load a role) or install the agent on a Proxmox node to begin.</p>`;
+        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected yet. Install the agent on a node (it appears here to be approved, then load a role) or install the agent on a Proxmox node to begin.</p>`;
     } else {
         agentsWrap.innerHTML = `<div class="space-y-1.5">${all.map(a => {
             const aid = a.agent_id;
@@ -9630,7 +9984,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             // only once they have a role loaded — idle ones sit in the Generic
             // Agents tile) vs Proxmox node agents relayed through the pxmx
             // spoke. The Module badge names what each one runs.
-            const typeLabel = isSpokeKind ? 'Generic Agent' : 'PXMX AGENT';
+            const typeLabel = isSpokeKind ? 'Agent' : 'PXMX AGENT';
             const moduleLabelCell = a._module || '—';
             const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
             const eAid = aid.replace(/'/g, "\\'");
@@ -11878,7 +12232,7 @@ async function showLoadRoleModal(spokeId) {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <p class="text-xs text-slate-500">A generic agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">${spokeId}-&lt;role&gt;</code>) that auto-approves via this agent.</p>
+                <p class="text-xs text-slate-500">An agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">${spokeId}-&lt;role&gt;</code>) that auto-approves via this agent.</p>
                 <div id="role-list" class="grid grid-cols-3 gap-2 max-h-52 overflow-y-auto pr-1">
                     <p class="text-xs text-slate-400 italic col-span-2">Loading roles…</p>
                 </div>
@@ -11946,7 +12300,7 @@ function updateRoleDesc(roleId) {
     const note = document.getElementById('role-note');
     if (note) {
         if (r?.deploy) {
-            note.innerHTML = `The agent runs the role's install script in the background and stays online as a generic agent. The deployed service installs as a systemd unit and connects to the Hub as its own agent. This can take a few minutes; watch <strong>Setup → Spokes & Agents</strong> for the new agent to appear.`;
+            note.innerHTML = `The agent runs the role's install script in the background and stays online as an agent. The deployed service installs as a systemd unit and connects to the Hub as its own agent. This can take a few minutes; watch <strong>Setup → Spokes & Agents</strong> for the new agent to appear.`;
         } else {
             note.textContent = `The agent installs required system packages (e.g. unbound, kea, certbot) and hosts the role as a new sub-spoke, auto-approved via this agent. This may take 30–60 seconds; the new spoke appears in Spokes & Agents as Connected.`;
         }
@@ -12066,7 +12420,7 @@ function showDeployAgentInfo() {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200">
             <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-[#263040]">Deploy Generic Agent</h3>
+                <h3 class="text-lg font-bold text-[#263040]">Deploy Agent</h3>
                 <button onclick="document.getElementById('deploy-agent-modal').remove()" class="text-slate-400 hover:text-slate-600">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
@@ -13462,7 +13816,7 @@ function _renderConsolePorts(el, data) {
     const consoles = data.consoles || [];
     const admin = isAdmin();
     if (consoles.length === 0) {
-        el.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No Console agents connected. Load the <b>Console</b> role on a generic agent (Setup → Spokes &amp; Agents → Load Role).</div>`;
+        el.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No Console agents connected. Load the <b>Console</b> role on an agent (Setup → Spokes &amp; Agents → Load Role).</div>`;
         return;
     }
     if (ports.length === 0) {
@@ -14422,8 +14776,8 @@ async function showNetboxMigrateTenantModal() {
           <p class="font-bold text-slate-500 uppercase tracking-wider mb-1">Modules to migrate</p>
           <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-cs" type="checkbox" checked class="w-4 h-4 rounded"> CS / Simulations — all per-tenant config (central, sim conf, quotas, overrides, notifications, …)</label>
           <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-netbox" type="checkbox" checked class="w-4 h-4 rounded"> NetBox — reassign objects, delete the source NetBox tenant</label>
-          <label class="flex items-center gap-2 text-slate-400"><input id="nbmig-m-pxmx" type="checkbox" class="w-4 h-4 rounded"> pxmx / Hypervisors <span class="text-[10px]">(Phase 2 — reports not-yet-applied)</span></label>
-          <label class="flex items-center gap-2 text-slate-400"><input id="nbmig-m-ldap" type="checkbox" class="w-4 h-4 rounded"> LDAP / Directory <span class="text-[10px]">(Phase 2 — reports not-yet-applied)</span></label>
+          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-pxmx" type="checkbox" class="w-4 h-4 rounded"> pxmx / Hypervisors — re-tag VMs from the source proxmox_tag to the target's</label>
+          <label class="flex items-center gap-2 text-slate-600"><input id="nbmig-m-ldap" type="checkbox" class="w-4 h-4 rounded"> LDAP / Directory — re-home the directory subtree (ldap_base_dn)</label>
         </div>
         <label class="flex items-center gap-2 text-xs text-slate-600">
           <input id="nbmig-delete" type="checkbox" checked class="w-4 h-4 rounded"> Purge the source after migrating (clear its CS data + delete its NetBox tenant)
@@ -19595,6 +19949,36 @@ async function loadDashboardSummary() {
         ['dash-devices','dash-vms','dash-sessions','dash-prefixes','dash-ips'].forEach(id => set(id, '—'));
         console.warn('Dashboard summary unavailable:', err.message);
     }
+}
+
+// Hub/spoke/agent up-down summary tile on the Dashboard Overview. Tenant-scoped:
+// a Global Admin sees ALL; a tenant user sees its own spokes + shared infra.
+async function loadInfraStatus() {
+    const el = document.getElementById('infra-status-body');
+    if (!el) return;
+    const tenantParam = isAdmin() ? 'all' : encodeURIComponent(currentTenant || 'default');
+    let d = {};
+    try {
+        const r = await fetch(`/api/dashboard/infra-status?tenant=${tenantParam}`);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        d = await r.json();
+    } catch (e) { el.innerHTML = '<p class="text-xs text-slate-400 italic">Status unavailable</p>'; return; }
+    const c = d.counts || {};
+    const items = d.items || [];
+    const dot = s => `<span class="inline-block w-2.5 h-2.5 rounded-full ${s === 'green' ? 'bg-green-500' : s === 'yellow' ? 'bg-amber-400' : 'bg-red-500'}"></span>`;
+    const pill = (label, n, cls) => `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full ${cls} text-xs font-bold">${label} ${n}</span>`;
+    const rows = items.map(i => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
+        <span class="flex items-center gap-2 min-w-0">${dot(i.status)}<span class="font-mono text-xs text-slate-600 truncate">${escapeHtml(i.name)}</span>${i.type ? `<span class="text-[10px] text-slate-400">${escapeHtml(i.type)}</span>` : ''}</span>
+        <span class="text-[10px] ${i.online ? (i.tier === 'warning' ? 'text-amber-600' : 'text-slate-400') : 'text-red-500'}">${i.online ? (i.tier === 'warning' ? 'warning' : 'online') : 'offline'}</span></div>`).join('');
+    el.innerHTML = `
+      <div class="flex flex-wrap items-center gap-2 mb-3">
+        <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-100 text-green-700 text-xs font-bold">${dot('green')} Hub online</span>
+        ${pill('Healthy', c.green || 0, 'bg-green-100 text-green-700')}
+        ${pill('Warning', c.yellow || 0, 'bg-amber-100 text-amber-700')}
+        ${pill('Down', c.red || 0, 'bg-red-100 text-red-700')}
+        <span class="text-[11px] text-slate-400 ml-auto">${items.length} spoke/agent(s)${d.all_tenants ? ' · all tenants' : ''}</span>
+      </div>
+      <div class="max-h-56 overflow-y-auto">${items.length ? rows : '<p class="text-xs text-slate-400 italic">No spokes/agents in scope.</p>'}</div>`;
 }
 
 // ─── Global Cross-System Search ──────────────────────────────────────────────

@@ -161,3 +161,18 @@ def register(app, hub, ctx):
             return {"status": "error", "message": str(e)}
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "message": str(e)}
+
+    @app.get("/setup/notifications/azure-acs-domains")
+    async def list_azure_acs_domains(request: Request):
+        """Email domains LINKED to the chosen ACS resource — the valid sender
+        MailFrom picker. Empty = no domain connected (the DomainNotLinked cause)."""
+        sub = (request.query_params.get("subscription_id") or "").strip()
+        rg = (request.query_params.get("resource_group") or "").strip()
+        name = (request.query_params.get("acs_name") or "").strip()
+        try:
+            doms = await _n.list_acs_sender_domains(hub, sub, rg, name)
+            return {"status": "ok", "domains": doms}
+        except _n.NotificationsError as e:
+            return {"status": "error", "message": str(e)}
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": str(e)}

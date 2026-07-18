@@ -36,6 +36,20 @@ class HubIdentityMixin:
                 idx[iu] = aid
         self.install_uuid_index = idx
 
+    def _primary_key(self, spoke_id: str) -> str:
+        """The key this spoke's routing/approval/crypto/mailbox state lives
+        under.
+
+        Returns the guid once the spoke has been lazily migrated to
+        guid-primary (recorded in ``spoke_id_alias``), else ``spoke_id``
+        (legacy — the fail-safe). A spoke still CONNECTS by its
+        operator-chosen spoke_id (the auth-frame id), so this is the single
+        resolve point mapping that connect-id to the guid-keyed state. With
+        ``spoke_id_alias`` empty (before the Phase 2b migration trigger arms)
+        this returns ``spoke_id`` for every spoke → identical to today.
+        """
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
+
     def _reconcile_spoke_identity(self, new_id: str, install_uuid: str,
                                   hostname: str, is_agent: bool = False,
                                   parent_spoke_id: Optional[str] = None,
@@ -61,8 +75,15 @@ class HubIdentityMixin:
         if is_agent:
             self._reconcile_agent_identity(new_id, install_uuid, hostname, parent_spoke_id)
             return
+        # Resolve to the guid primary key once armed (== new_id until the lazy
+        # arm at the end of this method flips it). All state ops key through
+        # new_pk so a reconnecting spoke — which still DIALS IN by its
+        # operator-chosen name — lands on its guid-keyed state instead of
+        # re-creating a name-keyed record and splitting. Pre-arm this is just
+        # new_id (alias empty), so behavior is identical to today.
+        new_pk = self._primary_key(new_id)
         mm = self.state.system_state.setdefault("module_metadata", {})
-        meta = mm.get(new_id, {})
+        meta = mm.get(new_pk, {})
         prev_hostname = meta.get("hostname")
         prev_uuid = meta.get("install_uuid")
 
@@ -72,17 +93,19 @@ class HubIdentityMixin:
         owns_uuid = True
         if install_uuid:
             old_id = self.install_uuid_index.get(install_uuid)
-            if old_id and old_id != new_id:
+            if old_id and old_id != new_pk:
                 if migrate_if:
                     # Same install UUID, new id → cloned+renamed spoke WITH proof of
                     # the old id's secret. Migrate so the renamed box keeps its
-                    # approval/tenant binding + key material.
+                    # approval/tenant binding + key material. Target is new_pk
+                    # (the primary key) so the chain old_id→new_pk→guid converges
+                    # on the guid when the arm below relocates name→guid.
                     self.record_spoke_event(old_id, "identity_changed",
                                             f"was {old_id}, now {new_id} (hostname={hostname or '?'})")
-                    self._migrate_spoke_identity(old_id, new_id)
-                    self.record_spoke_event(new_id, "identity_changed",
+                    self._migrate_spoke_identity(old_id, new_pk)
+                    self.record_spoke_event(new_pk, "identity_changed",
                                             f"migrated from {old_id} (hostname={hostname or '?'})")
-                    self.install_uuid_index[install_uuid] = new_id
+                    self.install_uuid_index[install_uuid] = new_pk
                 else:
                     # CC2 guard: known install_uuid under a NEW id with NO proof
                     # of the old id's secret. Do NOT migrate approval/keys and do
@@ -90,7 +113,7 @@ class HubIdentityMixin:
                     # new_id is left as a fresh spoke (pending approval / PSK),
                     # never an inheritance. The uuid is not recorded under new_id
                     # so a reload can't drift the index onto it.
-                    self.record_spoke_event(new_id, "identity_rename_unproven",
+                    self.record_spoke_event(new_pk, "identity_rename_unproven",
                                             f"install_uuid seen under {old_id} but no valid secret "
                                             f"for it — migration to {new_id} refused")
                     logger.warning("[identity] %s claimed install_uuid of %s without a "
@@ -101,30 +124,54 @@ class HubIdentityMixin:
                 # Fresh UUID. If this id slot already had a different UUID, the box
                 # was re-imaged (prep-for-imaging wiped the UUID) reusing the id.
                 if prev_uuid and prev_uuid != install_uuid:
-                    self.record_spoke_event(new_id, "reimaged",
+                    self.record_spoke_event(new_pk, "reimaged",
                                             f"install_uuid {prev_uuid[:8]}… → {install_uuid[:8]}…")
-                    if self.install_uuid_index.get(prev_uuid) == new_id:
+                    if self.install_uuid_index.get(prev_uuid) == new_pk:
                         del self.install_uuid_index[prev_uuid]
-                self.install_uuid_index[install_uuid] = new_id
-            # old_id == new_id: normal reconnect — nothing to migrate.
+                self.install_uuid_index[install_uuid] = new_pk
+            # old_id == new_pk: normal reconnect — nothing to migrate. (Comparing
+            # against new_pk, not new_id, is what prevents the arm from ping-
+            # ponging state guid↔name every reconnect once the alias is armed:
+            # index[uuid]=guid and _primary_key(name)=guid → equal → no rename.)
 
         # Hostname-change detection (independent of id/uuid change). Covers the
         # pinned-id case where the id is frozen but the OS host was renamed.
         # Skip in the unproven-rename case — we're refusing to recognize new_id,
         # so a fabricated hostname_changed would be misleading.
         if owns_uuid and hostname and prev_hostname and prev_hostname != hostname:
-            self.record_spoke_event(new_id, "hostname_changed",
+            self.record_spoke_event(new_pk, "hostname_changed",
                                     f"was {prev_hostname}, now {hostname}")
 
         # Persist current hostname + install_uuid so the next reconnect can diff.
         # install_uuid is recorded only when new_id actually owns it.
-        self.state.update_module_metadata(new_id, {
+        self.state.update_module_metadata(new_pk, {
             "hostname": hostname or "",
             "install_uuid": (install_uuid or "") if owns_uuid else "",
         })
 
-    def _migrate_spoke_identity(self, old_id: str, new_id: str) -> None:
-        """Carry a spoke's approval/tenant binding/keys/timeline from old→new id."""
+        # Lazy guid-primary arm: relocate this spoke's hub-side state from its
+        # connect-id (the operator-chosen name) to its stable install_uuid, so
+        # the guid becomes the primary key (_primary_key(name)→guid). Idempotent
+        # and silent (a key relocation, not a rename — no identity_changed
+        # event). Only when the caller proved uuid ownership (owns_uuid); the
+        # CC2 unproven-rename branch leaves the spoke name-keyed. See
+        # _arm_guid_primary for the re-key contract.
+        if owns_uuid and install_uuid:
+            self._arm_guid_primary(new_id, install_uuid)
+
+    def _migrate_spoke_identity(self, old_id: str, new_id: str,
+                                rekey_agent_composite: bool = True) -> None:
+        """Carry a spoke's approval/tenant binding/keys/timeline from old→new id.
+
+        ``rekey_agent_composite``: whether to relocate the ``{spoke}:{agent}``
+        composite heartbeat keys whose spoke-prefix matches ``old_id``. True
+        for a clone-rename (the spoke now dials in by ``new_id``, so the write
+        site — ``_handle_agent_relay_up`` keys the composite by the raw dial-in
+        name — writes ``{new_id}:{agent}`` and the re-key must follow). False
+        for the guid arm: the spoke STILL dials in by its connect-id name, so
+        the composite write site keeps writing ``{name}:{agent}`` and the
+        composite must stay name-keyed (agent composites are B2 territory).
+        """
         if old_id == new_id:
             return
         # Persisted module-keyed state (approved_modules / known_modules /
@@ -153,12 +200,78 @@ class HubIdentityMixin:
         # KeyManager re-key (CRITICAL): without this the new id has no key and the
         # renamed spoke falls into pending-negotiation despite the approval carryover.
         self.key_manager.rename_spoke_keys(old_id, new_id)
-        # Composite heartbeat keys for any agents relayed under this spoke.
-        for key in list(self.heartbeat.last_seen.keys()):
-            if key.startswith(f"{old_id}:"):
-                self.heartbeat.last_seen[key.replace(f"{old_id}:", f"{new_id}:", 1)] = \
-                    self.heartbeat.last_seen.pop(key)
+        # Composite heartbeat keys for any agents relayed under this spoke. Skipped
+        # for the guid arm (see param docstring) so agent composites stay name-keyed.
+        if rekey_agent_composite:
+            for key in list(self.heartbeat.last_seen.keys()):
+                if key.startswith(f"{old_id}:"):
+                    self.heartbeat.last_seen[key.replace(f"{old_id}:", f"{new_id}:", 1)] = \
+                        self.heartbeat.last_seen.pop(key)
         logger.info(f"[identity] migrated spoke {old_id} → {new_id}")
+
+    def _arm_guid_primary(self, spoke_id: str, install_uuid: str) -> None:
+        """Lazily migrate a spoke's hub-side state from its connect-id (the
+        operator-chosen name) to its stable ``install_uuid`` (guid) as the
+        primary key, so ``_primary_key(spoke_id)`` resolves name→guid.
+
+        Sets ``spoke_id_alias[spoke_id] = install_uuid`` then re-keys every
+        name-keyed store name→guid. Idempotent: an already-armed spoke (alias
+        set to this guid) is a no-op; a spoke armed to a *different* guid is
+        left untouched (a uuid is stable per-install — a mismatch shouldn't
+        happen, and thrashing the state would only make it worse).
+
+        Reuses ``_migrate_spoke_identity`` for the bulk re-key (persisted
+        module-keyed state + in-memory mirrors + KeyManager keys). Called from
+        ``_reconcile_spoke_identity`` BEFORE the connect path registers the
+        spoke / installs its live websocket, so:
+
+        * ``_migrate_spoke_identity``'s ``active_connections.pop(name)`` is a
+          safe no-op (no connection is installed yet at arm time — the live ws
+          is installed under guid afterward by ``_install_active_connection``,
+          which resolves ``_primary_key``).
+        * the in-memory mirrors (telemetry / versions / module_types / events /
+          recovery / rate_limiters) are empty on a first-connect arm, so their
+          re-key is a no-op; on the rare arm that follows a clone-rename chain
+          they carry whatever the rename just migrated.
+
+        Silent — no ``identity_changed`` event (this is a key relocation, not a
+        rename; the guid is the same box). Agent-side state (agent_config /
+        agent_info / agent_logs / the ``{spoke}:{agent}`` heartbeat composite)
+        is NOT re-keyed here — that is B2 (agent-relay guid-primary); re-keying
+        the agent composite now would split it from its still-name-keyed write
+        site (``_handle_agent_relay_up`` writes ``{spoke_id}:{agent_id}`` raw).
+        ``spoke_last_seen`` (offline-only contact metadata, module-keyed) is
+        re-keyed for accuracy. ``install_uuid_index`` repoints to the guid (the
+        new primary key).
+        """
+        if not install_uuid or install_uuid == spoke_id:
+            return
+        existing = self.spoke_id_alias.get(spoke_id)
+        if existing == install_uuid:
+            return  # already armed to this guid — idempotent no-op
+        if existing:
+            # Armed to a different guid — leave it; a uuid is stable per-install.
+            logger.warning("[identity] %s already guid-armed to %s; ignoring %s",
+                           spoke_id, existing, install_uuid)
+            return
+        self.spoke_id_alias[spoke_id] = install_uuid
+        # Bulk re-key name→guid (state + in-memory + keys). The active-connection
+        # pop inside is a safe no-op at arm time (no ws installed yet). Agent
+        # composite heartbeat keys are NOT re-keyed (rekey_agent_composite=False):
+        # the spoke still dials in by its connect-id name, so the composite write
+        # site (_handle_agent_relay_up) keeps writing {name}:{agent}; re-keying to
+        # {guid}:{agent} here would split it from the write site. Agent composites
+        # stay name-keyed until B2.
+        self._migrate_spoke_identity(spoke_id, install_uuid,
+                                     rekey_agent_composite=False)
+        self.install_uuid_index[install_uuid] = install_uuid
+        # spoke_last_seen is module-keyed offline-only contact metadata; re-key
+        # so a hub reboot doesn't reset this spoke to "Never connected / RED".
+        sls = self.state.system_state.get("spoke_last_seen", {})
+        if spoke_id in sls:
+            sls[install_uuid] = sls.pop(spoke_id)
+        self.state._mark_dirty()
+        logger.info("[identity] armed guid-primary %s → %s", spoke_id, install_uuid)
 
     def _reconcile_agent_identity(self, new_id: str, install_uuid: str,
                                   hostname: str, parent_spoke_id: Optional[str]) -> None:

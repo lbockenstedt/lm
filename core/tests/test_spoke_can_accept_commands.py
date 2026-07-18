@@ -40,6 +40,13 @@ class _CmdGateHub:
         self.active_connections = {}
         self.spoke_authenticated = {}
         self.spoke_telemetry = {}
+        # Phase 2: the forwarded real methods resolve state keys via
+        # _primary_key. Alias empty here -> _primary_key returns spoke_id,
+        # matching the real hub before the 2b2 migration trigger arms.
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def spoke_can_accept_commands(self, spoke_id):
         return main.LabManagerHub.spoke_can_accept_commands(self, spoke_id)
@@ -169,6 +176,12 @@ class _DisconnectHub:
 
     def __init__(self):
         self.spoke_telemetry = {}
+        # Phase 2: _mark_spoke_disconnected resolves state keys via _primary_key.
+        # Alias empty -> returns spoke_id (pre-2b2-trigger behavior).
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def _mark_spoke_disconnected(self, spoke_id):
         return main.LabManagerHub._mark_spoke_disconnected(self, spoke_id)
@@ -208,6 +221,12 @@ class _DiagHub:
     def __init__(self):
         self.spoke_telemetry = {}
         self._unauth_warned_spokes = set()
+        # Phase 2: _maybe_log_unauthenticated_agent resolves state keys via
+        # _primary_key. Alias empty -> returns spoke_id (pre-2b2-trigger).
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def _maybe_log_unauthenticated_agent(self, spoke_id):
         return main.LabManagerHub._maybe_log_unauthenticated_agent(self, spoke_id)
@@ -308,6 +327,12 @@ class _PendingHub:
         self.active_connection_key_ids = {}
         self.spoke_authenticated = {}
         self.spoke_events = {}
+        # Phase 2: _install_pending_connection resolves state keys via
+        # _primary_key. Alias empty -> returns spoke_id (pre-2b2-trigger).
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def record_spoke_event(self, spoke_id, event, detail):
         self.spoke_events.setdefault(spoke_id, []).append((event, detail))

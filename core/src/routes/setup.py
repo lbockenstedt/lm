@@ -1,8 +1,150 @@
 """Hub Setup routes: spokes, sync loops, module configs, metadata."""
+import asyncio
 from api import (
     HTTPException, Request, _hub_msg, logger, time,
 )
 from access import tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible
+
+# ── /setup/pending_spokes cache (stale-while-revalidate) ─────────────────────
+# The Spokes & Agents page polls /setup/pending_spokes on every load + every
+# poll tick; the handler iterates known_modules and per-spoke reads
+# (module_metadata, approved_modules, get_spoke_events for the rename banner).
+# Mirror the /api/pxmx/agents SWR cache (routes/pxmx.py): instant serve from a
+# fresh cache, one background refresh at the fresh-TTL boundary, and a forced
+# refresh only when there's no servable cache. One hub per process → a
+# module-level cache is fine.
+_SPOKES_CACHE: dict = {"data": None, "ts": 0.0, "refreshing": False}
+_SPOKES_FRESH_S = 5.0    # serve cached payload verbatim while younger than this
+_SPOKES_STALE_S = 30.0   # still servable (background refresh kicks in here)
+# Per-loop lock: a module-level asyncio.Lock() binds to the first event loop
+# that acquires it, which breaks across ``asyncio.run()`` (tests) and would
+# break a hub that ever recreates its loop. One lock per running loop gives
+# correct mutual exclusion within a loop (one uvicorn loop in production)
+# without cross-loop coupling. (Verbatim mirror of pxmx._agents_lock.)
+_spokes_locks: dict = {}
+
+
+def _spokes_lock() -> "asyncio.Lock":
+    loop = asyncio.get_running_loop()
+    lk = _spokes_locks.get(id(loop))
+    if lk is None:
+        lk = asyncio.Lock()
+        _spokes_locks[id(loop)] = lk
+    return lk
+
+
+# module_type prefix fallback for offline spokes (was nested in the handler;
+# hoisted to module scope so the SWR compute fn can use it without a closure).
+_PREFIX_MODULE = {
+    "pxmx": "hypervisor", "opn": "firewall", "cppm": "nac",
+    "cs": "simulation", "netbox": "ipam", "ldap": "directory",
+    "dns": "dns", "dhcp": "dhcp", "nw": "nw",
+}
+
+
+def _module_type_for(hub, sid: str):
+    """Live registration wins; then the module_type we PERSISTED at registration
+    (module_metadata[sid].module_type) so an OFFLINE spoke/agent keeps its true
+    type; then a spoke_id-prefix fallback for legacy dedicated ids. The
+    persisted read is what lets a disconnected generic agent (module_type
+    "agent") or a role sub-spoke "{base}-{role}" keep its category instead of
+    falling through to "—" or a wrong prefix guess."""
+    mt = hub.spoke_module_types.get(hub._primary_key(sid))
+    if mt:
+        return mt
+    meta = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
+    if meta.get("module_type"):
+        return meta["module_type"]
+    for prefix, fallback in _PREFIX_MODULE.items():
+        if sid == prefix or sid.startswith(prefix + "-"):
+            return fallback
+    return None
+
+
+def _identity_change_for(hub, sid: str, meta: dict):
+    """Latest unacknowledged identity_changed/hostname_changed event for a spoke.
+
+    Returns ``None`` when there is no such event newer than the last ack ts
+    (``module_metadata[sid]["change_acked_ts"]``), so the WebUI only shows the
+    amber "renamed" banner until an admin dismisses it. Mirrored for agents
+    via the parent spoke's event timeline.
+    """
+    acked_ts = float(meta.get("change_acked_ts") or 0.0)
+    for ev in hub.get_spoke_events(sid, limit=20):
+        if ev.get("event") in ("identity_changed", "hostname_changed", "reimaged"):
+            if ev.get("ts", 0) > acked_ts:
+                return ev
+    return None
+
+
+async def _aggregate_spokes(hub):
+    """Recompute the /setup/pending_spokes payload from live hub state.
+    Pure hub-local reads (no spoke fan-out), so it is cheap; module-level (not
+    a route closure) so it depends only on ``hub`` and is unit-testable with a
+    stub hub. Does not itself catch exceptions — ``_maybe_refresh_spokes``
+    serves stale on failure rather than blanking the tile."""
+    known_spokes = hub.state.system_state.get("known_modules", [])
+    module_names = hub.state.system_state.get("module_names", {})
+    module_metadata = hub.state.system_state.get("module_metadata", {})
+    spokes_status = []
+    for sid in known_spokes:
+        meta = module_metadata.get(sid, {}) or {}
+        spokes_status.append({
+            "spoke_id": sid,
+            "display_name": module_names.get(sid, sid),
+            "approved": hub.approved_modules.get(hub._primary_key(sid), False),
+            "module_type": _module_type_for(hub, sid),
+            "hostname": meta.get("hostname", ""),
+            "install_uuid": meta.get("install_uuid", ""),
+            "spoke_guid": meta.get("install_uuid", ""),
+            "identity_change": _identity_change_for(hub, sid, meta),
+            "tenant_id": hub.state.get_spoke_tenant(sid) or "",
+            "tenant_shared": _tenant_is_shared(hub.state.get_spoke_tenant(sid) or ""),
+        })
+    return {"spokes": spokes_status}
+
+
+async def _maybe_refresh_spokes(hub, force=False):
+    """Under ``_spokes_lock``: serve the cached payload if it's still fresh
+    (unless ``force``); otherwise recompute and store. Serializes concurrent
+    first-loaders into a single recompute; later waiters re-check under the
+    lock and return the just-refreshed payload. Returns the served payload
+    (fresh, recomputed, or stale-on-failure). Mirrors pxmx._maybe_refresh_agents.
+
+    ``force`` means "the caller already decided the cache is unservable" — it
+    does NOT bypass a genuinely-fresh result (if a concurrent caller refreshed
+    while this one waited on the lock, serving it is the whole point)."""
+    async with _spokes_lock():
+        cached = _SPOKES_CACHE["data"]
+        age = (time.time() - _SPOKES_CACHE["ts"]) if cached is not None else None
+        if cached is not None and age is not None and age < _SPOKES_FRESH_S:
+            return cached
+        _SPOKES_CACHE["refreshing"] = True
+        try:
+            result = await _aggregate_spokes(hub)
+            _SPOKES_CACHE["data"] = result
+            _SPOKES_CACHE["ts"] = time.time()
+            return result
+        except Exception:
+            logger.exception("spokes cache refresh failed")
+            return cached  # serve stale rather than blanking the tile
+        finally:
+            _SPOKES_CACHE["refreshing"] = False
+
+
+def _bust_spokes_cache():
+    """Mark the spokes cache unservable so the next GET forced-refreshes.
+    Called from setup mutation endpoints (approve/revoke/delete/purge/ack/
+    metadata rename) so an admin action is reflected immediately instead of
+    after the fresh/stale TTL. Also busts the /setup/diagnostics cache, since
+    the same mutations (approval/connection/registration state) are surfaced
+    there too — one call busts both tiles."""
+    _SPOKES_CACHE["ts"] = 0.0
+    try:
+        from routes import setup_admin  # lazy: avoid any import-cycle at load
+        setup_admin._bust_diag_cache()
+    except Exception:
+        logger.debug("diag cache bust skipped (setup_admin unavailable)", exc_info=True)
 
 
 def register(app, hub, ctx):
@@ -141,7 +283,7 @@ def register(app, hub, ctx):
     async def reset_spoke_secret(spoke_id: str):
         hub = app.state.hub
         try:
-            hub.key_manager.delete_spoke_key(spoke_id)
+            hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
             # Drop any queued/pending messages for this spoke — without its key
             # they can no longer be signed and would retry against the keyless
             # spoke (log flood). Re-onboarding generates a fresh key + pushes.
@@ -191,7 +333,9 @@ def register(app, hub, ctx):
         DELETE /setup/spokes/{id} instead."""
         hub = app.state.hub
         try:
-            return await hub.revoke_spoke(spoke_id)
+            res = await hub.revoke_spoke(spoke_id)
+            _bust_spokes_cache()
+            return res
         except Exception as e:
             logger.exception("revoke_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
@@ -208,15 +352,15 @@ def register(app, hub, ctx):
         """
         hub = app.state.hub
         try:
-            ws = hub.active_connections.get(spoke_id)
+            ws = hub.active_connections.get(hub._primary_key(spoke_id))
             if ws is not None:
                 try:
                     await ws.close(code=1008, reason="Removed by admin")
                 except Exception as e:
                     logger.warning(f"Could not close live WS for {spoke_id} during delete: {e}")
-            hub.approved_modules.pop(spoke_id, None)
+            hub.approved_modules.pop(hub._primary_key(spoke_id), None)
             hub.state.remove_module(spoke_id)
-            hub.key_manager.delete_spoke_key(spoke_id)
+            hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
             # Drop queued/pending messages for the deleted spoke — its key is
             # gone, so they can no longer be signed and would retry against the
             # keyless spoke (log flood). The spoke must fully re-onboard to
@@ -230,6 +374,7 @@ def register(app, hub, ctx):
             # delete (unlike a transient disconnect, which needs telemetry
             # for the WebUI's DISCONNECTED status + recovery for the watchdog).
             hub._evict_spoke(spoke_id)
+            _bust_spokes_cache()
             return {"status": "ok", "message": f"Spoke '{spoke_id}' removed."}
         except Exception as e:
             logger.exception("delete_spoke failed")
@@ -269,15 +414,15 @@ def register(app, hub, ctx):
         removed = 0
         for spoke_id in sorted(targets):
             try:
-                ws = hub.active_connections.get(spoke_id)
+                ws = hub.active_connections.get(hub._primary_key(spoke_id))
                 if ws is not None:
                     try:
                         await ws.close(code=1008, reason="load-test purge")
                     except Exception:
                         pass
-                hub.approved_modules.pop(spoke_id, None)
+                hub.approved_modules.pop(hub._primary_key(spoke_id), None)
                 hub.state.remove_module(spoke_id)
-                hub.key_manager.delete_spoke_key(spoke_id)
+                hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
                 await hub.mailbox.clear_spoke(spoke_id)
                 hub._evict_spoke(spoke_id)
                 removed += 1
@@ -286,13 +431,14 @@ def register(app, hub, ctx):
         logger.warning("[diag] purged %d spoke(s) with prefix '%s' by %s",
                        removed, prefix,
                        (sess.get("username") if isinstance(sess, dict) else "?"))
+        _bust_spokes_cache()
         return {"status": "ok", "removed": removed, "prefix": prefix}
 
     @app.post("/setup/spokes/{spoke_id}/rotate-secret")
     async def rotate_spoke_secret(spoke_id: str):
         hub = app.state.hub
         try:
-            new_key = hub.key_manager.rotate_key(spoke_id)
+            new_key = hub.key_manager.rotate_key(hub._primary_key(spoke_id))
             return {"status": "ok", "new_secret": new_key.secret}
         except Exception as e:
             logger.exception("rotate_spoke_secret failed")
@@ -312,6 +458,7 @@ def register(app, hub, ctx):
                 spoke_id, {"change_acked_ts": time.time()}
             )
             hub.state._mark_dirty()
+            _bust_spokes_cache()
             return {"status": "ok", "spoke_id": spoke_id}
         except Exception as e:
             logger.exception("ack_identity_change failed")
@@ -336,11 +483,11 @@ def register(app, hub, ctx):
             # Capture the secret the spoke currently holds BEFORE rotating, so
             # the key-delivery push is signed with it — the spoke can't verify a
             # frame signed with the new secret it hasn't installed yet.
-            prev_secret = hub.key_manager.current_session_secret(spoke_id)
-            new_key = hub.key_manager.rotate_key(spoke_id)
+            prev_secret = hub.key_manager.current_session_secret(hub._primary_key(spoke_id))
+            new_key = hub.key_manager.rotate_key(hub._primary_key(spoke_id))
             new_secret = new_key.secret
 
-            spoke_conn = hub.active_connections.get(spoke_id)
+            spoke_conn = hub.active_connections.get(hub._primary_key(spoke_id))
             if spoke_conn:
                 try:
                     result = await hub.request_response(
@@ -423,7 +570,7 @@ def register(app, hub, ctx):
                     agent_cfg_store[agent_id] = entry
                     hub.state._mark_dirty()
 
-            if target_spoke in hub.active_connections:
+            if hub._primary_key(target_spoke) in hub.active_connections:
                 msg = _hub_msg(target_spoke, "SPOKE_RELAY", {
                     "target_agent_id": agent_id,
                     "command": "APPROVAL_SUCCESS",
@@ -435,80 +582,35 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("approve_agent_under_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            # Approving a relayed agent mutates known_modules/approved_modules
+            # (leaked-id self-heal surface) — bust the spokes cache.
+            _bust_spokes_cache()
 
     @app.get("/setup/pending_spokes")
     async def get_all_spokes_status():
         hub = app.state.hub
-        known_spokes = hub.state.system_state.get("known_modules", [])
-        module_names = hub.state.system_state.get("module_names", {})
 
-        # module_type is held in the live spoke_module_types dict, which is
-        # popped on disconnect (main.py disconnect handler) — so an offline
-        # spoke reports None and the WebUI can't show its module. Fall back to
-        # the spoke_id prefix so the Setup tile still labels offline spokes
-        # (opn/cppm/cs/etc.) with their module instead of "—".
-        _PREFIX_MODULE = {
-            "pxmx": "hypervisor", "opn": "firewall", "cppm": "nac",
-            "cs": "simulation", "netbox": "ipam", "ldap": "directory",
-            "dns": "dns", "dhcp": "dhcp", "nw": "nw",
-        }
+        # Serves a stale-while-revalidate cache (``_SPOKES_CACHE``): fresh
+        # within ``_SPOKES_FRESH_S`` (instant serve), servable-stale until
+        # ``_SPOKES_STALE_S`` (instant serve + one background refresh), and a
+        # forced refresh only when there's no servable cache. Keeps Setup →
+        # Spokes & Agents instant on repeat loads. Mutation endpoints call
+        # ``_bust_spokes_cache()`` so an admin action is reflected at once.
+        cached = _SPOKES_CACHE["data"]
+        age = (time.time() - _SPOKES_CACHE["ts"]) if cached is not None else None
 
-        def _module_type_for(sid: str):
-            # Live registration wins; then the module_type we PERSISTED at
-            # registration (module_metadata[sid].module_type, written in main.py
-            # on connect) so an OFFLINE spoke/agent keeps its true type; then a
-            # spoke_id-prefix fallback for legacy dedicated ids. The persisted
-            # read is what lets a disconnected generic agent (module_type
-            # "agent") or a role sub-spoke "{base}-{role}" keep its category
-            # instead of falling through to "—" or a wrong prefix guess.
-            mt = hub.spoke_module_types.get(sid)
-            if mt:
-                return mt
-            meta = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
-            if meta.get("module_type"):
-                return meta["module_type"]
-            for prefix, fallback in _PREFIX_MODULE.items():
-                if sid == prefix or sid.startswith(prefix + "-"):
-                    return fallback
-            return None
+        # Inside the stale window → serve instantly; past fresh-TTL, kick ONE
+        # background refresh (the ``not refreshing`` guard avoids a pile-up).
+        if cached is not None and age is not None and age < _SPOKES_STALE_S:
+            if age >= _SPOKES_FRESH_S and not _SPOKES_CACHE["refreshing"]:
+                asyncio.create_task(_maybe_refresh_spokes(hub))
+            return cached
 
-        spokes_status = []
-        module_metadata = hub.state.system_state.get("module_metadata", {})
-        for sid in known_spokes:
-            meta = module_metadata.get(sid, {}) or {}
-            spokes_status.append({
-                "spoke_id": sid,
-                "display_name": module_names.get(sid, sid),
-                "approved": hub.approved_modules.get(sid, False),
-                "module_type": _module_type_for(sid),
-                # Install-UUID identity tracking: current OS hostname + the latest
-                # unacknowledged rename/hostname-change event (for the UI banner).
-                "hostname": meta.get("hostname", ""),
-                "install_uuid": meta.get("install_uuid", ""),
-                "identity_change": _identity_change_for(hub, sid, meta),
-                "tenant_id": hub.state.get_spoke_tenant(sid) or "",
-                # Whether this spoke's tenant is the shared tenant (visible to
-                # all). The WebUI _spokeVisibleToTenant reads this directly so its
-                # gate is self-contained (no client-side shared-id lookup/race).
-                "tenant_shared": _tenant_is_shared(hub.state.get_spoke_tenant(sid) or ""),
-            })
-
-        return {"spokes": spokes_status}
-
-    def _identity_change_for(hub, sid: str, meta: dict):
-        """Latest unacknowledged identity_changed/hostname_changed event for a spoke.
-
-        Returns ``None`` when there is no such event newer than the last ack ts
-        (``module_metadata[sid]["change_acked_ts"]``), so the WebUI only shows the
-        amber "renamed" banner until an admin dismisses it. Mirrored for agents
-        via the parent spoke's event timeline.
-        """
-        acked_ts = float(meta.get("change_acked_ts") or 0.0)
-        for ev in hub.get_spoke_events(sid, limit=20):
-            if ev.get("event") in ("identity_changed", "hostname_changed", "reimaged"):
-                if ev.get("ts", 0) > acked_ts:
-                    return ev
-        return None
+        # No servable cache → forced refresh. The lock serializes concurrent
+        # first-loaders into a single recompute; each re-checks under the lock.
+        result = await _maybe_refresh_spokes(hub, force=True)
+        return result or {"spokes": []}
 
     @app.post("/setup/approve_spoke")
     async def approve_spoke(request: Request):
@@ -523,14 +625,14 @@ def register(app, hub, ctx):
 
             if action == "unapprove":
                 hub.state.register_module(spoke_id, approved=False)
-                hub.approved_modules[spoke_id] = False
+                hub.approved_modules[hub._primary_key(spoke_id)] = False
                 # An un-approved spoke's session key is no longer valid for
                 # outbound commands; drop queued messages so they don't retry
                 # against it. Re-approval generates a fresh key + pushes.
                 await hub.mailbox.clear_spoke(spoke_id)
             else:
                 hub.state.register_module(spoke_id, approved=True)
-                hub.approved_modules[spoke_id] = True
+                hub.approved_modules[hub._primary_key(spoke_id)] = True
 
             # Spoke→tenant binding (admin assigns at approval time). Omitting
             # tenant_id leaves any existing binding untouched.
@@ -540,13 +642,13 @@ def register(app, hub, ctx):
 
             await hub.state.save_state_now()
 
-            if spoke_id in hub.active_connections:
+            if hub._primary_key(spoke_id) in hub.active_connections:
                 if action != "unapprove":
                     # Generate a session secret for the spoke (idempotent — reuses existing key if present).
                     # Sign the key-delivery push with the secret the spoke currently holds (None = pending,
                     # it accepts anyway) so it can verify and install the new secret.
-                    prev_secret = hub.key_manager.current_session_secret(spoke_id)
-                    session_secret = hub.key_manager.generate_first_secret(spoke_id)
+                    prev_secret = hub.key_manager.current_session_secret(hub._primary_key(spoke_id))
+                    session_secret = hub.key_manager.generate_first_secret(hub._primary_key(spoke_id))
                     key_msg = _hub_msg(spoke_id, "SPOKE_UPDATE_SESSION_KEY", {"secret": session_secret})
                     await hub.send_to_spoke(key_msg, signing_secret=prev_secret)
 
@@ -572,6 +674,10 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("approve_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            # Approval status + tenant binding are surfaced by /setup/pending_spokes;
+            # bust so the WebUI reflects the change immediately.
+            _bust_spokes_cache()
 
     # ── Product config pairs: cppm/pxmx/ldap/dns/dhcp (/setup/*-config) ───────
     @app.get("/setup/cppm-config")
@@ -878,7 +984,7 @@ def register(app, hub, ctx):
                 "id": fw.get("id", "") if isinstance(fw, dict) else "",
                 "name": fw.get("name", fw.get("id", "")) if isinstance(fw, dict) else "",
                 "spoke_id": sid or "",
-                "connected": bool(sid and sid in getattr(hub, "active_connections", {})),
+                "connected": bool(sid and hub._primary_key(sid) in getattr(hub, "active_connections", {})),
             })
         return {"active": active, "sources": sources, "firewalls": firewalls,
                 "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}
@@ -1149,7 +1255,7 @@ def register(app, hub, ctx):
                 "id": d.get("id", "") if isinstance(d, dict) else "",
                 "name": d.get("name", d.get("id", "")) if isinstance(d, dict) else "",
                 "spoke_id": sid or "",
-                "connected": bool(sid and sid in getattr(hub, "active_connections", {})),
+                "connected": bool(sid and hub._primary_key(sid) in getattr(hub, "active_connections", {})),
             })
         return {"active": active, "sources": sources, "devices": devices,
                 "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}
@@ -1292,6 +1398,9 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("Error updating spoke metadata")
             raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            # display_name / hostname edits are surfaced by /setup/pending_spokes.
+            _bust_spokes_cache()
 
     @app.get("/setup/spoke-metadata/{spoke_id}")
     async def get_spoke_metadata(spoke_id: str):

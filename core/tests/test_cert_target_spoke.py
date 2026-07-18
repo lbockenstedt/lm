@@ -23,6 +23,12 @@ class _FakeHub:
         self.spoke_module_types = module_types        # {sid: module_type}
         self.active_connections = active              # set/list of connected sids
         self.agent_info = agent_info                  # {agent_id: {"spoke_id": sid}}
+        # Phase 2: _cert_target_spoke resolves state keys via _primary_key.
+        # Alias empty -> returns spoke_id (pre-2b2-trigger).
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def get_spoke_by_type(self, module_type):
         for sid, mt in self.spoke_module_types.items():

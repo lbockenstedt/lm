@@ -272,6 +272,59 @@ class HubCertDistributionMixin:
         except Exception as e:  # never block distribution on a state-save
             cert_log.debug("wildcard push-state save failed: %s", e)
 
+    async def _hub_self_write(self, path: str, content: str, mode: int = 0o600) -> bool:
+        """Write a file ON THE HUB via the loopback hub-self agent's ``WRITE_FILE``
+        primitive — the SAME primitive a spoke-side cert deploy uses — so the
+        hub's own cert-install path is uniform with spoke deploys (agent-rework
+        #5 / Phase 4). Falls back to a direct inline atomic write (identical to
+        what the agent would have run) when the hub-self agent isn't connected:
+        feature off (``LM_HUB_SELF_AGENT=0``), not booted yet, or the loopback
+        listener died. Returns True iff the file landed."""
+        hub_self = getattr(self, "_hub_self", None)
+        if hub_self is not None:
+            try:
+                resp = await hub_self.write_file(path, content, mode=mode)
+                if resp.get("status") == "SUCCESS" and (resp.get("result") or {}).get("ok"):
+                    return True
+                cert_log.debug("[cert] hub-self WRITE_FILE %s non-success → direct fallback (resp=%s)",
+                               path, resp)
+            except Exception as e:  # noqa: BLE001
+                cert_log.debug("[cert] hub-self WRITE_FILE %s error → direct fallback: %s", path, e)
+        # Direct fallback — the identical atomic write the in-process agent runs.
+        try:
+            self._atomic_write(path, content, mode)
+            return True
+        except Exception as e:  # noqa: BLE001
+            cert_log.warning("[cert] direct write to %s failed: %s", path, e)
+            return False
+
+    async def _hub_self_restart(self) -> str:
+        """Schedule ``lm-self-restart`` via the loopback hub-self agent's
+        ``RUN_COMMAND`` — uniformity with spoke-side cert deploys. The command is
+        backgrounded (``&``) so the agent responds BEFORE the restart kills the
+        hub process (an awaited foreground restart would drop the WS mid-reply
+        and the caller's ``send_to_agent`` would time out + double-restart on
+        fallback). Falls back to a direct fire-and-forget ``subprocess.Popen`` if
+        the hub-self agent isn't connected. Returns a status message."""
+        hub_self = getattr(self, "_hub_self", None)
+        if hub_self is not None:
+            try:
+                cmd = f"sudo -n {_LM_SELF_RESTART} >/dev/null 2>&1 &"
+                resp = await hub_self.run_command(cmd, allow_shell=True, timeout=10.0)
+                if resp.get("status") == "SUCCESS":
+                    return "lm.service restarting to apply"
+                cert_log.debug("[cert] hub-self RUN_COMMAND restart non-success → direct fallback (resp=%s)",
+                               resp)
+            except Exception as e:  # noqa: BLE001
+                cert_log.debug("[cert] hub-self RUN_COMMAND restart error → direct fallback: %s", e)
+        try:
+            subprocess.Popen(["sudo", "-n", _LM_SELF_RESTART],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return "lm.service restarting to apply"
+        except Exception as e:
+            return (f"cert written; could not schedule self-restart ({e}) — "
+                    "restart lm.service manually")
+
     async def _install_cert_on_hub(self, domain: str, fullchain: str,
                                    privkey: str, chain: str,
                                    identifier: str = "", ca_only: bool = False) -> dict:
@@ -317,16 +370,21 @@ class HubCertDistributionMixin:
             if not (chain and "BEGIN CERTIFICATE" in chain):
                 return {"status": "SUCCESS", "message": "no CA chain to install — hub unchanged"}
             ca_path = os.path.join(os.path.dirname(os.path.abspath(cert_path)), "mtls-ca.pem")
+            # CA bundle file write via the loopback hub-self agent (WRITE_FILE) —
+            # uniformity with spoke-side cert deploys — with a direct inline
+            # atomic-write fallback. The runtime CA registration below is hub-
+            # state (not a file-on-disk op), so it stays inline.
+            if not await self._hub_self_write(ca_path, chain, 0o644):
+                cert_log.warning("[mtls] %s → hub: CA bundle write to %s failed", domain, ca_path)
+                return {"status": "ERROR", "message": f"CA bundle write to {ca_path} failed"}
             try:
-                self._atomic_write(ca_path, chain, 0o644)
                 self._register_hub_mtls_ca(ca_path)
-                cert_log.info("[mtls] %s → hub: CA bundle → %s (hub keeps its own cert; no restart)",
-                              domain, ca_path)
-                return {"status": "SUCCESS",
-                        "message": f"mTLS CA bundle → {ca_path} (hub keeps its own cert)"}
             except Exception as e:  # noqa: BLE001
-                cert_log.warning("[mtls] %s → hub: CA bundle write to %s failed: %s", domain, ca_path, e)
-                return {"status": "ERROR", "message": f"CA bundle write failed: {e}"}
+                cert_log.warning("[mtls] %s → hub: CA register failed: %s", domain, e)
+            cert_log.info("[mtls] %s → hub: CA bundle → %s (hub keeps its own cert; no restart)",
+                          domain, ca_path)
+            return {"status": "SUCCESS",
+                    "message": f"mTLS CA bundle → {ca_path} (hub keeps its own cert)"}
         # The WILDCARD is NEVER the hub's own server cert. The hub keeps its own
         # (non-wildcard) cert; a wildcard reaching here via ANY path — explicit
         # "hub" target in distribute_cert_to_targets OR a fan-out — is a no-op for
@@ -363,15 +421,17 @@ class HubCertDistributionMixin:
             return {"status": "ERROR",
                     "message": f"cert validation failed (not written): {e}"}
 
-        # Atomic write (temp + os.replace). Key 0600, chain 0644.
-        try:
-            self._atomic_write(cert_path, fullchain, 0o644)
-            self._atomic_write(key_path, privkey, 0o600)
-        except Exception as e:
-            cert_log.warning("[cert] %s → hub: FAILED — write to %s/%s failed: %s",
-                              domain, cert_path, key_path, e)
+        # Atomic write via the loopback hub-self agent's WRITE_FILE — the SAME
+        # primitive a spoke-side cert deploy uses (agent-rework #5 / Phase 4) —
+        # with a direct inline atomic-write fallback when the hub-self agent
+        # isn't connected. Cert 0644, key 0600 (temp + os.replace either way).
+        ok_cert = await self._hub_self_write(cert_path, fullchain, 0o644)
+        ok_key = await self._hub_self_write(key_path, privkey, 0o600)
+        if not ok_cert or not ok_key:
+            cert_log.warning("[cert] %s → hub: FAILED — write to %s/%s failed "
+                              "(see cert log for detail)", domain, cert_path, key_path)
             return {"status": "ERROR",
-                    f"message": f"write to {cert_path}/{key_path} failed: {e}"}
+                    "message": f"write to {cert_path}/{key_path} failed (see cert log)"}
 
         # Also write the LE chain → the mTLS CA bundle (LM_MTLS_CA) so the hub
         # can verify spoke client certs once mTLS is enabled. The hub is the
@@ -385,28 +445,30 @@ class HubCertDistributionMixin:
         if chain and "BEGIN CERTIFICATE" in chain:
             ca_path = os.path.join(os.path.dirname(os.path.abspath(cert_path)),
                                    "mtls-ca.pem")
-            try:
-                self._atomic_write(ca_path, chain, 0o644)
-                self._register_hub_mtls_ca(ca_path)
-                ca_msg = f"; CA bundle → {ca_path}"
-                cert_log.info("[cert] %s → hub: mTLS CA bundle installed on %s",
-                              domain, ca_path)
-            except Exception as e:
-                ca_msg = f"; CA bundle write FAILED ({e})"
-                cert_log.warning("[cert] %s → hub: CA bundle write to %s failed: %s",
-                                  domain, ca_path, e)
+            if await self._hub_self_write(ca_path, chain, 0o644):
+                try:
+                    self._register_hub_mtls_ca(ca_path)
+                except Exception as e:  # noqa: BLE001
+                    ca_msg = f"; CA bundle write OK but register FAILED ({e})"
+                    cert_log.warning("[cert] %s → hub: CA register failed: %s", domain, e)
+                else:
+                    ca_msg = f"; CA bundle → {ca_path}"
+                    cert_log.info("[cert] %s → hub: mTLS CA bundle installed on %s",
+                                  domain, ca_path)
+            else:
+                ca_msg = "; CA bundle write FAILED"
+                cert_log.warning("[cert] %s → hub: CA bundle write to %s failed",
+                                 domain, ca_path)
         elif chain:
             cert_log.debug("[cert] %s → hub: chain present but not PEM — CA bundle not written", domain)
 
-        # Schedule a non-blocking self-restart so uvicorn reloads the cert (and,
-        # if mTLS is on, arms client-cert verification against the new CA — see
-        # api.build_server).
-        restart_msg = "lm.service restarting to apply"
-        try:
-            subprocess.Popen(["sudo", "-n", _LM_SELF_RESTART],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            restart_msg = f"cert written; could not schedule self-restart ({e}) — restart lm.service manually"
+        # Schedule a non-blocking self-restart via the loopback hub-self agent's
+        # RUN_COMMAND (uniformity with spoke-side cert deploys), backgrounded so
+        # the agent responds before the restart kills the hub; direct fire-and-
+        # forget subprocess.Popen fallback when the hub-self agent isn't
+        # connected. uvicorn reloads the cert (and, if mTLS is on, arms client-
+        # cert verification against the new CA — see api.build_server).
+        restart_msg = await self._hub_self_restart()
         cert_log.info("[cert] %s → hub: installed on %s — %s", domain, cert_path, restart_msg)
         return {"status": "SUCCESS", "message": f"installed to {cert_path}{ca_msg}; {restart_msg}"}
 

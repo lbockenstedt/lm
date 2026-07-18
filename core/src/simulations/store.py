@@ -422,6 +422,32 @@ class SimulationsStore:
             self._tenant(tenant_id)["adaptive_quota_state"] = dict(state) if isinstance(state, dict) else {}
             await self._asave()
 
+    # ── knob-floor learner state (config-value learner) ──────────────────────
+    # Per-tenant {quota_key: {values, floors, active, mode, last_change}} — the
+    # running state of the coordinate-descent floor search over a sim's
+    # [simulation] intensity knobs (SIM_KNOBS). Separate from adaptive_state so
+    # the count controller and the knob learner never clobber each other.
+    async def get_knob_learn_state(self, tenant_id: str) -> Dict[str, Any]:
+        v = self._data.get(tenant_id, {}).get("knob_learn_state")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_knob_learn_state(self, tenant_id: str, state: Dict[str, Any]) -> None:
+        with self._lock:
+            self._tenant(tenant_id)["knob_learn_state"] = dict(state) if isinstance(state, dict) else {}
+            await self._asave()
+
+    # ── realtime alert rules (per-tenant; the AlertEngine matches on these) ─────
+    async def get_alert_rules(self, tenant_id: str) -> List[Dict[str, Any]]:
+        """[{id, name, source, recipients:[...], enabled}] — the tenant's realtime
+        alert-routing rules (dashboard_check / vm_offline / quota_unmet /
+        spoke_offline → recipients)."""
+        return list(self._data.get(tenant_id, {}).get("alert_rules", []) or [])
+
+    async def set_alert_rules(self, tenant_id: str, rules: List[Dict[str, Any]]) -> None:
+        with self._lock:
+            self._tenant(tenant_id)["alert_rules"] = list(rules or [])
+            await self._asave()
+
     # ── shared alert/insight history (GLOBAL — all tenants + system defaults) ──
     # A single hub-wide catalog of every Central alert/insight NAME ever observed,
     # so the Sim-Quota "Alert / Insight ID" picker can offer them BEFORE they fire

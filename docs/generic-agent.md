@@ -1,8 +1,8 @@
-# generic-agent (lm/agent)
+# Agent (lm/agent)
 
 The **agent-spoke** — a spoke of the hub that, on `LOAD_ROLE`, clones a sibling repo and swaps in a real spoke class. Not a separate repo — lives under `lm/agent/`.
 
-> **The legacy `generic_agent/` leaf was removed** (commit `3ddda2c` — "delete the legacy protocol-incompatible generic_agent leaf"). It could not adopt a session key or handle the current mutual-auth protocol. Everything below describes the current **agent-spoke** (`agent/src/agent_spoke.py::GenericAgent`, a `BaseSpoke` subclass); `install_menu.sh`'s "Generic agent" path now runs `agent/install_agent.sh`, not the deleted leaf.
+> **The legacy `generic_agent/` leaf was removed** (commit `3ddda2c` — "delete the legacy protocol-incompatible generic_agent leaf"). It could not adopt a session key or handle the current mutual-auth protocol. Everything below describes the current **agent-spoke** (`agent/src/agent_spoke.py::GenericAgent`, a `BaseSpoke` subclass); `install_menu.sh`'s "Agent" path now runs `agent/install_agent.sh`, not the deleted leaf.
 
 ## Role & module_type
 
@@ -10,7 +10,7 @@ The **agent-spoke** — a spoke of the hub that, on `LOAD_ROLE`, clones a siblin
 
 ## What it does
 
-The generic agent is what you install on every managed node — one systemd unit per box
+The agent is what you install on every managed node — one systemd unit per box
 (`lm-agent`, spoke id `agent-<hostname>`). By itself it does nothing but phone the hub;
 it becomes a DNS server, a DHCP server, a NetBox sync spoke, a firewall spoke, a
 hypervisor spoke, a console server, etc. only when the hub tells it to **load a role**.

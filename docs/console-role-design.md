@@ -7,7 +7,7 @@
 ## 1. Executive summary
 The **Console** role turns any lm agent host with serial adapters (`/dev/ttyUSB*`, `/dev/ttyACM*`,
 on-board UARTs `/dev/ttyAMA*`) into a network-reachable serial console server — an lm-native
-reimagining of ConsolePi. An admin assigns the `console` role to a Generic Agent via the existing
+reimagining of ConsolePi. An admin assigns the `console` role to an Agent via the existing
 "Load Role" flow; the agent enumerates + registers its serial ports; the admin opens an interactive
 **xterm.js** terminal in the hub WebUI to a selected port, with the raw serial byte stream proxied
 over the existing hub↔spoke WebSocket transport — mirroring how lm relays VM VNC consoles today.

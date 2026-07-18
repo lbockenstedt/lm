@@ -848,6 +848,29 @@ class GenericAgent(BaseSpoke):
                                 "module_type": e["conn"].module_type}
                                for r, e in self._roles.items()]}
 
+        if cmd == "VOUCH_SUBSPOKE":
+            # Parent attestation for parent-auto-approve (H3). The hub asks this
+            # base agent — over the signed request_response channel — whether
+            # <sub_spoke_id> is one of the role sub-spokes it actually spawned
+            # and tracks. A signed yes lets the hub auto-approve + tenant-bind
+            # the child WITHOUT trusting the child's self-claimed
+            # parent_spoke_id (which is an unsigned WS-auth frame field); a no
+            # (or an unknown id) leaves the child pending admin approval. This
+            # closes the hostname-spoof sub-issue: identity is the parent's
+            # signed vouch, not the child's string claim.
+            #
+            # Read-only over the in-memory role registry, so it's safe to
+            # answer the moment the session key is pushed — the hub's vouch
+            # request can land before this agent is fully approved, and signing
+            # uses whatever current key the control plane holds. vouched=True
+            # only for a sub_spoke_id this agent spawned (RoleConnection
+            # registry keyed by sub_id = f"{base_id}-{role_name}").
+            sub_id = (data or {}).get("sub_spoke_id", "")
+            vouched = bool(sub_id) and any(
+                e["conn"].spoke_id == sub_id for e in self._roles.values())
+            return {"status": "SUCCESS",
+                    "data": {"vouched": vouched, "sub_spoke_id": sub_id}}
+
         if cmd == "LOAD_ROLE":
             role_name = data.get("role")
             if not role_name:

@@ -312,6 +312,7 @@ class _FakeRouteHub:
         self.state = type("S", (), {
             "system_state": {},
             "save_state": lambda self: None,
+            "_mark_dirty": lambda self: None,  # parity with StateManager
         })()
         self.fanned = []
         self._fan_result = fan_result or {

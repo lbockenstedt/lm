@@ -64,6 +64,15 @@ def _num(v: Any) -> str:
     return _esc(v) if v is not None else "—"
 
 
+def _html_to_text(html: str) -> str:
+    """Crude plain-text fallback for the multipart email (clients render the
+    HTML; this is the text/plain alternative)."""
+    import re as _re
+    txt = _re.sub(r"<(style|script)[^>]*>.*?</\1>", " ", html or "", flags=_re.S | _re.I)
+    txt = _re.sub(r"<[^>]+>", " ", txt).replace("&nbsp;", " ")
+    return _re.sub(r"[ \t]*\n\s*", "\n", _re.sub(r"[ \t]{2,}", " ", txt)).strip()
+
+
 async def build_report(hub, service: SimulationsService, tenant_id: str,
                        cfg: Dict[str, Any]) -> Tuple[str, str]:
     """Return (subject, html) for the tenant's report per ``cfg['sections']``."""
@@ -249,38 +258,100 @@ def _due(now: datetime.datetime, sch: Dict[str, Any]) -> bool:
 
 async def send_now(hub, tenant_id: str, cfg: Dict[str, Any]) -> None:
     """Build + send immediately (the 'Send test now' path)."""
+    import notifications as _n  # leaf, lazy — same provider-aware sender as hub alerts
     service = SimulationsService(hub)
     subject, html = await build_report(hub, service, tenant_id, cfg)
-    notif = await hub.simulations_store.get_notifications(tenant_id)
-    await asyncio.to_thread(send_report, notif, cfg.get("recipients") or [], subject, html)
+    ok = await _n.send_email(hub, subject, _html_to_text(html),
+                             to_emails=cfg.get("recipients") or [], html=html)
+    if not ok:
+        raise RuntimeError("send failed — check Setup → Notifications "
+                           "(provider enabled, From address + recipient(s) set)")
+
+
+def get_reports(hub) -> List[Dict[str, Any]]:
+    """The GLOBAL list of scheduled email reports. Each entry ``{id, name, tenant,
+    sections, recipients, schedule, enabled, last_sent}`` carries its own target
+    ``tenant`` so a Global Admin manages reports for any tenant from one list.
+    Stored in ``global_config['email_reports']``."""
+    gc = hub.state.system_state.get("global_config", {}) or {}
+    return list(gc.get("email_reports", []) or [])
+
+
+def save_reports(hub, reports: List[Dict[str, Any]]) -> None:
+    gc = hub.state.system_state.setdefault("global_config", {})
+    gc["email_reports"] = list(reports or [])
+    hub.state._mark_dirty()
+
+
+async def _migrate_legacy(hub) -> None:
+    """One-time: fold any pre-list per-tenant email_report config into the global
+    list so an existing schedule isn't lost when this ships."""
+    gc = hub.state.system_state.setdefault("global_config", {})
+    if gc.get("email_reports_migrated"):
+        return
+    store = hub.simulations_store
+    reports = get_reports(hub)
+    have = {r.get("tenant") for r in reports}
+    try:
+        for tid in store.tenant_ids():
+            old = await store.get_email_report(tid)
+            if isinstance(old, dict) and old.get("recipients") and tid not in have:
+                reports.append({
+                    "id": "legacy-" + str(tid), "name": str(tid) + " dashboard",
+                    "tenant": tid,
+                    "sections": old.get("sections") or {"checks": True, "clients": True},
+                    "recipients": old.get("recipients") or [],
+                    "schedule": old.get("schedule") or {"freq": "weekly", "dow": 0, "dom": 1, "hour": 7},
+                    "enabled": bool(old.get("enabled")),
+                    "last_sent": old.get("last_sent"),
+                })
+    except Exception:  # noqa: BLE001
+        pass
+    save_reports(hub, reports)
+    gc["email_reports_migrated"] = True
+    hub.state._mark_dirty()
 
 
 async def run_loop(hub) -> None:
-    """Fire each tenant's due report once per period. Started from main.py."""
-    store = hub.simulations_store
+    """Fire each due report in the global list once per period. Started from main.py."""
     service = SimulationsService(hub)
+    try:
+        await _migrate_legacy(hub)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("email report migration skipped: %s", exc)
     while True:
         try:
             now = datetime.datetime.now()
-            for tid in store.tenant_ids():
+            reports = get_reports(hub)
+            changed = False
+            import notifications as _n
+            for r in reports:
                 try:
-                    cfg = await store.get_email_report(tid)
-                    if not cfg or not cfg.get("enabled"):
+                    if not r.get("enabled"):
                         continue
-                    sch = cfg.get("schedule") or {}
+                    sch = r.get("schedule") or {}
                     if not _due(now, sch):
                         continue
                     period = _period_key(now, sch.get("freq", "weekly"))
-                    if cfg.get("last_sent") == period:
+                    if r.get("last_sent") == period:
                         continue
-                    subject, html = await build_report(hub, service, tid, cfg)
-                    notif = await store.get_notifications(tid)
-                    await asyncio.to_thread(send_report, notif, cfg.get("recipients") or [], subject, html)
-                    cfg["last_sent"] = period
-                    await store.set_email_report(tid, cfg)
-                    logger.info("email report delivered for tenant %s (%s)", tid, period)
-                except Exception as exc:  # noqa: BLE001 — one tenant never blocks the rest
-                    logger.warning("email report failed for tenant %s: %s", tid, exc)
+                    tid = r.get("tenant") or "default"
+                    subject, html = await build_report(hub, service, tid, r)
+                    sent = await _n.send_email(hub, subject, _html_to_text(html),
+                                               to_emails=r.get("recipients") or [], html=html)
+                    if not sent:
+                        logger.warning("email report '%s' (tenant %s) not sent "
+                                       "(notifications disabled / no From / no recipients)",
+                                       r.get("name"), tid)
+                        continue
+                    r["last_sent"] = period
+                    changed = True
+                    logger.info("email report '%s' delivered (tenant %s, %s)",
+                                r.get("name"), tid, period)
+                except Exception as exc:  # noqa: BLE001 — one report never blocks the rest
+                    logger.warning("email report '%s' failed: %s", r.get("name"), exc)
+            if changed:
+                save_reports(hub, reports)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001

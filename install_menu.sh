@@ -112,14 +112,14 @@ locate_clone() {
 }
 
 #======================================================================
-# Top-level menu: Hub vs Generic agent
+# Top-level menu: Hub vs Agent
 #======================================================================
 top_menu() {
     local choice
     echo
     echo "${C_BOLD}${C_CYAN}=== Lab Manager Installer ===${C_RESET}"
     echo "  1) ${C_BOLD}Hub${C_RESET}        — this box runs the LM hub (+ WebUI); optionally co-locate spokes"
-    echo "  2) ${C_BOLD}Generic agent${C_RESET} — leaf spoke that calls home, morphs into a role later (netbox/ldap/…)"
+    echo "  2) ${C_BOLD}Agent${C_RESET} — leaf spoke that calls home, morphs into a role later (netbox/ldap/…)"
     echo "  q) Quit"
     while true; do
         read -rp "Select [1/2/q]: " choice || choice=""
@@ -201,11 +201,11 @@ run_hub_install() {
 }
 
 #======================================================================
-# Generic path: prompt hub URL / id / secret / clone-only → install_agent.sh
+# Agent path: prompt hub URL / id / secret / clone-only → install_agent.sh
 #======================================================================
 run_generic_install() {
     echo
-    echo "${C_BOLD}${C_CYAN}--- Generic agent: connection details ---${C_RESET}"
+    echo "${C_BOLD}${C_CYAN}--- Agent: connection details ---${C_RESET}"
     echo "${C_DIM}This spoke calls home to an existing hub and is approved there, then${C_RESET}"
     echo "${C_DIM}morphs into its role (netbox/ldap/dns/…) via hub provisioning.${C_RESET}"
     echo

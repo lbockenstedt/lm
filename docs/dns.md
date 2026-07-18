@@ -16,7 +16,7 @@ In the WebUI, open a node's **DNS** module from the sidebar to reach the **Recor
 
 `python3 -m src.main` (`DNSControlPlane`); spoke `DNSSpoke(BaseSpoke)`. **No install script** in this repo.
 
-> **Primarily a role now.** DNS runs mainly as the **`dns`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dns` (module_type `dns`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Unbound host prep). There is no dedicated `lm-dns` unit — the agent role is the standard path; a hand-rolled unit is the only standalone alternative. Config (`UNBOUND_CONTROL` etc.) comes from the hub push (WebUI), not a per-module `.env`.
+> **Primarily a role now.** DNS runs mainly as the **`dns`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dns` (module_type `dns`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Unbound host prep). There is no dedicated `lm-dns` unit — the agent role is the standard path; a hand-rolled unit is the only standalone alternative. Config (`UNBOUND_CONTROL` etc.) comes from the hub push (WebUI), not a per-module `.env`.
 
 ## Ports / backends
 
@@ -55,7 +55,7 @@ Module view tabs: **Records**, **Statistics** (total-queries / cache-hit-ratio /
 
 ## How it works
 
-- **Where it runs.** Standard path: the **`dns`** role on the generic agent (unit `lm-agent`) opens a sub-spoke `{agent}-dns` (parent-auto-approved) and loads this repo in-process via `agent_spoke.py::_install_role`. Rare alternative: a hand-rolled `lm-dns` unit running `python3 -m src.main` (`DNSControlPlane`) standalone.
+- **Where it runs.** Standard path: the **`dns`** role on the agent (unit `lm-agent`) opens a sub-spoke `{agent}-dns` (parent-auto-approved) and loads this repo in-process via `agent_spoke.py::_install_role`. Rare alternative: a hand-rolled `lm-dns` unit running `python3 -m src.main` (`DNSControlPlane`) standalone.
 - **Config delivery.** The hub pushes config with `UPDATE_CONFIG` (rebuilds the `UnboundManager` with the configured conf path) — there's no per-module `.env` to hand-edit on the box; `UNBOUND_CONF` env var is only the fallback default before a push arrives.
 - **Command flow.** WebUI/hub issues one command at a time over the hub↔spoke session: `GET_VERSION`, `UPDATE_CONFIG`, `DNS_STATUS`, `DNS_LIST`, `DNS_ADD`, `DNS_DELETE`, `DNS_UPDATE`, `DNS_SYNC`, `DNS_STATS`, `DNS_FORWARDERS`.
 - **How records are actually written.** `UnboundManager` keeps exactly **one** managed conf.d file (default `/etc/unbound/conf.d/lm-netbox.conf`, overridable). Every add/update/delete/sync:

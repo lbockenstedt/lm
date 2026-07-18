@@ -7,6 +7,7 @@ import secrets
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import List
 
@@ -25,6 +26,29 @@ from typing import List
 _LM_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 if _LM_ROOT not in sys.path:
     sys.path.insert(0, _LM_ROOT)
+
+# Runtime dep self-heal BEFORE the heavy core import below. The agent entry
+# imports core.src.messaging.control_plane (→ frame_crypto → cryptography); if a
+# transitive core dep is missing, that import crashes HERE and systemd
+# restart-loops the unit BEFORE any later dep_guard could run (the spoke_client
+# guard only fires once a connection is up — unreachable while the entry import
+# fails). Ensure BOTH the agent's and core's requirements.txt here so a missing
+# dep (e.g. cryptography after the frame_crypto change) self-installs into the
+# venv (sys.executable) on the next restart instead of crash-looping. dep_guard
+# is stdlib-only and core has no heavy __init__, so importing it here is safe
+# even when every third-party dep is absent. Best-effort: never raise — a pip
+# failure surfaces as the real ImportError below, which Restart=always retries.
+try:
+    from core.src.dep_guard import ensure_requirements as _ensure_requirements
+    _agent_req = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "requirements.txt")
+    _ensure_requirements(_agent_req)
+    _core_req = os.path.join(_LM_ROOT, "core", "requirements.txt")
+    if os.path.isfile(_core_req):
+        _ensure_requirements(_core_req)
+    del _ensure_requirements, _agent_req, _core_req
+except Exception:  # noqa: BLE001
+    pass
 
 try:
     from core.src.messaging.control_plane import BaseControlPlane
@@ -97,11 +121,14 @@ class RoleConnection(AgentHostingControlPlane):
         hub can auto-approve this sub-spoke via the (already-approved) parent
         agent and bind it to the parent's tenant (see hub ``handle_connection``
         parent-auto-approve + ``_auto_approve_pending_subspokes``).
-      * **No ``install_uuid``** is sent. The hub's clone-and-rename reconciler
-        maps one install UUID → one spoke id (``install_uuid_index``); a
-        same-box sub-spoke sharing the base's UUID would be treated as a rename
-        of the base and clobber it. Clearing ``install_uuid`` skips correlation
-        — the sub-spoke is identified by its spoke_id + parent claim instead.
+      * A per-role ``install_uuid`` is derived as
+        ``uuid5(base_install_uuid, "role:{role}")`` — deterministic (same
+        base+role → same guid every boot), distinct per role, and distinct from
+        the base agent's own uuid4, so the hub's clone-and-rename reconciler
+        (``install_uuid_index``) no longer sees a sub-spoke as a rename of the
+        base. The base's uuid4 is retained as ``parent_install_uuid`` for
+        future parent linkage. Falls back to ``""`` (legacy no-correlation) if
+        the base uuid is unset.
 
     Secrets: a ``RoleConnection`` starts zero-touch (no secret) and is
     re-provisioned by the hub on every boot via parent-auto-approve
@@ -128,8 +155,20 @@ class RoleConnection(AgentHostingControlPlane):
         # _agent_listener_enabled + run); other roles never bind, so those
         # dicts stay empty — any role module reading them gets a clean empty
         # result.
-        # Sub-spokes must NOT carry the base's install UUID (see class docstring).
-        self.install_uuid = ""
+        # Derive a per-role guid from the base's install UUID (uuid5) instead of
+        # carrying the base's own uuid4 — see class docstring. The base uuid is
+        # retained for parent linkage (Phase 2). Falls back to "" (legacy) if
+        # the base uuid is unset/unparseable.
+        base_iu = self.install_uuid  # set by BaseControlPlane.__init__ from .env
+        self.parent_install_uuid = base_iu or ""
+        if base_iu:
+            try:
+                self.install_uuid = str(
+                    uuid.uuid5(uuid.UUID(base_iu), f"role:{self.role_name}"))
+            except (ValueError, TypeError, AttributeError):
+                self.install_uuid = ""
+        else:
+            self.install_uuid = ""
         # Suppress the one-time "Hub secrets not configured" warning per role —
         # sub-spokes intentionally run zero-touch and re-provision via the parent.
         self._hub_secret_warned = True

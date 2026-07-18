@@ -96,6 +96,12 @@ class _ConnHub:
         # updates it every authenticated frame; a half-open (dead-peer) socket
         # stops receiving frames so it goes stale.
         self.heartbeat = type("HB", (), {"last_seen": {}})()
+        # Phase 2: _install_active_connection resolves state keys via
+        # _primary_key. Alias empty -> returns spoke_id (pre-2b2-trigger).
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def record_spoke_event(self, spoke_id, event_type, detail=""):
         self.events.append((spoke_id, event_type, detail))

@@ -128,7 +128,7 @@ class _MiniState:
         self.saved += 1
 
     def _mark_dirty(self):  # parity with StateManager dirty-flag persistence
-        pass
+        self.saved += 1     # counted as a persist request (60s loop flushes)
 
     async def save_state_now(self):
         self.save_state()
@@ -159,7 +159,7 @@ def test_migrate_rekeys_hostname_entry_to_agent_id_and_persists():
     assert "cs-svr-02" not in store                      # old key removed
     assert store["pxmx-cs-svr-02-agent"]["display_name"] == "cs"
     assert store["pxmx-cs-svr-02-agent"]["client_simulation"]["enabled"] is True
-    assert hub.state.saved == 1                          # persisted
+    assert hub.state.saved == 1                          # persist requested (dirty-flagged)
 
 
 def test_migrate_keeps_operator_enable_but_preserves_existing_usb_config():

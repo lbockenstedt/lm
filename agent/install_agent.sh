@@ -293,6 +293,16 @@ cd "$INSTALL_DIR/agent"
 python3 -m venv venv
 ./venv/bin/pip install --upgrade pip -q
 [[ -f requirements.txt ]] && ./venv/bin/pip install -r requirements.txt -q
+# The agent imports /opt/lm/core (BaseControlPlane, frame_crypto, dep_guard, …),
+# so the agent venv needs core's deps too — NOT just agent/requirements.txt
+# (requests, websockets). A core change that adds an import (e.g. frame_crypto →
+# cryptography) otherwise crashes the agent on the next venv reinstall because
+# the runtime dep_guard only reads the agent's own requirements.txt. Install
+# core/requirements.txt here so a fresh agent venv has every transitive core dep.
+# (The optional azure SDK lines in core/requirements.txt are commented out, so
+# this pulls only the runtime deps — no heavy azure SDK onto every agent.)
+[[ -f "$INSTALL_DIR/core/requirements.txt" ]] && \
+    ./venv/bin/pip install -r "$INSTALL_DIR/core/requirements.txt" -q
 
 # Stage each startup role's code + Python deps + system packages.
 #   - in-repo roles (dns, dhcp) ship inside the lm clone already.

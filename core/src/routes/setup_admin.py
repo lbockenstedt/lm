@@ -5,6 +5,61 @@ from api import (
 )
 from update_pipeline import _version_behind
 
+# ── /setup/diagnostics cache (stale-while-revalidate) ───────────────────────
+# The Diagnostics card + the Spokes & Agents page poll /setup/diagnostics on
+# every load/tick; the handler gathers system metrics + the local version, then
+# per-spoke iterates events/log_events/heartbeat/recovery/version. Mirror the
+# /api/pxmx/agents SWR cache (routes/pxmx.py): instant serve from a fresh
+# cache, one background refresh at the fresh-TTL boundary, a forced refresh
+# only when there's no servable cache. One hub per process → module-level.
+_DIAG_CACHE: dict = {"data": None, "ts": 0.0, "refreshing": False}
+_DIAG_FRESH_S = 5.0    # serve cached payload verbatim while younger than this
+_DIAG_STALE_S = 30.0   # still servable (background refresh kicks in here)
+# Per-loop lock (verbatim mirror of pxmx._agents_lock — see there for why a
+# module-level asyncio.Lock() breaks across asyncio.run()/loop recreation).
+_diag_locks: dict = {}
+
+
+def _diag_lock() -> "asyncio.Lock":
+    loop = asyncio.get_running_loop()
+    lk = _diag_locks.get(id(loop))
+    if lk is None:
+        lk = asyncio.Lock()
+        _diag_locks[id(loop)] = lk
+    return lk
+
+
+async def _maybe_refresh_diagnostics(hub, force=False):
+    """Under ``_diag_lock``: serve the cached payload if fresh (unless
+    ``force``); otherwise recompute via ``_aggregate_diagnostics`` and store.
+    Serializes concurrent first-loaders into a single recompute. Returns the
+    served payload (fresh, recomputed, or stale-on-failure). Mirrors
+    pxmx._maybe_refresh_agents; ``force`` does not bypass a genuinely-fresh
+    result (a concurrent refresh while this one waited is served as-is)."""
+    async with _diag_lock():
+        cached = _DIAG_CACHE["data"]
+        age = (time.time() - _DIAG_CACHE["ts"]) if cached is not None else None
+        if cached is not None and age is not None and age < _DIAG_FRESH_S:
+            return cached
+        _DIAG_CACHE["refreshing"] = True
+        try:
+            result = await _aggregate_diagnostics(hub)
+            _DIAG_CACHE["data"] = result
+            _DIAG_CACHE["ts"] = time.time()
+            return result
+        except Exception:
+            logger.exception("diagnostics cache refresh failed")
+            return cached  # serve stale rather than blanking the card
+        finally:
+            _DIAG_CACHE["refreshing"] = False
+
+
+def _bust_diag_cache():
+    """Mark the diagnostics cache unservable so the next GET forced-refreshes.
+    Called from setup mutation endpoints (approve/revoke/delete/purge/ack/
+    metadata rename) so an admin action is reflected immediately."""
+    _DIAG_CACHE["ts"] = 0.0
+
 
 async def _compute_mtls_readiness(hub) -> dict:
     """Delegate to ``hub.mtls_readiness()`` (HubCertDistributionMixin) so the
@@ -13,6 +68,203 @@ async def _compute_mtls_readiness(hub) -> dict:
     offline spokes don't block, ready = hub CA + server cert + every connected
     primary spoke has materials)."""
     return await hub.mtls_readiness()
+
+async def _aggregate_diagnostics(hub):
+    """Per-spoke + hub diagnostic snapshot (compute fn for the
+    /setup/diagnostics SWR cache). Assembles, for each known
+    spoke: connection status, heartbeat age + RED flag, watchdog/
+    recovery state, flapping detection, version skew vs the hub,
+    and CS telemetry presence; plus hub-side metrics. Module-level
+    (not a route closure) so it depends only on ``hub`` and is
+    unit-testable with a stub hub. Includes the leaked relay-agent
+    self-heal (run on every fresh recompute so stale serves inherit
+    a cleaned state)."""
+    metrics = await hub.get_system_metrics()
+    diagnostics = []
+    known_spokes = hub.state.system_state.get("known_modules", [])
+
+    # Resolved up-front so per-spoke version_skew can be computed in the loop.
+    hub_version = await hub.get_local_version()
+    now = time.time()
+
+    # version_skew now means "not on the per-repo .NN numbering" — see the
+    # per-spoke comment in the loop. Each repo's .NN is an independent
+    # counter, so a spoke .NN ≠ hub .NN is normal; this flags only stale
+    # X.Y.Z / v-tag / pre-reset values.
+    import re as _re
+    def _is_nn(v) -> bool:
+        return bool(_re.match(r"^\.\d+$", str(v).strip()))
+
+    # Relayed node agents (pxmx) connect THROUGH their hypervisor spoke, not
+    # directly to the hub, so the hub has no WebSocket for the bare agent
+    # id. The old approve flow leaked agent ids into known_modules /
+    # approved_modules; a leaked id renders here as a bogus OFFLINE spoke
+    # row (the footer module-status then shows it offline while the
+    # Diagnostics → Agents table — fed by /api/pxmx/agents — shows it
+    # online), AND the recovery watchdog would resolve the leaked id to the
+    # parent spoke's unit (pxmx-cs-svr-02 -> lm-pxmx) and restart a healthy
+    # pxmx spoke every cycle. Identify relayed agent ids from the composite
+    # heartbeat keys ("{spoke}:{agent}") plus the agent_config registry, skip
+    # them below, and self-heal the persisted registries so the watchdog
+    # stops considering them. Mirrors the client-side filter in
+    # loadDiagnostics (WebUI/main.js).
+    agent_cfg_keys = set((hub.state.system_state.get("agent_config", {}) or {}).keys())
+    relay_ids = {k.split(":", 1)[1] for k in hub.heartbeat.last_seen if ":" in k}
+    relay_ids |= agent_cfg_keys
+    if relay_ids:
+        known = list(hub.state.system_state.get("known_modules", []))
+        leaked = [m for m in known if m in relay_ids]
+        if leaked:
+            cleaned = [m for m in known if m not in relay_ids]
+            hub.state.system_state["known_modules"] = cleaned
+            hub.known_modules = cleaned
+            for aid in leaked:
+                hub.approved_modules.pop(aid, None)
+            hub.state._mark_dirty()
+            logger.info("[diag] removed leaked relay-agent id(s) from "
+                        "known_modules/approved_modules: %s", leaked)
+
+    for sid in known_spokes:
+        if sid in relay_ids:
+            continue  # relayed node agent — surfaced via /api/pxmx/agents, not here
+        ws = hub.active_connections.get(hub._primary_key(sid))
+        telemetry = hub.spoke_telemetry.get(hub._primary_key(sid), {})
+        events = hub.get_spoke_events(sid, limit=50)
+        log_events = hub.get_spoke_log_events(sid, limit=30)
+
+        # Flapping detector: count connect/close cycles in the last 5 min.
+        # A "flap" is a connection_closed / connection_error / auth_failed
+        # event — i.e. the spoke reached the hub then dropped. Many of
+        # these in a short window with intervening auth_attempt/connected
+        # events is the flapping signature (spoke process is alive and
+        # retrying, but never holds the connection).
+        recent = [e for e in events if now - e["ts"] <= 300]
+        flap_drops = sum(1 for e in recent if e["event"] in
+                         ("connection_closed", "connection_error",
+                          "auth_failed", "mutual_auth_failed", "mutual_auth_timeout"))
+        flapping = flap_drops >= 3
+
+        # Heartbeat age: seconds since the last inbound heartbeat frame, or
+        # None if the spoke has never heartbeated. get_status() already
+        # classifies GREEN/YELLOW/RED from this; surfacing the raw age lets
+        # the UI show "last seen 312s ago" rather than just a colored dot.
+        last_seen = hub.heartbeat.last_seen.get(sid)
+        heartbeat_age_s = None
+        if isinstance(last_seen, (int, float)):
+            heartbeat_age_s = max(0, int(now - last_seen))
+
+        # Watchdog recovery state (run_spoke_recovery_loop). Empty dict when
+        # the spoke has never been stranded/recovered. The WebUI renders a
+        # badge + attempt counter + last action/error from this; bugfixer
+        # also reads it via GET_SPOKE_STATUS to suppress/escalate.
+        rec = hub.spoke_recovery.get(hub._primary_key(sid), {}) or {}
+
+        # Out-of-contact alert (SpokeAlertMixin) — separate from the realtime
+        # heartbeat_status traffic-light above. tier is "warning" (>=5 min out
+        # of contact) or "error" (>=30 min); absent when the spoke is in
+        # contact. Drives the diagnostics badge.
+        alert = (getattr(hub, "_spoke_alerts", {}) or {}).get(sid, {}) or {}
+
+        spoke_version = hub.spoke_versions.get(hub._primary_key(sid), "unknown")
+        # version_skew: True when a connected spoke reports a version that
+        # is NOT in the new per-repo ".NN" numbering (e.g. a stale X.Y.Z /
+        # v-tag / pre-reset value). Each repo has an INDEPENDENT .NN
+        # counter, so a spoke's .NN differing from the hub's .NN is normal
+        # and NOT a mismatch — the flag now points at un-migrated
+        # components. "unknown" / disconnected spokes are not skewed (we
+        # just don't know). _is_nn is defined up-front above the loop.
+        version_skew = (
+            spoke_version not in ("unknown", None, "")
+            and not _is_nn(spoke_version)
+        )
+
+        # version_behind: a GENUINE "this spoke is older than the latest
+        # build of ITS OWN repo" signal. Each repo has an INDEPENDENT .NN
+        # counter, so this compares the spoke's .NN to the latest .NN the hub
+        # can resolve LOCALLY for the repo backing this module_type (the lm
+        # repo for dns/dhcp/console/agent; a sibling checkout for the rest).
+        # latest_version is None when the hub can't determine it (unknown
+        # module_type or no local checkout) → version_behind stays False so
+        # we NEVER false-positive. This is orthogonal to version_skew, which
+        # flags a stale non-.NN reported version. Both mean "out of date".
+        module_type = hub.spoke_module_types.get(hub._primary_key(sid), "")
+        latest_version = hub.latest_version_for_module(module_type)
+        version_behind = _version_behind(spoke_version, latest_version)
+
+        diagnostics.append({
+            "spoke_id": sid,
+            "display_name": hub.state.get_module_name(sid),
+            "authenticated": hub._primary_key(sid) in hub.active_connections,
+            # Grace-based display status: connected now OR seen within the
+            # grace window. The WebUI header dots use this so a transient
+            # stall / brief reconnect doesn't flip a module offline.
+            "in_contact": hub.is_spoke_in_contact(sid),
+            "approved": hub.approved_modules.get(hub._primary_key(sid), False),
+            "heartbeat_status": hub.heartbeat.get_status(sid),
+            "heartbeat_age_s": heartbeat_age_s,
+            # Forgiving out-of-contact alert (separate from heartbeat_status):
+            # warning >=5 min, error >=30 min. None when in contact.
+            "alert_tier": alert.get("tier"),
+            "alert_since": alert.get("since_ts"),
+            "alert_duration_s": int(alert.get("duration_s", 0) or 0) if alert else 0,
+            "connection_state": ws.state if ws else "OFFLINE",
+            "version": spoke_version,
+            "version_skew": version_skew,
+            "version_behind": version_behind,
+            "latest_version": latest_version,
+            "hub_version": hub_version,
+            "last_attempt": telemetry.get("last_attempt"),
+            "last_status": telemetry.get("status", "UNKNOWN"),
+            "last_error": telemetry.get("error"),
+            "flapping": flapping,
+            "recent_drops": flap_drops,
+            "events": events,
+            "log_events": log_events,
+            "cpu_util": telemetry.get("cpu_util"),
+            "mem_util": telemetry.get("mem_util"),
+            # Watchdog recovery (see run_spoke_recovery_loop). in_progress =
+            # hub is actively restarting the unit (backoff); gave_up = a
+            # restart structurally can't fix it (e.g. venv missing) and
+            # bugfixer has/will be handed off; manual_pause = admin paused.
+            "recovery": {
+                "attempts": rec.get("attempts", 0),
+                "in_progress": bool(rec.get("in_progress", False)),
+                "gave_up": bool(rec.get("gave_up", False)),
+                "manual_pause": bool(rec.get("manual_pause", False)),
+                "last_action": rec.get("last_action", ""),
+                "last_error": rec.get("last_error", ""),
+                "last_crash_sig": rec.get("last_crash_sig", ""),
+                "next_retry_ts": rec.get("next_retry_ts", 0),
+                "last_attempt_ts": rec.get("last_attempt_ts", 0),
+            },
+            # Client-Sim combined spoke: module type, tenant binding, and
+            # whether the latest CS_TELEMETRY frame is cached.
+            "module_type": module_type,
+            "tenant_id": hub.state.get_spoke_tenant(sid),
+            "cs_telemetry_cached": sid in hub.simulations_cache,
+            "cs_telemetry_ts": (hub.simulations_cache.get(sid, {}) or {}).get("timestamp"),
+        })
+
+    webui_version = "unknown"
+    try:
+        # The WebUI lives at lm/WebUI (not lm/ui). Resolve from core/src →
+        # lm/WebUI/VERSION; the autobump bumps this in lockstep with the
+        # other lm VERSION files so "WebUI .NN" tracks the hub's .NN.
+        version_path = os.path.join(os.path.dirname(__file__), "../../WebUI/VERSION")
+        if not os.path.exists(version_path):
+            version_path = os.path.join(os.path.dirname(__file__), "../../../GitHub/webui/VERSION")
+        with open(version_path, "r") as f:
+            webui_version = f.read().strip()
+    except Exception:
+        pass
+
+    return {
+        "spokes": diagnostics,
+        "hub_version": hub_version,
+        "webui_version": webui_version,
+        "system": metrics
+    }
+
 
 
 def register(app, hub, ctx):
@@ -478,7 +730,7 @@ def register(app, hub, ctx):
     @app.get("/setup/api-probe")
     async def probe_spoke_api(spoke_id: str, path: str):
         hub = app.state.hub
-        if spoke_id not in hub.active_connections:
+        if hub._primary_key(spoke_id) not in hub.active_connections:
             raise HTTPException(status_code=503, detail=f"Spoke {spoke_id} not connected")
 
         try:
@@ -492,201 +744,30 @@ def register(app, hub, ctx):
     # ── Diagnostics + bug-report (/setup/diagnostics, /api/bug-report/*) ───────
     @app.get("/setup/diagnostics")
     async def get_diagnostics():
-        """Per-spoke + hub diagnostic snapshot for the WebUI Diagnostics card.
-
-        Assembles, for each known spoke: connection status, heartbeat age + RED
-        flag, watchdog/recovery state, flapping detection, version skew vs the
-        hub, and CS telemetry presence; plus hub-side metrics. Consumer: the
-        WebUI Diagnostics view (``loadDiagnostics`` in ``WebUI/main.js``).
-        Read-only aggregate — does NOT mutate state or send to spokes. The
-        heartbeat 300s RED threshold is load-bearing for the watchdog (see
-        ``messaging/heartbeat.py`` and ``main.py`` ``run_spoke_recovery_loop``)."""
+        """Per-spoke + hub diagnostic snapshot for the WebUI Diagnostics
+        card. Serves a stale-while-revalidate cache (``_DIAG_CACHE``):
+        fresh within ``_DIAG_FRESH_S`` (instant serve), servable-stale
+        until ``_DIAG_STALE_S`` (instant serve + one background refresh),
+        and a forced refresh only when there is no servable cache. The
+        compute (``_aggregate_diagnostics``) runs the leaked relay-agent
+        self-heal on every fresh recompute."""
         hub = app.state.hub
-        metrics = await hub.get_system_metrics()
-        diagnostics = []
-        known_spokes = hub.state.system_state.get("known_modules", [])
 
-        # Resolved up-front so per-spoke version_skew can be computed in the loop.
-        hub_version = await hub.get_local_version()
-        now = time.time()
+        cached = _DIAG_CACHE["data"]
+        age = (time.time() - _DIAG_CACHE["ts"]) if cached is not None else None
 
-        # version_skew now means "not on the per-repo .NN numbering" — see the
-        # per-spoke comment in the loop. Each repo's .NN is an independent
-        # counter, so a spoke .NN ≠ hub .NN is normal; this flags only stale
-        # X.Y.Z / v-tag / pre-reset values.
-        import re as _re
-        def _is_nn(v) -> bool:
-            return bool(_re.match(r"^\.\d+$", str(v).strip()))
+        # Inside the stale window → serve instantly; past fresh-TTL,
+        # kick ONE background refresh (the ``not refreshing`` guard
+        # avoids a pile-up).
+        if cached is not None and age is not None and age < _DIAG_STALE_S:
+            if age >= _DIAG_FRESH_S and not _DIAG_CACHE["refreshing"]:
+                asyncio.create_task(_maybe_refresh_diagnostics(hub))
+            return cached
 
-        # Relayed node agents (pxmx) connect THROUGH their hypervisor spoke, not
-        # directly to the hub, so the hub has no WebSocket for the bare agent
-        # id. The old approve flow leaked agent ids into known_modules /
-        # approved_modules; a leaked id renders here as a bogus OFFLINE spoke
-        # row (the footer module-status then shows it offline while the
-        # Diagnostics → Agents table — fed by /api/pxmx/agents — shows it
-        # online), AND the recovery watchdog would resolve the leaked id to the
-        # parent spoke's unit (pxmx-cs-svr-02 -> lm-pxmx) and restart a healthy
-        # pxmx spoke every cycle. Identify relayed agent ids from the composite
-        # heartbeat keys ("{spoke}:{agent}") plus the agent_config registry, skip
-        # them below, and self-heal the persisted registries so the watchdog
-        # stops considering them. Mirrors the client-side filter in
-        # loadDiagnostics (WebUI/main.js).
-        agent_cfg_keys = set((hub.state.system_state.get("agent_config", {}) or {}).keys())
-        relay_ids = {k.split(":", 1)[1] for k in hub.heartbeat.last_seen if ":" in k}
-        relay_ids |= agent_cfg_keys
-        if relay_ids:
-            known = list(hub.state.system_state.get("known_modules", []))
-            leaked = [m for m in known if m in relay_ids]
-            if leaked:
-                cleaned = [m for m in known if m not in relay_ids]
-                hub.state.system_state["known_modules"] = cleaned
-                hub.known_modules = cleaned
-                for aid in leaked:
-                    hub.approved_modules.pop(aid, None)
-                hub.state._mark_dirty()
-                logger.info("[diag] removed leaked relay-agent id(s) from "
-                            "known_modules/approved_modules: %s", leaked)
-
-        for sid in known_spokes:
-            if sid in relay_ids:
-                continue  # relayed node agent — surfaced via /api/pxmx/agents, not here
-            ws = hub.active_connections.get(sid)
-            telemetry = hub.spoke_telemetry.get(sid, {})
-            events = hub.get_spoke_events(sid, limit=50)
-            log_events = hub.get_spoke_log_events(sid, limit=30)
-
-            # Flapping detector: count connect/close cycles in the last 5 min.
-            # A "flap" is a connection_closed / connection_error / auth_failed
-            # event — i.e. the spoke reached the hub then dropped. Many of
-            # these in a short window with intervening auth_attempt/connected
-            # events is the flapping signature (spoke process is alive and
-            # retrying, but never holds the connection).
-            recent = [e for e in events if now - e["ts"] <= 300]
-            flap_drops = sum(1 for e in recent if e["event"] in
-                             ("connection_closed", "connection_error",
-                              "auth_failed", "mutual_auth_failed", "mutual_auth_timeout"))
-            flapping = flap_drops >= 3
-
-            # Heartbeat age: seconds since the last inbound heartbeat frame, or
-            # None if the spoke has never heartbeated. get_status() already
-            # classifies GREEN/YELLOW/RED from this; surfacing the raw age lets
-            # the UI show "last seen 312s ago" rather than just a colored dot.
-            last_seen = hub.heartbeat.last_seen.get(sid)
-            heartbeat_age_s = None
-            if isinstance(last_seen, (int, float)):
-                heartbeat_age_s = max(0, int(now - last_seen))
-
-            # Watchdog recovery state (run_spoke_recovery_loop). Empty dict when
-            # the spoke has never been stranded/recovered. The WebUI renders a
-            # badge + attempt counter + last action/error from this; bugfixer
-            # also reads it via GET_SPOKE_STATUS to suppress/escalate.
-            rec = hub.spoke_recovery.get(sid, {}) or {}
-
-            # Out-of-contact alert (SpokeAlertMixin) — separate from the realtime
-            # heartbeat_status traffic-light above. tier is "warning" (>=5 min out
-            # of contact) or "error" (>=30 min); absent when the spoke is in
-            # contact. Drives the diagnostics badge.
-            alert = (getattr(hub, "_spoke_alerts", {}) or {}).get(sid, {}) or {}
-
-            spoke_version = hub.spoke_versions.get(sid, "unknown")
-            # version_skew: True when a connected spoke reports a version that
-            # is NOT in the new per-repo ".NN" numbering (e.g. a stale X.Y.Z /
-            # v-tag / pre-reset value). Each repo has an INDEPENDENT .NN
-            # counter, so a spoke's .NN differing from the hub's .NN is normal
-            # and NOT a mismatch — the flag now points at un-migrated
-            # components. "unknown" / disconnected spokes are not skewed (we
-            # just don't know). _is_nn is defined up-front above the loop.
-            version_skew = (
-                spoke_version not in ("unknown", None, "")
-                and not _is_nn(spoke_version)
-            )
-
-            # version_behind: a GENUINE "this spoke is older than the latest
-            # build of ITS OWN repo" signal. Each repo has an INDEPENDENT .NN
-            # counter, so this compares the spoke's .NN to the latest .NN the hub
-            # can resolve LOCALLY for the repo backing this module_type (the lm
-            # repo for dns/dhcp/console/agent; a sibling checkout for the rest).
-            # latest_version is None when the hub can't determine it (unknown
-            # module_type or no local checkout) → version_behind stays False so
-            # we NEVER false-positive. This is orthogonal to version_skew, which
-            # flags a stale non-.NN reported version. Both mean "out of date".
-            module_type = hub.spoke_module_types.get(sid, "")
-            latest_version = hub.latest_version_for_module(module_type)
-            version_behind = _version_behind(spoke_version, latest_version)
-
-            diagnostics.append({
-                "spoke_id": sid,
-                "display_name": hub.state.get_module_name(sid),
-                "authenticated": sid in hub.active_connections,
-                # Grace-based display status: connected now OR seen within the
-                # grace window. The WebUI header dots use this so a transient
-                # stall / brief reconnect doesn't flip a module offline.
-                "in_contact": hub.is_spoke_in_contact(sid),
-                "approved": hub.approved_modules.get(sid, False),
-                "heartbeat_status": hub.heartbeat.get_status(sid),
-                "heartbeat_age_s": heartbeat_age_s,
-                # Forgiving out-of-contact alert (separate from heartbeat_status):
-                # warning >=5 min, error >=30 min. None when in contact.
-                "alert_tier": alert.get("tier"),
-                "alert_since": alert.get("since_ts"),
-                "alert_duration_s": int(alert.get("duration_s", 0) or 0) if alert else 0,
-                "connection_state": ws.state if ws else "OFFLINE",
-                "version": spoke_version,
-                "version_skew": version_skew,
-                "version_behind": version_behind,
-                "latest_version": latest_version,
-                "hub_version": hub_version,
-                "last_attempt": telemetry.get("last_attempt"),
-                "last_status": telemetry.get("status", "UNKNOWN"),
-                "last_error": telemetry.get("error"),
-                "flapping": flapping,
-                "recent_drops": flap_drops,
-                "events": events,
-                "log_events": log_events,
-                "cpu_util": telemetry.get("cpu_util"),
-                "mem_util": telemetry.get("mem_util"),
-                # Watchdog recovery (see run_spoke_recovery_loop). in_progress =
-                # hub is actively restarting the unit (backoff); gave_up = a
-                # restart structurally can't fix it (e.g. venv missing) and
-                # bugfixer has/will be handed off; manual_pause = admin paused.
-                "recovery": {
-                    "attempts": rec.get("attempts", 0),
-                    "in_progress": bool(rec.get("in_progress", False)),
-                    "gave_up": bool(rec.get("gave_up", False)),
-                    "manual_pause": bool(rec.get("manual_pause", False)),
-                    "last_action": rec.get("last_action", ""),
-                    "last_error": rec.get("last_error", ""),
-                    "last_crash_sig": rec.get("last_crash_sig", ""),
-                    "next_retry_ts": rec.get("next_retry_ts", 0),
-                    "last_attempt_ts": rec.get("last_attempt_ts", 0),
-                },
-                # Client-Sim combined spoke: module type, tenant binding, and
-                # whether the latest CS_TELEMETRY frame is cached.
-                "module_type": module_type,
-                "tenant_id": hub.state.get_spoke_tenant(sid),
-                "cs_telemetry_cached": sid in hub.simulations_cache,
-                "cs_telemetry_ts": (hub.simulations_cache.get(sid, {}) or {}).get("timestamp"),
-            })
-
-        webui_version = "unknown"
-        try:
-            # The WebUI lives at lm/WebUI (not lm/ui). Resolve from core/src →
-            # lm/WebUI/VERSION; the autobump bumps this in lockstep with the
-            # other lm VERSION files so "WebUI .NN" tracks the hub's .NN.
-            version_path = os.path.join(os.path.dirname(__file__), "../../WebUI/VERSION")
-            if not os.path.exists(version_path):
-                version_path = os.path.join(os.path.dirname(__file__), "../../../GitHub/webui/VERSION")
-            with open(version_path, "r") as f:
-                webui_version = f.read().strip()
-        except Exception:
-            pass
-
-        return {
-            "spokes": diagnostics,
-            "hub_version": hub_version,
-            "webui_version": webui_version,
-            "system": metrics
-        }
+        # No servable cache → forced refresh. The lock serializes
+        # concurrent first-loaders into a single recompute.
+        result = await _maybe_refresh_diagnostics(hub, force=True)
+        return result or {"spokes": [], "hub_version": "", "webui_version": "unknown", "system": {}}
 
     @app.post("/setup/spoke/{spoke_id}/recovery")
     async def set_spoke_recovery_pause(spoke_id: str, request: Request):
@@ -705,7 +786,7 @@ def register(app, hub, ctx):
             data = {}
         pause = bool(data.get("pause", False))
 
-        st = hub.spoke_recovery.setdefault(spoke_id, {"attempts": 0})
+        st = hub.spoke_recovery.setdefault(hub._primary_key(spoke_id), {"attempts": 0})
         if pause:
             st["manual_pause"] = True
             st["in_progress"] = False
@@ -722,6 +803,7 @@ def register(app, hub, ctx):
             action, event = "resumed", "recovery_resumed"
             hub.record_spoke_event(spoke_id, "recovery_resumed", "manual pause cleared via WebUI")
             logger.info(f"[recovery] spoke_id={spoke_id} action=resumed reason=manual_override")
+        _bust_diag_cache()
         return {"status": "ok", "spoke_id": spoke_id, "paused": pause}
 
     @app.post("/api/bug-report")
