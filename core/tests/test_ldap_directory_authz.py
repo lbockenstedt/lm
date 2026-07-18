@@ -111,3 +111,31 @@ def test_group_mapping_unmatched_membership_maps_to_nothing():
     hub = _hub_with_groups()
     assert access.groups_for_ldap_membership(hub, ["cn=unknown,dc=x"]) == []
     assert access.groups_for_ldap_membership(hub, []) == []
+
+
+# ── LDAPAuthProvider.get_user_groups: raw membership → hub permission groups ──
+
+def test_provider_maps_directory_groups_to_permission_groups(monkeypatch):
+    import security.auth_manager as am
+    hub = _hub_with_groups()
+    prov = am.LDAPAuthProvider({"server": "ldap://x", "hub": hub})
+    # Stand in for the spoke relay: return raw directory groups (case differs).
+    monkeypatch.setattr(prov, "get_directory_groups",
+                        lambda uid, tenant_slug=None: ["CN=NetEng,OU=LRB,DC=X"])
+    assert prov.get_user_groups("alice") == ["grp-net"]
+
+
+def test_provider_no_hub_returns_empty():
+    import security.auth_manager as am
+    prov = am.LDAPAuthProvider({"server": "ldap://x"})  # no hub
+    assert prov.hub is None
+    assert prov.get_user_groups("bob") == []
+    assert prov.get_directory_groups("bob") == []
+
+
+def test_provider_no_directory_spoke_degrades_gracefully():
+    import security.auth_manager as am
+    hub = _hub_with_groups()  # FakeHub.get_spoke_by_type → None
+    prov = am.LDAPAuthProvider({"server": "ldap://x", "hub": hub})
+    assert prov.get_directory_groups("carol") == []
+    assert prov.get_user_groups("carol") == []

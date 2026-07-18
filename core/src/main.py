@@ -313,8 +313,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.key_manager = KeyManager()
         self.state = StateManager()
 
-        # Initialize Auth with LDAP
-        self.auth = AuthManager(LDAPAuthProvider({"server": "ldap://localhost"}))
+        # Initialize Auth with LDAP. Pass ``hub=self`` so the provider can relay
+        # LDAP_GET_USER_GROUPS to the directory spoke and map a directory user's
+        # membership onto hub permission groups (access.groups_for_ldap_membership,
+        # the same mapping the Entra OIDC callback uses).
+        self.auth = AuthManager(LDAPAuthProvider({"server": "ldap://localhost", "hub": self}))
 
         # State is now managed via StateManager methods
         self.approved_modules = self.state.get_approved_modules()
