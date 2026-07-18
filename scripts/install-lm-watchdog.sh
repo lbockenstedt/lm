@@ -54,6 +54,51 @@ hub_healthy(){
   return 1
 }
 
+# ── Update safety gate (blast-radius control) ───────────────────────────────
+LAST_GOOD=/var/lib/lm/state/last-good-commit     # commit last proven healthy at runtime
+UPDATE_BLOCKED=/var/lib/lm/state/update-blocked  # WebUI surfaces this if set
+
+# Build-boot the on-disk code WITHOUT serving (main.py --preflight builds the
+# app + uvicorn Server via create_app but never binds :443). 0 = it boots — the
+# exact synchronous path that has crash-looped the hub (removed FastAPI method,
+# missing dep, duplicated launch block). Run as svc_lm with the unit's real env
+# (/opt/lm/.env → LM_FERNET_KEY for state decrypt) so a good build never false-fails.
+preflight_ok(){
+  runuser -u svc_lm -- bash -c '
+    set -a; [ -f /opt/lm/.env ] && . /opt/lm/.env 2>/dev/null; set +a
+    export LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443
+    cd /opt/lm/core/src 2>/dev/null || exit 1
+    timeout 90 /opt/lm/core/venv/bin/python3 /opt/lm/core/src/main.py --preflight
+  ' >>"$LOG" 2>&1
+}
+
+# Record the running commit as last-known-good ONLY when the live process is
+# healthy AND its running version matches on-disk (i.e. this exact code booted
+# and serves). That is the definition of "safe to roll back to."
+record_last_good(){
+  [ -d /opt/lm/.git ] || return 0
+  local dv rv head
+  dv=$(tr -d '[:space:]' < /opt/lm/VERSION 2>/dev/null || true)
+  rv=$(tr -d '[:space:]' < /var/lib/lm/state/running-version 2>/dev/null || true)
+  [ -n "$dv" ] && [ "$dv" = "$rv" ] || return 0
+  head=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
+  [ -n "$head" ] && printf '%s' "$head" > "$LAST_GOOD" 2>/dev/null || true
+}
+
+# Revert /opt/lm to last-known-good before a force-restart, so a hub crash-looping
+# on bad code (slipped past preflight, or fails only at serve-time not build-time)
+# recovers instead of looping on the bad commit.
+rollback_if_bad(){
+  [ -d /opt/lm/.git ] || return 0
+  local lg cur
+  lg=$(cat "$LAST_GOOD" 2>/dev/null || true)
+  cur=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
+  if [ -n "$lg" ] && [ -n "$cur" ] && [ "$lg" != "$cur" ]; then
+    log "ROLLBACK: crash-looping on ${cur:0:7} — reverting to last-good ${lg:0:7}"
+    runuser -u svc_lm -- git -C /opt/lm reset --hard "$lg" 2>/dev/null || true
+  fi
+}
+
 # ── 1. Hub liveness ─────────────────────────────────────────────────────────
 if systemctl is-enabled --quiet lm.service 2>/dev/null; then
   state=$(systemctl is-active lm.service 2>/dev/null || echo unknown)
@@ -61,11 +106,13 @@ if systemctl is-enabled --quiet lm.service 2>/dev/null; then
     active)
       if hub_healthy; then
         [ -f "$STATE" ] && { rm -f "$STATE"; log "hub healthy again"; } || true
+        record_last_good
       else
         fails=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
         echo "$fails" > "$STATE"
         log "hub unresponsive: unit active but /status not 200 (strike $fails/$MAX_FAILS)"
         if [ "$fails" -ge "$MAX_FAILS" ]; then
+          rollback_if_bad   # revert to last-good if we're crash-looping on new code
           log "FORCE-RESTART: SIGKILL wedged hub + free :443/:8000, then restart"
           systemctl kill -s KILL lm.service 2>/dev/null || true
           if command -v fuser >/dev/null 2>&1; then
@@ -82,8 +129,10 @@ if systemctl is-enabled --quiet lm.service 2>/dev/null; then
       fi
       ;;
     failed)
-      # systemd gave up after hitting the start limit — clear the latch + start.
-      log "lm.service FAILED (start-limit) — reset-failed + start"
+      # systemd gave up after hitting the start limit — a start-limit failure is
+      # almost always bad code crash-looping, so roll back to last-good first.
+      log "lm.service FAILED (start-limit) — rollback-if-bad + reset-failed + start"
+      rollback_if_bad
       systemctl reset-failed lm.service 2>/dev/null || true
       timeout 30 systemctl start lm.service 2>/dev/null || true
       rm -f "$STATE"
@@ -107,8 +156,29 @@ if [ -d /opt/lm/.git ]; then
   lc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
   rc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse origin/main 2>/dev/null || true)
   if [ -n "$lc" ] && [ -n "$rc" ] && [ "$lc" != "$rc" ]; then
-    log "pull: /opt/lm behind (local ${lc:0:7} -> remote ${rc:0:7}) — hard-align to origin/main"
+    # PREFLIGHT GATE (blast-radius control): do NOT blindly adopt origin/main —
+    # a bad push (removed API, missing dep, broken startup) would crash-loop the
+    # hub and take the WebUI down. Check the new code out, self-heal deps, then
+    # build-boot it with --preflight. Adopt only if it boots; otherwise revert to
+    # the current (working) commit and flag the update as blocked. The live hub
+    # keeps serving old in-memory code throughout; the restart into new code is
+    # still gated by section 1b below.
+    log "pull: /opt/lm behind (local ${lc:0:7} -> remote ${rc:0:7}) — verifying before adopt"
     runuser -u svc_lm -- git -C /opt/lm reset --hard origin/main 2>/dev/null || true
+    # Self-heal any new/updated deps into the hub venv (additive; harmless to
+    # keep even if we revert the code below). This is what turns a "new import
+    # added" push from a crash into a clean adopt.
+    runuser -u svc_lm -- /opt/lm/core/venv/bin/python3 -m pip install -q \
+        -r /opt/lm/core/requirements.txt >>"$LOG" 2>&1 || true
+    if preflight_ok; then
+      rm -f "$UPDATE_BLOCKED" 2>/dev/null || true
+      log "preflight OK for ${rc:0:7} — adopted (restart gated by 1b)"
+    else
+      log "preflight FAILED for ${rc:0:7} — reverting to ${lc:0:7}; UPDATE BLOCKED"
+      runuser -u svc_lm -- git -C /opt/lm reset --hard "$lc" 2>/dev/null || true
+      printf '%s blocked: origin/main %s failed --preflight; staying on %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc:0:7}" "${lc:0:7}" > "$UPDATE_BLOCKED" 2>/dev/null || true
+    fi
   fi
 fi
 

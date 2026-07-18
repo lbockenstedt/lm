@@ -1401,17 +1401,49 @@ hub_healthy(){
   done
   return 1
 }
+# ── Update safety gate (blast-radius control). KEEP IN SYNC with install-lm-watchdog.sh ──
+LAST_GOOD=/var/lib/lm/state/last-good-commit
+UPDATE_BLOCKED=/var/lib/lm/state/update-blocked
+preflight_ok(){
+  runuser -u svc_lm -- bash -c '
+    set -a; [ -f /opt/lm/.env ] && . /opt/lm/.env 2>/dev/null; set +a
+    export LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443
+    cd /opt/lm/core/src 2>/dev/null || exit 1
+    timeout 90 /opt/lm/core/venv/bin/python3 /opt/lm/core/src/main.py --preflight
+  ' >>"$LOG" 2>&1
+}
+record_last_good(){
+  [ -d /opt/lm/.git ] || return 0
+  local dv rv head
+  dv=$(tr -d '[:space:]' < /opt/lm/VERSION 2>/dev/null || true)
+  rv=$(tr -d '[:space:]' < /var/lib/lm/state/running-version 2>/dev/null || true)
+  [ -n "$dv" ] && [ "$dv" = "$rv" ] || return 0
+  head=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
+  [ -n "$head" ] && printf '%s' "$head" > "$LAST_GOOD" 2>/dev/null || true
+}
+rollback_if_bad(){
+  [ -d /opt/lm/.git ] || return 0
+  local lg cur
+  lg=$(cat "$LAST_GOOD" 2>/dev/null || true)
+  cur=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
+  if [ -n "$lg" ] && [ -n "$cur" ] && [ "$lg" != "$cur" ]; then
+    log "ROLLBACK: crash-looping on ${cur:0:7} — reverting to last-good ${lg:0:7}"
+    runuser -u svc_lm -- git -C /opt/lm reset --hard "$lg" 2>/dev/null || true
+  fi
+}
 if systemctl is-enabled --quiet lm.service 2>/dev/null; then
   state=$(systemctl is-active lm.service 2>/dev/null || echo unknown)
   case "$state" in
     active)
       if hub_healthy; then
         [ -f "$STATE" ] && { rm -f "$STATE"; log "hub healthy again"; } || true
+        record_last_good
       else
         fails=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
         echo "$fails" > "$STATE"
         log "hub unresponsive: unit active but /status not 200 (strike $fails/$MAX_FAILS)"
         if [ "$fails" -ge "$MAX_FAILS" ]; then
+          rollback_if_bad
           log "FORCE-RESTART: SIGKILL wedged hub + free :443/:8000, then restart"
           systemctl kill -s KILL lm.service 2>/dev/null || true
           command -v fuser >/dev/null 2>&1 && fuser -k -9 443/tcp 8000/tcp 2>/dev/null || true
@@ -1424,7 +1456,8 @@ if systemctl is-enabled --quiet lm.service 2>/dev/null; then
       fi
       ;;
     failed)
-      log "lm.service FAILED (start-limit) — reset-failed + start"
+      log "lm.service FAILED (start-limit) — rollback-if-bad + reset-failed + start"
+      rollback_if_bad
       systemctl reset-failed lm.service 2>/dev/null || true
       timeout 30 systemctl start lm.service 2>/dev/null || true
       rm -f "$STATE"
@@ -1443,8 +1476,22 @@ if [ -d /opt/lm/.git ]; then
   lc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
   rc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse origin/main 2>/dev/null || true)
   if [ -n "$lc" ] && [ -n "$rc" ] && [ "$lc" != "$rc" ]; then
-    log "pull: /opt/lm behind (local ${lc:0:7} -> remote ${rc:0:7}) — hard-align to origin/main"
+    # PREFLIGHT GATE: verify origin/main boots (--preflight) before adopting it;
+    # revert to the working commit + flag UPDATE_BLOCKED if not. Prevents a bad
+    # push from crash-looping the hub. KEEP IN SYNC with install-lm-watchdog.sh.
+    log "pull: /opt/lm behind (local ${lc:0:7} -> remote ${rc:0:7}) — verifying before adopt"
     runuser -u svc_lm -- git -C /opt/lm reset --hard origin/main 2>/dev/null || true
+    runuser -u svc_lm -- /opt/lm/core/venv/bin/python3 -m pip install -q \
+        -r /opt/lm/core/requirements.txt >>"$LOG" 2>&1 || true
+    if preflight_ok; then
+      rm -f "$UPDATE_BLOCKED" 2>/dev/null || true
+      log "preflight OK for ${rc:0:7} — adopted (restart gated by 1b)"
+    else
+      log "preflight FAILED for ${rc:0:7} — reverting to ${lc:0:7}; UPDATE BLOCKED"
+      runuser -u svc_lm -- git -C /opt/lm reset --hard "$lc" 2>/dev/null || true
+      printf '%s blocked: origin/main %s failed --preflight; staying on %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc:0:7}" "${lc:0:7}" > "$UPDATE_BLOCKED" 2>/dev/null || true
+    fi
   fi
 fi
 
