@@ -302,10 +302,37 @@ def register(app, hub, ctx):
 
             hub.state.update_tenant(tenant_id, {})
             hub.state._mark_dirty()
+            # TENANT == OU (1:1): stand up the tenant's directory OU
+            # (ou=<slug>,<base_dn>) on the LDAP mirror. Best-effort — the OU is
+            # idempotent (case-insensitive) and re-provisionable via the backfill
+            # endpoint, so a disconnected directory spoke doesn't fail tenant
+            # creation.
+            try:
+                await hub.provision_tenant_ou(tenant_id)
+            except Exception:  # noqa: BLE001
+                logger.debug("create_tenant: OU provisioning skipped", exc_info=True)
             return {"status": "ok", "message": f"Tenant {tenant_id} created."}
         except Exception as e:
             logger.exception("create_tenant failed")
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/setup/ldap/provision-ous")
+    async def provision_all_tenant_ous(request: Request):
+        """Backfill: (re)provision the per-tenant OU (ou=<slug>,<base_dn>) for
+        EVERY existing tenant on the directory mirror. Global-Admin-only (under
+        the /setup gate). Idempotent case-insensitively, so it's safe to re-run;
+        covers tenants created before the directory spoke existed and the
+        sync-tenants path."""
+        hub = app.state.hub
+        tenants = (hub.state.tenant_state.get("tenants", {}) or {})
+        results = {}
+        for tid in list(tenants.keys()):
+            try:
+                await hub.provision_tenant_ou(tid)
+                results[tid] = "ok"
+            except Exception as e:  # noqa: BLE001
+                results[tid] = f"error: {e}"
+        return {"status": "ok", "provisioned": len(results), "results": results}
 
     @app.post("/setup/tenant")
     async def update_tenant(request: Request):

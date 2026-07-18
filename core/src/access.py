@@ -354,6 +354,76 @@ def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
         return {"netbox_tenant_slug": "", "proxmox_tag": "", "ldap_base_dn": "", "tenant_id": "default"}
 
 
+# ── Directory (LDAP) per-tenant identity — TENANT == OU, 1:1 ─────────────────
+# The tenant slug IS the directory OU (``ou=<slug>,<base_dn>``). The SAME slug
+# identifies the tenant across LDAP ↔ NetBox ↔ LM, and it is matched
+# CASE-INSENSITIVELY everywhere (OU "LRB" == NetBox tenant "LRB" == LM tenant
+# "lrb"). We PRESERVE the LM tenant's display case for the stored OU RDN but
+# resolve/dedup/guard case-insensitively, so provisioning is idempotent (never
+# both "LRB" and "lrb") and case can neither bypass the cross-tenant guard nor
+# cause a spurious mismatch.
+
+def ldap_tenant_slug(hub, tenant_id: str) -> str:
+    """Canonical directory OU slug for an LM tenant (its display-cased identity).
+
+    One source of truth shared by OU provisioning (``LDAP_PROVISION_TENANT_OU``)
+    and the Directory routes, so a route always targets the OU that was
+    provisioned. Prefers the tenant's ``netbox_tenant_slug`` (keeps NetBox +
+    directory aligned), then a stored ``slug``, else the tenant_id itself.
+    Callers compare with :func:`tenant_slug_matches` (case-insensitive)."""
+    tid = str(tenant_id or "").strip()
+    if not tid:
+        return ""
+    try:
+        cfg = hub.state.get_tenant(tid) or {}
+    except Exception:  # noqa: BLE001
+        cfg = {}
+    return str(cfg.get("netbox_tenant_slug") or cfg.get("slug") or tid).strip()
+
+
+def tenant_slug_matches(a, b) -> bool:
+    """Case-insensitive tenant/OU identity comparison ("LRB" == "lrb" == "Lrb").
+
+    The single normalization used everywhere a tenant is matched across LDAP ↔
+    NetBox ↔ LM — never a case-sensitive ``==`` (case must not be usable to
+    bypass a guard or to mismatch two names for the same tenant)."""
+    return str(a or "").strip().casefold() == str(b or "").strip().casefold()
+
+
+def resolve_directory_tenant(is_admin_flag, acting_tenants, requested):
+    """Decide which LM tenant a Directory request acts on AND enforce the
+    cross-tenant boundary. Pure (no hub / no HTTP) so it is unit-testable.
+
+    Returns ``(tenant_id, status, detail)``: on success ``(tenant_id, None,
+    None)``; on failure ``(None, http_status, message)``. All tenant matching is
+    CASE-INSENSITIVE (:func:`tenant_slug_matches`) so case can neither bypass the
+    guard nor produce a spurious mismatch.
+
+    * Global admin — may act on any ``requested`` tenant, but must name one.
+    * Everyone else (tenant-admin / directory viewer) — may act ONLY on a tenant
+      in ``acting_tenants``. A ``requested`` outside that set (in ANY case) is
+      rejected 403 (the cross-tenant guard). With no ``requested`` and exactly
+      one owned tenant, that tenant is used; with several, a 400 asks the caller
+      to select one; with none, 403. The returned tenant_id is the caller's OWN
+      stored form (canonical case), never the client-supplied casing."""
+    req = str(requested or "").strip()
+    acting = [str(t).strip() for t in (acting_tenants or []) if str(t).strip()]
+    if is_admin_flag:
+        if not req:
+            return None, 400, "Select a tenant to manage its directory"
+        return req, None, None
+    if req:
+        for t in acting:
+            if tenant_slug_matches(t, req):
+                return t, None, None  # own stored case wins over client casing
+        return None, 403, "You may only manage your own tenant's directory"
+    if len(acting) == 1:
+        return acting[0], None, None
+    if not acting:
+        return None, 403, "No tenant is assigned to your account"
+    return None, 400, "Select one of your tenants"
+
+
 # ── Session / auth helpers ───────────────────────────────────────────────────
 
 # Idle timeout: a session with no activity for this long is treated as expired
