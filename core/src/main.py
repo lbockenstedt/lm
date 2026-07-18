@@ -1961,6 +1961,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 config = {"devices": _project_nw_devices(mine),
                           "default_poll_interval":
                               self.state.get_global_config().get("nw_poll_default_interval")}
+            elif module_key == 'ldap':
+                # Directory (LDAP) spoke: the bound instance's LDAP_* connection
+                # settings PLUS this node's multi-instance mirror identity
+                # (LDAP_SERVER_ID + LDAP_MIRROR_PEERS for the 2-node mirror) PLUS
+                # the Entra app creds (ENTRA_*) sourced from the hub's OIDC config
+                # so the spoke can authenticate Entra-backed directory users
+                # (ROPC). Built here (not via _INSTANCE_CONFIG_SOURCES, which only
+                # projects the LDAP_* base fields) because it needs hub-global
+                # OIDC config + every instance to compute the peer list. Handled
+                # BEFORE the generic instance branch (ldap is also a key there).
+                config = self._ldap_config_for_spoke(spoke_id)
             elif module_key in _INSTANCE_CONFIG_SOURCES:
                 # NAC / IPAM / Directory migrated to multi-instance storage
                 # (nac_instances / ipam_instances / ldap_instances). The legacy
@@ -2036,6 +2047,114 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             logger.info(f"Pushed {module_key} config to {spoke_id}")
         except Exception as e:
             logger.error(f"Failed to push config to {spoke_id}: {e}")
+
+    def _ldap_config_for_spoke(self, spoke_id: str):
+        """Build the full UPDATE_CONFIG payload for a directory (LDAP) spoke.
+
+        Combines three sources into the shared config contract the ldap spoke is
+        built to consume:
+
+        * the bound ``ldap_instances`` entry's connection settings —
+          ``LDAP_SERVER_URL`` / ``LDAP_BASE_DN`` / ``LDAP_ADMIN_DN`` /
+          ``LDAP_ADMIN_PW``;
+        * this node's multi-instance mirror identity — ``LDAP_SERVER_ID`` (this
+          instance's replication id) + ``LDAP_MIRROR_PEERS`` (a JSON list of the
+          OTHER instances' ``{server_id, url}`` for the 2-node OpenLDAP mirror);
+        * the Entra app credentials from the hub's OIDC config —
+          ``ENTRA_TENANT_ID`` / ``ENTRA_CLIENT_ID`` / ``ENTRA_CLIENT_CERT`` /
+          ``ENTRA_CLIENT_KEY`` / ``ENTRA_ROPC_SCOPE`` — so the spoke can
+          password-authenticate Entra-backed directory users. The cert/key are
+          pushed as PEM **content** (not the hub-local path, which is meaningless
+          on the remote spoke), resolved via the credential store so a Key Vault
+          ref works too.
+
+        Returns None when no ldap instance is configured (nothing to push)."""
+        gc = self.state.get_global_config()
+        instances = gc.get("ldap_instances", []) or []
+        inst = next((x for x in instances
+                     if isinstance(x, dict) and x.get("spoke_id") == spoke_id), None)
+        if inst is None:
+            inst = next((x for x in instances
+                         if isinstance(x, dict) and not x.get("spoke_id")), None)
+        if inst is None and instances and isinstance(instances[0], dict):
+            inst = instances[0]
+        if inst is None:
+            return None
+        cfg = {
+            "LDAP_SERVER_URL": inst.get("server_url"),
+            "LDAP_BASE_DN": inst.get("base_dn"),
+            "LDAP_ADMIN_DN": inst.get("admin_dn"),
+            "LDAP_ADMIN_PW": inst.get("admin_pw"),
+        }
+        cfg["LDAP_SERVER_ID"] = str(inst.get("server_id") or inst.get("id") or spoke_id)
+        peers = []
+        for other in instances:
+            if not isinstance(other, dict) or other is inst:
+                continue
+            purl = other.get("server_url")
+            if purl:
+                peers.append({
+                    "server_id": str(other.get("server_id") or other.get("id") or ""),
+                    "url": purl,
+                })
+        cfg["LDAP_MIRROR_PEERS"] = json.dumps(peers)
+        try:
+            from security.oidc import get_oidc_config
+            from security.credential_store import resolve_private_key_material
+            oc = get_oidc_config(self)
+            cfg["ENTRA_TENANT_ID"] = oc.tenant_id
+            cfg["ENTRA_CLIENT_ID"] = oc.client_id
+            cert_pem = resolve_private_key_material(oc.cert_path) if oc.cert_path else None
+            key_pem = resolve_private_key_material(oc.key_path) if oc.key_path else None
+            cfg["ENTRA_CLIENT_CERT"] = cert_pem.decode("utf-8", "replace") if cert_pem else ""
+            cfg["ENTRA_CLIENT_KEY"] = key_pem.decode("utf-8", "replace") if key_pem else ""
+            cfg["ENTRA_ROPC_SCOPE"] = ((gc.get("oidc") or {}).get("ropc_scope")
+                                       or "https://graph.microsoft.com/.default")
+        except Exception as e:  # noqa: BLE001 — Entra optional; push LDAP anyway
+            logger.warning("ldap config: could not source Entra creds from OIDC: %s", e)
+            for k in ("ENTRA_TENANT_ID", "ENTRA_CLIENT_ID",
+                      "ENTRA_CLIENT_CERT", "ENTRA_CLIENT_KEY"):
+                cfg.setdefault(k, "")
+            cfg.setdefault("ENTRA_ROPC_SCOPE", "https://graph.microsoft.com/.default")
+        return cfg
+
+    async def push_ldap_config_all(self) -> None:
+        """Re-push the full LDAP + Entra config to EVERY connected directory
+        spoke. Called on OIDC-config change so the directory mirror picks up new
+        Entra creds immediately instead of waiting for a reconnect. Multi-instance
+        aware — ``push_config_to_spoke`` resolves each node to its own instance
+        (its ``LDAP_SERVER_ID`` + peer list)."""
+        try:
+            spokes = self.get_all_spokes_by_type("directory") or []
+        except Exception:  # noqa: BLE001
+            spokes = []
+        for sid in spokes:
+            try:
+                await self.push_config_to_spoke(sid)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("push_ldap_config_all: %s failed: %s", sid, e)
+
+    async def provision_tenant_ou(self, tenant_id: str) -> None:
+        """Provision (idempotently) a tenant's OU on every connected directory
+        spoke: ``ou=<tenant_slug>,<base_dn>``. TENANT == OU, 1:1 — the tenant
+        slug IS the OU RDN. Best-effort: a disconnected mirror node re-syncs the
+        OU from its peer (or on the next touch). The spoke's
+        ``LDAP_PROVISION_TENANT_OU`` is idempotent case-insensitively so a repeat
+        never creates both ``LRB`` and ``lrb``."""
+        from access import ldap_tenant_slug
+        slug = ldap_tenant_slug(self, tenant_id)
+        if not slug:
+            return
+        try:
+            spokes = self.get_all_spokes_by_type("directory") or []
+        except Exception:  # noqa: BLE001
+            spokes = []
+        for sid in spokes:
+            try:
+                await self.request_response(sid, "LDAP_PROVISION_TENANT_OU",
+                                            {"tenant_slug": slug}, timeout=20.0)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("provision_tenant_ou %s on %s: %s", slug, sid, e)
 
     async def push_cs_hub_config(self, spoke_id: str) -> None:
         """Re-push the tenant's hub-owned CS provisioning config

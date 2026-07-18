@@ -285,6 +285,12 @@ def register(app, hub, ctx):
         gc["oidc"] = oidc
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
+        # A fresh Entra client cert/key changes what the directory mirror must use
+        # for Entra (ROPC) auth — re-push to every connected ldap spoke now.
+        try:
+            await hub.push_ldap_config_all()
+        except Exception:  # noqa: BLE001 — best-effort; reconnect re-pushes
+            logger.debug("generate_oidc_cert: ldap re-push skipped", exc_info=True)
         return {"status": "ok", "key_path": res["key_path"], "cert_path": res["cert_path"],
                 "thumbprint": res["thumbprint"], "cert_pem": res["cert_pem"]}
 
@@ -346,7 +352,14 @@ def register(app, hub, ctx):
             global_config["oidc"] = clean
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
-            # OIDC is hub-side only — no spoke push (unlike ldap-config).
+            # The hub's OIDC login is hub-side only, BUT the directory (LDAP)
+            # spoke reuses these Entra app creds for ROPC auth of Entra-backed
+            # directory users — re-push the LDAP+Entra config to every connected
+            # ldap spoke so a tenant/client change reaches the mirror now.
+            try:
+                await hub.push_ldap_config_all()
+            except Exception:  # noqa: BLE001 — best-effort; reconnect re-pushes
+                logger.debug("update_oidc_config: ldap re-push skipped", exc_info=True)
             return {"status": "ok"}
         except Exception as e:  # noqa: BLE001
             logger.exception("update_oidc_config failed")
