@@ -855,7 +855,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # { msg_id: expire_ts }; bounded by _prune_seen_message_ids (time-gated
         # to at most once per second — see _seen_prune_last_mono).
         self._seen_message_ids: Dict[str, float] = {}
-        self._seen_prune_last_mono = 0.0  # monotonic ts of last seen-set prune
+        # -inf (not 0.0): time.monotonic() starts near zero on some platforms
+        # (macOS), so a 0.0 seed would gate off every prune in the process's
+        # first second.
+        self._seen_prune_last_mono = float("-inf")  # monotonic ts of last seen-set prune
         self._REPLAY_WINDOW_S = float(os.environ.get("LM_REPLAY_WINDOW_S", "120"))
         self._REPLAY_FUTURE_SKEW_S = 5.0  # accept up to Ns clock skew into the future
         self._REPLAY_SEEN_TTL = self._REPLAY_WINDOW_S  # seen-set lives for the window

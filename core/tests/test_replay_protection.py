@@ -25,7 +25,7 @@ def _fake_hub(window=120.0, skew=5.0, warn_interval=10.0):
             self._REPLAY_SEEN_TTL = window
             self._replay_warn_last = {}
             self._REPLAY_WARN_INTERVAL_S = warn_interval
-            self._seen_prune_last_mono = 0.0  # prune time-gate (1/s)
+            self._seen_prune_last_mono = float("-inf")  # prune time-gate (1/s)
     return _FakeHub()
 
 
