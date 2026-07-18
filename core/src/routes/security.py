@@ -25,17 +25,25 @@ def register(app, hub, ctx):
     async def security_config(request: Request):
         """Update policy: enabled, auto_block, threshold (>N fails), window_s,
         ttl_s, permanent_after, success_grace_s, block_rule_name, block_priority.
-        Returns a non-fatal ``warning`` if the deny priority is not below the
-        allow priority (Deny must win)."""
-        from security.threat_monitor import priority_conflict_warning
+        When ``block_priority`` is changed it is REJECTED with 400 unless it keeps
+        the invariant ``allow_priority < block_priority < 1000`` against the
+        CURRENT azure_nsg allow priority (Azure evaluates lower numbers first)."""
+        from security.threat_monitor import validate_nsg_priorities
         _guard(request)
-        body = await request.json()
-        cfg = hub.threat_monitor.set_config(body or {})
-        warning = priority_conflict_warning(cfg.get("block_priority"),
-                                            hub.threat_monitor.allow_priority())
+        body = await request.json() or {}
+        # Enforce the ordering guard when the deny priority is being changed:
+        # validate the incoming deny against the CURRENT stored allow priority.
+        if "block_priority" in body:
+            allow = hub.threat_monitor.allow_priority()
+            ok, message = validate_nsg_priorities(allow, body.get("block_priority"))
+            if not ok:
+                raise HTTPException(status_code=400, detail=message)
+        cfg = hub.threat_monitor.set_config(body)
+        ok, warning = validate_nsg_priorities(hub.threat_monitor.allow_priority(),
+                                              cfg.get("block_priority"))
         return {"status": "ok", "config": cfg,
                 "allow_priority": hub.threat_monitor.allow_priority(),
-                "warning": warning}
+                "warning": "" if ok else warning}
 
     @app.post("/api/security/block")
     async def security_block(request: Request):

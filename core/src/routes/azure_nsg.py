@@ -54,7 +54,18 @@ def register(app, hub, ctx):
                     _save(cfg)
             except Exception as e:  # noqa: BLE001
                 warning = str(e)
-        return {"config": cfg, "live_prefixes": live, "warning": warning}
+        # Surface the threat-monitor DENY rule's priority/name so the NSG tile can
+        # display + edit BOTH priorities (single source of truth with Security).
+        deny = {}
+        tm = getattr(hub, "threat_monitor", None)
+        if tm is not None:
+            try:
+                tcfg = tm.config()
+                deny = {"priority": tcfg.get("block_priority"),
+                        "rule_name": tcfg.get("block_rule_name")}
+            except Exception:  # noqa: BLE001
+                deny = {}
+        return {"config": cfg, "live_prefixes": live, "warning": warning, "deny": deny}
 
     @app.post("/setup/azure-nsg")
     async def set_azure_nsg(request: Request):
@@ -79,6 +90,17 @@ def register(app, hub, ctx):
         except _nsg.AzureNsgError as e:
             raise HTTPException(status_code=400, detail=str(e))
         clean["enabled"] = bool(clean.get("enabled", False))
+        # Enforce the allow/deny priority ordering guard when the ALLOW priority is
+        # being changed: validate the incoming allow against the CURRENT
+        # threat-monitor deny priority (allow < deny < 1000). Reject before persist.
+        if "priority" in clean:
+            from security.threat_monitor import validate_nsg_priorities
+            tm = getattr(hub, "threat_monitor", None)
+            if tm is not None:
+                block = tm.config().get("block_priority")
+                ok, message = validate_nsg_priorities(clean.get("priority"), block)
+                if not ok:
+                    raise HTTPException(status_code=400, detail=message)
         _save(clean)
         # Reconcile to Azure only when enabled + configured. A failure here is
         # returned as a warning (config is still saved) so the admin can fix RBAC.
