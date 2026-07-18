@@ -175,8 +175,35 @@ class SimulationsService:
                 "hardware_breakdown": hw, "checks_summary": checks,
                 "spokes_online": online, "spokes_total": len(spokes)}
 
+    # ── shaped-read memo ────────────────────────────────────────────────────
+    # get_clients_data / get_proxmox_data rebuild + dedup a per-client / per-host
+    # result on every poll. The inputs are the tenant's cached telemetry (which
+    # only changes on a CS_TELEMETRY frame → hub._sim_cache_gen bump) and which
+    # of the tenant's spokes are online. Memoize the shaped result on the HUB
+    # (this service is re-instantiated per request) keyed by that pair, so the
+    # repeated polls BETWEEN telemetry frames serve a cached build. gen bumps on
+    # every frame, so any real data change refreshes within one relay interval.
+    def _sim_memo_key(self, tenant_id: str):
+        gen = (getattr(self.hub, "_sim_cache_gen", {}) or {}).get(tenant_id, 0)
+        online = tuple(sorted(
+            sid for sid, _ in self._spokes_for_tenant(tenant_id) if self._is_online(sid)
+        ))
+        return (gen, online)
+
     async def get_clients_data(self, tenant_id: str) -> Dict[str, Any]:
-        """One row per cached client across the tenant's spokes (the Clients view shape)."""
+        """One row per cached client across the tenant's spokes (the Clients view
+        shape). Memoized on (tenant_id, cache-gen + online-set); callers treat
+        the result as read-only, so the memoized object is served directly."""
+        memo = self.hub.__dict__.setdefault("_sim_shaped_memo", {})
+        key = self._sim_memo_key(tenant_id)
+        hit = memo.get(("clients", tenant_id))
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        result = self._build_clients_data(tenant_id)
+        memo[("clients", tenant_id)] = (key, result)
+        return result
+
+    def _build_clients_data(self, tenant_id: str) -> Dict[str, Any]:
         rows: List[dict] = []
         for sid, data in self._spokes_for_tenant(tenant_id):
             meta = self._meta(sid, data)
@@ -314,7 +341,24 @@ class SimulationsService:
         return {"tenant_id": tenant_id, "simulations": rows}
 
     async def get_proxmox_data(self, tenant_id: str) -> Dict[str, Any]:
-        """One VM Server row per known Proxmox host aggregated by the tenant's cs spoke(s)."""
+        """One VM Server row per known Proxmox host aggregated by the tenant's cs
+        spoke(s). Memoized on (tenant_id, cache-gen + online-set). The route
+        caller mutates the result (reassigns ``hosts`` via _reclassify_host_usb,
+        which edits host dicts in place, and adds ``_usb_debug``), so return a
+        FRESH top dict with shallow-copied host dicts — the memoized build is
+        never handed out for mutation."""
+        memo = self.hub.__dict__.setdefault("_sim_shaped_memo", {})
+        key = self._sim_memo_key(tenant_id)
+        hit = memo.get(("proxmox", tenant_id))
+        if hit is not None and hit[0] == key:
+            result = hit[1]
+        else:
+            result = self._build_proxmox_data(tenant_id)
+            memo[("proxmox", tenant_id)] = (key, result)
+        return {"tenant_id": result.get("tenant_id", tenant_id),
+                "hosts": [dict(h) for h in (result.get("hosts") or [])]}
+
+    def _build_proxmox_data(self, tenant_id: str) -> Dict[str, Any]:
         hosts: List[dict] = []
         for sid, data in self._spokes_for_tenant(tenant_id):
             # New multi-host shape (cs spoke aggregating several pxmx agents):

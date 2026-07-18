@@ -1757,6 +1757,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         rate_limiters / re-pushes simulations_cache, so eviction on delete is safe.
         """
         pk = self._primary_key(spoke_id)
+        self._bump_sim_cache_gen(spoke_id)  # shaped-read memo invalidation (tenant set changed)
         self.simulations_cache.pop(pk, None)
         self.spoke_telemetry.pop(pk, None)
         self.rate_limiters.pop(pk, None)
@@ -3361,6 +3362,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.record_spoke_event(spoke_id, "psk_self_provision", f"tenant={tenant_hint}")
         return True
 
+    def _bump_sim_cache_gen(self, spoke_id: str) -> None:
+        """Bump the per-tenant simulations-cache generation counter for the tenant
+        this spoke is bound to. SimulationsService keys its shaped-read memo
+        (get_clients_data / get_proxmox_data) on (tenant_id, generation), so a
+        bump here is what makes the next read rebuild after a CS_TELEMETRY frame
+        (or a spoke eviction) changes the tenant's cached data. Lazy dict so no
+        __init__ change is needed; never raises."""
+        try:
+            tenant = self.state.get_spoke_tenant(spoke_id) or ""
+            gen = self.__dict__.setdefault("_sim_cache_gen", {})
+            gen[tenant] = gen.get(tenant, 0) + 1
+        except Exception:  # noqa: BLE001 — memo bookkeeping must never break ingest
+            pass
+
     async def _handle_cs_telemetry(self, spoke_id: str, cs_data) -> None:
         """Ingest a CS_TELEMETRY frame from a combined cs / unified pxmx spoke.
 
@@ -3379,6 +3394,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         pk = self._primary_key(spoke_id)
         self.simulations_cache[pk] = cs_data
         self._sim_cache_dirty = True  # warm-load snapshot flushed by run_sim_cache_flush_loop
+        # Invalidate the shaped-read memo (SimulationsService.get_clients_data /
+        # get_proxmox_data) for this spoke's tenant: a fresh telemetry frame is
+        # exactly when the shaped result changes.
+        self._bump_sim_cache_gen(spoke_id)
         # Spoke-reported drain state (mid self-update). ``draining: true`` keeps
         # the hub from firing request/reply commands at a spoke that's about to
         # os._exit+relaunch (config pushes queue to the mailbox instead). A
