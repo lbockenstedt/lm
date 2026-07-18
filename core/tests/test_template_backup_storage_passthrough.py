@@ -37,6 +37,16 @@ class FakeHub:
     def get_hypervisor_spoke(self):
         return "cs-spoke-1"
 
+    # B1/B2 guid-primary seams: aliases empty → identity.
+    def _primary_key(self, spoke_id):
+        return spoke_id
+
+    def _agent_primary_key(self, agent_id):
+        return agent_id
+
+    def _agent_relay_name(self, agent_id):
+        return agent_id
+
 
 def _build(tmp):
     app = FastAPI()

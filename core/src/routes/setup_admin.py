@@ -111,6 +111,13 @@ async def _aggregate_diagnostics(hub):
     agent_cfg_keys = set((hub.state.system_state.get("agent_config", {}) or {}).keys())
     relay_ids = {k.split(":", 1)[1] for k in hub.heartbeat.last_seen if ":" in k}
     relay_ids |= agent_cfg_keys
+    # B2: agent_config / composite keys are guid-keyed post-arm, but a leaked
+    # id in known_modules from the pre-guid approve flow is a raw NAME — include
+    # the raw names (agent_info[guid]["agent_id"]) so those still match + clean.
+    for _aid, _info in (getattr(hub, "agent_info", {}) or {}).items():
+        _raw = (_info or {}).get("agent_id")
+        if _raw:
+            relay_ids.add(_raw)
     if relay_ids:
         known = list(hub.state.system_state.get("known_modules", []))
         leaked = [m for m in known if m in relay_ids]
@@ -610,8 +617,12 @@ def register(app, hub, ctx):
             if module == "agents":
                 flat = []
                 for agent_id, logs in hub.agent_logs.items():
+                    # B2: agent_logs is guid-keyed for relayed agents; label with
+                    # the raw name (guid→name via agent_info). Spoke-namespace
+                    # keys (SPOKE_LOG, guid-keyed) fall back to the key itself.
+                    label = hub._agent_relay_name(agent_id)
                     for line in logs:
-                        flat.append(f"[{agent_id}] {line}")
+                        flat.append(f"[{label}] {line}")
                 return {"logs": flat[-500:]}
 
             # This module's spoke(s) run on a SEPARATE box from the hub in any

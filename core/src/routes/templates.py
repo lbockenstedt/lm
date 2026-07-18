@@ -110,7 +110,8 @@ def register(app, hub, ctx):
         # tenant binding (Agent Config → Client Simulation tenant_id), else the
         # owning spoke's tenant. Resolve a display name so the repo stays readable
         # even if the tenant is later renamed/removed.
-        agent_cfg = (hub.state.system_state.get("agent_config", {}) or {}).get(agent_id, {})
+        agent_cfg = (hub.state.system_state.get("agent_config", {}) or {}).get(
+            hub._agent_primary_key(agent_id), {})
         tenant_id = str((agent_cfg.get("client_simulation") or {}).get("tenant_id") or "").strip()
         if not tenant_id:
             try:
@@ -128,7 +129,7 @@ def register(app, hub, ctx):
 
         rec = _repo().create_pending(
             name=name, source_vmid=vmid, source_node=node,
-            source_agent=agent_id, source_spoke=owning_spoke,
+            source_agent=hub._agent_relay_name(agent_id), source_spoke=owning_spoke,
             created_by=_username(sess), tenant=tenant_name, tenant_id=tenant_id)
         tid, token = rec["id"], rec["_upload_token"]
 
@@ -140,7 +141,7 @@ def register(app, hub, ctx):
 
         try:
             result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
-                "target_agent_id": agent_id,
+                "target_agent_id": hub._agent_relay_name(agent_id),
                 "command": "START_BACKUP",
                 "data": {"template_id": tid, "vmid": vmid, "node": node,
                          "upload_url": upload_url, "upload_token": token,
@@ -307,7 +308,7 @@ def register(app, hub, ctx):
         _repo().set_refresh_status(tid, "pending", step="queued")
         try:
             result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
-                "target_agent_id": agent_id,
+                "target_agent_id": hub._agent_relay_name(agent_id),
                 "command": "REFRESH_TEMPLATE",
                 "data": {"template_id": tid, "template_vmid": template_vmid,
                          "download_url": download_url, "refresh_token": dl_token},
@@ -382,7 +383,7 @@ def register(app, hub, ctx):
         This is the default qmrestore destination when the caller does not pass an
         explicit ``target_vmid``. Returns an int or None."""
         ac = (getattr(hub, "state", None) and hub.state.system_state.get("agent_config", {}) or {}) \
-            .get(agent_id, {})
+            .get(hub._agent_primary_key(agent_id), {})
         usb = (ac.get("client_simulation") or {}).get("usb_config") or {}
         v = usb.get("image1_template_id")
         try:
@@ -392,7 +393,7 @@ def register(app, hub, ctx):
 
     def _agent_tenant_id(agent_id):
         ac = (getattr(hub, "state", None) and hub.state.system_state.get("agent_config", {}) or {}) \
-            .get(agent_id, {})
+            .get(hub._agent_primary_key(agent_id), {})
         return str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
 
     @app.post("/tenant/templates/refresh-hosts")
@@ -478,7 +479,7 @@ def register(app, hub, ctx):
                 # Pick any agent indexed under this spoke.
                 agent_id = None
                 for aid, info in (getattr(hub, "agent_info", {}) or {}).items():
-                    if (info or {}).get("spoke_id") == sid and aid:
+                    if hub._primary_key((info or {}).get("spoke_id")) == hub._primary_key(sid) and aid:
                         agent_id = aid
                         break
                 if agent_id is None:

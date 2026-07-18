@@ -77,6 +77,17 @@ class _FakeHub:
     def get_spoke_events(self, *a, **k):
         return []
 
+    # B1/B2 guid-primary seams: aliases empty → identity (mirrors a hub with
+    # no spokes/agents armed yet). The aggregate builder resolves through these.
+    def _primary_key(self, spoke_id):
+        return spoke_id
+
+    def _agent_primary_key(self, agent_id):
+        return agent_id
+
+    def _agent_relay_name(self, agent_id):
+        return agent_id
+
 
 def _reset_cache():
     pxmx._AGENTS_CACHE["data"] = None

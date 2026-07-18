@@ -565,6 +565,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # spoke (legacy, zero behavior change).
         self.spoke_id_alias: Dict[str, str] = {}
 
+        # Phase 2b (B2) agent-relay guid-primary: once a relayed agent is lazily
+        # migrated to guid-primary, agent_id_alias maps the agent_id it REPORTS
+        # on AGENT_RELAY_UP → the guid its agent_config / agent_info / agent_logs
+        # / {spoke}:{agent} composite / spoke_telemetry nested entry lives under.
+        # _agent_primary_key consults this first. Empty until the B2 arm fires →
+        # _agent_primary_key returns agent_id for every agent (legacy, zero
+        # behavior change). The relay envelope target_agent_id stays the raw
+        # name (option b); guid→name translation is via agent_info[guid]["agent_id"].
+        self.agent_id_alias: Dict[str, str] = {}
+
         # { spoke_id: str } tracking spoke versions
         self.spoke_versions: Dict[str, str] = {}
         # { spoke_id: module_type } — e.g. {"pxmx-spoke-1": "hypervisor"}
@@ -1382,7 +1392,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             payload=MessagePayload(
                 type="SPOKE_RELAY",
                 data={
-                    "target_agent_id": agent_id,
+                    "target_agent_id": self._agent_relay_name(agent_id),
                     "command_type": command_type,
                     "data": data
                 }
@@ -1841,7 +1851,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         cs-dialed agent (e.g. the CS bridge relaying commands) pass
         ``fallback_hypervisor=False`` and skip when None is returned.
         """
-        info = self.agent_info.get(agent_id)
+        info = self.agent_info.get(self._agent_primary_key(agent_id))
         if info:
             sid = info.get("spoke_id")
             if sid and self._primary_key(sid) in self.active_connections:
@@ -2107,13 +2117,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Resolve tenant: per-agent store first, then the relaying spoke's binding.
         tenant_id = None
         try:
-            ac = (self.state.system_state.get("agent_config", {}) or {}).get(agent_id, {})
+            ac = (self.state.system_state.get("agent_config", {}) or {}).get(
+                self._agent_primary_key(agent_id), {})
             tenant_id = (ac.get("client_simulation") or {}).get("tenant_id")
         except Exception:
             tenant_id = None
         if not tenant_id:
             try:
-                tenant_id = self.state.get_spoke_tenant(spoke_id)
+                tenant_id = self.state.get_spoke_tenant(self._primary_key(spoke_id))
             except Exception:
                 tenant_id = None
         # A VM-mutating command result (delete_vm / reclone_vm / clone_lxc /
@@ -3471,10 +3482,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return
         try:
             store = self.state.system_state.setdefault("agent_config", {})
-            entry = store.get(agent_id)
+            agent_pk = self._agent_primary_key(agent_id)
+            entry = store.get(agent_pk)
             if not isinstance(entry, dict):
                 entry = {"display_name": agent_id}
-                store[agent_id] = entry
+                store[agent_pk] = entry
             cs_cfg = dict(entry.get("client_simulation") or {})
             if cs_cfg.get("tenant_id") != spoke_tenant:
                 cs_cfg["tenant_id"] = spoke_tenant
@@ -3560,14 +3572,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             parent_spoke_id=spoke_id,
         )
 
+        # The agent primary key (guid once B2 has armed it via the reconcile
+        # above, else the raw name). All per-agent hub state below keys through
+        # agent_pk; the relay envelope target_agent_id stays the raw name (option
+        # b), translated from the guid via agent_info[guid]["agent_id"] where a
+        # guid-keyed internal caller needs the wire name.
+        agent_pk = self._agent_primary_key(agent_id) if agent_id else None
+
         # Index the agent → its owning spoke so command routing (CS bridge,
         # SET_AGENT_CONFIG) reaches the right spoke: a pxmx-dialed agent indexes
         # to the pxmx spoke, a cs-dialed agent indexes to the cs spoke. Updated
         # on every relayed frame (heartbeat/telemetry/log/CS_*), so the index is
         # fresh and the hostname tracks a rename. Evicted on spoke disconnect.
-        if agent_id:
-            self.agent_info[agent_id] = {
-                "spoke_id":  spoke_id,
+        # agent_id (raw name) is stored for guid→name relay translation; spoke_id
+        # is the raw connect name (relay destinations resolve via _primary_key).
+        if agent_id and agent_pk is not None:
+            self.agent_info[agent_pk] = {
+                "spoke_id":  self._primary_key(spoke_id),
+                "agent_id":  agent_id,
                 "hostname":  (relay_data.get("hostname") or "").strip() or agent_id,
                 "last_seen": time.time(),
             }
@@ -3592,18 +3614,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # canonical record; the WebUI prepends the ``[agent_id]`` source
             # label itself, so agent identity is not lost.
             msg = log_data.get('message') or ''
-            if agent_id not in self.agent_logs:
-                self.agent_logs[agent_id] = deque(maxlen=self.max_log_size)
+            if agent_pk not in self.agent_logs:
+                self.agent_logs[agent_pk] = deque(maxlen=self.max_log_size)
             if msg:
-                self.agent_logs[agent_id].append(msg)
+                self.agent_logs[agent_pk].append(msg)
             return True
 
         # If the original message was a heartbeat, update heartbeat for that
-        # specific agent (keyed spoke_id:agent_id). pxmx unified agents emit
-        # "AGENT_HEARTBEAT" (30s); accept the legacy "HEARTBEAT" type too.
+        # specific agent (keyed spoke_pk:agent_pk — both guid-primary post-B2).
+        # pxmx unified agents emit "AGENT_HEARTBEAT" (30s); accept the legacy
+        # "HEARTBEAT" type too.
         _orig_type = original_msg.get("payload", {}).get("type")
         if _orig_type in ("HEARTBEAT", "AGENT_HEARTBEAT"):
-            self.heartbeat.update_heartbeat(f"{spoke_id}:{agent_id}")
+            self.heartbeat.update_heartbeat(f"{self._primary_key(spoke_id)}:{agent_pk}")
             return True
 
         # Otherwise, process the original payload as if it came from the agent
@@ -3611,7 +3634,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             pk = self._primary_key(spoke_id)
             if pk not in self.spoke_telemetry:
                 self.spoke_telemetry[pk] = {}
-            self.spoke_telemetry[pk][agent_id] = original_msg.get("payload", {}).get("data")
+            self.spoke_telemetry[pk][agent_pk] = original_msg.get("payload", {}).get("data")
             return True
 
         # --- Client-Simulation event relay (Phase D1) ---
@@ -3961,6 +3984,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     rename_proven = True
             self._reconcile_spoke_identity(spoke_id, install_uuid, spoke_hostname,
                                            migrate_if=rename_proven)
+            # Re-resolve the primary key: _reconcile_spoke_identity may have
+            # armed guid-primary (spoke_id_alias[spoke_id]=install_uuid), so pk
+            # now resolves name→guid. Every state op below keys through pk so
+            # the spoke's routing/approval/crypto/mailbox state lands under the
+            # guid (the stable primary key) instead of the connect-id name.
+            pk = self._primary_key(spoke_id)
             # Recompute pk: the arm inside reconcile may have flipped the alias
             # name→guid, so the pre-reconcile pk computed above is now stale.
             pk = self._primary_key(spoke_id)
@@ -4310,7 +4339,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # signed with the previous secret so the spoke can adopt it
                     # without a full re-onboard. Rate-limited per spoke.
                     if src == "history":
-                        await self._maybe_redeliver_session_key(spoke_id)
+                        await self._maybe_redeliver_session_key(pk)
                     # First signed frame clears any prior "never authenticated"
                     # diagnosis (idempotent with the connect-time discard).
                     self._unauth_warned_spokes.discard(pk)
@@ -4319,7 +4348,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # or whose timestamp is outside the freshness window. Runs
                     # only on signed frames, after verification, so unsigned
                     # heartbeats cost nothing and it's not an unauth flood vector.
-                    if not self._check_freshness_and_replay(spoke_id, msg_data):
+                    if not self._check_freshness_and_replay(pk, msg_data):
                         continue
                     # H4: AEAD-decrypt payload.data of secret-bearing inbound
                     # frames (after HMAC verify + freshness pass) BEFORE dispatch
@@ -4328,7 +4357,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # is a no-op on plaintext/legacy frames, and returns _H4_DROP
                     # on tamper / wrong key / marked-encrypted-with-no-decrypt-key
                     # (the frame is dropped — ciphertext is never dispatched).
-                    _dec_secret = await self._decrypt_inbound_payload(spoke_id, src, msg_data)
+                    _dec_secret = await self._decrypt_inbound_payload(pk, src, msg_data)
                     if _dec_secret is _H4_DROP:
                         continue
                 else:
@@ -4341,7 +4370,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         # crashed-on-startup agent — emit ONE actionable ERROR
                         # via the GenericAgent logger (throttled per-connection)
                         # instead of flooding WARNING per frame.
-                        self._maybe_log_unauthenticated_agent(spoke_id)
+                        self._maybe_log_unauthenticated_agent(pk)
                         logger.debug(
                             f"Unauthenticated non-heartbeat from {spoke_id} "
                             f"(only HEARTBEAT allowed). Dropping.")
@@ -4733,7 +4762,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # Iterate over a snapshot — mutating the dict during iteration
                 # would otherwise raise RuntimeError.
                 for aid in list(self.agent_info):
-                    if self.agent_info.get(aid, {}).get("spoke_id") == spoke_id:
+                    if self._primary_key(self.agent_info.get(aid, {}).get("spoke_id")) == pk:
                         self.agent_info.pop(aid, None)
 
     # ── Update pipeline (extracted) ───────────────────────────────────────
@@ -7174,6 +7203,26 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # SSH/REST/console access, then LE_MARK_DISTRIBUTED records the push on
         # the le ledger. Also fired inline on /api/le/issue + /api/le/renew.
         # See run_cert_distribution_loop / _distribute_one_cert.
+        # Virtual hub-self spoke (agent-rework #5 / Phase 4): a loopback
+        # ``/ws/agent`` listener + an in-process dumb agent INSIDE the hub
+        # process, so ``_install_cert_on_hub`` routes the server-cert write +
+        # ``lm-self-restart`` through the SAME WRITE_FILE + RUN_COMMAND
+        # primitives spoke-side cert deploys use. NOT a separate unit, NOT a
+        # spoke in the hub registry (invisible to WebUI Spokes). The hub's own
+        # cert-install path falls back to direct inline writes if the hub-self
+        # agent is down. ``LM_HUB_SELF_AGENT=0`` disables the feature entirely.
+        # See ``core/src/hub_self.py`` + ``docs/hub-direct-ops.md``.
+        self._hub_self = None
+        if os.environ.get("LM_HUB_SELF_AGENT", "1").strip() not in ("0", "false", "False"):
+            try:
+                from hub_self import HubSelfControlPlane
+                self._hub_self = HubSelfControlPlane("hub-self")
+                asyncio.create_task(self._hub_self.run())
+                logger.info("hub-self loopback agent-host started")
+            except Exception as e:  # noqa: BLE001 — never fatal to the hub
+                logger.warning("hub-self agent-host disabled (non-fatal): %s", e)
+                self._hub_self = None
+
         # Virtual hub-self spoke (agent-rework #5 / Phase 4): a loopback
         # ``/ws/agent`` listener + an in-process dumb agent INSIDE the hub
         # process, so ``_install_cert_on_hub`` routes the server-cert write +

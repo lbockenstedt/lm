@@ -51,6 +51,16 @@ class _FakeHub:
             return {"payload": {"data": {"status": "SUCCESS"}}}
         raise AssertionError(f"unexpected command {cmd_type}")
 
+    # B1/B2 guid-primary seams: aliases empty → identity.
+    def _primary_key(self, spoke_id):
+        return spoke_id
+
+    def _agent_primary_key(self, agent_id):
+        return agent_id
+
+    def _agent_relay_name(self, agent_id):
+        return agent_id
+
 
 class _FakeState:
     def __init__(self, agent_config, spoke_tenants):
@@ -137,6 +147,16 @@ class _MiniState:
 class _MiniHub:
     def __init__(self, agent_config):
         self.state = _MiniState(agent_config)
+
+    # B1/B2 guid-primary seams: aliases empty → identity.
+    def _primary_key(self, spoke_id):
+        return spoke_id
+
+    def _agent_primary_key(self, agent_id):
+        return agent_id
+
+    def _agent_relay_name(self, agent_id):
+        return agent_id
 
 
 def test_agent_config_entry_prefers_agent_id_then_falls_back_to_hostname():

@@ -51,6 +51,16 @@ class _FakeHub:
                                          "attempts": 1, "max_retries": 5}}}
         raise AssertionError(f"unexpected command {cmd_type}")
 
+    # B1/B2 guid-primary seams: aliases empty → identity.
+    def _primary_key(self, spoke_id):
+        return spoke_id
+
+    def _agent_primary_key(self, agent_id):
+        return agent_id
+
+    def _agent_relay_name(self, agent_id):
+        return agent_id
+
 
 class _FakeState:
     def __init__(self, agent_config, spoke_tenants, global_config=None):

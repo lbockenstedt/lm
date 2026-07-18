@@ -81,7 +81,8 @@ class _ReconcileHub:
         self.state = state
         self.key_manager = km
         self.install_uuid_index = {}
-        self.spoke_id_alias = {}                       # B1 guid-primary seam
+        self.spoke_id_alias = {}                       # B1 guid-primary seam (spoke)
+        self.agent_id_alias = {}                       # B2 guid-primary seam (agent)
         self.heartbeat = _Heartbeat()
         self.spoke_event_limit = 100
         self.spoke_events = {}
@@ -121,6 +122,16 @@ class _ReconcileHub:
 
     def _migrate_spoke_identity(self, old_id, new_id, **kw):
         return main.LabManagerHub._migrate_spoke_identity(self, old_id, new_id, **kw)
+
+    def _agent_primary_key(self, agent_id):
+        return main.LabManagerHub._agent_primary_key(self, agent_id)
+
+    def _agent_relay_name(self, agent_id):
+        return main.LabManagerHub._agent_relay_name(self, agent_id)
+
+    def _arm_agent_guid_primary(self, agent_id, install_uuid, parent_spoke_id=None):
+        return main.LabManagerHub._arm_agent_guid_primary(
+            self, agent_id, install_uuid, parent_spoke_id)
 
     def _reconcile_agent_identity(self, new_id, install_uuid, hostname, parent_spoke_id):
         return main.LabManagerHub._reconcile_agent_identity(
@@ -409,12 +420,18 @@ def test_agent_same_uuid_new_id_migrates_agent_config(tmp_path):
               is_agent=True, parent_spoke_id="pxmx-spoke-1")
 
     cfg = state.system_state["agent_config"]
-    assert "new-node-agent" in cfg and "old-node-agent" not in cfg
-    assert cfg["new-node-agent"]["client_simulation"]["tenant_id"] == "tenant-A"
-    assert hub.install_uuid_index["A-UUID"] == "new-node-agent"
-    # Agent key material re-keyed too.
-    assert km.get_valid_key("new-node-agent", "ag-secret") == "ka"
-    # Event recorded on the PARENT spoke's timeline (the agents-API filter key).
+    # B2: the clone-rename migrates old→new-name, then the arm relocates
+    # new-name→guid (A-UUID). Net: state converges on the guid.
+    assert "A-UUID" in cfg
+    assert "new-node-agent" not in cfg and "old-node-agent" not in cfg
+    assert cfg["A-UUID"]["client_simulation"]["tenant_id"] == "tenant-A"
+    assert hub.install_uuid_index["A-UUID"] == "A-UUID"
+    assert hub.agent_id_alias["new-node-agent"] == "A-UUID"
+    # Agent key material re-keyed to the guid (the new primary key).
+    assert km.get_valid_key("A-UUID", "ag-secret") == "ka"
+    assert km.get_valid_key("new-node-agent", "ag-secret") is None
+    # identity_changed recorded on the PARENT spoke's timeline (the clone-rename
+    # migrate fires it; the silent arm does not).
     assert _events_of(hub, "pxmx-spoke-1", "identity_changed")
 
 

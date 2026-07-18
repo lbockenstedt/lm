@@ -50,6 +50,33 @@ class HubIdentityMixin:
         """
         return self.spoke_id_alias.get(spoke_id, spoke_id)
 
+    def _agent_primary_key(self, agent_id: str) -> str:
+        """The key a relayed agent's hub-side state lives under.
+
+        Mirrors ``_primary_key`` for the agent-relay path: returns the guid once
+        the agent has been lazily migrated to guid-primary (recorded in
+        ``agent_id_alias``), else ``agent_id`` (the fail-safe). A relayed agent
+        still reports its self-chosen ``agent_id`` (the name the spoke knows it
+        by) on every AGENT_RELAY_UP frame; the guid is the hub-internal primary
+        key, translated to the raw name at the relay boundary (option (b)).
+        With ``agent_id_alias`` empty (before the B2 arm fires) this returns
+        ``agent_id`` for every agent → identical to today.
+        """
+        return self.agent_id_alias.get(agent_id, agent_id)
+
+    def _agent_relay_name(self, agent_id: str) -> str:
+        """Translate an agent primary key (guid) OR raw name to the raw name the
+        spoke knows the agent by — for the relay envelope ``target_agent_id``
+        (option b: guid is the hub-side key, the wire name stays raw).
+
+        Idempotent: a raw name pre-arm resolves to itself; a guid post-arm
+        resolves via ``agent_info[guid]["agent_id"]`` (the raw name stored at the
+        AGENT_RELAY_UP write site); an unknown / offline id falls back to itself
+        so a relay to a just-disconnected agent still targets the right name.
+        """
+        apk = self._agent_primary_key(agent_id)
+        return (self.agent_info.get(apk) or {}).get("agent_id") or agent_id
+
     def _reconcile_spoke_identity(self, new_id: str, install_uuid: str,
                                   hostname: str, is_agent: bool = False,
                                   parent_spoke_id: Optional[str] = None,
@@ -75,6 +102,19 @@ class HubIdentityMixin:
         if is_agent:
             self._reconcile_agent_identity(new_id, install_uuid, hostname, parent_spoke_id)
             return
+        # Cold-restart re-arm: the install_uuid_index is rebuilt guid-keyed on
+        # load (module_metadata is guid-keyed post-arm), but spoke_id_alias is
+        # in-memory (empty after a hub restart). If this uuid is already indexed
+        # to itself (== the guid), this is an armed spoke reconnecting BY NAME
+        # after a restart — pre-arm the alias so new_pk resolves to the guid and
+        # the clone-rename check below sees old_id == new_pk (no spurious
+        # guid→name reversal + identity_changed on every restart). Idempotent
+        # with the lazy arm at the end. Skipped when the uuid is unset, when the
+        # spoke already has an alias, or when new_id IS the guid (nothing to arm).
+        if install_uuid and not self.spoke_id_alias.get(new_id) \
+                and self.install_uuid_index.get(install_uuid) == install_uuid \
+                and install_uuid != new_id:
+            self.spoke_id_alias[new_id] = install_uuid
         # Resolve to the guid primary key once armed (== new_id until the lazy
         # arm at the end of this method flips it). All state ops key through
         # new_pk so a reconnecting spoke — which still DIALS IN by its
@@ -275,42 +315,90 @@ class HubIdentityMixin:
 
     def _reconcile_agent_identity(self, new_id: str, install_uuid: str,
                                   hostname: str, parent_spoke_id: Optional[str]) -> None:
-        """Agent counterpart of _reconcile_spoke_identity for relayed pxmx agents."""
+        """Agent counterpart of _reconcile_spoke_identity for relayed pxmx agents.
+
+        Keys all state ops through ``new_pk = _agent_primary_key(new_id)`` (the
+        guid once armed, else the raw name) so a reconnecting agent — which still
+        REPORTS its self-chosen ``agent_id`` name on every AGENT_RELAY_UP frame —
+        lands on its guid-keyed state instead of re-creating a name-keyed record
+        and splitting. Pre-arm ``new_pk == new_id`` (alias empty), so behavior is
+        identical to today. The agent relay path is post-auth and migrates
+        unconditionally (no CC2 ``migrate_if`` gate — the spoke vouched for the
+        agent by relaying it). Arms guid-primary at the end (B2).
+        """
         if not new_id:
             return
+        # Cold-restart re-arm (mirror the spoke path): agent_id_alias is in-memory
+        # (empty after a hub restart) but install_uuid_index is rebuilt guid-keyed
+        # on load (agent_config is guid-keyed post-arm). If this uuid is already
+        # indexed to itself (== the guid), this is an armed agent reconnecting BY
+        # NAME after a restart — pre-arm the alias so new_pk resolves to the guid
+        # and the clone-rename check sees old_id == new_pk (no spurious guid→name
+        # reversal + identity_changed on every restart). Idempotent with the
+        # lazy arm at the end.
+        if install_uuid and not self.agent_id_alias.get(new_id) \
+                and self.install_uuid_index.get(install_uuid) == install_uuid \
+                and install_uuid != new_id:
+            self.agent_id_alias[new_id] = install_uuid
+        new_pk = self._agent_primary_key(new_id)
         ac = self.state.system_state.setdefault("agent_config", {})
-        cfg = ac.get(new_id, {})
+        cfg = ac.get(new_pk, {})
         prev_hostname = cfg.get("hostname")
         prev_uuid = cfg.get("install_uuid")
 
         if install_uuid:
             old_id = self.install_uuid_index.get(install_uuid)
-            if old_id and old_id != new_id:
-                # Cloned+renamed Proxmox node: carry over per-agent config.
-                self.record_spoke_event(parent_spoke_id or new_id, "identity_changed",
+            if old_id and old_id != new_pk:
+                # Cloned+renamed Proxmox node: carry over per-agent config. Target
+                # is new_pk (the primary key) so the chain old_id→new_pk→guid
+                # converges on the guid when the arm below relocates name→guid.
+                self.record_spoke_event(parent_spoke_id or new_pk, "identity_changed",
                                         f"agent {old_id} → {new_id} (hostname={hostname or '?'})")
-                self._migrate_agent_identity(old_id, new_id, parent_spoke_id)
-                self.install_uuid_index[install_uuid] = new_id
+                self._migrate_agent_identity(old_id, new_pk, parent_spoke_id)
+                self.record_spoke_event(new_pk, "identity_changed",
+                                        f"migrated from {old_id} (hostname={hostname or '?'})")
+                self.install_uuid_index[install_uuid] = new_pk
             elif not old_id:
                 if prev_uuid and prev_uuid != install_uuid:
-                    self.record_spoke_event(parent_spoke_id or new_id, "reimaged",
+                    self.record_spoke_event(parent_spoke_id or new_pk, "reimaged",
                                             f"agent {new_id} install_uuid {prev_uuid[:8]}… → {install_uuid[:8]}…")
-                    if self.install_uuid_index.get(prev_uuid) == new_id:
+                    if self.install_uuid_index.get(prev_uuid) == new_pk:
                         del self.install_uuid_index[prev_uuid]
-                self.install_uuid_index[install_uuid] = new_id
+                self.install_uuid_index[install_uuid] = new_pk
+            # old_id == new_pk: normal reconnect — nothing to migrate. (Comparing
+            # against new_pk, not new_id, is what prevents the arm from ping-
+            # ponging agent state guid↔name every reconnect once the alias is
+            # armed: index[uuid]=guid and _agent_primary_key(name)=guid → equal.)
 
         if hostname and prev_hostname and prev_hostname != hostname:
-            self.record_spoke_event(parent_spoke_id or new_id, "hostname_changed",
+            self.record_spoke_event(parent_spoke_id or new_pk, "hostname_changed",
                                     f"agent {new_id}: was {prev_hostname}, now {hostname}")
 
-        cfg_new = ac.setdefault(new_id, {})
+        cfg_new = ac.setdefault(new_pk, {})
         cfg_new["hostname"] = hostname or ""
         cfg_new["install_uuid"] = install_uuid or ""
         self.state._mark_dirty()
 
+        # Lazy guid-primary arm: relocate this agent's hub-side state from its
+        # reported name to its stable install_uuid (guid) so _agent_primary_key
+        # resolves name→guid. Idempotent + silent (a key relocation, not a rename
+        # — same box, same install_uuid). Mirrors _arm_guid_primary.
+        if install_uuid:
+            self._arm_agent_guid_primary(new_id, install_uuid, parent_spoke_id)
+
     def _migrate_agent_identity(self, old_id: str, new_id: str,
                                 parent_spoke_id: Optional[str]) -> None:
-        """Carry an agent's per-agent config + logs + heartbeat from old→new id."""
+        """Carry an agent's per-agent config + logs + heartbeat from old→new id.
+
+        ``new_id`` is the agent primary key (guid once armed, else the raw name).
+        Parent-spoke-keyed state (``spoke_telemetry`` nested + the
+        ``{spoke}:{agent}`` composite heartbeat) resolves the spoke half through
+        ``_primary_key(parent_spoke_id)`` so it matches the write site in
+        ``_handle_agent_relay_up`` (which keys the composite ``{spoke_pk}:{agent_pk}``
+        post-B2). A pre-arm migrate (parent unarmed) lands on the raw name, same
+        as today; the next AGENT_HEARTBEAT overwrites the composite with the
+        armed form, so a transient mismatch self-heals within ~30s.
+        """
         if old_id == new_id:
             return
         # Persisted per-agent config (client_simulation/tenant binding/display_name).
@@ -324,18 +412,53 @@ class HubIdentityMixin:
         if old_id in self.agent_logs:
             self.agent_logs[new_id] = self.agent_logs.pop(old_id)
         # Agent→spoke index: keep the routing entry under the new id so command
-        # relay survives a clone-and-rename.
+        # relay survives a clone-and-rename. The embedded ``agent_id`` (raw name
+        # for relay translation) travels with the dict; the write site in
+        # _handle_agent_relay_up refreshes it on the next frame.
         if old_id in self.agent_info:
             self.agent_info[new_id] = self.agent_info.pop(old_id)
         if parent_spoke_id:
-            if parent_spoke_id in self.spoke_telemetry:
-                nested = self.spoke_telemetry[parent_spoke_id]
+            parent_pk = self._primary_key(parent_spoke_id)
+            if parent_pk in self.spoke_telemetry:
+                nested = self.spoke_telemetry[parent_pk]
                 if old_id in nested:
                     nested[new_id] = nested.pop(old_id)
-            # Composite heartbeat keys "{spoke}:{agent}".
-            old_hb = f"{parent_spoke_id}:{old_id}"
-            new_hb = f"{parent_spoke_id}:{new_id}"
+            # Composite heartbeat keys "{spoke_pk}:{agent}".
+            old_hb = f"{parent_pk}:{old_id}"
+            new_hb = f"{parent_pk}:{new_id}"
             if old_hb in self.heartbeat.last_seen:
                 self.heartbeat.last_seen[new_hb] = self.heartbeat.last_seen.pop(old_hb)
         self.key_manager.rename_spoke_keys(old_id, new_id)
         logger.info(f"[identity] migrated agent {old_id} → {new_id}")
+
+    def _arm_agent_guid_primary(self, agent_id: str, install_uuid: str,
+                                parent_spoke_id: Optional[str]) -> None:
+        """Lazily migrate a relayed agent's hub-side state from its reported name
+        to its stable ``install_uuid`` (guid) as the agent primary key, so
+        ``_agent_primary_key(agent_id)`` resolves name→guid. Mirrors
+        ``_arm_guid_primary`` for the agent-relay path (B2, option b: guid is the
+        hub-side key; the relay envelope ``target_agent_id`` stays the raw name).
+
+        Sets ``agent_id_alias[agent_id] = install_uuid`` then re-keys every
+        name-keyed agent store name→guid via ``_migrate_agent_identity``:
+        agent_config / agent_display_names / agent_logs / agent_info / the
+        ``{spoke}:{agent}`` composite heartbeat / the spoke_telemetry nested
+        agent entry. Idempotent: already-armed → no-op; armed to a *different*
+        guid is left untouched. ``install_uuid_index`` repoints to the guid.
+        ``agent_info[guid]["agent_id"]`` holds the raw name (set by the write
+        site in _handle_agent_relay_up) for guid→name relay translation.
+        """
+        if not install_uuid or install_uuid == agent_id:
+            return
+        existing = self.agent_id_alias.get(agent_id)
+        if existing == install_uuid:
+            return  # already armed to this guid — idempotent no-op
+        if existing:
+            # Armed to a different guid — leave it; a uuid is stable per-install.
+            logger.warning("[identity] agent %s already guid-armed to %s; ignoring %s",
+                           agent_id, existing, install_uuid)
+            return
+        self.agent_id_alias[agent_id] = install_uuid
+        self._migrate_agent_identity(agent_id, install_uuid, parent_spoke_id)
+        self.install_uuid_index[install_uuid] = install_uuid
+        logger.info("[identity] armed agent guid-primary %s → %s", agent_id, install_uuid)

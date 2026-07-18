@@ -230,11 +230,13 @@ class CSBridgePoller:
                     continue
                 cfg_key, ac_entry = self._agent_config_entry(aid, hostname)
                 # Heal a hostname-keyed (or otherwise stale-keyed) entry to the
-                # runtime agent_id ONCE, so this stops recurring and the tolerant
-                # lookup becomes belt-and-suspenders. Safe no-op when already
-                # keyed by agent_id or when nothing is stored.
-                if cfg_key != aid and ac_entry:
-                    self._migrate_agent_config_key(cfg_key, aid)
+                # agent primary key (guid once armed, else the runtime agent_id)
+                # ONCE, so this stops recurring and the tolerant lookup becomes
+                # belt-and-suspenders. Safe no-op when already keyed by the pk or
+                # when nothing is stored.
+                agent_pk = hub._agent_primary_key(aid)
+                if cfg_key != agent_pk and ac_entry:
+                    self._migrate_agent_config_key(cfg_key, agent_pk)
                     cfg_key, ac_entry = self._agent_config_entry(aid, hostname)
                 cs_cfg = ac_entry.get("client_simulation") or {}
                 enabled = bool(cs_cfg.get("enabled"))
@@ -255,7 +257,7 @@ class CSBridgePoller:
                     decision = (f"SKIP no-cs-spoke — client_simulation.enabled=on but no "
                                 f"client-sim spoke is bound to tenant {tenant_id!r}")
                 else:
-                    keynote = "" if cfg_key == aid else f" [config keyed by {cfg_key!r}, not agent_id — re-save to normalize]"
+                    keynote = "" if cfg_key == agent_pk else f" [config keyed by {cfg_key!r}, not agent pk — re-save to normalize]"
                     decision = f"ACTIVE — tenant={tenant_id} cs_spoke={cs_spoke}{keynote}"
                 self._log_agent_diag(host_spoke, aid, hostname, decision)
 
@@ -295,13 +297,24 @@ class CSBridgePoller:
         under the hostname (or an older id) showed "CS-enabled agents: 1" yet the
         bridge never matched it, so usb_config never reached the agent and
         auto-provision reported "no dongle_vidpids configured". Prefer an exact
-        agent_id match; fall back to hostname. Returns ``(agent_id, {})`` on miss."""
+        agent_id match; fall back to hostname. Returns ``(agent_id, {})`` on miss.
+
+        B2: agent_config is guid-keyed once the agent is armed, so the canonical
+        key is ``_agent_primary_key(agent_id)`` (the guid; the raw name pre-arm).
+        Try that first, then the raw name, then the hostname (and the hostname's
+        guid resolution) — covers armed / pre-arm / legacy-hostname-keyed entries.
+        """
         try:
             store = self.hub.state.system_state.get("agent_config", {}) or {}
         except Exception:
             return agent_id, {}
-        for key in (agent_id, hostname):
-            if key and isinstance(store.get(key), dict):
+        keys = []
+        for k in (self.hub._agent_primary_key(agent_id), agent_id,
+                  self.hub._agent_primary_key(hostname or ""), hostname):
+            if k and k not in keys:
+                keys.append(k)
+        for key in keys:
+            if isinstance(store.get(key), dict):
                 return key, store[key]
         return agent_id, {}
 
@@ -479,7 +492,7 @@ class CSBridgePoller:
         try:
             raw = await hub.request_response(
                 host_spoke, "SPOKE_RELAY",
-                {"target_agent_id": agent_id, "command": "CS_COMMAND", "data": relay_data},
+                {"target_agent_id": hub._agent_relay_name(agent_id), "command": "CS_COMMAND", "data": relay_data},
                 timeout=timeout,
             )
         except Exception as exc:  # noqa: BLE001 — spoke mid-reconnect: retry, don't fail.

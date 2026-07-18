@@ -80,10 +80,21 @@ class _FakeHub:
     def _schedule_vm_cache_refresh(self, tenant_id):
         self.vm_refresh_calls.append(tenant_id)
 
+    # B1/B2 guid-primary seams: aliases empty → identity.
+    def _primary_key(self, spoke_id):
+        return spoke_id
+
+    def _agent_primary_key(self, agent_id):
+        return agent_id
+
+    def _agent_relay_name(self, agent_id):
+        return agent_id
+
 
 def _bind(hub):
     """Bind the real LabManagerHub relay methods onto the fake hub."""
     hub._handle_agent_relay_up = LabManagerHub._handle_agent_relay_up.__get__(hub)
+    hub._inherit_agent_tenant = LabManagerHub._inherit_agent_tenant.__get__(hub)
     hub._relay_cs_event = LabManagerHub._relay_cs_event.__get__(hub)
     hub._relay_cs_event_inner = LabManagerHub._relay_cs_event_inner.__get__(hub)
     return hub

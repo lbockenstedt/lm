@@ -40,6 +40,16 @@ class _Hub:
     def __init__(self, state):
         self.state = state
 
+    # B1/B2 guid-primary seams: aliases empty → identity.
+    def _primary_key(self, spoke_id):
+        return spoke_id
+
+    def _agent_primary_key(self, agent_id):
+        return agent_id
+
+    def _agent_relay_name(self, agent_id):
+        return agent_id
+
 
 def _inherit(hub, agent_id, spoke_id):
     return main.LabManagerHub._inherit_agent_tenant(hub, agent_id, spoke_id)

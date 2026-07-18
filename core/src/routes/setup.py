@@ -562,17 +562,18 @@ def register(app, hub, ctx):
             spoke_tenant = hub.state.get_spoke_tenant(target_spoke)
             if spoke_tenant:
                 agent_cfg_store = hub.state.system_state.setdefault("agent_config", {})
-                entry = dict(agent_cfg_store.get(agent_id, {}))
+                agent_pk = hub._agent_primary_key(agent_id)
+                entry = dict(agent_cfg_store.get(agent_pk, {}))
                 cs_cfg = dict(entry.get("client_simulation") or {})
                 if not cs_cfg.get("tenant_id"):
                     cs_cfg["tenant_id"] = spoke_tenant
                     entry["client_simulation"] = cs_cfg
-                    agent_cfg_store[agent_id] = entry
+                    agent_cfg_store[agent_pk] = entry
                     hub.state._mark_dirty()
 
             if hub._primary_key(target_spoke) in hub.active_connections:
                 msg = _hub_msg(target_spoke, "SPOKE_RELAY", {
-                    "target_agent_id": agent_id,
+                    "target_agent_id": hub._agent_relay_name(agent_id),
                     "command": "APPROVAL_SUCCESS",
                     "payload": {}
                 })

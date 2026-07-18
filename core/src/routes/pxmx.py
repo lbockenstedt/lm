@@ -90,16 +90,23 @@ async def _aggregate_agents(hub, agent_spokes):
         for a in data.get("agents", []) or []:
             aid = a["agent_id"]
             a["spoke_id"] = parent_spoke
-            cfg = agent_cfg.get(aid, {})
+            # B2: agent_config / agent_display_names / the {spoke}:{agent}
+            # composite heartbeat are guid-keyed post-arm; resolve the agent +
+            # spoke primary keys so reads land on the guid-keyed state. Pre-arm
+            # the aliases are empty → identity (same as today).
+            agent_pk = hub._agent_primary_key(aid)
+            spoke_pk = hub._primary_key(parent_spoke)
+            a["spoke_guid"] = spoke_pk
+            cfg = agent_cfg.get(agent_pk, {})
             if cfg.get("display_name"):
                 a["display_name"] = cfg["display_name"]
-            elif aid in names:
-                a["display_name"] = names[aid]
+            elif agent_pk in names:
+                a["display_name"] = names[agent_pk]
             if cfg.get("client_simulation"):
                 a["client_simulation"] = cfg["client_simulation"]
-            # Hub-tracked per-agent heartbeat (keyed spoke_id:agent_id, fed by
+            # Hub-tracked per-agent heartbeat (keyed spoke_pk:agent_pk, fed by
             # the owning spoke relaying AGENT_HEARTBEAT up).
-            hb_key = f"{parent_spoke}:{aid}"
+            hb_key = f"{spoke_pk}:{agent_pk}"
             hb_last = hub.heartbeat.last_seen.get(hb_key)
             a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
             a["heartbeat_status"] = str(hub.heartbeat.get_status(hb_key).value)
@@ -420,7 +427,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No agent-hosting spoke connected")
         try:
             result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
-                "target_agent_id": agent_id,
+                "target_agent_id": hub._agent_relay_name(agent_id),
                 "command": "REVOKE_AGENT",
             })
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
@@ -438,7 +445,8 @@ def register(app, hub, ctx):
         """Dismiss the amber "renamed" banner for a pxmx node agent (idempotent)."""
         hub = app.state.hub
         try:
-            cfg = hub.state.system_state.setdefault("agent_config", {}).setdefault(agent_id, {})
+            agent_pk = hub._agent_primary_key(agent_id)
+            cfg = hub.state.system_state.setdefault("agent_config", {}).setdefault(agent_pk, {})
             cfg["change_acked_ts"] = time.time()
             hub.state._mark_dirty()
             return {"status": "ok", "agent_id": agent_id}
@@ -453,7 +461,7 @@ def register(app, hub, ctx):
         display_name = (data.get("display_name") or "").strip()
         if not display_name:
             raise HTTPException(status_code=400, detail="display_name required")
-        hub.state.system_state.setdefault("agent_display_names", {})[agent_id] = display_name
+        hub.state.system_state.setdefault("agent_display_names", {})[hub._agent_primary_key(agent_id)] = display_name
         hub.state._mark_dirty()
         return {"status": "ok", "message": f"Agent '{agent_id}' renamed to '{display_name}'"}
 
@@ -461,10 +469,11 @@ def register(app, hub, ctx):
     async def get_pxmx_agent_config(agent_id: str):
         """Return the stored per-agent config (display name + Client Simulation mode)."""
         hub = app.state.hub
-        cfg = hub.state.system_state.get("agent_config", {}).get(agent_id, {})
+        agent_pk = hub._agent_primary_key(agent_id)
+        cfg = hub.state.system_state.get("agent_config", {}).get(agent_pk, {})
         # Fall back to the legacy display-name override if agent_config has none yet.
         if not cfg.get("display_name"):
-            legacy = hub.state.system_state.get("agent_display_names", {}).get(agent_id)
+            legacy = hub.state.system_state.get("agent_display_names", {}).get(agent_pk)
             if legacy:
                 cfg = dict(cfg)
                 cfg["display_name"] = legacy
@@ -496,13 +505,14 @@ def register(app, hub, ctx):
 
             # Persist (merge with any existing entry so partial updates keep fields).
             store = hub.state.system_state.setdefault("agent_config", {})
-            entry = dict(store.get(agent_id, {}))
+            agent_pk = hub._agent_primary_key(agent_id)
+            entry = dict(store.get(agent_pk, {}))
             if display_name:
                 entry["display_name"] = display_name
             entry["client_simulation"] = cs_cfg
             if has_cron:
                 entry["managed_crontab"] = cron_val
-            store[agent_id] = entry
+            store[agent_pk] = entry
             hub.state._mark_dirty()
 
             # The config pushed down to the agent — include managed_crontab only
@@ -584,7 +594,7 @@ def register(app, hub, ctx):
         pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "hypervisor")
         try:
             result = await hub.request_response(pxmx_spoke, "SPOKE_RELAY", {
-                "target_agent_id": agent_id,
+                "target_agent_id": hub._agent_relay_name(agent_id),
                 "command": "CS_COMMAND",
                 "data": body,
             })
@@ -605,7 +615,7 @@ def register(app, hub, ctx):
         if pxmx_spoke:
             try:
                 result = await hub.request_response(pxmx_spoke, "SPOKE_RELAY", {
-                    "target_agent_id": agent_id,
+                    "target_agent_id": hub._agent_relay_name(agent_id),
                     "command": "REVOKE_AGENT",
                 })
                 data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
@@ -614,8 +624,9 @@ def register(app, hub, ctx):
                 # Agent may already be disconnected — non-fatal for a delete.
                 logger.info(f"Revoke relay for delete of agent '{agent_id}' skipped/failed (may be dead): {e}")
         names = hub.state.system_state.get("agent_display_names", {})
-        if agent_id in names:
-            names.pop(agent_id, None)
+        agent_pk = hub._agent_primary_key(agent_id)
+        if agent_pk in names:
+            names.pop(agent_pk, None)
             hub.state._mark_dirty()
         msg = ("Agent disconnected and removed." if relayed else "Agent removed (was not connected).")
         return {"status": "ok", "message": msg}
@@ -747,7 +758,7 @@ def register(app, hub, ctx):
         try:
             res = await hub.request_response(pxmx_spoke, "SHELL_START", {
                 "session_id": session_id, "unique_id": unique_id,
-                "agent_id": agent_id, "target_agent_id": agent_id,
+                "agent_id": agent_id, "target_agent_id": hub._agent_relay_name(agent_id),
             }, timeout=30.0)
         except Exception as e:
             hub.unregister_shell_session(session_id)
@@ -827,7 +838,7 @@ def register(app, hub, ctx):
                 "vmid": vmid,
                 "node": node,
                 "type": str((body or {}).get("type", "qemu")),
-                "target_agent_id": agent_id,
+                "target_agent_id": hub._agent_relay_name(agent_id),
             }, timeout=50.0)
         except Exception as e:
             hub.unregister_vnc_session(session_id)

@@ -84,7 +84,12 @@ def register(app, hub, ctx):
             if not sid or hub._primary_key(sid) not in conns:
                 continue
             host = (info or {}).get("hostname", aid) or aid
-            targets.append({"id": f"agent:{sid}:{aid}", "label": f"{host} · agent", "kind": "agent"})
+            # B2: agent_info is guid-keyed; ``agent_id`` holds the raw name the
+            # spoke knows the agent by. The relay target encodes the RAW name so
+            # the run path relays AGENT_RUN_COMMAND with a name the spoke
+            # recognizes (option b — guid stays hub-side).
+            raw_aid = (info or {}).get("agent_id") or aid
+            targets.append({"id": f"agent:{sid}:{raw_aid}", "label": f"{host} · agent", "kind": "agent"})
         return {"targets": targets}
 
     @app.post("/api/exec")
