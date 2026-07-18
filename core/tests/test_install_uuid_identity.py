@@ -81,6 +81,7 @@ class _ReconcileHub:
         self.state = state
         self.key_manager = km
         self.install_uuid_index = {}
+        self.spoke_id_alias = {}                       # B1 guid-primary seam
         self.heartbeat = _Heartbeat()
         self.spoke_event_limit = 100
         self.spoke_events = {}
@@ -112,8 +113,14 @@ class _ReconcileHub:
     # Delegate the production migrate/reconcile helpers (they call each other via
     # self, so the fake must expose them as bound methods forwarding to the real
     # unbound LabManagerHub methods with `self` = this fake).
-    def _migrate_spoke_identity(self, old_id, new_id):
-        return main.LabManagerHub._migrate_spoke_identity(self, old_id, new_id)
+    def _primary_key(self, spoke_id):
+        return main.LabManagerHub._primary_key(self, spoke_id)
+
+    def _arm_guid_primary(self, spoke_id, install_uuid):
+        return main.LabManagerHub._arm_guid_primary(self, spoke_id, install_uuid)
+
+    def _migrate_spoke_identity(self, old_id, new_id, **kw):
+        return main.LabManagerHub._migrate_spoke_identity(self, old_id, new_id, **kw)
 
     def _reconcile_agent_identity(self, new_id, install_uuid, hostname, parent_spoke_id):
         return main.LabManagerHub._reconcile_agent_identity(
@@ -192,26 +199,34 @@ def test_same_uuid_new_id_migrates_approval_tenant_and_keys(tmp_path):
     # The cloned box renamed itself → reconnects with a new id, same UUID.
     reconcile(hub, "new-spoke", "UUID-1", "newhost")
 
-    # Approval + tenant binding carried over to the new id; old id no longer approved.
-    assert state.system_state["approved_modules"].get("new-spoke") is True
+    # B1: the clone-rename migrates old-spoke→new-spoke, then the lazy arm
+    # relocates new-spoke→UUID-1 (the guid primary key). Approval + tenant
+    # binding land on the guid; old + connect names are no longer keyed.
+    assert state.system_state["approved_modules"].get("UUID-1") is True
     assert "old-spoke" not in state.system_state["approved_modules"]
-    assert state.get_spoke_tenant("new-spoke") == "tenant-A"
-    # Known-modules list re-keyed in place.
-    assert "new-spoke" in state.system_state["known_modules"]
+    assert "new-spoke" not in state.system_state["approved_modules"]
+    assert state.get_spoke_tenant("UUID-1") == "tenant-A"
+    # Known-modules list re-keyed in place onto the guid.
+    assert "UUID-1" in state.system_state["known_modules"]
     assert "old-spoke" not in state.system_state["known_modules"]
-    # Install-UUID index now points at the new id.
-    assert hub.install_uuid_index["UUID-1"] == "new-spoke"
-    # CRITICAL: key material re-keyed so the renamed spoke authenticates seamlessly.
-    assert km.get_valid_key("new-spoke", "the-secret") == "k1"
+    # Install-UUID index now points at the guid (the new primary key).
+    assert hub.install_uuid_index["UUID-1"] == "UUID-1"
+    # The connect name aliases to the guid.
+    assert hub.spoke_id_alias["new-spoke"] == "UUID-1"
+    # CRITICAL: key material re-keyed so the guid-keyed spoke authenticates
+    # seamlessly; neither the old nor the connect name has a key.
+    assert km.get_valid_key("UUID-1", "the-secret") == "k1"
+    assert km.get_valid_key("new-spoke", "the-secret") is None
     assert km.get_valid_key("old-spoke", "the-secret") is None
     # identity_changed lifecycle events: the old timeline is carried onto the
-    # new id by the migration, so BOTH events ("was old…" + "migrated from old…")
-    # end up on the new-spoke timeline that the banner API reads.
-    changed = _events_of(hub, "new-spoke", "identity_changed")
+    # guid by the migration + arm, so BOTH events ("was old…" + "migrated
+    # from old…") end up on the guid timeline the banner API reads (the
+    # banner resolves the connect name → guid via _primary_key).
+    changed = _events_of(hub, "UUID-1", "identity_changed")
     assert len(changed) == 2
-    assert _events_of(hub, "old-spoke", "identity_changed") == []   # moved to new
-    # Hostname persisted on the new id.
-    assert state.system_state["module_metadata"]["new-spoke"]["hostname"] == "newhost"
+    assert _events_of(hub, "old-spoke", "identity_changed") == []   # moved to guid
+    # Hostname persisted on the guid.
+    assert state.system_state["module_metadata"]["UUID-1"]["hostname"] == "newhost"
 
 
 def test_same_id_new_hostname_emits_hostname_changed(tmp_path):
@@ -224,11 +239,15 @@ def test_same_id_new_hostname_emits_hostname_changed(tmp_path):
 
     reconcile(hub, "pinned-spoke", "UUID-2", "newhost")
 
-    assert _events_of(hub, "pinned-spoke", "hostname_changed")
+    # B1: the arm relocates pinned-spoke→UUID-2, so the hostname_changed event
+    # lands on the guid timeline (banner resolves name→guid).
+    assert _events_of(hub, "UUID-2", "hostname_changed")
     assert not _events_of(hub, "pinned-spoke", "identity_changed")
-    # No migration occurred (id unchanged): no new id appeared.
+    # No clone-rename migration occurred (id unchanged): no new id appeared.
     assert set(state.system_state["approved_modules"]) == set()
-    assert hub.install_uuid_index["UUID-2"] == "pinned-spoke"
+    # Index now points at the guid (the arm repointed it).
+    assert hub.install_uuid_index["UUID-2"] == "UUID-2"
+    assert hub.spoke_id_alias["pinned-spoke"] == "UUID-2"
 
 
 def test_new_uuid_reusing_known_id_emits_reimaged(tmp_path):
@@ -241,11 +260,13 @@ def test_new_uuid_reusing_known_id_emits_reimaged(tmp_path):
 
     reconcile(hub, "spoke-1", "NEW-UUID", "host")
 
-    assert _events_of(hub, "spoke-1", "reimaged")
-    assert not _events_of(hub, "spoke-1", "identity_changed")
-    # Index now owned by the new image; old UUID evicted.
-    assert hub.install_uuid_index.get("NEW-UUID") == "spoke-1"
+    # B1: arm relocates spoke-1→NEW-UUID, so the reimaged event lands on the guid.
+    assert _events_of(hub, "NEW-UUID", "reimaged")
+    assert not _events_of(hub, "NEW-UUID", "identity_changed")
+    # Index now owned by the new image (pointing at the guid); old UUID evicted.
+    assert hub.install_uuid_index.get("NEW-UUID") == "NEW-UUID"
     assert "OLD-UUID" not in hub.install_uuid_index
+    assert hub.spoke_id_alias["spoke-1"] == "NEW-UUID"
 
 
 def test_fresh_uuid_unknown_id_emits_no_event(tmp_path):
@@ -256,8 +277,10 @@ def test_fresh_uuid_unknown_id_emits_no_event(tmp_path):
     reconcile(hub, "brand-new", "UUID-X", "host-x")
 
     assert hub.spoke_events == {}                 # no lifecycle events at all
-    assert hub.install_uuid_index["UUID-X"] == "brand-new"
-    assert state.system_state["module_metadata"]["brand-new"]["install_uuid"] == "UUID-X"
+    # B1: arm relocated brand-new→UUID-X; index + metadata now guid-keyed.
+    assert hub.install_uuid_index["UUID-X"] == "UUID-X"
+    assert hub.spoke_id_alias["brand-new"] == "UUID-X"
+    assert state.system_state["module_metadata"]["UUID-X"]["install_uuid"] == "UUID-X"
 
 
 def test_empty_install_uuid_records_hostname_only(tmp_path):
@@ -291,11 +314,13 @@ def test_proven_rename_migrates(tmp_path):
 
     reconcile(hub, "new-spoke", "UUID-1", "newhost", migrate_if=True)
 
-    assert state.system_state["approved_modules"].get("new-spoke") is True
+    # B1: proven rename migrates old-spoke→new-spoke, then arms new-spoke→UUID-1.
+    assert state.system_state["approved_modules"].get("UUID-1") is True
     assert "old-spoke" not in state.system_state["approved_modules"]
-    assert km.get_valid_key("new-spoke", "the-secret") == "k1"
-    assert hub.install_uuid_index["UUID-1"] == "new-spoke"
-    assert _events_of(hub, "new-spoke", "identity_changed")
+    assert km.get_valid_key("UUID-1", "the-secret") == "k1"
+    assert hub.install_uuid_index["UUID-1"] == "UUID-1"
+    assert hub.spoke_id_alias["new-spoke"] == "UUID-1"
+    assert _events_of(hub, "UUID-1", "identity_changed")
 
 
 def test_unproven_rename_refuses_migration(tmp_path):
@@ -356,7 +381,9 @@ def test_sub_spoke_uuid5_guid_does_not_clobber_base(tmp_path):
 
     # Base entry is INTACT (not renamed/clobbered); sub-spoke has its own entry.
     assert hub.install_uuid_index[base_uuid] == "agent-1"
-    assert hub.install_uuid_index[sub_uuid] == "agent-1-network"
+    # B1: sub-spoke armed to its own guid; index points at the guid.
+    assert hub.install_uuid_index[sub_uuid] == sub_uuid
+    assert hub.spoke_id_alias["agent-1-network"] == sub_uuid
     assert state.system_state["approved_modules"].get("agent-1") is True
     # No identity_changed migration fired on the base (it wasn't renamed).
     assert _events_of(hub, "agent-1", "identity_changed") == []

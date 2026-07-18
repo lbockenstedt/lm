@@ -1595,9 +1595,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         """Emit a replay/stale WARNING at most once per
         ``_REPLAY_WARN_INTERVAL_S`` per spoke so a replay flood doesn't spam."""
         now = time.time()
-        last = self._replay_warn_last.get(spoke_id, 0.0)
+        sid = self._primary_key(spoke_id)
+        last = self._replay_warn_last.get(sid, 0.0)
         if now - last >= self._REPLAY_WARN_INTERVAL_S:
-            self._replay_warn_last[spoke_id] = now
+            self._replay_warn_last[sid] = now
             logger.warning("Dropping frame from %s: %s", spoke_id, reason)
         else:
             logger.debug("Dropping frame from %s: %s (throttled)", spoke_id, reason)
@@ -1695,7 +1696,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         still uses ``active_connections`` directly (must be live-accurate)."""
         if self._primary_key(spoke_id) in self.active_connections:
             return True
-        ts = self.heartbeat.last_seen.get(spoke_id)
+        ts = self.heartbeat.last_seen.get(self._primary_key(spoke_id))
         if not ts:
             return False
         g = self._online_grace_s() if grace_s is None else grace_s
@@ -1725,16 +1726,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         rate_limiters / re-pushes simulations_cache, so eviction on delete is safe.
         """
         pk = self._primary_key(spoke_id)
-        self.simulations_cache.pop(spoke_id, None)
+        self.simulations_cache.pop(pk, None)
         self.spoke_telemetry.pop(pk, None)
         self.rate_limiters.pop(pk, None)
-        self.spoke_events.pop(spoke_id, None)
+        self.spoke_events.pop(pk, None)
         self.spoke_recovery.pop(pk, None)
-        self.agent_logs.pop(spoke_id, None)
-        self.heartbeat.last_seen.pop(spoke_id, None)  # else grows unbounded across delete/recreate
+        self.agent_logs.pop(pk, None)
+        self.heartbeat.last_seen.pop(pk, None)  # else grows unbounded across delete/recreate
         # Also drop the persisted last-seen so a deleted spoke doesn't keep a
         # stale timestamp that would surface as a ghost "last seen" entry.
-        self.state.clear_spoke_last_seen(spoke_id)
+        self.state.clear_spoke_last_seen(pk)
 
     def _mark_spoke_disconnected(self, spoke_id: str) -> None:
         """Record a clean-WS-close disconnect in ``spoke_telemetry``.
@@ -2816,9 +2817,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         ``/setup/approve_spoke`` flow and the PSK claim flow
         (``/sim/api/tenant/{t}/spokes/{id}/claim``). Mirrors the connected-push
         in api.py approve_spoke (561-592)."""
-        self.state.register_module(spoke_id, approved=True)
-        self.state.set_spoke_tenant(spoke_id, tenant_id)
         pk = self._primary_key(spoke_id)
+        self.state.register_module(pk, approved=True)
+        self.state.set_spoke_tenant(pk, tenant_id)
         self.approved_modules[pk] = True
         self.state.save_state()
         if pk in self.active_connections:
@@ -3046,7 +3047,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"revoke_spoke: could not close live WS for {spoke_id}: {e}")
         self.approved_modules[pk] = False
-        self.state.register_module(spoke_id, approved=False)
+        self.state.register_module(pk, approved=False)
         self.state.save_state()
         self.key_manager.delete_spoke_key(pk)
         await self.mailbox.clear_spoke(spoke_id)
@@ -3159,13 +3160,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         covers sub-before-parent connect order AND boot-seeded roles (the parent
         re-spawns roles at boot without a hub ``LOAD_ROLE`` — the live round-trip
         handles these with no prior hub state)."""
-        tenant = self.state.get_spoke_tenant(parent_spoke_id) or ""
+        parent_pk = self._primary_key(parent_spoke_id)
+        tenant = self.state.get_spoke_tenant(parent_pk) or ""
         for sid in list(self.active_connections.keys()):
-            if sid == parent_spoke_id:
+            if sid == parent_pk:
                 continue
             if self.approved_modules.get(sid, False):
                 continue
-            if self.spoke_parent_map.get(sid) != parent_spoke_id:
+            if self._primary_key(self.spoke_parent_map.get(sid, "")) != parent_pk:
                 continue
             vouched, reason = await self._parent_vouches(sid, parent_spoke_id)
             if not vouched:
@@ -3316,9 +3318,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Constant-time compare against each stored PSK for the tenant.
         if not any(hmac.compare_digest(str(p), psk) for p in psks):
             return False
-        self.state.register_module(spoke_id, approved=True)
-        self.state.set_spoke_tenant(spoke_id, tenant_hint)
-        self.approved_modules[self._primary_key(spoke_id)] = True
+        pk = self._primary_key(spoke_id)
+        self.state.register_module(pk, approved=True)
+        self.state.set_spoke_tenant(pk, tenant_hint)
+        self.approved_modules[pk] = True
         self.state.save_state()
         logger.info(f"PSK self-provision: {spoke_id} auto-approved + bound to tenant {tenant_hint}.")
         self.record_spoke_event(spoke_id, "psk_self_provision", f"tenant={tenant_hint}")
@@ -3339,7 +3342,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         """
         if not isinstance(cs_data, dict):
             return
-        self.simulations_cache[spoke_id] = cs_data
+        pk = self._primary_key(spoke_id)
+        self.simulations_cache[pk] = cs_data
         self._sim_cache_dirty = True  # warm-load snapshot flushed by run_sim_cache_flush_loop
         # Spoke-reported drain state (mid self-update). ``draining: true`` keeps
         # the hub from firing request/reply commands at a spoke that's about to
@@ -3417,8 +3421,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         log_data = payload.get("data", {})
         entries = log_data.get("entries") if isinstance(log_data, dict) else None
         if isinstance(entries, list):
-            if spoke_id not in self.agent_logs:
-                self.agent_logs[spoke_id] = deque(maxlen=self.max_log_size)
+            pk = self._primary_key(spoke_id)
+            if pk not in self.agent_logs:
+                self.agent_logs[pk] = deque(maxlen=self.max_log_size)
             # Entries arrive already canonical-formatted by the spoke's
             # _SpokeLogRelayHandler (``<asctime> - <name> - <levelname> - <msg>``)
             # — store verbatim. Re-stamping with the hub receive time would
@@ -3426,7 +3431,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # the entry) and desync the WebUI view from the spoke's local log.
             for entry in entries:
                 if isinstance(entry, str):
-                    self.agent_logs[spoke_id].append(entry)
+                    self.agent_logs[pk].append(entry)
             logger.debug(f"SPOKE_LOG: stored {len(entries)} entries for {spoke_id}")
 
     def _inherit_agent_tenant(self, agent_id: str, spoke_id: str) -> None:
@@ -3445,7 +3450,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if not agent_id:
             return
         try:
-            spoke_tenant = self.state.get_spoke_tenant(spoke_id)
+            spoke_tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id))
         except Exception:
             spoke_tenant = None
         if not spoke_tenant:
@@ -3942,6 +3947,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     rename_proven = True
             self._reconcile_spoke_identity(spoke_id, install_uuid, spoke_hostname,
                                            migrate_if=rename_proven)
+            # Recompute pk: the arm inside reconcile may have flipped the alias
+            # name→guid, so the pre-reconcile pk computed above is now stale.
+            pk = self._primary_key(spoke_id)
 
             # If secret is provided, verify it. If not, the spoke is in 'pending secret' state.
             is_authenticated = False
@@ -3964,8 +3972,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
             if not is_authenticated:
                 # Register as known if not already
-                if spoke_id not in self.known_modules:
-                    self.state.register_module(spoke_id, approved=False)
+                if pk not in self.known_modules:
+                    self.state.register_module(pk, approved=False)
                     self.known_modules = self.state.system_state["known_modules"]
 
                 # Update telemetry
@@ -4056,8 +4064,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             }
 
             # Track this module as known for approval lists
-            if spoke_id not in self.known_modules:
-                self.state.register_module(spoke_id, approved=False)
+            if pk not in self.known_modules:
+                self.state.register_module(pk, approved=False)
                 self.known_modules = self.state.system_state["known_modules"]
 
             # Initialize the per-spoke rate limiter from config (applied on each
@@ -4088,8 +4096,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # spoke re-registers its type anyway. Only log/event on a genuinely
                 # NEW type so a reconnect storm doesn't spam either.
                 _prev_type = self.state.system_state.get("module_metadata", {}).get(
-                    spoke_id, {}).get("module_type")
-                self.state.update_module_metadata(spoke_id, {"module_type": module_type})
+                    pk, {}).get("module_type")
+                self.state.update_module_metadata(pk, {"module_type": module_type})
                 if _prev_type != module_type:
                     logger.info(f"Spoke {spoke_id} registered as module type: {module_type}")
                     self.record_spoke_event(spoke_id, "registered", f"module_type={module_type}")
@@ -4148,7 +4156,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # sub-before-parent connect order).
                     vouched, reason = await self._parent_vouches(spoke_id, parent_spoke_id)
                     if vouched:
-                        tenant = self.state.get_spoke_tenant(parent_spoke_id) or ""
+                        tenant = self.state.get_spoke_tenant(self._primary_key(parent_spoke_id)) or ""
                         logger.info(f"Parent auto-approve: {spoke_id} via parent "
                                     f"{parent_spoke_id} (tenant={tenant or 'unassigned'}).")
                         await self.approve_and_bind_spoke(spoke_id, tenant)
@@ -4226,7 +4234,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # dict op per frame — cheap. Counts frames we then drop, unlike
                 # spoke_msg_count (which is post-shed).
                 if spoke_id:
-                    self._spoke_recv[spoke_id] = self._spoke_recv.get(spoke_id, 0) + 1
+                    self._spoke_recv[pk] = self._spoke_recv.get(pk, 0) + 1
                 # PROTECT MODE — early shed by SIZE, BEFORE the expensive JSON
                 # parse. At a CPU-pegged loop the parse of large telemetry frames
                 # IS the bottleneck, so dropping them here (not after parsing) is
@@ -4244,8 +4252,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # isn't corrupted by the shedding itself.
                     try:
                         if (len(message_json) > self._protect_shed_bytes
-                                and self._spoke_offered.get(spoke_id, 0) >= self._protect_shed_min_mps):
-                            self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
+                                and self._spoke_offered.get(pk, 0) >= self._protect_shed_min_mps):
+                            self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
                             continue
                     except Exception:
                         pass
@@ -4331,23 +4339,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # Per-spoke inbound rate (relayed agent frames count toward the
                 # hosting spoke) — reset + averaged each 1s tick in run_mps_loop.
                 if spoke_id:
-                    self.spoke_msg_count[spoke_id] = self.spoke_msg_count.get(spoke_id, 0) + 1
+                    self.spoke_msg_count[pk] = self.spoke_msg_count.get(pk, 0) + 1
                 # Inbound trace: one line per frame so the full dispatch flow is
                 # greppable when DEBUG is on. Heartbeats are the bulk of traffic,
                 # so this stays at DEBUG (not INFO) to avoid flooding the log.
                 logger.debug("inbound type=%s from spoke=%s", payload.get("type"), spoke_id)
                 if payload.get("type") == "HEARTBEAT":
                     self.message_count += 1
-                    self.heartbeat.update_heartbeat(spoke_id)
+                    self.heartbeat.update_heartbeat(pk)
                     # Persist last-contacted so a hub reboot doesn't reset this
                     # spoke to "Never connected / RED". _mark_dirty (no disk
                     # write here) — the 60s persistence_loop flushes. Cheap
                     # enough to run every heartbeat tick.
-                    self.state.set_spoke_last_seen(spoke_id, self.heartbeat.last_seen[spoke_id])
+                    self.state.set_spoke_last_seen(pk, self.heartbeat.last_seen[pk])
                     # A heartbeat means the spoke is in contact — clear any
                     # never-seen absent clock so the alert loop doesn't keep a
                     # stale _spoke_absent_since entry around after first contact.
-                    self._spoke_absent_since.pop(spoke_id, None)
+                    self._spoke_absent_since.pop(pk, None)
                     continue
 
                 # If the module is not approved, ignore all other messages
@@ -4455,7 +4463,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 if payload.get("type") == "LOADTEST_PROBE":
                     self.message_count += 1
                     st = self._probe_state.setdefault(
-                        spoke_id, {"count": 0, "last_seq": -1, "gaps": 0})
+                        pk, {"count": 0, "last_seq": -1, "gaps": 0})
                     try:
                         seq = int((payload.get("data") or {}).get("seq", -1))
                     except (TypeError, ValueError):
@@ -4480,8 +4488,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # (handled above) always flow. Survive > fresh, but spare the
                     # innocent.
                     if (self._protect_mode
-                            and self._spoke_offered.get(spoke_id, 0) >= self._protect_shed_min_mps):
-                        self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
+                            and self._spoke_offered.get(pk, 0) >= self._protect_shed_min_mps):
+                        self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
                         continue
                     limiter = self.rate_limiters.get(pk)
                     if limiter:
@@ -4493,18 +4501,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         # with its dedup/dwell/cap. A correct client backs off here
                         # and never reaches the hard limit below.
                         if limiter.capacity and limiter.tokens <= (1.0 - self._rl_soft_frac) * limiter.capacity:
-                            self._rl_breached.add(spoke_id)
+                            self._rl_breached.add(pk)
                         if not ok:
                             # HARD LIMIT (100%) → DROP the frame (enforcement). A
                             # client still hard-dropping here IGNORED the 80%
                             # slow-down — track the hard drops so the ladder can
                             # escalate a persistent flooder to disconnect+quarantine
                             # (DDoS defense: stop parsing its frames entirely).
-                            self.rate_limit_drops[spoke_id] = self.rate_limit_drops.get(spoke_id, 0) + 1
-                            self._rl_harddrops[spoke_id] = self._rl_harddrops.get(spoke_id, 0) + 1
+                            self.rate_limit_drops[pk] = self.rate_limit_drops.get(pk, 0) + 1
+                            self._rl_harddrops[pk] = self._rl_harddrops.get(pk, 0) + 1
                             logger.debug(
                                 "Rate limit HARD-DROP for spoke %s (type=%s, total drops=%d).",
-                                spoke_id, payload.get('type'), self.rate_limit_drops[spoke_id])
+                                spoke_id, payload.get('type'), self.rate_limit_drops[pk])
                             continue
 
                 # Handle other messages
@@ -4522,10 +4530,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # for this spoke is merged away (counted). Keeps the main loop
                     # free for must-process frames while the spoke catches up to
                     # the slow-down signal. Not under pressure → ingest inline.
-                    if spoke_id in self._spoke_backoff:
-                        if spoke_id in self._coalesce_pending:
+                    if pk in self._spoke_backoff:
+                        if pk in self._coalesce_pending:
                             self._telemetry_coalesced += 1
-                        self._coalesce_pending[spoke_id] = (payload.get("data", {}), time.time())
+                        self._coalesce_pending[pk] = (payload.get("data", {}), time.time())
                         continue
                     await self._handle_cs_telemetry(spoke_id, payload.get("data", {}))
                     self._telemetry_processed += 1
@@ -4540,7 +4548,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     try:
                         await self.simulations_broadcaster.broadcast(
                             spoke_id, {"type": "cs_progress", "data": payload.get("data", {})},
-                            self.state.get_spoke_tenant(spoke_id))
+                            self.state.get_spoke_tenant(pk))
                     except Exception:  # noqa: BLE001 — feed is best-effort
                         pass
                     continue
@@ -4581,7 +4589,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # device from the harvested identity. Fire-and-forget so the
                 # dispatch loop doesn't block on a NetBox round-trip.
                 if payload.get("type") == "CONSOLE_PROBE_RESULT":
-                    asyncio.create_task(self._handle_console_probe(spoke_id, payload.get("data", {}) or {}))
+                    asyncio.create_task(self._handle_console_probe(pk, payload.get("data", {}) or {}))
                     continue
 
                 # --- NW autonomous per-device poll result (spoke-driven) ---
@@ -5427,7 +5435,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         Tenant is forced from the sub-spoke binding (never the payload); the
         client is validated against that tenant before the cs relay fires."""
         try:
-            tenant_id = self.state.get_spoke_tenant(spoke_id)
+            tenant_id = self.state.get_spoke_tenant(self._primary_key(spoke_id))
         except Exception:  # noqa: BLE001
             tenant_id = None
         if not tenant_id:
@@ -5945,11 +5953,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
     def _is_quarantined(self, spoke_id: str) -> bool:
         """True while ``spoke_id`` is inside its DDoS quarantine cooldown.
         Expired entries are pruned on read so the dict stays bounded."""
-        until = self._quarantine.get(spoke_id)
+        sid = self._primary_key(spoke_id)
+        until = self._quarantine.get(sid)
         if until is None:
             return False
         if time.monotonic() >= until:
-            self._quarantine.pop(spoke_id, None)
+            self._quarantine.pop(sid, None)
             return False
         return True
 
@@ -6435,7 +6444,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         """
         if not spoke_id:
             return
-        buf = self.spoke_events.setdefault(spoke_id, deque(maxlen=self.spoke_event_limit))
+        sid = self._primary_key(spoke_id)
+        buf = self.spoke_events.setdefault(sid, deque(maxlen=self.spoke_event_limit))
         buf.append({
             "ts": time.time(),
             "event": event,
@@ -6445,7 +6455,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
     def get_spoke_events(self, spoke_id: str, limit: int = 50) -> list:
         """Most-recent-first lifecycle events for a spoke (for the WebUI)."""
-        buf = self.spoke_events.get(spoke_id)
+        buf = self.spoke_events.get(self._primary_key(spoke_id))
         if not buf:
             return []
         out = list(buf)[-limit:]
@@ -6459,7 +6469,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         the relayed log format ``<asctime> - <name> - <levelname> - <msg>`` from
         ``agent_logs[spoke_id]``; lines that don't parse or are below WARNING are
         skipped. Newest first, capped at ``limit``."""
-        buf = self.agent_logs.get(spoke_id)
+        buf = self.agent_logs.get(self._primary_key(spoke_id))
         if not buf:
             return []
         levels = {"WARNING", "ERROR", "CRITICAL"}
