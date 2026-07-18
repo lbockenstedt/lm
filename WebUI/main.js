@@ -10202,7 +10202,16 @@ async function loadSpokesAndAgents() {
     // role sub-spoke still keeps its OWN row in the Spokes table (its
     // module_type is the role's, not "agent") — the intended model is one entry
     // per role spoke plus one for the agent.
-    const hasRole = baseId => spokes.some(o => o.spoke_id !== baseId && o.spoke_id.startsWith(baseId + '-'));
+    //
+    // B4: after the guid-primary migration (B1), the base agent + each role
+    // sub-spoke are independent guid keys, so the pre-B1 "{base}-{role}"
+    // string-prefix match no longer holds. The hub now stamps an explicit
+    // ``parent_spoke_id`` (the parent's current primary key) + ``role_name`` on
+    // each sub-spoke row; prefer that. The legacy prefix/endsWith fallbacks
+    // stay for pre-B1 entries that don't carry the fields yet.
+    const hasRole = baseId => spokes.some(o => o.spoke_id !== baseId && (
+        (o.parent_spoke_id && o.parent_spoke_id === baseId) ||
+        o.spoke_id.startsWith(baseId + '-')));
     const isAgent = s => String(s.module_type || '').toLowerCase() === 'agent' || hasRole(s.spoke_id);
     const trueSpokes    = spokes.filter(s => !isAgent(s) && !pxmxAgentIds.has(s.spoke_id));
     const genericAgents = spokes.filter(isAgent);
@@ -10217,12 +10226,22 @@ async function loadSpokesAndAgents() {
     // first so e.g. a compound key wins over a shorter prefix of it.
     const _roleKeys = Object.keys(AGENT_ROLES).sort((a, b) => b.length - a.length);
     trueSpokes.forEach(s => {
-        // Primary: the closest CURRENTLY-CONNECTED generic agent whose id is a
-        // prefix of this sub-spoke id.
-        let parent = _agentIds
-            .filter(aid => s.spoke_id !== aid && s.spoke_id.startsWith(aid + '-'))
-            .sort((a, b) => b.length - a.length)[0];
-        let roleName = parent ? s.spoke_id.slice(parent.length + 1) : '';
+        // B4 primary: the hub-stamped explicit parent linkage (guid-stable,
+        // works whether the parent is connected or offline). ``parent_spoke_id``
+        // is the parent's current primary key (matches a genericAgent row's
+        // ``spoke_id``); ``role_name`` is the _ROLE_MAP key.
+        let parent = s.parent_spoke_id || '';
+        let roleName = s.role_name || '';
+        // Legacy prefix fallback (pre-B1 entries without parent_spoke_id): the
+        // closest CURRENTLY-CONNECTED generic agent whose id is a prefix of this
+        // sub-spoke id.
+        if (!parent || !roleName) {
+            const prefixParent = _agentIds
+                .filter(aid => s.spoke_id !== aid && s.spoke_id.startsWith(aid + '-'))
+                .sort((a, b) => b.length - a.length)[0];
+            if (prefixParent && !parent) parent = prefixParent;
+            if (prefixParent && !roleName) roleName = s.spoke_id.slice(prefixParent.length + 1);
+        }
         // Fallback: identify a role sub-spoke by a trailing "-<knownRole>" even
         // when its parent agent isn't in the connected list right now (agent
         // flapping / not yet re-approved). This keeps "Unload Role" available on
@@ -10232,7 +10251,7 @@ async function loadSpokesAndAgents() {
                 s.spoke_id.endsWith('-' + role) && s.spoke_id.length > role.length + 1);
             if (match) {
                 roleName = match;
-                parent = s.spoke_id.slice(0, s.spoke_id.length - match.length - 1);
+                if (!parent) parent = s.spoke_id.slice(0, s.spoke_id.length - match.length - 1);
             }
         }
         if (parent && roleName) {

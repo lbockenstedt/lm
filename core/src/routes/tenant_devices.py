@@ -186,6 +186,12 @@ def register(app, hub, ctx):
                 # explicit guid for display + consistency hardening).
                 "spoke_guid": m.get("install_uuid", ""),
                 "install_uuid": m.get("install_uuid", ""),
+                # B4: explicit parent linkage for role sub-spokes (see setup.py
+                # _aggregate_spokes). Resolved to the parent's current primary
+                # key so it matches the parent row's ``spoke_id``.
+                "parent_spoke_id": (hub._primary_key(m.get("parent_name", ""))
+                                    if m.get("parent_name") else ""),
+                "role_name": m.get("role_name", ""),
             })
         return {"spokes": out}
 

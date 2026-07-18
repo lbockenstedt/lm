@@ -100,6 +100,16 @@ async def _aggregate_spokes(hub):
             "identity_change": _identity_change_for(hub, sid, meta),
             "tenant_id": hub.state.get_spoke_tenant(sid) or "",
             "tenant_shared": _tenant_is_shared(hub.state.get_spoke_tenant(sid) or ""),
+            # B4: explicit parent linkage for role sub-spokes. Post-B1 both the
+            # base agent + the role sub-spoke are independent guid keys, so the
+            # pre-B1 ``{base}-{role}`` string-prefix match broke. ``parent_name``
+            # is the raw parent name stamped at connect; resolve it to the
+            # parent's current primary key so it matches the parent row's own
+            # ``spoke_id``. ``role_name`` is the _ROLE_MAP key. Blank for base
+            # spokes / pre-B1 entries (WebUI falls back to the prefix match).
+            "parent_spoke_id": (hub._primary_key(meta.get("parent_name", ""))
+                                if meta.get("parent_name") else ""),
+            "role_name": meta.get("role_name", ""),
         })
     return {"spokes": spokes_status}
 

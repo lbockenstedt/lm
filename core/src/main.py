@@ -4194,6 +4194,22 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self.spoke_enc_capable[pk] = spoke_enc_capable
             if parent_spoke_id:
                 self.spoke_parent_map[pk] = parent_spoke_id
+                # B4: persist the parent linkage + role name into the sub-spoke's
+                # metadata so the WebUI can match a role sub-spoke to its parent
+                # agent AFTER B1 re-keyed known_modules raw→guid (the pre-B1
+                # ``{base}-{role}`` string-prefix match broke once both the base
+                # and the sub-spoke became independent guid keys). Stamped raw
+                # (the parent name the sub-spoke claimed) + resolved to the
+                # parent's current primary key at emit time (``_primary_key``),
+                # which matches whatever the parent's own pending_spokes row emits
+                # as ``spoke_id`` (guid once armed, raw until then). Persisted →
+                # the linkage survives the sub-spoke going offline (the in-memory
+                # ``spoke_parent_map`` does not).
+                if spoke_id.startswith(parent_spoke_id + "-"):
+                    self.state.update_module_metadata(pk, {
+                        "parent_name": parent_spoke_id,
+                        "role_name": spoke_id[len(parent_spoke_id) + 1:],
+                    })
                 if not self.approved_modules.get(pk, False):
                     # Parent attestation (H3): ask the claimed parent to sign a
                     # vouch that this sub-spoke is one it spawned, instead of
