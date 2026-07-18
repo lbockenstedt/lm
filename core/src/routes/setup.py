@@ -157,6 +157,71 @@ def _bust_spokes_cache():
         logger.debug("diag cache bust skipped (setup_admin unavailable)", exc_info=True)
 
 
+# ── /status cache (stale-while-revalidate) ──────────────────────────────────
+# The AUTHENTICATED /status body is polled by every open WebUI tab every ~10s
+# and recomputes hub.get_system_metrics() + spokes_in_contact() +
+# heartbeat.get_all_statuses() + get_active_spoke_alerts() on every hit. The
+# body is user-INVARIANT (it carries no per-user / per-permission fields — see
+# the handler), so ONE process-wide cache serves every authenticated session
+# identically. Short TTLs (fresh 2s / servable-stale 5s) keep it near-live while
+# collapsing the N-tabs × 10s fan-out into one recompute per ~2s. Mirrors the
+# /setup/pending_spokes + /setup/diagnostics SWR caches above. The anonymous
+# body (readiness + live connection COUNT) is NOT cached — it is already trivial.
+_STATUS_CACHE: dict = {"data": None, "ts": 0.0, "refreshing": False}
+_STATUS_FRESH_S = 2.0    # serve cached payload verbatim while younger than this
+_STATUS_STALE_S = 5.0    # still servable (background refresh kicks in here)
+_status_locks: dict = {}
+
+
+def _status_lock() -> "asyncio.Lock":
+    loop = asyncio.get_running_loop()
+    lk = _status_locks.get(id(loop))
+    if lk is None:
+        lk = asyncio.Lock()
+        _status_locks[id(loop)] = lk
+    return lk
+
+
+async def _aggregate_status(hub):
+    """Recompute the authenticated /status body from live hub state. Byte-for-byte
+    the same dict the handler used to build inline; module-level (not a closure)
+    so it depends only on ``hub`` and is unit-testable with a stub hub."""
+    metrics = await hub.get_system_metrics()
+    return {
+        "ready": True,
+        "active_connections": list(hub.active_connections.keys()),
+        # Display "online" set: connected now OR seen within the grace window.
+        "in_contact": hub.spokes_in_contact(),
+        "spoke_module_types": dict(hub.spoke_module_types),
+        "heartbeats": {sid: str(s) for sid, s in hub.heartbeat.get_all_statuses().items()},
+        "active_alert_count": len(getattr(hub, "_spoke_alerts", {}) or {}),
+        "active_alerts": hub.get_active_spoke_alerts(),
+        "metrics": metrics,
+    }
+
+
+async def _maybe_refresh_status(hub, force=False):
+    """Under ``_status_lock``: serve the cached body if fresh (unless ``force``);
+    otherwise recompute and store. Serializes concurrent first-loaders into a
+    single recompute; serves stale on failure. Mirrors _maybe_refresh_spokes."""
+    async with _status_lock():
+        cached = _STATUS_CACHE["data"]
+        age = (time.time() - _STATUS_CACHE["ts"]) if cached is not None else None
+        if cached is not None and age is not None and age < _STATUS_FRESH_S:
+            return cached
+        _STATUS_CACHE["refreshing"] = True
+        try:
+            result = await _aggregate_status(hub)
+            _STATUS_CACHE["data"] = result
+            _STATUS_CACHE["ts"] = time.time()
+            return result
+        except Exception:
+            logger.exception("status cache refresh failed")
+            return cached  # serve stale rather than blanking the WebUI
+        finally:
+            _STATUS_CACHE["refreshing"] = False
+
+
 def register(app, hub, ctx):
     """Register setup routes on the Hub app."""
     _session_user = ctx._session_user
@@ -234,23 +299,20 @@ def register(app, hub, ctx):
         conn_count = len(hub.active_connections)
         if not sess:
             return {"ready": True, "active_connection_count": conn_count}
-        metrics = await hub.get_system_metrics()
-        return {
-            "ready": True,
-            "active_connections": list(hub.active_connections.keys()),
-            # Display "online" set: connected now OR seen within the grace window.
-            # The WebUI colours tiles from this so a transient loop stall / brief
-            # reconnect doesn't flip a module offline — only genuine long absence
-            # does. active_connections stays the live WS truth for command routing.
-            "in_contact": hub.spokes_in_contact(),
-            "spoke_module_types": dict(hub.spoke_module_types),
-            "heartbeats": {sid: str(s) for sid, s in hub.heartbeat.get_all_statuses().items()},
-            # Out-of-contact alerts (SpokeAlertMixin) — drives the WebUI header
-            # badge (count + list) off the already-polled /status fetch.
-            "active_alert_count": len(getattr(hub, "_spoke_alerts", {}) or {}),
-            "active_alerts": hub.get_active_spoke_alerts(),
-            "metrics": metrics
-        }
+        # Authenticated body is user-invariant → serve the process-wide SWR
+        # cache. Inside the stale window serve instantly; past fresh-TTL kick ONE
+        # background refresh (the ``not refreshing`` guard avoids a pile-up). The
+        # WebUI colours tiles from ``in_contact`` (connected now OR seen within
+        # the grace window), so a transient loop stall / brief reconnect doesn't
+        # flip a module offline — only genuine long absence does.
+        cached = _STATUS_CACHE["data"]
+        age = (time.time() - _STATUS_CACHE["ts"]) if cached is not None else None
+        if cached is not None and age is not None and age < _STATUS_STALE_S:
+            if age >= _STATUS_FRESH_S and not _STATUS_CACHE["refreshing"]:
+                asyncio.create_task(_maybe_refresh_status(hub))
+            return cached
+        # No servable cache → forced refresh (the lock serializes first-loaders).
+        return await _maybe_refresh_status(hub, force=True)
 
 
     @app.get("/vm/{vm_id}/firewall")
