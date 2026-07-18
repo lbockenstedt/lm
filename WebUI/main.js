@@ -494,8 +494,10 @@ const PRODUCT_MAP = {
 // even when its NAME resembles a product (e.g. an agent named "lm-opnsense").
 // Only a real module spoke (module_type "firewall" / "dns" / ...) or a loaded
 // role sub-spoke ("{base}-{role}", module_type = the role's) maps to a product.
-// "agent" / "qa" have no product; "directory" (LDAP) has no nav class (it lives
-// behind its own view), matching the old PRODUCT_MAP which had no ldap entry.
+// "agent" / "qa" have no product. "directory" (LDAP) maps to the 'ldap' product
+// so a loaded directory spoke registers in activeProducts and lights the
+// standalone "Directory" nav item (see _directoryNavHtml). It is NOT a
+// MODULE_CLASSES class — it's a standalone view reached via setView('ldap').
 const MODULE_TYPE_PRODUCT = {
     hypervisor: 'pxmx',
     firewall: 'opnsense',
@@ -507,6 +509,7 @@ const MODULE_TYPE_PRODUCT = {
     nw: 'nw',
     certificates: 'le',
     console: 'console',
+    directory: 'ldap',
 };
 
 // spoke_id prefix -> product, used ONLY as a fallback when a spoke's module_type
@@ -2721,6 +2724,16 @@ function _rebuildMainNav(allSpokes, connections) {
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8 17V11m4 6V7m4 10v-4M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg></div>
             <span>Reports</span>
         </div>`;
+    // Directory (LDAP/Entra) — a standalone tenant-scoped view (setView('ldap')),
+    // NOT a MODULE_CLASSES class. Shown once a directory spoke is loaded
+    // (activeProducts has 'ldap' via MODULE_TYPE_PRODUCT) AND the caller has the
+    // 'ldap' right (canSeeModule) — so a tenant-admin managing their own OU sees
+    // it too, not just global admins. People/id icon.
+    const _directoryNavHtml = () => `
+        <div onclick="setView('ldap')" id="nav-ldap" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4-4 4 4 0 004 4zm6 1a3 3 0 10-2-5.24M5 9.76A3 3 0 107 5"></path></svg></div>
+            <span>Directory</span>
+        </div>`;
     // Security (threat monitor) — admin-only hub-side view; static like Reports.
     const _securityNavHtml = () => `
         <div onclick="setView('security')" id="nav-security" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
@@ -2731,6 +2744,7 @@ function _rebuildMainNav(allSpokes, connections) {
     mainNav.innerHTML = `
         ${dashboardNav}
         ${dynamicHtml}
+        ${((window.activeProducts && window.activeProducts.has('ldap')) && canSeeModule('Directory')) ? _directoryNavHtml() : ''}
         ${canSeeModule('Reports') ? _reportsNavHtml() : ''}
         <div class="pt-4 mt-4 border-t border-slate-200"></div>
         ${isAdmin() ? adminSetup : ''}
