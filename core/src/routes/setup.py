@@ -143,13 +143,20 @@ async def _maybe_refresh_spokes(hub, force=False):
 
 
 def _bust_spokes_cache():
-    """Mark the spokes cache unservable so the next GET forced-refreshes.
-    Called from setup mutation endpoints (approve/revoke/delete/purge/ack/
-    metadata rename) so an admin action is reflected immediately instead of
-    after the fresh/stale TTL. Also busts the /setup/diagnostics cache, since
-    the same mutations (approval/connection/registration state) are surfaced
-    there too — one call busts both tiles."""
-    _SPOKES_CACHE["ts"] = 0.0
+    """Debounced invalidation of the spokes cache. Called from setup mutation
+    endpoints (approve/revoke/delete/purge/ack/metadata rename). Rather than
+    cold-busting (ts=0), which forced a BLOCKING full recompute on the next GET
+    and — under admin churn (many mutations back-to-back) — made every poll
+    bypass the SWR cache entirely, this DEMOTES the cache to "just past fresh":
+    the next GET serves the current payload instantly and kicks a single
+    background refresh, so the mutation is reflected within the fresh-TTL window
+    without thrash. A cold cache (data is None) still forced-refreshes on the
+    next GET (the age check requires a servable payload). Also busts the
+    /setup/diagnostics cache — the same mutations surface there too."""
+    if _SPOKES_CACHE.get("data") is not None:
+        _SPOKES_CACHE["ts"] = min(_SPOKES_CACHE["ts"], time.time() - _SPOKES_FRESH_S)
+    else:
+        _SPOKES_CACHE["ts"] = 0.0
     try:
         from routes import setup_admin  # lazy: avoid any import-cycle at load
         setup_admin._bust_diag_cache()

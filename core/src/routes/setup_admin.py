@@ -55,10 +55,18 @@ async def _maybe_refresh_diagnostics(hub, force=False):
 
 
 def _bust_diag_cache():
-    """Mark the diagnostics cache unservable so the next GET forced-refreshes.
-    Called from setup mutation endpoints (approve/revoke/delete/purge/ack/
-    metadata rename) so an admin action is reflected immediately."""
-    _DIAG_CACHE["ts"] = 0.0
+    """Debounced invalidation of the diagnostics cache. Called from setup
+    mutation endpoints (approve/revoke/delete/purge/ack/metadata rename +
+    recovery pause). Rather than cold-busting (ts=0), which forced a BLOCKING
+    full recompute on the next GET and — under admin churn — made every poll
+    bypass the SWR cache, this DEMOTES the cache to "just past fresh": the next
+    GET serves instantly and kicks a single background refresh, reflecting the
+    mutation within the fresh-TTL window without thrash. A cold cache (data is
+    None) still forced-refreshes on the next GET."""
+    if _DIAG_CACHE.get("data") is not None:
+        _DIAG_CACHE["ts"] = min(_DIAG_CACHE["ts"], time.time() - _DIAG_FRESH_S)
+    else:
+        _DIAG_CACHE["ts"] = 0.0
 
 
 async def _compute_mtls_readiness(hub) -> dict:
