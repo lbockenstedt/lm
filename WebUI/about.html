@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>About | Lab Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        :root {
+            --hpe-green: #01A982;
+            --hpe-green-dark: #008c6a;
+            --hpe-navy: #263040;
+            --hpe-bg-light: #F5F5F5;
+        }
+        html, body { height: 100%; }
+        body {
+            font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--hpe-bg-light);
+            color: #444;
+            -webkit-font-smoothing: antialiased;
+        }
+        .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+        .hpe-card { background: #fff; border: 1px solid #e5e9ee; }
+        .feat > li { position: relative; padding-left: 1.6rem; }
+        .feat > li::before {
+            content: ""; position: absolute; left: 0; top: .5rem;
+            width: .7rem; height: .7rem; border-radius: 4px;
+            background: rgba(1,169,130,.12); border: 1.5px solid var(--hpe-green);
+        }
+        a:focus-visible, button:focus-visible { outline: 2px solid var(--hpe-green); outline-offset: 3px; border-radius: 4px; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+    <!-- Top bar — matches the WebUI header (navy + HPE-green accent) -->
+    <header class="w-full flex items-center justify-between px-6 py-3 shrink-0"
+            style="background-color: var(--hpe-navy); border-bottom: 3px solid var(--hpe-green);">
+        <div class="flex items-center gap-3">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 180 504 144" height="26" role="img" aria-label="HPE" style="height:26px;width:auto;color:#fff;">
+                <path fill="#01A982" d="M391.2 261.27v35.46H504V324H362.4v-90H504v27.27H391.2Z"/>
+                <path fill="currentColor" d="M276.67 180h-89.25v144h28.8v-36.6h60c37.92 0 59.7-21.6 59.7-53.4 0-32.01-21.78-54-59.25-54Zm-1.88 79.8h-58.57v-52.54h58.57c22.68 0 31.28 10.48 31.28 26.73 0 16.08-8.6 25.8-31.28 25.8Zm116.41-39.18h-28.8V180H504v27.27H391.2v13.36ZM151.2 180v144h-28.8v-59.02H28.8V324H0V180h28.8v57.38h93.6V180h28.8Z"/>
+            </svg>
+            <span class="text-white text-lg font-bold tracking-tight">Lab Manager</span>
+        </div>
+        <a href="/" class="bg-[#01A982] hover:bg-[#008c6a] text-white font-bold text-xs uppercase tracking-wider px-4 py-2 rounded-md transition-colors">Sign in &rarr;</a>
+    </header>
+
+    <main class="flex-1">
+      <div class="max-w-5xl mx-auto px-5 sm:px-8 py-10 space-y-6">
+
+        <!-- Hero -->
+        <section>
+            <p class="mono text-xs uppercase tracking-widest text-[#01A982] font-bold mb-3">Secure Infrastructure Control Plane</p>
+            <h1 class="text-3xl sm:text-4xl font-bold text-[#263040] tracking-tight" style="text-wrap:balance;">About Lab Manager</h1>
+            <p class="text-base text-slate-600 mt-3 max-w-3xl" style="text-wrap:pretty;">
+                A highly secure, multi-tenant control plane for standing up, scaling, testing, and securing
+                complex lab, demo, and edge environments &mdash; hypervisors, networks, identity, and cloud &mdash;
+                from a single console.
+            </p>
+            <div class="flex flex-wrap gap-2 mt-5">
+                <span class="mono text-[11px] text-slate-600 bg-white border border-slate-300 rounded-full px-3 py-1">mTLS authenticated</span>
+                <span class="mono text-[11px] text-slate-600 bg-white border border-slate-300 rounded-full px-3 py-1">Multi-tenant</span>
+                <span class="mono text-[11px] text-slate-600 bg-white border border-slate-300 rounded-full px-3 py-1">Self-learning scale testing</span>
+                <span class="mono text-[11px] text-slate-600 bg-white border border-slate-300 rounded-full px-3 py-1">Self-healing</span>
+                <span class="mono text-[11px] text-slate-600 bg-white border border-slate-300 rounded-full px-3 py-1">One-click deployment</span>
+            </div>
+        </section>
+
+        <!-- Security lead card -->
+        <section class="hpe-card rounded-lg shadow-sm p-5" style="border-left: 4px solid var(--hpe-green);">
+            <p class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">Security posture</p>
+            <div class="flex items-center gap-2 mb-4">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#01A982" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 3l7 3v5c0 4.4-3 8.4-7 10-4-1.6-7-5.6-7-10V6l7-3z"></path><path d="M9 12l2 2 4-4"></path>
+                </svg>
+                <h2 class="text-lg font-bold text-[#263040]">Highly secure by design</h2>
+            </div>
+            <ul class="feat space-y-3 text-sm text-slate-600">
+                <li><b class="text-[#263040] font-semibold">Mutual-TLS (mTLS) authentication</b> — the console and every managed component authenticate each other with cryptographic certificates, not just shared passwords, so only trusted, verified systems can join.</li>
+                <li><b class="text-[#263040] font-semibold">Signed &amp; encrypted everywhere</b> — every instruction is cryptographically signed and every secret is encrypted in transit and at rest.</li>
+                <li><b class="text-[#263040] font-semibold">Automatic intrusion detection</b> — continuously watches for brute-force and forged-credential attempts and flags them in real time with a full audit trail.</li>
+                <li><b class="text-[#263040] font-semibold">Firewall safeguards that respond automatically</b> — detected offenders are auto-blocked at the network firewall, governed by a unified trusted-IP allow-list and enforced rule-priority model, with safeguards that make it impossible to accidentally lock out trusted addresses.</li>
+                <li><b class="text-[#263040] font-semibold">Secure credential vault</b> — Azure Key Vault&ndash;backed secret storage, escrow, and break-glass recovery, so credentials stay protected and recoverable even in a disaster.</li>
+            </ul>
+        </section>
+
+        <!-- Capabilities -->
+        <p class="text-sm font-bold text-slate-500 uppercase tracking-wider pt-2">Capabilities</p>
+        <div class="grid gap-5 md:grid-cols-2">
+
+            <section class="hpe-card rounded-lg shadow-sm p-5">
+                <h3 class="text-lg font-bold text-[#263040] mb-4">Automated provisioning &amp; elastic scaling</h3>
+                <ul class="feat space-y-3 text-sm text-slate-600">
+                    <li><b class="text-[#263040] font-semibold">Auto-provisioning</b> — automatically clones and configures VMs and clients on demand to reach a target size, with safeguards so it only touches what it should.</li>
+                    <li><b class="text-[#263040] font-semibold">VM / client shedding</b> — monitors CPU, memory, and client-count pressure and automatically sheds or halts provisioning when a host is overloaded, then recovers as capacity frees up.</li>
+                    <li><b class="text-[#263040] font-semibold">Golden-image cloning</b> — prepare a system once and spin up any number of identical, self-registering copies for rapid fleet expansion.</li>
+                    <li><b class="text-[#263040] font-semibold">Full VM lifecycle</b> — clone-from-template, snapshots, start/stop, a template library, and in-browser console and shell access.</li>
+                </ul>
+            </section>
+
+            <section class="hpe-card rounded-lg shadow-sm p-5">
+                <h3 class="text-lg font-bold text-[#263040] mb-4">Intelligent, self-learning scale testing</h3>
+                <ul class="feat space-y-3 text-sm text-slate-600">
+                    <li><b class="text-[#263040] font-semibold">Realistic scale testing</b> — generate fleets of simulated clients producing true-to-life network traffic (DHCP, DNS, web, collaboration, NAC onboarding) to load-test and demonstrate the whole environment without physical devices.</li>
+                    <li><b class="text-[#263040] font-semibold">Automatic alert &amp; insight learning</b> — the platform learns the exact client volume and conditions that trigger each network alert or insight, then tunes the simulation to reproduce it on demand and shares those thresholds across tenants.</li>
+                    <li><b class="text-[#263040] font-semibold">Self-building alert/insight catalog</b> — every condition observed anywhere is captured into a shared library, so a test scenario can be built from any alert or insight without staging it first.</li>
+                </ul>
+            </section>
+
+            <section class="hpe-card rounded-lg shadow-sm p-5">
+                <h3 class="text-lg font-bold text-[#263040] mb-4">Multi-tenancy &amp; delegation</h3>
+                <ul class="feat space-y-3 text-sm text-slate-600">
+                    <li><b class="text-[#263040] font-semibold">True multi-tenant isolation</b> — every resource, view, and action is scoped per tenant, so teams or customers only see and touch their own environment.</li>
+                    <li><b class="text-[#263040] font-semibold">Role-based delegation</b> — global admins run the platform; tenant admins safely self-serve their own users, devices, subnets, and directory without platform-wide access.</li>
+                </ul>
+            </section>
+
+            <section class="hpe-card rounded-lg shadow-sm p-5">
+                <h3 class="text-lg font-bold text-[#263040] mb-4">Identity, directory &amp; Azure integration</h3>
+                <ul class="feat space-y-3 text-sm text-slate-600">
+                    <li><b class="text-[#263040] font-semibold">LDAP directory with Azure Entra ID pass-through</b> — a redundant, replicated directory where users authenticate directly against Entra ID, with tenant-scoped user and group management from the console.</li>
+                    <li><b class="text-[#263040] font-semibold">Single sign-on</b> — Entra / OIDC login across the platform and integrated systems.</li>
+                    <li><b class="text-[#263040] font-semibold">Vault-backed credentials</b> — all secrets protected by the secure, recoverable credential vault.</li>
+                </ul>
+            </section>
+
+            <section class="hpe-card rounded-lg shadow-sm p-5 md:col-span-2">
+                <h3 class="text-lg font-bold text-[#263040] mb-4">Unified operations &amp; resilience</h3>
+                <ul class="feat space-y-3 text-sm text-slate-600 md:grid md:grid-cols-2 md:gap-x-8 md:space-y-0">
+                    <li class="md:mb-3"><b class="text-[#263040] font-semibold">One console for everything</b> — hypervisors, firewalls, network access control, IP management, DNS, DHCP, directory, network switches, and certificates in a single pane of glass.</li>
+                    <li class="md:mb-3"><b class="text-[#263040] font-semibold">Automated discovery &amp; sync</b> — discovers devices and keeps IP management, access control, and firewalls in sync with reality.</li>
+                    <li class="md:mb-3"><b class="text-[#263040] font-semibold">Automated certificate management</b> — issues, renews, and distributes TLS certificates to every managed system.</li>
+                    <li class="md:mb-3"><b class="text-[#263040] font-semibold">Zero-touch deployment</b> — add a capability or stand up a backing server with one click; no command line required.</li>
+                    <li class="md:mb-3"><b class="text-[#263040] font-semibold">Always-on &amp; self-healing</b> — self-recovering services with safe, gated updates and automatic rollback, so a bad change can&rsquo;t take the console down.</li>
+                    <li class="md:mb-3"><b class="text-[#263040] font-semibold">Reporting &amp; monitoring</b> — scheduled per-tenant reports, real-time alerting, live status dashboards, centralized logging, plus automated end-to-end testing and AI-assisted self-repair.</li>
+                </ul>
+            </section>
+        </div>
+
+        <div class="pt-2">
+            <a href="/" class="inline-block bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">&larr; Back to sign in</a>
+        </div>
+      </div>
+    </main>
+
+    <footer class="w-full flex items-center px-6 py-2.5 text-white text-xs shrink-0"
+            style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
+        <span class="opacity-80">&copy; 2026 Lab Manager</span>
+        <span class="mono opacity-60 ml-3 uppercase tracking-widest text-[10px]">Secure &middot; Multi-tenant &middot; Self-healing</span>
+    </footer>
+
+</body>
+</html>
