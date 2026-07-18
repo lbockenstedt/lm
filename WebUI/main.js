@@ -157,6 +157,7 @@ const ROUTES = {
     purgeAllCaches:         { m: 'POST', p: '/admin/cache/purge',         api: 'admin_purge_cache' },
     loadSubnetFilterToggles:{ m: 'GET',  p: '/admin/subnet-filter-config',api: 'get_subnet_filter_config' },
     loadSpokesAndAgents:    { m: 'GET',  p: '/setup/pending_spokes + /api/pxmx/agents + /setup/diagnostics', api: 'get_pending_spokes / get_pxmx_agents / get_diagnostics' },
+    ensureSpokeEventsLoaded:{ m: 'GET',  p: '/setup/diagnostics/{spoke_id}', api: 'get_diagnostics_detail' },
     loadModuleLogs:         { m: 'GET',  p: '/setup/logs/{module}',       api: 'get_module_logs' },
     loadRecoveryLogs:       { m: 'GET',  p: '/setup/logs',                api: 'get_hub_logs' },
 
@@ -11606,9 +11607,39 @@ function spokeLogEventRow(le) {
     return `<div class="py-0.5"><span class="text-slate-400">${escapeHtml(when)}</span> <span class="${tone} font-bold">${escapeHtml(lvl)}</span> <span class="text-slate-400">${escapeHtml(le.name || '')}</span> <span class="text-slate-600 break-all">${escapeHtml(le.msg || '')}</span></div>`;
 }
 
-function toggleSpokeEvents(spokeId) {
+// Build the inner HTML of a spoke's events panel from its events + log_events
+// arrays. Same markup the LIST payload used to pre-render inline; now shared by
+// the lazy loader and the compat inline path. Errors/warnings first (relayed
+// WARNING/ERROR/CRITICAL log lines), then lifecycle events.
+function _renderSpokeEventsInner(events, log_events) {
+    events = events || [];
+    log_events = log_events || [];
+    return `${log_events.length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Errors &amp; warnings</div>${log_events.map(spokeLogEventRow).join('')}<div class="border-t border-slate-200 my-1.5"></div>` : ''}${events.length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Lifecycle</div>${events.map(spokeEventRow).join('')}` : (log_events.length ? '' : '<span class="text-slate-400 italic">No events recorded.</span>')}`;
+}
+
+// Lazily fetch + render a spoke's events into its panel the first time it's
+// needed (panel expand or Copy). GET /setup/diagnostics/{spoke_id} returns the
+// events/log_events arrays that the polled LIST no longer carries. Idempotent:
+// data-loaded="1" short-circuits repeat calls. Best-effort — a failed fetch
+// leaves an error note in the panel rather than throwing.
+async function ensureSpokeEventsLoaded(spokeId) {
+    const panel = document.getElementById(`events-${spokeId}`);
+    if (!panel || panel.dataset.loaded === '1') return;
+    try {
+        const d = await apiJson('/setup/diagnostics/' + encodeURIComponent(spokeId));
+        panel.innerHTML = _renderSpokeEventsInner(d.events || [], d.log_events || []);
+        panel.dataset.loaded = '1';
+    } catch (err) {
+        panel.innerHTML = '<span class="text-red-500 italic">Failed to load events.</span>';
+        console.error('ensureSpokeEventsLoaded failed', err);
+    }
+}
+
+async function toggleSpokeEvents(spokeId) {
     const panel = document.getElementById(`events-${spokeId}`);
     if (!panel) return;
+    const willShow = panel.classList.contains('hidden');
+    if (willShow) await ensureSpokeEventsLoaded(spokeId);
     panel.classList.toggle('hidden');
 }
 
@@ -11617,6 +11648,9 @@ function toggleSpokeEvents(spokeId) {
 async function copySpokeEvents(spokeId) {
     const panel = document.getElementById(`events-${spokeId}`);
     if (!panel) return;
+    // Ensure the events are fetched even if the operator clicks Copy without
+    // first expanding the panel (the LIST no longer ships the arrays inline).
+    await ensureSpokeEventsLoaded(spokeId);
     const text = panel.innerText;
     try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -11731,7 +11765,12 @@ function _diagTelemetryExtras(s, fns) {
     // resetFn/allowReset are no longer consumed here — Reset Secret moved into
     // the spoke Edit modal (openSpokeMetadataModal). Callers may still pass them.
     const status = spokeStatusMessage(s);
-    const evCount = (s.events || []).length + (s.log_events || []).length;
+    // event_count is the light badge value shipped in the /setup/diagnostics
+    // LIST; the actual events/log_events arrays are lazily fetched on expand
+    // (see toggleSpokeEvents). Fall back to inline arrays for compatibility.
+    const evCount = (s.event_count != null)
+        ? s.event_count
+        : ((s.events || []).length + (s.log_events || []).length);
     const rec = s.recovery || {};
     const badge = recoveryBadge(rec);
     const _recTextTone = rec.gave_up ? 'text-red-600'
@@ -11818,7 +11857,12 @@ function _diagTelemetryExtras(s, fns) {
             `<button onclick="toggleSpokeEvents('${eSid}')" class="text-blue-500 hover:text-blue-700 font-medium text-xs">${evCount} events ▾</button>`,
             evCount ? `<button onclick="copySpokeEvents('${eSid}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Copy</button>` : '',
         ],
-        eventsPanel: `<div id="events-${s.spoke_id}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.log_events || []).length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Errors &amp; warnings</div>${(s.log_events || []).map(spokeLogEventRow).join('')}<div class="border-t border-slate-200 my-1.5"></div>` : ''}${(s.events || []).length ? `<div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">Lifecycle</div>${(s.events || []).map(spokeEventRow).join('')}` : ((s.log_events || []).length ? '' : '<span class="text-slate-400 italic">No events recorded.</span>')}</div>`,
+        // Empty container — the events/log_events arrays are fetched from
+        // GET /setup/diagnostics/{spoke_id} the first time the panel is expanded
+        // (toggleSpokeEvents), keeping the polled LIST payload light. If the
+        // entry still carries inline arrays (compat), render them immediately and
+        // mark the panel loaded so no fetch fires.
+        eventsPanel: `<div id="events-${s.spoke_id}" data-loaded="${(s.events || s.log_events) ? '1' : '0'}" class="hidden font-mono text-[11px] bg-slate-50 border border-slate-200 rounded p-3 max-h-56 overflow-y-auto ml-6 mt-1">${(s.events || s.log_events) ? _renderSpokeEventsInner(s.events || [], s.log_events || []) : '<span class="text-slate-400 italic">Loading…</span>'}</div>`,
     };
 }
 

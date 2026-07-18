@@ -225,8 +225,13 @@ async def _aggregate_diagnostics(hub):
             "last_error": telemetry.get("error"),
             "flapping": flapping,
             "recent_drops": flap_drops,
-            "events": events,
-            "log_events": log_events,
+            # The full events(50)+log_events(30) arrays are NOT sent in the LIST
+            # payload (heavy: 80 objects × every spoke on every poll). Only the
+            # total count for the "N events ▾" badge ships here; the WebUI lazily
+            # fetches the arrays from GET /setup/diagnostics/{spoke_id} on
+            # row-expand (see get_diagnostics_detail below + toggleSpokeEvents in
+            # WebUI/main.js). ``events`` is still computed above for flapping.
+            "event_count": len(events) + len(log_events),
             "cpu_util": telemetry.get("cpu_util"),
             "mem_util": telemetry.get("mem_util"),
             # Watchdog recovery (see run_spoke_recovery_loop). in_progress =
@@ -779,6 +784,21 @@ def register(app, hub, ctx):
         # concurrent first-loaders into a single recompute.
         result = await _maybe_refresh_diagnostics(hub, force=True)
         return result or {"spokes": [], "hub_version": "", "webui_version": "unknown", "system": {}}
+
+    @app.get("/setup/diagnostics/{spoke_id}")
+    async def get_diagnostics_detail(spoke_id: str):
+        """Per-spoke lifecycle events + relayed WARNING/ERROR log lines, fetched
+        lazily by the WebUI when an admin expands a spoke's events panel. Split
+        out of the /setup/diagnostics LIST payload (which now carries only an
+        ``event_count`` badge) so the polled list stays light — these arrays are
+        only needed for the one spoke the operator actually expanded. Cheap
+        hub-local reads (in-memory deques), admin-gated by the /setup/ prefix."""
+        hub = app.state.hub
+        return {
+            "spoke_id": spoke_id,
+            "events": hub.get_spoke_events(spoke_id, limit=50),
+            "log_events": hub.get_spoke_log_events(spoke_id, limit=30),
+        }
 
     @app.post("/setup/spoke/{spoke_id}/recovery")
     async def set_spoke_recovery_pause(spoke_id: str, request: Request):
