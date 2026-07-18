@@ -5289,10 +5289,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             if not os.path.exists(vp):
                 vp = os.path.join(os.path.dirname(__file__), "../VERSION")
             # _live_watchdog_status() calls this on EVERY /status; read the VERSION
-            # file through the mtime-keyed cache so a repeated poll doesn't re-open
-            # it each time. The cache re-reads only when the file's mtime changes
-            # (a repo pull rewrites VERSION), so the value stays correct.
-            target_ver = self._read_version_cached(vp) or ""
+            # file through the mtime-keyed cache (_read_version_cached) so a
+            # repeated poll doesn't re-open it each time. The cache re-reads only
+            # when the file's mtime changes (a repo pull rewrites VERSION), so the
+            # value stays correct — this is disk-vs-running drift detection, so it
+            # MUST reflect a pull. Direct-read fallback when the cached reader is
+            # unavailable (e.g. a stub hub in unit tests).
+            _reader = getattr(self, "_read_version_cached", None)
+            if _reader is not None:
+                target_ver = _reader(vp) or ""
+            else:
+                with open(vp) as vf:
+                    target_ver = vf.read().strip()
         except Exception:  # noqa: BLE001
             pass
         running_ver = getattr(self, "_startup_version", "") or ""
