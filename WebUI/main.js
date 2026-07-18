@@ -3592,6 +3592,7 @@ async function loadSecurityData() {
         return;
     }
     const c = d.config || {};
+    window._secAllowPriority = (d.allow_rule || {}).priority;  // for save-time ordering check
     const card = 'hpe-card rounded-lg p-5 shadow-sm';
     const fmtTs = ts => { try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return ''; } };
     const expIn = b => { if (b.permanent) return 'never'; if (!b.expires_at) return '—'; const s = Math.max(0, b.expires_at - Date.now() / 1000); return s > 3600 ? Math.round(s / 3600) + 'h' : Math.round(s / 60) + 'm'; };
@@ -3611,6 +3612,16 @@ async function loadSecurityData() {
           <label class="text-slate-500">Permanent after N re-blocks<input type="number" id="sec-permafter" min="1" value="${c.permanent_after != null ? c.permanent_after : 3}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           <label class="text-slate-500">NSG deny rule name<input type="text" id="sec-rule" value="${escapeHtml(c.block_rule_name || 'lm-threat-block')}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           <label class="text-slate-500">NSG deny priority<input type="number" id="sec-priority" min="100" max="4096" value="${c.block_priority != null ? c.block_priority : 200}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          ${(() => {
+            const ar = d.allow_rule || {};
+            const bp = c.block_priority != null ? c.block_priority : 200;
+            const ap = ar.priority != null ? ar.priority : 300;
+            const bad = Number(bp) >= Number(ap);
+            return `<div class="col-span-2 md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
+              The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b> @ priority <b>${ap}</b>) is set in <b>Settings → Azure → NSG</b>. Azure evaluates <b>lower priority numbers first</b>, so the <b>Deny (${bp})</b> must be a lower number than <b>Allow (${ap})</b> for auto-blocks to win.
+              ${bad ? '<span class="text-red-600 font-bold"> ⚠ Deny priority is not below Allow — Deny may not take effect.</span>' : '<span class="text-green-600 font-medium"> ✓ ordering OK</span>'}
+            </div>`;
+          })()}
         </div>
         <div class="flex justify-end mt-3"><button onclick="saveSecurityConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save</button></div>
       </div>`;
@@ -3625,14 +3636,25 @@ async function loadSecurityData() {
         <div class="text-xs max-h-64 overflow-y-auto">${items.length ? items.map(blockRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
       </div>`;
 
-    const nb = d.never_block || [];
-    const neverRow = x => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
-        <span class="font-mono text-slate-700">${escapeHtml(x)}</span>
-        <button onclick="securityNeverRemove('${escapeHtml(x)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium">Remove</button></div>`;
+    // Shared trusted list — the SAME global_config.azure_nsg.entries the Azure
+    // NSG tile edits. Each entry is both never-auto-blocked AND allowed through
+    // the NSG. Prefer full {ip, description} entries; fall back to bare IPs.
+    const trusted = (d.trusted && d.trusted.length) ? d.trusted
+        : (d.never_block || []).map(ip => ({ ip, description: '' }));
+    const allowOn = (d.allow_rule || {}).enabled;
+    const neverRow = e => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
+        <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(e.ip)}</span>
+          ${e.description ? `<div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</div>` : ''}</div>
+        <button onclick="securityNeverRemove('${escapeHtml(e.ip)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
     const neverTile = `<div class="${card}">
-        <h3 class="text-sm font-bold text-green-600 mb-2">Never-block allow list <span class="text-slate-400 font-normal">(${nb.length})</span></h3>
-        <div class="flex gap-2 mb-2"><input id="sec-never-ip" placeholder="IP or CIDR" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs"><button onclick="securityNeverAdd()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded text-xs font-medium">Add</button></div>
-        <div class="text-xs max-h-56 overflow-y-auto">${nb.length ? nb.map(neverRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
+        <h3 class="text-sm font-bold text-green-600 mb-1">Trusted IPs — never auto-blocked <span class="text-slate-500">AND allowed through the Azure NSG</span> <span class="text-slate-400 font-normal">(${trusted.length})</span></h3>
+        <p class="text-[11px] text-slate-400 mb-2">Shared list — the same one edited under <b>Settings → Azure → NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
+        <div class="flex gap-2 mb-2">
+          <input id="sec-never-ip" placeholder="IP or CIDR" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs font-mono">
+          <input id="sec-never-desc" placeholder="description (optional)" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs">
+          <button onclick="securityNeverAdd()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded text-xs font-medium whitespace-nowrap">Add</button>
+        </div>
+        <div class="text-xs max-h-56 overflow-y-auto">${trusted.length ? trusted.map(neverRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
       </div>`;
 
     const manualBlock = `<div class="${card}">
@@ -3679,6 +3701,12 @@ async function saveSecurityConfig() {
         block_rule_name: (document.getElementById('sec-rule').value || '').trim(),
         block_priority: num('sec-priority'),
     };
+    // Non-fatal ordering check: Deny priority must be a lower number than Allow
+    // (Azure evaluates low numbers first). Warn but still save.
+    const ap = window._secAllowPriority;
+    if (ap != null && !isNaN(body.block_priority) && body.block_priority >= Number(ap)) {
+        showToast(`Warning: deny priority ${body.block_priority} is not below the allow priority ${ap} — Deny may not win. Saving anyway.`, 'error');
+    }
     await _securityReq('/api/security/config', 'PUT', body, 'Policy saved');
     loadSecurityData();
 }
@@ -3690,7 +3718,7 @@ async function securityBlock() {
     loadSecurityData();
 }
 async function securityUnblock(ip) { await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`); loadSecurityData(); }
-async function securityNeverAdd() { const cidr = (document.getElementById('sec-never-ip').value || '').trim(); if (!cidr) return; await _securityReq('/api/security/never-block', 'POST', { cidr }, `Added ${cidr}`); loadSecurityData(); }
+async function securityNeverAdd() { const cidr = (document.getElementById('sec-never-ip').value || '').trim(); if (!cidr) return; const descEl = document.getElementById('sec-never-desc'); const description = (descEl && descEl.value || '').trim(); await _securityReq('/api/security/never-block', 'POST', { cidr, description }, `Added ${cidr} to trusted list`); loadSecurityData(); }
 async function securityNeverRemove(cidr) { await _securityReq('/api/security/never-block', 'DELETE', { cidr }, `Removed ${cidr}`); loadSecurityData(); }
 async function securityReconcile() { await _securityReq('/api/security/reconcile', 'POST', {}, 'NSG sync requested'); }
 async function _securityReq(url, method, body, okMsg) {
@@ -3699,6 +3727,7 @@ async function _securityReq(url, method, body, okMsg) {
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || d.message || ('HTTP ' + r.status));
         showToast(d.message || okMsg, (d.status === 'ERROR') ? 'error' : 'success');
+        if (d.warning) showToast(d.warning, 'error');  // non-fatal advisories (e.g. priority ordering)
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
@@ -7979,6 +8008,7 @@ function _renderSettingsAzureNsgTile(content) {
                     <label class="${labelCls}">Allow-list — IP / CIDR + description <span class="text-slate-400 normal-case font-normal">(descriptions are kept in LM only — Azure has no per-IP note)</span></label>
                     <span id="nsg-drift" class="text-[11px] text-slate-400"></span>
                 </div>
+                <p class="text-[11px] text-slate-400 mb-1">This is a <b>shared trusted list</b>: every IP here is also <b>never auto-blocked</b> by the threat monitor, and the same list is editable under <b>Security → Trusted IPs</b>. IPs open an NSG allow rule only when NSG management is enabled above.</p>
                 <div class="flex gap-2 mb-2">
                     <input id="nsg-add-ip" type="text" placeholder="1.2.3.4 or 10.0.0.0/24" class="${inputCls} font-mono text-xs flex-1">
                     <input id="nsg-add-desc" type="text" placeholder="description (optional)" class="${inputCls} text-xs flex-1">
