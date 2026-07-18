@@ -3593,6 +3593,7 @@ async function loadSecurityData() {
     }
     const c = d.config || {};
     window._secAllowPriority = (d.allow_rule || {}).priority;  // for save-time ordering check
+    window._secDenyPriority = c.block_priority;                // stored deny (for save ordering)
     const card = 'hpe-card rounded-lg p-5 shadow-sm';
     const fmtTs = ts => { try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return ''; } };
     const expIn = b => { if (b.permanent) return 'never'; if (!b.expires_at) return '—'; const s = Math.max(0, b.expires_at - Date.now() / 1000); return s > 3600 ? Math.round(s / 3600) + 'h' : Math.round(s / 60) + 'm'; };
@@ -3611,15 +3612,13 @@ async function loadSecurityData() {
           <label class="text-slate-500">TTL (hours)<input type="number" id="sec-ttl" min="1" value="${Math.round((c.ttl_s || 86400) / 3600)}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           <label class="text-slate-500">Permanent after N re-blocks<input type="number" id="sec-permafter" min="1" value="${c.permanent_after != null ? c.permanent_after : 3}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           <label class="text-slate-500">NSG deny rule name<input type="text" id="sec-rule" value="${escapeHtml(c.block_rule_name || 'lm-threat-block')}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
-          <label class="text-slate-500">NSG deny priority<input type="number" id="sec-priority" min="100" max="4096" value="${c.block_priority != null ? c.block_priority : 200}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">NSG allow priority<input type="number" id="sec-allow-priority" min="100" max="4096" value="${(d.allow_rule || {}).priority != null ? (d.allow_rule || {}).priority : 300}" oninput="_secPrioLive()" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
+          <label class="text-slate-500">NSG deny priority<input type="number" id="sec-priority" min="100" max="4096" value="${c.block_priority != null ? c.block_priority : 400}" oninput="_secPrioLive()" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           ${(() => {
             const ar = d.allow_rule || {};
-            const bp = c.block_priority != null ? c.block_priority : 200;
-            const ap = ar.priority != null ? ar.priority : 300;
-            const bad = Number(bp) >= Number(ap);
             return `<div class="col-span-2 md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
-              The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b> @ priority <b>${ap}</b>) is set in <b>Settings → Azure → NSG</b>. Azure evaluates <b>lower priority numbers first</b>, so the <b>Deny (${bp})</b> must be a lower number than <b>Allow (${ap})</b> for auto-blocks to win.
-              ${bad ? '<span class="text-red-600 font-bold"> ⚠ Deny priority is not below Allow — Deny may not take effect.</span>' : '<span class="text-green-600 font-medium"> ✓ ordering OK</span>'}
+              <b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Azure → NSG</b> — saving here updates <b>both</b> priorities (allow → Azure NSG, deny → threat monitor).
+              <span id="sec-prio-check"></span>
             </div>`;
           })()}
         </div>
@@ -3687,10 +3686,57 @@ async function loadSecurityData() {
       </div>
       ${neverTile}
       ${events}`;
+    _secPrioLive();
+}
+
+// ── Shared NSG allow/deny priority helpers (used by BOTH the Security tile and
+// the Settings → Azure NSG tile — single source of truth, edit in either) ─────
+// Invariant (Azure evaluates LOWER priority numbers FIRST): allow < deny < 1000.
+function _nsgPriorityCheck(allow, deny) {
+    const a = Number(allow), d = Number(deny);
+    if (isNaN(a) || isNaN(d)) return { ok: false, msg: 'Enter numeric allow and deny priorities.' };
+    const problems = [];
+    if (!(a < d)) problems.push(`Allow (${a}) must be a LOWER number than Deny (${d}).`);
+    if (!(d < 1000)) problems.push(`Deny (${d}) must be below 1000 (Azure's default allow on 443).`);
+    if (!(a < 1000)) problems.push(`Allow (${a}) must be below 1000 (Azure's default allow on 443).`);
+    return problems.length ? { ok: false, msg: problems.join(' ') } : { ok: true, msg: 'ordering OK' };
+}
+function _prioCheckHtml(allow, deny) {
+    const r = _nsgPriorityCheck(allow, deny);
+    return r.ok ? '<span class="text-green-600 font-medium">✓ ordering OK</span>'
+                : `<span class="text-red-600 font-bold">⚠ ${escapeHtml(r.msg)}</span>`;
+}
+function _secPrioLive() {
+    const a = document.getElementById('sec-allow-priority'), d = document.getElementById('sec-priority');
+    const out = document.getElementById('sec-prio-check');
+    if (a && d && out) out.innerHTML = ' ' + _prioCheckHtml(a.value, d.value);
+}
+// Persist the ALLOW priority to its canonical store (azure_nsg) by patching the
+// current Azure config so no other field is clobbered. Triggers NSG reconcile.
+async function _saveAllowPriority(allow) {
+    let cfg = {};
+    try { const d = await apiJson('/setup/azure-nsg'); cfg = (d && d.config) || {}; } catch (e) { cfg = {}; }
+    cfg.priority = Number(allow);
+    return apiJson('/setup/azure-nsg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
+}
+// Persist the DENY priority to its canonical store (threat_monitor).
+async function _saveDenyPriority(deny) {
+    return apiJson('/api/security/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ block_priority: Number(deny) }) });
+}
+// Run the two single-field writes in an order that never trips the server-side
+// allow<deny guard mid-flight (both final values are already client-validated).
+async function _saveOrderedPriorities(allow, storedDeny, saveAllowFn, saveDenyFn) {
+    if (Number(allow) < Number(storedDeny)) { await saveAllowFn(); await saveDenyFn(); }
+    else { await saveDenyFn(); await saveAllowFn(); }
 }
 
 async function saveSecurityConfig() {
     const num = id => parseInt(document.getElementById(id).value, 10);
+    const allow = num('sec-allow-priority');
+    const deny = num('sec-priority');
+    // Client-side guard (server enforces the same invariant). Block save when bad.
+    const chk = _nsgPriorityCheck(allow, deny);
+    if (!chk.ok) { showToast('Cannot save: ' + chk.msg, 'error'); return; }
     const body = {
         enabled: document.getElementById('sec-enabled').checked,
         auto_block: document.getElementById('sec-autoblock').checked,
@@ -3699,15 +3745,16 @@ async function saveSecurityConfig() {
         ttl_s: Math.max(300, num('sec-ttl') * 3600),
         permanent_after: num('sec-permafter'),
         block_rule_name: (document.getElementById('sec-rule').value || '').trim(),
-        block_priority: num('sec-priority'),
+        block_priority: deny,
     };
-    // Non-fatal ordering check: Deny priority must be a lower number than Allow
-    // (Azure evaluates low numbers first). Warn but still save.
-    const ap = window._secAllowPriority;
-    if (ap != null && !isNaN(body.block_priority) && body.block_priority >= Number(ap)) {
-        showToast(`Warning: deny priority ${body.block_priority} is not below the allow priority ${ap} — Deny may not win. Saving anyway.`, 'error');
-    }
-    await _securityReq('/api/security/config', 'PUT', body, 'Policy saved');
+    // Save BOTH priorities: allow → Azure NSG, deny (+ policy) → threat monitor.
+    const storedDeny = Number(window._secDenyPriority != null ? window._secDenyPriority : deny);
+    try {
+        await _saveOrderedPriorities(allow, storedDeny,
+            () => _saveAllowPriority(allow),
+            () => apiJson('/api/security/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
+        showToast('Policy saved', 'success');
+    } catch (e) { showToast('Failed: ' + (e.message || e), 'error'); }
     loadSecurityData();
 }
 async function securityBlock() {
@@ -7998,11 +8045,13 @@ function _renderSettingsAzureNsgTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Resource Group</label><input id="nsg-rg" type="text" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">NSG Name</label><input id="nsg-name" type="text" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Rule Name</label><input id="nsg-rule" type="text" placeholder="lm-allowlist" class="${inputCls}"></div>
-                <div class="space-y-1"><label class="${labelCls}">Priority (100–4096)</label><input id="nsg-prio" type="number" placeholder="300" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Allow priority (100–4096)</label><input id="nsg-prio" type="number" placeholder="300" oninput="_nsgPrioLive()" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Deny priority <span class="text-slate-400 normal-case font-normal">(threat-monitor block rule)</span></label><input id="nsg-deny-prio" type="number" placeholder="400" oninput="_nsgPrioLive()" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Direction</label><select id="nsg-dir" class="${inputCls}"><option>Inbound</option><option>Outbound</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">Protocol</label><select id="nsg-proto" class="${inputCls}"><option value="*">Any</option><option value="Tcp">Tcp</option><option value="Udp">Udp</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">Destination Port(s)</label><input id="nsg-dport" type="text" placeholder="* or 443,22" class="${inputCls}"></div>
             </div>
+            <p class="text-[11px] text-slate-500 mt-2 bg-slate-50 rounded px-2 py-1.5 leading-relaxed"><b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>Deny priority</b> belongs to the threat monitor (<b>Security</b> view) — editing it here updates <b>both</b> (allow → Azure NSG, deny → threat monitor). <span id="nsg-prio-check"></span></p>
             <div class="mt-3 space-y-1">
                 <div class="flex items-center justify-between">
                     <label class="${labelCls}">Allow-list — IP / CIDR + description <span class="text-slate-400 normal-case font-normal">(descriptions are kept in LM only — Azure has no per-IP note)</span></label>
@@ -8089,8 +8138,14 @@ async function loadAzureNsg() {
         set('nsg-sub', c.subscription_id); set('nsg-rg', c.resource_group); set('nsg-name', c.nsg_name);
         set('nsg-rule', c.rule_name || 'lm-allowlist'); set('nsg-prio', c.priority || 300);
         set('nsg-dir', c.direction || 'Inbound'); set('nsg-proto', c.protocol || '*'); set('nsg-dport', c.dest_port || '*');
+        // Deny priority is owned by the threat monitor; the GET returns it under `deny`.
+        const denyPrio = (d.deny && d.deny.priority != null) ? d.deny.priority : 400;
+        set('nsg-deny-prio', denyPrio);
+        window._nsgStoredAllow = c.priority || 300;
+        window._nsgStoredDeny = denyPrio;
         window._nsgEntries = (c.entries || []).map(e => ({ ip: e.ip, description: e.description || '' }));
         renderNsgEntries();
+        _nsgPrioLive();
         const pill = document.getElementById('nsg-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const drift = document.getElementById('nsg-drift');
@@ -8105,17 +8160,34 @@ async function loadAzureNsg() {
     } catch (e) { console.error('loadAzureNsg failed', e); }
 }
 
+function _nsgPrioLive() {
+    const a = document.getElementById('nsg-prio'), d = document.getElementById('nsg-deny-prio');
+    const out = document.getElementById('nsg-prio-check');
+    if (a && d && out) out.innerHTML = _prioCheckHtml(a.value, d.value);
+}
+
 async function saveAzureNsg() {
     const btn = document.getElementById('nsg-save-btn'); const msg = document.getElementById('nsg-msg');
+    const cfg = _azureNsgFormConfig();                 // includes priority (allow)
+    const allow = cfg.priority;
+    const deny = parseInt((document.getElementById('nsg-deny-prio')?.value || ''), 10);
+    // Client-side guard (server enforces the same invariant). Block save when bad.
+    const chk = _nsgPriorityCheck(allow, deny);
+    if (!chk.ok) { showToast('Cannot save: ' + chk.msg, 'error'); return; }
     if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
     try {
-        const d = await apiJson('/setup/azure-nsg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _azureNsgFormConfig() }) });
-        if (d.warning) { showToast('Saved, but Azure apply failed: ' + d.warning, 'error'); if (msg) msg.textContent = d.warning; }
-        else {
+        // Save BOTH: allow (full Azure config) → azure_nsg, deny → threat monitor.
+        const storedDeny = Number(window._nsgStoredDeny != null ? window._nsgStoredDeny : deny);
+        let d = null;
+        await _saveOrderedPriorities(allow, storedDeny,
+            async () => { d = await apiJson('/setup/azure-nsg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) }); },
+            () => _saveDenyPriority(deny));
+        if (d && d.warning) { showToast('Saved, but Azure apply failed: ' + d.warning, 'error'); if (msg) msg.textContent = d.warning; }
+        else if (d) {
             const a = d.applied;
             const detail = a ? (a.deleted ? 'rule cleared' : `${(a.prefixes || []).length} IP(s) applied`) : 'saved (not applied)';
             showToast('Azure NSG: ' + detail, 'success'); if (msg) msg.textContent = detail;
-        }
+        } else { showToast('Priorities saved', 'success'); }
         loadAzureNsg();
     } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Save & Apply'; } }
