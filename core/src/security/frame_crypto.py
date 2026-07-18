@@ -39,12 +39,29 @@ import base64
 import logging
 from typing import Any, Dict, FrozenSet, Optional
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
-from cryptography.exceptions import InvalidTag
-
 logger = logging.getLogger("FrameCrypto")
+
+# cryptography is a core dep, but a spoke venv that hasn't installed it yet
+# (older install / core-req drift) must NOT crash-loop on import — this module
+# is fail-safe by design (every version combo degrades to plaintext). When the
+# lib is absent we disable app-layer encryption: the spoke doesn't advertise
+# the capability, so the hub degrades to plaintext for it (mixed → plaintext).
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.exceptions import InvalidTag
+    _CRYPTO_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only on a dep-short venv
+    _CRYPTO_AVAILABLE = False
+
+    class InvalidTag(Exception):  # fallback so callers can still `except InvalidTag`
+        pass
+
+    logger.warning(
+        "cryptography not installed — app-layer frame encryption DISABLED "
+        "(plaintext, HMAC-signed as before). Install 'cryptography>=42' to enable."
+    )
 
 #: Env var that toggles app-layer encryption. Default ON (``"1"``); set to
 #: ``0``/``false``/``no`` to make a new hub/spoke behave as legacy (don't
@@ -86,7 +103,10 @@ ENC_MARKER = "v1"
 
 def encryption_enabled() -> bool:
     """Whether app-layer frame encryption is active. Default ON (``"1"``);
-    ``0``/``false``/``no`` (case-insensitive, whitespace-trimmed) → off."""
+    ``0``/``false``/``no`` (case-insensitive, whitespace-trimmed) → off. Always
+    off when the ``cryptography`` lib is unavailable (fail-safe → plaintext)."""
+    if not _CRYPTO_AVAILABLE:
+        return False
     return os.environ.get(_ENV_VAR, "1").strip().lower() not in ("0", "false", "no")
 
 
@@ -155,6 +175,8 @@ def wrap(secret: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     frames, ``type``) are preserved. Returns ``payload`` for chaining."""
     if not isinstance(payload, dict):
         return payload
+    if not _CRYPTO_AVAILABLE:
+        return payload  # no crypto lib → never encrypt (fail-safe plaintext)
     if payload.get("enc") == ENC_MARKER:
         return payload  # already wrapped — idempotent
     if "data" not in payload:
@@ -176,6 +198,10 @@ def unwrap(secret: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         return payload
     if payload.get("enc") != ENC_MARKER:
         return payload  # plaintext — pass through (legacy / non-secret path)
+    if not _CRYPTO_AVAILABLE:
+        # An encrypted frame arrived but we can't decrypt (shouldn't happen — we
+        # don't advertise the capability without crypto). Drop it, don't dispatch.
+        raise InvalidTag("cryptography unavailable — cannot decrypt frame")
     payload["data"] = decrypt_payload_data(secret, payload["data"])
     del payload["enc"]
     return payload
