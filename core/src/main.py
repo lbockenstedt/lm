@@ -7150,6 +7150,26 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # SSH/REST/console access, then LE_MARK_DISTRIBUTED records the push on
         # the le ledger. Also fired inline on /api/le/issue + /api/le/renew.
         # See run_cert_distribution_loop / _distribute_one_cert.
+        # Virtual hub-self spoke (agent-rework #5 / Phase 4): a loopback
+        # ``/ws/agent`` listener + an in-process dumb agent INSIDE the hub
+        # process, so ``_install_cert_on_hub`` routes the server-cert write +
+        # ``lm-self-restart`` through the SAME WRITE_FILE + RUN_COMMAND
+        # primitives spoke-side cert deploys use. NOT a separate unit, NOT a
+        # spoke in the hub registry (invisible to WebUI Spokes). The hub's own
+        # cert-install path falls back to direct inline writes if the hub-self
+        # agent is down. ``LM_HUB_SELF_AGENT=0`` disables the feature entirely.
+        # See ``core/src/hub_self.py`` + ``docs/hub-direct-ops.md``.
+        self._hub_self = None
+        if os.environ.get("LM_HUB_SELF_AGENT", "1").strip() not in ("0", "false", "False"):
+            try:
+                from hub_self import HubSelfControlPlane
+                self._hub_self = HubSelfControlPlane("hub-self")
+                asyncio.create_task(self._hub_self.run())
+                logger.info("hub-self loopback agent-host started")
+            except Exception as e:  # noqa: BLE001 — never fatal to the hub
+                logger.warning("hub-self agent-host disabled (non-fatal): %s", e)
+                self._hub_self = None
+
         cert_dist_task = asyncio.create_task(self.run_cert_distribution_loop())
 
         # compression=None disables permessage-deflate. The hub's core venv and
