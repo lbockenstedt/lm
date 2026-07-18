@@ -2271,7 +2271,12 @@ function _updateMetrics(statusData) {
             : updateAvail
                 ? `Update available — a newer version is on the remote (running ${running}); click Update to pull`
                 : `Up to date (running ${running})`;
-        versionEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full ${dotTone} transition-all align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
+        // Match the green glow the hub/module online dots carry
+        // (shadow-[0_0_6px_rgba(34,197,94,0.5)]) so the version dot reads as the
+        // same shade of green, not a flatter one. Only green gets the halo; the
+        // amber behind/update-available tone stays flat (matches the amber dots).
+        const dotGlow = (behind || updateAvail) ? '' : ' shadow-[0_0_6px_rgba(34,197,94,0.5)]';
+        versionEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full ${dotTone}${dotGlow} transition-all align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
         window.__lmHubVersion = m.version;  // for File-a-Bug context (running version)
         window.__lmTargetVersion = target || null;  // on-disk VERSION, for the Update toast
     }
