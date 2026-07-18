@@ -162,11 +162,57 @@ class AgentHostingControlPlane(BaseControlPlane):
                 res = {"ok": False, "rc": None, "stdout": "", "stderr": "",
                        "truncated": False, "error": "no result from agent"}
             return {"status": "SUCCESS", "result": res}
+        if cmd_type == "SPOKE_UPDATE":
+            # The spoke is about to pull its own repo + os._exit(3) to reload
+            # (handled by the base class below). FIRST, fan the same update out
+            # to every connected device-mode agent so they pull the SAME code
+            # (the lm repo the agent runs) + restart on their own — closing the
+            # "Update button / auto-update reaches the spoke but not its
+            # device-mode agents" gap. Fire-and-forget (send_raw_to_agent): the
+            # agent's AGENT_UPDATE handler os._exit(3)s on a real update, so it
+            # never returns a correlated response (awaiting one would time out);
+            # any pre-exit AGENT_RESPONSE is dropped by the AGENT_RESPONSE branch
+            # (no pending corr_id), exactly like the VNC down-frame path. The
+            # device-mode SpokeClient handles AGENT_UPDATE; a legacy node-agent
+            # (BaseControlPlane) has no AGENT_UPDATE branch and ignores it
+            # benignly — it's updated as an agent *spoke* via the hub mailbox, not
+            # here. Forward the SAME {repo_url, core_repo_url, core_branch} the
+            # hub sent: for an agent-hosting spoke these point at the lm repo
+            # (update_sources.agent / .hub), which IS the device-mode agent's own
+            # repo, so the agent pulls the right thing.
+            await self._push_agent_update_to_devices(data)
         result = await super().handle_system_command(cmd_type, data)
         if cmd_type in ("SET_LOG_LEVEL", "SPOKE_SET_LOG_LEVEL"):
             if self.connected_agents:
                 await self.broadcast_to_agents("SET_LOG_LEVEL", data)
         return result
+
+    async def _push_agent_update_to_devices(self, update_data: Dict[str, Any]) -> None:
+        """Fan an ``AGENT_UPDATE`` out to every connected device-mode agent so a
+        spoke-side update (``SPOKE_UPDATE``) reaches its hosted agents too — each
+        pulls its own repo + the shared /opt/lm core, arms its rollback watchdog,
+        and ``os._exit(3)``s to reload, symmetric with the spoke's own
+        ``SPOKE_UPDATE``. Fire-and-forget (see the SPOKE_UPDATE intercept above
+        for why we don't await a response). Best-effort: a gone/erroring agent is
+        skipped, never fatal — the agent's own code-drift watchdog + reconnect
+        self-heal cover a missed delivery."""
+        if not self.connected_agents:
+            return
+        payload = {
+            "repo_url": update_data.get("repo_url"),
+            "core_repo_url": update_data.get("core_repo_url"),
+            "core_branch": update_data.get("core_branch"),
+        }
+        if not payload["repo_url"]:
+            # Nothing to forward (hub didn't thread a repo_url) — leave the
+            # agents on their current code; the next SPOKE_UPDATE carries it.
+            return
+        for aid in list(self.connected_agents):
+            try:
+                await self.send_raw_to_agent(aid, "AGENT_UPDATE", payload)
+                logger.info("AGENT_UPDATE forwarded to device-mode agent '%s'", aid)
+            except Exception as e:  # noqa: BLE001 — never let one agent break the fan-out
+                logger.debug("AGENT_UPDATE forward to '%s' failed: %s", aid, e)
 
     # ── Agent WebSocket server ──────────────────────────────────────────────
 

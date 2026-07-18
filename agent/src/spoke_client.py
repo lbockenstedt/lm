@@ -40,6 +40,18 @@ try:
 except ImportError:  # bare-module layout (/opt/lm/core on sys.path)
     from messaging.code_drift_watchdog import CodeDriftWatchdogMixin  # type: ignore
 
+# Self-update mixin — the git pull + snapshot + rollback-watchdog + restart
+# machinery that backs AGENT_UPDATE (the spoke→device-mode-agent update
+# command, symmetric with the hub→spoke SPOKE_UPDATE). This class provides the
+# _repo_root / _resolve_core_root hooks (below) + get_service_name /
+# _flush_log_relay_sync; the mixin supplies _run_git, _perform_self_update_sync,
+# the rollback state dir, and the external watchdog arming. Same shape a spoke
+# has, so a device-mode agent self-updates with the SAME rollback guarantees.
+try:
+    from core.src.messaging.self_update import SelfUpdateMixin
+except ImportError:  # bare-module layout (/opt/lm/core on sys.path)
+    from messaging.self_update import SelfUpdateMixin  # type: ignore
+
 # Dep self-heal (mirror core/src/dep_guard + the netbox control-plane pattern):
 # at startup the agent verifies its venv can import every declared requirement
 # and runs `pip install -r requirements.txt` if not. None if dep_guard isn't
@@ -112,7 +124,7 @@ def normalize_spoke_url(url: str) -> str:
     return f"{scheme}://{host_port}{path}"
 
 
-class SpokeClient(CodeDriftWatchdogMixin):
+class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
     """A generic dumb executor that dials a spoke and runs primitives."""
 
     def __init__(self, agent_id: str, spoke_url: str, secret: str = "",
@@ -350,10 +362,10 @@ class SpokeClient(CodeDriftWatchdogMixin):
 
     async def _dispatch(self, cmd, data):
         """Generic primitives ONLY — the spoke holds all product logic."""
-        from command_runner import run_local_command, write_local_file
         if cmd in ("HUB_PING", "HEARTBEAT_ACK"):
             return {"status": "SUCCESS"}
         if cmd == "RUN_COMMAND":
+            from command_runner import run_local_command
             res = await asyncio.to_thread(
                 run_local_command, data.get("command", ""),
                 bool(data.get("allow_shell", False)),
@@ -361,6 +373,7 @@ class SpokeClient(CodeDriftWatchdogMixin):
             return {"status": "SUCCESS" if res.get("ok") else "ERROR",
                     "result": res, "message": res.get("error", "")}
         if cmd == "WRITE_FILE":
+            from command_runner import write_local_file
             res = await asyncio.to_thread(
                 write_local_file, data.get("path", ""), data.get("content", ""),
                 b64=data.get("b64", ""), mode=int(data.get("mode", 0o600)),
@@ -368,6 +381,47 @@ class SpokeClient(CodeDriftWatchdogMixin):
                 atomic=bool(data.get("atomic", True)))
             return {"status": "SUCCESS" if res.get("ok") else "ERROR",
                     "result": res, "message": res.get("error", "")}
+        if cmd == "AGENT_UPDATE":
+            # Spoke-driven self-update — symmetric with the hub→spoke
+            # SPOKE_UPDATE. The spoke sends {repo_url, core_repo_url?, core_branch?}
+            # and the agent pulls its own repo (+ the shared /opt/lm core checkout
+            # when core_repo_url is threaded), snapshots HEAD, arms the external
+            # rollback watchdog, and os._exit(3)s so systemd Restart=on-failure
+            # reloads the new code — exactly the sequence a spoke runs for
+            # SPOKE_UPDATE (now shared via SelfUpdateMixin). A bad update is
+            # rolled back by the watchdog; known-bad commits are skipped. The
+            # whole git dance runs off the event loop (asyncio.to_thread) so a
+            # slow link doesn't stall in-flight primitives, mirroring the
+            # spoke handler. See _perform_self_update_sync.
+            #
+            # Single-flight guard mirrors the spoke's: a slow link makes the
+            # spoke's mailbox re-deliver AGENT_UPDATE; without this guard each
+            # re-delivery spawned a concurrent git pull. to_thread frees the
+            # loop while the first run executes, so a duplicate arrives with
+            # the flag set and short-circuits with an immediate ack.
+            repo_url = data.get("repo_url")
+            if not repo_url:
+                return {"status": "ERROR", "message": "Missing repo_url for update"}
+            if getattr(self, "_spoke_update_in_progress", False):
+                logger.info("AGENT_UPDATE already in progress; "
+                            "ignoring duplicate re-delivery.")
+                return {"status": "SUCCESS",
+                        "message": "update already in progress"}
+            self._spoke_update_in_progress = True
+            self._draining = True  # spoke queues pushes; we os._exit at the end
+            try:
+                return await asyncio.to_thread(
+                    self._perform_self_update_sync, repo_url,
+                    core_repo_url=data.get("core_repo_url"),
+                    core_branch=data.get("core_branch"),
+                    reason="agent-update")
+            finally:
+                self._spoke_update_in_progress = False
+                # Non-exit path (already up to date / known-bad skip / git error):
+                # clear _draining or the code-drift watchdog would skip every
+                # cycle for the rest of this process lifetime. The exit path
+                # os._exit(3)s above, killing the process before this runs.
+                self._draining = False
         logger.debug("device-mode agent got non-primitive command %s (ignored)", cmd)
         return {"status": "ERROR", "message": f"unsupported in device mode: {cmd}"}
 
@@ -510,6 +564,41 @@ class SpokeClient(CodeDriftWatchdogMixin):
             await asyncio.wait_for(self._send_agent_log(ws, entries), timeout=timeout)
         except Exception as e:  # noqa: BLE001
             logger.debug("pre-exit AGENT_LOG flush failed: %s", e)
+
+    def _flush_log_relay_sync(self, timeout: float = 2.0) -> None:
+        """Sync counterpart to ``_flush_log_relay_async`` — called from the
+        ``_perform_self_update_sync`` worker thread (no running loop in that
+        thread) right before ``os._exit(3)`` on an AGENT_UPDATE restart, so the
+        agent's last lines (including the "reloading …" message) reach the hub
+        instead of dying in the queue. Schedules the send on the captured event
+        loop and blocks briefly; any failure is swallowed because the process
+        is about to exit regardless. Hook for SelfUpdateMixin."""
+        entries = []
+        try:
+            while True:
+                entries.append(self._log_relay_queue.get_nowait())
+        except queue.Empty:
+            pass
+        if not entries:
+            return
+        loop = self._loop
+        ws = self.websocket
+        if loop is None or ws is None:
+            return
+        try:
+            fut = asyncio.run_coroutine_threadsafe(self._send_agent_log(ws, entries), loop)
+            fut.result(timeout=timeout)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("pre-exit AGENT_LOG flush failed: %s", e)
+
+    def get_service_name(self) -> str:
+        """The agent's systemd unit name — the rollback watchdog restarts this.
+        The device-mode agent runs as ONE ``lm-agent`` unit hosting all roles
+        (install_agent.sh SERVICE_NAME), so this is a fixed name, not derived
+        from the agent_id like a spoke's ``lm-<module>``. Honors an
+        ``LM_AGENT_SERVICE_NAME`` override for non-standard installs. Hook for
+        SelfUpdateMixin."""
+        return os.environ.get("LM_AGENT_SERVICE_NAME", "").strip() or "lm-agent"
 
     def _repo_root(self) -> str:
         """The agent's own repo checkout root (the lm repo, which vendors
