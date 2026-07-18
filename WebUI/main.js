@@ -9811,13 +9811,11 @@ function _mgmtEntryCard(o) {
         <div class="flex items-center justify-between gap-3">
             <div class="flex items-center gap-2.5 min-w-0">
                 <div class="w-2 h-2 rounded-full ${o.dot} shrink-0"></div>
-                <div class="font-medium text-slate-700 break-words min-w-0">${o.name}</div>
+                <div class="font-medium text-slate-700 break-words min-w-0" title="${escapeHtml(o.sid || '')}">${o.name}</div>
             </div>
             ${corner ? `<div class="flex items-center gap-2 shrink-0">${corner}</div>` : ''}
         </div>
-        <div class="text-[11px] text-slate-500 break-words leading-relaxed pl-[18px]">
-            <span class="font-mono text-slate-400">${escapeHtml(o.sid)}</span>${o.metaInline ? ` <span class="text-slate-300">·</span> ${o.metaInline}` : ''}
-        </div>
+        ${o.metaInline ? `<div class="text-[11px] text-slate-500 break-words leading-relaxed pl-[18px]">${o.metaInline}</div>` : ''}
         ${o.identityBanner || ''}
         ${meta}
         ${actions ? `<div class="flex items-center gap-2 flex-wrap pl-6">${actions}</div>` : ''}
