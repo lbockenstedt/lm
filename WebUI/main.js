@@ -5862,13 +5862,13 @@ async function saveNwPollConfig(btn) {
 function _renderSetupSimulationsTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
-            <div class="flex items-center gap-5 border-b border-slate-200 mb-4">
-                <div id="simtab-btn-usb" onclick="_simSetupTab('usb')" class="sub-nav-item active px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">USB</div>
-                <div id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">PCI (Tiers)</div>
-                <div id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">DHCP</div>
-                <div id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Quotas</div>
-                <div id="simtab-btn-catalog" onclick="_simSetupTab('catalog')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Catalog</div>
-                <div id="simtab-btn-glv" onclick="_simSetupTab('glv')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Learned Values</div>
+            <div class="flex items-center gap-6 border-b border-slate-200 mb-4 text-sm font-medium text-slate-600">
+                <div id="simtab-btn-usb" onclick="_simSetupTab('usb')" class="sub-nav-item active px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">USB</div>
+                <div id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">PCI (Tiers)</div>
+                <div id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">DHCP</div>
+                <div id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">Quotas</div>
+                <div id="simtab-btn-catalog" onclick="_simSetupTab('catalog')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">Catalog</div>
+                <div id="simtab-btn-glv" onclick="_simSetupTab('glv')" class="sub-nav-item px-1.5 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">Learned Values</div>
             </div>
             <div id="simtab-usb" class="space-y-4">
             <div class="${card}">
