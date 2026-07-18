@@ -2330,13 +2330,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # verify a frame signed with the new secret it hasn't installed yet.
             prev_secret = self.key_manager.current_session_secret(pk)
             session_secret = self.key_manager.generate_first_secret(pk)
-            key_msg = Message(
-                header=MessageHeader(
-                    message_id=str(uuid.uuid4()), timestamp=time.time(),
-                    sender_id="hub", destination_id=spoke_id),
-                payload=MessagePayload(
-                    type="SPOKE_UPDATE_SESSION_KEY", data={"secret": session_secret}))
-            await self.send_to_spoke(key_msg, signing_secret=prev_secret)
+            # Await the spoke's key-adoption ack BEFORE pushing encrypted config.
+            # The hub provisions the session key (the AEAD key the spoke needs to
+            # decrypt UPDATE_CONFIG) and the encrypted UPDATE_CONFIG back-to-back;
+            # fire-and-forget delivery races the spoke's concurrent session-key
+            # handler, so the encrypted config can be decoded before self.secret
+            # is armed and dropped — the role-never-repoints outage (netbox stuck
+            # on localhost:8000, ldap/nac config never applied). Waiting for the
+            # ack guarantees the spoke has armed the key. On a timeout, proceed
+            # anyway: the spoke-side deferral (_drain_pending_encrypted) replays
+            # any frame decoded before the key armed. signing_secret=prev_secret
+            # signs with the pre-rotation key the spoke still holds (None on
+            # first keying → unsigned, accepted in bootstrap).
+            await self.request_response(
+                spoke_id, "SPOKE_UPDATE_SESSION_KEY", {"secret": session_secret},
+                signing_secret=prev_secret)
             approval_msg = Message(
                 header=MessageHeader(
                     message_id=str(uuid.uuid4()), timestamp=time.time(),
@@ -3754,14 +3762,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     # so it can verify and install the new secret.
                     prev_secret = self.key_manager.current_session_secret(pk)
                     session_secret = self.key_manager.generate_first_secret(pk)
-                    key_msg = Message(
-                        header=MessageHeader(
-                            message_id=str(uuid.uuid4()), timestamp=time.time(),
-                            sender_id="hub", destination_id=spoke_id),
-                        payload=MessagePayload(
-                            type="SPOKE_UPDATE_SESSION_KEY",
-                            data={"secret": session_secret}))
-                    await self.send_to_spoke(key_msg, signing_secret=prev_secret)
+                    # Await the key-adoption ack before the encrypted config push
+                    # below — see approve_and_bind_spoke for the rationale (the
+                    # bootstrap-race that left roles stuck on localhost:8000).
+                    # On timeout, proceed: the spoke-side deferral is the net.
+                    await self.request_response(
+                        spoke_id, "SPOKE_UPDATE_SESSION_KEY",
+                        {"secret": session_secret}, signing_secret=prev_secret)
                 await self.push_config_to_spoke(spoke_id)
 
                 # Request version AFTER the session key is established so the spoke

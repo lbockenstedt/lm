@@ -37,6 +37,9 @@ class _Spoke:
         self.secret = secret
         self.signer = MessageSigner(secret) if secret else None
         self.hub_enc_capable = False
+        # Bootstrap-race replay buffer (see BaseControlPlane._decode_frame +
+        # _drain_pending_encrypted). Present so the deferral path is exercised.
+        self._pending_encrypted_frames = []
 
 
 # ── outbound _encode_frame: nested CS_TOKEN_RESULT (refinement #2) ────────────
@@ -200,18 +203,29 @@ def test_decode_plaintext_frame_still_works():
     assert msg["payload"]["data"] == {"want": "v"}
 
 
-def test_decode_encrypted_frame_with_no_secret_dropped():
-    """A never-keyed spoke receives an encrypted frame — but a real hub never
-    sends one to a never-keyed spoke (refinement #1). If it did, the spoke
-    has no secret to decrypt with → drop (defensive)."""
+def test_decode_encrypted_frame_with_no_secret_deferred():
+    """A never-keyed spoke receives an encrypted frame during the bootstrap
+    race (the hub sends SPOKE_UPDATE_SESSION_KEY + an encrypted UPDATE_CONFIG
+    back-to-back; the session-key handler hasn't armed self.secret yet). It
+    can't decrypt yet → defer: ok=False (not dispatchable now) AND the raw
+    wire is buffered for replay once the key arms (_drain_pending_encrypted).
+    A real hub never sends an encrypted frame to a never-keyed spoke outside
+    this race (refinement #1); a harness without the buffer attr still drops."""
     spoke = _Spoke(secret=None)
     spoke.signer = None
-    # Build an encrypted frame signed with some secret; the spoke has no key,
-    # so has_key=False → it parses without verifying (bootstrap path) but then
-    # hits the encrypted-with-no-secret drop.
-    wire = _wire_from_hub("other-secret", "INSTALL_CERT", {"privkey": "PEM"}, encrypt=True)
+    wire = _wire_from_hub(SECRET, "UPDATE_CONFIG",
+                         {"netbox_url": "https://4.236.1.124", "api_token": "TOK"},
+                         encrypt=True)
     msg, ok = BaseControlPlane._decode_frame(spoke, wire)
     assert ok is False
+    # The frame was buffered, not lost — replay succeeds once the key arms.
+    assert len(spoke._pending_encrypted_frames) == 1
+    spoke.secret = SECRET
+    spoke.signer = MessageSigner(SECRET)
+    msg2, ok2 = BaseControlPlane._decode_frame(spoke,
+                                                spoke._pending_encrypted_frames[0][0])
+    assert ok2 is True
+    assert msg2["payload"]["data"]["netbox_url"] == "https://4.236.1.124"
 
 
 # ── kill switch on advertise ─────────────────────────────────────────────────

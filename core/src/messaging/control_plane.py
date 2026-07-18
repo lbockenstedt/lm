@@ -22,7 +22,7 @@ import sys
 import fcntl
 import contextlib
 import concurrent.futures
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 try:
     from ..security.signer import MessageSigner, encode_frame, split_frame
     from ..security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
@@ -273,6 +273,29 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         self._install_uncaught_exception_relay()
         # Active hub websocket — set while connected so subclasses can relay messages up.
         self._hub_ws = None
+        # Encrypted inbound frames that arrived during the bootstrap race —
+        # BEFORE ``SPOKE_UPDATE_SESSION_KEY`` armed ``self.secret`` (the AEAD
+        # key). The hub provisions the session key and an encrypted
+        # ``UPDATE_CONFIG`` (carrying api_token / admin_pw / client_secret)
+        # back-to-back via fire-and-forget ``send_to_spoke``; the session-key
+        # handler runs as a CONCURRENT task (``_handle_one_command``), so the
+        # encrypted frame is frequently decoded before ``self.secret`` is set
+        # → ``_decode_frame`` would otherwise drop it ("Encrypted frame from
+        # hub but no session secret — dropping"), and the role never repoints
+        # (e.g. a netbox role stuck on localhost:8000). Buffer such frames here
+        # and replay them once the key is armed — see
+        # ``_drain_pending_encrypted`` (called from the SPOKE_UPDATE_SESSION_KEY
+        # handler). Each entry is ``(wire, enq_time)``; a stale entry is pruned
+        # past the drain deadline so a key that never arrives can't wedge the
+        # buffer. Cleared per connection (run() finally + start).
+        self._pending_encrypted_frames: List[tuple] = []
+        # ``(websocket, send_lock, sem)`` captured at the top of the receive
+        # loop so ``_drain_pending_encrypted`` can dispatch replayed frames
+        # through the same bounded-concurrency path as live ones.
+        self._decrypt_dispatch_ctx = None
+        # Outstanding _drain_pending_encrypted tasks (kept referenced so the
+        # GC can't reap a not-yet-awaited fire-and-forget drain).
+        self._drain_tasks: set = set()
         # Pending HUB_REQUEST → HUB_RESPONSE waiters keyed by correlation_id
         # (header.message_id of the outbound request, which the hub echoes back
         # as data.correlation_id on the HUB_RESPONSE). A module awaiting a hub
@@ -1130,6 +1153,14 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             cmd_send_lock = asyncio.Lock()
             cmd_sem = asyncio.Semaphore(self._max_concurrent_commands())
             cmd_tasks: set = set()
+            # Capture the dispatch context so _drain_pending_encrypted (fired
+            # from the SPOKE_UPDATE_SESSION_KEY handler, which has no local
+            # access to these) can replay deferred encrypted frames through the
+            # same bounded-concurrency dispatch as live ones. Cleared in the
+            # finally below. Fresh connection → drop any stale deferred frames
+            # from a prior (dropped) connection.
+            self._decrypt_dispatch_ctx = (websocket, cmd_send_lock, cmd_sem)
+            self._pending_encrypted_frames = []
 
             # Main Message Loop
             try:
@@ -1137,6 +1168,12 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 self._last_hub_contact = time.time()  # any frame = hub reachable
                 msg, _ok = self._decode_frame(message)
                 if not _ok:
+                    # _decode_frame returns ok=False for two distinct reasons:
+                    # a genuinely bad frame (bad HMAC / tamper / undecryptable)
+                    # OR a deferred encrypted frame it buffered into
+                    # _pending_encrypted_frames for replay once the session key
+                    # arms. Either way there's nothing to dispatch now; the
+                    # deferred one is replayed by _drain_pending_encrypted.
                     continue
 
                 payload = msg.get("payload", {})
@@ -1203,6 +1240,10 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 task.add_done_callback(cmd_tasks.discard)
             finally:
                 self._hub_ws = None
+                # Drop the bootstrap-race replay context + any still-pending
+                # deferred frames — they belong to THIS (now-closed) connection.
+                self._decrypt_dispatch_ctx = None
+                self._pending_encrypted_frames = []
                 _hb_stop.set()  # signal the heartbeat thread to exit
                 _hb_thread.join(timeout=2.0)  # short — it ticks on its own clock
                 _lr_task.cancel()
@@ -1726,6 +1767,15 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 self.signer = MessageSigner(new_secret)
                 self._persist_session_secret(new_secret)
                 logger.info(f"Session key updated for {self.spoke_id}")
+                # Replay encrypted frames buffered during the bootstrap race
+                # (decoded before this handler armed self.secret). Fire-and-
+                # forget: THIS command's ack goes out first, then the drain
+                # dispatches the replayed frames concurrently through the same
+                # bounded-concurrency path as live ones.
+                if self._pending_encrypted_frames:
+                    _t = asyncio.create_task(self._drain_pending_encrypted())
+                    self._drain_tasks.add(_t)
+                    _t.add_done_callback(self._drain_tasks.discard)
                 return {"status": "SUCCESS", "message": "Session key updated successfully"}
             return {"status": "ERROR", "message": "Missing secret in data"}
 
@@ -2086,7 +2136,34 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         _payload = msg.get("payload", {})
         if is_encrypted(_payload):
             if not self.secret:
-                logger.debug("Encrypted frame from hub but no session secret — dropping")
+                # Bootstrap race: the hub sent SPOKE_UPDATE_SESSION_KEY and this
+                # encrypted frame back-to-back; the session-key handler (a
+                # concurrent task) hasn't armed self.secret yet, so we can't
+                # AEAD-decrypt here. DEFER instead of drop — buffer the raw wire
+                # and replay it through _decode_frame once the key is armed (see
+                # _drain_pending_encrypted, fired from the SPOKE_UPDATE_SESSION_KEY
+                # handler). Cap + prune so a key that never arrives can't wedge
+                # the buffer; the normal case drains within milliseconds.
+                # getattr → test harnesses / subclasses that bypass __init__
+                # (no buffer attr) fall back to the legacy drop (return ok=False).
+                buf = getattr(self, "_pending_encrypted_frames", None)
+                if isinstance(buf, list):
+                    buf.append((wire, time.time()))
+                    if len(buf) > 64:
+                        buf.pop(0)
+                        logger.warning(
+                            "Encrypted frame deferred >64 times without a "
+                            "session key; dropping oldest (spoke=%s)",
+                            self.spoke_id)
+                    else:
+                        logger.debug(
+                            "Encrypted frame from hub but no session secret "
+                            "yet — deferring for replay (spoke=%s)",
+                            self.spoke_id)
+                else:
+                    logger.debug(
+                        "Encrypted frame from hub but no session secret — "
+                        "dropping (spoke=%s)", self.spoke_id)
                 return None, False
             try:
                 unwrap(self.secret, _payload)
@@ -2094,3 +2171,44 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 logger.debug("Dropping tampered/undecryptable frame from hub: %s", e)
                 return None, False
         return msg, True
+
+    async def _drain_pending_encrypted(self) -> None:
+        """Replay encrypted frames buffered during the bootstrap race (see
+        ``_decode_frame``). Called once ``SPOKE_UPDATE_SESSION_KEY`` arms
+        ``self.secret``. Re-decodes each buffered raw wire frame (the AEAD key
+        is now set → decode succeeds) and dispatches it through the same
+        bounded-concurrency path as a live inbound frame. Stale entries (the
+        key took too long / never came) are pruned, not held forever.
+
+        Dispatch is sequential-await (encrypted config frames are few and
+        fast); the shared semaphore still bounds total concurrency against any
+        live receive-loop dispatches racing this drain. The drain runs as its
+        own task so the SPOKE_UPDATE_SESSION_KEY ack goes out immediately."""
+        if not self._pending_encrypted_frames or not self._decrypt_dispatch_ctx:
+            return
+        websocket, send_lock, sem = self._decrypt_dispatch_ctx
+        pending = self._pending_encrypted_frames
+        self._pending_encrypted_frames = []
+        now = time.time()
+        for wire, enq in pending:
+            if now - enq > 30.0:
+                logger.warning(
+                    "Dropping deferred encrypted frame — session key not armed "
+                    "within 30s (spoke=%s)", self.spoke_id)
+                continue
+            # Re-decode now that self.secret is armed. A still-failing decode
+            # (tamper / key rotated again mid-drain) is dropped — the hub
+            # re-pushes on the next config change or reconnect.
+            msg, ok = self._decode_frame(wire)
+            if not ok:
+                continue
+            payload = msg.get("payload", {}) or {}
+            cmd_type = payload.get("type")
+            if not cmd_type:
+                continue
+            data = payload.get("data", {})
+            corr_id = msg.get("header", {}).get("message_id")
+            logger.debug("Replaying deferred encrypted %s (spoke=%s)",
+                         cmd_type, self.spoke_id)
+            await self._handle_one_command(
+                websocket, cmd_type, data, corr_id, send_lock, sem)

@@ -122,6 +122,11 @@ class _AutoApproveHub:
         # Configurable vouch replies keyed by sub_spoke_id. Absent → timeout.
         self._vouch_replies = {}
         self.request_response_calls = 0
+        # Split counters so a test can assert "no VOUCH round-trip for a sub"
+        # independently of the base spoke's own session-key push (which now
+        # also goes through request_response — the bootstrap-race fix).
+        self.vouch_round_trips = 0
+        self.session_key_pushes = 0
         # Phase 2: forwarded real methods resolve state keys via _primary_key.
         # Alias empty -> _primary_key returns spoke_id (pre-2b2-trigger).
         self.spoke_id_alias = {}
@@ -143,10 +148,16 @@ class _AutoApproveHub:
 
     async def request_response(self, spoke_id, command_type, data, timeout=5.0,
                                signing_secret=None):
-        """Stubbed round-trip: return the configured vouch reply for the
-        sub_spoke_id in ``data``, or a timeout (no payload) if none configured."""
+        """Stubbed round-trip. ``VOUCH_SUBSPOKE`` returns the configured vouch
+        reply for the sub_spoke_id in ``data`` (or a timeout). The session-key
+        push (``SPOKE_UPDATE_SESSION_KEY``) returns a SUCCESS ack — the spoke
+        armed the key — so approve_and_bind_spoke proceeds to the config push."""
         self.request_response_calls += 1
+        if command_type == "SPOKE_UPDATE_SESSION_KEY":
+            self.session_key_pushes += 1
+            return {"status": "SUCCESS", "message": "Session key updated successfully"}
         assert command_type == "VOUCH_SUBSPOKE", command_type
+        self.vouch_round_trips += 1
         sub_id = (data or {}).get("sub_spoke_id")
         return self._vouch_replies.get(sub_id, _TIMEOUT_REPLY)
 
@@ -221,7 +232,11 @@ def test_vouch_happy_path_approves_and_binds(tmp_path):
     assert hub.state.get_spoke_tenant("agent-1-dns") == "tenant-A"
     assert hub.key_manager.keys.get("agent-1-dns") is not None
     assert _events_of(hub, "agent-1-dns", "parent_auto_approve")
-    assert hub.request_response_calls == 1
+    # The parent vouch round-trip + the sub-spoke's session-key push (awaited
+    # before the config push so the spoke arms its AEAD key first — the
+    # bootstrap-race fix; see approve_and_bind_spoke).
+    assert hub.vouch_round_trips == 1
+    assert hub.session_key_pushes == 1
 
 
 def test_vouch_false_stays_pending(tmp_path):
@@ -449,9 +464,10 @@ def test_sweep_skips_already_approved_subspokes(tmp_path):
     asyncio.run(hub.approve_and_bind_spoke("agent-1", "tenant-A"))
 
     # No new key was generated for the already-approved sub-spoke; no vouch
-    # round-trip was made for it (the sweep skips approved subs).
+    # round-trip was made for it (the sweep skips approved subs). The base
+    # agent-1's own session-key push is separate (session_key_pushes).
     assert hub.key_manager.keys.get("agent-1-dns") is km_before
-    assert hub.request_response_calls == 0
+    assert hub.vouch_round_trips == 0
 
 
 def test_sweep_skips_subspokes_claiming_a_different_parent(tmp_path):
@@ -471,7 +487,7 @@ def test_sweep_skips_subspokes_claiming_a_different_parent(tmp_path):
     assert hub.approved_modules.get("agent-9-dns") is None
     assert not hub.key_manager.keys.get("agent-9-dns")
     # Not agent-1's sub-spoke → no vouch round-trip for it.
-    assert hub.request_response_calls == 0
+    assert hub.vouch_round_trips == 0
 
 
 def test_sweep_only_runs_for_agent_module_type(tmp_path):
@@ -489,4 +505,6 @@ def test_sweep_only_runs_for_agent_module_type(tmp_path):
     asyncio.run(hub.approve_and_bind_spoke("dns-spoke-99", "tenant-A"))
 
     assert hub.approved_modules.get("agent-1-dns") is None
-    assert hub.request_response_calls == 0
+    # Non-agent approval → no sub-spoke sweep → no vouch round-trip. (The base
+    # dns-spoke-99's own session-key push is separate — session_key_pushes.)
+    assert hub.vouch_round_trips == 0
