@@ -2514,7 +2514,10 @@ function _applyHubHealth(diagData) {
             // Grace-based: in contact now or recently (falls back to the live WS
             // flag on an older hub) so a transient stall doesn't drop the dot.
             online: (s.in_contact !== undefined ? s.in_contact : s.authenticated),
-            error: !!s.last_error
+            error: !!s.last_error,
+            // Friendly label for the tray tooltip — the spoke_id is a GUID after
+            // the guid-primary migration; show the name, keep the id on hover.
+            name: s.display_name || s.hostname || s.spoke_id,
         };
     });
     renderSpokeIndicators();
@@ -2885,7 +2888,7 @@ function renderSpokeIndicators() {
             statusText = hasError ? 'Online (Error)' : 'Online';
         }
 
-        tooltipHtml += `<div class="flex items-center justify-between gap-4 py-0.5"><span class="font-mono opacity-80">${id}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${dotColor}"></div><span class="text-[9px]">${statusText}</span></div></div>`;
+        tooltipHtml += `<div class="flex items-center justify-between gap-4 py-0.5"><span class="opacity-80" title="${escapeHtml(id)}">${escapeHtml(health.name || id)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${dotColor}"></div><span class="text-[9px]">${statusText}</span></div></div>`;
     });
 
     let overallColor = 'bg-yellow-500';
@@ -2908,7 +2911,7 @@ function renderSpokeIndicators() {
         const esc = escapeHtml;  // shared escaper (escapes &<>"')
         alertHtml = `<div class="mt-2 pt-2 border-t border-white/15">
             <div class="text-[9px] uppercase opacity-60 mb-1">Out-of-contact alerts</div>
-            ${alerts.map(a => `<div class="flex items-center justify-between gap-4 py-0.5"><span class="font-mono opacity-80">${esc(a.spoke_id)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${a.tier === 'error' ? 'bg-red-400' : 'bg-amber-400'}"></div><span class="text-[9px]">${a.tier}</span></div></div>`).join('')}
+            ${alerts.map(a => { const _h = (window.spokeHealth || {})[a.spoke_id]; const _nm = (a.display_name || a.name || (_h && _h.name) || a.spoke_id); return `<div class="flex items-center justify-between gap-4 py-0.5"><span class="opacity-80" title="${esc(a.spoke_id)}">${esc(_nm)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${a.tier === 'error' ? 'bg-red-400' : 'bg-amber-400'}"></div><span class="text-[9px]">${a.tier}</span></div></div>`; }).join('')}
         </div>`;
     }
     tooltipEl.innerHTML = tooltipHtml + alertHtml;
