@@ -490,11 +490,20 @@ class SimulationsStore:
                         continue
                     name = str((it or {}).get("name") or ident).strip()
                     site = str((it or {}).get("site") or "").strip()
+                    # Optional enrichment: present from the rich browse objects,
+                    # absent from the poller's count-only path. Stored when known,
+                    # backfilled if a later observation supplies it.
+                    extra = {}
+                    for fld in ("category", "severity", "device_type"):
+                        val = str((it or {}).get(fld) or "").strip()
+                        if val:
+                            extra[fld] = val
                     key = f"{typ}:{ident}"
                     entry = hist.get(key)
                     if entry is None:
                         hist[key] = {"type": typ, "id": ident, "name": name,
-                                     "site": site, "first_seen": now, "last_seen": now}
+                                     "site": site, "first_seen": now, "last_seen": now,
+                                     **extra}
                         added += 1
                         changed = True
                     else:
@@ -502,6 +511,10 @@ class SimulationsStore:
                         if name and entry.get("name") != name:
                             entry["name"] = name
                             changed = True
+                        for fld, val in extra.items():  # backfill enrichment seen later
+                            if entry.get(fld) != val:
+                                entry[fld] = val
+                                changed = True
                 except Exception:  # noqa: BLE001 — never let telemetry recording throw
                     continue
             if changed:

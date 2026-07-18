@@ -105,3 +105,39 @@ async def test_reset_hub_config_is_tenant_scoped(tmp_path):
     b = (await s.get_hub_config("tenantB"))["hub_config"]
     assert a["usb_max_slots"] == 24   # reset
     assert b["usb_max_slots"] == 7    # untouched
+
+async def test_record_alert_insight_seen_catalog_dedup_and_enrichment(tmp_path):
+    """The global (cross-tenant) alert/insight catalog: upsert dedups by
+    {type}:{id}, keeps first_seen, and backfills enrichment (category/severity/
+    device_type) observed on a later sighting — the feature that lets the poller
+    build a sim library automatically from any tenant's live polling."""
+    s = SimulationsStore(str(tmp_path))
+    # First sighting from the poller path: name/site only, no enrichment.
+    added = await s.record_alert_insight_seen([
+        {"type": "alert", "id": "DNS Server Failed to Respond", "name": "DNS Server Failed to Respond", "site": "MIA"},
+        {"type": "insight", "id": "Wireless Client Onboarding Experience",
+         "name": "Wireless Client Onboarding Experience", "site": "DFW"},
+    ])
+    assert added == 2
+    hist = {f"{e['type']}:{e['id']}": e for e in await s.get_alert_insight_history()}
+    assert set(hist) == {"alert:DNS Server Failed to Respond",
+                         "insight:Wireless Client Onboarding Experience"}
+    assert "category" not in hist["alert:DNS Server Failed to Respond"]
+
+    # Same alert seen again, now from the rich browse path with enrichment:
+    # no new entry, first_seen preserved, enrichment backfilled.
+    first_seen = hist["alert:DNS Server Failed to Respond"]["first_seen"]
+    added2 = await s.record_alert_insight_seen([
+        {"type": "alert", "id": "DNS Server Failed to Respond", "name": "DNS Server Failed to Respond",
+         "site": "MIA", "category": "Connectivity", "severity": "Major", "device_type": "ACCESS_POINT"},
+    ])
+    assert added2 == 0
+    e = {f"{x['type']}:{x['id']}": x for x in await s.get_alert_insight_history()}["alert:DNS Server Failed to Respond"]
+    assert e["category"] == "Connectivity" and e["severity"] == "Major" and e["device_type"] == "ACCESS_POINT"
+    assert e["first_seen"] == first_seen  # dedup kept the original first_seen
+
+    # A brand-new type from a DIFFERENT tenant lands in the SAME global catalog.
+    added3 = await s.record_alert_insight_seen([
+        {"type": "alert", "id": "AP_DOWN", "name": "AP_DOWN", "site": "LHR"}])
+    assert added3 == 1
+    assert len(await s.get_alert_insight_history()) == 3

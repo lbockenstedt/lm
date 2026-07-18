@@ -1341,12 +1341,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 ident = str((a.get("name") or a.get("category") or "")).strip()
                 if ident:
                     items.append({"type": "alert", "id": ident, "name": a.get("name") or ident,
-                                  "site": a.get("site") or ""})
+                                  "site": a.get("site") or "",
+                                  # Rich browse objects carry these; the poller path
+                                  # doesn't. Recorded to enrich the global catalog.
+                                  "category": a.get("category") or "",
+                                  "severity": a.get("severity") or "",
+                                  "device_type": a.get("device_type") or a.get("deviceType") or ""})
             for i in (browse.get("insights") or []):
                 ident = str((i.get("name") or i.get("category") or "")).strip()
                 if ident:
                     items.append({"type": "insight", "id": ident, "name": i.get("name") or ident,
-                                  "site": i.get("site") or ""})
+                                  "site": i.get("site") or "",
+                                  "category": i.get("category") or "",
+                                  "severity": i.get("severity") or "",
+                                  "device_type": i.get("device_type") or i.get("deviceType") or ""})
             if items:
                 await store.record_alert_insight_seen(items)
         except Exception:  # noqa: BLE001

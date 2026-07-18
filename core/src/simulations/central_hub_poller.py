@@ -508,6 +508,25 @@ class CentralHubPoller:
                         wireless_site, central_site,
                         [str(c.get("id")) for c in monitored if isinstance(c, dict) and c.get("id")],
                         sorted(alert_ci), sorted(insight_ci))
+            # GLOBAL SIM CATALOG: record every alert/insight NAME observed on this
+            # tenant/site into the hub-wide history shared by ALL tenants, so the
+            # Sim-Quota "Alert / Insight ID" picker builds a library automatically
+            # from live polling — no need to stage the condition in a monitored
+            # site first. Use the properly-cased pre-normalize count keys
+            # (alert_ci/insight_ci are lowercased for matching only). Best-effort:
+            # the store writes only when a NEW type appears, so a steady poll adds
+            # no I/O, and a failure here can never break the poll cycle.
+            try:
+                _cat_items = (
+                    [{"type": "alert", "id": k, "name": k, "site": central_site}
+                     for k in (alert_counts or {})]
+                    + [{"type": "insight", "id": k, "name": k, "site": central_site}
+                       for k in (insight_counts or {})]
+                )
+                if _cat_items:
+                    await self._store.record_alert_insight_seen(_cat_items)
+            except Exception:  # noqa: BLE001 — cataloguing must never break the poll
+                pass
             checks: Dict[str, Any] = {}
             for chk in monitored:
                 cid = str(chk.get("id") or "")
