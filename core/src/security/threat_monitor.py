@@ -28,8 +28,11 @@ left empty. Both the Azure NSG tile and the Security never-block tile edit this
 same list.
 
 NSG shape: blocks are reconciled — one prefix per IP — onto a dedicated DENY
-rule (``block_rule_name``, LOWER priority number than the allow rule so Deny is
-evaluated first). Per-IP "why" descriptions are kept hub-local here (Azure rules
+rule (``block_rule_name``). Priority ordering invariant (Azure evaluates LOWER
+priority numbers FIRST): the ALLOW rule is evaluated first, the DENY rule sits
+just ABOVE it (a HIGHER number), and both sit below Azure's default allow on 443
+(priority 1000) — i.e. ``allow_priority < block_priority < 1000``. See
+``validate_nsg_priorities``. Per-IP "why" descriptions are kept hub-local here (Azure rules
 carry one description each) and surfaced in the WebUI Security view. A leaf-ish
 module: stdlib + azure_nsg.
 """
@@ -54,7 +57,9 @@ _DEFAULTS = {
     "permanent_after": 3,     # re-blocks after auto-release → permanent
     "success_grace_s": 3600,  # a recently-authenticated IP is exempt for this long
     "block_rule_name": "lm-threat-block",
-    "block_priority": 200,    # < the allow rule's priority so Deny wins
+    # Allow is evaluated first; Deny sits just above it (a HIGHER number), both
+    # below the 1000 default-allow on 443 → allow(300) < block(400) < 1000.
+    "block_priority": 400,
 }
 _EVENTS_MAX = 500
 
@@ -63,21 +68,50 @@ def _now() -> float:
     return time.time()
 
 
-def priority_conflict_warning(block_priority: Any, allow_priority: Any) -> str:
-    """Return a non-empty warning when the deny (block) rule's priority is NOT
-    numerically lower than the allow rule's — Azure evaluates lower priority
-    numbers first, so the deny rule must win. Pure + non-fatal (advisory only).
-    Returns "" when the ordering is correct or either value is unparseable."""
+_DEFAULT_ALLOW_ON_443 = 1000  # Azure's built-in AllowVnetInBound-style default
+
+
+def validate_nsg_priorities(allow_priority: Any, block_priority: Any) -> tuple:
+    """Validate the allow/deny NSG priority ordering. Azure evaluates LOWER
+    priority numbers FIRST, so for an allow-list + block-list model the ALLOW
+    rule must be evaluated before the DENY rule, and both must sit below Azure's
+    default allow on 443 (priority 1000). The invariant is therefore:
+
+        allow_priority < block_priority   AND   block_priority < 1000
+        (which also implies allow_priority < 1000)
+
+    Pure function. Returns ``(ok: bool, message: str)`` — ``ok`` iff the invariant
+    holds; ``message`` names the exact violation(s) (empty when ok)."""
     try:
-        bp = int(block_priority)
         ap = int(allow_priority)
+        bp = int(block_priority)
     except (TypeError, ValueError):
-        return ""
-    if bp >= ap:
-        return (f"Deny (block) priority {bp} is not lower than the allow priority "
-                f"{ap}. Azure evaluates lower numbers first, so Deny may not win — "
-                f"set the deny priority below {ap}.")
-    return ""
+        return (False, "Allow and Deny priorities must both be integers.")
+    problems = []
+    if not (ap < bp):
+        problems.append(
+            f"Allow priority ({ap}) must be LOWER than Deny priority ({bp}) — "
+            f"Azure evaluates lower numbers first, so the allow rule must be "
+            f"evaluated before the deny rule.")
+    if not (bp < _DEFAULT_ALLOW_ON_443):
+        problems.append(
+            f"Deny priority ({bp}) must be below {_DEFAULT_ALLOW_ON_443} — "
+            f"Azure's default allow on 443 is {_DEFAULT_ALLOW_ON_443}.")
+    if not (ap < _DEFAULT_ALLOW_ON_443):
+        problems.append(
+            f"Allow priority ({ap}) must be below {_DEFAULT_ALLOW_ON_443} — "
+            f"Azure's default allow on 443 is {_DEFAULT_ALLOW_ON_443}.")
+    if problems:
+        return (False, " ".join(problems))
+    return (True, "")
+
+
+def priority_conflict_warning(block_priority: Any, allow_priority: Any) -> str:
+    """Back-compatible alias for legacy callers (arg order is ``(block, allow)``).
+    Returns "" when the ordering is valid, else the violation message from
+    ``validate_nsg_priorities``."""
+    ok, message = validate_nsg_priorities(allow_priority, block_priority)
+    return "" if ok else message
 
 
 class ThreatMonitor:
@@ -417,7 +451,7 @@ class ThreatMonitor:
         deny_cfg["rule_name"] = self._cfg.get("block_rule_name") or "lm-threat-block"
         deny_cfg["access"] = "Deny"
         deny_cfg["direction"] = "Inbound"
-        deny_cfg["priority"] = int(self._cfg.get("block_priority") or 200)
+        deny_cfg["priority"] = int(self._cfg.get("block_priority") or 400)
         ips = sorted(self._blocks.keys())
         try:
             res = await _nsg.reconcile_allowlist(get_oidc_config(self.hub), deny_cfg, ips)

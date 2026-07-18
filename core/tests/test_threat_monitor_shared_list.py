@@ -43,6 +43,7 @@ _load_from_src("azure_nsg", "azure_nsg.py")
 _tm = _load_from_src("security.threat_monitor", os.path.join("security", "threat_monitor.py"))
 ThreatMonitor = _tm.ThreatMonitor
 priority_conflict_warning = _tm.priority_conflict_warning
+validate_nsg_priorities = _tm.validate_nsg_priorities
 
 
 class _State:
@@ -130,11 +131,84 @@ def test_add_trusted_immediately_unblocks_now_exempt_ip(tmp_path):
     assert "9.9.9.9" not in tm._blocks
 
 
-# ── 3. priority ordering validation ─────────────────────────────────────────
+# ── 3. priority ordering validation (NEW rule: allow < deny < 1000) ──────────
+# Azure evaluates LOWER priority numbers FIRST → the ALLOW rule must be evaluated
+# before the DENY rule, and both must sit below Azure's default allow on 443
+# (priority 1000). Invariant: allow_priority < block_priority < 1000.
 
-def test_priority_conflict_warning():
-    assert priority_conflict_warning(200, 300) == ""      # deny < allow — OK
-    assert priority_conflict_warning(300, 300) != ""      # equal — warn
-    assert priority_conflict_warning(350, 300) != ""      # deny > allow — warn
-    assert priority_conflict_warning("x", 300) == ""      # unparseable — silent
-    assert priority_conflict_warning(200, None) == ""
+def test_validate_nsg_priorities_ok():
+    ok, msg = validate_nsg_priorities(300, 400)   # allow < deny < 1000
+    assert ok is True and msg == ""
+    ok, _ = validate_nsg_priorities(100, 999)
+    assert ok is True
+
+
+def test_validate_nsg_priorities_allow_not_below_deny():
+    # allow >= deny → violation naming both numbers.
+    ok, msg = validate_nsg_priorities(400, 300)
+    assert ok is False and "must be LOWER than Deny" in msg
+    assert "400" in msg and "300" in msg
+    # equal is also a violation.
+    ok, msg = validate_nsg_priorities(300, 300)
+    assert ok is False and "must be LOWER than Deny" in msg
+
+
+def test_validate_nsg_priorities_deny_not_below_1000():
+    # allow < deny but deny >= 1000 → below-1000 violation.
+    ok, msg = validate_nsg_priorities(300, 1000)
+    assert ok is False and "below 1000" in msg
+    ok, msg = validate_nsg_priorities(300, 1500)
+    assert ok is False and "below 1000" in msg
+
+
+def test_validate_nsg_priorities_both_above_1000():
+    # allow >= deny AND both >= 1000 → multiple violations reported.
+    ok, msg = validate_nsg_priorities(1200, 1100)
+    assert ok is False
+    assert "must be LOWER than Deny" in msg and "below 1000" in msg
+
+
+def test_validate_nsg_priorities_unparseable():
+    ok, msg = validate_nsg_priorities("x", 300)
+    assert ok is False and "integer" in msg
+    ok, msg = validate_nsg_priorities(300, None)
+    assert ok is False and "integer" in msg
+
+
+def test_priority_conflict_warning_backcompat_alias():
+    # Legacy arg order is (block, allow). "" when valid (allow < block < 1000).
+    assert priority_conflict_warning(400, 300) == ""      # deny=400, allow=300 — OK
+    assert priority_conflict_warning(300, 300) != ""      # equal — violation
+    assert priority_conflict_warning(200, 300) != ""      # deny < allow — violation (new rule)
+    assert priority_conflict_warning(1500, 300) != ""     # deny >= 1000 — violation
+
+
+def test_fresh_defaults_satisfy_invariant():
+    # A fresh install must satisfy allow(300) < deny(400) < 1000.
+    assert _tm._DEFAULTS["block_priority"] == 400
+    ok, msg = validate_nsg_priorities(300, _tm._DEFAULTS["block_priority"])
+    assert ok is True and msg == ""
+
+
+# ── 4. save-rejection logic (pure-logic mirror of the route guards) ─────────
+# create_app cannot import under Python 3.9 (unrelated `int|None` annotations in
+# sibling modules), so the two save endpoints' guard is exercised at the pure
+# validate_nsg_priorities level exactly as the routes call it.
+
+def test_security_config_save_rejects_bad_deny():
+    # PUT /api/security/config validates the incoming deny against CURRENT allow.
+    current_allow = 300
+    ok, message = validate_nsg_priorities(current_allow, 200)  # deny below allow
+    assert ok is False          # → route raises HTTP 400 with `message`
+    assert "300" in message and "200" in message
+
+
+def test_azure_nsg_save_rejects_bad_allow():
+    # POST /setup/azure-nsg validates the incoming allow against CURRENT deny.
+    current_deny = 400
+    ok, message = validate_nsg_priorities(500, current_deny)   # allow above deny
+    assert ok is False
+    assert "500" in message and "400" in message
+    # A valid pair passes → route persists + reconciles.
+    ok, _ = validate_nsg_priorities(350, current_deny)
+    assert ok is True
