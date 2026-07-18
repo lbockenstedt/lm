@@ -3232,6 +3232,18 @@ function _viewTemplate(viewId) {
     </div>
     ${(isAdmin() || isTenantAdmin()) ? `<button onclick="showLDAPModal(currentSubView)" class="${btn}">+ Add</button>` : ''}
   </div>
+  <div id="ldap-status-row" class="flex items-center gap-6 flex-wrap text-xs">
+    <div class="flex items-center gap-2">
+      <span id="ldap-health-dot" class="w-2.5 h-2.5 rounded-full bg-slate-300"></span>
+      <span class="text-slate-500 font-semibold uppercase tracking-wide">LDAP Server</span>
+      <span id="ldap-health-label" class="text-slate-400">checking…</span>
+    </div>
+    <div class="flex items-center gap-2">
+      <span id="entra-health-dot" class="w-2.5 h-2.5 rounded-full bg-slate-300"></span>
+      <span class="text-slate-500 font-semibold uppercase tracking-wide">Entra ID</span>
+      <span id="entra-health-label" class="text-slate-400">checking…</span>
+    </div>
+  </div>
   <div class="${card} p-0 overflow-hidden">
     <table class="w-full text-left text-sm">
       <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr id="ldap-table-head"></tr></thead>
@@ -3826,6 +3838,7 @@ function initView(viewId, subView) {
             break;
         case 'ldap':
             loadLDAPData(subView || 'Users');
+            startLdapHealthPoll();
             break;
         case 'settings':
             _renderSettingsSection(subView || 'Hub Status');
@@ -5775,6 +5788,45 @@ async function loadLdapConfig() {
             pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (n ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500');
         }
     } catch (e) { console.error('loadLdapConfig failed', e); }
+}
+
+// ── Directory page LDAP-server + EntraID health dots ─────────────────────
+// Polls GET /api/ldap/health while the Directory view is open and paints the
+// two header dots Green (healthy) / Yellow (degraded) / Red (down). Self-stops
+// when the user navigates away from the Directory view.
+let _ldapHealthTimer = null;
+function _setHealthDot(dotId, labelId, status, detail) {
+    const dot = document.getElementById(dotId);
+    const lbl = document.getElementById(labelId);
+    if (!dot || !lbl) return;
+    const map = {
+        healthy:  { c: 'bg-green-500', t: 'text-green-700', s: 'Connected' },
+        degraded: { c: 'bg-amber-500', t: 'text-amber-700', s: 'Degraded' },
+        down:     { c: 'bg-red-500',   t: 'text-red-700',   s: 'Offline' },
+    };
+    const m = map[status] || { c: 'bg-slate-300', t: 'text-slate-400', s: 'Unknown' };
+    dot.className = 'w-2.5 h-2.5 rounded-full ' + m.c;
+    lbl.className = m.t;
+    lbl.textContent = detail ? `${m.s} — ${detail}` : m.s;  // textContent → no XSS from detail
+}
+async function pollLdapHealth() {
+    if (currentView !== 'ldap') { stopLdapHealthPoll(); return; }
+    try {
+        const h = await apiJson('/api/ldap/health', { method: 'GET' });
+        _setHealthDot('ldap-health-dot', 'ldap-health-label', h.ldap && h.ldap.status, h.ldap && h.ldap.detail);
+        _setHealthDot('entra-health-dot', 'entra-health-label', h.entra && h.entra.status, h.entra && h.entra.detail);
+    } catch (e) {
+        _setHealthDot('ldap-health-dot', 'ldap-health-label', 'down', 'hub unreachable');
+        _setHealthDot('entra-health-dot', 'entra-health-label', 'down', 'hub unreachable');
+    }
+}
+function startLdapHealthPoll() {
+    stopLdapHealthPoll();
+    pollLdapHealth();
+    _ldapHealthTimer = setInterval(pollLdapHealth, 10000);
+}
+function stopLdapHealthPoll() {
+    if (_ldapHealthTimer) { clearInterval(_ldapHealthTimer); _ldapHealthTimer = null; }
 }
 
 function _ldapConfigForm() {

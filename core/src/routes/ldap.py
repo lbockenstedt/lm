@@ -165,6 +165,61 @@ def register(app, hub, ctx):
                 return cached
             raise
 
+    # ── Server + Entra health (Directory page status icons) ────────────────
+    @app.get("/api/ldap/health")
+    async def ldap_health(request: Request):
+        """Two status dots for the Directory page header: is the LDAP server
+        (slapd) bindable from the directory spoke, and are the hub's Entra
+        (OIDC) app creds live-valid. Returns ``{"ldap": {...}, "entra": {...}}``
+        with each ``status`` ∈ ``healthy`` / ``degraded`` / ``down``.
+
+        LDAP: relays ``LIST_OUS`` (binds + a one-level OU search) to the
+        connected directory spoke — a FRESH bind check each poll, not stale
+        heartbeat state. No spoke connected → ``down`` (not a 503) so the icon
+        still renders and tells the admin the role isn't loaded.
+        Entra: a real client-credentials token mint via the cert
+        ``client_assertion`` (``fetch_app_graph_token``); not-configured →
+        ``degraded`` (yellow), cred/network failure → ``down`` (red)."""
+        import time
+        from security.oidc import (OidcError, fetch_app_graph_token,
+                                   get_oidc_config)
+
+        # ── LDAP server ──
+        ldap = {"status": "down", "detail": "no directory spoke connected"}
+        spoke_id = hub.get_spoke_by_type("directory")
+        if spoke_id:
+            try:
+                result = await hub.request_response(spoke_id, "LIST_OUS",
+                                                    {}, timeout=5.0)
+                if isinstance(result, dict) and \
+                        str(result.get("status", "")).upper() == "ERROR":
+                    ldap = {"status": "down",
+                            "detail": (result.get("message")
+                                       or "LDAP command failed")[:160]}
+                else:
+                    ldap = {"status": "healthy", "detail": "OpenLDAP online"}
+            except Exception as e:  # noqa: BLE001 — spoke unreachable / timeout
+                ldap = {"status": "down", "detail": str(e)[:160]}
+
+        # ── Entra ID ──
+        entra = {"status": "down", "detail": "OIDC config error"}
+        try:
+            cfg = get_oidc_config(hub)
+            if not cfg.ready():
+                entra = {"status": "degraded", "detail": "not configured"}
+            else:
+                try:
+                    await fetch_app_graph_token(cfg)
+                    entra = {"status": "healthy", "detail": "Entra online"}
+                except OidcError as e:
+                    entra = {"status": "down", "detail": str(e)[:160]}
+                except Exception as e:  # noqa: BLE001 — network / crypto
+                    entra = {"status": "down", "detail": str(e)[:160]}
+        except Exception as e:  # noqa: BLE001 — OIDC config unreadable
+            entra = {"status": "down", "detail": f"OIDC config error: {e}"[:160]}
+
+        return {"ldap": ldap, "entra": entra, "checked_at": time.time()}
+
     # ── Tenant picker (feeds the WebUI Directory tenant dropdown) ─────────────
     @app.get("/api/ldap/tenants")
     async def ldap_tenants(request: Request):
