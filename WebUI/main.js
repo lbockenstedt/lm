@@ -5867,6 +5867,7 @@ function _renderSetupSimulationsTile(content) {
                 <div id="simtab-btn-pci" onclick="_simSetupTab('pci')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">PCI (Tiers)</div>
                 <div id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">DHCP</div>
                 <div id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Quotas</div>
+                <div id="simtab-btn-catalog" onclick="_simSetupTab('catalog')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Catalog</div>
             </div>
             <div id="simtab-usb" class="space-y-4">
             <div class="${card}">
@@ -5954,10 +5955,24 @@ function _renderSetupSimulationsTile(content) {
                 <p class="text-xs text-slate-500 mb-3">Platform-wide (all tenants): which simulations may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — no tenant's Quota Engine will pack it onto a client running other sims (authoritative, overrides a quota's Multi-capable). Mark a sim <b>N/A</b> to hide it via Hide N/A.</p>
                 <div id="sim-sharing-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
+            </div>
+            <div id="simtab-catalog" class="space-y-4 hidden">
+            <div class="${card}">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Observed Catalog ${helpIcon('cs', null, 'Simulations help')}</h3>
+                  <div class="flex items-center gap-2">
+                    <input id="obs-catalog-search" oninput="_renderObservedCatalog()" placeholder="Search name / category / type…" class="${inputCls} text-xs px-2 py-1 w-56">
+                    <button onclick="loadObservedCatalog()" class="${btnSecCls} text-xs px-3 py-1">Refresh</button>
+                  </div>
+                </div>
+                <p class="text-xs text-slate-500 mb-3">Every Central alert/insight the hub has ever observed across <b>all tenants</b> — populated automatically as the hub polls Central and as admins browse Central. This is the same shared library the Sim-Quota "Alert / Insight ID" pickers draw from. Occurrence <b>Count</b> is approximate across hub restarts. Click a column header to sort; use <b>Use in Sim-Quota</b> to stage an entry into a new Sim Quota Defaults row.</p>
+                <div id="obs-catalog-table"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
             </div>`;
     loadSimAdminOverview();
     loadGlobalTierPci();
     loadSimQuotaDefaults();
+    loadObservedCatalog();
     // Auto-save on change. Both cards' fields are rendered dynamically with
     // data-* attributes (no id): quota defaults use data-sqd (+ data-sqd-idpick
     // picker), sharing uses data-simshare / data-simna. The mapper keys off
@@ -5968,7 +5983,7 @@ function _renderSetupSimulationsTile(content) {
 // In-tile sub-tabs for Setup → Simulations: group USB / PCI / DHCP so the tile
 // isn't one long stack. Pure show/hide of the three panels + active styling.
 function _simSetupTab(name) {
-    ['usb', 'pci', 'dhcp', 'simq'].forEach(n => {
+    ['usb', 'pci', 'dhcp', 'simq', 'catalog'].forEach(n => {
         const panel = document.getElementById('simtab-' + n);
         const btn = document.getElementById('simtab-btn-' + n);
         if (panel) panel.classList.toggle('hidden', n !== name);
@@ -6370,6 +6385,107 @@ async function saveSimQuotaDefaults() {
         if (typeof showToast === 'function') showToast('Failed: ' + e.message, 'error');
         console.error('saveSimQuotaDefaults failed', e);
     }
+}
+
+// ── Observed Catalog (Setup → Simulations → Catalog) — superadmin ───────────
+// Read-only view of the hub-wide __alert_insight_history__ catalog: every
+// Central alert/insight observed across ALL tenants, with occurrence counts.
+// GET /sim/api/superadmin/observed-catalog (admin-gated) → {catalog:[...],count}.
+// Searchable + click-to-sort table; the row "Use in Sim-Quota" action stages
+// the entry into a new Sim Quota Defaults row (the superadmin/platform-wide
+// sibling editor in this same tile) and switches to the Quotas sub-tab.
+const OBSERVED_CATALOG_URL = '/sim/api/superadmin/observed-catalog';
+let _observedCatalog = [];
+let _observedCatalogSort = { key: 'last_seen', dir: 'desc' };
+
+async function loadObservedCatalog() {
+    const el = document.getElementById('obs-catalog-table');
+    if (!el) return;
+    try {
+        const data = await apiJson(OBSERVED_CATALOG_URL, { credentials: 'same-origin' });
+        _observedCatalog = Array.isArray(data.catalog) ? data.catalog : [];
+        _renderObservedCatalog();
+    } catch (e) {
+        el.innerHTML = '<p class="text-xs text-red-400 italic">Failed to load observed catalog</p>';
+        console.error('loadObservedCatalog failed', e);
+    }
+}
+
+// Click a sortable header: toggle direction if same key, else sort by the new
+// key (text asc / numeric desc by default). Re-renders from the cached data.
+function _observedCatalogSortBy(key) {
+    if (_observedCatalogSort.key === key) {
+        _observedCatalogSort.dir = _observedCatalogSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+        _observedCatalogSort = { key, dir: (key === 'name' || key === 'type') ? 'asc' : 'desc' };
+    }
+    _renderObservedCatalog();
+}
+
+function _renderObservedCatalog() {
+    const el = document.getElementById('obs-catalog-table');
+    if (!el) return;
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
+    if (!_observedCatalog.length) {
+        el.innerHTML = '<p class="text-sm text-slate-400 italic py-4">No alerts/insights observed yet — they populate automatically as the hub polls Central.</p>';
+        return;
+    }
+    const q = ((document.getElementById('obs-catalog-search') || {}).value || '').trim().toLowerCase();
+    let rows = _observedCatalog.slice();
+    if (q) rows = rows.filter(e => [e.name, e.category, e.type, e.id].some(v => String(v == null ? '' : v).toLowerCase().includes(q)));
+    const { key, dir } = _observedCatalogSort;
+    const mul = dir === 'asc' ? 1 : -1;
+    const numeric = (key === 'count' || key === 'last_seen' || key === 'first_seen');
+    rows.sort((a, b) => {
+        if (numeric) return (Number(a[key] || 0) - Number(b[key] || 0)) * mul;
+        return String(a[key] == null ? '' : a[key]).toLowerCase()
+            .localeCompare(String(b[key] == null ? '' : b[key]).toLowerCase()) * mul;
+    });
+    const arrow = k => _observedCatalogSort.key === k ? (_observedCatalogSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    // Sortable columns carry an onclick; the rest are plain headers.
+    const sortTh = (k, label) => `<th class="px-4 py-2 text-left font-medium cursor-pointer select-none hover:text-slate-700" onclick="_observedCatalogSortBy('${k}')">${label}${arrow(k)}</th>`;
+    const plainTh = label => `<th class="px-4 py-2 text-left font-medium">${label}</th>`;
+    const head = `<thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>` +
+        sortTh('type', 'Type') + sortTh('name', 'Name') + plainTh('Category') +
+        plainTh('Severity') + plainTh('Device Type') + plainTh('Site') +
+        plainTh('First Seen') + sortTh('last_seen', 'Last Seen') + sortTh('count', 'Count') +
+        plainTh('Action') + `</tr></thead>`;
+    const body = rows.map(e => {
+        const type = String(e.type || 'alert');
+        const badgeCls = type === 'insight' ? 'bg-sky-100 text-sky-700' : 'bg-amber-100 text-amber-700';
+        return `<tr class="border-t border-slate-100">
+          <td class="px-4 py-2"><span class="inline-block text-[11px] font-medium rounded px-2 py-0.5 ${badgeCls}">${esc(type)}</span></td>
+          <td class="px-4 py-2 text-slate-800">${esc(e.name || e.id || '')}</td>
+          <td class="px-4 py-2 text-slate-500">${esc(e.category || '—')}</td>
+          <td class="px-4 py-2 text-slate-500">${esc(e.severity || '—')}</td>
+          <td class="px-4 py-2 text-slate-500">${esc(e.device_type || '—')}</td>
+          <td class="px-4 py-2 text-slate-500">${esc(e.site || '—')}</td>
+          <td class="px-4 py-2 text-slate-500 whitespace-nowrap">${esc(fmtDate(e.first_seen))}</td>
+          <td class="px-4 py-2 text-slate-500 whitespace-nowrap">${esc(fmtDate(e.last_seen))}</td>
+          <td class="px-4 py-2 text-slate-700 tabular-nums">${esc(String(e.count == null ? 1 : e.count))}</td>
+          <td class="px-4 py-2"><button data-obs-type="${esc(type)}" data-obs-id="${esc(e.id || '')}" data-obs-name="${esc(e.name || e.id || '')}" onclick="_useInSimQuota(this)" class="text-[#01A982] hover:underline text-xs font-medium">Use in Sim-Quota</button></td>
+        </tr>`;
+    }).join('');
+    const empty = '<tr><td colspan="10" class="px-4 py-6 text-center text-slate-400">No entries match your search.</td></tr>';
+    el.innerHTML = tableWrap(head + `<tbody>${body || empty}</tbody>`);
+}
+
+// Stage an observed entry into a NEW Sim Quota Defaults row (the platform-wide
+// superadmin editor in this same tile — the natural target for a cross-tenant
+// catalog) with its Alert/Insight type + id pre-filled, then switch to the
+// Quotas sub-tab so the admin picks a simulation and saves. Reads type/id/name
+// from the button's data-* attributes (escaped, so quotes in a name are safe).
+function _useInSimQuota(btn) {
+    const type = (btn.getAttribute('data-obs-type') === 'insight') ? 'insight' : 'alert';
+    const id = btn.getAttribute('data-obs-id') || '';
+    const name = btn.getAttribute('data-obs-name') || id;
+    if (!id) return;
+    if (typeof addSimQuotaDefault !== 'function') return;
+    addSimQuotaDefault({ alert_type: type, alert_id: id, tied: true });
+    _simSetupTab('simq');
+    const rowsEl = document.getElementById('sim-quota-defaults-rows');
+    if (rowsEl && typeof rowsEl.scrollIntoView === 'function') rowsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (typeof showToast === 'function') showToast(`Staged '${name}' into a new Sim-Quota Default row — pick a simulation and Save.`, 'success');
 }
 
 // Setup → General (default) tile. Cache config + update sources + appearance.
