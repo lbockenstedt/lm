@@ -79,6 +79,14 @@ _sites_health_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _devices_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _nc_clients_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _NC_GLOBAL_CACHE_TTL = 270  # 4.5 min — just under the 5-min poll interval
+
+# OAuth token state, MODULE-level (keyed by config_hash) like the data caches
+# above. The from_config helpers (test_central_from_config / browse_all_from_config
+# / get_central_available_from_config) build a FRESH ArubaClient per call, so an
+# instance-scoped token cache meant a new OAuth token exchange every call. A
+# module-level cache lets a same-config client reuse a still-valid token; expiry
+# handling is unchanged (each state dict carries its own ``expires_at``).
+_token_cache: dict[str, dict[str, Any]] = {}
 _KNOWN_CENTRAL_GATEWAY_SUFFIXES = (".api.central.arubanetworks.com", ".api.central.arubanetworks.com.cn")
 
 
@@ -118,7 +126,8 @@ class ArubaClient:
         self._config_hash = hashlib.md5(
             json.dumps(self.config, sort_keys=True, default=str).encode()
         ).hexdigest()[:8]
-        self._token_cache: Dict[str, Dict[str, Any]] = {self._config_hash: {}}
+        # Token state lives in the module-level _token_cache (keyed by
+        # config_hash) so a fresh per-call ArubaClient reuses a valid token.
         # Per-poll-cycle site index (new_central). Built once on the first
         # poll_site_data() call and reused for every subsequent site in the same
         # cycle, so the poller's O(sites) sweep no longer rescans the full
@@ -133,7 +142,7 @@ class ArubaClient:
         return bool(self.cluster_url) or self.api_version == "new_central"
 
     def _token_state(self) -> Dict[str, Any]:
-        return self._token_cache.setdefault(self._config_hash, {})
+        return _token_cache.setdefault(self._config_hash, {})
 
     def _new_central_token_url(self) -> str:
         workspace_id = str(self.config.get("workspace_id") or "").strip()
