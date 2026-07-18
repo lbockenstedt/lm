@@ -17,6 +17,85 @@ from api import (
     get_spoke_or_503, logger,
 )
 
+_DEFAULT_LDAP_SERVER_URL = "ldap://localhost:389"
+
+
+# ── Setup → Directory (LDAP) SERVER connection config — pure helpers ──────────
+# A Global Admin sets the directory SERVER connection (base DN + admin account +
+# server URL + mirror peers) from the WebUI instead of relying on install flags /
+# defaults. Stored under ``global_config["ldap"]``; ``_ldap_config_for_spoke``
+# (main.py) PREFERS these over the legacy ``ldap_instances`` entry (and the
+# dc=example,dc=org install default) via :func:`merge_ldap_connection`, and Save
+# re-pushes through ``hub.push_ldap_config_all()`` so the mirror gets it at once.
+# NOTE: TENANT == OU is unchanged — this is the SERVER config, not per-tenant.
+
+def merge_ldap_connection(gldap, inst):
+    """Precedence merge for the four LDAP_* connection fields the directory spoke
+    consumes. A non-empty Setup value (``global_config["ldap"]`` = ``gldap``) WINS
+    over the install-time ``ldap_instances`` entry (``inst``), which wins over
+    nothing. Returns the UPDATE_CONFIG field dict (``LDAP_SERVER_URL`` /
+    ``LDAP_BASE_DN`` / ``LDAP_ADMIN_DN`` / ``LDAP_ADMIN_PW``). Pure — unit-tested
+    for the precedence contract."""
+    gldap = gldap or {}
+    inst = inst or {}
+
+    def pick(gkey, ikey):
+        gv = gldap.get(gkey)
+        if isinstance(gv, str):
+            gv = gv.strip()
+        return gv if gv else inst.get(ikey)
+
+    return {
+        "LDAP_SERVER_URL": pick("server_url", "server_url"),
+        "LDAP_BASE_DN": pick("base_dn", "base_dn"),
+        "LDAP_ADMIN_DN": pick("admin_dn", "admin_dn"),
+        "LDAP_ADMIN_PW": pick("admin_pw", "admin_pw"),
+    }
+
+
+def normalize_mirror_peers(raw):
+    """Coerce a stored/submitted mirror-peer list into the spoke's contract shape
+    — a list of ``{"server_id", "url"}`` dicts. Accepts a list of URL strings OR
+    a list of dicts; blanks are dropped. Pure."""
+    peers = []
+    for p in raw or []:
+        if isinstance(p, dict):
+            url = str(p.get("url") or "").strip()
+            if url:
+                peers.append({"server_id": str(p.get("server_id") or ""), "url": url})
+        elif isinstance(p, str) and p.strip():
+            peers.append({"server_id": "", "url": p.strip()})
+    return peers
+
+
+def parse_mirror_peers_input(raw):
+    """Parse the WebUI Mirror-Peers field — a comma/newline separated list of peer
+    URLs — into a list of URL strings. A list is passed through (stripped); a
+    string is split on commas/newlines. Pure."""
+    if isinstance(raw, list):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    out = []
+    for chunk in str(raw or "").replace(",", "\n").splitlines():
+        s = chunk.strip()
+        if s:
+            out.append(s)
+    return out
+
+
+def mask_ldap_config(gldap):
+    """Shape the stored ``global_config["ldap"]`` for the GET response — never
+    echo the admin password (report ``admin_pw_set`` bool instead), mirroring how
+    ``/setup/oidc-config`` withholds secrets. Pure."""
+    gldap = gldap or {}
+    return {
+        "base_dn": gldap.get("base_dn") or "",
+        "admin_dn": gldap.get("admin_dn") or "",
+        "server_url": gldap.get("server_url") or "",
+        "server_id": gldap.get("server_id") or "",
+        "mirror_peers": normalize_mirror_peers(gldap.get("mirror_peers")),
+        "admin_pw_set": bool(gldap.get("admin_pw")),
+    }
+
 
 def register(app, hub, ctx):
     """Register directory (LDAP) routes on the Hub app."""
@@ -285,3 +364,80 @@ def register(app, hub, ctx):
             data = {}
         slug = _directory_slug(request, data if isinstance(data, dict) else {})
         return await _relay("LDAP_PROVISION_TENANT_OU", {"tenant_slug": slug})
+
+    # ── Admin: Directory (LDAP) SERVER connection config (mirror oidc route) ──
+    # ``/setup/*`` is Global-Admin-only via the access-control middleware, so no
+    # extra gate is needed here. GET masks the admin password (reports whether
+    # one is set, like ``/setup/oidc-config`` does for secrets). POST validates
+    # (base DN + admin DN non-empty), stores under ``global_config["ldap"]``,
+    # persists, then re-pushes to every connected directory spoke so the values
+    # reach the mirror immediately (not only on the next reconnect).
+    @app.get("/setup/ldap-config")
+    async def get_ldap_config_route():
+        gldap = hub.state.system_state.get("global_config", {}).get("ldap", {}) or {}
+        try:
+            connected = len(hub.get_all_spokes_by_type("directory") or [])
+        except Exception:  # noqa: BLE001
+            connected = 0
+        return {"config": mask_ldap_config(gldap), "spokes_connected": connected}
+
+    @app.post("/setup/ldap-config")
+    async def update_ldap_config_route(request: Request):
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001
+            data = {}
+        config = (data or {}).get("config", {}) or {}
+        base_dn = str(config.get("base_dn") or "").strip()
+        admin_dn = str(config.get("admin_dn") or "").strip()
+        if not base_dn:
+            raise HTTPException(status_code=400, detail="Base DN is required")
+        if not admin_dn:
+            raise HTTPException(status_code=400, detail="Admin DN is required")
+        gc = hub.state.system_state.setdefault("global_config", {})
+        prev = dict(gc.get("ldap", {}) or {})
+        clean = {
+            "base_dn": base_dn,
+            "admin_dn": admin_dn,
+            "server_url": (str(config.get("server_url") or "").strip()
+                           or _DEFAULT_LDAP_SERVER_URL),
+            "server_id": str(config.get("server_id") or "").strip(),
+            "mirror_peers": normalize_mirror_peers(
+                parse_mirror_peers_input(config.get("mirror_peers"))),
+        }
+        # Admin password: a submitted value REPLACES; blank KEEPS the stored one
+        # (mirrors the netbox-sso "leave blank to keep" secret handling). The
+        # state file is Fernet-encrypted at rest, so the plaintext pw lives only
+        # inside the encrypted blob — same as ldap_instances / cloud_nac secrets.
+        submitted_pw = config.get("admin_pw")
+        if submitted_pw:
+            clean["admin_pw"] = str(submitted_pw)
+        elif prev.get("admin_pw"):
+            clean["admin_pw"] = prev["admin_pw"]
+        gc["ldap"] = clean
+        hub.state.system_state["global_config"] = gc
+        hub.state._mark_dirty()
+        # Re-push the full LDAP + Entra config to every connected directory spoke
+        # so the Setup values reach the mirror now (not on the next reconnect).
+        pushed = 0
+        try:
+            pushed = len(hub.get_all_spokes_by_type("directory") or [])
+            await hub.push_ldap_config_all()
+        except Exception:  # noqa: BLE001 — best-effort; reconnect re-pushes
+            logger.debug("update_ldap_config: spoke re-push skipped", exc_info=True)
+        return {"status": "ok", "pushed_to_spokes": pushed,
+                "admin_pw_set": bool(clean.get("admin_pw"))}
+
+    @app.post("/setup/ldap-config/push")
+    async def push_ldap_config_route():
+        """Re-push the stored LDAP config to every connected directory spoke
+        WITHOUT changing values (the "Push to spokes now" button)."""
+        try:
+            spokes = hub.get_all_spokes_by_type("directory") or []
+        except Exception:  # noqa: BLE001
+            spokes = []
+        try:
+            await hub.push_ldap_config_all()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"push failed: {e}")
+        return {"status": "ok", "pushed_to_spokes": len(spokes)}
