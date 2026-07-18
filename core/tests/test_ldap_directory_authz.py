@@ -70,13 +70,14 @@ def test_tenant_slug_matches_case_insensitive():
 
 # ── ldap_tenant_slug: shared OU derivation ──────────────────────────────────
 
-def test_ldap_tenant_slug_prefers_netbox_slug_then_id():
+def test_ldap_tenant_slug_prefers_netbox_slug_then_id_lowercased():
     hub = FakeHub(FakeState(tenants={
         "lrb": {"netbox_tenant_slug": "LRB"},
-        "plain": {},
+        "Plain": {},
     }))
-    assert access.ldap_tenant_slug(hub, "lrb") == "LRB"      # display case preserved
-    assert access.ldap_tenant_slug(hub, "plain") == "plain"  # falls back to id
+    # Canonical stored form is lower-case (matches the server's ou=lrb RDN).
+    assert access.ldap_tenant_slug(hub, "lrb") == "lrb"
+    assert access.ldap_tenant_slug(hub, "Plain") == "plain"  # falls back to id, lowered
     assert access.ldap_tenant_slug(hub, "") == ""
 
 

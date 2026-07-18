@@ -358,18 +358,20 @@ def get_tenant_scoping(hub, tenant_id: str = None) -> dict:
 # The tenant slug IS the directory OU (``ou=<slug>,<base_dn>``). The SAME slug
 # identifies the tenant across LDAP ↔ NetBox ↔ LM, and it is matched
 # CASE-INSENSITIVELY everywhere (OU "LRB" == NetBox tenant "LRB" == LM tenant
-# "lrb"). We PRESERVE the LM tenant's display case for the stored OU RDN but
-# resolve/dedup/guard case-insensitively, so provisioning is idempotent (never
-# both "LRB" and "lrb") and case can neither bypass the cross-tenant guard nor
-# cause a spurious mismatch.
+# "lrb"). CANONICAL STORED FORM = **lower-case**: the directory server lower-cases
+# the OU RDN (``ou=lrb,<base>``), so the hub sends a lower-cased slug and the
+# cross-tenant guard compares case-insensitively — provisioning is idempotent
+# (never both "LRB" and "lrb") and case can neither bypass the guard nor cause a
+# spurious mismatch.
 
 def ldap_tenant_slug(hub, tenant_id: str) -> str:
-    """Canonical directory OU slug for an LM tenant (its display-cased identity).
+    """Canonical (lower-case) directory OU slug for an LM tenant.
 
     One source of truth shared by OU provisioning (``LDAP_PROVISION_TENANT_OU``)
     and the Directory routes, so a route always targets the OU that was
     provisioned. Prefers the tenant's ``netbox_tenant_slug`` (keeps NetBox +
-    directory aligned), then a stored ``slug``, else the tenant_id itself.
+    directory aligned), then a stored ``slug``, else the tenant_id itself — then
+    LOWER-CASES it to match the server's canonical OU RDN (``ou=lrb,<base>``).
     Callers compare with :func:`tenant_slug_matches` (case-insensitive)."""
     tid = str(tenant_id or "").strip()
     if not tid:
@@ -378,7 +380,7 @@ def ldap_tenant_slug(hub, tenant_id: str) -> str:
         cfg = hub.state.get_tenant(tid) or {}
     except Exception:  # noqa: BLE001
         cfg = {}
-    return str(cfg.get("netbox_tenant_slug") or cfg.get("slug") or tid).strip()
+    return str(cfg.get("netbox_tenant_slug") or cfg.get("slug") or tid).strip().lower()
 
 
 def tenant_slug_matches(a, b) -> bool:

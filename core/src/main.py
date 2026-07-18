@@ -2109,13 +2109,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             cfg["ENTRA_CLIENT_CERT"] = cert_pem.decode("utf-8", "replace") if cert_pem else ""
             cfg["ENTRA_CLIENT_KEY"] = key_pem.decode("utf-8", "replace") if key_pem else ""
             cfg["ENTRA_ROPC_SCOPE"] = ((gc.get("oidc") or {}).get("ropc_scope")
-                                       or "https://graph.microsoft.com/.default")
+                                       or "openid")
         except Exception as e:  # noqa: BLE001 — Entra optional; push LDAP anyway
             logger.warning("ldap config: could not source Entra creds from OIDC: %s", e)
             for k in ("ENTRA_TENANT_ID", "ENTRA_CLIENT_ID",
                       "ENTRA_CLIENT_CERT", "ENTRA_CLIENT_KEY"):
                 cfg.setdefault(k, "")
-            cfg.setdefault("ENTRA_ROPC_SCOPE", "https://graph.microsoft.com/.default")
+            cfg.setdefault("ENTRA_ROPC_SCOPE", "openid")
         return cfg
 
     async def push_ldap_config_all(self) -> None:

@@ -210,10 +210,12 @@ const ROUTES = {
     showClaimDeviceModal:   { m: 'GET',  p: '/api/netbox/claim-device/options', api: 'netbox_claim_device_options' },
     submitClaimDevice:      { m: 'POST', p: '/api/netbox/claim-device',   api: 'netbox_claim_device' },
 
-    // ── LDAP ──
-    loadLDAPData:           { m: 'GET',  p: '/api/ldap/{ous|users|groups}', api: 'get_ldap_ous/get_ldap_users/get_ldap_groups' },
-    showLDAPModal:          { m: 'POST', p: '/api/ldap/{ous|users|groups}', api: 'create_*/update_*_ldap_*', via: 'saveLDAPEntity' }, // (modal)
-    showLDAPPasswordModal:  { m: 'POST', p: '/api/ldap/users/password',   api: 'set_ldap_user_password', via: 'changeUserPassword' }, // (modal)
+    // ── Directory (LDAP/Entra) — tenant-scoped (tenant_slug server-injected) ──
+    loadLDAPData:           { m: 'GET',  p: '/api/ldap/{users|groups}?tenant=', api: 'get_ldap_users/get_ldap_groups' },
+    ensureLDAPTenants:      { m: 'GET',  p: '/api/ldap/tenants',              api: 'ldap_tenants' },
+    showLDAPModal:          { m: 'POST|PUT', p: '/api/ldap/{users|groups}',   api: 'create/update_ldap_user, create_ldap_group', via: 'saveLDAPUser/saveLDAPGroup' }, // (modal)
+    showLDAPMembersModal:   { m: 'POST|DELETE', p: '/api/ldap/groups/members', api: 'add/remove_ldap_member', via: 'addLDAPMember/removeLDAPMember' }, // (modal)
+    showLDAPPasswordModal:  { m: 'POST', p: '/api/ldap/users/password',       api: 'set_ldap_user_password (local only)', via: 'changeUserPassword' }, // (modal)
 
     // ── Instances (multi-instance Setup tabs) ──
     loadInstances:          { m: 'GET',  p: '/setup/{nac|ipam|ldap|dns|dhcp}-instances', api: 'list_instances (_instance_crud)' },
@@ -303,10 +305,12 @@ const CRUD_ROUTES = {
     saveDhcpReservation:    { m: 'POST|PUT', p: '/api/dhcp/reservation',                     api: 'dhcp_add_reservation/dhcp_update_reservation' },
     deleteDhcpReservation:  { m: 'DELETE', p: '/api/dhcp/reservation',                       api: 'dhcp_delete_reservation' },
 
-    // ── LDAP CRUD ──
-    saveLDAPEntity:         { m: 'POST|PUT', p: '/api/ldap/{ous|users|groups}',              api: 'create_*/update_*_ldap_*' }, // PUT when editing
-    deleteLDAPEntity:       { m: 'DELETE', p: '/api/ldap/entity',                            api: 'delete_ldap_entity' },
-    changeUserPassword:     { m: 'POST', p: '/api/ldap/users/password',                      api: 'set_ldap_user_password' },
+    // ── Directory (LDAP/Entra) CRUD ──
+    saveLDAPUser:           { m: 'POST|PUT', p: '/api/ldap/users',                           api: 'create_ldap_user/update_ldap_user' }, // PUT when editing
+    saveLDAPGroup:          { m: 'POST', p: '/api/ldap/groups',                              api: 'create_ldap_group' },
+    deleteLDAPUser:         { m: 'DELETE', p: '/api/ldap/users',                             api: 'delete_ldap_user' },
+    deleteLDAPGroup:        { m: 'DELETE', p: '/api/ldap/groups',                            api: 'delete_ldap_group' },
+    changeUserPassword:     { m: 'POST', p: '/api/ldap/users/password',                      api: 'set_ldap_user_password (local only)' },
 
     // ── OPNsense delete ──
     deleteOpnsenseItem:     { m: 'DELETE', p: '/api/firewall/{fwId}/{rules|aliases|nat|dns}/{id}', api: 'delete_firewall_rule/delete_firewall_alias/delete_nat_rule/delete_dns_record' },
@@ -1255,7 +1259,7 @@ const VIEW_SUBMENUS = {
     setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
-    ldap: ['OUs', 'Users', 'Groups'],
+    ldap: ['Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'VM Server', 'Config', 'Setup', 'Spoke Management'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
@@ -3199,15 +3203,24 @@ function _viewTemplate(viewId) {
 </div>`;
 
         case 'ldap':
-            // Directory writes are tenant-admin tier, OU-scoped to the tenant's
-            // ldap_base_dn subtree (server-enforced); a plain ldap-right user can
+            // Tenant-scoped Directory: TENANT == OU (1:1). A tenant-admin manages
+            // ONLY their own tenant (the picker shows just theirs); a Global Admin
+            // picks any tenant. The tenant_slug is injected + guarded server-side
+            // (a tenant-admin cannot cross tenants). A plain ldap-right user can
             // view but not mutate.
             return `<div class="space-y-6">
-  <div class="flex justify-end mb-2">${(isAdmin() || isTenantAdmin()) ? `<button onclick="showLDAPModal(currentSubView)" class="${btn}">+ Add</button>` : ''}</div>
+  <div class="flex items-center justify-between gap-3 mb-2 flex-wrap">
+    <div class="flex items-center gap-2">
+      <label class="text-xs text-slate-500 uppercase font-bold">Tenant</label>
+      <select id="ldap-tenant-select" onchange="onLDAPTenantChange()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500"><option>Loading…</option></select>
+      <span id="ldap-ou-hint" class="text-xs text-slate-400 font-mono"></span>
+    </div>
+    ${(isAdmin() || isTenantAdmin()) ? `<button onclick="showLDAPModal(currentSubView)" class="${btn}">+ Add</button>` : ''}
+  </div>
   <div class="${card} p-0 overflow-hidden">
     <table class="w-full text-left text-sm">
       <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr id="ldap-table-head"></tr></thead>
-      <tbody id="ldap-table-body" class="divide-y divide-slate-200"><tr><td class="px-4 py-8 text-center text-slate-400 italic">Select a category above.</td></tr></tbody>
+      <tbody id="ldap-table-body" class="divide-y divide-slate-200"><tr><td class="px-4 py-8 text-center text-slate-400 italic">Loading…</td></tr></tbody>
     </table>
   </div>
 </div>`;
@@ -3721,7 +3734,7 @@ function initView(viewId, subView) {
             _loadFirewallData();
             break;
         case 'ldap':
-            loadLDAPData(subView || 'OUs');
+            loadLDAPData(subView || 'Users');
             break;
         case 'settings':
             _renderSettingsSection(subView || 'Hub Status');
@@ -18240,239 +18253,412 @@ async function submitOpnsenseEdit(fwId, subMenu, itemId) {
     }
 }
 
+// ── Directory (LDAP/Entra) — tenant-scoped user + group management ───────────
+// TENANT == OU (1:1). The tenant picker selects which OU to manage; the server
+// injects + guards the tenant_slug (a tenant-admin cannot cross tenants). Auth
+// mode per user: Entra-backed (UPN, no local password) or Local (set password).
+
+const LDAP_ICONS = {
+    edit: `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`,
+    del:  `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`,
+    pw:   `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>`,
+    mem:  `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4-4 4 4 0 004 4z"></path></svg>`,
+};
+
+// Currently-selected tenant id (the OU to manage). Populated by ensureLDAPTenants.
+window._ldapTenant = window._ldapTenant || '';
+
+async function ensureLDAPTenants(force) {
+    if (!window._ldapTenants || force) {
+        try {
+            const data = await apiJson('/api/ldap/tenants');
+            window._ldapTenants = data.tenants || [];
+        } catch (e) {
+            window._ldapTenants = [];
+        }
+    }
+    const ts = window._ldapTenants || [];
+    const sel = document.getElementById('ldap-tenant-select');
+    if (sel) {
+        if (!ts.length) {
+            sel.innerHTML = '<option value="">No tenants</option>';
+            window._ldapTenant = '';
+        } else {
+            if (!window._ldapTenant || !ts.some(t => t.id === window._ldapTenant)) {
+                window._ldapTenant = ts[0].id;
+            }
+            sel.innerHTML = ts.map(t => `<option value="${escapeHtml(t.id)}" ${t.id === window._ldapTenant ? 'selected' : ''}>${escapeHtml(t.name || t.id)}</option>`).join('');
+        }
+        _updateLDAPOuHint();
+    }
+    return ts;
+}
+
+function _updateLDAPOuHint() {
+    const hint = document.getElementById('ldap-ou-hint');
+    if (!hint) return;
+    const cur = (window._ldapTenants || []).find(t => t.id === window._ldapTenant);
+    hint.textContent = cur ? ('ou=' + (cur.slug || cur.id)) : '';
+}
+
+function onLDAPTenantChange() {
+    const sel = document.getElementById('ldap-tenant-select');
+    if (sel) window._ldapTenant = sel.value;
+    _updateLDAPOuHint();
+    loadLDAPData(currentSubView || 'Users');
+}
+
+function _ldapTenantQuery() {
+    return window._ldapTenant ? ('?tenant=' + encodeURIComponent(window._ldapTenant)) : '';
+}
+
 async function loadLDAPData(subMenu) {
+    subMenu = (subMenu === 'Groups') ? 'Groups' : 'Users';
     const headEl = document.getElementById('ldap-table-head');
     const bodyEl = document.getElementById('ldap-table-body');
     if (!headEl || !bodyEl) return;
 
-    try {
-        let endpoint = '';
-        let headers = [];
-        if (subMenu === 'OUs') {
-            endpoint = '/api/ldap/ous';
-            headers = ['Name', 'DN', 'Actions'];
-        } else if (subMenu === 'Users') {
-            endpoint = '/api/ldap/users';
-            headers = ['Username', 'First Name', 'Last Name', 'Email', 'DN', 'Actions'];
-        } else if (subMenu === 'Groups') {
-            endpoint = '/api/ldap/groups';
-            headers = ['Name', 'DN', 'Members', 'Actions'];
-        }
+    await ensureLDAPTenants();
+    if (!window._ldapTenant) {
+        headEl.innerHTML = '';
+        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">No tenant available to manage.</td></tr>`;
+        return;
+    }
+    const canWrite = isAdmin() || isTenantAdmin();
 
-        headEl.innerHTML = `<tr>${headers.map(h => `<th class="px-4 py-3 font-bold">${h}</th>`).join('')}</tr>`;
-        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">Fetching ${subMenu}...</td></tr>`;
+    try {
+        const endpoint = (subMenu === 'Groups' ? '/api/ldap/groups' : '/api/ldap/users') + _ldapTenantQuery();
+        const headers = (subMenu === 'Groups')
+            ? ['Group', 'Members', 'Actions']
+            : ['Username', 'Name', 'Auth', 'Email / UPN', 'Actions'];
+        headEl.innerHTML = headers.map(h => `<th class="px-4 py-3 font-bold">${h}</th>`).join('');
+        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">Fetching ${subMenu.toLowerCase()}…</td></tr>`;
 
         const data = await apiJson(endpoint);
-        const items = data.data || [];
-        // Cache rows so the Edit button can look up the entity by DN without
-        // encoding all fields into the onclick handler.
+        const items = (data && (data.users || data.groups || data.data)) || (Array.isArray(data) ? data : []);
         window._ldapRows = items;
 
-        if (items.length === 0) {
-            bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">No ${subMenu.toLowerCase()} found.</td></tr>`;
+        if (!items.length) {
+            bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">No ${subMenu.toLowerCase()} in this tenant.</td></tr>`;
             return;
         }
 
-        const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
-        const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
-        const pwIcon   = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>`;
-
-        bodyEl.innerHTML = items.map(item => {
-            const eDn = String(item.dn).replace(/'/g, "\\'");
-            const actions = `<td class="px-4 py-3 text-right whitespace-nowrap">
-                <button onclick="editLDAPEntity('${subMenu}','${eDn}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                ${subMenu === 'Users' ? `<button onclick="showLDAPPasswordModal('${eDn}')" title="Change Password" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${pwIcon}</button>` : ''}
-                <button onclick="deleteLDAPEntity('${eDn}')" title="Delete" class="p-1 text-slate-400 hover:text-red-600 transition-colors">${delIcon}</button>
-            </td>`;
-            let cells = '';
-            if (subMenu === 'OUs') {
-                cells = `<td class="px-4 py-3 text-slate-700">${item.name}</td><td class="px-4 py-3 font-mono text-xs text-slate-500">${item.dn}</td>`;
-            } else if (subMenu === 'Users') {
-                cells = `<td class="px-4 py-3 text-slate-700 font-medium">${item.username || ''}</td><td class="px-4 py-3 text-slate-600">${item.first_name || ''}</td><td class="px-4 py-3 text-slate-600">${item.last_name || ''}</td><td class="px-4 py-3 text-slate-600">${item.email || ''}</td><td class="px-4 py-3 font-mono text-xs text-slate-500 max-w-xs truncate">${item.dn}</td>`;
-            } else if (subMenu === 'Groups') {
-                cells = `<td class="px-4 py-3 text-slate-700">${item.name || ''}</td><td class="px-4 py-3 font-mono text-xs text-slate-500">${item.dn}</td><td class="px-4 py-3 text-slate-500 text-xs">${item.member_count || 0} members</td>`;
+        bodyEl.innerHTML = items.map(it => {
+            if (subMenu === 'Groups') {
+                const cn = escapeHtml(it.cn || it.name || '');
+                const members = it.members || it.member || [];
+                const memCount = Array.isArray(members) ? members.length : (it.member_count || 0);
+                const eCn = String(it.cn || it.name || '').replace(/'/g, "\\'");
+                const actions = canWrite ? `<td class="px-4 py-3 text-right whitespace-nowrap">
+                    <button onclick="showLDAPMembersModal('${eCn}')" title="Manage members" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.mem}</button>
+                    <button onclick="deleteLDAPGroup('${eCn}')" title="Delete" class="p-1 text-slate-400 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
+                </td>` : '<td></td>';
+                return `<tr class="hover:bg-slate-50 transition-colors"><td class="px-4 py-3 font-medium text-slate-700">${cn}</td><td class="px-4 py-3 text-slate-500 text-xs">${memCount} members</td>${actions}</tr>`;
             }
-            return `<tr class="hover:bg-slate-50 transition-colors">${cells}${actions}</tr>`;
+            const uid = escapeHtml(it.uid || it.username || '');
+            const eUid = String(it.uid || it.username || '').replace(/'/g, "\\'");
+            const isEntra = it.auth_mode === 'entra';
+            const name = escapeHtml(it.name || [it.first_name, it.last_name].filter(Boolean).join(' ') || '');
+            const email = escapeHtml(it.email || it.upn || '');
+            const badge = isEntra
+                ? '<span title="Authenticates via Entra — no local password" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">Entra</span>'
+                : '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600">Local</span>';
+            const actions = canWrite ? `<td class="px-4 py-3 text-right whitespace-nowrap">
+                <button onclick="editLDAPUser('${eUid}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.edit}</button>
+                ${isEntra ? '' : `<button onclick="showLDAPPasswordModal('${eUid}')" title="Reset password" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${LDAP_ICONS.pw}</button>`}
+                <button onclick="deleteLDAPUser('${eUid}')" title="Delete" class="p-1 text-slate-400 hover:text-red-600 transition-colors">${LDAP_ICONS.del}</button>
+            </td>` : '<td></td>';
+            return `<tr class="hover:bg-slate-50 transition-colors"><td class="px-4 py-3 font-medium text-slate-700">${uid}</td><td class="px-4 py-3 text-slate-600">${name}</td><td class="px-4 py-3">${badge}</td><td class="px-4 py-3 text-slate-600">${email}</td>${actions}</tr>`;
         }).join('');
     } catch (err) {
-        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-red-500">${err.message}</td></tr>`;
+        bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-red-500">${escapeHtml(err.message || String(err))}</td></tr>`;
     }
 }
 
-function editLDAPEntity(subMenu, dn) {
-    const item = (window._ldapRows || []).find(r => r.dn === dn);
+function editLDAPUser(uid) {
+    const item = (window._ldapRows || []).find(r => (r.uid || r.username) === uid);
     if (!item) { showToast('Row data not found — refresh and try again', 'error'); return; }
-    showLDAPModal(subMenu, item);
+    showLDAPModal('Users', item);
 }
 
 function showLDAPModal(subMenu, editItem) {
+    subMenu = (subMenu === 'Groups') ? 'Groups' : 'Users';
     const editing = !!editItem;
     const modal = document.createElement('div');
     modal.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50';
-    if (editing) modal.dataset.dn = editItem.dn;
-
-    const label = subMenu === 'OUs' ? 'OU' : (subMenu === 'Users' ? 'User' : 'Group');
     const inp = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
 
     let fields = '';
-    if (subMenu === 'OUs') {
-        fields = `
-            <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">OU Name</label><input type="text" id="ldap-ou-name" value="${val(editItem?.name)}" class="${inp}"></div>
-            ${editing ? '' : `<div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Parent DN</label><input type="text" id="ldap-ou-parent" placeholder="dc=example,dc=org" class="${inp}"></div>`}
-        `;
-    } else if (subMenu === 'Users') {
+    let title = '';
+    if (subMenu === 'Groups') {
+        title = 'Add Group';
+        fields = `<div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name (cn)</label><input type="text" id="ldap-group-cn" class="${inp}"></div>`;
+    } else {
+        title = editing ? 'Edit User' : 'Add User';
+        const curMode = editing ? (editItem.auth_mode === 'entra' ? 'entra' : 'local') : 'local';
         fields = `
             <div class="grid grid-cols-2 gap-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Username</label><input type="text" id="ldap-user-username" value="${val(editItem?.username)}" class="${inp}"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">First Name</label><input type="text" id="ldap-user-first" value="${val(editItem?.first_name)}" class="${inp}"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Last Name</label><input type="text" id="ldap-user-last" value="${val(editItem?.last_name)}" class="${inp}"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Email</label><input type="text" id="ldap-user-email" value="${val(editItem?.email)}" class="${inp}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Username (uid)</label><input type="text" id="ldap-user-uid" value="${val(editItem && (editItem.uid || editItem.username))}" ${editing ? 'readonly' : ''} class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mode</label>
+                    <select id="ldap-user-auth" ${editing ? 'disabled' : ''} onchange="_syncLDAPAuthFields()" class="${inp} ${editing ? 'bg-slate-100 text-slate-500' : ''}">
+                        <option value="local" ${curMode === 'local' ? 'selected' : ''}>Local (password)</option>
+                        <option value="entra" ${curMode === 'entra' ? 'selected' : ''}>Entra-backed (UPN)</option>
+                    </select>
+                </div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">First Name</label><input type="text" id="ldap-user-first" value="${val(editItem && editItem.first_name)}" class="${inp}"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Last Name</label><input type="text" id="ldap-user-last" value="${val(editItem && editItem.last_name)}" class="${inp}"></div>
+                <div class="space-y-2 col-span-2"><label class="text-xs text-slate-500 uppercase font-bold">Email</label><input type="text" id="ldap-user-email" value="${val(editItem && editItem.email)}" class="${inp}"></div>
             </div>
-            ${editing ? '' : `<div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">OU DN</label><input type="text" id="ldap-user-ou" placeholder="ou=Users,dc=example,dc=org" class="${inp}"></div>
-            <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-400 normal-case font-normal">(leave blank to auto-generate)</span></label><input type="password" id="ldap-user-password" class="${inp}"></div>`}
-        `;
-    } else if (subMenu === 'Groups') {
-        fields = `
-            <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Group Name</label><input type="text" id="ldap-group-name" value="${val(editItem?.name)}" class="${inp}"></div>
-            ${editing ? '' : `<div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">OU DN</label><input type="text" id="ldap-group-ou" placeholder="ou=Groups,dc=example,dc=org" class="${inp}"></div>`}
+            <div id="ldap-entra-wrap" class="space-y-2 ${curMode === 'entra' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">UPN (Entra user principal name)</label><input type="text" id="ldap-user-upn" value="${val(editItem && editItem.upn)}" placeholder="user@tenant.onmicrosoft.com" class="${inp}"></div>
+            ${editing ? '' : `<div id="ldap-local-wrap" class="space-y-2 ${curMode === 'local' ? '' : 'hidden'}"><label class="text-xs text-slate-500 uppercase font-bold">Password <span class="text-slate-400 normal-case font-normal">(leave blank to auto-generate)</span></label><input type="password" id="ldap-user-password" class="${inp}"></div>`}
         `;
     }
 
     modal.innerHTML = `
         <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} ${label}</h3>
+                <h3 class="text-lg font-bold text-[#263040]">${title}</h3>
                 <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
                 <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                <button onclick="saveLDAPEntity('${subMenu}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">${editing ? 'Save Changes' : 'Save Entity'}</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-}
-
-async function saveLDAPEntity(subMenu) {
-    const modal = document.querySelector('.fixed');
-    const editing = modal && modal.dataset.dn;
-    const body = {};
-    if (subMenu === 'OUs') {
-        body.name = document.getElementById('ldap-ou-name').value.trim();
-        if (!editing) body.parent_dn = document.getElementById('ldap-ou-parent')?.value || '';
-    } else if (subMenu === 'Users') {
-        body.username = document.getElementById('ldap-user-username').value.trim();
-        body.first_name = document.getElementById('ldap-user-first').value.trim();
-        body.last_name = document.getElementById('ldap-user-last').value.trim();
-        body.email = document.getElementById('ldap-user-email').value.trim();
-        if (!editing) {
-            body.ou_dn = document.getElementById('ldap-user-ou')?.value || '';
-            const pw = document.getElementById('ldap-user-password')?.value;
-            if (pw) body.password = pw;
-        }
-    } else if (subMenu === 'Groups') {
-        body.name = document.getElementById('ldap-group-name').value.trim();
-        if (!editing) body.ou_dn = document.getElementById('ldap-group-ou')?.value || '';
-    }
-
-    if (!body.name && subMenu !== 'Users' && !body.username) {
-        showToast('Name is required', 'error');
-        return;
-    }
-
-    if (editing) body.dn = modal.dataset.dn;
-
-    try {
-        const endpoint = subMenu === 'OUs' ? '/api/ldap/ous' : (subMenu === 'Users' ? '/api/ldap/users' : '/api/ldap/groups');
-        const response = await fetch(endpoint, {
-            method: editing ? 'PUT' : 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-        if (response.ok) {
-            const result = await response.json();
-            if (!editing && result.password) {
-                showToast(`User created!\n\nGenerated password: ${result.password}\n\nPlease record this — it will not be shown again.`, 'success');
-            } else {
-                showToast(editing ? 'Entity updated successfully!' : 'Entity created successfully!', 'success');
-            }
-            document.querySelector('.fixed').remove();
-            loadLDAPData(subMenu);
-        } else {
-            const err = await response.json().catch(() => ({}));
-            showToast('Error: ' + (err.message || (editing ? 'Failed to update entity' : 'Failed to create entity')), 'error');
-        }
-    } catch (e) {
-        showToast('Request failed: ' + e.message, 'error');
-    }
-}
-
-async function deleteLDAPEntity(dn) {
-    if (!await showConfirmToast(`Are you sure you want to delete ${dn}?`)) return;
-    try {
-        const response = await fetch('/api/ldap/entity', {
-            method: 'DELETE',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dn: dn })
-        });
-        if (response.ok) {
-            showToast('Entity deleted successfully!', 'success');
-            loadLDAPData(currentSubView);
-        } else {
-            const err = await response.json();
-            showToast('Error: ' + (err.message || 'Failed to delete entity'), 'error');
-        }
-    } catch (e) {
-        showToast('Request failed: ' + e.message, 'error');
-    }
-}
-
-function showLDAPPasswordModal(userDn) {
-    const modal = document.createElement('div');
-    modal.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50';
-    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
-    modal.innerHTML = `
-        <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
-            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-[#263040]">Change Password</h3>
-                <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
-            </div>
-            <div class="p-6 space-y-4">
-                <p class="text-xs text-slate-500 font-mono">${userDn}</p>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">New Password</label><input type="password" id="ldap-new-password" class="${inputCls}" autocomplete="new-password"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Confirm Password</label><input type="password" id="ldap-confirm-password" class="${inputCls}" autocomplete="new-password"></div>
-            </div>
-            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-                <button onclick="changeUserPassword('${userDn.replace(/'/g, "\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">Set Password</button>
+                <button onclick="${subMenu === 'Groups' ? 'saveLDAPGroup()' : `saveLDAPUser(${editing ? 'true' : 'false'})`}" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
 }
 
-async function changeUserPassword(userDn) {
+function _syncLDAPAuthFields() {
+    const mode = document.getElementById('ldap-user-auth')?.value;
+    const entra = document.getElementById('ldap-entra-wrap');
+    const local = document.getElementById('ldap-local-wrap');
+    if (entra) entra.classList.toggle('hidden', mode !== 'entra');
+    if (local) local.classList.toggle('hidden', mode !== 'local');
+}
+
+async function saveLDAPUser(editing) {
+    const uid = document.getElementById('ldap-user-uid')?.value.trim();
+    if (!uid) { showToast('Username (uid) is required', 'error'); return; }
+    const authEl = document.getElementById('ldap-user-auth');
+    const authMode = authEl ? authEl.value : 'local';
+    const attrs = {
+        first_name: document.getElementById('ldap-user-first')?.value.trim() || '',
+        last_name: document.getElementById('ldap-user-last')?.value.trim() || '',
+        email: document.getElementById('ldap-user-email')?.value.trim() || '',
+    };
+    const body = { tenant_id: window._ldapTenant, uid, attrs };
+    if (!editing) {
+        body.auth_mode = authMode;
+        if (authMode === 'entra') {
+            const upn = document.getElementById('ldap-user-upn')?.value.trim();
+            if (!upn) { showToast('UPN is required for an Entra-backed user', 'error'); return; }
+            body.upn = upn;
+        } else {
+            const pw = document.getElementById('ldap-user-password')?.value;
+            if (pw) body.password = pw;
+        }
+    } else if (authMode === 'entra') {
+        const upn = document.getElementById('ldap-user-upn')?.value.trim();
+        if (upn) body.upn = upn;
+    }
+    try {
+        const res = await fetch('/api/ldap/users', {
+            method: editing ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (res.ok) {
+            const result = await res.json().catch(() => ({}));
+            if (!editing && result.password) {
+                showToast(`User created!\n\nGenerated password: ${result.password}\n\nPlease record this — it will not be shown again.`, 'success');
+            } else {
+                showToast(editing ? 'User updated.' : 'User created.', 'success');
+            }
+            document.querySelector('.fixed')?.remove();
+            loadLDAPData('Users');
+        } else {
+            const err = await res.json().catch(() => ({}));
+            showToast('Error: ' + (err.detail || err.message || 'Failed to save user'), 'error');
+        }
+    } catch (e) {
+        showToast('Request failed: ' + e.message, 'error');
+    }
+}
+
+async function saveLDAPGroup() {
+    const cn = document.getElementById('ldap-group-cn')?.value.trim();
+    if (!cn) { showToast('Group name (cn) is required', 'error'); return; }
+    try {
+        const res = await fetch('/api/ldap/groups', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: window._ldapTenant, cn }),
+        });
+        if (res.ok) {
+            showToast('Group created.', 'success');
+            document.querySelector('.fixed')?.remove();
+            loadLDAPData('Groups');
+        } else {
+            const err = await res.json().catch(() => ({}));
+            showToast('Error: ' + (err.detail || err.message || 'Failed to create group'), 'error');
+        }
+    } catch (e) {
+        showToast('Request failed: ' + e.message, 'error');
+    }
+}
+
+async function deleteLDAPUser(uid) {
+    if (!await showConfirmToast(`Delete user "${uid}"?`)) return;
+    try {
+        const res = await fetch('/api/ldap/users', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: window._ldapTenant, uid }),
+        });
+        if (res.ok) { showToast('User deleted.', 'success'); loadLDAPData('Users'); }
+        else { const err = await res.json().catch(() => ({})); showToast('Error: ' + (err.detail || err.message || 'Failed to delete user'), 'error'); }
+    } catch (e) { showToast('Request failed: ' + e.message, 'error'); }
+}
+
+async function deleteLDAPGroup(cn) {
+    if (!await showConfirmToast(`Delete group "${cn}"?`)) return;
+    try {
+        const res = await fetch('/api/ldap/groups', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: window._ldapTenant, cn }),
+        });
+        if (res.ok) { showToast('Group deleted.', 'success'); loadLDAPData('Groups'); }
+        else { const err = await res.json().catch(() => ({})); showToast('Error: ' + (err.detail || err.message || 'Failed to delete group'), 'error'); }
+    } catch (e) { showToast('Request failed: ' + e.message, 'error'); }
+}
+
+function showLDAPPasswordModal(uid) {
+    const modal = document.createElement('div');
+    modal.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50';
+    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    const eUid = String(uid).replace(/'/g, "\\'");
+    modal.innerHTML = `
+        <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
+                <h3 class="text-lg font-bold text-[#263040]">Reset Password</h3>
+                <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
+            </div>
+            <div class="p-6 space-y-4">
+                <p class="text-xs text-slate-500 font-mono">${escapeHtml(uid)}</p>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">New Password</label><input type="password" id="ldap-new-password" class="${inputCls}" autocomplete="new-password"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Confirm Password</label><input type="password" id="ldap-confirm-password" class="${inputCls}" autocomplete="new-password"></div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+                <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
+                <button onclick="changeUserPassword('${eUid}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all">Set Password</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+}
+
+async function changeUserPassword(uid) {
     const pw = document.getElementById('ldap-new-password')?.value;
     const confirm = document.getElementById('ldap-confirm-password')?.value;
     if (!pw) { showToast('Password cannot be empty', 'error'); return; }
-    if (pw !== confirm) { showToast('Passwords do not match', 'success'); return; }
+    if (pw !== confirm) { showToast('Passwords do not match', 'error'); return; }
     try {
         const r = await fetch('/api/ldap/users/password', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_dn: userDn, password: pw })
+            body: JSON.stringify({ tenant_id: window._ldapTenant, uid, password: pw }),
         });
         if (r.ok) {
-            showToast('Password changed successfully.', 'success');
+            showToast('Password changed.', 'success');
             document.querySelector('.fixed')?.remove();
         } else {
-            const err = await r.json();
+            const err = await r.json().catch(() => ({}));
             showToast('Error: ' + (err.detail || err.message || 'Failed to change password'), 'error');
         }
     } catch (e) {
         showToast('Request failed: ' + e.message, 'error');
     }
+}
+
+async function showLDAPMembersModal(cn) {
+    const modal = document.createElement('div');
+    modal.className = 'fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50';
+    modal.dataset.cn = cn;
+    modal.innerHTML = `
+        <div class="bg-white rounded-lg shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center">
+                <h3 class="text-lg font-bold text-[#263040]">Members — ${escapeHtml(cn)}</h3>
+                <button onclick="this.closest('.fixed').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="flex items-center gap-2">
+                    <select id="ldap-member-add" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading users…</option></select>
+                    <button onclick="addLDAPMember('${String(cn).replace(/'/g, "\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add</button>
+                </div>
+                <div id="ldap-members-list" class="space-y-1 max-h-64 overflow-y-auto"><p class="text-xs text-slate-400 italic">Loading members…</p></div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end">
+                <button onclick="this.closest('.fixed').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    _renderLDAPMembers(cn);
+}
+
+async function _renderLDAPMembers(cn) {
+    const listEl = document.getElementById('ldap-members-list');
+    const addSel = document.getElementById('ldap-member-add');
+    try {
+        const [gData, uData] = await Promise.all([
+            apiJson('/api/ldap/groups' + _ldapTenantQuery()),
+            apiJson('/api/ldap/users' + _ldapTenantQuery()),
+        ]);
+        const groups = (gData && (gData.groups || gData.data)) || (Array.isArray(gData) ? gData : []);
+        const users = (uData && (uData.users || uData.data)) || (Array.isArray(uData) ? uData : []);
+        const grp = groups.find(g => (g.cn || g.name) === cn) || {};
+        const members = (grp.members || grp.member || []).map(m => String(m));
+        if (listEl) {
+            listEl.innerHTML = members.length
+                ? members.map(m => `<div class="flex items-center justify-between px-3 py-1.5 bg-slate-50 rounded-md text-sm"><span class="text-slate-700">${escapeHtml(m)}</span><button onclick="removeLDAPMember('${String(cn).replace(/'/g, "\\'")}','${String(m).replace(/'/g, "\\'")}')" class="text-xs font-bold text-red-600 hover:text-red-700">Remove</button></div>`).join('')
+                : '<p class="text-xs text-slate-400 italic">No members.</p>';
+        }
+        if (addSel) {
+            const avail = users.map(u => u.uid || u.username).filter(u => u && !members.includes(String(u)));
+            addSel.innerHTML = avail.length
+                ? avail.map(u => `<option value="${escapeHtml(u)}">${escapeHtml(u)}</option>`).join('')
+                : '<option value="">No users to add</option>';
+        }
+    } catch (e) {
+        if (listEl) listEl.innerHTML = `<p class="text-xs text-red-500">${escapeHtml(e.message || String(e))}</p>`;
+    }
+}
+
+async function addLDAPMember(cn) {
+    const uid = document.getElementById('ldap-member-add')?.value;
+    if (!uid) { showToast('Select a user to add', 'info'); return; }
+    try {
+        const res = await fetch('/api/ldap/groups/members', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: window._ldapTenant, cn, uid }),
+        });
+        if (res.ok) { showToast('Member added.', 'success'); _renderLDAPMembers(cn); }
+        else { const err = await res.json().catch(() => ({})); showToast('Error: ' + (err.detail || err.message || 'Failed to add member'), 'error'); }
+    } catch (e) { showToast('Request failed: ' + e.message, 'error'); }
+}
+
+async function removeLDAPMember(cn, uid) {
+    try {
+        const res = await fetch('/api/ldap/groups/members', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant_id: window._ldapTenant, cn, uid }),
+        });
+        if (res.ok) { showToast('Member removed.', 'success'); _renderLDAPMembers(cn); }
+        else { const err = await res.json().catch(() => ({})); showToast('Error: ' + (err.detail || err.message || 'Failed to remove member'), 'error'); }
+    } catch (e) { showToast('Request failed: ' + e.message, 'error'); }
 }
 
 async function showAddUserModal() {
