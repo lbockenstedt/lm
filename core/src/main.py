@@ -7372,7 +7372,37 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         conn_map.hub_instance = self
         await self.mailbox.retry_loop(conn_map)
 
+def _preflight() -> int:
+    """Prove this code can boot WITHOUT serving — the update safety gate.
+
+    Constructs the hub and builds the uvicorn Server (which runs ``create_app``,
+    the exact synchronous path that has crash-looped the hub on bad deploys:
+    a removed FastAPI method, a missing dependency, a duplicated launch block).
+    ``build_server`` does NOT bind the port — binding happens in ``.serve()``,
+    which we never call — so this is side-effect-light and never touches :443.
+
+    Exit 0 = the new code boots; the watchdog may adopt/restart into it.
+    Exit 1 = it would crash-loop; the watchdog must NOT restart into it.
+    """
+    try:
+        hub = LabManagerHub()
+        srv = build_server(
+            hub, host="127.0.0.1", port=hub.tls_port,
+            tls_cert=hub.tls_cert_path, tls_key=hub.tls_key_path,
+        )
+        del srv
+        print("PREFLIGHT OK")
+        return 0
+    except BaseException:  # noqa: BLE001 — report ANY startup failure to the gate
+        import traceback
+        traceback.print_exc()
+        print("PREFLIGHT FAILED")
+        return 1
+
+
 if __name__ == "__main__":
+    if "--preflight" in sys.argv:
+        sys.exit(_preflight())
     hub = LabManagerHub()
     try:
         asyncio.run(hub.start())
