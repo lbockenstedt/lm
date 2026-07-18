@@ -119,6 +119,15 @@ class ArubaClient:
             json.dumps(self.config, sort_keys=True, default=str).encode()
         ).hexdigest()[:8]
         self._token_cache: Dict[str, Dict[str, Any]] = {self._config_hash: {}}
+        # Per-poll-cycle site index (new_central). Built once on the first
+        # poll_site_data() call and reused for every subsequent site in the same
+        # cycle, so the poller's O(sites) sweep no longer rescans the full
+        # devices/clients/insights/alerts lists per site (was O(sites×items)).
+        # Instance-scoped: _poll_tenant constructs a fresh ArubaClient per cycle,
+        # so this naturally resets each cycle. Reset on the underlying cache
+        # identity so a mid-cycle TTL refresh of the shared fetchers rebuilds it.
+        self._site_index: Dict[str, Any] | None = None
+        self._site_index_sig: Any = None
 
     def is_configured(self) -> bool:
         return bool(self.cluster_url) or self.api_version == "new_central"
@@ -416,6 +425,84 @@ class ArubaClient:
 
         return findings
 
+    async def _build_new_central_index(self) -> Dict[str, Any]:
+        """Group the cached new_central global fetchers (sites-health / devices /
+        clients / insights / alerts) by site ONCE per poll cycle so
+        ``poll_site_data`` looks a site up in O(matches) instead of rescanning
+        every list per site. Reuses the module-level TTL caches — no extra API
+        calls. Cached on the instance (a fresh ArubaClient per poll cycle) and
+        rebuilt only if the underlying cache tuples change identity (a mid-cycle
+        TTL refresh). Grouping predicates mirror poll_site_data's old per-item
+        filters exactly."""
+        sites_health = await self._nc_sites_health()
+        devices = await self._nc_devices()
+        clients = await self._nc_clients()
+        insights = await self._new_central_insights()
+        alerts = await self._new_central_alerts()
+        sig = (id(sites_health), id(devices), id(clients), id(insights), id(alerts))
+        if self._site_index is not None and self._site_index_sig == sig:
+            return self._site_index
+
+        # Site health by name — FIRST match wins (mirrors the old break-on-first).
+        health_by_name: Dict[str, dict] = {}
+        for item in sites_health:
+            name = (item.get("name") or item.get("siteName") or item.get("site_name") or "").strip()
+            key = name.lower()
+            if key and key not in health_by_name:
+                health_by_name[key] = item
+
+        # Devices by site_id; a device with no site_id matched EVERY site.
+        devices_by_site_id: Dict[str, list] = {}
+        devices_no_site: list = []
+        for d in devices:
+            sid = str(d.get("siteId") or d.get("site_id") or "").strip()
+            if sid:
+                devices_by_site_id.setdefault(sid, []).append(d)
+            else:
+                devices_no_site.append(d)
+
+        # Clients by site_id (a client with no site_id matched no specific site).
+        clients_by_site_id: Dict[str, list] = {}
+        for c in clients:
+            sid = str(c.get("siteId") or c.get("site_id") or "").strip()
+            if sid:
+                clients_by_site_id.setdefault(sid, []).append(c)
+
+        # Insights: global bucket = no site or "All Sites"; else pinned by name.
+        insights_global: list = []
+        insights_by_site: Dict[str, list] = {}
+        for ins in insights:
+            s = str(ins.get("site") or "").strip()
+            if not s or s.lower() == "all sites":
+                insights_global.append(ins)
+            else:
+                insights_by_site.setdefault(s.lower(), []).append(ins)
+
+        # Alerts: global bucket = no site or "-"/"—"; else pinned by name.
+        alerts_global: list = []
+        alerts_by_site: Dict[str, list] = {}
+        for al in alerts:
+            s = str(al.get("site") or "").strip()
+            if not s or s in ("-", "—"):
+                alerts_global.append(al)
+            else:
+                alerts_by_site.setdefault(s.lower(), []).append(al)
+
+        self._site_index = {
+            "health_by_name": health_by_name,
+            "devices_all": devices,
+            "devices_by_site_id": devices_by_site_id,
+            "devices_no_site": devices_no_site,
+            "clients_all": clients,
+            "clients_by_site_id": clients_by_site_id,
+            "insights_global": insights_global,
+            "insights_by_site": insights_by_site,
+            "alerts_global": alerts_global,
+            "alerts_by_site": alerts_by_site,
+        }
+        self._site_index_sig = sig
+        return self._site_index
+
     async def poll_site_data(
         self,
         site: str,
@@ -441,25 +528,31 @@ class ArubaClient:
         hw_devices: dict[str, dict[str, int]] = {}
 
         if self.api_version == "new_central":
-            # Use cached global fetchers — 9 sites share 1 API call per endpoint
+            # Per-poll-cycle indexes over the cached global fetchers (built once,
+            # reused across sites) — was rescanning every devices/clients/
+            # insights/alerts list per site (O(sites×items)); now O(matches).
+            idx = await self._build_new_central_index()
+            site_lower = site.lower()
+
             site_id: str | None = None
-            for item in await self._nc_sites_health():
-                site_name = (item.get("name") or item.get("siteName") or item.get("site_name") or "").strip()
-                if site_name.lower() != site.lower():
-                    continue
-                site_id = str(item.get("id") or item.get("siteId") or item.get("site_id") or "").strip() or None
+            _h = idx["health_by_name"].get(site_lower)
+            if _h is not None:
+                site_id = str(_h.get("id") or _h.get("siteId") or _h.get("site_id") or "").strip() or None
                 good_pct = next(
-                    (g.get("value", 0) for g in (item.get("health") or {}).get("groups", []) if g.get("name") == "Good"),
-                    item.get("healthScore", item.get("health_score", 0)),
+                    (g.get("value", 0) for g in (_h.get("health") or {}).get("groups", []) if g.get("name") == "Good"),
+                    _h.get("healthScore", _h.get("health_score", 0)),
                 )
                 site_health = int(good_pct or 0)
-                break
 
             DEVICE_ALERT = {"ACCESS_POINT": "AP_DOWN", "SWITCH": "SWITCH_DOWN", "GATEWAY": "GATEWAY_DOWN"}
-            for device in await self._nc_devices():
-                dev_site_id = str(device.get("siteId") or device.get("site_id") or "").strip()
-                if site_id and dev_site_id and dev_site_id != site_id:
-                    continue
+            # site_id None → every device matched; else devices at this site_id
+            # PLUS devices with no site_id (which the old scan counted for every
+            # site). Index-prefiltered, so no per-device site check here.
+            if site_id is None:
+                device_candidates = idx["devices_all"]
+            else:
+                device_candidates = idx["devices_by_site_id"].get(site_id, []) + idx["devices_no_site"]
+            for device in device_candidates:
                 device_type = str(device.get("deviceType") or "").upper()
                 status = str(device.get("status") or "").upper()
                 if status in {"UP", "ONLINE"}:
@@ -476,12 +569,14 @@ class ArubaClient:
                     if device_name:
                         hw_devices.setdefault(alert_id, {})[device_name] = hw_devices.setdefault(alert_id, {}).get(device_name, 0) + 1
 
-            # Count all clients (wired + wireless) for the site from the global clients list
-            for cl in await self._nc_clients():
-                cl_site_id = str(cl.get("siteId") or cl.get("site_id") or "").strip()
-                matches = (site_id and cl_site_id and cl_site_id == site_id) or (not site_id)
-                if not matches:
-                    continue
+            # Count all clients (wired + wireless) for the site. site_id None →
+            # all clients; else only clients whose site_id matches (clients with
+            # no site_id are NOT counted, mirroring the old match condition).
+            if site_id is None:
+                client_candidates = idx["clients_all"]
+            else:
+                client_candidates = idx["clients_by_site_id"].get(site_id, [])
+            for cl in client_candidates:
                 conn_type = str(cl.get("clientConnectionType") or cl.get("connection_type") or "").lower()
                 if conn_type == "wired":
                     wired_clients += 1
@@ -490,28 +585,18 @@ class ArubaClient:
 
             # Count insights per site so MONITORED insight checks (enrolled from
             # the Central -> Insights tab) evaluate on the dashboard. Keyed
-            # name||category to match the WebUI monitored-check id. Insights carry
-            # a site NAME (or "All Sites" for global); _new_central_insights is
-            # cached so this adds no extra API call within the TTL.
-            for ins in await self._new_central_insights():
-                ins_site = str(ins.get("site") or "").strip()
-                if ins_site and ins_site.lower() not in (site.lower(), "all sites"):
-                    continue
+            # name||category to match the WebUI monitored-check id. Candidates =
+            # global (no site / "All Sites") + those pinned to this site.
+            for ins in idx["insights_global"] + idx["insights_by_site"].get(site_lower, []):
                 cat = str(ins.get("name") or ins.get("category") or "").strip()
                 if cat:
                     insight_cat_counts[cat] = insight_cat_counts.get(cat, 0) + 1
 
             # Count network-notifications alerts by name so MONITORED alert checks
             # (Central -> Alerts Monitor button) evaluate on the dashboard. Alerts
-            # aren't reliably site-scoped, so an active alert counts for EVERY
-            # monitored site; key name||category = the WebUI monitored-check id.
-            for al in await self._new_central_alerts():
-                al_site = str(al.get("site") or "").strip()
-                # Count an alert for THIS site when it is pinned here (name match)
-                # or has no site ("-" = global -> every site). Enables per-site
-                # alert monitoring; the monitored check id is name||category.
-                if al_site and al_site not in ("-", "—") and al_site.lower() != site.lower():
-                    continue
+            # aren't reliably site-scoped, so a global ("-"/"—"/no site) alert
+            # counts for EVERY monitored site; key name||category = check id.
+            for al in idx["alerts_global"] + idx["alerts_by_site"].get(site_lower, []):
                 nm = str(al.get("name") or al.get("category") or "").strip()
                 if nm:
                     alert_type_counts[nm] = alert_type_counts.get(nm, 0) + 1
