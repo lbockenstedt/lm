@@ -19792,11 +19792,21 @@ async function loadAllDevices() {
         listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No managed devices yet. Click <strong>Add Device</strong> to attach one.</p>';
         return;
     }
+    // Map spoke_id -> friendly name so each row shows the spoke NAME, not the GUID
+    // (spoke_id is a GUID post guid-migration). loadApprovedSpokes() is tenant-safe.
+    const _spokeNameById = {};
+    try {
+        (await loadApprovedSpokes()).forEach(s => {
+            _spokeNameById[s.spoke_id] = s.display_name || s.hostname || s.spoke_id;
+        });
+    } catch (e) { /* best-effort — fall back to the id below */ }
     listEl.innerHTML = all.map(d => {
         const t = DEVICE_TYPES[d._typeKey];
         const name = d.name || d.id;
         const summary = t.rowSummary(d);
-        const spoke = d.spoke_id ? ' · ' + escapeHtml(d.spoke_id) : '';
+        const spoke = d.spoke_id
+            ? ` · <span title="${escapeHtml(d.spoke_id)}">${escapeHtml(_spokeNameById[d.spoke_id] || d.spoke_id)}</span>`
+            : '';
         const eId = String(d._id).replace(/'/g, "\\'");
         return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
             <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(summary)}${spoke}</span></div>
