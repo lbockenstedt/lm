@@ -14,14 +14,24 @@ Policy (all configurable via ``global_config["threat_monitor"]``):
   * ``auto_block`` toggles whether a block reaches Azure (log-only when off).
 
 Self-lockout safeguards — an IP is NEVER auto-blocked when it is:
-  * on the Azure NSG allow-list (``global_config["azure_nsg"]["entries"]``),
-  * a recent successful-login IP (within ``success_grace_s``), or
-  * inside a CIDR on the manual never-block list.
+  * on the shared trusted / allow-list (``global_config["azure_nsg"]["entries"]``),
+  * a recent successful-login IP (within ``success_grace_s``).
+
+SHARED TRUSTED LIST — the "never auto-block" list and the Azure NSG allow-list
+are ONE list, canonically ``global_config["azure_nsg"]["entries"]`` (shape
+``[{ip, description}]``). An entry is BOTH never-auto-blocked AND allowed through
+the NSG. The list itself is never gated on ``azure_nsg.enabled`` (never-block
+works even when Azure is unused); the allow-rule reconcile only reaches ARM when
+azure_nsg is enabled + configured. The legacy private ``_never`` list is merged
+into this shared list once on load (see ``_migrate_never_to_entries``) and then
+left empty. Both the Azure NSG tile and the Security never-block tile edit this
+same list.
 
 NSG shape: blocks are reconciled — one prefix per IP — onto a dedicated DENY
-rule (``block_rule_name``, higher priority than the allow rule). Per-IP "why"
-descriptions are kept hub-local here (Azure rules carry one description each) and
-surfaced in the WebUI Security view. A leaf-ish module: stdlib + azure_nsg.
+rule (``block_rule_name``, LOWER priority number than the allow rule so Deny is
+evaluated first). Per-IP "why" descriptions are kept hub-local here (Azure rules
+carry one description each) and surfaced in the WebUI Security view. A leaf-ish
+module: stdlib + azure_nsg.
 """
 import asyncio
 import ipaddress
@@ -53,6 +63,23 @@ def _now() -> float:
     return time.time()
 
 
+def priority_conflict_warning(block_priority: Any, allow_priority: Any) -> str:
+    """Return a non-empty warning when the deny (block) rule's priority is NOT
+    numerically lower than the allow rule's — Azure evaluates lower priority
+    numbers first, so the deny rule must win. Pure + non-fatal (advisory only).
+    Returns "" when the ordering is correct or either value is unparseable."""
+    try:
+        bp = int(block_priority)
+        ap = int(allow_priority)
+    except (TypeError, ValueError):
+        return ""
+    if bp >= ap:
+        return (f"Deny (block) priority {bp} is not lower than the allow priority "
+                f"{ap}. Azure evaluates lower numbers first, so Deny may not win — "
+                f"set the deny priority below {ap}.")
+    return ""
+
+
 class ThreatMonitor:
     def __init__(self, hub) -> None:
         self.hub = hub
@@ -61,10 +88,11 @@ class ThreatMonitor:
         self._blocks: Dict[str, Dict[str, Any]] = {}      # ip -> block record
         self._recent_success: Dict[str, float] = {}       # ip -> last-success ts
         self._offense: Dict[str, int] = {}                # ip -> lifetime block count
-        self._never: List[str] = []                       # manual never-block CIDRs
+        self._never: List[str] = []                       # legacy; merged into shared list on load
         self._cfg: Dict[str, Any] = dict(_DEFAULTS)
         self._nsg_dirty = False
         self._load()
+        self._migrate_never_to_entries()  # one-time: fold legacy _never into shared entries
 
     # ── config ───────────────────────────────────────────────────────────────
     def config(self) -> Dict[str, Any]:
@@ -85,7 +113,10 @@ class ThreatMonitor:
                     self._cfg[k] = str(v)
         self._cfg["threshold"] = max(1, int(self._cfg["threshold"]))
         self._persist()
-        self._nsg_dirty = True  # auto_block toggle may have changed
+        # A block_rule_name / block_priority / auto_block change must be re-pushed
+        # so the ARM deny rule is (re)created with the new name/priority.
+        self._nsg_dirty = True
+        self._schedule_reconcile()
         return self.config()
 
     # ── ingest ─────────────────────────────────────────────────────────────────
@@ -163,30 +194,114 @@ class ThreatMonitor:
             self._schedule_reconcile()
         return {"status": "SUCCESS", "removed": bool(existed)}
 
-    # ── never-block list ─────────────────────────────────────────────────────
-    def add_never(self, cidr: str) -> Dict[str, Any]:
-        c = (cidr or "").strip()
+    # ── shared trusted / allow list (== global_config["azure_nsg"]["entries"]) ──
+    def _shared_entries(self) -> List[Dict[str, str]]:
+        """The canonical shared list, normalized ([{ip: CIDR, description}])."""
         try:
-            ipaddress.ip_network(c, strict=False)
-        except ValueError:
-            return {"status": "ERROR", "message": f"invalid IP/CIDR: {cidr}"}
-        if c not in self._never:
-            self._never.append(c)
-            # An IP that becomes exempt is immediately unblocked.
-            for ip in list(self._blocks):
-                if self._in_cidr(ip, [c]):
-                    self._blocks.pop(ip, None)
-                    self._nsg_dirty = True
+            import azure_nsg as _nsg
+            gc = self.hub.state.system_state.get("global_config", {}) or {}
+            entries = (gc.get("azure_nsg", {}) or {}).get("entries") or []
+            return _nsg.normalize_entries(entries)
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _save_shared_entries(self, entries: List[Dict[str, str]]) -> None:
+        gc = self.hub.state.system_state.get("global_config", {})
+        az = dict(gc.get("azure_nsg", {}) or {})
+        az["entries"] = entries
+        gc["azure_nsg"] = az
+        self.hub.state.system_state["global_config"] = gc
+        try:
+            self.hub.state._mark_dirty()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _migrate_never_to_entries(self) -> None:
+        """One-time: merge any legacy private ``_never`` CIDRs into the shared
+        ``azure_nsg.entries`` (union, dedup by CIDR, normalized; new ones tagged
+        'migrated from never-block' — existing descriptions preserved), then empty
+        ``_never`` so the shared list is the sole source of truth going forward."""
+        if not self._never:
+            return
+        try:
+            import azure_nsg as _nsg
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            entries = _nsg.normalize_entries(self._shared_entries())
+            have = {e["ip"] for e in entries}
+            added = 0
+            for c in self._never:
+                try:
+                    norm = _nsg.normalize_entries(
+                        [{"ip": c, "description": "migrated from never-block"}])
+                except Exception:  # noqa: BLE001
+                    continue
+                if norm and norm[0]["ip"] not in have:
+                    entries.append(norm[0])
+                    have.add(norm[0]["ip"])
+                    added += 1
+            self._save_shared_entries(entries)
+            self._never = []
             self._persist()
-            self._schedule_reconcile()
-        return {"status": "SUCCESS", "never_block": list(self._never)}
+            logger.info("threat_monitor: migrated legacy never-block list into "
+                        "shared azure_nsg.entries (%d new, %d total)", added, len(entries))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("threat_monitor never-block migration failed: %s", e)
+
+    def add_trusted(self, ip: str, description: str = "") -> Dict[str, Any]:
+        """Add an IP/CIDR to the shared trusted list (never-block + NSG allow).
+        Immediately unblocks any now-exempt IP and marks the deny/allow rules for
+        reconcile. Callers should ``await reconcile_allow()`` to push to Azure."""
+        raw = (ip or "").strip()
+        if not raw:
+            return {"status": "ERROR", "message": "ip required"}
+        try:
+            import azure_nsg as _nsg
+            entries = _nsg.normalize_entries(
+                self._shared_entries() + [{"ip": raw, "description": description or ""}])
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": str(e)}
+        self._save_shared_entries(entries)
+        # An IP that becomes exempt is immediately unblocked.
+        ips = [e["ip"] for e in entries]
+        for bip in list(self._blocks):
+            if self._in_cidr(bip, ips):
+                self._blocks.pop(bip, None)
+                self._nsg_dirty = True
+        self._persist()
+        self._schedule_reconcile()  # deny rule (any unblocked IPs removed)
+        return {"status": "SUCCESS", "entries": entries}
+
+    def remove_trusted(self, ip: str) -> Dict[str, Any]:
+        """Remove an IP/CIDR from the shared trusted list. Callers should
+        ``await reconcile_allow()`` to close the NSG hole in Azure."""
+        raw = (ip or "").strip()
+        try:
+            import azure_nsg as _nsg
+            target = _nsg.normalize_entries([{"ip": raw}])
+        except Exception:  # noqa: BLE001
+            target = []
+        tip = target[0]["ip"] if target else raw
+        entries = [e for e in self._shared_entries() if e["ip"] != tip]
+        self._save_shared_entries(entries)
+        self._persist()
+        return {"status": "SUCCESS", "entries": entries}
+
+    # Legacy aliases (private ``_never`` is retired; these now edit the shared list).
+    def add_never(self, cidr: str) -> Dict[str, Any]:
+        return self.add_trusted(cidr)
 
     def remove_never(self, cidr: str) -> Dict[str, Any]:
-        c = (cidr or "").strip()
-        if c in self._never:
-            self._never.remove(c)
-            self._persist()
-        return {"status": "SUCCESS", "never_block": list(self._never)}
+        return self.remove_trusted(cidr)
+
+    def allow_priority(self) -> int:
+        """The Azure NSG allow rule's priority (for Deny<Allow ordering checks)."""
+        try:
+            gc = self.hub.state.system_state.get("global_config", {}) or {}
+            return int((gc.get("azure_nsg", {}) or {}).get("priority") or 300)
+        except Exception:  # noqa: BLE001
+            return 300
 
     # ── exemptions ─────────────────────────────────────────────────────────────
     def _is_exempt(self, ip: str) -> bool:
@@ -194,21 +309,13 @@ class ThreatMonitor:
         last = self._recent_success.get(ip)
         if last and last > _now() - self._cfg["success_grace_s"]:
             return True
-        # (2) manual never-block CIDRs
-        if self._in_cidr(ip, self._never):
-            return True
-        # (3) Azure NSG allow-list IPs (trusted sources)
+        # (2) shared trusted / Azure NSG allow-list (the sole never-block source)
         if self._in_cidr(ip, self._allowlist_ips()):
             return True
         return False
 
     def _allowlist_ips(self) -> List[str]:
-        try:
-            gc = self.hub.state.system_state.get("global_config", {}) or {}
-            entries = (gc.get("azure_nsg", {}) or {}).get("entries", []) or []
-            return [e.get("ip", "") for e in entries if isinstance(e, dict) and e.get("ip")]
-        except Exception:  # noqa: BLE001
-            return []
+        return [e["ip"] for e in self._shared_entries() if e.get("ip")]
 
     @staticmethod
     def _in_cidr(ip: str, cidrs: List[str]) -> bool:
@@ -255,6 +362,39 @@ class ThreatMonitor:
         except RuntimeError:
             pass  # no loop (e.g. under sync test) — the sweep loop will catch up
 
+    def _schedule_allow_reconcile(self) -> None:
+        try:
+            asyncio.get_running_loop().create_task(self.reconcile_allow())
+        except RuntimeError:
+            pass  # no loop (e.g. under sync test)
+
+    async def reconcile_allow(self) -> Dict[str, Any]:
+        """Push the shared trusted list onto the Azure NSG ALLOW rule (the same
+        rule the Azure NSG tile manages). No-op unless azure_nsg is enabled +
+        configured — the trusted list itself is never gated on ``enabled`` (so
+        never-block always works), only the reach-to-ARM step is."""
+        try:
+            import azure_nsg as _nsg
+            from security.oidc import get_oidc_config
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"nsg import: {e}"}
+        gc = self.hub.state.system_state.get("global_config", {}) or {}
+        azcfg = dict(gc.get("azure_nsg", {}) or {})
+        if not azcfg.get("enabled"):
+            return {"status": "SKIPPED", "message": "Azure NSG disabled — list saved, not applied"}
+        if not all(azcfg.get(k) for k in ("subscription_id", "resource_group", "nsg_name")):
+            return {"status": "SKIPPED", "message": "Azure NSG not configured"}
+        ips = _nsg.entries_to_ips(azcfg.get("entries") or [])
+        try:
+            res = await _nsg.reconcile_allowlist(get_oidc_config(self.hub), azcfg, ips)
+            sec_log.info("THREAT NSG allow-rule reconciled: %d IP(s) on %s/%s",
+                         len(ips), azcfg.get("nsg_name"),
+                         azcfg.get("rule_name") or "lm-allowlist")
+            return {"status": "SUCCESS", "count": len(ips), **res}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("threat allow-rule reconcile failed: %s", e)
+            return {"status": "ERROR", "message": str(e)}
+
     async def reconcile_nsg(self) -> Dict[str, Any]:
         """Push the current blocked-IP set onto the Azure NSG deny rule (one
         prefix per IP). No-op unless auto_block is ON and azure_nsg is configured.
@@ -291,15 +431,28 @@ class ThreatMonitor:
     # ── snapshot for the WebUI ─────────────────────────────────────────────────
     def snapshot(self) -> Dict[str, Any]:
         blocks = list(self._blocks.values())
+        trusted = self._shared_entries()  # shared list [{ip, description}]
+        gc = self.hub.state.system_state.get("global_config", {}) or {}
+        az = gc.get("azure_nsg", {}) or {}
+        allow_rule = {
+            "name": az.get("rule_name") or "lm-allowlist",
+            "priority": self.allow_priority(),
+            "enabled": bool(az.get("enabled")),
+        }
         return {
             "config": self.config(),
             "permanent": [b for b in blocks if b.get("permanent")],
             "temporary": [b for b in blocks if not b.get("permanent")],
             "manual": [b for b in blocks if str(b.get("source", "")).startswith("manual")],
-            "never_block": list(self._never),
+            # Shared trusted list: full entries (with descriptions) + a bare-IP
+            # list for back-compat. Both editors (Azure NSG tile / Security tile)
+            # read/write the SAME underlying azure_nsg.entries.
+            "trusted": trusted,
+            "never_block": [e["ip"] for e in trusted],
+            "allow_rule": allow_rule,
             "events": list(self._events)[:200],
             "counts": {"blocked": len(blocks), "permanent": sum(1 for b in blocks if b.get("permanent")),
-                       "never": len(self._never), "events": len(self._events)},
+                       "never": len(trusted), "events": len(self._events)},
         }
 
     # ── persistence ─────────────────────────────────────────────────────────────
