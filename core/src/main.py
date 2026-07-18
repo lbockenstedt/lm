@@ -937,6 +937,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._sim_cache_path = os.path.join(self.state.data_dir, "simulations_cache.json")
         self._sim_cache_dirty = False
         self._load_simulations_cache()
+        # B3: one-shot persisted-blob guid migration. simulations_cache +
+        # mailbox warm-start + spoke_last_seen are guid-keyed at read sites
+        # but were RAW-keyed in the pre-guid era; fold OFFLINE spokes' entries
+        # into the guid key space once at boot (sentinel-guarded, idempotent).
+        # Runs after install_uuid_index rebuild (559) + mailbox load (531) +
+        # simulations_cache load (above) so all three blobs are warm.
+        self._migrate_persisted_blobs_to_guid()
         # Simulations module: tenant-scoped browser broadcast + slim cs-config store.
         self.simulations_broadcaster = SimulationsBroadcaster()
         self.simulations_store = SimulationsStore(self.state.data_dir)
@@ -3075,7 +3082,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.state.register_module(pk, approved=False)
         await self.state.save_state_now()
         self.key_manager.delete_spoke_key(pk)
-        await self.mailbox.clear_spoke(spoke_id)
+        # Mailbox is guid-keyed after arm — clear by pk so a revoked armed
+        # spoke's stranded queue/pending-ack (under its guid) is actually dropped.
+        await self.mailbox.clear_spoke(pk)
         self.record_spoke_event(spoke_id, "revoked",
                                 f"admin revoke; was_connected={was_connected}")
         logger.warning(f"Spoke {spoke_id} revoked by admin "
@@ -4267,8 +4276,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 except Exception as e:
                     logger.error(f"Failed to request version from {spoke_id}: {e}")
 
-            # 2. Flush Mailbox
-            await self.mailbox.flush_mailbox(spoke_id, self.send_to_spoke)
+            # 2. Flush Mailbox — keyed by pk (guid once armed): _arm_guid_primary
+            # in _reconcile_spoke_identity re-keyed the offline queue name→guid, so
+            # flush must read the guid-keyed queue or a reconnecting spoke's
+            # pending messages would be stranded under the stale name.
+            await self.mailbox.flush_mailbox(pk, self.send_to_spoke)
 
             # 3. Message Loop
             async for message_json in websocket:

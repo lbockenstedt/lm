@@ -488,18 +488,21 @@ class Mailbox:
             await self._asave()
         return dropped
 
-    async def rename_spoke(self, old_id: str, new_id: str) -> None:
-        """Re-key a spoke's mailbox state from ``old_id`` → ``new_id``.
+    def rename_spoke_inplace(self, old_id: str, new_id: str) -> bool:
+        """Sync in-memory re-key of a spoke's mailbox state ``old_id`` → ``new_id``.
 
-        The guid-primary migration counterpart to
-        KeyManager.rename_spoke_keys / StateManager.rename_module: when a
-        spoke is lazily re-keyed to its guid, its queued + pending-ack
-        messages + per-spoke cooldown / last-ack tracking must move with it
-        so delivery survives the rename. Idempotent (no-op if
+        The guid-primary arm (``_arm_guid_primary``) is called from the sync
+        ``_reconcile_spoke_identity`` on the connect path, so it cannot await
+        the async ``rename_spoke``. This is the sync core: it mutates
+        ``spoke_queues`` / ``_last_ack_ts`` / ``_spoke_update_delivered`` /
+        ``pending_ack`` destination_ids in place and returns whether anything
+        moved. Persistence is eventual — the next mailbox ``_asave`` (retry
+        loop / enqueue / clear) flushes it, and the one-shot startup
+        migration is the reboot backstop. Idempotent (no-op if
         ``old_id == new_id`` or ``old_id`` has no state). Best-effort,
         non-raising."""
         if old_id == new_id:
-            return
+            return False
         moved = False
         # Offline queue. Re-point each queued message's destination_id too so
         # a later flush delivers to the new id even before send_to_spoke
@@ -533,6 +536,20 @@ class Mailbox:
                 moved = True
         if moved:
             logger.info(f"Re-keyed mailbox for spoke {old_id} → {new_id}")
+        return moved
+
+    async def rename_spoke(self, old_id: str, new_id: str) -> None:
+        """Re-key a spoke's mailbox state from ``old_id`` → ``new_id``.
+
+        The guid-primary migration counterpart to
+        KeyManager.rename_spoke_keys / StateManager.rename_module: when a
+        spoke is lazily re-keyed to its guid, its queued + pending-ack
+        messages + per-spoke cooldown / last-ack tracking must move with it
+        so delivery survives the rename. Idempotent (no-op if
+        ``old_id == new_id`` or ``old_id`` has no state). Best-effort,
+        non-raising. The sync core is ``rename_spoke_inplace``; this wrapper
+        persists via ``_asave`` (call from async contexts)."""
+        if self.rename_spoke_inplace(old_id, new_id):
             await self._asave()
 
     def get_all_pending(self) -> list:

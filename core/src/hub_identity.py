@@ -36,6 +36,71 @@ class HubIdentityMixin:
                 idx[iu] = aid
         self.install_uuid_index = idx
 
+    # Sentinel in system_state marking that the one-shot persisted-blob
+    # guid migration has already run (see ``_migrate_persisted_blobs_to_guid``).
+    _GUID_BLOB_MIGRATION_SENTINEL = "guid_blob_migration_done"
+
+    def _migrate_persisted_blobs_to_guid(self) -> None:
+        """One-shot boot migration: re-key the persisted guid-keyed-at-read
+        blobs (``simulations_cache`` + mailbox ``spoke_queues``/``pending_ack``
+        + ``spoke_last_seen``) from raw connect-id → guid for OFFLINE spokes.
+
+        These blobs are read through ``_primary_key`` (the Simulations API,
+        ``clear_spoke``, ``flush_mailbox`` all resolve name→guid), but in the
+        pre-guid era they were written RAW, so a spoke that is OFFLINE at boot
+        stays RAW-keyed until it reconnects and ``_arm_guid_primary`` fires —
+        meaning its cached simulations payload / queued messages / last-seen
+        would be missed on every read until then. This folds them into the
+        guid key space once, at boot, pivoting on ``module_metadata.install_uuid``
+        (which is RAW-keyed at boot for offline spokes, with the guid as a
+        value). Idempotent (re-keying a guid key is a no-op); sentinel-guarded
+        so it runs once. Best-effort, non-raising — the lazy arm + reconcile
+        remain authoritative per-spoke.
+
+        Persistence is eventual: ``state._mark_dirty`` (sentinel +
+        ``spoke_last_seen``), the simulations-cache debounced flush
+        (``_sim_cache_dirty``), and the mailbox retry-loop ``_asave`` flush the
+        re-keyed blobs. A crash before the next save just re-runs this (no-op
+        for already-guid keys).
+        """
+        ss = self.state.system_state
+        if ss.get(self._GUID_BLOB_MIGRATION_SENTINEL):
+            return
+        md = ss.get("module_metadata", {})
+        sls = ss.get("spoke_last_seen", {})
+        sc = getattr(self, "simulations_cache", None)
+        mb = getattr(self, "mailbox", None)
+        moved = 0
+        for raw_sid, meta in list(md.items()):
+            guid = (meta or {}).get("install_uuid")
+            if not guid or guid == raw_sid:
+                continue
+            if isinstance(sc, dict) and raw_sid in sc:
+                sc[guid] = sc.pop(raw_sid)
+                moved += 1
+            if mb is not None:
+                try:
+                    if mb.rename_spoke_inplace(raw_sid, guid):
+                        moved += 1
+                except Exception:  # noqa: BLE001
+                    logger.warning("[identity] boot mailbox re-key %s→%s failed",
+                                   raw_sid, guid)
+            if raw_sid in sls:
+                sls[guid] = sls.pop(raw_sid)
+                moved += 1
+        ss[self._GUID_BLOB_MIGRATION_SENTINEL] = True
+        self.state._mark_dirty()
+        # Nudge the debounced simulations-cache flush so the re-keyed payload
+        # persists without waiting for the next spoke push.
+        if moved and isinstance(sc, dict) and hasattr(self, "_sim_cache_dirty"):
+            try:
+                self._sim_cache_dirty = True
+            except Exception:  # noqa: BLE001
+                pass
+        if moved:
+            logger.info("[identity] boot guid-blob migration re-keyed %d entry(ies)",
+                        moved)
+
     def _primary_key(self, spoke_id: str) -> str:
         """The key this spoke's routing/approval/crypto/mailbox state lives
         under.
@@ -310,6 +375,25 @@ class HubIdentityMixin:
         sls = self.state.system_state.get("spoke_last_seen", {})
         if spoke_id in sls:
             sls[install_uuid] = sls.pop(spoke_id)
+        # B3: mailbox + simulations_cache are guid-keyed at read sites
+        # (clear_spoke / flush_mailbox / the Simulations read API all resolve
+        # via _primary_key), so the arm must re-key their name-keyed entries to
+        # guid or a reconnecting spoke's offline-queued messages + cached
+        # simulations payload land under the stale name and are missed.
+        # Mailbox re-key is sync in-place (the arm is sync — called from
+        # _reconcile_spoke_identity on the connect path); persistence is
+        # eventual (next _asave / retry loop) with the one-shot startup
+        # migration as the reboot backstop. ``mailbox`` is guarded so the
+        # unit-test arm stubs (no mailbox) still work.
+        mb = getattr(self, "mailbox", None)
+        if mb is not None:
+            try:
+                mb.rename_spoke_inplace(spoke_id, install_uuid)
+            except Exception:  # noqa: BLE001
+                logger.warning("[identity] mailbox re-key %s→%s failed", spoke_id, install_uuid)
+        sim_cache = getattr(self, "simulations_cache", None)
+        if isinstance(sim_cache, dict) and spoke_id in sim_cache:
+            sim_cache[install_uuid] = sim_cache.pop(spoke_id)
         self.state._mark_dirty()
         logger.info("[identity] armed guid-primary %s → %s", spoke_id, install_uuid)
 
