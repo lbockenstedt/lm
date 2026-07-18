@@ -1146,7 +1146,7 @@ else:
     print(f"  '{first_uid}' already correct — no changes needed")
 PYEOF
 
-# UNIFIED AGENT-SPOKE MODEL: this all-in-one box runs ONE generic agent that
+# UNIFIED AGENT-SPOKE MODEL: this all-in-one box runs ONE agent that
 # hosts every module as a ROLE (sub-spoke {agent}-{role}), instead of ten
 # dedicated spokes. The hub is co-located here and owns :443, so the agent
 # installs with --loopback: the pxmx role's agent-host listener binds

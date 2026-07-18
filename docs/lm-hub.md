@@ -8,7 +8,7 @@ The hub is the central node — not a spoke, no `module_type`. It owns mutual-au
 
 ## What it does
 
-The hub is the single brain of the lab, and it is also the web app you log into — the WebUI is served directly by the hub process, not a separate server. Every spoke (opnsense, netbox, pxmx, dns, dhcp, cppm, ldap, cs, le, nw) and every generic agent connects outward to the hub over an authenticated WebSocket; the hub is the only thing any of them talk to (spokes never talk to each other directly).
+The hub is the single brain of the lab, and it is also the web app you log into — the WebUI is served directly by the hub process, not a separate server. Every spoke (opnsense, netbox, pxmx, dns, dhcp, cppm, ldap, cs, le, nw) and every agent connects outward to the hub over an authenticated WebSocket; the hub is the only thing any of them talk to (spokes never talk to each other directly).
 
 It owns the state that ties the lab together — which spokes/agents exist and whether they're approved, per-tenant config, encrypted secrets and signing keys, cert distribution — and keeps that state consistent with reality on its own via a set of always-running background sync loops (NetBox↔CPPM, hypervisor↔NetBox, firewall/network discovery, staleness sweeps, and more). If a WebUI page shows spoke/device status, lets you approve or configure a module, or triggers a "Sync now", it's this hub doing the work underneath.
 
@@ -42,7 +42,7 @@ It owns the state that ties the lab together — which spokes/agents exist and w
 
 ## Install flags
 
-`install_all.sh`: `--reinstall`, `--reset-secrets`, `--reset-users`, `--exclude <csv>`, `--tls-verify` (optional `--tls-ca-cert <path>`; defaults CA to the hub's own `$TLS_CERT`). `install_menu.sh`: top menu `1) Hub` (spoke checklist → `install_all.sh --exclude …`) or `2) Generic agent` (→ `agent/install_agent.sh`). Env `LM_BRANCH` (default `main`).
+`install_all.sh`: `--reinstall`, `--reset-secrets`, `--reset-users`, `--exclude <csv>`, `--tls-verify` (optional `--tls-ca-cert <path>`; defaults CA to the hub's own `$TLS_CERT`). `install_menu.sh`: top menu `1) Hub` (spoke checklist → `install_all.sh --exclude …`) or `2) Agent` (→ `agent/install_agent.sh`). Env `LM_BRANCH` (default `main`).
 
 ## Mutual TLS (mTLS)
 
@@ -93,7 +93,7 @@ mTLS on the hub↔spoke↔agent legs is **opportunistic and permissive**: when e
 
 ## How it works
 
-**The connection handshake.** A spoke/agent dials `wss://<hub>:443/ws/spoke` and sends an auth frame: `spoke_id`, `secret`, `module_type`, plus optional `onboarding_psk` + `tenant_id_hint` (zero-touch PSK self-provisioning), `install_uuid` + `hostname` (identity tracking that survives a rename or clone), and — for a role sub-spoke of a multi-role generic agent — `parent_spoke_id`. The hub validates the secret via `KeyManager`, then proves its OWN identity back: it signs a random challenge and replies `{"status": "HUB_VERIFIED", "challenge": …, "signature": …}`; the spoke must verify that signature and answer `HUB_OK` within 2 seconds or the hub closes the socket. This is genuine mutual auth, not one-directional trust — which is why a hub restart with rotated/changed secret material can make an existing spoke reject the hub's identity (logged as `mutual_auth_failed`, "stale HUB_SECRET after hub restart").
+**The connection handshake.** A spoke/agent dials `wss://<hub>:443/ws/spoke` and sends an auth frame: `spoke_id`, `secret`, `module_type`, plus optional `onboarding_psk` + `tenant_id_hint` (zero-touch PSK self-provisioning), `install_uuid` + `hostname` (identity tracking that survives a rename or clone), and — for a role sub-spoke of a multi-role agent — `parent_spoke_id`. The hub validates the secret via `KeyManager`, then proves its OWN identity back: it signs a random challenge and replies `{"status": "HUB_VERIFIED", "challenge": …, "signature": …}`; the spoke must verify that signature and answer `HUB_OK` within 2 seconds or the hub closes the socket. This is genuine mutual auth, not one-directional trust — which is why a hub restart with rotated/changed secret material can make an existing spoke reject the hub's identity (logged as `mutual_auth_failed`, "stale HUB_SECRET after hub restart").
 
 A spoke that authenticates but isn't yet approved stays connected in a **pending** state — it can still send a heartbeat, but every other command is refused — until one of three things happens: an admin approves it, it self-provisions with a valid onboarding PSK + tenant hint, or (multi-role agents) its base agent parent is already approved, in which case it auto-approves through the parent.
 

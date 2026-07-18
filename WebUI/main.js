@@ -10019,7 +10019,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     // skips (querySelector returns null) if it has since dropped off.
 
     if (all.length === 0) {
-        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected yet. Install the generic agent on a node (it appears here to be approved, then load a role) or install the agent on a Proxmox node to begin.</p>`;
+        agentsWrap.innerHTML = `<p class="py-6 text-center text-slate-400 italic text-xs">No agents connected yet. Install the agent on a node (it appears here to be approved, then load a role) or install the agent on a Proxmox node to begin.</p>`;
     } else {
         agentsWrap.innerHTML = `<div class="space-y-1.5">${all.map(a => {
             const aid = a.agent_id;
@@ -10031,7 +10031,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             // only once they have a role loaded — idle ones sit in the Generic
             // Agents tile) vs Proxmox node agents relayed through the pxmx
             // spoke. The Module badge names what each one runs.
-            const typeLabel = isSpokeKind ? 'Generic Agent' : 'PXMX AGENT';
+            const typeLabel = isSpokeKind ? 'Agent' : 'PXMX AGENT';
             const moduleLabelCell = a._module || '—';
             const statusLabel = isPending ? 'Pending' : (isSpokeKind ? 'Approved' : 'Connected');
             const eAid = aid.replace(/'/g, "\\'");
@@ -12269,7 +12269,7 @@ async function showLoadRoleModal(spokeId) {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <p class="text-xs text-slate-500">A generic agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">${spokeId}-&lt;role&gt;</code>) that auto-approves via this agent.</p>
+                <p class="text-xs text-slate-500">An agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">${spokeId}-&lt;role&gt;</code>) that auto-approves via this agent.</p>
                 <div id="role-list" class="grid grid-cols-3 gap-2 max-h-52 overflow-y-auto pr-1">
                     <p class="text-xs text-slate-400 italic col-span-2">Loading roles…</p>
                 </div>
@@ -12337,7 +12337,7 @@ function updateRoleDesc(roleId) {
     const note = document.getElementById('role-note');
     if (note) {
         if (r?.deploy) {
-            note.innerHTML = `The agent runs the role's install script in the background and stays online as a generic agent. The deployed service installs as a systemd unit and connects to the Hub as its own agent. This can take a few minutes; watch <strong>Setup → Spokes & Agents</strong> for the new agent to appear.`;
+            note.innerHTML = `The agent runs the role's install script in the background and stays online as an agent. The deployed service installs as a systemd unit and connects to the Hub as its own agent. This can take a few minutes; watch <strong>Setup → Spokes & Agents</strong> for the new agent to appear.`;
         } else {
             note.textContent = `The agent installs required system packages (e.g. unbound, kea, certbot) and hosts the role as a new sub-spoke, auto-approved via this agent. This may take 30–60 seconds; the new spoke appears in Spokes & Agents as Connected.`;
         }
@@ -12457,7 +12457,7 @@ function showDeployAgentInfo() {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200">
             <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-[#263040]">Deploy Generic Agent</h3>
+                <h3 class="text-lg font-bold text-[#263040]">Deploy Agent</h3>
                 <button onclick="document.getElementById('deploy-agent-modal').remove()" class="text-slate-400 hover:text-slate-600">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
@@ -13852,7 +13852,7 @@ function _renderConsolePorts(el, data) {
     const consoles = data.consoles || [];
     const admin = isAdmin();
     if (consoles.length === 0) {
-        el.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No Console agents connected. Load the <b>Console</b> role on a generic agent (Setup → Spokes &amp; Agents → Load Role).</div>`;
+        el.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No Console agents connected. Load the <b>Console</b> role on an agent (Setup → Spokes &amp; Agents → Load Role).</div>`;
         return;
     }
     if (ports.length === 0) {

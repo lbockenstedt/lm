@@ -4,7 +4,7 @@ This is the shared backbone page for the Lab Manager (LM) system. It describes t
 
 ## What LM is
 
-LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub** (the `lm` repo) is the control plane + WebUI + state store. It talks to many **spokes**, each wrapping one external system (a Proxmox cluster, an OPNsense firewall, NetBox IPAM, ClearPass NAC, an LDAP directory, Kea DHCP, Unbound DNS, a fleet of switches, a certbot ACME producer, a client-simulation engine). A few spokes **bridge** further out to **agents** that run on remote hosts (pxmx per-host agents on Proxmox nodes, the generic agent-spoke that hosts module roles, bugfixer as an agent-type client).
+LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub** (the `lm` repo) is the control plane + WebUI + state store. It talks to many **spokes**, each wrapping one external system (a Proxmox cluster, an OPNsense firewall, NetBox IPAM, ClearPass NAC, an LDAP directory, Kea DHCP, Unbound DNS, a fleet of switches, a certbot ACME producer, a client-simulation engine). A few spokes **bridge** further out to **agents** that run on remote hosts (pxmx per-host agents on Proxmox nodes, the agent-spoke that hosts module roles, bugfixer as an agent-type client).
 
 ```
                         ┌──────────────┐
@@ -19,7 +19,7 @@ LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub**
           │  relay-only for Proxmox                       
           ▼                                              
    pxmx host agents  (wss to pxmx spoke :443 standalone [DEFAULT, agent→spoke→hub]; or hub /ws/agent → spoke loopback :8443 [all-in-one, --loopback/install_all only])
-   generic agent-spoke  (wss to hub /ws/spoke; hosts module roles as sub-spokes)
+   agent-spoke  (wss to hub /ws/spoke; hosts module roles as sub-spokes)
    bugfixer  (agent-type WS client of the hub, not a spoke)
 ```
 
@@ -29,7 +29,7 @@ LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub**
 - **Spokes** — subclasses of `core/src/messaging/control_plane.py::BaseControlPlane` (and the spoke logic class subclasses `core/src/base_spoke.py::BaseSpoke`). One spoke instance per module_type: `hypervisor` (pxmx), `simulation` (cs), `ipam` (netbox), `firewall` (opnsense), `nac` (cppm), `directory` (ldap), `dns`, `dhcp`, `nw`, `certificates` (le). Each spoke dials the hub over `/ws/spoke`.
 - **Agents** — three flavors:
   - **pxmx per-host agents** run on Proxmox nodes (`pxmx/agent/src/agent.py`). They dial the **pxmx spoke's** agent listener (not the hub directly) over wss; the pxmx spoke relays their frames up to the hub wrapped in `AGENT_RELAY_UP`. This is the path for VM lifecycle, VNC, USB auto-provisioning, and all `CS_*` sim traffic.
-  - **generic agent-spoke** (`lm/agent/src/agent_spoke.py::GenericAgent`) dials the hub `/ws/spoke`. It is the "call home, then morph into a role later" shape — one agent per node hosting module roles as sub-spokes (see the unified-agent deep dive below). (The legacy `generic_agent/` leaf was removed — commit `3ddda2c`.)
+  - **agent-spoke** (`lm/agent/src/agent_spoke.py::GenericAgent`) dials the hub `/ws/spoke`. It is the "call home, then morph into a role later" shape — one agent per node hosting module roles as sub-spokes (see the unified-agent deep dive below). (The legacy `generic_agent/` leaf was removed — commit `3ddda2c`.)
   - **bugfixer** is an **agent-type WS client** of the hub (`module_type="agent"`), not a spoke — it consumes hub logs and can trigger spoke self-updates; it does not register a spoke module.
 - **Bridges:**
   - pxmx spoke bridges hub ↔ pxmx-agent (`pxmx/src/control_plane.py` `run_agent_server`).
@@ -63,7 +63,7 @@ LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub**
 
 ## TLS trust model
 
-- **Verify-OFF by default** — `ssl._create_unverified_context()` (`CERT_NONE`): traffic is encrypted but the self-signed hub cert is **not** authenticated (on-path MITM-able; lab-acceptable). This is the default for every spoke/agent client (`BaseControlPlane._client_ssl_ctx`, mirrored in the pxmx agent and the generic agent-spoke).
+- **Verify-OFF by default** — `ssl._create_unverified_context()` (`CERT_NONE`): traffic is encrypted but the self-signed hub cert is **not** authenticated (on-path MITM-able; lab-acceptable). This is the default for every spoke/agent client (`BaseControlPlane._client_ssl_ctx`, mirrored in the pxmx agent and the agent-spoke).
 - **Opt-in verification** is an **install flag**, not a hand-edited env: `--tls-verify` (+ optional `--tls-ca-cert <path>`) on `install_all.sh`, `install_pxmx.sh`, `install_cs.sh`, `agent/install_agent.sh` (+ an `install_menu.sh` prompt). It sets `LM_HUB_TLS_VERIFY=1` + `LM_HUB_CA_CERT=<path>` in the spoke/agent `.env`. Re-install toggling the flag `sed`-updates the `.env` (no stale setting).
   - `install_all.sh` defaults the CA to the hub's own generated cert (`$BASE_DIR/certs/hub.crt`) when co-located.
   - Standalone installers (pxmx/cs) **require** `--tls-ca-cert` (no local hub cert to default to).
@@ -121,7 +121,7 @@ LM is a zero-trust hub/spoke/agent management mesh for a lab/DC lab. One **hub**
 | `certificates` | `LESpoke` | `le` | — |
 | `agent` | — | `bugfixer` | bugfixer (WS client of hub) |
 
-The agent-spoke role loader (`lm/agent/src/agent_spoke.py::_ROLE_MAP`) maps a `--role` to the spoke class + repo URL so a single generic agent box can morph into any of these on `LOAD_ROLE`.
+The agent-spoke role loader (`lm/agent/src/agent_spoke.py::_ROLE_MAP`) maps a `--role` to the spoke class + repo URL so a single agent box can morph into any of these on `LOAD_ROLE`.
 
 ## The unified agent + roles model (deep dive)
 
@@ -229,9 +229,9 @@ See [pxmx.md](pxmx.md) for the agent/VM lifecycle and [cs.md](cs.md) for the Sim
 **Two shapes, one menu.** `install_menu.sh` is the single entry point and offers exactly two choices:
 
 1. **Hub** — this box becomes the LM hub (+ WebUI, always), optionally co-locating spokes. It runs `install_all.sh`.
-2. **Generic agent** — a role-capable node that calls home to an existing hub and morphs into roles later. It runs `agent/install_agent.sh`.
+2. **Agent** — a role-capable node that calls home to an existing hub and morphs into roles later. It runs `agent/install_agent.sh`.
 
-**The hub install (`install_all.sh`).** Brings up the hub + WebUI (always), then stands up the co-located modules as **one unified generic agent** (`agent-<hostname>`, installed with `--loopback` because the hub owns `:443` on the same box). The spoke checklist in the menu maps to `--exclude <csv>`: any module you *didn't* pick is excluded, and the remaining ones become that agent's roles. So even the all-in-one hub follows the agent+roles model — it is not ten separate spoke services. `--tls-verify` (+ optional `--tls-ca-cert`) opts into hub-cert verification; without it the co-located clients encrypt-without-auth against the self-signed hub cert.
+**The hub install (`install_all.sh`).** Brings up the hub + WebUI (always), then stands up the co-located modules as **one unified agent** (`agent-<hostname>`, installed with `--loopback` because the hub owns `:443` on the same box). The spoke checklist in the menu maps to `--exclude <csv>`: any module you *didn't* pick is excluded, and the remaining ones become that agent's roles. So even the all-in-one hub follows the agent+roles model — it is not ten separate spoke services. `--tls-verify` (+ optional `--tls-ca-cert`) opts into hub-cert verification; without it the co-located clients encrypt-without-auth against the self-signed hub cert.
 
 **The mental model: one agent per node.** A managed node = **one** generic-agent install that hosts whatever roles that node needs. You don't install a separate service per module on a node; you install the agent once and load roles onto it (see the unified-agent deep dive above). The standalone per-module installers still exist for a dedicated single-purpose box, but the default is one agent per node.
 

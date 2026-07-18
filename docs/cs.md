@@ -1,6 +1,6 @@
 # cs — Client Simulation
 
-Client Simulation spoke. Repo: `cs`. `module_type = "simulation"`, label "Generic Agent"/"Client Simulator". See [architecture-topology.md](architecture-topology.md).
+Client Simulation spoke. Repo: `cs`. `module_type = "simulation"`, label "Agent"/"Client Simulator". See [architecture-topology.md](architecture-topology.md).
 
 ## Role & module_type
 
@@ -20,7 +20,7 @@ The cs spoke itself owns the simulation "profile" logic, the per-client override
 - **webui-spoke (legacy):** `uvicorn server:app` :8000. Installer `installers/install-lxc.sh`.
 - **Sim agents:** `clients/linux/agent.sh` (systemd `client-sim-agent.service`), `clients/windows/*.ps1`, `clients/t3/*`.
 
-> **Primarily a role now.** cs runs mainly as the **`simulation`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-simulation` (module_type `simulation`, parent-auto-approved) and self-installs the role via `agent/src/agent_spoke.py::_install_role` — cloning `lbockenstedt/cs.git` + deps and running `install_cs.sh --infra-only` for the idempotent host prep (cs-owned Kea + 2nd-NIC). The dedicated `lm-cs.service` / `install_cs.sh` `{module}-spoke-1` path below is the **legacy/standalone** alternative. Sim/provisioning config arrives via the hub push (WebUI), not a per-module `.env`.
+> **Primarily a role now.** cs runs mainly as the **`simulation`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-simulation` (module_type `simulation`, parent-auto-approved) and self-installs the role via `agent/src/agent_spoke.py::_install_role` — cloning `lbockenstedt/cs.git` + deps and running `install_cs.sh --infra-only` for the idempotent host prep (cs-owned Kea + 2nd-NIC). The dedicated `lm-cs.service` / `install_cs.sh` `{module}-spoke-1` path below is the **legacy/standalone** alternative. Sim/provisioning config arrives via the hub push (WebUI), not a per-module `.env`.
 
 ## Ports
 
@@ -127,7 +127,7 @@ That is why the sim↔site linkage is **PXMX-server-based, not bucket-based**: l
 
 **"I changed a config/provisioning setting and nothing happened."** Hub-pushed provisioning config lands via the **`CS_CONFIG_UPDATE`** handler; without it, `usb_vidpids` stays `[]`, the bridge pulls an empty list every 60s, and auto-provision never fires. Also note the hub-config store **REPLACES** on write, so the two Setup cards ("VM Auto-Provisioning" and the flat "Hub Config") must GET-merge-PUT — if a save wiped the other card's values, re-open both and re-save. For simulation-profile edits, remember they only apply to a client on its next `/api/config` fetch, and per-`[username]` overrides key off the hostname's first `-` segment.
 
-**"The simulation spoke is offline / red."** cs runs mainly as the **`simulation`** role on the generic agent (sub-spoke `{agent}-simulation`), dialing the hub on 443. If it's red: confirm the generic agent (`lm-agent`) is up and approved, that `install_cs.sh --infra-only` host prep ran (cs Kea + second NIC), and check the spoke logs. A spoke that never provisioned its Kea/NIC still connects but the DHCP card shows "Not configured."
+**"The simulation spoke is offline / red."** cs runs mainly as the **`simulation`** role on the agent (sub-spoke `{agent}-simulation`), dialing the hub on 443. If it's red: confirm the agent (`lm-agent`) is up and approved, that `install_cs.sh --infra-only` host prep ran (cs Kea + second NIC), and check the spoke logs. A spoke that never provisioned its Kea/NIC still connects but the DHCP card shows "Not configured."
 
 **"Why is the client API on 8080 and not 8000?"** The legacy `webui-spoke` used :8000, but the unified LM hub owns that box, so binding :8000 collided and crash-looped cs. The client API moved to **8080**; sim clients reach `169.253.1.1:8080`. The installer auto-migrates a stale `CS_API_PORT=8000` in `.env` to 8080.
 

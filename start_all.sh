@@ -96,7 +96,7 @@ for port in 443 8000 8765; do
         kill -9 $PORT_PID || true
     fi
 done
-# Unified agent-spoke model: this box runs ONE generic agent (which hosts every
+# Unified agent-spoke model: this box runs ONE agent (which hosts every
 # module as a role). Kill only a manually-launched agent this script started —
 # do NOT touch an enabled lm-agent systemd unit (killing it just makes systemd
 # respawn it, and a second launch here would split-brain the agent socket, so
@@ -129,7 +129,7 @@ log_c "Hub started (logs: $LOG_DIR/hub.log)"
 sleep 5 # Give hub time to initialize
 
 # --- 2. Launch the unified agent (hosts every module as a role) ---
-# One generic agent replaces the former per-module dedicated spokes. If a
+# One agent replaces the former per-module dedicated spokes. If a
 # dedicated lm-agent systemd unit is enabled, that unit owns it — don't launch a
 # duplicate (it races Restart=always and split-brains the agent socket).
 AGENT_DIR="$ROOT_DIR/agent"

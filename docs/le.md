@@ -16,7 +16,7 @@ le itself only *produces* certificates — it doesn't configure other services. 
 
 `python3 -m src.control_plane` (`LEControlPlane`), systemd `lm-le.service`, `User=root` (root because certbot binds :80 for HTTP-01 and writes `/etc/letsencrypt`). Installer `install_le.sh` (clones lm core to `/opt/lm/core`, le to `/opt/lm/le`, apt `certbot python3-certbot-dns-cloudflare python3-certbot-dns-route53`, `/etc/lm-le` DNS-creds dir, `lm-le.service`).
 
-> **Primarily a role now.** le runs mainly as the **`le`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-le` (module_type `certificates`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/le.git` + deps). The dedicated `lm-le.service` / `install_le.sh` `le-<hostname>` path is the **legacy/standalone** alternative. Config (`renew_interval`, ACME/DNS settings) comes from the hub push (WebUI), not a per-module `.env`.
+> **Primarily a role now.** le runs mainly as the **`le`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-le` (module_type `certificates`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/le.git` + deps). The dedicated `lm-le.service` / `install_le.sh` `le-<hostname>` path is the **legacy/standalone** alternative. Config (`renew_interval`, ACME/DNS settings) comes from the hub push (WebUI), not a per-module `.env`.
 
 ## Ports
 
@@ -58,7 +58,7 @@ Background `_renew_loop`: daily reconcile of ledger vs `/etc/letsencrypt/live`, 
 
 ## How it works
 
-- **Hub connection.** Like every LM spoke, le dials the hub over a WebSocket. In the current unified model this is the sub-spoke `{agent}-le` opened by the generic agent (parent-auto-approved); the legacy path is the standalone `le-<hostname>` dialing the hub directly.
+- **Hub connection.** Like every LM spoke, le dials the hub over a WebSocket. In the current unified model this is the sub-spoke `{agent}-le` opened by the agent (parent-auto-approved); the legacy path is the standalone `le-<hostname>` dialing the hub directly.
 - **Config delivery.** le has very little to configure — mainly `renew_interval` (default 86400s / daily) — and it arrives via the hub's `UPDATE_CONFIG` push, not a per-module `.env`. Pushing a new `renew_interval` restarts the background renewal loop immediately with the new timer.
 - **Command flow.** Every WebUI action (issue, renew, revoke, list, add/remove a distribution target) becomes one `LESpoke.handle_command` call. Issuing or renewing shells out to `certbot` as an async subprocess (never blocking the event loop); revoking removes the cert from the ledger as well as from certbot.
 - **The ledger.** A per-spoke JSON file (`/var/lib/lm/<spoke_id>/certs.json`, atomic tmp-file + `os.replace` writes) tracks, per domain: `material_hash`, `not_after`, `last_renewed_at`/`last_error`, and a `targets[]` list — the modules this cert should be pushed to, each with its own `last_pushed_hash`/`last_pushed_at`/`last_status`. Certificates themselves stay in certbot's native `/etc/letsencrypt/live/<name>/` layout, so plain `certbot renew` and other standard tooling keep working; the ledger is a parallel index the hub reads through the spoke.

@@ -16,7 +16,7 @@ In the WebUI this shows up under the **Security/NAC** area — a "NAC (Aruba Cle
 
 `python3 -m src.control_plane` (`CPPMControlPlane`); spoke `CPPMSpoke` (**no base class** — not `BaseSpoke`); falls back to `run_standalone_mode()` (FastAPI `0.0.0.0:8000`, `/status`) if `--hub` omitted. systemd `lm-cppm.service`. Installer `install.sh` (clones to `/opt/lm/cppm`, venv, `.env`, unit; `PYTHONPATH=$INSTALL_DIR:$INSTALL_DIR/core/src:$INSTALL_DIR/cppm/src`). `src/main.py` is a standalone demo script, not the entrypoint.
 
-> **Primarily a role now.** cppm runs mainly as the **`cppm`** role hosted by the generic agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-cppm` (module_type `nac`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/cppm.git` + deps); because `CPPMSpoke` is non-BaseSpoke the role loader wraps it with `_RoleAdapter`. The dedicated `lm-cppm.service` / `install.sh` `cppm-spoke-1` path is the **legacy/standalone** alternative. Connection config (`CPPM_HOST`/creds) comes from the hub push (WebUI), not a per-module `.env`.
+> **Primarily a role now.** cppm runs mainly as the **`cppm`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-cppm` (module_type `nac`, parent-auto-approved) and self-installs it via `agent/src/agent_spoke.py::_install_role` (clones `lbockenstedt/cppm.git` + deps); because `CPPMSpoke` is non-BaseSpoke the role loader wraps it with `_RoleAdapter`. The dedicated `lm-cppm.service` / `install.sh` `cppm-spoke-1` path is the **legacy/standalone** alternative. Connection config (`CPPM_HOST`/creds) comes from the hub push (WebUI), not a per-module `.env`.
 
 ## Ports / backends
 

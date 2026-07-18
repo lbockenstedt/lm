@@ -8,7 +8,7 @@ Not a spoke — the hub's admin/operator UI. Talks to the hub over same-origin H
 
 ## What it does
 
-The WebUI is the browser app operators use to run the lab day to day: one view per module (opnsense, netbox, pxmx, dns, dhcp, cppm, ldap, cs, le, nw, generic agents), plus hub-wide Setup/Settings/Logs views. It's just the client — every page loads and saves data by calling the hub's own REST routes over the same origin (cookie session auth), and it never opens a connection to a spoke or agent directly.
+The WebUI is the browser app operators use to run the lab day to day: one view per module (opnsense, netbox, pxmx, dns, dhcp, cppm, ldap, cs, le, nw, agents), plus hub-wide Setup/Settings/Logs views. It's just the client — every page loads and saves data by calling the hub's own REST routes over the same origin (cookie session auth), and it never opens a connection to a spoke or agent directly.
 
 It also carries the in-app documentation experience: a Help drawer that renders the canonical `lm/docs/*.md` files verbatim, and — when the bugfixer agent is connected — an "Ask AI" LLM assistant that answers questions from those same docs plus a couple of live-state lookups. See "In-app Help & the Ask AI assistant" below.
 
