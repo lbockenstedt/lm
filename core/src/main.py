@@ -5269,8 +5269,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             vp = os.path.join(os.path.dirname(__file__), "../../VERSION")
             if not os.path.exists(vp):
                 vp = os.path.join(os.path.dirname(__file__), "../VERSION")
-            with open(vp) as vf:
-                target_ver = vf.read().strip()
+            # _live_watchdog_status() calls this on EVERY /status; read the VERSION
+            # file through the mtime-keyed cache so a repeated poll doesn't re-open
+            # it each time. The cache re-reads only when the file's mtime changes
+            # (a repo pull rewrites VERSION), so the value stays correct.
+            target_ver = self._read_version_cached(vp) or ""
         except Exception:  # noqa: BLE001
             pass
         running_ver = getattr(self, "_startup_version", "") or ""
@@ -6585,9 +6588,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         Collects CPU, Memory, and Disk metrics.
         """
         try:
+            # cpu_percent(interval=None) is non-blocking (delta since the last
+            # call) so it stays live. virtual_memory() + disk_usage('/') are
+            # statvfs/sysctl syscalls on the event loop; /status is polled every
+            # ~10s by every open tab, so cache their result for ~5s. Host RAM/disk
+            # don't move meaningfully within a 5s window, and this keeps the
+            # blocking syscalls off the hot path when many tabs poll at once.
             cpu = psutil.cpu_percent(interval=None)
-            mem = psutil.virtual_memory()
-            disk = psutil.disk_usage('/')
+            _mnow = time.time()
+            _hm = getattr(self, "_host_metrics_cache", None)
+            if _hm is not None and (_mnow - _hm[0]) < 5.0:
+                mem, disk = _hm[1], _hm[2]
+            else:
+                mem = psutil.virtual_memory()
+                disk = psutil.disk_usage('/')
+                self._host_metrics_cache = (_mnow, mem, disk)
             # The footer version is what THIS process is RUNNING, not what's on
             # disk: get_local_version() re-reads the VERSION file every /status
             # call, so right after a `git pull` bumps VERSION it would show the
@@ -6599,14 +6614,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # sets _startup_version (a pre-ready /status poll).
             version = getattr(self, "_startup_version", None) or await self.get_local_version()
 
+            # get_all_pending() is O(backlog); queue_size and backlog are the same
+            # count, so scan ONCE and reuse len() for both (was scanning twice).
+            # backlog_stats() below is its own pass — it produces the by-type/
+            # by-spoke/oldest breakdown that can't be derived from the flat list —
+            # and is skipped entirely in protect mode.
+            _pending_count = len(self.mailbox.get_all_pending())
+
             return {
                 "cpu_util": cpu,
                 "mem_util": mem.percent,
                 "disk_util": disk.percent,
                 "disk_free": disk.free // (1024 * 1024), # MB
                 "disk_total": disk.total // (1024 * 1024), # MB
-                "queue_size": len(self.mailbox.get_all_pending()),
-                "backlog": len(self.mailbox.get_all_pending()),
+                "queue_size": _pending_count,
+                "backlog": _pending_count,
                 # Backlog breakdown (by type / by spoke / oldest age) so a
                 # stuck backlog is diagnosable in System → Hub Status. Skipped in
                 # protect mode — it iterates the mailbox (O(backlog)) and /status
