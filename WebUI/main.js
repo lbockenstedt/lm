@@ -1252,7 +1252,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
-    setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Global Learned Values', 'Remote Console'],
+    setup: ['Spokes & Agents', 'Module Management', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['OUs', 'Users', 'Groups'],
@@ -3041,7 +3041,7 @@ function renderTopNav(viewId) {
     // Logs is dynamic: only show tabs for modules that are actually installed
     // (see logsSubmenu). Every other view uses its fixed VIEW_SUBMENUS list.
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
-    const subMenus = rawSubmenus.filter(m => !((m === 'Simulations' || m === 'Global Learned Values') && !isAdmin()));
+    const subMenus = rawSubmenus.filter(m => !(m === 'Simulations' && !isAdmin()));
     // Trailing help affordance for tabbed module views (esp. the table-tab
     // modules — opnsense/netbox/nw/dns/dhcp/ldap/le — whose pages are just a
     // table with no on-page section header to attach an inline icon to). Placed
@@ -5868,6 +5868,7 @@ function _renderSetupSimulationsTile(content) {
                 <div id="simtab-btn-dhcp" onclick="_simSetupTab('dhcp')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">DHCP</div>
                 <div id="simtab-btn-simq" onclick="_simSetupTab('simq')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Quotas</div>
                 <div id="simtab-btn-catalog" onclick="_simSetupTab('catalog')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Catalog</div>
+                <div id="simtab-btn-glv" onclick="_simSetupTab('glv')" class="sub-nav-item px-2 py-2 text-xs uppercase tracking-widest cursor-pointer select-none">Learned Values</div>
             </div>
             <div id="simtab-usb" class="space-y-4">
             <div class="${card}">
@@ -5968,6 +5969,18 @@ function _renderSetupSimulationsTile(content) {
                 <p class="text-xs text-slate-500 mb-3">Every Central alert/insight the hub has ever observed across <b>all tenants</b> — populated automatically as the hub polls Central and as admins browse Central. This is the same shared library the Sim-Quota "Alert / Insight ID" pickers draw from. Occurrence <b>Count</b> is approximate across hub restarts. Click a column header to sort; use <b>Use in Sim-Quota</b> to stage an entry into a new Sim Quota Defaults row.</p>
                 <div id="obs-catalog-table"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
+            </div>
+            <div id="simtab-glv" class="space-y-4 hidden">
+            <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global Learned Values ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <p class="text-xs text-slate-500 mb-3">Publish the learned client count needed to fire each alert, platform-wide. A tenant marks a quota row as a <b>Learning lab</b> (Config → Engine); its controller ratchets down to find the min count that fires and records a <b>learned_op</b>. Pick a tenant's stable learned value per alert and Publish it — every other tenant's <b>Consumer</b> rows (Learning off) then seed/lift from it (up-only; never down-ratchet). Highest learned op wins.</p>
+                <div id="glv-published" class="space-y-2 mb-4"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
+            <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Candidates from Learning Labs</h3>
+                <p class="text-xs text-slate-500 mb-3">Stable learned values from every tenant's Learning-lab rows, grouped by alert. The highest op per tenant leads. Click <b>Publish</b> to publish that value for the alert (replaces any current published value for it).</p>
+                <div id="glv-candidates" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
             </div>`;
     loadSimAdminOverview();
     loadGlobalTierPci();
@@ -5983,12 +5996,15 @@ function _renderSetupSimulationsTile(content) {
 // In-tile sub-tabs for Setup → Simulations: group USB / PCI / DHCP so the tile
 // isn't one long stack. Pure show/hide of the three panels + active styling.
 function _simSetupTab(name) {
-    ['usb', 'pci', 'dhcp', 'simq', 'catalog'].forEach(n => {
+    ['usb', 'pci', 'dhcp', 'simq', 'catalog', 'glv'].forEach(n => {
         const panel = document.getElementById('simtab-' + n);
         const btn = document.getElementById('simtab-btn-' + n);
         if (panel) panel.classList.toggle('hidden', n !== name);
         if (btn) btn.classList.toggle('active', n === name);  // .sub-nav-item.active = HPE-green underline
     });
+    // Learned Values loads lazily when its tab is first opened (its panel is
+    // hidden on tile render, so we fetch on select rather than up-front).
+    if (name === 'glv') loadGlobalLearnedValues();
 }
 
 
@@ -8123,33 +8139,19 @@ const SETUP_TILES = {
     'Tenant Config':    _renderSetupTenantTile,
     'User Access':      _renderSetupUserAccessTile,
     'Simulations':      _renderSetupSimulationsTile,
-    'Global Learned Values': _renderSetupGlobalLearnedValuesTile,
     'Remote Console':   _renderSetupRemoteConsoleTile,
 };
 
-// Setup → Global Learned Values (Global Admin only). A learning tenant's lab
-// rows produce stable learned_op values; the Admin selects one per alert and
-// Publishes it here so every other tenant's learning-OFF consumer rows seed/lift
-// from it (applied_op = max(own, global)). Endpoints in simulations/routes.py:
-// GET /sim/api/superadmin/learned-values/candidates, GET/PUT .../global-learned-values.
+// Global Learned Values (Global Admin only) — now the "Learned Values" tab of
+// the Setup → Simulations tile (panel #simtab-glv; markup lives in
+// _renderSetupSimulationsTile, loaded lazily by _simSetupTab('glv')). A learning
+// tenant's lab rows produce stable learned_op values; the Admin selects one per
+// alert and Publishes it here so every other tenant's learning-OFF consumer rows
+// seed/lift from it (applied_op = max(own, global)). Endpoints in
+// simulations/routes.py: GET /sim/api/superadmin/learned-values/candidates,
+// GET/PUT .../global-learned-values.
 let _glvCandidates = [];
 let _glvPublished = {};
-
-function _renderSetupGlobalLearnedValuesTile(content) {
-    const { card, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
-        <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global Learned Values ${helpIcon('cs', null, 'Simulations help')}</h3>
-            <p class="text-xs text-slate-500 mb-3">Publish the learned client count needed to fire each alert, platform-wide. A tenant marks a quota row as a <b>Learning lab</b> (Config → Engine); its controller ratchets down to find the min count that fires and records a <b>learned_op</b>. Pick a tenant's stable learned value per alert and Publish it — every other tenant's <b>Consumer</b> rows (Learning off) then seed/lift from it (up-only; never down-ratchet). Highest learned op wins.</p>
-            <div id="glv-published" class="space-y-2 mb-4"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
-        </div>
-        <div class="${card}">
-            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Candidates from Learning Labs</h3>
-            <p class="text-xs text-slate-500 mb-3">Stable learned values from every tenant's Learning-lab rows, grouped by alert. The highest op per tenant leads. Click <b>Publish</b> to publish that value for the alert (replaces any current published value for it).</p>
-            <div id="glv-candidates" class="space-y-3"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
-        </div>`;
-    loadGlobalLearnedValues();
-}
 
 async function loadGlobalLearnedValues() {
     try {
