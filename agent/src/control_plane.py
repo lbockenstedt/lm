@@ -586,18 +586,29 @@ class AgentControlPlane(BaseControlPlane):
     def _resolve_startup_roles(self) -> List[str]:
         """Durable loaded-roles set for boot.
 
-        CLI ``--roles`` seeds ``LOADED_ROLES`` in .env on first install;
-        thereafter ``LOADED_ROLES`` (.env) is the source of truth so roles
-        loaded at runtime (via LOAD_ROLE) survive a self-update restart (the
-        RoleConnection SPOKE_UPDATE handler exits the whole process; on reboot
-        this list re-spawns every role's connection). CLI roles win only when
-        ``LOADED_ROLES`` is empty (first boot of a fresh install)."""
+        ``LOADED_ROLES`` (.env) persists roles loaded at runtime (via hub-pushed
+        LOAD_ROLE) so they survive a self-update restart (the RoleConnection
+        SPOKE_UPDATE handler exits the whole process; on reboot this list
+        re-spawns every role's connection). CLI ``--roles`` / STARTUP_ROLES
+        seeds it on first install AND is unioned in on EVERY boot, so:
+
+          * adding a role to STARTUP_ROLES after first boot takes effect on the
+            next restart (previously the persisted list was the sole source of
+            truth once non-empty, so CLI additions were silently ignored);
+          * a role whose LOAD_ROLE failed once (and was therefore absent from
+            the persisted set — ``_persist_loaded_roles`` writes only
+            successfully-loaded roles) is re-attempted on the next boot instead
+            of being permanently evicted by a transient install/clone failure.
+
+        Roles removed from STARTUP_ROLES are NOT auto-dropped (LOADED_ROLES
+        keeps them); use UNLOAD_ROLE to retire one. Unknown role names (not in
+        _ROLE_MAP) are filtered out so a stale entry can't crash the seed loop."""
         persisted = [r for r in self._read_env_value("LOADED_ROLES").split(",")
-                     if r.strip()]
-        if not persisted and self._cli_roles:
-            self._persist_secret_to_env("LOADED_ROLES", ",".join(self._cli_roles))
-            return list(self._cli_roles)
-        return persisted
+                     if r.strip() and r in _ROLE_MAP]
+        roles = list(dict.fromkeys([*persisted, *self._cli_roles]))  # union, order-stable
+        if roles:
+            self._persist_secret_to_env("LOADED_ROLES", ",".join(roles))
+        return roles
 
     async def run(self):
         startup_roles = self._resolve_startup_roles()
