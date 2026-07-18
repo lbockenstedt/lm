@@ -3350,6 +3350,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return {"defaults": await store.get_sim_quota_defaults(),
                 "catalog": catalog}
 
+    # ── Observed Catalog (Setup → Simulations, superadmin) ───────────────────
+    # A read-only view of the hub-wide catalog of every Central alert/insight
+    # ever observed (all tenants), with occurrence counts — the same
+    # __alert_insight_history__ that feeds every Sim-Quota picker, exposed whole
+    # so an admin can browse/search what the poller and browse paths have seen.
+    @app.get("/sim/api/superadmin/observed-catalog")
+    async def get_observed_catalog(request: Request):
+        """Admin-only: the full hub-wide alert/insight catalog, most-recent first."""
+        _require_admin(request)
+        try:
+            catalog = await store.get_alert_insight_history()
+        except Exception:  # noqa: BLE001
+            catalog = []
+        catalog = sorted(catalog, key=lambda e: float(e.get("last_seen") or 0), reverse=True)
+        return {"catalog": catalog, "count": len(catalog)}
+
     async def _platform_wide_sim_quota_sites() -> list:
         """Union of sites known across all tenants — from each tenant's
         simulation.conf (cached relayed ``sim_conf_content`` or the stored
