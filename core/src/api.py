@@ -1156,7 +1156,11 @@ def create_app(hub):
         except Exception as e:  # noqa: BLE001
             logger.warning("shutdown state flush failed: %s", e)
 
-    app.add_event_handler("shutdown", _persist_on_shutdown)
+    # Register on the router's shutdown list directly: modern Starlette dropped
+    # the app.add_event_handler("shutdown", ...) convenience method, but
+    # router.on_shutdown (what that method appended to internally) is stable and
+    # is still run by the default lifespan.
+    app.router.on_shutdown.append(_persist_on_shutdown)
 
     @app.middleware("http")
     async def access_control_middleware(request, call_next):
