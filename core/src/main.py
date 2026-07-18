@@ -2325,26 +2325,36 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.approved_modules[pk] = True
         await self.state.save_state_now()
         if pk in self.active_connections:
-            # Capture the secret the spoke currently holds BEFORE generating the
-            # new one, then sign the key-delivery push with it — the spoke can't
-            # verify a frame signed with the new secret it hasn't installed yet.
-            prev_secret = self.key_manager.current_session_secret(pk)
             session_secret = self.key_manager.generate_first_secret(pk)
-            # Await the spoke's key-adoption ack BEFORE pushing encrypted config.
-            # The hub provisions the session key (the AEAD key the spoke needs to
-            # decrypt UPDATE_CONFIG) and the encrypted UPDATE_CONFIG back-to-back;
-            # fire-and-forget delivery races the spoke's concurrent session-key
-            # handler, so the encrypted config can be decoded before self.secret
-            # is armed and dropped — the role-never-repoints outage (netbox stuck
-            # on localhost:8000, ldap/nac config never applied). Waiting for the
-            # ack guarantees the spoke has armed the key. On a timeout, proceed
-            # anyway: the spoke-side deferral (_drain_pending_encrypted) replays
-            # any frame decoded before the key armed. signing_secret=prev_secret
-            # signs with the pre-rotation key the spoke still holds (None on
-            # first keying → unsigned, accepted in bootstrap).
-            await self.request_response(
-                spoke_id, "SPOKE_UPDATE_SESSION_KEY", {"secret": session_secret},
-                signing_secret=prev_secret)
+            # Zero-touch provisioning MUST be plaintext. A newly-approved spoke
+            # is pending (no secret); a re-approval of an already-authenticated
+            # spoke holds its current secret. The hub's key_manager RETAINS a
+            # spoke's secret server-side (keys[pk] is persisted by _save_keys),
+            # so current_session_secret(pk) can be NON-None even for a zero-touch
+            # role sub-spoke that connected before and never persisted the key
+            # (RoleConnection._persist_session_secret is a no-op). If we signed
+            # the SPOKE_UPDATE_SESSION_KEY push with that retained secret, the
+            # spoke-side gate would AEAD-encrypt it with a key the sub-spoke no
+            # longer holds → _decode_frame defers it (encrypted + no self.secret)
+            # forever → the key never arms → the never-adopted outage. Force
+            # plaintext (signing_secret=None) for zero-touch spokes so the frame
+            # is accepted in bootstrap decode and arms; an authenticated spoke
+            # keeps the signed re-key (it can verify the pre-rotation signature).
+            # Fire-and-forget (NOT request_response): awaiting the ack in this
+            # connect path is structurally unreachable — the message loop hasn't
+            # started, so nothing populates response_cache → a 5s timeout every
+            # connect that stalls push_config and flaps the WS. The spoke-side
+            # deferral (_drain_pending_encrypted) closes the back-to-back
+            # encrypted UPDATE_CONFIG race without the await.
+            prev_secret = self.key_manager.current_session_secret(pk)
+            key_sign = None if not self.spoke_authenticated.get(pk) else prev_secret
+            key_msg = Message(
+                header=MessageHeader(
+                    message_id=str(uuid.uuid4()), timestamp=time.time(),
+                    sender_id="hub", destination_id=spoke_id),
+                payload=MessagePayload(
+                    type="SPOKE_UPDATE_SESSION_KEY", data={"secret": session_secret}))
+            await self.send_to_spoke(key_msg, signing_secret=key_sign)
             approval_msg = Message(
                 header=MessageHeader(
                     message_id=str(uuid.uuid4()), timestamp=time.time(),
@@ -3757,18 +3767,29 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # If the spoke connected without a secret (zero-touch, already approved),
                 # generate and push its session key before sending config.
                 if not secret:
-                    # Sign the key-delivery push with the secret the spoke
-                    # currently holds (None here = pending, it accepts anyway)
-                    # so it can verify and install the new secret.
-                    prev_secret = self.key_manager.current_session_secret(pk)
+                    # Zero-touch reconnect (spoke connected with no secret).
+                    # Provision PLAINTEXT: signing_secret=None → no AEAD wrap →
+                    # accepted in the spoke's bootstrap decode (which ignores
+                    # signatures when self.secret is unset). Never sign with a
+                    # retained prev_secret here — the hub persists keys[pk] so
+                    # current_session_secret(pk) can be a secret a prior-session
+                    # sub-spoke armed but never persisted (RoleConnection no-op),
+                    # and encrypting the push with it traps the sub-spoke in
+                    # _decode_frame's defer-buffer forever (the never-adopted
+                    # outage). Fire-and-forget (NOT request_response): the ack
+                    # is unreachable in the connect path (the message loop
+                    # hasn't started) → a 5s timeout every connect that stalls
+                    # push_config and flaps the WS. The spoke-side deferral
+                    # closes the back-to-back encrypted UPDATE_CONFIG race.
                     session_secret = self.key_manager.generate_first_secret(pk)
-                    # Await the key-adoption ack before the encrypted config push
-                    # below — see approve_and_bind_spoke for the rationale (the
-                    # bootstrap-race that left roles stuck on localhost:8000).
-                    # On timeout, proceed: the spoke-side deferral is the net.
-                    await self.request_response(
-                        spoke_id, "SPOKE_UPDATE_SESSION_KEY",
-                        {"secret": session_secret}, signing_secret=prev_secret)
+                    key_msg = Message(
+                        header=MessageHeader(
+                            message_id=str(uuid.uuid4()), timestamp=time.time(),
+                            sender_id="hub", destination_id=spoke_id),
+                        payload=MessagePayload(
+                            type="SPOKE_UPDATE_SESSION_KEY",
+                            data={"secret": session_secret}))
+                    await self.send_to_spoke(key_msg, signing_secret=None)
                 await self.push_config_to_spoke(spoke_id)
 
                 # Request version AFTER the session key is established so the spoke

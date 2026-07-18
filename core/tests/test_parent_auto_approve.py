@@ -141,21 +141,22 @@ class _AutoApproveHub:
         buf.append({"ts": 0.0, "event": event, "detail": detail})
 
     async def send_to_spoke(self, message, signing_secret=None):
-        return  # no real WS — the key-push is exercised via key_manager state
+        # no real WS — but count the session-key push (fire-and-forget through
+        # send_to_spoke now, not request_response) so tests can assert it armed.
+        if getattr(getattr(message, "payload", None), "type", None) == "SPOKE_UPDATE_SESSION_KEY":
+            self.session_key_pushes += 1
 
     async def push_config_to_spoke(self, spoke_id):
         return  # no-op
 
     async def request_response(self, spoke_id, command_type, data, timeout=5.0,
                                signing_secret=None):
-        """Stubbed round-trip. ``VOUCH_SUBSPOKE`` returns the configured vouch
-        reply for the sub_spoke_id in ``data`` (or a timeout). The session-key
-        push (``SPOKE_UPDATE_SESSION_KEY``) returns a SUCCESS ack — the spoke
-        armed the key — so approve_and_bind_spoke proceeds to the config push."""
+        """Stubbed round-trip — VOUCH_SUBSPOKE only. The session-key push used
+        to ride this channel (awaiting the spoke's key-adoption ack); it is now
+        fire-and-forget via send_to_spoke (the ack was structurally unreachable
+        in the connect path, and a retained prev_secret encrypted the push with
+        a key a zero-touch sub-spoke didn't hold → never-adopted outage)."""
         self.request_response_calls += 1
-        if command_type == "SPOKE_UPDATE_SESSION_KEY":
-            self.session_key_pushes += 1
-            return {"status": "SUCCESS", "message": "Session key updated successfully"}
         assert command_type == "VOUCH_SUBSPOKE", command_type
         self.vouch_round_trips += 1
         sub_id = (data or {}).get("sub_spoke_id")
@@ -232,9 +233,10 @@ def test_vouch_happy_path_approves_and_binds(tmp_path):
     assert hub.state.get_spoke_tenant("agent-1-dns") == "tenant-A"
     assert hub.key_manager.keys.get("agent-1-dns") is not None
     assert _events_of(hub, "agent-1-dns", "parent_auto_approve")
-    # The parent vouch round-trip + the sub-spoke's session-key push (awaited
-    # before the config push so the spoke arms its AEAD key first — the
-    # bootstrap-race fix; see approve_and_bind_spoke).
+    # The parent vouch round-trip + the sub-spoke's session-key push
+    # (fire-and-forget via send_to_spoke, plaintext for zero-touch so a
+    # retained prev_secret can't trap it in the defer-buffer — see
+    # approve_and_bind_spoke).
     assert hub.vouch_round_trips == 1
     assert hub.session_key_pushes == 1
 
