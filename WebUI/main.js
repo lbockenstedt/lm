@@ -12538,8 +12538,8 @@ async function showLoadRoleModal(spokeId) {
     modal.id = 'load-role-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4';
     modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden border border-slate-200">
-            <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden border border-slate-200">
+            <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center shrink-0">
                 <div>
                     <h3 class="text-lg font-bold text-[#263040]">Load Role</h3>
                     <p class="text-xs text-slate-500 mt-0.5 font-mono">${spokeId}</p>
@@ -12548,29 +12548,31 @@ async function showLoadRoleModal(spokeId) {
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
-            <div class="p-6 space-y-4">
+            <div class="p-6 space-y-4 overflow-y-auto">
                 <p class="text-xs text-slate-500">An agent can host <strong>multiple roles at once</strong>. Each role opens its own sub-spoke (<code class="bg-slate-100 px-1 rounded">${spokeId}-&lt;role&gt;</code>) that auto-approves via this agent.</p>
-                <div id="role-list" class="grid grid-cols-3 gap-2 max-h-52 overflow-y-auto pr-1">
-                    <p class="text-xs text-slate-400 italic col-span-2">Loading roles…</p>
+                <div id="role-list" class="grid grid-cols-3 gap-2 max-h-44 overflow-y-auto pr-1">
+                    <p class="text-xs text-slate-400 italic col-span-3">Loading roles…</p>
                 </div>
                 <div id="netbox-admin-creds" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
                     <p class="text-xs font-semibold text-slate-700">NetBox admin account</p>
-                    <input id="nb-admin-user" type="text" value="admin" placeholder="admin username" autocomplete="off"
-                        class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                    <input id="nb-admin-pass" type="password" placeholder="admin password (blank = auto-generate)" autocomplete="new-password"
-                        class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    <div class="grid grid-cols-2 gap-2">
+                        <input id="nb-admin-user" type="text" value="admin" placeholder="admin username" autocomplete="off"
+                            class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <input id="nb-admin-pass" type="password" placeholder="admin password (blank = auto-generate)" autocomplete="new-password"
+                            class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    </div>
                     <p class="text-[11px] text-slate-500">Sets the NetBox WebUI login. Leave blank to auto-generate (shown in the deploy log).</p>
                 </div>
                 <div id="ldap-server-cfg" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
                     <p class="text-xs font-semibold text-slate-700">LDAP server</p>
-                    <input id="lsrv-base-dn" type="text" placeholder="base DN (e.g. dc=lab,dc=example,dc=com)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                    <input id="lsrv-admin-dn" type="text" placeholder="admin DN (e.g. cn=admin,dc=lab,dc=example,dc=com)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                    <input id="lsrv-admin-pw" type="password" placeholder="admin password (blank = auto-generate)" autocomplete="new-password" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                    <div class="flex gap-2">
-                        <select id="lsrv-server-id" class="w-1/3 px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500"><option value="1">server-id 1</option><option value="2">server-id 2</option></select>
-                        <input id="lsrv-server-url" type="text" placeholder="this node ldaps:// URL" autocomplete="off" class="flex-1 px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    <div class="grid grid-cols-2 gap-2">
+                        <input id="lsrv-base-dn" type="text" placeholder="base DN (e.g. dc=lab,dc=example,dc=com)" autocomplete="off" class="col-span-2 w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <input id="lsrv-admin-dn" type="text" placeholder="admin DN (e.g. cn=admin,dc=lab,dc=example,dc=com)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <input id="lsrv-admin-pw" type="password" placeholder="admin password (blank = auto-generate)" autocomplete="new-password" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <select id="lsrv-server-id" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500"><option value="1">server-id 1</option><option value="2">server-id 2</option></select>
+                        <input id="lsrv-server-url" type="text" placeholder="this node ldaps:// URL" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <input id="lsrv-peer" type="text" placeholder="peer node ldaps:// URL (for the 2-node mirror; blank = single node)" autocomplete="off" class="col-span-2 w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
                     </div>
-                    <input id="lsrv-peer" type="text" placeholder="peer node ldaps:// URL (for the 2-node mirror; blank = single node)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
                     <p class="text-[11px] text-slate-500">Entra credentials are injected from the hub OIDC config automatically. For a 2-node mirror, load this role on both hosts with matching base DN, server-id 1 &amp; 2, and each node's peer URL set to the OTHER node.</p>
                 </div>
                 <p id="role-desc" class="text-xs text-slate-500 italic min-h-[1.5rem]"></p>
@@ -12578,7 +12580,7 @@ async function showLoadRoleModal(spokeId) {
                     The agent installs required system packages (e.g. unbound, kea, certbot) and hosts the role as a new sub-spoke. This may take 30–60 seconds per role.
                 </div>
             </div>
-            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 shrink-0">
                 <button onclick="document.getElementById('load-role-modal').remove()"
                     class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
                 <button onclick="loadRole('${spokeId}')"
