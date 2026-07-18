@@ -9848,7 +9848,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
         } else {
             spokesWrap.innerHTML = `<div class="space-y-1.5">${trueSpokes.map(s => {
                 const sid = s.spoke_id;
-                const name = s.display_name || sid;
+                const name = s.display_name || s.hostname || sid;
                 const approved = s.approved;
                 const mtRaw = String(s.module_type || '').toLowerCase();
                 const modLabel = moduleLabel(mtRaw);
@@ -10692,7 +10692,7 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
 
     let description = '';
     try {
-        const res = await setupFetch(`/setup/spoke-metadata/${spokeId}`);
+        const res = await setupFetch(`/setup/spoke-metadata/${encodeURIComponent(spokeId)}`);
         if (res.ok) {
             const data = await res.json();
             description = data.metadata.description || '';
@@ -10835,7 +10835,7 @@ async function resetSpokeSecret(spokeId) {
         return;
     }
     try {
-        await apiJson(`/setup/spokes/${spokeId}/reset-secret`, { method: 'POST' });
+        await apiJson(`/setup/spokes/${encodeURIComponent(spokeId)}/reset-secret`, { method: 'POST' });
 
         showToast(`Secret for ${spokeId} has been reset. Restart the agent install or trigger a new handshake.`, 'success');
         _reloadActiveMgmtView();

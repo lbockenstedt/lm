@@ -166,18 +166,26 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         known = hub.state.system_state.get("known_modules", []) or []
         names = hub.state.system_state.get("module_names", {}) or {}
+        meta = hub.state.system_state.get("module_metadata", {}) or {}
         out = []
         for sid in known:
             if not hub.approved_modules.get(hub._primary_key(sid), False):
                 continue
             if not access.can_bind_spoke(hub, sess, sid):
                 continue
+            m = meta.get(sid, {}) or {}
             out.append({
                 "spoke_id": sid,
                 "display_name": names.get(sid, sid),
                 "approved": True,
                 "module_type": _module_type_for(sid),
                 "tenant_id": hub.state.get_spoke_tenant(sid) or "",
+                # B4: mirror /setup/pending_spokes so the WebUI spoke dropdown +
+                # Spokes & Agents page share one guid-keyed shape (``spoke_id``
+                # is the guid once armed; ``spoke_guid``/``install_uuid`` are the
+                # explicit guid for display + consistency hardening).
+                "spoke_guid": m.get("install_uuid", ""),
+                "install_uuid": m.get("install_uuid", ""),
             })
         return {"spokes": out}
 
