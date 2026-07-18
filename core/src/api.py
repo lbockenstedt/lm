@@ -947,6 +947,13 @@ def create_app(hub):
     """
     app = FastAPI(title="Lab Manager Hub API")
 
+    # Gzip text responses (WebUI JS/HTML/JSON). main.js is ~1.3 MB uncompressed
+    # and dominated page load (~9s on the wire); gzip cuts JS/HTML ~4-5x. Only
+    # applies to http responses with Accept-Encoding: gzip and bodies over the
+    # threshold — WebSocket upgrades (scope "websocket") pass through untouched.
+    from starlette.middleware.gzip import GZipMiddleware
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+
     # CORS. The WebUI is served from the SAME origin (unified :443 uvicorn), so a
     # credentialed cross-origin policy is NOT needed by default. Default (env
     # unset) = no credentialed cross-origin: empty origin list + credentials OFF.
@@ -1682,7 +1689,7 @@ def create_app(hub):
         ui_real = os.path.realpath(ui_path)
 
         @app.get("/{full_path:path}")
-        async def serve_ui(full_path: str):
+        async def serve_ui(full_path: str, request: Request):
             # SECURITY: the /{full_path:path} catch-all is PUBLIC (no session
             # gate), so a containment guard is mandatory. Without it a path
             # like 'static/../../../../etc/passwd' would let an UNAUTHENTICATED
@@ -1702,9 +1709,17 @@ def create_app(hub):
                 raise HTTPException(status_code=404, detail="Not found")
             if os.path.isfile(real):
                 response = FileResponse(real)
-                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-                response.headers["Pragma"] = "no-cache"
-                response.headers["Expires"] = "0"
+                # Cacheability: index.html is served no-store (below) so it always
+                # re-fetches and picks up the current ?v=<version> on the asset
+                # URLs. An asset requested WITH a version query (?v=) is therefore
+                # immutable — a new version is a new URL — so cache it hard and
+                # stop re-downloading ~2 MB of JS on every page load (the actual
+                # cause of the slow load: main.js was 1.3 MB, no-store, ~9s wire).
+                # An unversioned static request gets a short cache as a safety net.
+                if request.query_params.get("v"):
+                    response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+                else:
+                    response.headers["Cache-Control"] = "public, max-age=300"
                 return response
 
             index_html_path = os.path.join(ui_path, "index.html")
