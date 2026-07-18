@@ -38,6 +38,8 @@ Audience: Hub developers.
 from __future__ import annotations
 
 import asyncio
+
+from sync_loop import run_sync_loop  # sibling leaf
 import datetime as _dt
 import logging
 import os
@@ -269,64 +271,67 @@ class RepoSyncMixin:
         a freshly-booted hub reconciles its repos sooner) and away from the
         other heavy syncs that stagger at 90s+.
         """
-        await asyncio.sleep(30)  # let spokes connect; stagger off the 90s syncs
         _last_disabled_audit = 0.0
-        while True:
-            try:
-                cfg = self._repo_sync_cfg()
-                if cfg.get("enabled", True):
-                    # run_repo_sync_all runs check_update_health every cycle.
-                    # Backstop: bound the cycle to 10m so a slow/hung op (serial
-                    # provisioning pulls, a wedged spoke send in the fan-out)
-                    # can't strand updates — abandon and retry next interval
-                    # instead of stalling the loop indefinitely.
+
+        async def _body():
+            nonlocal _last_disabled_audit
+            cfg = self._repo_sync_cfg()
+            if cfg.get("enabled", True):
+                # run_repo_sync_all runs check_update_health every cycle.
+                # Backstop: bound the cycle to 10m so a slow/hung op (serial
+                # provisioning pulls, a wedged spoke send in the fan-out)
+                # can't strand updates — abandon and retry next interval
+                # instead of stalling the loop indefinitely.
+                try:
+                    await asyncio.wait_for(self.run_repo_sync_all(), timeout=600)
+                except asyncio.TimeoutError:
+                    # ERROR (not WARNING) so it lands in the hub error view
+                    # (GET_ERROR_LOGS / bugfixer keys off [sync-error] ERROR),
+                    # and persist a timeout status so the WebUI Sync card
+                    # shows the stall (the abandoned run_repo_sync_all was
+                    # cancelled BEFORE it could set_repo_sync_status, so
+                    # without this the card kept the last green cycle while
+                    # the loop sat wedged on a hung spoke send / slow pull).
+                    logger.error("[sync-error] repo_sync cycle exceeded 600s "
+                                  "— abandoned; will retry next interval")
                     try:
-                        await asyncio.wait_for(self.run_repo_sync_all(), timeout=600)
-                    except asyncio.TimeoutError:
-                        # ERROR (not WARNING) so it lands in the hub error view
-                        # (GET_ERROR_LOGS / bugfixer keys off [sync-error] ERROR),
-                        # and persist a timeout status so the WebUI Sync card
-                        # shows the stall (the abandoned run_repo_sync_all was
-                        # cancelled BEFORE it could set_repo_sync_status, so
-                        # without this the card kept the last green cycle while
-                        # the loop sat wedged on a hung spoke send / slow pull).
-                        logger.error("[sync-error] repo_sync cycle exceeded 600s "
-                                      "— abandoned; will retry next interval")
-                        try:
-                            _ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                            await self.simulations_store.set_repo_sync_status({
-                                "last_sync_ts": _ts,
-                                "hub": {"status": "error",
-                                        "message": "repo_sync cycle exceeded 600s — abandoned"},
-                                "provisioning_repos": [],
-                                "message": "hub=error; cycle exceeded 600s timeout — abandoned",
-                                "update_health": {"ok": False, "checks": {},
-                                                  "warnings": ["cycle timeout"],
-                                                  "errors": ["repo_sync cycle exceeded 600s"]},
-                            })
-                        except Exception as _e:  # noqa: BLE001 — store failure must not kill the loop
-                            logger.warning("[sync-error] repo_sync timeout status persist failed: %s", _e)
-                else:
-                    # Scheduled sync OFF - still audit the update/self-heal
-                    # infrastructure (systemd Type=exec / MainPID / Restart=,
-                    # watchdog timer, restart helper, git checkout) so drift is
-                    # LOUD in the hub log regardless of the sync toggle. Throttled
-                    # to ~5m to avoid a per-minute git ls-remote.
-                    _now = _dt.datetime.now(_dt.timezone.utc).timestamp()
-                    if (_now - _last_disabled_audit) >= 300:
-                        _last_disabled_audit = _now
-                        try:
-                            health = await self.check_update_health()
-                            for e in health.get("errors", []):
-                                logger.error("[sync-error] update-health CRITICAL "
-                                             "(sync disabled): %s", e)
-                            for w in health.get("warnings", []):
-                                logger.warning("[sync-error] update-health "
-                                               "(sync disabled): %s", w)
-                        except Exception as e:  # noqa: BLE001 - never fatal
-                            logger.warning("[sync-error] update-health audit failed: %s", e)
-                delay = self._repo_sync_interval() if cfg.get("enabled", True) else 60
-                await asyncio.sleep(delay)
-            except Exception as e:
-                logger.warning("[sync-error] repo_sync loop cycle failed: %s", e)
-                await asyncio.sleep(60)
+                        _ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        await self.simulations_store.set_repo_sync_status({
+                            "last_sync_ts": _ts,
+                            "hub": {"status": "error",
+                                    "message": "repo_sync cycle exceeded 600s — abandoned"},
+                            "provisioning_repos": [],
+                            "message": "hub=error; cycle exceeded 600s timeout — abandoned",
+                            "update_health": {"ok": False, "checks": {},
+                                              "warnings": ["cycle timeout"],
+                                              "errors": ["repo_sync cycle exceeded 600s"]},
+                        })
+                    except Exception as _e:  # noqa: BLE001 — store failure must not kill the loop
+                        logger.warning("[sync-error] repo_sync timeout status persist failed: %s", _e)
+            else:
+                # Scheduled sync OFF - still audit the update/self-heal
+                # infrastructure (systemd Type=exec / MainPID / Restart=,
+                # watchdog timer, restart helper, git checkout) so drift is
+                # LOUD in the hub log regardless of the sync toggle. Throttled
+                # to ~5m to avoid a per-minute git ls-remote.
+                _now = _dt.datetime.now(_dt.timezone.utc).timestamp()
+                if (_now - _last_disabled_audit) >= 300:
+                    _last_disabled_audit = _now
+                    try:
+                        health = await self.check_update_health()
+                        for e in health.get("errors", []):
+                            logger.error("[sync-error] update-health CRITICAL "
+                                         "(sync disabled): %s", e)
+                        for w in health.get("warnings", []):
+                            logger.warning("[sync-error] update-health "
+                                           "(sync disabled): %s", w)
+                    except Exception as e:  # noqa: BLE001 - never fatal
+                        logger.warning("[sync-error] update-health audit failed: %s", e)
+        def _delay() -> float:
+            enabled = self._repo_sync_cfg().get("enabled", True)
+            return self._repo_sync_interval() if enabled else 60
+
+        # stagger 30s: let spokes connect; stagger off the 90s syncs (shorter
+        # than staleness's 90s so a freshly-booted hub reconciles sooner).
+        await run_sync_loop(stagger=30, body=_body, delay=_delay,
+                            error_label="repo_sync loop cycle failed")

@@ -34,6 +34,8 @@ import datetime as _dt
 import logging
 from typing import Any, Dict, List, Optional
 
+from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
+
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 
 logger = logging.getLogger("Hub")
@@ -219,32 +221,6 @@ class VmSyncMixin:
         except (TypeError, ValueError):
             n = 4
         return max(1, min(8, n))
-
-    def _vm_sync_next_delay(self, cfg: Dict[str, Any]) -> float:
-        """Seconds to sleep before the next scheduled VM sync, per the config mode.
-
-        ``mode`` is ``"daily"`` (run once a day at ``daily_time`` "HH:MM", 24h
-        local) or anything else (interval mode → every ``interval_seconds``).
-        Always clamped to >= 60 s so a bad config can't hot-loop the hub.
-        """
-        mode = str(cfg.get("mode", "interval")).strip().lower()
-        if mode == "daily":
-            hhmm = str(cfg.get("daily_time", "03:00")).strip()
-            try:
-                hh, mm = (int(p) for p in hhmm.split(":")[:2])
-                now = _dt.datetime.now()
-                target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if target <= now:
-                    target += _dt.timedelta(days=1)
-                return max(60.0, (target - now).total_seconds())
-            except Exception:
-                logger.debug("vm sync: bad daily_time %r — falling back to interval", hhmm)
-        interval = 3600
-        try:
-            interval = int(cfg.get("interval_seconds", 3600))
-        except (TypeError, ValueError):
-            interval = 3600
-        return max(60.0, float(interval))
 
     # Synthetic tenant-id key for the untagged/no-tenant bucket. Mirrors the
     # netbox spoke's NetBoxEngine._VM_SYNC_UNASSIGNED_KEY so per-tenant status
@@ -523,20 +499,26 @@ class VmSyncMixin:
         parallelize. Staggered 45s after the endpoint sync loop so the two heavy
         syncs don't simultaneous-fire on startup.
         """
-        await asyncio.sleep(45)  # let spokes connect; stagger after endpoint sync
-        while True:
+        def _guard() -> bool:
+            cfg = self._vm_sync_cfg()
+            se = self._vm_sync_source()
+            return bool(cfg.get("enabled", False)
+                        and self.get_spoke_by_type(se.get("module_type", "hypervisor"))
+                        and self.get_spoke_by_type(self._VM_SYNC_TARGET_MODULE))
+
+        async def _body():
             try:
-                cfg = self._vm_sync_cfg()
-                se = self._vm_sync_source()
-                if cfg.get("enabled", False) and \
-                        self.get_spoke_by_type(se.get("module_type", "hypervisor")) and \
-                        self.get_spoke_by_type(self._VM_SYNC_TARGET_MODULE):
-                    try:
-                        await self.sync_all_vms()
-                    except Exception as e:  # sync_all_vms already swallows; never let one cycle kill the loop
-                        logger.warning("[sync-error] vm-sync loop cycle failed: %s", e)
-                delay = self._vm_sync_next_delay(cfg) if cfg.get("enabled", False) else 60
-                await asyncio.sleep(delay)
-            except Exception as e:
-                logger.warning("[sync-error] vm-sync loop failed: %s", e)
-                await asyncio.sleep(60)
+                await self.sync_all_vms()
+            except Exception as e:  # sync_all_vms already swallows; never let one cycle kill the loop
+                logger.warning("[sync-error] vm-sync loop cycle failed: %s", e)
+
+        def _delay() -> float:
+            cfg = self._vm_sync_cfg()
+            if not cfg.get("enabled", False):
+                return 60
+            return next_schedule_delay(cfg, default_daily_time="03:00",
+                                       log_name="vm sync")
+
+        # stagger 45s: let spokes connect; stagger after endpoint sync
+        await run_sync_loop(stagger=45, guard=_guard, body=_body, delay=_delay,
+                            error_label="vm-sync loop failed")

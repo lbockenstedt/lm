@@ -263,7 +263,7 @@ async def test_relayed_agent_ids_skipped_and_selfhealed(monkeypatch):
     h.known_modules = ["pxmx-agent", "s1"]
     h.agent_info = {"pxmx-agent": {"spoke_id": "pxmx", "last_seen": 0.0}}
     saved = {"n": 0}
-    h.state.save_state = lambda: saved.__setitem__("n", saved["n"] + 1)  # type: ignore
+    h.state._mark_dirty = lambda: saved.__setitem__("n", saved["n"] + 1)  # type: ignore
 
     # One body at a large clock: s1 (last_seen 0) → error; pxmx-agent would ALSO
     # escalate if it weren't skipped (bare key absent, not in active_connections).
@@ -297,7 +297,7 @@ async def test_relayed_agent_ids_skipped_and_selfhealed(monkeypatch):
 @pytest.mark.asyncio
 async def test_relayed_agent_skip_is_change_gated(monkeypatch):
     """Once the leaked relay id has been self-healed out, subsequent cycles do
-    NO work for it (no repeated save_state / no per-cycle write)."""
+    NO work for it (no repeated dirty-mark / no per-cycle write)."""
     h = _AlertHub(global_config={"spoke_alert": {"enabled": True}},
                   approved={"pxmx-agent": True, "s1": True},
                   last_seen={"pxmx:pxmx-agent": 0.0, "s1": 0.0})
@@ -306,7 +306,7 @@ async def test_relayed_agent_skip_is_change_gated(monkeypatch):
     h.known_modules = ["pxmx-agent", "s1"]
     h.agent_info = {"pxmx-agent": {}}
     saved = {"n": 0}
-    h.state.save_state = lambda: saved.__setitem__("n", saved["n"] + 1)  # type: ignore
+    h.state._mark_dirty = lambda: saved.__setitem__("n", saved["n"] + 1)  # type: ignore
 
     # Two bodies: first self-heals + saves; second finds nothing leaked → no save.
     stages = [2000, 2010]
@@ -325,7 +325,7 @@ async def test_relayed_agent_skip_is_change_gated(monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         await h.run_spoke_alert_loop()
 
-    assert saved["n"] == 1, "self-heal must persist once, not every cycle"
+    assert saved["n"] == 1, "self-heal must mark dirty once, not every cycle"
     assert "pxmx-agent" not in h.approved_modules
 
 

@@ -33,6 +33,7 @@ import time
 from typing import Any, Dict, List, Tuple
 
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from sync_loop import run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
 
@@ -288,17 +289,22 @@ class DnsDhcpSyncMixin:
         offline — nothing to reconcile against.
         """
         logger.info("DNS/DHCP NetBox auto-sync loop started.")
-        while True:
-            interval = _DEFAULT_INTERVAL
+
+        def _delay() -> float:
             try:
-                cfg = self._dds_cfg()
-                interval = cfg["interval"]
-                if cfg["enabled"]:
-                    # Single NetBox fetch + skip-if-unchanged (see
-                    # _sync_dns_dhcp_once). The manual /api/dns|dhcp/sync buttons
-                    # still call the per-side methods directly (they re-fetch,
-                    # which is correct for an explicit button press).
-                    await self._sync_dns_dhcp_once()
-            except Exception as e:  # noqa: BLE001 — loop must survive anything
-                logger.error("Error in DNS/DHCP auto-sync loop: %s", e)
-            await asyncio.sleep(max(30, interval))
+                return max(30, self._dds_cfg()["interval"])
+            except Exception:  # noqa: BLE001 — bad config falls back to default
+                return max(30, _DEFAULT_INTERVAL)
+
+        async def _body():
+            # Single NetBox fetch + skip-if-unchanged (see
+            # _sync_dns_dhcp_once). The manual /api/dns|dhcp/sync buttons
+            # still call the per-side methods directly (they re-fetch,
+            # which is correct for an explicit button press).
+            await self._sync_dns_dhcp_once()
+
+        await run_sync_loop(
+            stagger=0, guard=lambda: bool(self._dds_cfg()["enabled"]),
+            body=_body, delay=_delay,
+            on_error=lambda e: logger.error("Error in DNS/DHCP auto-sync loop: %s", e),
+            error_delay=_delay)

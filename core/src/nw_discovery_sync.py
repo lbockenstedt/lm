@@ -48,6 +48,7 @@ except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
     norm_mac = None  # type: ignore
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
 
@@ -137,31 +138,6 @@ class NwDiscoverySyncMixin:
         except (TypeError, ValueError):
             n = 4
         return max(1, min(8, n))
-
-    def _nw_discovery_next_delay(self, cfg: Dict[str, Any]) -> float:
-        """Seconds to sleep before the next scheduled sync, per the config mode.
-
-        ``mode`` is ``"daily"`` (once a day at ``daily_time`` "HH:MM", 24h
-        local) or interval (every ``interval_seconds``). Clamped to >= 60 s.
-        """
-        mode = str(cfg.get("mode", "interval")).strip().lower()
-        if mode == "daily":
-            hhmm = str(cfg.get("daily_time", "02:30")).strip()
-            try:
-                hh, mm = (int(p) for p in hhmm.split(":")[:2])
-                now = _dt.datetime.now()
-                target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if target <= now:
-                    target += _dt.timedelta(days=1)
-                return max(60.0, (target - now).total_seconds())
-            except Exception:
-                logger.debug("nw discovery sync: bad daily_time %r — falling back to interval", hhmm)
-        interval = 3600
-        try:
-            interval = int(cfg.get("interval_seconds", 3600))
-        except (TypeError, ValueError):
-            interval = 3600
-        return max(60.0, float(interval))
 
     # ── pull / attribute / push ─────────────────────────────────────────────
 
@@ -681,19 +657,23 @@ class NwDiscoverySyncMixin:
         spoke or NetBox is offline. Staggered ~75s after the fw-discovery loop
         (60s) so the heavy syncs don't simultaneous-fire on startup.
         """
-        await asyncio.sleep(75)  # let spokes connect; stagger after fw-discovery
-        while True:
-            try:
-                cfg = self._nw_discovery_cfg()
-                nw_up = bool(self._nw_spokes())
-                if cfg.get("enabled", False) and nw_up and \
-                        self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE):
-                    await self.run_nw_discovery_sync_all()
-                delay = self._nw_discovery_next_delay(cfg) if cfg.get("enabled", False) else 60
-                await asyncio.sleep(delay)
-            except Exception as e:
-                logger.warning("[sync-error] nw-discovery loop cycle failed: %s", e)
-                await asyncio.sleep(60)
+        def _guard() -> bool:
+            cfg = self._nw_discovery_cfg()
+            return bool(cfg.get("enabled", False)
+                        and self._nw_spokes()
+                        and self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE))
+
+        def _delay() -> float:
+            cfg = self._nw_discovery_cfg()
+            if not cfg.get("enabled", False):
+                return 60
+            return next_schedule_delay(cfg, default_daily_time="02:30",
+                                       log_name="nw discovery sync")
+
+        # stagger 75s: let spokes connect; stagger after fw-discovery
+        await run_sync_loop(stagger=75, guard=_guard,
+                            body=self.run_nw_discovery_sync_all, delay=_delay,
+                            error_label="nw-discovery loop cycle failed")
 
     # ── NetBox → NW fleet import (NetBox is source of truth) ─────────────────
     # Reverse of the discovery/inventory push: devices already in NetBox whose
@@ -822,15 +802,18 @@ class NwDiscoverySyncMixin:
         """Periodic NetBox→NW fleet import per the configured interval. Reads
         config fresh each cycle; disabled → short re-check. Staggered ~110s after
         boot so it doesn't stampede with the discovery/fw loops."""
-        await asyncio.sleep(110)
-        while True:
-            try:
-                cfg = self._nw_import_cfg()
-                if (cfg["enabled"] and cfg["roles"]
+        def _guard() -> bool:
+            cfg = self._nw_import_cfg()
+            return bool(cfg["enabled"] and cfg["roles"]
                         and self.get_all_spokes_by_type("nw")
-                        and self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE)):
-                    await self.run_nw_netbox_import_all()
-                await asyncio.sleep(max(60, cfg["interval"]) if cfg["enabled"] else 120)
-            except Exception as e:
-                logger.warning("[sync-error] nw netbox import loop failed: %s", e)
-                await asyncio.sleep(120)
+                        and self.get_spoke_by_type(self._NW_DISCOVERY_TARGET_MODULE))
+
+        def _delay() -> float:
+            cfg = self._nw_import_cfg()
+            return max(60, cfg["interval"]) if cfg["enabled"] else 120
+
+        # stagger 110s: don't stampede with the discovery/fw loops at boot
+        await run_sync_loop(stagger=110, guard=_guard,
+                            body=self.run_nw_netbox_import_all, delay=_delay,
+                            error_label="nw netbox import loop failed",
+                            error_delay=120)

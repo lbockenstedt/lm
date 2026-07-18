@@ -32,6 +32,7 @@ import logging
 from typing import Any, Dict
 
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from sync_loop import run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
 
@@ -176,15 +177,15 @@ class StalenessSweepMixin:
         spoke is offline. Staggered ~90s after startup so it doesn't
         simultaneous-fire with the other heavy syncs.
         """
-        await asyncio.sleep(90)  # let spokes connect; stagger after the other syncs
-        while True:
-            try:
-                cfg = self._staleness_cfg()
-                ipam_up = bool(self.get_spoke_by_type("ipam"))
-                if cfg.get("enabled", False) and ipam_up:
-                    await self.run_staleness_sweep_all()
-                delay = self._staleness_interval() if cfg.get("enabled", False) else 60
-                await asyncio.sleep(delay)
-            except Exception as e:
-                logger.warning("[sync-error] staleness-sweep loop cycle failed: %s", e)
-                await asyncio.sleep(60)
+        def _guard() -> bool:
+            return bool(self._staleness_cfg().get("enabled", False)
+                        and self.get_spoke_by_type("ipam"))
+
+        def _delay() -> float:
+            enabled = self._staleness_cfg().get("enabled", False)
+            return self._staleness_interval() if enabled else 60
+
+        # stagger 90s: let spokes connect; stagger after the other syncs
+        await run_sync_loop(stagger=90, guard=_guard,
+                            body=self.run_staleness_sweep_all, delay=_delay,
+                            error_label="staleness-sweep loop cycle failed")

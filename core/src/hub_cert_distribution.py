@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import time
 
+from sync_loop import run_sync_loop  # sibling leaf
+
 # Pure transport helpers live in cert_distribution.py (no heavy imports, so they
 # are unit-testable without constructing a LabManagerHub, which pulls in at-rest
 # encryption). The Hub methods _distribute_one_cert / _distribute_all_certs are
@@ -457,27 +459,31 @@ class HubCertDistributionMixin:
         ``global_config["certs"]["distribution_retry_hours"]`` (default 1h). Also
         fired inline on /api/le/issue + /api/le/renew for immediate effect after
         a (re)issue. See _distribute_one_cert / _distribute_all_certs."""
-        await asyncio.sleep(60)  # let the le spoke connect + reconcile its ledger
-        while True:
+        async def _body():
+            le_sid = self.get_spoke_by_type("certificates")
+            if not le_sid:
+                return
+            await self._distribute_all_certs(le_sid)
+            # Warm the Certificates page cache on the same cadence so a
+            # hub restart / slow le spoke serves fresh-ish last-known data.
             try:
-                le_sid = self.get_spoke_by_type("certificates")
-                if le_sid:
-                    await self._distribute_all_certs(le_sid)
-                    # Warm the Certificates page cache on the same cadence so a
-                    # hub restart / slow le spoke serves fresh-ish last-known data.
-                    try:
-                        rr = await self.request_response(le_sid, "LE_LIST_CERTS", {})
-                        certs = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else rr
-                        if isinstance(certs, dict) and str(certs.get("status", "SUCCESS")).upper() != "ERROR":
-                            await self.le_cache_set("certs", certs)
-                    except Exception as e:
-                        logger.debug("le cache refresh (distribution loop) skipped: %s", e)
-                    # Phase B: when auto-provision is on, try to auto-enable mTLS
-                    # once the fleet is ready (hub + every connected primary spoke).
-                    await self._maybe_auto_enable_mtls()
+                rr = await self.request_response(le_sid, "LE_LIST_CERTS", {})
+                certs = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else rr
+                if isinstance(certs, dict) and str(certs.get("status", "SUCCESS")).upper() != "ERROR":
+                    await self.le_cache_set("certs", certs)
             except Exception as e:
-                logger.warning("[sync-error] cert-distribution loop failed: %s", e)
-            await asyncio.sleep(self._cert_distribution_retry_seconds())
+                logger.debug("le cache refresh (distribution loop) skipped: %s", e)
+            # Phase B: when auto-provision is on, try to auto-enable mTLS
+            # once the fleet is ready (hub + every connected primary spoke).
+            await self._maybe_auto_enable_mtls()
+
+        # stagger 60s: let the le spoke connect + reconcile its ledger. On
+        # error the sleep is the SAME retry cadence (no shorter error sleep) —
+        # unchanged from the inline loop.
+        await run_sync_loop(stagger=60, body=_body,
+                            delay=self._cert_distribution_retry_seconds,
+                            error_label="cert-distribution loop failed",
+                            error_delay=self._cert_distribution_retry_seconds)
 
     async def _on_le_cert_renewed(self, le_spoke_id: str, domain: str,
                                   targets: list) -> None:

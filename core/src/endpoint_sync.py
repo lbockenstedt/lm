@@ -26,6 +26,8 @@ import datetime as _dt
 import logging
 from typing import Any, Dict, List, Optional
 
+from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
+
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
 
 logger = logging.getLogger("Hub")
@@ -134,32 +136,6 @@ class EndpointSyncMixin:
         except (TypeError, ValueError):
             n = 8
         return max(1, min(16, n))
-
-    def _endpoint_sync_next_delay(self, cfg: Dict[str, Any]) -> float:
-        """Seconds to sleep before the next scheduled sync, per the config mode.
-
-        ``mode`` is ``"daily"`` (run once a day at ``daily_time`` "HH:MM", 24h
-        local) or anything else (interval mode → every ``interval_seconds``).
-        Always clamped to >= 60 s so a bad config can't hot-loop the hub.
-        """
-        mode = str(cfg.get("mode", "interval")).strip().lower()
-        if mode == "daily":
-            hhmm = str(cfg.get("daily_time", "02:00")).strip()
-            try:
-                hh, mm = (int(p) for p in hhmm.split(":")[:2])
-                now = _dt.datetime.now()
-                target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if target <= now:
-                    target += _dt.timedelta(days=1)
-                return max(60.0, (target - now).total_seconds())
-            except Exception:
-                logger.debug("endpoint sync: bad daily_time %r — falling back to interval", hhmm)
-        interval = 3600
-        try:
-            interval = int(cfg.get("interval_seconds", 3600))
-        except (TypeError, ValueError):
-            interval = 3600
-        return max(60.0, float(interval))
 
     async def sync_tenant_endpoints(self, tenant_id: str) -> Dict[str, Any]:
         """Pull this tenant's endpoints from the configured IPAM source, push to CPPM.
@@ -307,41 +283,47 @@ class EndpointSyncMixin:
         IPAM source or CPPM is offline (the per-tenant sync records an 'error'
         status for it).
         """
-        await asyncio.sleep(30)  # let spokes connect first (parity with tenant_sync)
-        while True:
-            try:
-                cfg = self._endpoint_sync_cfg()
-                se = self._endpoint_sync_source()
-                nac = self.get_spoke_by_type("nac")
-                if cfg.get("enabled", False) and \
-                        self.get_spoke_by_type(se.get("module_type", "ipam")) and \
-                        nac and nac not in self._nac_unconfigured_spokes:
-                    # Fan tenants out concurrently with a bounded semaphore.
-                    # Sequential await at hundreds of tenants × (30s IPAM + 60s
-                    # CPPM) per tenant made a full cycle take longer than the
-                    # schedule, so late tenants were perpetually stale. Bounded
-                    # (not unbounded gather) so we don't stampede the IPAM/CPPM
-                    # spokes with hundreds of simultaneous requests.
-                    tenants = self._endpoint_sync_tenants()
-                    sem = asyncio.Semaphore(self._endpoint_sync_concurrency())
+        def _guard() -> bool:
+            cfg = self._endpoint_sync_cfg()
+            se = self._endpoint_sync_source()
+            nac = self.get_spoke_by_type("nac")
+            return bool(cfg.get("enabled", False)
+                        and self.get_spoke_by_type(se.get("module_type", "ipam"))
+                        and nac and nac not in self._nac_unconfigured_spokes)
 
-                    async def _one(tid: str):
-                        async with sem:
-                            try:
-                                await self.sync_tenant_endpoints(tid)
-                            except Exception as e:  # defense in depth — sync_tenant_endpoints already swallows, but never let one task kill the gather
-                                logger.debug("endpoint sync gather tenant=%s: %s", tid, e)
+        async def _body():
+            # Fan tenants out concurrently with a bounded semaphore.
+            # Sequential await at hundreds of tenants × (30s IPAM + 60s
+            # CPPM) per tenant made a full cycle take longer than the
+            # schedule, so late tenants were perpetually stale. Bounded
+            # (not unbounded gather) so we don't stampede the IPAM/CPPM
+            # spokes with hundreds of simultaneous requests.
+            tenants = self._endpoint_sync_tenants()
+            sem = asyncio.Semaphore(self._endpoint_sync_concurrency())
 
-                    await asyncio.gather(*(_one(tid) for tid in tenants))
-                    # The cycle just pushed endpoint tags into CPPM — drop + re-fetch
-                    # the cppm_devices / cppm_sessions tenant caches so a non-admin
-                    # viewer sees the updated endpoint attribution immediately
-                    # instead of waiting up to 300s for the next cache tick. Best-
-                    # effort; refresh_module_cache swallows errors.
-                    self.refresh_module_cache("cppm_devices")
-                    self.refresh_module_cache("cppm_sessions")
-                delay = self._endpoint_sync_next_delay(cfg) if cfg.get("enabled", False) else 60
-                await asyncio.sleep(delay)
-            except Exception as e:
-                logger.warning("[sync-error] endpoint-sync loop failed: %s", e)
-                await asyncio.sleep(60)
+            async def _one(tid: str):
+                async with sem:
+                    try:
+                        await self.sync_tenant_endpoints(tid)
+                    except Exception as e:  # defense in depth — sync_tenant_endpoints already swallows, but never let one task kill the gather
+                        logger.debug("endpoint sync gather tenant=%s: %s", tid, e)
+
+            await asyncio.gather(*(_one(tid) for tid in tenants))
+            # The cycle just pushed endpoint tags into CPPM — drop + re-fetch
+            # the cppm_devices / cppm_sessions tenant caches so a non-admin
+            # viewer sees the updated endpoint attribution immediately
+            # instead of waiting up to 300s for the next cache tick. Best-
+            # effort; refresh_module_cache swallows errors.
+            self.refresh_module_cache("cppm_devices")
+            self.refresh_module_cache("cppm_sessions")
+
+        def _delay() -> float:
+            cfg = self._endpoint_sync_cfg()
+            if not cfg.get("enabled", False):
+                return 60
+            return next_schedule_delay(cfg, default_daily_time="02:00",
+                                       log_name="endpoint sync")
+
+        # stagger 30s: let spokes connect first (parity with tenant_sync)
+        await run_sync_loop(stagger=30, guard=_guard, body=_body, delay=_delay,
+                            error_label="endpoint-sync loop failed")

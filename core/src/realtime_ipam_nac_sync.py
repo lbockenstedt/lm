@@ -45,6 +45,7 @@ try:
 except Exception:  # pragma: no cover - access always importable in-app
     attribute_by_prefix = None  # type: ignore
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from sync_loop import run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
 
@@ -357,17 +358,18 @@ class RealtimeIpamNacSyncMixin:
         NAC spoke or NetBox is offline. Staggered ~75s after startup so it
         doesn't simultaneous-fire with the other heavy syncs.
         """
-        await asyncio.sleep(75)  # let spokes connect; stagger after the other syncs
-        while True:
-            try:
-                cfg = self._rt_nac_cfg()
-                nac = self._rt_nac_spoke()
-                nac_up = bool(nac) and nac not in self._nac_unconfigured_spokes
-                ipam_up = bool(self._rt_ipam_spoke())
-                if cfg.get("enabled", False) and nac_up and ipam_up:
-                    await self.run_realtime_nac_sync_all()
-                delay = self._rt_nac_interval() if cfg.get("enabled", False) else 60
-                await asyncio.sleep(delay)
-            except Exception as e:
-                logger.warning("[sync-error] realtime-nac loop cycle failed: %s", e)
-                await asyncio.sleep(60)
+        def _guard() -> bool:
+            cfg = self._rt_nac_cfg()
+            nac = self._rt_nac_spoke()
+            nac_up = bool(nac) and nac not in self._nac_unconfigured_spokes
+            return bool(cfg.get("enabled", False) and nac_up
+                        and self._rt_ipam_spoke())
+
+        def _delay() -> float:
+            enabled = self._rt_nac_cfg().get("enabled", False)
+            return self._rt_nac_interval() if enabled else 60
+
+        # stagger 75s: let spokes connect; stagger after the other syncs
+        await run_sync_loop(stagger=75, guard=_guard,
+                            body=self.run_realtime_nac_sync_all, delay=_delay,
+                            error_label="realtime-nac loop cycle failed")

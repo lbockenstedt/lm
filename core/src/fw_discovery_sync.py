@@ -56,6 +56,7 @@ except Exception:  # pragma: no cover - access always importable in-app
     fetch_tenant_prefixes = None  # type: ignore
     attribute_by_prefix = None  # type: ignore
 from access import unwrap_spoke  # sibling leaf (no main/api back-import)
+from sync_loop import next_schedule_delay, run_sync_loop  # sibling leaf
 
 logger = logging.getLogger("Hub")
 
@@ -146,32 +147,6 @@ class FwDiscoverySyncMixin:
         except (TypeError, ValueError):
             n = 4
         return max(1, min(8, n))
-
-    def _fw_discovery_next_delay(self, cfg: Dict[str, Any]) -> float:
-        """Seconds to sleep before the next scheduled sync, per the config mode.
-
-        ``mode`` is ``"daily"`` (run once a day at ``daily_time`` "HH:MM", 24h
-        local) or anything else (interval mode → every ``interval_seconds``).
-        Always clamped to >= 60 s so a bad config can't hot-loop the hub.
-        """
-        mode = str(cfg.get("mode", "interval")).strip().lower()
-        if mode == "daily":
-            hhmm = str(cfg.get("daily_time", "02:00")).strip()
-            try:
-                hh, mm = (int(p) for p in hhmm.split(":")[:2])
-                now = _dt.datetime.now()
-                target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                if target <= now:
-                    target += _dt.timedelta(days=1)
-                return max(60.0, (target - now).total_seconds())
-            except Exception:
-                logger.debug("fw discovery sync: bad daily_time %r — falling back to interval", hhmm)
-        interval = 3600
-        try:
-            interval = int(cfg.get("interval_seconds", 3600))
-        except (TypeError, ValueError):
-            interval = 3600
-        return max(60.0, float(interval))
 
     # ── pull / attribute / push ─────────────────────────────────────────────
 
@@ -448,17 +423,20 @@ class FwDiscoverySyncMixin:
         the vm-sync loop (45s) and endpoint-sync loop (30s) so the three heavy
         syncs don't simultaneous-fire on startup.
         """
-        await asyncio.sleep(60)  # let spokes connect; stagger after the other two syncs
-        while True:
-            try:
-                cfg = self._fw_discovery_cfg()
-                se = self._fw_discovery_source()
-                fw_up = bool(self._fw_firewall_spokes())
-                if cfg.get("enabled", False) and fw_up and \
-                        self.get_spoke_by_type(self._FW_DISCOVERY_TARGET_MODULE):
-                    await self.run_fw_discovery_sync_all()
-                delay = self._fw_discovery_next_delay(cfg) if cfg.get("enabled", False) else 60
-                await asyncio.sleep(delay)
-            except Exception as e:
-                logger.warning("[sync-error] fw-discovery loop cycle failed: %s", e)
-                await asyncio.sleep(60)
+        def _guard() -> bool:
+            cfg = self._fw_discovery_cfg()
+            return bool(cfg.get("enabled", False)
+                        and self._fw_firewall_spokes()
+                        and self.get_spoke_by_type(self._FW_DISCOVERY_TARGET_MODULE))
+
+        def _delay() -> float:
+            cfg = self._fw_discovery_cfg()
+            if not cfg.get("enabled", False):
+                return 60
+            return next_schedule_delay(cfg, default_daily_time="02:00",
+                                       log_name="fw discovery sync")
+
+        # stagger 60s: let spokes connect; stagger after the other two syncs
+        await run_sync_loop(stagger=60, guard=_guard,
+                            body=self.run_fw_discovery_sync_all, delay=_delay,
+                            error_label="fw-discovery loop cycle failed")
