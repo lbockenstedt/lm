@@ -24,10 +24,18 @@ def register(app, hub, ctx):
     @app.put("/api/security/config")
     async def security_config(request: Request):
         """Update policy: enabled, auto_block, threshold (>N fails), window_s,
-        ttl_s, permanent_after, success_grace_s, block_rule_name, block_priority."""
+        ttl_s, permanent_after, success_grace_s, block_rule_name, block_priority.
+        Returns a non-fatal ``warning`` if the deny priority is not below the
+        allow priority (Deny must win)."""
+        from security.threat_monitor import priority_conflict_warning
         _guard(request)
         body = await request.json()
-        return {"status": "ok", "config": hub.threat_monitor.set_config(body or {})}
+        cfg = hub.threat_monitor.set_config(body or {})
+        warning = priority_conflict_warning(cfg.get("block_priority"),
+                                            hub.threat_monitor.allow_priority())
+        return {"status": "ok", "config": cfg,
+                "allow_priority": hub.threat_monitor.allow_priority(),
+                "warning": warning}
 
     @app.post("/api/security/block")
     async def security_block(request: Request):
@@ -47,17 +55,31 @@ def register(app, hub, ctx):
 
     @app.post("/api/security/never-block")
     async def security_never_add(request: Request):
-        """Add an IP/CIDR to the never-block allow list. Body: {cidr}."""
+        """Add an IP/CIDR to the SHARED trusted list (never auto-blocked AND
+        allowed through the Azure NSG). Edits ``global_config['azure_nsg']
+        ['entries']`` — the same list the Azure NSG tile manages — then reconciles
+        the NSG allow rule (opens the hole) when Azure NSG is enabled.
+        Body: {cidr|ip, description?}."""
         _guard(request)
         body = await request.json()
-        return hub.threat_monitor.add_never((body.get("cidr") or "").strip())
+        ip = (body.get("cidr") or body.get("ip") or "").strip()
+        desc = (body.get("description") or "").strip()
+        res = hub.threat_monitor.add_trusted(ip, desc)
+        if res.get("status") == "SUCCESS":
+            res["allow"] = await hub.threat_monitor.reconcile_allow()
+        return res
 
     @app.delete("/api/security/never-block")
     async def security_never_remove(request: Request):
-        """Remove an IP/CIDR from the never-block allow list. Body: {cidr}."""
+        """Remove an IP/CIDR from the SHARED trusted list, then reconcile the NSG
+        allow rule (closes the hole) when Azure NSG is enabled. Body: {cidr|ip}."""
         _guard(request)
         body = await request.json()
-        return hub.threat_monitor.remove_never((body.get("cidr") or "").strip())
+        ip = (body.get("cidr") or body.get("ip") or "").strip()
+        res = hub.threat_monitor.remove_trusted(ip)
+        if res.get("status") == "SUCCESS":
+            res["allow"] = await hub.threat_monitor.reconcile_allow()
+        return res
 
     @app.post("/api/security/reconcile")
     async def security_reconcile(request: Request):
