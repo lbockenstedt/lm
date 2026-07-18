@@ -1370,11 +1370,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     async def _push_usb_to_all_tenants() -> int:
         """Push the effective USB list to every tenant's cs speak. Used after a
-        global certified/ignored change so all tenants pick up the new devices."""
-        pushed = 0
-        for tid in _all_tenant_ids():
-            pushed += await _push_usb_to_tenant(tid)
-        return pushed
+        global certified/ignored change so all tenants pick up the new devices.
+        Fanned out concurrently across tenants (the per-spoke push inside is
+        already concurrent); returns the total pushed. Any error propagates as
+        before (gather re-raises the first exception)."""
+        counts = await asyncio.gather(
+            *[_push_usb_to_tenant(tid) for tid in _all_tenant_ids()]
+        )
+        return sum(counts)
 
     # ── Sim-Quota effective merge + push ─────────────────────────────────────
     async def _effective_sim_quotas(tenant_id: str) -> list:
@@ -1433,7 +1436,34 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                        applied_op: int | None = None) -> dict:
         return sim_quota.adaptive_step(st, q, firing, now, applied_op)
 
-    async def _alert_firing(tenant_id: str, q: dict):
+    def _alias_groups_from_csc(csc: dict) -> list:
+        """Build the "groups" of co-referring site identifiers from a tenant's
+        central_sites_config: each ssid_matrix cell, each site_link, and each
+        site_mappings pair contributes the SET of its site-ish field values.
+        Pure (no I/O) so a sweep can compute it ONCE per tenant and pass it to
+        every _alert_firing call instead of re-reading csc + rebuilding per
+        quota. The transitive fixpoint over these groups still runs per-quota in
+        _alert_firing (it depends on the quota's own site)."""
+        _FIELDS = ("name", "cell", "site", "wsite", "central_site")
+        groups: list = []
+        for cd in (csc.get("ssid_matrix") or []):
+            g = {str(cd.get(f) or "").strip().lower() for f in _FIELDS}
+            g.discard("")
+            if g:
+                groups.append(g)
+        for lk in (csc.get("site_links") or []):
+            g = {str(lk.get(f) or "").strip().lower() for f in _FIELDS}
+            g.discard("")
+            if g:
+                groups.append(g)
+        for wk, cv in (csc.get("site_mappings") or {}).items():
+            g = {str(wk).strip().lower(), str(cv or "").strip().lower()}
+            g.discard("")
+            if g:
+                groups.append(g)
+        return groups
+
+    async def _alert_firing(tenant_id: str, q: dict, alias_groups: list | None = None):
         """Is this quota's alert firing at its site?
 
         Reads the SAME per-site check status the dashboard already computed — the
@@ -1477,37 +1507,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # map is keyed by: a cell-scoped quota (MIA-ACD) must match its physical
         # wsite (MIA) and linked central_site (Miami); an empty site = global →
         # match every wsite.
+        # A quota's site can be a cell name, a wsite code, a link name, or a
+        # central_site — and the chain is multi-hop (cell "MIA-ACD" → wsite "MIA"
+        # → central_site "Miami", the form the poller keys status by). Fold the
+        # co-referring "groups" into the alias set TRANSITIVELY (fixpoint) so any
+        # hop is reachable. ``alias_groups`` is computed ONCE per sweep by the
+        # controller/learner loops (from the csc they already read) and passed in
+        # to avoid re-reading csc + rebuilding groups per quota; when absent (any
+        # other caller), read + build here so behavior is identical.
         site = str(q.get("site") or "").strip()
         aliases = set()
         if site:
             aliases.add(site.lower())
             try:
-                csc = await store.get_central_sites_config(tenant_id) or {}
-                # Build "groups" of co-referring site identifiers: each ssid_matrix
-                # cell, each site_link, and each site_mappings pair contributes the
-                # SET of its site-ish field values. A quota's site can be a cell
-                # name, a wsite code, a link name, or a central_site — and the chain
-                # is multi-hop (cell "MIA-ACD" → wsite "MIA" → central_site "Miami",
-                # which is the form the poller keys status by). Fold groups into the
-                # alias set TRANSITIVELY (fixpoint) so any hop is reachable; the
-                # earlier single-hop resolver stopped at "MIA" and missed "Miami".
-                _FIELDS = ("name", "cell", "site", "wsite", "central_site")
-                groups = []
-                for cd in (csc.get("ssid_matrix") or []):
-                    g = {str(cd.get(f) or "").strip().lower() for f in _FIELDS}
-                    g.discard("")
-                    if g:
-                        groups.append(g)
-                for lk in (csc.get("site_links") or []):
-                    g = {str(lk.get(f) or "").strip().lower() for f in _FIELDS}
-                    g.discard("")
-                    if g:
-                        groups.append(g)
-                for wk, cv in (csc.get("site_mappings") or {}).items():
-                    g = {str(wk).strip().lower(), str(cv or "").strip().lower()}
-                    g.discard("")
-                    if g:
-                        groups.append(g)
+                groups = alias_groups
+                if groups is None:
+                    csc = await store.get_central_sites_config(tenant_id) or {}
+                    groups = _alias_groups_from_csc(csc)
                 # Fixpoint: union any group that shares a member with the alias set,
                 # repeating until nothing new is added (bounded by len(groups)).
                 changed = True
@@ -1584,6 +1600,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         for tid in _all_tenant_ids():
             try:
                 csc = await store.get_central_sites_config(tid) or {}
+                # Resolve the tenant's site-alias groups ONCE for the whole sweep
+                # (was re-read + rebuilt inside _alert_firing per quota).
+                alias_groups = _alias_groups_from_csc(csc)
                 all_q = [normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
                 adaptive = [q for q in all_q if q.get("enabled") and _adaptive_is_on(q)]
                 # DIAG: does the controller even reach _alert_firing for this tenant?
@@ -1624,7 +1643,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 live = set()
                 for q in adaptive:
                     k = _adaptive_key(q); live.add(k)
-                    firing = await _alert_firing(tid, q)
+                    firing = await _alert_firing(tid, q, alias_groups)
                     before = dict(state.get(k) or {})
                     after = _adaptive_step(before, q, firing, now,
                                             applied_op.get(_alert_key(q)))
@@ -1707,12 +1726,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                          if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
                 if not learn:
                     continue
+                # Site-alias groups resolved ONCE for the sweep (see controller).
+                alias_groups = _alias_groups_from_csc(csc)
                 state = await store.get_knob_learn_state(tid)
                 changed = False
                 live = set()
                 for q in learn:
                     k = _adaptive_key(q); live.add(k)
-                    firing = await _alert_firing(tid, q)
+                    firing = await _alert_firing(tid, q, alias_groups)
                     before = dict(state.get(k) or {})
                     after = knob_step(before, knobs_for_sim(q.get("sim_id")), firing, now)
                     if after != before:
@@ -1868,11 +1889,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     async def _push_sim_quotas_all_tenants() -> int:
         """Re-push effective sim quotas to every tenant after a global-defaults
-        change (Setup → Simulations → Sim Quotas)."""
-        pushed = 0
-        for tid in _all_tenant_ids():
-            pushed += await _push_sim_quotas(tid)
-        return pushed
+        change (Setup → Simulations → Sim Quotas). Fanned out concurrently across
+        tenants (per-spoke push inside is already concurrent); returns the total
+        pushed. Any error propagates as before (gather re-raises)."""
+        counts = await asyncio.gather(
+            *[_push_sim_quotas(tid) for tid in _all_tenant_ids()]
+        )
+        return sum(counts)
 
     # ── aggregate reads (literal "aggregate" first segment) ────────────────
     @app.get("/sim/api/aggregate/dashboard")
