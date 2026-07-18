@@ -2081,6 +2081,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
         Returns None when no ldap instance is configured (nothing to push)."""
         gc = self.state.get_global_config()
+        # Setup → Directory (LDAP) SERVER config (global_config["ldap"]) is the
+        # Global-Admin-set source of truth. It takes PRECEDENCE over the legacy
+        # ldap_instances entry (and the dc=example,dc=org install default) per
+        # field via merge_ldap_connection, so the Setup values actually flow to
+        # the spoke instead of the install-time fallback.
+        gldap = gc.get("ldap") or {}
         instances = gc.get("ldap_instances", []) or []
         inst = next((x for x in instances
                      if isinstance(x, dict) and x.get("spoke_id") == spoke_id), None)
@@ -2089,25 +2095,30 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                          if isinstance(x, dict) and not x.get("spoke_id")), None)
         if inst is None and instances and isinstance(instances[0], dict):
             inst = instances[0]
-        if inst is None:
+        # Nothing to push only when BOTH sources are empty.
+        if inst is None and not gldap:
             return None
-        cfg = {
-            "LDAP_SERVER_URL": inst.get("server_url"),
-            "LDAP_BASE_DN": inst.get("base_dn"),
-            "LDAP_ADMIN_DN": inst.get("admin_dn"),
-            "LDAP_ADMIN_PW": inst.get("admin_pw"),
-        }
-        cfg["LDAP_SERVER_ID"] = str(inst.get("server_id") or inst.get("id") or spoke_id)
-        peers = []
-        for other in instances:
-            if not isinstance(other, dict) or other is inst:
-                continue
-            purl = other.get("server_url")
-            if purl:
-                peers.append({
-                    "server_id": str(other.get("server_id") or other.get("id") or ""),
-                    "url": purl,
-                })
+        from routes.ldap import merge_ldap_connection, normalize_mirror_peers
+        inst = inst or {}
+        cfg = merge_ldap_connection(gldap, inst)
+        cfg["LDAP_SERVER_ID"] = str(gldap.get("server_id") or inst.get("server_id")
+                                    or inst.get("id") or spoke_id)
+        # Mirror peers: the Setup panel's list wins; otherwise derive the peer set
+        # from the OTHER ldap_instances (legacy 2-node mirror wiring).
+        gpeers = normalize_mirror_peers(gldap.get("mirror_peers"))
+        if gpeers:
+            peers = gpeers
+        else:
+            peers = []
+            for other in instances:
+                if not isinstance(other, dict) or other is inst:
+                    continue
+                purl = other.get("server_url")
+                if purl:
+                    peers.append({
+                        "server_id": str(other.get("server_id") or other.get("id") or ""),
+                        "url": purl,
+                    })
         cfg["LDAP_MIRROR_PEERS"] = json.dumps(peers)
         try:
             from security.oidc import get_oidc_config
