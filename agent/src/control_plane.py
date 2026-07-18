@@ -483,11 +483,17 @@ class AgentControlPlane(BaseControlPlane):
         return "lm-agent"
 
     def _extra_auth_fields(self) -> dict:
-        """No cert-target capability is advertised anymore. In the tiered
-        Hub→Spoke→Agent model the ipam spoke is the cert custodian and drives its
-        hosted Agent directly (WRITE_FILE + RUN_COMMAND) — the hub no longer routes
-        NetBox certs to a capability-advertising agent. Kept as a hook for future
-        auth fields."""
+        """Advertise the ldap-server cert-target capability when this host ran the
+        ldap-server deploy role (detected by the root ldaps cert helper the
+        installer drops). The hub records it in ``ldap_server_agents`` and routes
+        an LE cert for the LDAPS endpoint here (target ``ldap-server``). Emitted
+        after a deploy + reconnect."""
+        try:
+            from agent_spoke import _LDAP_INSTALL_CERT_HELPER
+            if os.path.exists(_LDAP_INSTALL_CERT_HELPER):
+                return {"ldap_server": True}
+        except Exception:  # noqa: BLE001
+            pass
         return {}
 
     def __init__(self, spoke_id, secret, hub_secret="", hub_url="",

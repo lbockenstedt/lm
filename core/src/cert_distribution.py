@@ -46,7 +46,7 @@ logger = logging.getLogger("le.distribution")
 # other nw families (aos_switch/ex_switch/gateway) return a clear ERROR from
 # the spoke (external-key / SSH-SFTP plumbing not yet built). Both are fast
 # REST targets → 120s install tier (no pvenode wait).
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation", "nac", "nw", "netbox-server"}
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation", "nac", "nw", "netbox-server", "ldap-server"}
 
 
 async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
@@ -712,7 +712,8 @@ def build_available_targets(spoke_module_types: Dict[str, str],
                             active_connections, module_names: Dict[str, str],
                             capable: Set[str],
                             agents: List[Dict[str, Any]],
-                            netbox_server_agents=None) -> List[Dict[str, Any]]:
+                            netbox_server_agents=None,
+                            ldap_server_agents=None) -> List[Dict[str, Any]]:
     """Build the click-to-add list of cert distribution targets from live hub
     state — the ``GET /api/le/targets/available`` payload. One entry per
     cert-capable CONNECTED spoke (by ``module_type``), EXCEPT agent-hosting
@@ -794,4 +795,14 @@ def build_available_targets(spoke_module_types: Dict[str, str],
         nm = names.get(sid, sid) or sid
         targets.append({"module_type": "netbox-server", "identifier": sid,
                         "label": f"netbox-server — {nm}", "spoke_id": sid})
+    # LDAP server: a generic agent that ran the ldap-server deploy role
+    # (module_type "agent", so not in the loops above). It has the local
+    # lm-ldap-install-cert helper, so it — not the API-only directory spoke — is
+    # the cert target for the LDAPS endpoint. identifier = the agent's spoke_id.
+    for sid in (ldap_server_agents or []):
+        if sid not in active_connections:
+            continue
+        nm = names.get(sid, sid) or sid
+        targets.append({"module_type": "ldap-server", "identifier": sid,
+                        "label": f"ldap-server — {nm}", "spoke_id": sid})
     return targets

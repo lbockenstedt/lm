@@ -378,6 +378,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # certs land on the actual NetBox web server, not the API-only IPAM spoke.
         self.netbox_server_agents: set = set()
 
+        # Generic-agent hosts that ran the "ldap-server" deploy role (they stood
+        # up OpenLDAP + the /usr/local/bin/lm-ldap-install-cert helper and run as
+        # root). Advertised in the agent's WS auth frame ("ldap_server": true);
+        # used to offer + resolve an "ldap-server" cert-distribution target so an
+        # LE cert lands on the actual LDAP (ldaps) host. Mirrors
+        # netbox_server_agents.
+        self.ldap_server_agents: set = set()
+
         # --- System Diagnostics ---
         self.logs = deque(maxlen=500)
         self.agent_logs = {} # { agent_id: deque(logs) }
@@ -3569,6 +3577,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # (has the local nginx cert helper) advertises this so the hub can
             # route the NetBox cert to it. Recorded post-auth below.
             netbox_server_cap = bool(auth_data.get("netbox_server"))
+            # LDAP web/ldaps server cert-target capability (mirrors netbox_server):
+            # a generic agent that ran the ldap-server deploy role advertises this
+            # so the hub can route an LE cert to it. Recorded post-auth below.
+            ldap_server_cap = bool(auth_data.get("ldap_server"))
             # H4 app-layer-encryption capability: the spoke advertises ``enc="v1"``
             # in its auth frame. Combined with encryption_enabled() so
             # LM_APP_ENCRYPTION=0 makes a new spoke behave as legacy (don't
@@ -3816,6 +3828,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.netbox_server_agents.add(pk)
             else:
                 self.netbox_server_agents.discard(pk)
+            if ldap_server_cap:
+                self.ldap_server_agents.add(pk)
+            else:
+                self.ldap_server_agents.discard(pk)
             # H4: record encryption capability unconditionally (covers the
             # zero-touch / secret-less connect path too). A non-capable or
             # kill-switched spoke records False → outbound frames stay plaintext.
@@ -4417,6 +4433,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.spoke_module_types.pop(pk, None)
                 self.spoke_parent_map.pop(pk, None)
                 self.netbox_server_agents.discard(pk)
+                self.ldap_server_agents.discard(pk)
                 self.spoke_authenticated.pop(pk, None)
                 self.spoke_enc_capable.pop(pk, None)
                 # Drop the per-connection "never authenticated" diagnosis state

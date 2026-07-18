@@ -5,6 +5,25 @@ from api import (
 from access import valid_display_name, valid_identifier
 
 
+def _enrich_ldap_server_config(hub, cfg):
+    """Inject the Entra app creds into an ``ldap-server`` LOAD_ROLE config from
+    the hub's OIDC config so the WebUI never has to handle them. The installer
+    consumes --entra-tenant/--entra-client/--entra-cert/--entra-key; source them
+    from get_oidc_config (tenant_id, client_id, cert path, key path). Only fills
+    values the caller didn't already provide."""
+    cfg = dict(cfg or {})
+    try:
+        from security.oidc import get_oidc_config
+        oc = get_oidc_config(hub)
+        cfg.setdefault("entra_tenant", oc.tenant_id)
+        cfg.setdefault("entra_client", oc.client_id)
+        cfg.setdefault("entra_cert", oc.cert_path)
+        cfg.setdefault("entra_key", oc.key_path)
+    except Exception as e:  # noqa: BLE001 — Entra optional; deploy LDAP anyway
+        logger.warning("ldap-server: could not source Entra creds from OIDC: %s", e)
+    return cfg
+
+
 def register(app, hub, ctx):
     """Register agents routes on the Hub app."""
 
@@ -175,6 +194,8 @@ def register(app, hub, ctx):
                         results.append({"role": None, "status": "ERROR",
                                         "message": "role is required"})
                         continue
+                    if rname == "ldap-server":
+                        rcfg = _enrich_ldap_server_config(hub, rcfg)
                     try:
                         res = await hub.request_response(spoke_id, "LOAD_ROLE",
                                                          {"role": rname, "config": rcfg},
@@ -195,6 +216,8 @@ def register(app, hub, ctx):
             config = data.get("config", {})
             if not role:
                 raise HTTPException(status_code=400, detail="role is required")
+            if role == "ldap-server":
+                config = _enrich_ldap_server_config(hub, config)
             # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling
             # repo (e.g. github.com/lbockenstedt/opnsense.git) on first load — a
             # network git clone that routinely exceeds the 5s request_response

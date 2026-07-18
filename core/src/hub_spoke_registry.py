@@ -189,6 +189,15 @@ class SpokeRegistryMixin:
                 return identifier
             return next((sid for sid in self.netbox_server_agents
                          if sid in self.active_connections), None)
+        if module_type == "ldap-server":
+            # The cert target is a generic agent that ran the ldap-server deploy
+            # (has the local lm-ldap-install-cert helper + root). Mirrors the
+            # netbox-server branch.
+            if identifier and self._primary_key(identifier) in self.ldap_server_agents \
+                    and self._primary_key(identifier) in self.active_connections:
+                return identifier
+            return next((sid for sid in self.ldap_server_agents
+                         if sid in self.active_connections), None)
         return self.get_spoke_by_type(module_type)
 
     def get_hypervisor_spoke(self) -> Optional[str]:
@@ -248,6 +257,9 @@ class SpokeRegistryMixin:
         # targeting resolve it from the netbox_server_agents set.
         if module_type == "netbox-server":
             return [sid for sid in getattr(self, "netbox_server_agents", set())
+                    if sid in self.active_connections]
+        if module_type == "ldap-server":
+            return [sid for sid in getattr(self, "ldap_server_agents", set())
                     if sid in self.active_connections]
         # Legacy fallback: same prefix map as get_spoke_by_type. See
         # _MODULE_TYPE_PREFIX.

@@ -464,6 +464,7 @@ const AGENT_ROLES = {
     'netbox-server': { name: 'NetBox Server', desc: 'Deploys the NetBox application itself — PostgreSQL, Redis, gunicorn, and nginx serving the WebUI on port 80. Runs as its own service on this host; does NOT create a spoke. Load the "IPAM/DCIM (NetBox)" module role to talk to it.', deploy: true },
     'opnsense':   { name: 'Firewall (OPNsense)',   desc: 'Manages an OPNsense firewall — aliases, filter/NAT rules, Unbound DNS, DHCP leases, ARP. Syncs DHCP/ARP into NetBox.', deploy: false },
     'ldap':       { name: 'Directory (LDAP)',      desc: 'Wraps an LDAP directory for identity/group lookups.', deploy: false },
+    'ldap-server': { name: 'LDAP Server (OpenLDAP)', desc: 'Deploys OpenLDAP itself (slapd + ldaps, optional 2-node delta-syncrepl mirror). Runs as its own service on this host; does NOT create a spoke. Load the "Directory (LDAP)" module role to talk to it. Entra creds are sourced from the hub OIDC config automatically.', deploy: true },
     'simulation': { name: 'Client Simulator (cs)', desc: 'Client-sim engine, client registry, USB auto-provisioning relay, per-client override control panel, and the DHCP/client API for the isolated sim-client network.', deploy: false },
     'cppm':       { name: 'NAC (Aruba ClearPass)', desc: 'Syncs ClearPass sessions/endpoints (by-MAC / by-IP) into NetBox.', deploy: false },
     'proxmox':    { name: 'Hypervisor (Proxmox / pxmx)', desc: 'Proxmox spoke bridging the hub to per-host pxmx agents (VM lifecycle, VNC console, USB auto-provisioning).', deploy: false },
@@ -12444,6 +12445,18 @@ async function showLoadRoleModal(spokeId) {
                         class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
                     <p class="text-[11px] text-slate-500">Sets the NetBox WebUI login. Leave blank to auto-generate (shown in the deploy log).</p>
                 </div>
+                <div id="ldap-server-cfg" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
+                    <p class="text-xs font-semibold text-slate-700">LDAP server</p>
+                    <input id="lsrv-base-dn" type="text" placeholder="base DN (e.g. dc=lab,dc=example,dc=com)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    <input id="lsrv-admin-dn" type="text" placeholder="admin DN (e.g. cn=admin,dc=lab,dc=example,dc=com)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    <input id="lsrv-admin-pw" type="password" placeholder="admin password (blank = auto-generate)" autocomplete="new-password" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    <div class="flex gap-2">
+                        <select id="lsrv-server-id" class="w-1/3 px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500"><option value="1">server-id 1</option><option value="2">server-id 2</option></select>
+                        <input id="lsrv-server-url" type="text" placeholder="this node ldaps:// URL" autocomplete="off" class="flex-1 px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    </div>
+                    <input id="lsrv-peer" type="text" placeholder="peer node ldaps:// URL (for the 2-node mirror; blank = single node)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                    <p class="text-[11px] text-slate-500">Entra credentials are injected from the hub OIDC config automatically. For a 2-node mirror, load this role on both hosts with matching base DN, server-id 1 &amp; 2, and each node's peer URL set to the OTHER node.</p>
+                </div>
                 <p id="role-desc" class="text-xs text-slate-500 italic min-h-[1.5rem]"></p>
                 <div id="role-note" class="p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
                     The agent installs required system packages (e.g. unbound, kea, certbot) and hosts the role as a new sub-spoke. This may take 30–60 seconds per role.
@@ -12490,6 +12503,9 @@ function syncNetboxCreds() {
     const cb = document.querySelector('.role-check[value="netbox-server"]');
     const creds = document.getElementById('netbox-admin-creds');
     if (creds) creds.classList.toggle('hidden', !(cb && cb.checked));
+    const lcb = document.querySelector('.role-check[value="ldap-server"]');
+    const lcfg = document.getElementById('ldap-server-cfg');
+    if (lcfg) lcfg.classList.toggle('hidden', !(lcb && lcb.checked));
 }
 
 function updateRoleDesc(roleId) {
@@ -12525,12 +12541,27 @@ async function loadRole(spokeId) {
         if (p) netboxCfg.admin_password = p;
     }
 
+    // ldap-server topology (Entra creds are injected hub-side from OIDC config).
+    let ldapSrvCfg = null;
+    if (checked.includes('ldap-server')) {
+        ldapSrvCfg = {};
+        const g = id => document.getElementById(id)?.value?.trim();
+        if (g('lsrv-base-dn')) ldapSrvCfg.base_dn = g('lsrv-base-dn');
+        if (g('lsrv-admin-dn')) ldapSrvCfg.admin_dn = g('lsrv-admin-dn');
+        const pw = document.getElementById('lsrv-admin-pw')?.value;
+        if (pw) ldapSrvCfg.admin_pw = pw;
+        if (g('lsrv-server-id')) ldapSrvCfg.server_id = g('lsrv-server-id');
+        if (g('lsrv-server-url')) ldapSrvCfg.server_url = g('lsrv-server-url');
+        if (g('lsrv-peer')) ldapSrvCfg.peers = [g('lsrv-peer')];
+    }
+
     // One batched request — the backend loads the roles SEQUENTIALLY on the agent
     // (each is a git clone + package install, can't run concurrently) and returns
     // a per-role results[]. Replaces the old one-POST-per-role loop.
     const rolesPayload = checked.map(roleId => {
         const r = { role: roleId };
         if (roleId === 'netbox-server' && netboxCfg && Object.keys(netboxCfg).length) r.config = netboxCfg;
+        if (roleId === 'ldap-server' && ldapSrvCfg) r.config = ldapSrvCfg;
         return r;
     });
     const results = [];

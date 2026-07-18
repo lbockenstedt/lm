@@ -15,6 +15,11 @@ from typing import Dict, Any, Optional
 # + AgentControlPlane._extra_auth_fields).
 _NETBOX_INSTALL_CERT_HELPER = "/usr/local/bin/lm-netbox-install-cert"
 
+# Root LDAPS cert-install helper dropped by ldap/install_ldap.sh --infra-only.
+# Its presence marks this host as the LDAP (ldaps) server (see the INSTALL_CERT
+# handler + AgentControlPlane._extra_auth_fields advertising "ldap_server").
+_LDAP_INSTALL_CERT_HELPER = "/usr/local/bin/lm-ldap-install-cert"
+
 # NetBox app layout on a netbox-server host (deployed by netbox/install.sh
 # --infra-only). Used by the NETBOX_APPLY_SSO handler to apply Entra SSO live
 # (the agent runs as root here) without a full installer re-run.
@@ -111,6 +116,17 @@ _ROLE_LOG_PREFIXES: Dict[str, tuple] = {
 # The deployed service connects to the Hub independently (under its own
 # spoke_id), so the generic agent keeps module_type "agent" and stays online.
 # Each entry: {"cmd": [...], "module_type": <agent's type after deploy>}
+def _infra_install_cmd(installer_url: str) -> list:
+    """Background curl-fetch + run of a role installer's ``--infra-only`` mode
+    (the same shape the netbox-server deploy role uses inline). Kept as a helper
+    so a new deploy role is one line + a URL. ``_build_deploy_cmd`` appends the
+    per-load flags after ``--infra-only``."""
+    fetch = "exec </dev/null; curl -sSL " + shlex.quote(installer_url) + " "
+    return ["bash", "-c", fetch + "| bash -s -- --infra-only"]
+
+
+_LDAP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/ldap/main/install_ldap.sh"
+
 _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
     "bugfixer": {
         "cmd": ["bash", "-c",
@@ -131,6 +147,18 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
                 "exec </dev/null; curl -sSL "
                 "https://raw.githubusercontent.com/lbockenstedt/netbox/main/install.sh "
                 "| bash -s -- --infra-only"],
+        "module_type": "agent",
+    },
+    # LDAP SERVER: deploy OpenLDAP (slapd + ldaps + optional 2-node delta-syncrepl
+    # mirror + the lm-ldap-install-cert helper) via the ldap installer's
+    # --infra-only mode. Stands up the server but NOT an lm-ldap spoke unit — the
+    # directory MODULE that talks to it is the SEPARATE "ldap" role (module_type
+    # "directory") in _ROLE_MAP. Per-load config (base-dn/admin-dn/admin-pw/
+    # server-id/peer/server-url + hub-injected entra creds) is appended as
+    # installer flags by _build_deploy_cmd/_ldap_server_install_args. Mirrors
+    # netbox-server.
+    "ldap-server": {
+        "cmd": _infra_install_cmd(_LDAP_INSTALLER_URL),
         "module_type": "agent",
     },
 }
@@ -442,7 +470,50 @@ class GenericAgent(BaseSpoke):
                 extra += " --admin-password " + shlex.quote(str(pw))
             if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
                 cmd[-1] = cmd[-1] + extra
+        elif role_name == "ldap-server":
+            extra = self._ldap_server_install_args(config or {})
+            if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
+                cmd[-1] = cmd[-1] + extra
         return cmd
+
+    @staticmethod
+    def _ldap_server_install_args(config: dict) -> str:
+        """Project the ldap-server LOAD_ROLE ``config`` into install_ldap.sh flags
+        appended after ``--infra-only``. The WebUI collects the topology
+        (base-dn, admin-dn, server-id 1|2, peer ldaps:// URLs, server-url); the
+        HUB injects the Entra creds (entra_tenant/client/cert/key from
+        get_oidc_config). Flags accepted by the installer (finalized contract):
+        --base-dn --admin-dn --admin-pw --server-id --peer(repeatable)
+        --entra-tenant --entra-client --entra-cert --entra-key --entra-scope
+        (default "openid") --server-url. Auto-generates --admin-pw when the WebUI
+        didn't collect one. All values shlex-quoted."""
+        parts = []
+
+        def _flag(name, value):
+            if value not in (None, "", []):
+                parts.append("--" + name + " " + shlex.quote(str(value)))
+
+        _flag("base-dn", config.get("base_dn"))
+        _flag("admin-dn", config.get("admin_dn"))
+        pw = config.get("admin_pw") or config.get("admin_password")
+        if not pw:
+            import secrets as _secrets
+            pw = _secrets.token_urlsafe(24)
+        _flag("admin-pw", pw)
+        _flag("server-id", config.get("server_id"))
+        # --peer is repeatable, one per mirror peer (the OTHER node's ldaps:// URL).
+        peers = config.get("peers") or config.get("peer") or []
+        if isinstance(peers, str):
+            peers = [peers]
+        for p in peers:
+            _flag("peer", p)
+        _flag("server-url", config.get("server_url"))
+        _flag("entra-tenant", config.get("entra_tenant"))
+        _flag("entra-client", config.get("entra_client"))
+        _flag("entra-cert", config.get("entra_cert"))
+        _flag("entra-key", config.get("entra_key"))
+        _flag("entra-scope", config.get("entra_scope") or "openid")
+        return (" " + " ".join(parts)) if parts else ""
 
     async def _run_deploy(self, role_name: str, cmd: list) -> None:
         """Run a deploy role's install script in the background and track status.
@@ -573,6 +644,62 @@ class GenericAgent(BaseSpoke):
                 return {"status": "SUCCESS", "message": out[2:].strip() or out or "installed on netbox-server"}
             msg = err or out or f"helper exit {proc.returncode}"
             logger.warning("[cert] %s → netbox-server: FAILED — %s", domain, msg)
+            return {"status": "ERROR", "message": msg}
+        finally:
+            for p in (crt_tmp, key_tmp):
+                if p:
+                    try: os.unlink(p)
+                    except OSError: pass
+
+    async def _install_ldap_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Install an LE cert onto this host's OpenLDAP (ldaps) via the root
+        helper dropped by the ldap installer (--infra-only). Mirrors
+        :meth:`_install_netbox_cert`: validate the fullchain+privkey pair
+        in-process, then run ``sudo -n /usr/local/bin/lm-ldap-install-cert
+        <crt> <key>`` which atomically swaps the slapd TLS material + reloads."""
+        domain = data.get("domain", "") or ""
+        fullchain = data.get("fullchain", "") or ""
+        privkey = data.get("privkey", "") or ""
+        if not fullchain or not privkey:
+            return {"status": "ERROR", "message": "missing cert material"}
+        if "BEGIN CERTIFICATE" not in fullchain or "PRIVATE KEY" not in privkey:
+            return {"status": "ERROR", "message": "fullchain/privkey not PEM"}
+        if not os.path.exists(_LDAP_INSTALL_CERT_HELPER):
+            return {"status": "ERROR",
+                    "message": (f"cert helper {_LDAP_INSTALL_CERT_HELPER} missing — "
+                                "is this the ldap-server host? (re-load the "
+                                "ldap-server role)")}
+        crt_tmp = key_tmp = None
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".crt.pem", delete=False) as cf:
+                cf.write(fullchain); crt_tmp = cf.name
+            with tempfile.NamedTemporaryFile("w", suffix=".key.pem", delete=False) as kf:
+                kf.write(privkey); key_tmp = kf.name
+            os.chmod(crt_tmp, 0o600); os.chmod(key_tmp, 0o600)
+            try:
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(crt_tmp, key_tmp)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[cert] %s → ldap-server: FAILED — validation: %s", domain, e)
+                return {"status": "ERROR", "message": f"cert validation failed (helper not called): {e}"}
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "sudo", "-n", _LDAP_INSTALL_CERT_HELPER, crt_tmp, key_tmp,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=20.0)
+            except asyncio.TimeoutError:
+                try: proc.kill()
+                except (ProcessLookupError, UnboundLocalError): pass
+                return {"status": "ERROR", "message": "cert-install helper timed out"}
+            except Exception as e:  # noqa: BLE001
+                return {"status": "ERROR", "message": f"cert-install helper invocation failed: {e}"}
+            out = (out_b or b"").decode(errors="replace").strip()
+            err = (err_b or b"").decode(errors="replace").strip()
+            if proc.returncode == 0 and out.startswith("OK"):
+                logger.info("[cert] %s → ldap-server: installed — %s", domain, out[2:].strip() or out)
+                return {"status": "SUCCESS", "message": out[2:].strip() or out or "installed on ldap-server"}
+            msg = err or out or f"helper exit {proc.returncode}"
+            logger.warning("[cert] %s → ldap-server: FAILED — %s", domain, msg)
             return {"status": "ERROR", "message": msg}
         finally:
             for p in (crt_tmp, key_tmp):
@@ -814,12 +941,14 @@ class GenericAgent(BaseSpoke):
                     "result": res, "message": res.get("error", "")}
 
         if cmd == "INSTALL_CERT":
-            # This host ran the netbox-server deploy role, so it has the NetBox
-            # nginx + the root cert helper. LE distribution (hub-brokered) routes
-            # the NetBox cert HERE (target "netbox-server") instead of the API-
-            # only IPAM spoke. Validate the pair in-process, write 0600 temp
-            # files, and hand them to the root helper (same contract as the
-            # netbox spoke) which atomically swaps + reloads nginx.
+            # A generic agent host that ran a *-server deploy role holds the root
+            # cert helper for that service. The hub tags the target service in the
+            # payload (module_type), so route to the matching helper: ldap-server
+            # → OpenLDAP/ldaps, else netbox-server → NetBox nginx (the historical
+            # default). Both validate the pair in-process then hand 0600 temp
+            # files to the root helper that atomically swaps + reloads the service.
+            if (data or {}).get("module_type") == "ldap-server":
+                return await self._install_ldap_cert(data)
             return await self._install_netbox_cert(data)
 
         if cmd == "NETBOX_TEST_SSO":

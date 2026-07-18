@@ -572,7 +572,8 @@ def register(app, hub, ctx):
         return {"targets": build_available_targets(
             dict(hub.spoke_module_types), hub.active_connections,
             module_names, hub.CERT_CAPABLE_MODULES, agents,
-            netbox_server_agents=set(getattr(hub, "netbox_server_agents", set())))}
+            netbox_server_agents=set(getattr(hub, "netbox_server_agents", set())),
+            ldap_server_agents=set(getattr(hub, "ldap_server_agents", set())))}
 
     @app.get("/api/le/wildcard/eligibility")
     async def le_wildcard_eligibility():
