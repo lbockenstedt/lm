@@ -31,6 +31,15 @@ try:
 except ImportError:  # bare-module layout (/opt/lm/core on sys.path)
     from security.signer import MessageSigner, encode_frame, split_frame
 
+# Code-drift watchdog mixin — shared with BaseControlPlane (core) so the dumb
+# device-mode agent and every spoke run ONE source of truth. The mixin calls
+# this class's _repo_root + _resolve_core_root (overridable hooks); the
+# watchdog body + _drift_watched_dirs come from the mixin.
+try:
+    from core.src.messaging.code_drift_watchdog import CodeDriftWatchdogMixin
+except ImportError:  # bare-module layout (/opt/lm/core on sys.path)
+    from messaging.code_drift_watchdog import CodeDriftWatchdogMixin  # type: ignore
+
 # Dep self-heal (mirror core/src/dep_guard + the netbox control-plane pattern):
 # at startup the agent verifies its venv can import every declared requirement
 # and runs `pip install -r requirements.txt` if not. None if dep_guard isn't
@@ -103,7 +112,7 @@ def normalize_spoke_url(url: str) -> str:
     return f"{scheme}://{host_port}{path}"
 
 
-class SpokeClient:
+class SpokeClient(CodeDriftWatchdogMixin):
     """A generic dumb executor that dials a spoke and runs primitives."""
 
     def __init__(self, agent_id: str, spoke_url: str, secret: str = "",
@@ -524,75 +533,8 @@ class SpokeClient:
                 return cand
         return None
 
-    def _drift_watched_dirs(self) -> list:
-        """Git checkouts whose on-disk HEAD advancing past the running process
-        should trigger a restart: the agent's own repo + the shared core (if it
-        is a separate checkout). Only real git roots are returned."""
-        dirs = set()
-        try:
-            dirs.add(os.path.abspath(self._repo_root()))
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            core = self._resolve_core_root()
-            if core:
-                dirs.add(os.path.abspath(core))
-        except Exception:  # noqa: BLE001
-            pass
-        return [d for d in dirs if os.path.isdir(os.path.join(str(d), ".git"))]
-
-    async def _code_drift_watchdog(self, interval_s: float = 300.0):
-        """Restart when code on disk drifts AHEAD of the running process — a
-        manual pull / spoke-pushed update that advanced the repo but never
-        restarted, so the old class stays in memory AND the next update sees
-        "already up to date". Any advance → os._exit(3) so systemd
-        Restart=on-failure reloads current code. Skips the exit while a
-        self-update is mid-flight (that path restarts itself); a repo that
-        first appears after boot is baselined, not treated as drift. Never
-        crashes the agent — every failure is swallowed. Mirrors
-        BaseControlPlane._code_drift_watchdog."""
-        async def _head(d):
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "git", "-C", str(d), "rev-parse", "HEAD",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL)
-                out, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-                return out.decode().strip() if proc.returncode == 0 else ""
-            except Exception:  # noqa: BLE001 — never let the watchdog crash the agent
-                return ""
-
-        baseline = {}
-        for d in self._drift_watched_dirs():
-            baseline[str(d)] = await _head(d)
-        logger.info("code-drift watchdog armed (every %ss): %s", int(interval_s),
-                    {k: v[:8] for k, v in baseline.items() if v})
-        while not self._stop:
-            try:
-                await asyncio.sleep(interval_s)
-                # A self-update in flight advances HEAD on purpose and restarts
-                # itself; don't race it with a second exit.
-                if self._draining or self._spoke_update_in_progress:
-                    continue
-                for d in self._drift_watched_dirs():
-                    key, now = str(d), await _head(d)
-                    if not now:
-                        continue
-                    if key not in baseline:  # newly-watched repo → baseline it
-                        baseline[key] = now
-                        continue
-                    was = baseline.get(key)
-                    if was and now != was:
-                        logger.warning(
-                            "code-drift: %s advanced %s->%s on disk but the "
-                            "process never restarted -- exiting so systemd "
-                            "reloads current code.", d, was[:8], now[:8])
-                        try:
-                            await self._flush_log_relay_async()
-                        except Exception:  # noqa: BLE001
-                            pass
-                        os._exit(3)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001 — never fatal
-                logger.debug("code-drift watchdog cycle failed: %s", e)
+    # _drift_watched_dirs + _code_drift_watchdog come from CodeDriftWatchdogMixin
+    # (shared with BaseControlPlane). This class provides the _repo_root +
+    # _resolve_core_root hooks above; the mixin composes them the same way every
+    # spoke does. The watchdog's ``while not getattr(self, "_stop", False)``
+    # loop honors this class's ``self._stop`` shutdown flag.
