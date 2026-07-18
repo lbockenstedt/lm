@@ -3689,6 +3689,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 if not await self._install_active_connection(spoke_id, websocket, key_id):
                     return
                 self.record_spoke_event(spoke_id, "connected", "authenticated with secret")
+                # A history-key reconnect (missed a rotation push while offline)
+                # is re-synced by _maybe_redeliver_session_key on the first
+                # history-signed frame in the message loop (main.py ~3924) — no
+                # connect-time push needed here.
 
             # --- Mutual Authentication (Hub Identity Proof) ---
             try:

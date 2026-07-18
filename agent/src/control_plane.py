@@ -130,14 +130,22 @@ class RoleConnection(AgentHostingControlPlane):
         future parent linkage. Falls back to ``""`` (legacy no-correlation) if
         the base uuid is unset.
 
-    Secrets: a ``RoleConnection`` starts zero-touch (no secret) and is
-    re-provisioned by the hub on every boot via parent-auto-approve
-    (``approve_and_bind_spoke`` → ``SPOKE_UPDATE_SESSION_KEY``). It therefore
-    does NOT persist its session secret / hub secret to ``.env`` (which it
-    shares with the base agent) — overriding the persist hooks to no-ops avoids
-    clobbering the base agent's ``SPOKE_SECRET`` / ``HUB_SECRET`` lines. The
-    in-memory secret survives reconnects within one process; a process restart
-    re-provisions fresh.
+    Secrets: a ``RoleConnection`` persists its session secret under a PER-ROLE
+    ``.env`` key (``SPOKE_SECRET_<ROLE>`` — never ``SPOKE_SECRET``, which is the
+    base agent's line in the shared ``.env``) so the sub-spoke reconnects
+    AUTHENTICATED (``secret`` in the auth frame) instead of zero-touch every
+    boot — the same pattern the standalone ``cs`` spoke uses. The hub then
+    skips the ``SPOKE_UPDATE_SESSION_KEY`` provisioning push on reconnects and
+    re-keys via AEAD-encrypted rotation (new key encrypted with the pre-rotation
+    key this sub-spoke still holds), keeping H4 app-layer encryption intact
+    (the prior zero-touch-every-boot design forced a plaintext provisioning push
+    every boot, and the hub's retained-key encryption of that push deadlocked
+    the sub-spoke in the defer-buffer — the never-adopted outage). First boot,
+    or a blanked key (the connect-path 1008-fallback, which writes "" via
+    ``_persist_session_secret``), → no persisted secret → zero-touch → the hub
+    re-provisions (plaintext on the true first keying only, inherent to H4).
+    Hub identity is NOT verified by sub-spokes (they rely on TLS), so
+    ``_persist_hub_secret`` stays a no-op.
     """
 
     def __init__(self, role_name: str, base_id: str, hub_url: str,
@@ -149,6 +157,24 @@ class RoleConnection(AgentHostingControlPlane):
         self.base_id = base_id
         self.module_type = mtype
         self.parent_spoke_id = base_id
+        # H4: load this role's persisted session secret so the sub-spoke
+        # reconnects AUTHENTICATED (``secret`` in the auth frame) instead of
+        # zero-touch every boot — the same pattern cs uses. The hub then skips
+        # the SPOKE_UPDATE_SESSION_KEY provisioning push on reconnects and
+        # re-keys via AEAD-encrypted rotation (new key encrypted with the
+        # pre-rotation key this sub-spoke still holds), keeping H4 app-layer
+        # encryption intact. First boot, or a blanked key (the 1008-fallback in
+        # BaseControlPlane.connect, which writes "" via _persist_session_secret)
+        # → no persisted secret → zero-touch → the hub re-provisions (plaintext
+        # on the true first keying, inherent to H4 — you can't encrypt the first
+        # key with a key that doesn't exist yet; encrypted via the hub's
+        # history-key re-sync thereafter). Stored under a per-role env key so it
+        # never clobbers the base agent's SPOKE_SECRET line in the shared .env.
+        if secret is None:
+            _persisted = self._read_env_value(self._role_env_key())
+            if _persisted:
+                self.secret = _persisted
+                self.signer = self._build_agent_signer(_persisted)
         # connected_agents / pending_agents / agent_signer / _agent_server_task
         # are initialized by AgentHostingControlPlane.__init__ (the mixin). The
         # pxmx (hypervisor) role binds a /ws/agent listener (see
@@ -452,14 +478,26 @@ class RoleConnection(AgentHostingControlPlane):
             logger.error("SPOKE_UPDATE failed for %s: %s", cwd, e)
             return {"status": "ERROR", "message": str(e)}
 
-    # ── Secret persistence: no-ops (see class docstring) ──────────────────────
+    # ── Secret persistence: per-role keys (H4) ─────────────────────────────────
+    def _role_env_key(self) -> str:
+        """The .env key this role's session secret lives under. Per-role (NOT
+        ``SPOKE_SECRET`` — that's the base agent's line in the shared .env) so a
+        sub-spoke persisting its key never clobbers the base agent's."""
+        return f"SPOKE_SECRET_{self.role_name.upper()}"
+
     def _persist_session_secret(self, new_secret: str) -> None:  # noqa: D401
-        """No-op: sub-spokes re-provision via parent-auto-approve on each boot;
-        persisting here would clobber the base agent's SPOKE_SECRET line."""
-        return
+        """Persist the rotated session key under the per-role .env key so it
+        survives a process restart and the sub-spoke reconnects authenticated
+        (H4: re-keying stays AEAD-encrypted). An empty ``new_secret`` (the
+        1008-fallback in BaseControlPlane.connect, which blanks a stale secret
+        the hub rejected) writes the empty value so the next boot reconnects
+        zero-touch and the hub re-provisions."""
+        self._persist_secret_to_env(self._role_env_key(), new_secret or "")
 
     def _persist_hub_secret(self, new_secret: str) -> None:  # noqa: D401
-        """No-op for the same reason as _persist_session_secret."""
+        """No-op: sub-spokes don't verify hub identity (they rely on TLS), so
+        there's no hub secret to persist. H4 session-key encryption is
+        independent of hub_secret."""
         return
 
     def _extra_auth_fields(self) -> dict:

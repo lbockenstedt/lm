@@ -154,3 +154,51 @@ def test_on_agent_registered_repushes_stored_config(monkeypatch, tmp_path):
     # Unknown agent → no send.
     asyncio.run(conn._on_agent_registered("agent-unknown"))
     assert len(sent) == 1
+
+def test_role_connection_persists_session_secret_per_role(monkeypatch, tmp_path):
+    """H4: a RoleConnection persists its session secret under a per-role .env
+    key (SPOKE_SECRET_<ROLE>) — NOT SPOKE_SECRET (the base agent's line in the
+    shared .env) — and reloads it on construction so the sub-spoke reconnects
+    AUTHENTICATED (like cs) instead of zero-touch every boot. That lets the hub
+    skip the SPOKE_UPDATE_SESSION_KEY provisioning push on reconnects and re-key
+    via AEAD-encrypted rotation (new key encrypted with the pre-rotation key the
+    sub-spoke holds), keeping H4 app-layer encryption intact. First boot, or a
+    blanked key (the 1008-fallback), → no persisted secret → zero-touch → the
+    hub re-provisions (plaintext on the true first keying only — inherent to
+    H4, since you can't encrypt the first key with a key that doesn't exist)."""
+    monkeypatch.setattr(cp_module.RoleConnection, "AGENT_CONFIG_PATH",
+                       str(tmp_path / "agent-config.json"))
+    monkeypatch.setattr(cp_module.RoleConnection, "_repo_root",
+                        lambda self: str(tmp_path))
+
+    # First boot: no persisted secret → zero-touch (self.secret / signer None).
+    conn = cp_module.RoleConnection(
+        "netbox", "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
+    assert conn.secret is None
+    assert conn.signer is None
+    assert conn._role_env_key() == "SPOKE_SECRET_NETBOX"
+
+    # The hub provisions a key; the sub-spoke persists it under the per-role key.
+    conn._persist_session_secret("netbox-session-secret-abc")
+    env = (tmp_path / ".env").read_text()
+    assert "SPOKE_SECRET_NETBOX=netbox-session-secret-abc" in env
+    # The base agent's SPOKE_SECRET line is NOT written/clobbered.
+    assert "SPOKE_SECRET=" not in env.replace("SPOKE_SECRET_NETBOX=", "X")
+
+    # Restart: a fresh RoleConnection loads the persisted secret → authenticated.
+    conn2 = cp_module.RoleConnection(
+        "netbox", "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
+    assert conn2.secret == "netbox-session-secret-abc"
+    assert conn2.signer is not None
+
+    # A different role uses a different key — no cross-role clobber.
+    conn3 = cp_module.RoleConnection(
+        "dns", "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
+    assert conn3._role_env_key() == "SPOKE_SECRET_DNS"
+    assert conn3.secret is None  # dns has no persisted secret
+
+    # Blanking (the connect-path 1008-fallback) writes empty → next boot zero-touch.
+    conn2._persist_session_secret("")
+    conn4 = cp_module.RoleConnection(
+        "netbox", "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
+    assert conn4.secret is None
