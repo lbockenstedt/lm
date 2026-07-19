@@ -1371,6 +1371,15 @@ class UpdatePipelineMixin:
         # Group spokes by resolved repo, check each repo's tip once, push on change.
         last_pushed = dict(config.get("spoke_update_commits", {}) or {})
         repo_spokes: Dict[str, list] = {}
+        # Self-heal relayed node-agent ids (pxmx proxmox agents) that leaked into
+        # approved_modules BEFORE building the repo-sync "Module updates" spokes
+        # list — otherwise they show up here as extra UUID rows. They're tracked
+        # under composite heartbeat keys + agent_info, not as module spokes.
+        # Shared helper on SpokeAlertMixin; guard so the update pipeline doesn't
+        # depend on that mixin being present (it is, on LabManagerHub).
+        _selfheal = getattr(self, "_selfheal_leaked_agents", None)
+        if callable(_selfheal):
+            _selfheal()
         for spoke_id, approved in self.approved_modules.items():
             if not approved:
                 continue
