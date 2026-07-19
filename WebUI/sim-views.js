@@ -2589,7 +2589,8 @@ const CS_ONOFF_KEYS = new Set([
 // are never lost (and any extra section falls back to a raw textarea).
 const CS_SIM_SECTION_FIELDS = {
     simulation: [
-        ['sim_load', 'Sim Load'], ['repo_location', 'Repo Location'],
+        ['sim_load', 'Sim Load'], ['mutter_cpu_limit', 'Mutter CPU Limit (% of 1 core; 0=off)'],
+        ['repo_location', 'Repo Location'],
         ['repo_branch', 'Repo Branch'], ['reboot_schedule', 'Reboot Schedule'],
         ['dot1x_password', 'Dot1x Password'], ['dot1x_eap', 'Dot1x Eap'],
         ['iperf_bw', 'Iperf Bw'], ['kill_switch', 'Kill Switch'],
