@@ -877,6 +877,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # (LM_BACKPRESSURE) instead of just silently dropping its frames. Reset
         # each tick by the ladder.
         self._rl_breached = set()
+        # Event-driven VM transient-state overlay for the Simulations VM Server
+        # table: {tenant_id: {vmid_str: {"state": str, "ts": float}}}. Set from
+        # CS_PROGRESS (deleting/recloning/provisioning) + CS_COMMAND_RESULT
+        # terminals (delete completed => "deleted" so the row drops immediately
+        # until telemetry catches up). Applied in service._build_proxmox_data and
+        # TTL-expired so a missed terminal frame never sticks a stale state.
+        self._vm_live_state = {}
         # Soft watermark (default 0.8): when a spoke has consumed ≥80% of its
         # burst bucket it is SIGNALLED to slow down (proactive). The hard limit
         # (100%) is still a HARD DROP. Cached here and refreshed each 1s tick so
@@ -1574,6 +1581,67 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
     # Coalesce VM-cache refreshes to at most one per tenant per this interval.
     _VM_REFRESH_MIN_INTERVAL = 5.0
 
+    # ── VM Server live-state overlay ─────────────────────────────────────────
+    # Map a mutating CS action to the transient state shown on the VM row while
+    # the op is in flight (before the ~10-30s telemetry frame reflects reality).
+    # Values match the prov_status vocabulary the pxmx agent already stamps and
+    # the WebUI badge (csVmStatusBadge) already renders — tearing_down => "Deleting…",
+    # recloning => "Recloning…", provisioning => "Provisioning/Configuring".
+    _VM_ACTION_STATE = {
+        "delete_vm": "tearing_down",
+        "reclone_vm": "recloning",
+        "clone_lxc": "provisioning",
+        "provision_unassigned": "provisioning",
+    }
+    _VM_LIVE_TTL = 300.0       # in-progress state auto-expires after 5 min (safety)
+    _VM_DELETED_TTL = 180.0    # a "deleted" prune persists 3 min until telemetry drops the vm
+
+    @staticmethod
+    def _vmid_key(vmid) -> str:
+        try:
+            return str(int(vmid))
+        except (TypeError, ValueError):
+            return str(vmid)
+
+    def _vm_live_set(self, tenant_id, vmid, state) -> None:
+        """Stamp a transient state for one vmid (best-effort; no-op on bad input)."""
+        if not tenant_id or vmid in (None, ""):
+            return
+        self._vm_live_state.setdefault(str(tenant_id), {})[self._vmid_key(vmid)] = {
+            "state": state, "ts": time.time()}
+
+    def _vm_live_clear(self, tenant_id, vmid) -> None:
+        t = self._vm_live_state.get(str(tenant_id))
+        if not t:
+            return
+        t.pop(self._vmid_key(vmid), None)
+        if not t:
+            self._vm_live_state.pop(str(tenant_id), None)
+
+    def vm_live_states(self, tenant_id) -> Dict[str, str]:
+        """TTL-pruned {vmid_str: state} overlay for a tenant — read by
+        service._build_proxmox_data to stamp/prune VM rows. Expired entries are
+        dropped here so a missed terminal frame can never wedge a stale state."""
+        t = self._vm_live_state.get(str(tenant_id))
+        if not t:
+            return {}
+        now = time.time()
+        out: Dict[str, str] = {}
+        expired = []
+        for k, v in t.items():
+            state = (v or {}).get("state")
+            ts = float((v or {}).get("ts", 0) or 0)
+            ttl = self._VM_DELETED_TTL if state == "deleted" else self._VM_LIVE_TTL
+            if now - ts > ttl:
+                expired.append(k)
+            elif state:
+                out[k] = state
+        for k in expired:
+            t.pop(k, None)
+        if not t:
+            self._vm_live_state.pop(str(tenant_id), None)
+        return out
+
     async def _relay_cs_event(self, spoke_id: str, agent_id: str,
                               cs_type: str, data: Dict[str, Any]) -> None:
         """Forward a relayed CS_* agent event to the tenant's cs spoke (best-effort).
@@ -1633,6 +1701,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if cs_type == "CS_COMMAND_RESULT" and tenant_id:
             action = (data or {}).get("action")
             status = (data or {}).get("status")
+            # VM Server live-state overlay (see _vm_live_set): a delete that
+            # COMPLETED marks the vmid "deleted" so the table drops the row at
+            # once (until telemetry catches up); any other terminal clears the
+            # in-progress state so the row reverts to its real telemetry status.
+            _vmid = (data or {}).get("vmid")
+            _st = str(status or "").lower()
+            if action in self._VM_MUTATING_ACTIONS and _vmid not in (None, ""):
+                try:
+                    if action == "delete_vm" and _st == "completed":
+                        self._vm_live_set(tenant_id, _vmid, "deleted")
+                    elif _st in ("completed", "failed", "error"):
+                        self._vm_live_clear(tenant_id, _vmid)
+                except Exception:  # noqa: BLE001 — overlay is best-effort
+                    pass
             if action in self._VM_MUTATING_ACTIONS and status != "failed":
                 try:
                     self._schedule_vm_cache_refresh(tenant_id)
@@ -1969,7 +2051,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     mine = [d for d in devices if isinstance(d, dict) and not d.get("spoke_id")]
                 # default_poll_interval = module-level poll cadence; the spoke
                 # uses it for devices that don't set their own (device wins).
+                # shared_tenant_id = the shared tenant, so the spoke's spoke-side
+                # tenant filter (Stage 1) returns shared devices to ANY tenant
+                # reader (shared-tenant-flag invariant). Read via access (cached
+                # at startup + tenant writes) to avoid a circular import here.
+                import access as _access
                 config = {"devices": _project_nw_devices(mine),
+                          "shared_tenant_id": _access.shared_tenant_id() or "",
                           "default_poll_interval":
                               self.state.get_global_config().get("nw_poll_default_interval")}
             elif module_key == 'ldap':
@@ -4285,10 +4373,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # CS_TELEMETRY frame. Fan these out to the tenant's /sim/ws browsers
                 # for a live feed. Fire-and-forget passthrough (no ingest/state).
                 if payload.get("type") == "CS_PROGRESS":
+                    _pdata = payload.get("data", {}) or {}
+                    try:
+                        _ptenant = self.state.get_spoke_tenant(pk)
+                    except Exception:  # noqa: BLE001
+                        _ptenant = None
+                    # Drive the VM Server table's per-VM live state from the op
+                    # feed (instant, one vmid per event). Non-terminal progress
+                    # sets the in-progress state; terminals are owned by the
+                    # CS_COMMAND_RESULT handler above.
+                    try:
+                        _pstate = self._VM_ACTION_STATE.get(_pdata.get("action"))
+                        _pstat = str(_pdata.get("status") or "").lower()
+                        if _ptenant and _pstate and _pstat not in ("completed", "failed", "error"):
+                            self._vm_live_set(_ptenant, _pdata.get("vmid"), _pstate)
+                    except Exception:  # noqa: BLE001 — overlay is best-effort
+                        pass
                     try:
                         await self.simulations_broadcaster.broadcast(
-                            spoke_id, {"type": "cs_progress", "data": payload.get("data", {})},
-                            self.state.get_spoke_tenant(pk))
+                            spoke_id, {"type": "cs_progress", "data": _pdata}, _ptenant)
                     except Exception:  # noqa: BLE001 — feed is best-effort
                         pass
                     continue

@@ -463,6 +463,37 @@ class SimulationsService:
         # richest-entry pick.
         hosts = [h for h in hosts
                  if _agent_cs_enabled(self.hub, h.get("hostname") or h.get("spoke_hostname") or "")]
+        # Event-driven live-state overlay (see hub._vm_live_set): stamp the
+        # transient prov_status (deleting/recloning/provisioning) onto matching
+        # VM rows and PRUNE vmids whose delete just completed, so the table
+        # reflects a mutation the instant its message arrives instead of waiting
+        # for the next ~10-30s telemetry frame. Best-effort — never break render.
+        try:
+            overlay = self.hub.vm_live_states(tenant_id)
+        except Exception:  # noqa: BLE001
+            overlay = {}
+        if overlay:
+            for h in hosts:
+                vms = h.get("proxmox_vms") or []
+                kept = []
+                pruned = 0
+                for vm in vms:
+                    if not isinstance(vm, dict):
+                        kept.append(vm)
+                        continue
+                    state = overlay.get(str(vm.get("vmid")))
+                    if state == "deleted":
+                        pruned += 1
+                        continue
+                    if state:
+                        vm = {**vm, "prov_status": state}
+                    kept.append(vm)
+                h["proxmox_vms"] = kept
+                if pruned:
+                    try:
+                        h["vm_count"] = max(0, int(h.get("vm_count") or len(vms)) - pruned)
+                    except (TypeError, ValueError):
+                        h["vm_count"] = len(kept)
         return {"tenant_id": tenant_id, "hosts": hosts}
 
     async def get_central_data(self, tenant_id: str) -> Dict[str, Any]:

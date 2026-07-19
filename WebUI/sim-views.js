@@ -470,14 +470,42 @@ function connectCSWebSocket() {
 // update (an op that finishes stops emitting progress), so no terminal is needed.
 window._csLiveOps = window._csLiveOps || {};
 const _CS_OP_LABEL = { reclone_vm: 'Recloning', delete_vm: 'Deleting', clone_lxc: 'Cloning CT', provision_unassigned: 'Provisioning', update_agent: 'Updating' };
+// Actions that change the VM inventory/state shown in the VM Server table — the
+// hub stamps prov_status / prunes a completed delete for exactly these (see
+// main.py _VM_ACTION_STATE). Others (update_agent, …) don't touch the table.
+const _CS_VM_OP_ACTIONS = new Set(['delete_vm', 'reclone_vm', 'clone_lxc', 'provision_unassigned']);
+// Debounced immediate re-fetch of the VM Server table so a live op is reflected
+// within a fetch RTT (the hub overlay already carries the transient state and
+// prunes a completed delete) instead of only on the ≤15s burst cadence. A burst
+// of progress frames coalesces into a single fetch.
+window._csVmRefreshSoonTimer = null;
+function csVmTableRefreshSoon() {
+    if (window._csVmRefreshSoonTimer) return;
+    window._csVmRefreshSoonTimer = setTimeout(async () => {
+        window._csVmRefreshSoonTimer = null;
+        if (typeof currentSubView === 'undefined' || currentSubView !== 'VM Server') return;
+        try { await loadCSData('VM Server', currentSubChild, true); }
+        catch (e) { /* the fast-refresh burst below covers the retry */ }
+    }, 350);
+}
 function csHandleLiveOp(d) {
     const key = (d.vmid != null && d.vmid !== '') ? 'vm' + d.vmid : (d.cs_cmd_id || '');
     if (!key) return;
     const st = String(d.status || '').toLowerCase();
-    if (st === 'completed' || st === 'failed') { delete window._csLiveOps[key]; }
+    const terminal = (st === 'completed' || st === 'failed');
+    const wasActive = !!window._csLiveOps[key];
+    if (terminal) { delete window._csLiveOps[key]; }
     else { window._csLiveOps[key] = { vmid: d.vmid, action: d.action, step: d.step, pct: d.pct, ts: Date.now() }; }
     csRenderLiveOps();
     if (!window._csLiveOpsTicker) window._csLiveOpsTicker = pollManager.register(csRenderLiveOps, 2000);
+    // Reflect VM-affecting ops in the VM Server TABLE (not just the live-ops
+    // feed): refresh now on a NEW op or a TERMINAL (so a completed delete's row
+    // drops immediately), and keep the sustained burst so intermediate telemetry
+    // keeps flowing while the op runs.
+    if (_CS_VM_OP_ACTIONS.has(d.action) && typeof currentSubView !== 'undefined' && currentSubView === 'VM Server') {
+        if (terminal || !wasActive) csVmTableRefreshSoon();
+        csVmOpFastRefresh();
+    }
 }
 function csRenderLiveOps() {
     const el = document.getElementById('cs-live-ops');
