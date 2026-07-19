@@ -528,13 +528,7 @@ class HubCertDistributionMixin:
             await self._distribute_all_certs(le_sid)
             # Warm the Certificates page cache on the same cadence so a
             # hub restart / slow le spoke serves fresh-ish last-known data.
-            try:
-                rr = await self.request_response(le_sid, "LE_LIST_CERTS", {})
-                certs = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else rr
-                if isinstance(certs, dict) and str(certs.get("status", "SUCCESS")).upper() != "ERROR":
-                    await self.le_cache_set("certs", certs)
-            except Exception as e:
-                logger.debug("le cache refresh (distribution loop) skipped: %s", e)
+            await self._le_refresh_certs_cache(le_sid)
             # Phase B: when auto-provision is on, try to auto-enable mTLS
             # once the fleet is ready (hub + every connected primary spoke).
             await self._maybe_auto_enable_mtls()
@@ -546,6 +540,22 @@ class HubCertDistributionMixin:
                             delay=self._cert_distribution_retry_seconds,
                             error_label="cert-distribution loop failed",
                             error_delay=self._cert_distribution_retry_seconds)
+
+    async def _le_refresh_certs_cache(self, le_sid: str) -> None:
+        """Pull LE_LIST_CERTS from the le spoke → le_cache_set('certs'). Best-
+        effort (a slow/offline spoke skips silently — the cache stays on
+        last-known). Called from the distribution loop AND from the
+        /api/le/issue + /api/le/renew routes after a (re)issue/deploy so the
+        Certificates list + the cert-failure alert pull-branch see the new
+        failed-issue entry / per-target last_status promptly (within the 60s
+        alert tick) instead of waiting up to 1h for the next sweep."""
+        try:
+            rr = await self.request_response(le_sid, "LE_LIST_CERTS", {})
+            certs = rr.get("payload", {}).get("data", rr) if isinstance(rr, dict) else rr
+            if isinstance(certs, dict) and str(certs.get("status", "SUCCESS")).upper() != "ERROR":
+                await self.le_cache_set("certs", certs)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("le cache refresh skipped: %s", e)
 
     async def _on_le_cert_renewed(self, le_spoke_id: str, domain: str,
                                   targets: list) -> None:
@@ -657,6 +667,12 @@ class HubCertDistributionMixin:
 
         results = (await asyncio.gather(*[_query(sid) for sid, _ in primary])
                    if primary else [])
+        # Friendly name per spoke: module_names defaults display_name to the sid
+        # (UUID) when unnamed, so treat display_name===sid as unset and fall
+        # through to the reported hostname before the UUID (same guard as the
+        # WebUI spokes list). The UUID still rides as ``id`` for the hover title.
+        _names = self.state.system_state.get("module_names", {}) or {}
+        _meta_all = self.state.system_state.get("module_metadata", {}) or {}
         spoke_status = []
         spokes_ready = True
         for (sid, mt), mstat in zip(primary, results):
@@ -666,8 +682,11 @@ class HubCertDistributionMixin:
             ck = bool(mstat.get("client_key_present")) if online else False
             spoke_ready = online and ca and cc and ck
             spokes_ready = spokes_ready and spoke_ready
+            _dn = _names.get(sid, sid)
+            _name = _dn if (_dn and _dn != sid) else \
+                ((_meta_all.get(sid, {}) or {}).get("hostname", "") or sid)
             spoke_status.append({
-                "id": sid, "type": mt, "online": online,
+                "id": sid, "name": _name, "type": mt, "online": online,
                 "ca_present": ca, "client_cert_present": cc,
                 "client_key_present": ck, "ready": spoke_ready,
                 "status": "ready" if spoke_ready

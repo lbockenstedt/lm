@@ -3434,7 +3434,7 @@ async function loadAlertRules() {
     } catch (e) { el.innerHTML = `<p class="text-sm text-red-500">Could not load alert rules: ${escapeHtml(e.message)}</p>`; return; }
     window._alertSources = d.sources || [];
     window._alertRulesCache = d.rules || [];
-    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline' };
+    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline', cert_issue_failed: 'Certificate issue failed', cert_renew_failed: 'Certificate renewal failed', cert_deploy_failed: 'Certificate deployment failed' };
     const rules = d.rules || [];
     const rows = rules.length ? rules.map(r => `<tr class="border-b border-slate-100">
         <td class="px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(r.name || '')}</span></td>
@@ -3453,7 +3453,7 @@ async function loadAlertRules() {
 
 function editAlertRule(id) {
     const existing = (window._alertRulesCache || []).find(r => r.id === id) || null;
-    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline' };
+    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline', cert_issue_failed: 'Certificate issue failed', cert_renew_failed: 'Certificate renewal failed', cert_deploy_failed: 'Certificate deployment failed' };
     const sources = (window._alertSources && window._alertSources.length) ? window._alertSources : ['dashboard_check', 'vm_offline', 'quota_unmet', 'spoke_offline'];
     document.getElementById('alert-edit-modal')?.remove();
     const modal = document.createElement('div');
@@ -11809,7 +11809,7 @@ async function loadMtlsReadiness() {
                     spokes.map(s => {
                         const c = s.ready ? 'bg-green-500' : (s.online ? 'bg-amber-500' : 'bg-slate-300');
                         const t = s.ready ? 'ready' : (s.online ? 'missing materials' : 'offline — will receive on reconnect');
-                        return `<div class="flex items-center gap-2 text-xs text-slate-600 py-0.5"><span class="inline-block w-2 h-2 rounded-full ${c}"></span><span class="font-mono">${escapeHtml(s.id)}</span><span class="text-slate-400">· ${escapeHtml(s.type || '')} · ${t}</span></div>`;
+                        return `<div class="flex items-center gap-2 text-xs text-slate-600 py-0.5"><span class="inline-block w-2 h-2 rounded-full ${c}"></span><span class="font-medium" title="${escapeHtml(s.id)}">${escapeHtml(s.name || s.id)}</span><span class="text-slate-400">· ${escapeHtml(s.type || '')} · ${t}</span></div>`;
                     }).join('');
             } else {
                 spokesEl.classList.add('hidden');
