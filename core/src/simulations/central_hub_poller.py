@@ -765,6 +765,23 @@ class CentralHubPoller:
             for cid, info in checks_map.items():
                 st = (info.get("status") if isinstance(info, dict) else info) or "no_data"
                 self._health.record(tenant_id, wsite, cid, st)
+                # Rolling 1h verdict: a check must NOT read OK if any poll FAILED
+                # in the last hour. Classify this poll (INVERTED sim semantics —
+                # a client-drop "warning" or a missing-alert "error" both = a
+                # FAILED poll), record it, then OVERRIDE the stored status with the
+                # aggregate verdict. Because central_hub_status[...]["status"] holds
+                # this SAME dict by reference, rewriting info["status"] flows into
+                # the persisted block and to the dashboard. no_data/other → ignore
+                # (verdict stays None) → leave the instantaneous status as-is.
+                is_pass = _classify_poll_status(st)
+                if is_pass is None or not isinstance(info, dict):
+                    continue
+                self._cpw.record(tenant_id, wsite, cid, is_pass)
+                verdict = self._cpw.verdict(tenant_id, wsite, cid)
+                if verdict is not None:
+                    info["status"] = verdict
+                    passes, total = self._cpw.counts(tenant_id, wsite, cid)
+                    info["message"] = f"{info.get('message', '')} · {passes}/{total} polls OK in last 1h"
 
     async def _poll_once(self) -> None:
         tenants = await self._centralized_tenants()
