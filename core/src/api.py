@@ -1266,21 +1266,21 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Hypervisor module access required"})
 
-        # /api/ldap/* (Directory module). The directory is a SHARED identity store
-        # with no tenant partition, so WRITES (user/group/OU CRUD + password
-        # reset) stay Global-Admin-only; READS require the ``ldap`` right OR admin
-        # so a directory viewer can browse without mutate rights. Reopen writes to
-        # tenant scope only once a directory-tenancy model (e.g. per-tenant OU)
-        # exists. (Was entirely Global-Admin-only via _ADMIN_API_PREFIXES.)
+        # /api/ldap/* (Directory module). The directory is ONE OpenLDAP mirror
+        # partitioned per tenant: TENANT == OU (1:1), ``ou=<slug>,<base_dn>``.
+        # READS require the ``ldap`` right OR admin so a directory viewer can
+        # browse; WRITES (user/group/OU CRUD + password reset) need the
+        # tenant-admin tier (``_can_edit_shared``). The tenant is resolved + the
+        # cross-tenant guard is enforced IN-HANDLER (routes/ldap.py
+        # ``_directory_resolve`` → ``access.resolve_directory_tenant``), which 403s
+        # a tenant-admin reaching for a foreign OU and then re-checks the tier via
+        # ``read_scope``/``write_scope`` (defense-in-depth, mirroring firewall/nw).
+        # Global Admin is unconfined — may pick + manage ANY tenant's OU.
         if path.startswith("/api/ldap/"):
             if request.method == "GET":
                 if not (_is_admin(sess) or _has_ldap_access(sess)):
                     return JSONResponse(status_code=403,
                                         content={"detail": "Directory module access required"})
-            # WRITES are tenant-admin tier (directory management), OU-scoped in the
-            # handler (routes/ldap.py _assert_ldap_write binds a tenant-admin to
-            # their own ldap_base_dn subtree; reads are filtered to it). Global
-            # Admin is unconfined.
             elif not _can_edit_shared(sess):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Tenant-admin (or admin) required for directory changes"})

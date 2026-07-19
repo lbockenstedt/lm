@@ -278,6 +278,46 @@ class SpokeRegistryMixin:
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
 
+    def get_directory_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
+        """Tenant-aware directory (LDAP) spoke — mirrors
+        ``get_nw_spoke_for_tenant`` but with ONE key difference: the directory's
+        tenancy is OU-partitioning on a SHARED server (``ou=<slug>,<base_dn>``),
+        not per-tenant spokes. A typical deploy is a single (mirror-pair)
+        directory spoke that is UNASSIGNED and serves every tenant via its OU.
+        So unlike nw/hypervisor (which return ``None`` when no spoke is bound to
+        the tenant — strict, no unassigned fallback), this resolver FALLS BACK
+        to an unassigned directory spoke: that shared OU server legitimately
+        serves the asking tenant.
+
+        With a real ``tenant_id``: prefer a connected, approved directory spoke
+        BOUND to that tenant; if none, fall back to an UNASSIGNED directory spoke
+        (the shared OU server); else ``None``. NEVER return a spoke bound to a
+        DIFFERENT tenant — that would relay this tenant's OU ops to another
+        tenant's spoke (the cross-tenant leak this closes in a multi-spoke
+        deploy; the spoke-side OU slug is the backstop, this is defense-in-depth).
+
+        With ``tenant_id`` None / ``"default"`` (admin unscoped / global view),
+        fall back to ``get_spoke_by_type("directory")`` so a Global Admin still
+        sees / manages every tenant's OU (unchanged legacy behavior).
+        """
+        if not tenant_id or tenant_id == "default":
+            return self.get_spoke_by_type("directory")
+        cands = [sid for sid in (self.get_all_spokes_by_type("directory") or [])
+                 if sid in self.active_connections
+                 and self.approved_modules.get(sid, False)]
+        if not cands:
+            return None
+        md = self.state.system_state.get("module_metadata", {})
+        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        if bound:
+            return bound[0]
+        # No spoke bound to this tenant → the shared OU-partitioned server: an
+        # UNASSIGNED directory spoke serves every tenant via ou=<slug>,<base>.
+        # This fallback is intentional and DIFFERENT from nw/hypervisor (which
+        # return None here) — do not "fix" it to match them.
+        unassigned = [sid for sid in cands if not (md.get(sid, {}).get("tenant_id") or "")]
+        return unassigned[0] if unassigned else None
+
     def get_nw_spoke_for_shared(self) -> Optional[str]:
         """The nw spoke that owns the SHARED-tenant devices. Shared devices are
         visible to every tenant (the shared-tenant-flag invariant), so when a

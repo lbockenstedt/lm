@@ -14,7 +14,7 @@ This module adds the per-tenant slug injection + guard on top.
 """
 from api import (
     HTTPException, Request, _invalidate_user_sessions, access,
-    get_spoke_or_503, logger,
+    logger,
 )
 
 _DEFAULT_LDAP_SERVER_URL = "ldap://localhost:389"
@@ -101,14 +101,20 @@ def register(app, hub, ctx):
     """Register directory (LDAP) routes on the Hub app."""
     _session_user = ctx._session_user
 
-    def _directory_slug(request: Request, data=None) -> str:
-        """Resolve the tenant OU slug this request acts on, enforcing the
-        cross-tenant guard. The requested tenant is read from the body
-        (``tenant_id``/``tenant``) OR the ``?tenant=`` query — a tenant-admin
-        cannot smuggle a foreign tenant through EITHER, since
-        :func:`access.resolve_directory_tenant` validates it against their own
-        tenants case-insensitively. Returns the canonical OU slug (never the
-        client-supplied casing)."""
+    def _directory_resolve(request: Request, data=None, write: bool = False):
+        """Resolve the tenant this request acts on, enforce the cross-tenant
+        guard, AND classify the read/write scope (defense-in-depth, mirroring
+        firewall/nw — see ``_authz_firewall`` / ``_authz_nw_device``). Returns
+        ``(tenant_id, ou_slug, scope)``.
+
+        ``resolve_directory_tenant`` picks the tenant (an admin may name any; a
+        non-admin only their own — case-insensitively) and 403s a foreign
+        tenant. ``read_scope``/``write_scope`` then re-check the TIER (a write
+        needs edit access) and give the single canonical deny point the other
+        modules have. For an admin both return ``"full"`` for any tenant, so the
+        all-OU admin view is preserved. ``scope`` is returned for callers that
+        need to narrow shared-tenant writes (none today — own-tenant only — but
+        the contract matches the other modules)."""
         sess = _session_user(request)
         is_adm = access.is_admin(sess)
         acting = (sess or {}).get("user", {}).get("tenants") or []
@@ -120,26 +126,34 @@ def register(app, hub, ctx):
         tid, status, detail = access.resolve_directory_tenant(is_adm, acting, requested)
         if status:
             raise HTTPException(status_code=status, detail=detail)
-        return access.ldap_tenant_slug(hub, tid)
+        scope = access.write_scope(sess, tid) if write else access.read_scope(sess, tid)
+        if scope == "deny":
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have access to this tenant's directory")
+        return tid, access.ldap_tenant_slug(hub, tid), scope
 
-    async def _relay(cmd: str, payload: dict):
+    async def _relay(cmd: str, payload: dict, spoke_id: str):
         """Relay an LDAP_* command to the directory spoke and unwrap its data.
+        ``spoke_id`` is resolved tenant-aware by the caller via
+        ``hub.get_directory_spoke_for_tenant(tid)`` — never the first connected
+        directory spoke blindly (that could land a tenant's OU op on another
+        tenant's spoke in a multi-spoke deploy).
 
         SURFACES spoke-side failures: if the spoke returns an ERROR envelope
         (e.g. slapd unreachable → SERVER_DOWN) this raises 502 with the message
         instead of returning the envelope with a 200 — otherwise the WebUI shows
         a false 'created' toast for an op that actually failed."""
-        spoke_id = get_spoke_or_503(hub, "directory", "LDAP")
         result = await hub.request_response(spoke_id, cmd, payload, timeout=20.0)
         if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
             raise HTTPException(status_code=502,
                                 detail=result.get("message") or f"{cmd} failed on the LDAP server")
         return result.get("data", result) if isinstance(result, dict) else result
 
-    async def _relay_list(cmd: str, slug: str):
+    async def _relay_list(cmd: str, slug: str, spoke_id: str):
         """Warm-cached LIST read (per tenant slug): serve last-known (stale) on
-        spoke-down / error so the Directory page renders instead of 503-ing."""
-        spoke_id = hub.get_spoke_by_type("directory")
+        spoke-down / error so the Directory page renders instead of 503-ing.
+        ``spoke_id`` is resolved tenant-aware by the caller."""
         key = cmd.lower()
         if not spoke_id:
             cached = hub.warm_get(key, slug)
@@ -164,6 +178,16 @@ def register(app, hub, ctx):
             if cached is not None:
                 return cached
             raise
+
+    def _directory_spoke(tid: str) -> str:
+        """Resolve the tenant-aware directory spoke or 503. Mirrors the
+        ``get_spoke_or_503`` shape the old single-instance relay had, but routes
+        through ``hub.get_directory_spoke_for_tenant(tid)`` so a tenant's OU op
+        never lands on another tenant's spoke."""
+        sid = hub.get_directory_spoke_for_tenant(tid)
+        if not sid:
+            raise HTTPException(status_code=503, detail="LDAP spoke not connected")
+        return sid
 
     # ── Server + Entra health (Directory page status icons) ────────────────
     @app.get("/api/ldap/health")
@@ -242,15 +266,15 @@ def register(app, hub, ctx):
     # ── Users ────────────────────────────────────────────────────────────────
     @app.get("/api/ldap/users")
     async def get_ldap_users(request: Request):
-        slug = _directory_slug(request)
+        tid, slug, _ = _directory_resolve(request)
         logger.debug("relay LDAP_LIST_USERS tenant=%s", slug)
-        return await _relay_list("LDAP_LIST_USERS", slug)
+        return await _relay_list("LDAP_LIST_USERS", slug, _directory_spoke(tid))
 
     @app.post("/api/ldap/users")
     async def create_ldap_user(request: Request):
         try:
             data = await request.json()
-            slug = _directory_slug(request, data)
+            tid, slug, _ = _directory_resolve(request, data, write=True)
             uid = str(data.get("uid") or "").strip()
             if not uid:
                 raise HTTPException(status_code=400, detail="uid is required")
@@ -267,7 +291,7 @@ def register(app, hub, ctx):
                 # Local: optional password (spoke auto-generates + returns one when blank).
                 if data.get("password"):
                     payload["password"] = data.get("password")
-            return await _relay("LDAP_CREATE_USER", payload)
+            return await _relay("LDAP_CREATE_USER", payload, _directory_spoke(tid))
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
@@ -278,13 +302,14 @@ def register(app, hub, ctx):
     async def update_ldap_user(request: Request):
         try:
             data = await request.json()
-            slug = _directory_slug(request, data)
+            tid, slug, _ = _directory_resolve(request, data, write=True)
             uid = str(data.get("uid") or "").strip()
             if not uid:
                 raise HTTPException(status_code=400, detail="uid is required")
             return await _relay("LDAP_UPDATE_USER",
                                 {"tenant_slug": slug, "uid": uid,
-                                 "attrs": data.get("attrs") or {}})
+                                 "attrs": data.get("attrs") or {}},
+                                _directory_spoke(tid))
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
@@ -295,11 +320,12 @@ def register(app, hub, ctx):
     async def delete_ldap_user(request: Request):
         try:
             data = await request.json()
-            slug = _directory_slug(request, data)
+            tid, slug, _ = _directory_resolve(request, data, write=True)
             uid = str(data.get("uid") or "").strip()
             if not uid:
                 raise HTTPException(status_code=400, detail="uid is required")
-            result = await _relay("LDAP_DELETE_USER", {"tenant_slug": slug, "uid": uid})
+            result = await _relay("LDAP_DELETE_USER", {"tenant_slug": slug, "uid": uid},
+                                  _directory_spoke(tid))
             _invalidate_user_sessions(hub, uid)  # kill any live hub session for it
             return result
         except HTTPException:
@@ -314,13 +340,14 @@ def register(app, hub, ctx):
         against Entra — no local password)."""
         try:
             data = await request.json()
-            slug = _directory_slug(request, data)
+            tid, slug, _ = _directory_resolve(request, data, write=True)
             uid = str(data.get("uid") or "").strip()
             password = data.get("password")
             if not uid or not password:
                 raise HTTPException(status_code=400, detail="uid and password are required")
             result = await _relay("LDAP_SET_PASSWORD",
-                                  {"tenant_slug": slug, "uid": uid, "password": password})
+                                  {"tenant_slug": slug, "uid": uid, "password": password},
+                                  _directory_spoke(tid))
             # The directory credential changed → revoke any live hub session
             # minted for this user so the old password can't keep authorizing.
             _invalidate_user_sessions(hub, uid)
@@ -334,21 +361,22 @@ def register(app, hub, ctx):
     # ── Groups ───────────────────────────────────────────────────────────────
     @app.get("/api/ldap/groups")
     async def get_ldap_groups(request: Request):
-        slug = _directory_slug(request)
+        tid, slug, _ = _directory_resolve(request)
         logger.debug("relay LDAP_LIST_GROUPS tenant=%s", slug)
-        return await _relay_list("LDAP_LIST_GROUPS", slug)
+        return await _relay_list("LDAP_LIST_GROUPS", slug, _directory_spoke(tid))
 
     @app.post("/api/ldap/groups")
     async def create_ldap_group(request: Request):
         try:
             data = await request.json()
-            slug = _directory_slug(request, data)
+            tid, slug, _ = _directory_resolve(request, data, write=True)
             cn = str(data.get("cn") or data.get("name") or "").strip()
             if not cn:
                 raise HTTPException(status_code=400, detail="cn is required")
             return await _relay("LDAP_CREATE_GROUP",
                                 {"tenant_slug": slug, "cn": cn,
-                                 "attrs": data.get("attrs") or {}})
+                                 "attrs": data.get("attrs") or {}},
+                                _directory_spoke(tid))
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
@@ -362,11 +390,12 @@ def register(app, hub, ctx):
         # same LDAP_* + tenant_slug convention; needs the matching spoke handler.
         try:
             data = await request.json()
-            slug = _directory_slug(request, data)
+            tid, slug, _ = _directory_resolve(request, data, write=True)
             cn = str(data.get("cn") or data.get("name") or "").strip()
             if not cn:
                 raise HTTPException(status_code=400, detail="cn is required")
-            return await _relay("LDAP_DELETE_GROUP", {"tenant_slug": slug, "cn": cn})
+            return await _relay("LDAP_DELETE_GROUP", {"tenant_slug": slug, "cn": cn},
+                                _directory_spoke(tid))
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
@@ -377,13 +406,14 @@ def register(app, hub, ctx):
     async def add_ldap_member(request: Request):
         try:
             data = await request.json()
-            slug = _directory_slug(request, data)
+            tid, slug, _ = _directory_resolve(request, data, write=True)
             cn = str(data.get("cn") or data.get("group") or "").strip()
             uid = str(data.get("uid") or data.get("member") or "").strip()
             if not cn or not uid:
                 raise HTTPException(status_code=400, detail="cn and uid are required")
             return await _relay("LDAP_ADD_MEMBER",
-                                {"tenant_slug": slug, "cn": cn, "uid": uid})
+                                {"tenant_slug": slug, "cn": cn, "uid": uid},
+                                _directory_spoke(tid))
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
@@ -394,13 +424,14 @@ def register(app, hub, ctx):
     async def remove_ldap_member(request: Request):
         try:
             data = await request.json()
-            slug = _directory_slug(request, data)
+            tid, slug, _ = _directory_resolve(request, data, write=True)
             cn = str(data.get("cn") or data.get("group") or "").strip()
             uid = str(data.get("uid") or data.get("member") or "").strip()
             if not cn or not uid:
                 raise HTTPException(status_code=400, detail="cn and uid are required")
             return await _relay("LDAP_REMOVE_MEMBER",
-                                {"tenant_slug": slug, "cn": cn, "uid": uid})
+                                {"tenant_slug": slug, "cn": cn, "uid": uid},
+                                _directory_spoke(tid))
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
@@ -417,8 +448,10 @@ def register(app, hub, ctx):
             data = await request.json() if request.method == "POST" else {}
         except Exception:  # noqa: BLE001 — empty body is fine
             data = {}
-        slug = _directory_slug(request, data if isinstance(data, dict) else {})
-        return await _relay("LDAP_PROVISION_TENANT_OU", {"tenant_slug": slug})
+        tid, slug, _ = _directory_resolve(request, data if isinstance(data, dict) else {},
+                                          write=True)
+        return await _relay("LDAP_PROVISION_TENANT_OU", {"tenant_slug": slug},
+                            _directory_spoke(tid))
 
     # ── Admin: Directory (LDAP) SERVER connection config (mirror oidc route) ──
     # ``/setup/*`` is Global-Admin-only via the access-control middleware, so no
