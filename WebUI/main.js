@@ -13541,6 +13541,7 @@ const PXMX_VM_ACTIONS = [
     { action: 'reboot',   label: '↺ Restart',   cls: 'bg-amber-100 text-amber-700 hover:bg-amber-200' },
     { action: 'snapshot', label: '📷 Snapshot', cls: 'bg-slate-200 text-slate-700 hover:bg-slate-300' },
     { action: 'backup',   label: '💾 Backup',    cls: 'bg-sky-100 text-sky-700 hover:bg-sky-200' },
+    { action: 'destroy',  label: '🗑 Delete',    cls: 'bg-red-800 text-white hover:bg-red-900' },
 ];
 
 // Friendly OS label from the agent's cached Proxmox ostype (l26 → Linux, win*
@@ -13597,15 +13598,23 @@ function pxmxVmTableHtml(vms) {
         // users get a read-only list. Clone + Backup-to-Hub stay in the
         // click-through detail panel (they need the storage picker / template-pool
         // affordance).
-        const act = (spec) => canAct
-            ? `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2.5 py-1 rounded font-bold ${spec.cls}">${spec.label}</button>`
-            : '';
+        const act = (spec) => {
+            if (!canAct) return '';
+            // Delete-protection safeguard: a protected VM's Delete button is
+            // disabled + locked. The hub enforces this too (403), so this is
+            // UX, not the security boundary.
+            if (spec.action === 'destroy' && vm.protected) {
+                return `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-2.5 py-1 rounded font-bold bg-slate-100 text-slate-400 cursor-not-allowed">🔒 Delete</button>`;
+            }
+            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2.5 py-1 rounded font-bold ${spec.cls}">${spec.label}</button>`;
+        };
         const consoleBtn = !canAct ? ''
             : (isLxc || tpl)
                 ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2.5 py-1 rounded font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
                 : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2.5 py-1 rounded font-bold bg-slate-800 text-slate-100 hover:bg-slate-700" title="Open a noVNC console to this VM">🖥 Console</button>`;
-        // Templates: only Backup (vzdump) is valid. Non-templates: all 5.
-        const specs = tpl ? PXMX_VM_ACTIONS.filter(s => s.action === 'backup') : PXMX_VM_ACTIONS;
+        // Templates: Backup + Delete are valid (start/stop/reboot/snapshot aren't).
+        // Non-templates: all 6.
+        const specs = tpl ? PXMX_VM_ACTIONS.filter(s => ['backup', 'destroy'].includes(s.action)) : PXMX_VM_ACTIONS;
         const actions = `<div class="flex flex-wrap gap-1">
             ${consoleBtn}
             ${specs.map(act).join('')}
@@ -13645,7 +13654,9 @@ window.pxmxBulkSelectAll = function (checked) {
 window.pxmxBulkAction = async function (action) {
     const sel = Array.from(document.querySelectorAll('.pxmx-vm-sel:checked')).map(cb => cb.value);
     if (!sel.length) { showToast('No VMs selected', 'info'); return; }
-    if (['stop', 'reboot', 'restart', 'backup'].includes(action)) {
+    if (['destroy', 'delete'].includes(action)) {
+        if (!window.confirm(`DELETE ${sel.length} selected VM(s)?\n\nThis DESTROYS each VM and its disks (--purge) — IRREVERSIBLE. (VMs protected in Setup → Hypervisors are skipped.)`)) return;
+    } else if (['stop', 'reboot', 'restart', 'backup'].includes(action)) {
         const cfg = await pxmxHvConfig();
         if (cfg.confirm_destructive !== false &&
             !window.confirm(`${action.toUpperCase()} ${sel.length} selected VM(s)?`)) return;
@@ -13716,6 +13727,9 @@ function openVmDetail(uniqueId) {
             <button id="pxmx-backup-hub-btn" onclick="pxmxBackupToHub('${uid}')" title="vzdump this template and store a copy in the hub's Template Repo (Template Repo page). The archive is deleted from the chosen storage after streaming." class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition-colors">⬆ Back up to Hub</button>
             <select id="pxmx-backup-hub-storage" title="vzdump storage target for THIS backup (file-based only — PBS excluded; vzdump-to-PBS isn't a single streamable file). The archive is deleted from here after it streams to the hub." class="px-2 py-1.5 rounded-md text-xs border border-slate-300 bg-white max-w-[12rem]"><option value="">loading storages…</option></select>
             <button id="pxmx-vm-console-btn" onclick="pxmxOpenConsole('${uid}')" title="Open VNC console (noVNC)" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors">🖥 Console</button>
+            ${vm.protected
+                ? `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-200 text-slate-400 cursor-not-allowed">🔒 Delete</button>`
+                : `<button onclick="pxmxVmAction('${uid}','destroy')" title="Destroy this VM and its disks (--purge) — IRREVERSIBLE" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-800 hover:bg-red-900 text-white transition-colors">🗑 Delete</button>`}
             ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>` : ''; })()}
             <span id="pxmx-vm-action-status" class="text-xs text-slate-400"></span>
         </div>`;
@@ -13731,14 +13745,17 @@ function openVmDetail(uniqueId) {
 // PXMX_LIST_STORAGE to each host). Saves via PUT. Governs the VM action panel.
 async function renderPxmxSettings(container) {
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading Hypervisor settings…</p>';
-    let cfg = {}, storages = { hosts: [] };
+    let cfg = {}, storages = { hosts: [] }, vms = [];
     try {
-        const [cR, sR] = await Promise.all([
+        const [cR, sR, vR] = await Promise.all([
             setupFetch(`/sim/api/tenant/${currentTenant}/hypervisors-config?tenant_id=${encodeURIComponent(currentTenant)}`),
             setupFetch(`/sim/api/tenant/${currentTenant}/hypervisor-storages?tenant_id=${encodeURIComponent(currentTenant)}`),
+            setupFetch(`/api/pxmx/vms?tenant=${encodeURIComponent(currentTenant)}`),
         ]);
         cfg = (await cR.json()).hypervisors_config || {};
         storages = await sR.json() || { hosts: [] };
+        const _vd = await vR.json().catch(() => ({}));
+        vms = (Array.isArray(_vd.vms) ? _vd.vms : []).filter(v => v && v.unique_id);
     } catch (e) {
         container.innerHTML = `<div class="p-4 text-sm text-red-600">Could not load Hypervisor settings: ${escapeHtml(String(e.message || e))}</div>`;
         return;
@@ -13761,6 +13778,20 @@ async function renderPxmxSettings(container) {
     }).join('') || `<tr><td colspan="4" class="px-3 py-3 text-xs text-slate-400 italic">No hosts reporting storages yet (agents fan PXMX_LIST_STORAGE on connect).</td></tr>`;
     const inp = 'border border-slate-200 rounded-md px-3 py-1.5 text-sm w-full';
     const lbl = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2';
+    // Delete-protection safeguard (Global Admin only): a checkbox per visible VM
+    // so the admin can mark which VMs can't be deleted. Stored as this tenant's
+    // ``protected_vms`` (unique_id list); enforced globally as the union across
+    // all tenants. Pre-check the already-protected VMs.
+    const protectedVms = new Set((cfg.protected_vms || []).map(String));
+    const protectRows = vms.length ? vms.map(v => {
+        const uid = escapeHtml(v.unique_id);
+        const checked = protectedVms.has(v.unique_id) ? 'checked' : '';
+        return `<label class="flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer">
+            <input type="checkbox" class="pxmx-protect-cb rounded" value="${uid}" ${checked}/>
+            <span class="font-medium">${escapeHtml(v.name || '—')}</span>
+            <span class="text-slate-400 font-mono">VMID ${escapeHtml(v.vmid)} · ${escapeHtml((v.cluster || '') + '/' + (v.node || ''))}</span>
+        </label>`;
+    }).join('') : `<div class="px-3 py-3 text-xs text-slate-400 italic">No VMs visible for this tenant.</div>`;
     container.innerHTML = `
       <div class="space-y-5 max-w-3xl">
         <div class="hpe-card rounded-lg p-5 shadow-sm">
@@ -13790,6 +13821,11 @@ async function renderPxmxSettings(container) {
           <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded"/> Confirm before destructive VM actions (stop / restart / backup)</label>
           ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-host-shell" type="checkbox" ${cfg.host_shell_enabled ? 'checked' : ''} class="rounded mt-0.5"/> <span>Enable <b>host terminal</b> (root shell on the Proxmox host via VM Server → Terminal). <span class="text-amber-600">Off by default</span> — a live root shell on this tenant's hypervisor. Global Admin (any host) + Tenant Admin (own tenant). Every session is audited.</span></label>` : ''}
         </div>
+        ${isAdmin() ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
+          <p class="text-sm font-bold text-[#263040] mb-1">Delete protection ${helpIcon('pxmx', null, 'Hypervisor help')}</p>
+          <p class="text-[11px] text-slate-400 mb-3">Checked VMs cannot be deleted from anywhere — the list is enforced globally across all tenants. Managed by Global Admin.</p>
+          <div class="max-h-64 overflow-y-auto border border-slate-200 rounded-md divide-y divide-slate-50">${protectRows}</div>
+        </div>` : ''}
         <div class="flex justify-end items-center gap-3">
           <button onclick="savePxmxSettings()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold">Save</button>
           <span id="pxmx-settings-status" class="text-xs text-slate-400"></span>
@@ -13823,6 +13859,15 @@ async function savePxmxSettings() {
     const _hostShellEl = document.getElementById('hv-host-shell');
     if (_hostShellEl) cfg.host_shell_enabled = !!_hostShellEl.checked;
     else if (window._pxmxHvConfig) cfg.host_shell_enabled = !!window._pxmxHvConfig.host_shell_enabled;  // preserve for non-admins
+    // Delete-protection list (Global Admin only renders the checkboxes). Collect
+    // the checked unique_ids; for non-admins (no checkboxes) preserve the
+    // existing list so a non-admin Save doesn't wipe the safeguard.
+    const _protectCbs = document.querySelectorAll('.pxmx-protect-cb');
+    if (_protectCbs.length) {
+        cfg.protected_vms = Array.from(_protectCbs).filter(cb => cb.checked).map(cb => cb.value);
+    } else if (window._pxmxHvConfig) {
+        cfg.protected_vms = window._pxmxHvConfig.protected_vms || [];
+    }
     const st = document.getElementById('pxmx-settings-status');
     try {
         const r = await setupFetch(`/sim/api/tenant/${currentTenant}/hypervisors-config?tenant_id=${encodeURIComponent(currentTenant)}`, {
@@ -13848,8 +13893,13 @@ async function pxmxVmAction(uniqueId, action) {
     const vms = window._pxmxVms || [];
     const vm = vms.find(v => v.unique_id === uniqueId);
     if (!vm) { showToast('VM not found in cache', 'error'); return; }
-    // Confirm destructive actions when Setup → Hypervisors asks for it (default on).
-    if (['stop', 'reboot', 'restart', 'backup'].includes(action)) {
+    // Delete is IRREVERSIBLE (qm/pct destroy --purge — VM + disks + backup-job
+    // membership gone) so it ALWAYS confirms with the VM name, regardless of the
+    // confirm_destructive toggle. Stop/reboot/restart/backup confirm only when
+    // Setup → Hypervisors asks for it (default on).
+    if (['destroy', 'delete'].includes(action)) {
+        if (!window.confirm(`DELETE "${vm.name || vm.vmid}"?\n\nThis DESTROYS the VM and its disks (--purge) — IRREVERSIBLE.`)) return;
+    } else if (['stop', 'reboot', 'restart', 'backup'].includes(action)) {
         const cfg = await pxmxHvConfig();
         if (cfg.confirm_destructive !== false &&
             !window.confirm(`${action.toUpperCase()} "${vm.name || vm.vmid}"?`)) return;

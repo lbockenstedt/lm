@@ -40,12 +40,23 @@ class _State:
         return self._tenants.get(tid)
 
 
+class _Store:
+    """Minimal simulations_store: just the delete-protection union surface."""
+
+    def __init__(self, protected=None):
+        self._protected = set(protected or [])
+
+    def get_all_protected_vms(self):
+        return set(self._protected)
+
+
 class _Hub:
     """Minimal hub: in-memory warm cache + canned PXMX_LIST_VMS replies."""
 
     def __init__(self, vms=None, spoke_connected=True, tenants=None,
-                 system_state=None):
+                 system_state=None, protected=None):
         self.state = _State(tenants=tenants, system_state=system_state)
+        self.simulations_store = _Store(protected=protected)
         self._spoke = "pxmx-1" if spoke_connected else None
         self._vms = vms if vms is not None else []
         self.warm = {}          # {(namespace, key): raw envelope}
@@ -175,3 +186,19 @@ def test_warm_key_agent_scope_partition():
     assert r.status_code == 200
     assert ("pxmx_vms", "_all_|agent=pxmx-2") in hub.warm
     assert ("pxmx_vms", "_all_|agent=") not in hub.warm
+
+
+def test_protected_vm_annotated_in_list():
+    """A VM whose unique_id is in the global protected set is stamped
+    ``protected: True`` on the way out (so the UI can lock its Delete button);
+    a non-protected VM is ``protected: False``."""
+    hub = _Hub(vms=[
+        {"name": "guarded", "vmid": 100, "ips": [], "unique_id": "px/px/100"},
+        {"name": "free",    "vmid": 101, "ips": [], "unique_id": "px/px/101"},
+    ], protected={"px/px/100"})
+    c = _build(hub, admin=True)
+    r = c.get("/api/pxmx/vms")
+    assert r.status_code == 200
+    by = {v["unique_id"]: v for v in r.json()["vms"]}
+    assert by["px/px/100"]["protected"] is True
+    assert by["px/px/101"]["protected"] is False

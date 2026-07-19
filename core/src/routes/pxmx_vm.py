@@ -68,12 +68,22 @@ def register(app, hub, ctx):
         except Exception:
             body = {}
         action = str((body or {}).get("action", "")).lower()
-        if action not in ("start", "stop", "reboot", "restart", "snapshot", "backup"):
+        if action not in ("start", "stop", "reboot", "restart", "snapshot",
+                          "backup", "destroy", "delete"):
             raise HTTPException(status_code=400, detail=f"unknown action: {action}")
         # Admin → any VM; a write-user/tenant-admin → only a VM in their tenant.
         await _assert_vm_control(request, vmid=body.get("vmid"),
                                  node=body.get("node"), unique_id=body.get("unique_id"))
         hub = app.state.hub
+        # Delete-protection safeguard: a Global Admin can mark VMs non-deletable
+        # from Setup → Hypervisors (stored per-tenant, enforced as the UNION across
+        # all tenants). A protected VM is rejected here, before the relay runs.
+        if action in ("destroy", "delete"):
+            uid = str(body.get("unique_id") or "")
+            if uid and uid in hub.simulations_store.get_all_protected_vms():
+                raise HTTPException(
+                    status_code=403,
+                    detail="This VM is protected from deletion. Remove the safeguard in Setup → Hypervisors to delete it.")
         pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
         node = str(body.get("node", "") or "")
         payload = {
@@ -145,7 +155,8 @@ def register(app, hub, ctx):
         except Exception:
             body = {}
         action = str((body or {}).get("action", "")).lower()
-        if action not in ("start", "stop", "reboot", "restart", "snapshot", "backup"):
+        if action not in ("start", "stop", "reboot", "restart", "snapshot",
+                          "backup", "destroy", "delete"):
             raise HTTPException(status_code=400, detail=f"unknown action: {action}")
         items = (body or {}).get("items") or []
         if not isinstance(items, list) or not items:
@@ -153,6 +164,10 @@ def register(app, hub, ctx):
         hub = app.state.hub
         pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
         tenant_id = sess.get("tenant_id") or ""
+        # Delete-protection safeguard (union across all tenants) — computed once
+        # for the batch; each protected item is rejected and never reaches the
+        # spoke. Same safeguard as the single-VM route.
+        protected_set = hub.simulations_store.get_all_protected_vms() if action in ("destroy", "delete") else set()
         # Backup/snapshot config is per-host but read from ONE tenant config.
         hv = None
         if action in ("backup", "snapshot"):
@@ -175,6 +190,14 @@ def register(app, hub, ctx):
             except HTTPException as he:
                 results.append({"vmid": vmid, "ok": False, "error": str(he.detail)})
                 continue
+            # Delete-protection: a protected VM is skipped with a clear error
+            # (never relayed to the spoke). The other VMs in the batch still run.
+            if protected_set:
+                _uid = str(it.get("unique_id") or "")
+                if _uid and _uid in protected_set:
+                    results.append({"vmid": vmid, "ok": False,
+                                    "error": "protected from deletion (Setup → Hypervisors)"})
+                    continue
             payload = {
                 "unique_id": it.get("unique_id", ""),
                 "vmid": vmid,

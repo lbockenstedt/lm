@@ -676,11 +676,21 @@ def register(app, hub, ctx):
         # are clonable templates (clone-from-template). Computed once, merged into
         # the response envelope on every return path below.
         template_pools = access._template_pools(hub)
+        # Delete-protection safeguard (union across all tenants) — stamped on
+        # each VM as ``protected`` so the UI can lock the Delete button. Computed
+        # once; every return path goes through _with_tpl so the flag is set on
+        # live, warm, and cached reads alike.
+        protected_set = hub.simulations_store.get_all_protected_vms()
 
         def _with_tpl(data):
             if isinstance(data, dict):
                 data = dict(data)
                 data["template_pools"] = template_pools
+                vms = data.get("vms")
+                if isinstance(vms, list):
+                    for v in vms:
+                        if isinstance(v, dict):
+                            v["protected"] = v.get("unique_id") in protected_set
             return data
 
         sess = _session_user(request)

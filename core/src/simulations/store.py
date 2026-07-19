@@ -88,6 +88,11 @@ _DEFAULT_HYPERVISORS_CONFIG: Dict[str, Any] = {
     "snapshot_prefix": "lm",       # auto-snapshot name prefix
     "confirm_destructive": True,   # confirm prompt before stop/restart/backup/snapshot-delete
     "per_host": {},                # {hostname: {backup_storage, backup_mode, backup_keep, ...}}
+    # Delete-protection safeguard: unique_id strings ("<cluster>/<node>/<vmid>")
+    # of VMs a Global Admin has marked non-deletable from Setup → Hypervisors.
+    # Enforced as the UNION across all tenants (get_all_protected_vms) so a VM
+    # protected in any tenant's config can't be deleted from any context.
+    "protected_vms": [],
 }
 
 
@@ -352,6 +357,23 @@ class SimulationsStore:
         merged.update(stored)
         merged["per_host"] = dict(stored.get("per_host") or {})
         return merged
+
+    def get_all_protected_vms(self) -> set:
+        """Union of every tenant's ``protected_vms`` (unique_id strings) — the
+        delete-protection safeguard. A VM protected in ANY tenant's Setup →
+        Hypervisors is protected EVERYWHERE, so a delete can't be bypassed by
+        acting under a different tenant (e.g. an all-tenants admin view). Sync
+        + unlocked read mirrors ``get_hypervisors_config``; the set is small
+        and deletes are rare."""
+        protected: set = set()
+        for t in self._data.values():
+            if not isinstance(t, dict):
+                continue
+            cfg = t.get("hypervisors_config") or {}
+            vms = cfg.get("protected_vms") if isinstance(cfg, dict) else None
+            if isinstance(vms, list):
+                protected.update(str(x) for x in vms if x)
+        return protected
 
     async def set_hypervisors_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Persist the tenant's Hypervisors config (full GET-merge-PUT from the UI)."""
