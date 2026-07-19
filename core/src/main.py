@@ -4949,83 +4949,80 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
 
     _SIM_CACHE_FLUSH_INTERVAL_S = 30
 
-    def _load_simulations_cache(self) -> None:
-        """Warm-start simulations_cache from disk (best-effort; never fatal).
-        Mirrors Mailbox._load — decrypt + json.loads the last snapshot so the
-        Clients/VM Server views seed on a restart instead of blank-until-
-        reconnect."""
+    def _sim_cache_tenant_of(self, spoke_pk: str) -> str:
+        """Group simulations_cache (keyed by spoke primary key) into per-tenant
+        shards. Spokes with no tenant binding go to an ``_unassigned`` shard so
+        they still persist/warm-load."""
         try:
-            if not os.path.exists(self._sim_cache_path):
-                return
+            return self.state.get_spoke_tenant(spoke_pk) or "_unassigned"
+        except Exception:  # noqa: BLE001
+            return "_unassigned"
+
+    def _load_simulations_cache(self) -> None:
+        """Warm-start simulations_cache from per-tenant encrypted shards (best-
+        effort) so the Clients/VM Server views seed on a restart instead of
+        blank-until-reconnect. One-time migration from the legacy shared file."""
+        try:
             from security.encryption import hub_encryption
-            with open(self._sim_cache_path, "rb") as f:
-                blob = f.read()
-            if not blob:
-                return
-            data = json.loads(hub_encryption.decrypt(blob)) or {}
-            if isinstance(data, dict):
-                self.simulations_cache = {str(k): v for k, v in data.items()
-                                          if isinstance(v, dict)}
-                if self.simulations_cache:
-                    logger.info("simulations_cache: warm-loaded %d spoke payload(s) from disk",
-                                len(self.simulations_cache))
+            from tenant_sharded import migrate_legacy, shard_load
+            _dec = lambda b: hub_encryption.decrypt(b)  # noqa: E731
+            _enc = lambda s: hub_encryption.encrypt(s)  # noqa: E731
+            migrate_legacy(self.state.data_dir, "simulations", "simulations_cache.json",
+                           tenant_of=self._sim_cache_tenant_of, decrypt=_dec, encrypt=_enc)
+            data = shard_load(self.state.data_dir, "simulations", "simulations_cache.json",
+                              decrypt=_dec) or {}
+            self.simulations_cache = {str(k): v for k, v in data.items()
+                                      if isinstance(v, dict)}
+            if self.simulations_cache:
+                logger.info("simulations_cache: warm-loaded %d spoke payload(s) from shards",
+                            len(self.simulations_cache))
         except Exception as e:  # noqa: BLE001
-            logger.warning("simulations_cache warm load failed (%s): %s — starting empty",
-                           self._sim_cache_path, e)
+            logger.warning("simulations_cache warm load failed: %s — starting empty", e)
 
     def _save_simulations_cache(self) -> None:
-        """Encrypted atomic write of simulations_cache (mirrors Mailbox._save).
-        Never raises — a failed persist must not break telemetry ingest."""
+        """Encrypted per-tenant shard write of simulations_cache. Never raises — a
+        failed persist must not break telemetry ingest."""
         try:
             from security.encryption import hub_encryption
-            encrypted = hub_encryption.encrypt(json.dumps(self.simulations_cache, default=str))
-            tmp = self._sim_cache_path + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(encrypted)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self._sim_cache_path)
+            from tenant_sharded import shard_save
+            shard_save(self.state.data_dir, "simulations", "simulations_cache.json",
+                       self.simulations_cache, tenant_of=self._sim_cache_tenant_of,
+                       encrypt=lambda s: hub_encryption.encrypt(s))
         except Exception as e:  # noqa: BLE001
-            logger.warning("simulations_cache persist failed (%s): %s", self._sim_cache_path, e)
+            logger.warning("simulations_cache persist failed: %s", e)
 
     def _load_central_hub_status(self) -> None:
-        """Warm-start central_hub_status from disk (best-effort; never fatal) so
-        the centralized-mode Checks/Central/Hardware dashboards seed on a restart
-        instead of blank-until-first-poll. Encrypted at rest (mirrors
-        _load_simulations_cache)."""
+        """Warm-start central_hub_status from per-tenant encrypted shards so the
+        centralized-mode Checks/Central/Hardware dashboards seed on a restart
+        instead of blank-until-first-poll. One-time migration from legacy file."""
         try:
-            if not os.path.exists(self._central_status_path):
-                return
             from security.encryption import hub_encryption
-            with open(self._central_status_path, "rb") as f:
-                blob = f.read()
-            if not blob:
-                return
-            data = json.loads(hub_encryption.decrypt(blob)) or {}
-            if isinstance(data, dict):
-                self.central_hub_status = {str(k): v for k, v in data.items()
-                                           if isinstance(v, dict)}
-                if self.central_hub_status:
-                    logger.info("central_hub_status: warm-loaded %d tenant status block(s) from disk",
-                                len(self.central_hub_status))
+            from tenant_sharded import migrate_legacy, shard_load
+            _dec = lambda b: hub_encryption.decrypt(b)  # noqa: E731
+            _enc = lambda s: hub_encryption.encrypt(s)  # noqa: E731
+            migrate_legacy(self.state.data_dir, "simulations", "central_hub_status.json",
+                           tenant_of=lambda k: k, decrypt=_dec, encrypt=_enc)
+            data = shard_load(self.state.data_dir, "simulations", "central_hub_status.json",
+                              decrypt=_dec) or {}
+            self.central_hub_status = {str(k): v for k, v in data.items()
+                                       if isinstance(v, dict)}
+            if self.central_hub_status:
+                logger.info("central_hub_status: warm-loaded %d tenant status block(s) from shards",
+                            len(self.central_hub_status))
         except Exception as e:  # noqa: BLE001
-            logger.warning("central_hub_status warm load failed (%s): %s — starting empty",
-                           self._central_status_path, e)
+            logger.warning("central_hub_status warm load failed: %s — starting empty", e)
 
     def _save_central_hub_status(self) -> None:
-        """Encrypted atomic write of central_hub_status. Never raises — a failed
-        persist must not break the poll loop. Called once per poll cycle."""
+        """Encrypted per-tenant shard write of central_hub_status. Never raises — a
+        failed persist must not break the poll loop. Called once per poll cycle."""
         try:
             from security.encryption import hub_encryption
-            encrypted = hub_encryption.encrypt(json.dumps(self.central_hub_status, default=str))
-            tmp = self._central_status_path + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(encrypted)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self._central_status_path)
+            from tenant_sharded import shard_save
+            shard_save(self.state.data_dir, "simulations", "central_hub_status.json",
+                       self.central_hub_status, tenant_of=lambda k: k,
+                       encrypt=lambda s: hub_encryption.encrypt(s))
         except Exception as e:  # noqa: BLE001
-            logger.warning("central_hub_status persist failed (%s): %s", self._central_status_path, e)
+            logger.warning("central_hub_status persist failed: %s", e)
 
     async def run_sim_cache_flush_loop(self):
         """Persist simulations_cache to disk when dirty, off the event loop.
