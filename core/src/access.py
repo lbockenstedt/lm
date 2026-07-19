@@ -1105,9 +1105,12 @@ def filter_enabled(hub, module: str) -> bool:
 async def filter_session(hub, sessions: dict, request: "Request", data, module: str, ip_fields):
     """Apply server-side subnet filtering to ``data`` for ``module``.
 
-    No-op for admins, for disabled modules, or when the tenant has no prefixes
-    (can't filter). Otherwise drops items whose concrete IPs all fall outside the
-    tenant's prefixes (see simulations/tenant_filter.py).
+    No-op for admins and for disabled modules. Otherwise drops items whose
+    concrete IPs all fall outside the tenant's prefixes (see
+    simulations/tenant_filter.py). A non-admin whose tenant has NO prefixes
+    FAILS CLOSED (empty result): a tenant unconfigured for subnets sees
+    nothing, not the whole fleet — the old "can't filter → show all" was a
+    cross-tenant leak for such tenants.
 
     A non-admin with NO tenant assignment (``user.tenant_id`` absent — login
     derives it from ``tenants[0]``) is denied: returning the unfiltered
@@ -1124,7 +1127,7 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
         return [] if isinstance(data, list) else ({} if isinstance(data, dict) else data)
     prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
-        return data
+        return _empty_filter_result(data)
     return filter_items_by_prefixes(data, prefixes, ip_fields)
 
 
@@ -1187,7 +1190,8 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
     otherwise bypass. No explicit tenant → legacy session-tenant behavior
     (no-op for admins, session tenant for non-admins). Mirrors
     ``filter_tenant``. The ``firewall`` subnet-filter toggle gates both
-    paths; an empty prefix list still means "no filter" (can't filter)."""
+    paths; an empty prefix list FAILS CLOSED (empty result) — a tenant with no
+    prefixes sees nothing, not the whole fleet."""
     spec = _FW_FILTER_SPEC.get(endpoint)
     if not spec:
         return data  # health / unknown → no IP to filter on
@@ -1205,7 +1209,7 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
             return data
         prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
-        return data
+        return _empty_filter_result(data)
     # OPNsense category attribution: for rules/nat/aliases, a record whose
     # `category` belongs to the tenant is shown regardless of subnet. The admin
     # may tag a record with the tenant's display name, slug, netbox slug, or id,
@@ -1333,9 +1337,11 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
     as ``filter_fw`` — an explicit ``?tenant=`` scopes admins to that tenant's
     prefixes; no explicit tenant → legacy session-tenant behavior (no-op for
     admins, session tenant for non-admins). The ``nw`` subnet-filter toggle
-    gates both paths; empty prefixes → no filter. ``devices``/``info`` carry no
-    tenant-IP list and pass through unfiltered. MAC/ARP use drop_no_ip=False (a
-    MAC-only row leaks no cross-tenant IP); interfaces keep the strict default.
+    gates both paths; an empty prefix list FAILS CLOSED (empty result) — a
+    tenant with no prefixes sees nothing, not the whole fleet.
+    ``devices``/``info`` carry no tenant-IP list and pass through unfiltered.
+    MAC/ARP use drop_no_ip=False (a MAC-only row leaks no cross-tenant IP);
+    interfaces keep the strict default.
     """
     spec = _NW_FILTER_SPEC.get(endpoint)
     if not spec:
@@ -1354,7 +1360,7 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
             return data
         prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
-        return data
+        return _empty_filter_result(data)
     drop_no_ip = endpoint not in ("macs", "arp", "endpoints")
     before = _list_len(data)
     out = filter_items_by_prefixes(data, prefixes, fields, drop_no_ip=drop_no_ip)
@@ -1366,8 +1372,9 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
 
 async def gate_record(hub, sessions: dict, request: "Request", record, module: str, ip_fields):
     """Gate a single-record endpoint (e.g. CPPM device-enrich): return the record
-    if it may be shown, else ``None``. No-op for admins / disabled modules /
-    tenants without prefixes."""
+    if it may be shown, else ``None``. No-op for admins / disabled modules. A
+    non-admin whose tenant has no prefixes FAILS CLOSED (``None``): a tenant
+    unconfigured for subnets may not enrich a foreign device's record."""
     sess = session_user(sessions, request)
     if not sess or is_admin(sess):
         return record
@@ -1375,7 +1382,7 @@ async def gate_record(hub, sessions: dict, request: "Request", record, module: s
         return record
     prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
-        return record
+        return None
     return filter_record_by_prefixes(record, prefixes, ip_fields)
 
 
@@ -1386,6 +1393,56 @@ def _list_len(data) -> int:
         return -1
     lst = container if key is None else container[key]
     return len(lst) if isinstance(lst, list) else -1
+
+
+def _empty_filter_result(data):
+    """Fail-closed empty for a subnet-filtered READ — the shape a tenant with NO
+    NetBox prefixes sees: a NEW envelope of the same shape as ``data`` with its
+    record list emptied (so the UI's envelope contract — status/wrappers — is
+    preserved). A bare list → ``[]``; a dict envelope → a shallow copy with the
+    record list set to ``[]``; a non-list/non-dict → returned unchanged. The
+    caller's original ``data`` is NOT mutated (it may be a cached envelope
+    shared across requests — emptying it in place would corrupt the cache for
+    everyone).
+
+    A non-admin (or an admin acting-as a tenant via ``?tenant=``) whose tenant
+    has no prefixes sees NOTHING in a subnet-filtered module, not the whole
+    fleet — the old ``return data`` fail-open was a cross-tenant leak for
+    unconfigured tenants. This mirrors the FAIL-CLOSED semantics the
+    write/control gates (``vm_in_tenant_scope`` / ``fw_rule_in_tenant_scope`` /
+    ``record_in_tenant_scope``) already use on empty prefixes. Note: a
+    transient NetBox outage can also yield an empty prefix list; the session
+    prefix cache (``_PREFIX_CACHE_TTL``) mitigates this for established
+    sessions, and fail-closed is the safe default regardless."""
+    container, key = _find_list_slot(data)
+    if container is None:
+        return [] if isinstance(data, list) else ({} if isinstance(data, dict) else data)
+    if key is None:
+        return []                      # bare list → new empty list
+    if container is data:
+        out = dict(data)               # shallow copy, preserve wrapper fields
+        out[key] = []
+        return out
+    # container is nested one level inside data (e.g. data["payload"]["data"]):
+    # shallow-copy the outer dict + the container dict, then empty the list.
+    if isinstance(data, dict):
+        for k, v in data.items():
+            if v is container and isinstance(v, dict):
+                out = dict(data)
+                inner = dict(v)
+                inner[key] = []
+                out[k] = inner
+                return out
+    # Deeper nesting (not seen in practice): deepcopy + empty the list.
+    import copy
+    out = copy.deepcopy(data)
+    c2, k2 = _find_list_slot(out)
+    if c2 is not None and k2 is not None:
+        if c2 is out:
+            out = dict(out); out[k2] = []
+        else:
+            c2[k2] = []
+    return out
 
 
 def _template_pools(hub) -> list:
@@ -1443,8 +1500,17 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
         logger.debug("DIAG filter_tenant[%s] explicit=%r tid=%r enabled=%s "
                        "prefixes=%d items_before=%d ip_fields=%s", module, explicit_tenant,
                        tid, enabled, len(prefixes), before, ip_fields)
-        if not enabled or not prefixes:
-            return data
+        if not enabled:
+            return data          # subnet filter toggled OFF for this module → show all
+        if not prefixes:
+            # Hypervisor attributes by tenant TAG + template pool too, so a
+            # no-prefix tenant may still own tag-attributed VMs — don't blank
+            # it (filter_hypervisor_vms applies those overrides). Every other
+            # (purely subnet-filtered) module FAILS CLOSED: a tenant with no
+            # prefixes sees nothing, not the whole fleet.
+            if module == "hypervisor":
+                return data
+            return _empty_filter_result(data)
         if module == "hypervisor":
             out = filter_hypervisor_vms(data, prefixes,
                                         template_pools=_template_pools(hub),
@@ -1484,6 +1550,6 @@ async def gate_record_tenant(hub, sessions: dict, request: "Request", record, mo
             return record
         prefixes = await resolve_prefixes_for_tenant(hub, tid)
         if not prefixes:
-            return record
+            return None      # FAIL-CLOSED: a no-prefix tenant sees no foreign record
         return filter_record_by_prefixes(record, prefixes, ip_fields)
     return await gate_record(hub, sessions, request, record, module, ip_fields)

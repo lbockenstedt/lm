@@ -917,10 +917,11 @@ def test_dhcp_reservations_unfiltered_for_global_admin(monkeypatch, tmp_path):
 
 
 def test_dhcp_subnets_empty_for_non_admin_with_no_prefixes(monkeypatch, tmp_path):
-    # A non-admin whose tenant has NO NetBox prefixes → resolve_prefixes []
-    # → filter_session returns data unchanged (can't filter). But a tenantless
-    # non-admin (no tenant_id) → filter_session returns []. This test covers the
-    # tenantless path: an op with no tenant_id gets nothing, not the fleet.
+    # A non-admin whose tenant has NO NetBox prefixes → resolve_prefixes [] →
+    # filter_session FAILS CLOSED (empty result). A tenantless non-admin (no
+    # tenant_id) → filter_session returns [] at the earlier tenant-id check.
+    # This test covers the tenantless path: an op with no tenant_id gets
+    # nothing, not the fleet.
     c, hub = _build_dhcp(monkeypatch, tmp_path)
     user_data = {"user_id": "lost", "auth_type": "local",
                  "permissions": {"ipam": True},

@@ -65,7 +65,7 @@ def test_stored_values_are_coerced_to_bool():
 # → admin bypass preserved (regression guard).
 
 import asyncio
-from access import filter_fw, filter_tenant
+from access import filter_fw, filter_tenant, filter_session
 
 
 class _FakeRequest:
@@ -83,7 +83,7 @@ class _PrefixHub(FakeHub):
     def get_spoke_by_type(self, module_type):
         return self._ipam_spoke if module_type == "ipam" else None
 
-    async def request_response(self, spoke_id, command, payload):
+    async def request_response(self, spoke_id, command, payload, **kwargs):
         assert spoke_id == self._ipam_spoke
         assert command == "NETBOX_GET_PREFIXES"
         # Prefixes for the requested tenant slug (payload["tenant"]).
@@ -336,3 +336,80 @@ def test_hypervisor_module_in_toggle_set_and_default_on():
     from access import _FILTER_MODULES, _FILTER_DEFAULTS
     assert "hypervisor" in _FILTER_MODULES
     assert _FILTER_DEFAULTS["hypervisor"] is True
+
+# ── Fail-closed on empty prefixes (unconfigured tenant) ─────────────────────
+#
+# A tenant with NO NetBox prefixes sees NOTHING in a purely subnet-filtered
+# module, not the whole fleet. The old return data fail-open was a cross-
+# tenant leak for unconfigured tenants. Hypervisor is exempt (it also
+# attributes by tag + template pool).
+
+
+class _NoPrefixHub(_PrefixHub):
+    """_PrefixHub whose tenant has NO NetBox prefixes (unconfigured)."""
+    async def request_response(self, spoke_id, command, payload, **kwargs):
+        assert spoke_id == self._ipam_spoke
+        assert command == "NETBOX_GET_PREFIXES"
+        return {"payload": {"data": {"prefixes": []}}}
+
+
+def _user_session(tenant):
+    return {"user": {"tenants": [tenant], "tenant_id": tenant,
+                     "permissions": {"nac": True}}, "expires": 2 ** 31}
+
+
+def test_filter_fw_fails_closed_for_no_prefix_tenant():
+    """An admin acting-as a tenant with no prefixes sees nothing, not the
+    whole fleet (the old fail-open leaked every tenant's rules)."""
+    hub = _NoPrefixHub(FakeState(system_state={}, tenants={
+        "ghost": {"netbox_tenant_slug": "ghost"},
+    }))
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    env = _rules_env()
+    out = asyncio.run(filter_fw(hub, sessions, req, env, "rules",
+                                firewall_id=None, explicit_tenant="ghost"))
+    assert out is not env          # a NEW envelope, not the unfiltered input
+    assert out["rules"] == []     # fail-closed empty
+    assert env["rules"]           # the caller's original is NOT mutated (still 3)
+
+
+def test_filter_session_fails_closed_for_no_prefix_non_admin():
+    """A non-admin whose tenant has no prefixes sees nothing (fail-closed),
+    not the unfiltered fleet."""
+    hub = _NoPrefixHub(FakeState(system_state={}, tenants={
+        "ghost": {"netbox_tenant_slug": "ghost"},
+    }))
+    sessions = {"user-cookie": _user_session("ghost")}
+    req = _FakeRequest("user-cookie")
+    data = {"data": [{"ip": "10.20.0.5"}, {"ip": "8.8.8.8"}]}
+    out = asyncio.run(filter_session(hub, sessions, req, data, "nac", ["ip"]))
+    assert out["data"] == []      # fail-closed: no prefixes → nothing
+
+
+def test_filter_tenant_fails_closed_for_no_prefix_non_hypervisor():
+    """A purely subnet-filtered module (nac) for a no-prefix tenant → empty."""
+    hub = _NoPrefixHub(FakeState(system_state={}, tenants={
+        "ghost": {"netbox_tenant_slug": "ghost"},
+    }))
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    data = {"data": [{"ip": "10.20.0.5"}, {"ip": "8.8.8.8"}]}
+    out = asyncio.run(filter_tenant(hub, sessions, req, data, "nac", ["ip"],
+                                explicit_tenant="ghost"))
+    assert out["data"] == []
+
+
+def test_filter_tenant_hypervisor_exempt_from_fail_close():
+    """Hypervisor also attributes by tag + template pool, so a no-prefix tenant
+    is NOT blanked — the unfiltered VM list is returned (current behavior
+    preserved; tag/template attribution is a separate path)."""
+    hub = _NoPrefixHub(FakeState(system_state={}, tenants={
+        "ghost": {"netbox_tenant_slug": "ghost"},
+    }))
+    sessions = {"admin-cookie": _admin_session()}
+    req = _FakeRequest("admin-cookie")
+    vms = {"data": [{"name": "vm1", "ips": ["10.20.0.5"]}]}
+    out = asyncio.run(filter_tenant(hub, sessions, req, vms, "hypervisor", ["ips"],
+                                explicit_tenant="ghost"))
+    assert out is vms             # hypervisor no-prefix → unchanged
