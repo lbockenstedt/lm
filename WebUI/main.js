@@ -13530,53 +13530,79 @@ function tableHead(cols) {
 // Each VM is a 2-line entry: line 1 = identity (Cluster/Host, VMID, Name, IP,
 // Clone action); line 2 = metadata (Type, Status, CPU, Memory, Pool). Cluster
 // and Host(node) are merged into one "Cluster / Host" column as "<cluster>/<node>".
+// Friendly OS label from the agent's cached Proxmox ostype (l26 → Linux, win*
+// → Windows, etc.); falls back to the qemu/lxc type when ostype is unknown.
+// Mirrors csVmOs (sim-views.js) so the Hypervisor VM list reads the same as the
+// cs VM Server list.
+function pxmxOs(v) {
+    const t = String(v.ostype || v.os || '').toLowerCase();
+    if (!t) return v.template ? 'template' : (v.type === 'lxc' ? 'Linux (CT)' : '—');
+    if (t.startsWith('win')) return 'Windows';
+    if (t === 'l26' || t === 'l24' || t.startsWith('linux')) return 'Linux';
+    if (t.includes('solaris')) return 'Solaris';
+    if (t.includes('other')) return 'Other';
+    return v.ostype || v.os;
+}
+
+// Steady-state status pill for a pxmx VM (mirrors csVmStatusBadge's plain tail
+// branch — pxmx VMs don't carry prov_status/shed/reclone state like cs sim
+// clients do, so a simple running/stopped/other pill is the right shape here).
+function pxmxVmStatusBadge(v) {
+    const st = String(v.status || 'unknown').toLowerCase();
+    const cls = st === 'running' ? 'bg-green-100 text-green-700'
+              : st === 'stopped' ? 'bg-slate-100 text-slate-500'
+              : 'bg-amber-100 text-amber-700';
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${escapeHtml(v.status || '—')}</span>`;
+}
+
+// Hypervisor VM list — ported to the cs VM Server VMs list format: single-line
+// rows, columns [VMID, Name, OS, Status, Host, Actions], inline per-row action
+// buttons (cs-style) PLUS a row click → openVmDetail for the richer ops the cs
+// list doesn't have (Backup-to-Hub, Clone, storage picker). No category tabs
+// (the cs tabs are sim-client-specific). Bulk-select checkbox stays in the VMID
+// cell (cs shape) and feeds the existing pxmxBulkBar/pxmxBulkAction path.
 function pxmxVmTableHtml(vms) {
-    const cols = ['<input type="checkbox" onclick="pxmxBulkSelectAll(this.checked)" title="Select all"/>', 'Cluster / Host', 'VMID', 'Name', 'IP Address', ''];
+    const cols = ['<input type="checkbox" onclick="pxmxBulkSelectAll(this.checked)" title="Select all"/>', 'VMID', 'Name', 'OS', 'Status', 'Host', 'Actions'];
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const tplPools = window._pxmxTemplatePools || [];
-    const isTemplate = vm => !!(vm.pool && tplPools.includes(String(vm.pool).toLowerCase()));
+    const isTemplate = vm => !!(vm.template || (vm.pool && tplPools.includes(String(vm.pool).toLowerCase())));
+    const canAct = canEdit();   // VM control is write-tier; view users see no actions
     const rows = vms.map(vm => {
-        const memGb   = ((vm.mem_bytes || 0) / 1073741824).toFixed(1);
-        const runCls  = vm.status === 'running' ? 'bg-green-100 text-green-700'
-                      : vm.status === 'stopped' ? 'bg-slate-100 text-slate-500'
-                      : 'bg-amber-100 text-amber-700';
-        const typeCls = vm.type === 'lxc' ? 'bg-blue-50 text-blue-600' : 'bg-[#263040]/10 text-[#263040]';
-        // ips: best-effort guest IPv4 list from the pxmx agent (qemu needs
-        // qemu-guest-agent; lxc reads the container netns). [] for stopped VMs
-        // or when the guest agent is absent/unresponsive → show '—'.
-        const ipList = Array.isArray(vm.ips) ? vm.ips : [];
-        const ipCell = ipList.length ? escapeHtml(ipList.join(', ')) : '—';
-        // Cluster/Host merged: Proxmox node is the host, shown as "<cluster>/<node>".
-        const clusterHost = escapeHtml(`${vm.cluster || '—'}/${vm.node || '—'}`);
-        const poolCell = vm.pool ? escapeHtml(vm.pool) : '—';
         const uid = escJs(vm.unique_id || '');
-        const cloneBtn = isTemplate(vm)
-            ? `<button onclick="event.stopPropagation(); pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-2 py-1 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>`
+        const isLxc = String(vm.type || '').toLowerCase() === 'lxc';
+        const tpl = isTemplate(vm);
+        // Cluster/Host merged: Proxmox node is the host, shown as "<cluster>/<node>".
+        const host = escapeHtml(`${vm.cluster || '—'}/${vm.node || '—'}`);
+        // Inline action buttons (cs-style). Console is qemu-only (lxc has no VNC
+        // display; templates aren't runnable). Start/Stop/Reboot/Snapshot are
+        // suppressed on templates (not runnable); Backup is valid on any VM
+        // (vzdump). All route through pxmxVmAction (which confirms destructive
+        // ops per Hypervisors → Settings). Gated by canEdit() — view users get a
+        // read-only list. Clone + Backup-to-Hub stay in the click-through detail
+        // panel (they need the storage picker / template-pool affordance).
+        const act = (label, action, cls) => canAct
+            ? `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${cls}">${label}</button>`
             : '';
-        // Line 2 metadata: Type + Status keep their colored pill badges; CPU,
-        // Memory and Pool are labeled text. Wrapped so it folds on narrow widths.
-        const line2 = `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
-            <span class="px-2 py-0.5 rounded-full font-medium ${typeCls}">${vm.type || 'vm'}</span>
-            <span class="px-2 py-0.5 rounded-full font-medium ${runCls}">${vm.status}</span>
-            <span>CPU ${vm.cpu ?? '—'}%</span>
-            <span>Memory ${memGb} GB</span>
-            <span>Pool ${poolCell}</span>
+        const consoleBtn = !canAct ? ''
+            : (isLxc || tpl)
+                ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
+                : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
+        const actions = `<div class="flex flex-wrap gap-1">
+            ${consoleBtn}
+            ${tpl ? '' : act('Start', 'start', 'bg-green-100 text-green-700')}
+            ${tpl ? '' : act('Stop', 'stop', 'bg-amber-100 text-amber-700')}
+            ${tpl ? '' : act('Reboot', 'reboot', 'bg-slate-200 text-slate-700')}
+            ${tpl ? '' : act('Snapshot', 'snapshot', 'bg-sky-100 text-sky-700')}
+            ${act('Backup', 'backup', 'bg-sky-100 text-sky-700')}
         </div>`;
-        // One <tbody class="group"> per VM so both lines highlight together on
-        // hover and read as a single entry; both rows open the VM detail panel.
-        return `<tbody class="group">
-            <tr class="border-b border-slate-50 group-hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${uid}')">
-                <td class="px-4 py-2" onclick="event.stopPropagation()"><input type="checkbox" class="pxmx-vm-sel" value="${escapeHtml(vm.unique_id || '')}"/></td>
-                <td class="px-4 py-2 text-xs text-slate-500 font-mono">${clusterHost}</td>
-                <td class="px-4 py-2 font-mono text-xs font-bold">${vm.vmid}</td>
-                <td class="px-4 py-2 font-medium">${escapeHtml(vm.name || '—')}</td>
-                <td class="px-4 py-2 font-mono text-xs text-slate-600">${ipCell}</td>
-                <td class="px-4 py-2">${cloneBtn}</td>
-            </tr>
-            <tr class="border-b border-slate-100 group-hover:bg-slate-50 cursor-pointer" onclick="openVmDetail('${uid}')">
-                <td colspan="6" class="px-4 pb-2 pt-0">${line2}</td>
-            </tr>
-        </tbody>`;
+        return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${uid}')">
+            <td class="px-4 py-2 font-mono text-xs font-bold" onclick="event.stopPropagation()"><input type="checkbox" class="pxmx-vm-sel" value="${escapeHtml(vm.unique_id || '')}"/> ${escapeHtml(vm.vmid)}</td>
+            <td class="px-4 py-2 text-sm font-medium">${escapeHtml(vm.name || '—')}</td>
+            <td class="px-4 py-2 text-slate-500">${escapeHtml(pxmxOs(vm))}</td>
+            <td class="px-4 py-2">${pxmxVmStatusBadge(vm)}</td>
+            <td class="px-4 py-2 text-xs text-slate-500 font-mono">${host}</td>
+            <td class="px-4 py-2" onclick="event.stopPropagation()">${actions}</td>
+        </tr>`;
     }).join('');
     return pxmxBulkBar() + tableWrap(tableHead(cols) + rows);
 }
