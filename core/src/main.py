@@ -5024,6 +5024,63 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception as e:  # noqa: BLE001
             logger.warning("central_hub_status persist failed: %s", e)
 
+    def reset_derived_cache(self, tenant: "Optional[str]" = None) -> dict:
+        """Corruption recovery: wipe DERIVED/cache/history state — the sharded
+        simulations stores (check_health, poll_window, client_count,
+        simulations_cache, central_hub_status) — both the tenant shard FILES and
+        the resident in-memory dicts, globally or for one tenant.
+
+        INVARIANT: NEVER touches config/identity (state.json,
+        simulations_store.json = tenant config + spoke PSKs, sessions, tokens), so
+        a reset can't orphan a spoke or log anyone out. The derived data
+        regenerates from the next poll/telemetry cycle. Clearing the in-memory
+        dicts is essential — deleting files alone would let the next save re-write
+        the (possibly corrupt) resident data straight back. Best-effort per store.
+        """
+        from tenant_sharded import reset_tenant_files, reset_all_tenant_files
+        poller = getattr(self, "central_hub_poller", None)
+        stores = [getattr(poller, a, None) for a in ("_health", "_cpw", "_cc")] if poller else []
+        if tenant:
+            t = str(tenant)
+            try:
+                self.central_hub_status.pop(t, None)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                for pk in [pk for pk in list(self.simulations_cache)
+                           if self._sim_cache_tenant_of(pk) == t]:
+                    self.simulations_cache.pop(pk, None)
+                self._sim_cache_dirty = True
+            except Exception:  # noqa: BLE001
+                pass
+            for store in stores:
+                try:
+                    if store:
+                        store.forget(t)
+                except Exception:  # noqa: BLE001
+                    pass
+            files = reset_tenant_files(self.state.data_dir, t)
+        else:
+            try:
+                self.central_hub_status.clear()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.simulations_cache.clear()
+                self._sim_cache_dirty = True
+            except Exception:  # noqa: BLE001
+                pass
+            for store in stores:
+                try:
+                    if store:
+                        store.clear()
+                except Exception:  # noqa: BLE001
+                    pass
+            files = reset_all_tenant_files(self.state.data_dir)
+        logger.warning("reset_derived_cache: scope=%s removed %d shard file(s)",
+                       tenant or "ALL", files)
+        return {"status": "ok", "scope": tenant or "all", "files_removed": files}
+
     async def run_sim_cache_flush_loop(self):
         """Persist simulations_cache to disk when dirty, off the event loop.
         Decoupled from the ~10s-per-spoke telemetry rate → one bounded write per

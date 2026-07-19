@@ -129,6 +129,31 @@ def register(app, hub, ctx):
                 _start_cache_for_tenant(hub, tid)
         return {"status": "ok", "tenant": tenant or "all"}
 
+    @app.post("/admin/state/reset")
+    async def admin_reset_derived_state(request: Request, tenant: str = None):
+        """Corruption recovery: wipe DERIVED/cache/history JSON (sharded files +
+        in-memory dicts) globally or for one tenant (all its modules). Preserves
+        config/identity (tenant registration, spoke PSKs, users, sessions) — a
+        reset never orphans a spoke or logs anyone out; the derived data
+        regenerates from the next poll/telemetry. Global-Admin only + audited."""
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="Admin only")
+        who = (sess.get("user", {}) or {}).get("user_id") or sess.get("user_id") or "?"
+        try:
+            result = hub.reset_derived_cache(tenant or None)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"reset failed: {e}")
+        try:
+            audit = getattr(hub, "audit_event", None) or getattr(hub, "audit", None)
+            if callable(audit):
+                audit("state_reset", user=who,
+                      detail=f"derived-cache reset scope={tenant or 'ALL'} "
+                             f"files={result.get('files_removed')}")
+        except Exception:  # noqa: BLE001 — audit is best-effort
+            pass
+        return result
+
     @app.get("/admin/cache/status")
     async def admin_cache_status(request: Request):
         sess = _session_user(request)
