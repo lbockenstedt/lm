@@ -13537,7 +13537,7 @@ function tableHead(cols) {
 // and both surfaces update together.
 const PXMX_VM_ACTIONS = [
     { action: 'start',    label: '▶ Start',     cls: 'bg-green-100 text-green-700 hover:bg-green-200' },
-    { action: 'stop',     label: '■ Stop',      cls: 'bg-red-100 text-red-700 hover:bg-red-200' },
+    { action: 'stop',     label: '■ Stop',      cls: 'bg-red-600 text-white hover:bg-red-700' },
     { action: 'reboot',   label: '↺ Restart',   cls: 'bg-amber-100 text-amber-700 hover:bg-amber-200' },
     { action: 'snapshot', label: '📷 Snapshot', cls: 'bg-slate-200 text-slate-700 hover:bg-slate-300' },
     { action: 'backup',   label: '💾 Backup',    cls: 'bg-sky-100 text-sky-700 hover:bg-sky-200' },
