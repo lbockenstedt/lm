@@ -12,7 +12,7 @@ section). This is the LM-side port of the legacy solutions-hpe Client-Sim UI.
 
 from fastapi import WebSocket, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import asyncio
 import configparser
 from datetime import datetime, timezone
@@ -989,7 +989,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return sim_quota.ceil_to_int(x)
 
     def _adaptive_step(st: dict, q: dict, firing, now: float,
-                       applied_op: int | None = None) -> dict:
+                       applied_op: Optional[int] = None) -> dict:
         return sim_quota.adaptive_step(st, q, firing, now, applied_op)
 
     def _alias_groups_from_csc(csc: dict) -> list:
@@ -1019,7 +1019,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 groups.append(g)
         return groups
 
-    async def _alert_firing(tenant_id: str, q: dict, alias_groups: list | None = None):
+    async def _alert_firing(tenant_id: str, q: dict, alias_groups: Optional[list] = None):
         """Is this quota's alert firing at its site?
 
         Reads the SAME per-site check status the dashboard already computed — the
@@ -3718,7 +3718,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         for sid in all_sids:
             data = cache.get(sid, {})
             cached_central = data.get("central") or {}
-            live_entry: dict | None = None
+            live_entry: Optional[dict] = None
             try:
                 result = await hub.request_response(sid, "CS_TEST_CENTRAL", {}, timeout=8.0)
                 payload = (result.get("payload", {}) or {}).get("data", result) if isinstance(result, dict) else result
