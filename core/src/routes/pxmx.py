@@ -690,6 +690,31 @@ def register(app, hub, ctx):
                 cached = _cache_entry(tid, "pxmx_vms")
                 if cached:
                     return _with_tpl(await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant))
+        # Tenant scope for the live fetch (proxmox_tag filter) — also the warm-
+        # cache scope key so a cached raw envelope is only served back to the same
+        # scope (tenant isolation preserved). admins / a tenant with no
+        # proxmox_tag → "_all_" (the live fetch returns every VM, then
+        # _filter_tenant subnet-filters per reader on the way out — same as live).
+        scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
+        tag = scoping.get("proxmox_tag") or ""
+        warm_key = f"{tag or '_all_'}|agent={agent_id or ''}"
+
+        async def _warm_or_empty():
+            """Serve the last-known VM list (stale) when the spoke is down / a
+            live fetch overruns — mirrors the netbox/cppm warm cache so the
+            Hypervisors page renders instantly after a hub restart instead of
+            going empty until PXMX_LIST_VMS returns. Falls back to the empty
+            spoke-down envelope when no snapshot exists."""
+            cached = hub.warm_get("pxmx_vms", warm_key)
+            if cached is None:
+                return _with_tpl({"vms": [], "spoke_connected": False})
+            out = await _filter_tenant(request, cached, "hypervisor", ["ips"], tenant)
+            if isinstance(out, dict):
+                out = dict(out)
+                out["stale"] = True
+                out["spoke_connected"] = False
+            return _with_tpl(out)
+
         pxmx_spoke = hub.get_hypervisor_spoke()
         if not pxmx_spoke:
             if sess:
@@ -697,19 +722,32 @@ def register(app, hub, ctx):
                 cached = _cache_entry(tid, "pxmx_vms") if tid else None
                 if cached:
                     return _with_tpl(await _filter_tenant(request, cached["data"], "hypervisor", ["ips"], tenant))
-            return _with_tpl({"vms": [], "spoke_connected": False})
+            return await _warm_or_empty()
         try:
-            scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
             payload: dict = {}
             if agent_id:
                 payload["agent_id"] = agent_id
             if scoping.get("proxmox_tag"):
                 payload["tag_filter"] = scoping["proxmox_tag"]
-            result = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", payload)
+            # 30s (not the 5s relay default) — a large Proxmox fleet with guest
+            # IP annotation (QGA / lxc netns per-NIC) routinely exceeds 5s; the
+            # warm cache covers an overrun so the page still renders. Matches the
+            # vmid_alloc PXMX_LIST_VMS budget.
+            result = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", payload, timeout=30.0)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            await hub.warm_set("pxmx_vms", warm_key, data)  # cache raw (pre-filter)
             return _with_tpl(await _filter_tenant(request, data, "hypervisor", ["ips"], tenant))
         except Exception as e:
             logger.exception("get_pxmx_vms failed")
+            # Live fetch failed (timeout / spoke error) — serve stale from the
+            # warm cache if we have it, else surface the error.
+            cached = hub.warm_get("pxmx_vms", warm_key)
+            if cached is not None:
+                out = await _filter_tenant(request, cached, "hypervisor", ["ips"], tenant)
+                if isinstance(out, dict):
+                    out = dict(out)
+                    out["stale"] = True
+                return _with_tpl(out)
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/pxmx/shell")
