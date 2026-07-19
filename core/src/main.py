@@ -1689,6 +1689,30 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 tenant_id = self.state.get_spoke_tenant(self._primary_key(spoke_id))
             except Exception:
                 tenant_id = None
+        # VM Server live state + browser live-op feed for the IN-PROGRESS phase.
+        # Agent CS_PROGRESS reaches the hub HERE (via _handle_agent_relay_up →
+        # AGENT_RELAY_UP), NOT the direct-spoke CS_PROGRESS handler in
+        # handle_connection — so the overlay SET (tearing_down/recloning/
+        # provisioning) and the /sim/ws broadcast must happen on THIS path too,
+        # or a UI-initiated delete never shows "Deleting…" and the VM table
+        # doesn't refresh until the next telemetry poll. Terminals are owned by
+        # the CS_COMMAND_RESULT block below (delete completed => prune).
+        if cs_type == "CS_PROGRESS":
+            _pact = (data or {}).get("action")
+            _pstat = str((data or {}).get("status") or "").lower()
+            _pvmid = (data or {}).get("vmid")
+            _pstate = self._VM_ACTION_STATE.get(_pact)
+            if tenant_id and _pstate and _pvmid not in (None, "") \
+                    and _pstat not in ("completed", "failed", "error"):
+                try:
+                    self._vm_live_set(tenant_id, _pvmid, _pstate)
+                except Exception:  # noqa: BLE001 — overlay is best-effort
+                    pass
+            try:
+                await self.simulations_broadcaster.broadcast(
+                    spoke_id, {"type": "cs_progress", "data": data or {}}, tenant_id)
+            except Exception:  # noqa: BLE001 — live feed is best-effort
+                pass
         # A VM-mutating command result (delete_vm / reclone_vm / clone_lxc /
         # provision_unassigned) invalidates this tenant's cached pxmx_vms +
         # netbox_vms — the agent already changed Proxmox, so re-read the lists
@@ -1714,6 +1738,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     elif _st in ("completed", "failed", "error"):
                         self._vm_live_clear(tenant_id, _vmid)
                 except Exception:  # noqa: BLE001 — overlay is best-effort
+                    pass
+                # Broadcast the terminal to the browser live-op feed so the VM
+                # Server table re-fetches NOW (csHandleLiveOp treats completed/
+                # failed as terminal → prompt refresh) — a completed delete's row
+                # drops immediately instead of waiting for the ~15s op-burst tick.
+                try:
+                    await self.simulations_broadcaster.broadcast(
+                        spoke_id, {"type": "cs_progress", "data": data or {}}, tenant_id)
+                except Exception:  # noqa: BLE001 — live feed is best-effort
                     pass
             if action in self._VM_MUTATING_ACTIONS and status != "failed":
                 try:
