@@ -400,20 +400,31 @@ class CheckHealthHistory:
 _CPW_WINDOW = 3600  # seconds — the rolling 1-hour PASS/FAIL verdict window
 
 
+_POLL_PASS_STATES = ("ok", "pass", "passed", "green", "up", "healthy", "online")
+# Only genuinely-absent samples are IGNORED (don't count toward the verdict).
+# Everything that isn't a pass or an ignore is a FAIL — see below.
+_POLL_IGNORE_STATES = ("", "no_data", "nodata", "unknown", "pending", "n/a", "none", "-", "—")
+
+
 def _classify_poll_status(status: Any) -> Optional[bool]:
     """Classify one per-poll check status into PASS / FAIL / IGNORE for the
-    rolling 1h verdict. INVERTED sim semantics already baked into the per-poll
-    status: a per-poll ``"error"`` means the expected alert/insight is MISSING
-    (or clients dropped) — i.e. a FAILED poll — and a ``"warning"`` (client
-    drop) is also a FAILED poll. Returns ``True`` (PASS) for ``"ok"``, ``False``
-    (FAIL) for ``"warning"``/``"error"``, and ``None`` (IGNORE — don't record,
-    don't count) for ``"no_data"`` or anything else."""
-    s = str(status).strip().lower()
-    if s == "ok":
+    rolling 1h verdict. INVERTED sim semantics are already baked into the
+    per-poll status (a per-poll ``"error"`` = the expected alert/insight is
+    MISSING, a ``"warning"`` = clients dropped — both FAILED polls).
+
+    Returns ``True`` (PASS) for ok-like states, ``None`` (IGNORE — don't record,
+    don't count) only for genuinely-absent states (``no_data``/``unknown``/blank),
+    and ``False`` (FAIL) for EVERYTHING ELSE — ``warning``/``error`` but also
+    ``critical``/``fail``/``down``/``degraded``/… . Defaulting unknown states to
+    FAIL (not ignore) is deliberate: a failure state the classifier didn't
+    recognize used to be silently dropped, so a green last poll could win the
+    verdict even though the hour had failures."""
+    s = str(status or "").strip().lower()
+    if s in _POLL_PASS_STATES:
         return True
-    if s in ("warning", "error"):
-        return False
-    return None
+    if s in _POLL_IGNORE_STATES:
+        return None
+    return False
 
 
 class CheckPollWindow:
@@ -422,8 +433,8 @@ class CheckPollWindow:
     last hour.
 
       - every poll in the last hour PASSED            → verdict ``"ok"``     (green)
-      - some passed AND some failed in the last hour   → verdict ``"warning"`` (yellow)
-      - only failures in the last hour (no passes)     → verdict ``"error"``   (red)
+      - any failure but ≤50% of polls failed          → verdict ``"warning"`` (yellow)
+      - MORE THAN 50% of polls in the last hour failed → verdict ``"error"``   (red)
       - no pass/fail samples yet (only no_data/absent) → verdict ``None`` (leave as-is)
 
     Mirrors ``ClientCountTracker``'s persistence pattern: ``self._samples`` maps
@@ -475,12 +486,14 @@ class CheckPollWindow:
         samples = self._window(tenant, site, check)
         if not samples:
             return None
+        total = len(samples)
         passes = sum(1 for p in samples if p)
-        if passes == len(samples):
-            return "ok"
-        if passes == 0:
+        if passes == total:
+            return "ok"                     # every poll in the window passed → green
+        fails = total - passes
+        if fails * 2 > total:               # MORE THAN 50% of polls failed → red
             return "error"
-        return "warning"
+        return "warning"                    # any failure, up to 50% → yellow
 
     def counts(self, tenant: str, site: str, check: str) -> tuple:
         """``(passes, total)`` over the last hour — for the operator message hint."""
