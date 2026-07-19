@@ -143,6 +143,17 @@ async def _maybe_refresh_agents(hub, agent_spokes, force=False):
             result = await _aggregate_agents(hub, agent_spokes)
             _AGENTS_CACHE["data"] = result
             _AGENTS_CACHE["ts"] = time.time()
+            try:  # warm-start snapshot (off-thread) so the Agents tile seeds on restart
+                from tenant_sharded import snapshot_save
+                from security.encryption import hub_encryption
+                import os as _os
+                await asyncio.to_thread(
+                    snapshot_save,
+                    _os.path.join(hub.state.data_dir, "pxmx", "agents_cache.json"),
+                    {"data": result, "ts": _AGENTS_CACHE["ts"]},
+                    encrypt=lambda s: hub_encryption.encrypt(s))
+            except Exception:  # noqa: BLE001
+                pass
             return result
         except Exception:
             logger.exception("agents cache refresh failed")
@@ -155,6 +166,20 @@ def register(app, hub, ctx):
     """Register pxmx routes on the Hub app."""
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
+    # Warm-start the aggregated agents cache so the Agents tile seeds on restart
+    # instead of blanking until every agent spoke reconnects (stale-while-revalidate).
+    try:
+        from tenant_sharded import snapshot_load
+        from security.encryption import hub_encryption
+        import os as _os
+        _snap = snapshot_load(
+            _os.path.join(hub.state.data_dir, "pxmx", "agents_cache.json"),
+            decrypt=lambda b: hub_encryption.decrypt(b))
+        if isinstance(_snap, dict) and _snap.get("data") is not None:
+            _AGENTS_CACHE["data"] = _snap["data"]
+            _AGENTS_CACHE["ts"] = float(_snap.get("ts", 0) or 0)
+    except Exception:  # noqa: BLE001
+        pass
     _resolve_tenant = ctx._resolve_tenant
     _filter_tenant = ctx._filter_tenant
 

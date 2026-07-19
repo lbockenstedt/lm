@@ -789,6 +789,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             warm_load_tenant_cache(self)
         except Exception as e:  # noqa: BLE001
             logger.debug("tenant_cache warm load skipped: %s", e)
+        # Warm-start the per-device cert reports so the cert drill-down survives a
+        # restart instead of blanking until the hourly distribution loop repopulates.
+        try:
+            self.warm_load_cert_device_reports()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("cert_device_reports warm load skipped: %s", e)
         # Apply the configured session idle-timeout (minutes → seconds). Unset
         # leaves access.py's 60-minute default; 0 disables. A WebUI change
         # (/setup/session-timeout) re-applies this live.

@@ -170,6 +170,34 @@ class HubCertDistributionMixin:
             store[key] = {"devices": e.get("devices"), "message": e.get("message", ""),
                           "status": e.get("status", ""),
                           "at": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+        self._persist_cert_device_reports()
+
+    def _cert_reports_path(self) -> str:
+        import os as _os
+        return _os.path.join(self.state.data_dir, "le", "cert_device_reports.json")
+
+    def _persist_cert_device_reports(self) -> None:
+        """Snapshot the per-device cert reports so the cert drill-down survives a
+        restart instead of blanking until the hourly distribution loop repopulates."""
+        try:
+            from tenant_sharded import snapshot_save
+            from security.encryption import hub_encryption
+            snapshot_save(self._cert_reports_path(), self._cert_device_reports(),
+                          encrypt=lambda s: hub_encryption.encrypt(s))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def warm_load_cert_device_reports(self) -> None:
+        """Warm-start the per-device cert reports on boot (best-effort)."""
+        try:
+            from tenant_sharded import snapshot_load
+            from security.encryption import hub_encryption
+            data = snapshot_load(self._cert_reports_path(),
+                                 decrypt=lambda b: hub_encryption.decrypt(b))
+            if isinstance(data, dict):
+                self.cert_device_reports = data
+        except Exception:  # noqa: BLE001
+            pass
 
     def cert_device_report(self, domain: str, module_type: str, identifier: str = "") -> Dict[str, Any]:
         return self._cert_device_reports().get(f"{domain}|{module_type}|{identifier}") or {}
@@ -192,6 +220,7 @@ class HubCertDistributionMixin:
         else:
             devs.append({"device_id": device_id, "status": st, "message": msg})
         rep["at"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        self._persist_cert_device_reports()
 
     # ── wildcard-all-spokes toggle (OFF by default; the operator's testing
     # gate). Lives in global_config["certs"]["wildcard_all_spokes"]. When ON, a
