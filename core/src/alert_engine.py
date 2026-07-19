@@ -34,9 +34,9 @@ _LABEL = {
     "vm_offline": "VM / hypervisor offline",
     "quota_unmet": "Quota engine — requirement unmet",
     "spoke_offline": "Spoke / agent offline",
-    "cert_issue_failed": "Certificate issue failed",
-    "cert_renew_failed": "Certificate renewal failed",
-    "cert_deploy_failed": "Certificate deployment failed",
+    "cert_issue_failed": "Certificate Request Failed",
+    "cert_renew_failed": "Certificate Renewal Failed",
+    "cert_deploy_failed": "Certificate Deploy Failed",
 }
 _POLL_S = 60
 _HYPERVISOR_TYPES = ("hypervisor", "simulation")

@@ -75,7 +75,7 @@ def test_evaluate_fires_once_on_breach_then_recovery(monkeypatch):
                       "INSTALL_CERT failed", severity="error"))
     assert len(sent) == 1
     assert "ALERT" in sent[0]["subject"]
-    assert "Certificate deployment failed" in sent[0]["subject"]
+    assert "Certificate Deploy Failed" in sent[0]["subject"]
     # Held bad → no re-fire (edge-triggered).
     _run(eng.evaluate("default", "cert_deploy_failed", "a.com/firewall", True, "x"))
     assert len(sent) == 1
