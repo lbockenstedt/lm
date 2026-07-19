@@ -16282,7 +16282,7 @@ async function loadLEData(subMenu) {
         if (bar && s.ok && s.data) {
             const d = inner(s.data);
             bar.innerHTML =
-                `<span><b class="text-sm text-slate-700">${d.certs_managed ?? 0}</b> managed</span>`;
+                `<span><b class="text-sm text-slate-700">${d.certs_managed ?? 0}</b> Certificates Managed</span>`;
         } else if (bar) {
             bar.innerHTML = `<span class="text-amber-600">${s.detail || 'le spoke not connected'}</span>`;
         }
