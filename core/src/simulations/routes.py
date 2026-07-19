@@ -3252,13 +3252,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         tenant's config from its repo and, when it changed on GitHub (an external
         commit, or catch-up after a hub restart), re-distribute to that tenant's
         spokes. ONE central puller for the whole fleet — replaces the per-spoke
-        repo_sync. Interval via ``LM_HUB_GITHUB_SYNC_INTERVAL`` (default 120s,
-        floor 30s). Started from main.py."""
+        repo_sync. Interval via ``LM_HUB_GITHUB_SYNC_INTERVAL`` (default 3600s /
+        hourly — external repo edits are rare; human edits push immediately via
+        the save routes, so the poll only catches out-of-band commits; floor
+        30s). Started from main.py."""
         import os
         try:
-            interval = int(os.environ.get("LM_HUB_GITHUB_SYNC_INTERVAL", "120"))
+            interval = int(os.environ.get("LM_HUB_GITHUB_SYNC_INTERVAL", "3600"))
         except ValueError:
-            interval = 120
+            interval = 3600
         interval = max(30, interval)
         # Initial pull shortly after startup so a github-managed tenant's config
         # is populated hub-side (and pushed to spokes as they connect) without
