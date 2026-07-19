@@ -11900,7 +11900,7 @@ async function loadActiveSessions() {
         };
         tbody.innerHTML = sessions.map(s => `
             <tr class="hover:bg-slate-50">
-                <td class="px-4 py-3 font-medium text-slate-700">${s.user_id}</td>
+                <td class="px-4 py-3 font-medium text-slate-700" title="${escapeHtml(s.user_id || '')}">${escapeHtml(s.name || s.user_id || '')}</td>
                 <td class="px-4 py-3">
                     ${s.is_admin
                         ? `<span class="px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[10px] font-bold uppercase">Admin</span>`

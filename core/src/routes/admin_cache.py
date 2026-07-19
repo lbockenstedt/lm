@@ -46,8 +46,14 @@ def register(app, hub, ctx):
                 continue
             u = sess.get("user", {})
             p = u.get("permissions", {})
+            _uid = sess.get("user_id", u.get("user_id", "?"))
+            # Friendly display name — for an Entra user the user_id is the oid GUID,
+            # so surface the human name and fall back to the id only if nothing set.
+            _name = (u.get("name") or u.get("display_name") or u.get("full_name")
+                     or u.get("username") or u.get("email") or _uid)
             active.append({
-                "user_id":    sess.get("user_id", u.get("user_id", "?")),
+                "user_id":    _uid,
+                "name":       _name,
                 "is_admin":   bool(p.get("admin") or p.get("role") == "admin"),
                 "tenants":    u.get("tenants", []),
                 "expires_in": int(sess["expires"] - now),
@@ -62,7 +68,7 @@ def register(app, hub, ctx):
             })
         if pruned:
             _save_sessions(app.state.hub)
-        active.sort(key=lambda s: s["user_id"])
+        active.sort(key=lambda s: str(s.get("name") or s["user_id"]).lower())
         return {"sessions": active, "count": len(active)}
 
     @app.delete("/admin/sessions/{sid}")
