@@ -166,6 +166,39 @@ def migrate_legacy(data_dir: str, module: str, name: str,
         return False
 
 
+# ── whole-file snapshot (non-sharded, module-global warm-start caches) ───────
+def snapshot_save(path: str, obj: Any, *,
+                  encrypt: Optional[Callable[[str], bytes]] = None) -> None:
+    """Atomic whole-file JSON snapshot for a module-GLOBAL (not per-tenant) cache
+    — the warm-start analog of shard_save for stores that aren't tenant-keyed
+    (e.g. the aggregated agents list, cert device reports). Best-effort."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = json.dumps(obj, default=str)
+        blob = encrypt(payload) if encrypt else payload.encode("utf-8")
+        _atomic_write_bytes(path, blob)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("snapshot_save %s failed: %s", path, e)
+
+
+def snapshot_load(path: str, *, decrypt: Optional[Callable[[bytes], str]] = None,
+                  default: Any = None) -> Any:
+    """Restore a whole-file snapshot written by snapshot_save. Returns ``default``
+    on absent/empty/corrupt file (never raises)."""
+    try:
+        if not os.path.exists(path):
+            return default
+        with open(path, "rb") as f:
+            blob = f.read()
+        if not blob:
+            return default
+        text = decrypt(blob) if decrypt else blob.decode("utf-8")
+        return json.loads(text)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("snapshot_load %s failed: %s", path, e)
+        return default
+
+
 # ── corruption-recovery reset (Part 2) ──────────────────────────────────────
 def reset_tenant_files(data_dir: str, tenant: str) -> int:
     """Delete ALL sharded derived files for one tenant (every module). Returns the

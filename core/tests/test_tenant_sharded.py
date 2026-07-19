@@ -95,6 +95,22 @@ def test_encrypt_decrypt_hooks(tmp_path):
     assert ts.shard_load(d, "simulations", "simulations_cache.json", decrypt=dec) == resident
 
 
+def test_snapshot_save_load_roundtrip(tmp_path):
+    d = _mk(tmp_path)
+    p = os.path.join(d, "pxmx", "agents_cache.json")
+    obj = {"data": [{"agent_id": "a1"}], "ts": 123.0}
+    ts.snapshot_save(p, obj)
+    assert ts.snapshot_load(p) == obj
+    # absent → default; encrypt hook round-trips
+    assert ts.snapshot_load(os.path.join(d, "nope.json"), default={"x": 1}) == {"x": 1}
+    enc = lambda s: ("E:" + s).encode("utf-8")
+    dec = lambda b: b.decode("utf-8")[2:]
+    p2 = os.path.join(d, "le", "cert_reports.json")
+    ts.snapshot_save(p2, obj, encrypt=enc)
+    assert open(p2, "rb").read().startswith(b"E:")
+    assert ts.snapshot_load(p2, decrypt=dec) == obj
+
+
 def test_reset_tenant_and_global(tmp_path):
     d = _mk(tmp_path)
     ts.shard_save(d, "simulations", "a.json", {"t1": {"x": 1}}, tenant_of=lambda k: k)
