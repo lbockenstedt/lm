@@ -287,6 +287,12 @@ class ClientCountTracker:
             for k in [k for k in store if k.startswith(prefix)]:
                 store.pop(k, None)
 
+    def clear(self) -> None:
+        """Drop ALL in-memory client-count state (global corruption-recovery reset)."""
+        self._samples.clear()
+        self._hourly.clear()
+        self._baseline.clear()
+
 
 _HEALTH_IDX = {"ok": 0, "warning": 1, "error": 2}  # else (no_data/pending/unknown) -> 3
 
@@ -354,6 +360,11 @@ class CheckHealthHistory:
         for k in [k for k in self._h if k.startswith(prefix)]:
             self._h.pop(k, None)
         self._dirty.add(str(tenant))
+
+    def clear(self) -> None:
+        """Drop ALL in-memory health buckets (global corruption-recovery reset)."""
+        self._h.clear()
+        self._dirty.clear()
 
     def summary(self, tenant: str) -> Dict[str, Any]:
         """{site: {check_id: [{d, o, w, e, n} ... up to 30 daily]}} for the tenant."""
@@ -520,6 +531,11 @@ class CheckPollWindow:
         for k in [k for k in self._samples if k.startswith(prefix)]:
             self._samples.pop(k, None)
         self._dirty.add(str(tenant))
+
+    def clear(self) -> None:
+        """Drop ALL in-memory samples (global corruption-recovery reset)."""
+        self._samples.clear()
+        self._dirty.clear()
 
 
 class CentralHubPoller:
