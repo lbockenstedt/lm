@@ -4510,6 +4510,34 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                         logger.debug("LE_CERT_RENEWED from %s missing "
                                      "domain/targets; hourly loop will cover it",
                                      spoke_id)
+                    # A successful renew clears any prior cert-renew-failed alert
+                    # edge (recovery email) — tenant from the spoke's binding,
+                    # never the payload.
+                    if _ev_domain:
+                        _rn_tenant = self.state.get_spoke_tenant(spoke_id) or "default"
+                        asyncio.create_task(self.alert_engine.evaluate(
+                            _rn_tenant, "cert_renew_failed", _ev_domain, False,
+                            "", severity="ok"))
+                    continue
+
+                # --- LE cert renewal FAILED (event-driven alert) ---
+                # A le spoke's background (or on-demand) renewal failed and
+                # emitted LE_CERT_RENEW_FAILED so we fire a realtime
+                # cert-renewal-failed alert now (vs. the 60s pull loop scanning
+                # le_cache). The ledger's last_error is the persisted record;
+                # this event is the prompt transport. Tenant from the spoke's
+                # binding (security: never trust the payload tenant).
+                if payload.get("type") == "LE_CERT_RENEW_FAILED":
+                    ev = payload.get("data", {}) or {}
+                    _fr_domain = ev.get("domain")
+                    if _fr_domain:
+                        _fr_tenant = self.state.get_spoke_tenant(spoke_id) or "default"
+                        asyncio.create_task(self.alert_engine.evaluate(
+                            _fr_tenant, "cert_renew_failed", _fr_domain, True,
+                            ev.get("message") or "renew failed", severity="error"))
+                    else:
+                        logger.debug("LE_CERT_RENEW_FAILED from %s missing domain",
+                                     spoke_id)
                     continue
 
                 # --- Status-page public demo trigger (event-driven relay) ---

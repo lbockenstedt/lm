@@ -11,6 +11,11 @@ Sources (matched against ``store.get_alert_rules``):
   * ``spoke_offline``   — any OTHER spoke/agent is out of contact.
   * ``quota_unmet``     — a site's client-count check is ERROR (the sim client
                           requirement isn't being met).
+  * ``cert_issue_failed``  — a cert ISSUE attempt failed (ledger last_issue_error).
+  * ``cert_renew_failed``  — a cert RENEWAL failed (ledger last_error); pushed
+                             realtime via the LE_CERT_RENEW_FAILED event.
+  * ``cert_deploy_failed`` — a cert DEPLOY to a target failed (per-target
+                             last_status == ERROR).
 
 Emails route through the same provider-aware ``notifications.send_email`` the hub
 alerts + scheduled reports use. State is in-memory: after a restart a still-bad
@@ -22,12 +27,16 @@ from typing import Any, Dict
 
 logger = logging.getLogger("AlertEngine")
 
-SOURCES = ("dashboard_check", "vm_offline", "quota_unmet", "spoke_offline")
+SOURCES = ("dashboard_check", "vm_offline", "quota_unmet", "spoke_offline",
+           "cert_issue_failed", "cert_renew_failed", "cert_deploy_failed")
 _LABEL = {
     "dashboard_check": "Dashboard check",
     "vm_offline": "VM / hypervisor offline",
     "quota_unmet": "Quota engine — requirement unmet",
     "spoke_offline": "Spoke / agent offline",
+    "cert_issue_failed": "Certificate issue failed",
+    "cert_renew_failed": "Certificate renewal failed",
+    "cert_deploy_failed": "Certificate deployment failed",
 }
 _POLL_S = 60
 _HYPERVISOR_TYPES = ("hypervisor", "simulation")
@@ -210,6 +219,46 @@ async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set)
             await engine.evaluate(tenant, source, meta.get("display_name") or sid,
                                   tier in ("warning", "error"), f"out of contact ({tier})",
                                   severity=tier)
+    # cert_issue_failed / cert_renew_failed / cert_deploy_failed — from the hub's
+    # le_cache mirror of the le spoke's ledger (LE_LIST_CERTS). This is the
+    # restart re-fire + dedup-consistency path; cert_renew_failed is ALSO pushed
+    # realtime by the LE_CERT_RENEW_FAILED event (main.py dispatch calls evaluate
+    # directly). The cache is JSON-persisted + warm-loaded, so a hub restart
+    # re-alerts a still-bad cert within one tick. Per-tenant: a cert's
+    # tenant_id must match (default "" → "default").
+    if needed & {"cert_issue_failed", "cert_renew_failed", "cert_deploy_failed"}:
+        certs = []
+        try:
+            cl = hub.le_cache_get("certs") if hasattr(hub, "le_cache_get") else None
+            clist = cl.get("certs") if isinstance(cl, dict) else None
+            if isinstance(clist, list):
+                certs = [c for c in clist if isinstance(c, dict)
+                         and (c.get("tenant_id") or "default") == tenant]
+        except Exception:  # noqa: BLE001
+            certs = []
+        for c in certs:
+            domain = c.get("domain") or "<unknown>"
+            if "cert_issue_failed" in needed:
+                ie = c.get("last_issue_error")
+                await engine.evaluate(tenant, "cert_issue_failed", domain,
+                                      bool(ie), ie or "",
+                                      severity="error" if ie else "ok")
+            if "cert_renew_failed" in needed:
+                rerr = c.get("last_error")
+                await engine.evaluate(tenant, "cert_renew_failed", domain,
+                                      bool(rerr), rerr or "",
+                                      severity="error" if rerr else "ok")
+            if "cert_deploy_failed" in needed:
+                for t in (c.get("targets") or []):
+                    if not isinstance(t, dict):
+                        continue
+                    mt = t.get("module_type") or ""
+                    ident = t.get("identifier") or ""
+                    item = f"{domain}/{mt}" + (f"/{ident}" if ident else "")
+                    bad = str(t.get("last_status") or "").upper() == "ERROR"
+                    await engine.evaluate(tenant, "cert_deploy_failed", item,
+                                          bad, t.get("last_message") or "",
+                                          severity="error" if bad else "ok")
 
 
 async def run_alert_loop(hub) -> None:

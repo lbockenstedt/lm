@@ -465,6 +465,12 @@ def register(app, hub, ctx):
                 logger.warning("cert distribution after issue failed: %s", e)
                 dist = [{"status": "ERROR", "message": str(e)}]
         inner["distribution"] = dist
+        # Refresh the hub's le_cache so a FAILED issue's new ledger entry
+        # (last_issue_error) + any deploy last_status are hub-visible promptly
+        # → the Certificates list + the cert-failure alert pull-branch see them
+        # within the 60s alert tick (vs. up to 1h for the next distro sweep).
+        if le_sid:
+            asyncio.create_task(hub._le_refresh_certs_cache(le_sid))
         return payload
 
     @app.post("/api/le/renew")
@@ -489,6 +495,11 @@ def register(app, hub, ctx):
                     r["distribution"] = [{"status": "ERROR", "message": str(e)}]
                     agg.extend(r["distribution"])
         inner["distribution"] = agg
+        # Refresh le_cache so on-demand renew results (last_error / deploy
+        # last_status) are hub-visible promptly for the cert-failure alert
+        # pull-branch + the Certificates list.
+        if le_sid:
+            asyncio.create_task(hub._le_refresh_certs_cache(le_sid))
         return payload
 
     @app.post("/api/le/revoke")
