@@ -4620,13 +4620,17 @@ const CS_AUTOPROV_FIELDS = [
     { key: 'cpu_delete_threshold',    label: 'CPU — Delete VM above (%)',        type: 'number', ph: '90', min: 0, max: 100 },
     { key: 'mem_provision_threshold', label: 'Memory — Block provisioning above (%)', type: 'number', ph: '80', min: 0, max: 100 },
     { key: 'mem_delete_threshold',    label: 'Memory — Delete VM above (%)',        type: 'number', ph: '90', min: 0, max: 100 },
-    // Clone-source templates (clone FROM these VMIDs). The agent excludes them
-    // from the VMID allocation pool; keep them OUTSIDE vmid_start/vmid_end and
-    // cluster-consistent. Hub key vm_image_* is remapped to image*_template_id
-    // by the cs speak (_HUB_KEY_REMAP) before landing in settings + usb_config.
+    // Clone-source templates (clone FROM these). Accept EITHER a VMID (numeric,
+    // e.g. 100) OR a template NAME (text, e.g. debian-12-template) — the pxmx
+    // agent resolves a name to its vmid via `qm list` (must be unique on the
+    // host; multiple/no matches log an error and skip cloning). The agent
+    // excludes clone sources from the VMID allocation pool; keep them OUTSIDE
+    // vmid_start/vmid_end and cluster-consistent. Hub key vm_image_* is remapped
+    // to image*_template_id by the cs speak (_HUB_KEY_REMAP) before landing in
+    // settings + usb_config.
     { section: 'VM Templates' },
-    { key: 'vm_image_1_template_id', label: 'VM Image 1 Template VMID', type: 'number', ph: '100', min: 1 },
-    { key: 'vm_image_2_template_id', label: 'VM Image 2 Template VMID', type: 'number', ph: '200', min: 1 },
+    { key: 'vm_image_1_template_id', label: 'VM Image 1 Template (VMID or name)', type: 'text', ph: '100 or template-name' },
+    { key: 'vm_image_2_template_id', label: 'VM Image 2 Template (VMID or name)', type: 'text', ph: '200 or template-name' },
     { key: 'vm_image_1_pct',          label: 'VM Image 1 % target',     type: 'number', ph: '50',  min: 0, max: 100 },
     { section: 'Parallel Provisioning' },
     { key: 'reclone_concurrency', label: 'Max parallel operations', type: 'number', ph: '1', min: 1, max: 20 },
