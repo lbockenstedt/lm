@@ -16451,9 +16451,9 @@ async function loadLEData(subMenu) {
                 <td class="px-4 py-2 whitespace-nowrap">
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
-                        <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982] hover:bg-[#01A982]/90 text-white px-3 py-1.5 rounded-md text-xs font-bold transition-colors" title="Manage distribution targets">Manage</button>
-                        <button onclick="leRenewCert('${dEsc}')" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-md text-xs font-bold transition-colors" title="Renew this cert">Renew</button>
-                        <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-md text-xs font-bold transition-colors" title="Revoke + remove from managed list">Revoke</button>
+                        <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Manage distribution targets">Manage</button>
+                        <button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
+                        <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>
                     </div>
                 </td>
             </tr>
