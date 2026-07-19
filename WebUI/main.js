@@ -2818,10 +2818,15 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
         } else {
             spokeList.innerHTML = spokeListItems.map(spoke => {
                 const id = spoke.spoke_id;
-                // Show the friendly name (display_name → hostname → id) — spokes
-                // used to render the raw GUID here while agents already showed the
-                // name. Keep the GUID on hover via idTitle.
-                const name = spoke.display_name || spoke.hostname || id;
+                // Friendly name. GOTCHA: the backend (/setup/pending_spokes,
+                // setup.py) defaults display_name to the spoke_id (UUID) when a
+                // spoke is unnamed — so display_name is NEVER empty and a plain
+                // `display_name || hostname` always showed the UUID. Treat
+                // display_name===id as "unset" and fall through to the reported
+                // hostname before the UUID. GUID stays on hover via idTitle.
+                const name = (spoke.display_name && spoke.display_name !== id)
+                    ? spoke.display_name
+                    : (spoke.hostname || id);
                 const mod = moduleLabel(spoke.module_type);
                 const status = !spoke.approved ? 'pending'
                     : (connections.includes(id) ? 'online' : 'offline');
@@ -2835,8 +2840,8 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
     if (!agentList) return;
     // Generic Hub-direct agents (module_type "agent") from /setup/pending_spokes.
     const hubAgentRows = [
-        ...approvedHubAgents.map(a => ({ id: a.spoke_id, label: a.display_name || a.spoke_id, status: connections.includes(a.spoke_id) ? 'online' : 'offline', mod: moduleLabel(a.module_type) })),
-        ...pendingHubAgents.map(a => ({ id: a.spoke_id, label: a.display_name || a.spoke_id, status: 'pending', mod: moduleLabel(a.module_type) })),
+        ...approvedHubAgents.map(a => ({ id: a.spoke_id, label: (a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), status: connections.includes(a.spoke_id) ? 'online' : 'offline', mod: moduleLabel(a.module_type) })),
+        ...pendingHubAgents.map(a => ({ id: a.spoke_id, label: (a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), status: 'pending', mod: moduleLabel(a.module_type) })),
     ];
     // Proxmox node agents relayed through the pxmx hypervisor spoke
     // (best-effort). This runs on every 10s updateStatus() poll, so cache the
