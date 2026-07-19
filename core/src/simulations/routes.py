@@ -2559,24 +2559,31 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     async def get_sim_conf_parsed(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         """Structured simulation.conf view — ``{sections: {section: {k:v}}}``.
 
-        Does a spoke round-trip ``CS_GET_CONFIG`` to read the MERGED effective
-        config (base repo file + hub-managed override). Falls back to the stored
-        ``sim_conf_content`` override when the spoke is offline so the editor
-        still renders. ``source`` says which: ``spoke`` | ``stored-override``.
+        The HUB is the config authority: it pulls simulation.conf from GitHub
+        (or owns it in Hub mode) into the store, so the editor shows that stored
+        config DIRECTLY — the value pulled from GitHub / hub-owned — with no
+        dependency on a spoke round-trip that can return blank. Falls back to the
+        spoke's merged effective config only when the hub store is still empty
+        (the brief pre-first-pull bootstrap for a github tenant). ``source`` says
+        which: ``hub`` (authoritative store) | ``spoke`` (bootstrap fallback).
         """
-        raw = ""
-        source = "stored-override"
-        mode = "local"
+        raw = (await store.get_sim_conf_content(tenant_id)) or ""
+        source = "hub"
         try:
-            data = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
-            raw = (data or {}).get("simulation_conf", "") if isinstance(data, dict) else ""
-            mode = (data or {}).get("mode", "local") if isinstance(data, dict) else "local"
-            source = "spoke"
-        except HTTPException as exc:
-            # Round-trip failed — fall back to the stored override text so the
-            # editor still loads (read-only feel; save will re-push).
-            logger.info("sim-conf-parsed: CS_GET_CONFIG fell back to stored override (%s)", exc.detail)
-            raw = await store.get_sim_conf_content(tenant_id)
+            mode = "hub" if (await store.get_source_of_truth(tenant_id)) == "hub" else "github"
+        except Exception:  # noqa: BLE001
+            mode = "github"
+        if not raw.strip():
+            # Hub store empty (github tenant not yet pulled) — ask the spoke for
+            # its current effective config so the editor still renders.
+            try:
+                data = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
+                _sr = (data or {}).get("simulation_conf", "") if isinstance(data, dict) else ""
+                if (_sr or "").strip():
+                    raw = _sr
+                    source = "spoke"
+            except HTTPException as exc:
+                logger.info("sim-conf-parsed: hub store empty + CS_GET_CONFIG failed (%s)", exc.detail)
         # Distinguish a truly-offline spoke from one that IS connected but whose
         # live CS_GET_CONFIG round-trip failed/timed out (e.g. its event loop was
         # momentarily busy) — the editor mislabeled the latter as "spoke offline".
@@ -2593,23 +2600,30 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/{tenant}/config/user-overrides-conf")
     async def get_user_overrides_conf(tenant: str, tenant_id: str = Depends(get_tenant_id)):
-        """Raw user-overrides.conf (merged effective) for the per-user editor.
+        """Raw user-overrides.conf for the per-user editor.
 
-        Spoke round-trip ``CS_GET_CONFIG`` → ``user_overrides`` text (base repo
-        file + hub-user-override merged). Falls back to the stored
-        ``user_overrides_content`` override when the spoke is offline.
+        The HUB is the config authority: show the stored user_overrides_content
+        (pulled from GitHub / hub-owned) DIRECTLY. Falls back to the spoke's
+        effective user_overrides only when the hub store is still empty AND the
+        tenant hasn't been pulled yet (an empty store is otherwise the real value
+        — user-overrides.conf is commonly empty). ``source``: ``hub`` | ``spoke``.
         """
-        content = ""
-        source = "stored-override"
-        mode = "local"
+        content = (await store.get_user_overrides_content(tenant_id)) or ""
+        source = "hub"
         try:
-            data = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
-            content = (data or {}).get("user_overrides", "") if isinstance(data, dict) else ""
-            mode = (data or {}).get("mode", "local") if isinstance(data, dict) else "local"
-            source = "spoke"
-        except HTTPException as exc:
-            logger.info("user-overrides-conf: CS_GET_CONFIG fell back to stored override (%s)", exc.detail)
-            content = await store.get_user_overrides_content(tenant_id)
+            mode = "hub" if (await store.get_source_of_truth(tenant_id)) == "hub" else "github"
+        except Exception:  # noqa: BLE001
+            mode = "github"
+        if not content.strip() and not (await store.get_sim_conf_content(tenant_id) or "").strip():
+            # Nothing pulled yet (bootstrap) — ask the spoke so the editor renders.
+            try:
+                data = await _cs_forward(tenant_id, "CS_GET_CONFIG", {}, timeout=6.0)
+                _uo = (data or {}).get("user_overrides", "") if isinstance(data, dict) else ""
+                if (_uo or "").strip():
+                    content = _uo
+                    source = "spoke"
+            except HTTPException as exc:
+                logger.info("user-overrides-conf: hub store empty + CS_GET_CONFIG failed (%s)", exc.detail)
         return {"content": content, "mode": mode, "source": source,
                 "fetched_at": _now_iso()}
 
