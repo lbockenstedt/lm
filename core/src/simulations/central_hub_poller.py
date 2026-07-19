@@ -397,6 +397,124 @@ class CheckHealthHistory:
                 for b, v in sorted(buckets.items())]
 
 
+_CPW_WINDOW = 3600  # seconds — the rolling 1-hour PASS/FAIL verdict window
+
+
+def _classify_poll_status(status: Any) -> Optional[bool]:
+    """Classify one per-poll check status into PASS / FAIL / IGNORE for the
+    rolling 1h verdict. INVERTED sim semantics already baked into the per-poll
+    status: a per-poll ``"error"`` means the expected alert/insight is MISSING
+    (or clients dropped) — i.e. a FAILED poll — and a ``"warning"`` (client
+    drop) is also a FAILED poll. Returns ``True`` (PASS) for ``"ok"``, ``False``
+    (FAIL) for ``"warning"``/``"error"``, and ``None`` (IGNORE — don't record,
+    don't count) for ``"no_data"`` or anything else."""
+    s = str(status).strip().lower()
+    if s == "ok":
+        return True
+    if s in ("warning", "error"):
+        return False
+    return None
+
+
+class CheckPollWindow:
+    """Rolling 1-hour PASS/FAIL window per (tenant, site, check) enforcing the
+    operator rule: a dashboard check must NOT read OK if ANY poll FAILED in the
+    last hour.
+
+      - every poll in the last hour PASSED            → verdict ``"ok"``     (green)
+      - some passed AND some failed in the last hour   → verdict ``"warning"`` (yellow)
+      - only failures in the last hour (no passes)     → verdict ``"error"``   (red)
+      - no pass/fail samples yet (only no_data/absent) → verdict ``None`` (leave as-is)
+
+    Mirrors ``ClientCountTracker``'s persistence pattern: ``self._samples`` maps
+    ``tenant\\x1fsite\\x1fcheck`` (via ``_CC_KEYSEP``) to ``[(ts, is_pass), ...]``
+    trimmed to a 3600s window on every ``record``, and persisted atomically to a
+    single JSON file in the data dir (``save_samples``), restored (trimmed) on
+    init so a verdict survives a hub restart within the hour."""
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._samples: Dict[str, list] = {}    # key -> [(ts, is_pass: bool), ...]
+        self._load()
+
+    @staticmethod
+    def _key(tenant: str, site: str, check: str) -> str:
+        return f"{tenant}{_CC_KEYSEP}{site}{_CC_KEYSEP}{check}"
+
+    def _load(self) -> None:
+        now = time.time()
+        cutoff = now - _CPW_WINDOW
+        try:
+            with open(self._path, encoding="utf-8") as f:
+                raw = json.load(f) or {}
+            trimmed = {
+                k: [(float(ts), bool(p)) for ts, p in entries if float(ts) >= cutoff]
+                for k, entries in raw.items()
+            }
+            self._samples = {k: v for k, v in trimmed.items() if v}
+        except Exception:  # noqa: BLE001 — absent/corrupt → start empty
+            self._samples = {}
+
+    def record(self, tenant: str, site: str, check: str, is_pass: bool) -> None:
+        """Append a PASS/FAIL sample and trim to the 1-hour window."""
+        now = time.time()
+        key = self._key(tenant, site, check)
+        samples = self._samples.setdefault(key, [])
+        samples.append((now, bool(is_pass)))
+        cutoff = now - _CPW_WINDOW
+        self._samples[key] = [s for s in samples if s[0] >= cutoff]
+
+    def _window(self, tenant: str, site: str, check: str) -> list:
+        cutoff = time.time() - _CPW_WINDOW
+        return [p for ts, p in self._samples.get(self._key(tenant, site, check), [])
+                if ts >= cutoff]
+
+    def verdict(self, tenant: str, site: str, check: str) -> Optional[str]:
+        """Aggregate 1h verdict — ``"ok"``/``"warning"``/``"error"`` per the rule
+        above, or ``None`` when there are no PASS/FAIL samples in the window."""
+        samples = self._window(tenant, site, check)
+        if not samples:
+            return None
+        passes = sum(1 for p in samples if p)
+        if passes == len(samples):
+            return "ok"
+        if passes == 0:
+            return "error"
+        return "warning"
+
+    def counts(self, tenant: str, site: str, check: str) -> tuple:
+        """``(passes, total)`` over the last hour — for the operator message hint."""
+        samples = self._window(tenant, site, check)
+        return sum(1 for p in samples if p), len(samples)
+
+    def save_samples(self) -> None:
+        """Persist the window (trimmed) every poll cycle so a restart within the
+        hour restores the verdict. Best-effort; small dict."""
+        cutoff = time.time() - _CPW_WINDOW
+        trimmed = {
+            k: [(ts, p) for ts, p in v if ts >= cutoff]
+            for k, v in self._samples.items()
+        }
+        trimmed = {k: v for k, v in trimmed.items() if v}
+        self._persist(self._path, trimmed)
+
+    def forget(self, tenant: str) -> None:
+        """Drop all state for a tenant (left centralized mode / cleared creds)."""
+        prefix = f"{tenant}{_CC_KEYSEP}"
+        for k in [k for k in self._samples if k.startswith(prefix)]:
+            self._samples.pop(k, None)
+
+    @staticmethod
+    def _persist(path: str, data: dict) -> None:
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001 — persistence is best-effort
+            logger.warning("CheckPollWindow: persist failed (%s): %s", path, exc)
+
+
 class CentralHubPoller:
     """Polls Aruba Central hub-side for every centralized-mode tenant on a
     5-minute loop, writing ``hub.central_hub_status[tenant_id]`` in the shape the
@@ -413,6 +531,9 @@ class CentralHubPoller:
         )
         # 30-day per-check status history (green/yellow/red) for the health graphs.
         self._health = CheckHealthHistory(os.path.join(ddir, "check_health_history.json"))
+        # Rolling 1h PASS/FAIL window per check → the last-hour verdict override
+        # (a check can't read OK if any poll failed within the hour).
+        self._cpw = CheckPollWindow(os.path.join(ddir, "check_poll_window.json"))
         # Per-tenant last-poll timestamps + the next loop sleep. The Central poll
         # interval is configurable per tenant (Setup → Central API → Connection);
         # tenants are gated by their own interval and the loop wakes on the
@@ -460,6 +581,7 @@ class CentralHubPoller:
         if not client.is_configured():
             self.hub.central_hub_status.pop(tenant_id, None)
             self._cc.forget(tenant_id)
+            self._cpw.forget(tenant_id)
             return
         cc_thresh = _cc_thresholds(central_config)
         sites_cfg = await self._store.get_central_sites_config(tenant_id)
@@ -652,6 +774,7 @@ class CentralHubPoller:
         for stale in [t for t in list(self.hub.central_hub_status.keys()) if t not in live]:
             self.hub.central_hub_status.pop(stale, None)
             self._cc.forget(stale)
+            self._cpw.forget(stale)
             self._last_poll.pop(stale, None)
         now = time.time()
         # Gate each tenant by its own configured interval; wake on the shortest.
@@ -674,6 +797,9 @@ class CentralHubPoller:
         # last-hour reference instead of showing NO_DATA for ~15 min while it
         # rebuilds. Cheap (small dict); best-effort.
         self._cc.save_samples()
+        # Persist the rolling 1h PASS/FAIL window too so the last-hour verdict
+        # survives a hub restart within the hour (same best-effort/small-dict).
+        self._cpw.save_samples()
         # Persist the per-check health history off-thread (bounded once-per-cycle write).
         try:
             await asyncio.to_thread(self._health.save)
