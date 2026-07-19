@@ -127,21 +127,23 @@ class ClientCountTracker:
     the reference instead of showing NO_DATA for an hour. ``scope`` is the
     tenant_id on the hub (a single fixed key on the distributed spoke)."""
 
-    def __init__(self, baseline_path: str, sevenday_path: str,
-                 samples_path: str = "") -> None:
-        self._baseline_path = baseline_path
-        self._sevenday_path = sevenday_path
-        # Raw 1h samples persist here too (every poll cycle) so a restart within
-        # the first hour restores the ACTUAL reference, not just the synthetic
-        # seed from the (hourly-written) baseline.
-        self._samples_path = samples_path or (
-            baseline_path.replace("baseline", "samples") if "baseline" in baseline_path
-            else baseline_path + ".samples")
+    _MODULE = "simulations"
+    _BASELINE = "client_count_baseline.json"
+    _SEVENDAY = "client_count_7day.json"
+    _SAMPLES = "client_count_samples.json"
+
+    def __init__(self, data_dir: str) -> None:
+        # Sharded per tenant under <data_dir>/tenants/<tenant>/simulations/. Data is
+        # small (per-site, not per-check) so we shard-all each save for corruption
+        # isolation + per-tenant reset, without dirty-gating.
+        self._data_dir = data_dir
         self._samples: Dict[str, list] = {}    # key -> [(ts, count), ...] (1h)
         self._hourly: Dict[str, list] = {}      # key -> [(ts, hourly_avg), ...] (7d)
         self._baseline: Dict[str, dict] = {}    # key -> {hourly_avg, recorded_at}
         # Match the source: wait one full hour before the first snapshot write.
         self._last_snapshot = time.time()
+        for name in (self._BASELINE, self._SEVENDAY, self._SAMPLES):
+            migrate_legacy(data_dir, self._MODULE, name)
         self._load()
 
     @staticmethod
@@ -151,41 +153,29 @@ class ClientCountTracker:
 
     def _load(self) -> None:
         now = time.time()
-        try:
-            with open(self._baseline_path, encoding="utf-8") as f:
-                self._baseline = json.load(f) or {}
-            # Seed synthetic samples from the saved average so the UI surfaces a
-            # reference immediately on restart (they age out as live data arrives).
-            for key, saved in self._baseline.items():
-                avg = round(saved.get("hourly_avg", 0))
-                self._samples[key] = [
-                    (now - (_CC_MIN_SAMPLES - i) * 60, avg) for i in range(_CC_MIN_SAMPLES)
-                ]
-        except Exception:  # noqa: BLE001 — absent/corrupt baseline → start empty
-            self._baseline = {}
-        try:
-            with open(self._sevenday_path, encoding="utf-8") as f:
-                raw = json.load(f) or {}
-            cutoff = now - _CC_30DAY_WINDOW
-            self._hourly = {
-                k: [(float(ts), float(v)) for ts, v in entries if float(ts) >= cutoff]
-                for k, entries in raw.items()
-            }
-        except Exception:  # noqa: BLE001
-            self._hourly = {}
-        # Restore the ACTUAL last-hour raw samples (trimmed to the 1h window),
-        # overriding the synthetic seed above so the reference is exact on restart
-        # — including within the first hour before any baseline was ever written.
-        try:
-            with open(self._samples_path, encoding="utf-8") as f:
-                raw_s = json.load(f) or {}
-            scut = now - _CC_WINDOW
-            for key, entries in raw_s.items():
-                kept = [(float(ts), int(v)) for ts, v in entries if float(ts) >= scut]
-                if kept:
-                    self._samples[key] = kept
-        except Exception:  # noqa: BLE001 — absent/corrupt → keep synthetic seed
-            pass
+        # baseline shards → synthetic sample seed (surfaces a reference immediately
+        # on restart; ages out as live data arrives).
+        self._baseline = shard_load(self._data_dir, self._MODULE, self._BASELINE)
+        for key, saved in self._baseline.items():
+            avg = round((saved or {}).get("hourly_avg", 0))
+            self._samples[key] = [
+                (now - (_CC_MIN_SAMPLES - i) * 60, avg) for i in range(_CC_MIN_SAMPLES)
+            ]
+        # 7-day hourly history (trimmed to 30d).
+        cutoff = now - _CC_30DAY_WINDOW
+        raw = shard_load(self._data_dir, self._MODULE, self._SEVENDAY)
+        self._hourly = {
+            k: [(float(ts), float(v)) for ts, v in entries if float(ts) >= cutoff]
+            for k, entries in raw.items()
+        }
+        # Exact last-hour raw samples override the synthetic seed (restart within
+        # the first hour, before any baseline was ever written, is still exact).
+        scut = now - _CC_WINDOW
+        raw_s = shard_load(self._data_dir, self._MODULE, self._SAMPLES)
+        for key, entries in raw_s.items():
+            kept = [(float(ts), int(v)) for ts, v in entries if float(ts) >= scut]
+            if kept:
+                self._samples[key] = kept
 
     def record(self, scope: str, wsite: str, current: int, kind: str = "") -> None:
         """Append a raw sample and trim to the 1-hour window."""
@@ -273,13 +263,14 @@ class ClientCountTracker:
             self._hourly[key] = [(ts, v) for ts, v in hist if ts >= cutoff]
         if snapshot:
             self._baseline.update(snapshot)
-            self._persist(self._baseline_path, self._baseline)
+            shard_save(self._data_dir, self._MODULE, self._BASELINE, self._baseline)
         if self._hourly:
-            self._persist(self._sevenday_path, {k: list(v) for k, v in self._hourly.items()})
+            shard_save(self._data_dir, self._MODULE, self._SEVENDAY,
+                       {k: list(v) for k, v in self._hourly.items()})
 
     def save_samples(self) -> None:
         """Persist the raw 1h samples (trimmed to the window) every poll cycle so
-        a restart restores the exact reference. Best-effort; small dict."""
+        a restart restores the exact reference. Best-effort; sharded per tenant."""
         now = time.time()
         cutoff = now - _CC_WINDOW
         trimmed = {
@@ -287,24 +278,14 @@ class ClientCountTracker:
             for k, v in self._samples.items()
         }
         trimmed = {k: v for k, v in trimmed.items() if v}
-        self._persist(self._samples_path, trimmed)
+        shard_save(self._data_dir, self._MODULE, self._SAMPLES, trimmed)
 
     def forget(self, scope: str) -> None:
-        """Drop all state for a scope (tenant left centralized mode / cleared creds)."""
+        """Drop all in-memory state for a scope (left centralized mode / reset)."""
         prefix = f"{scope}{_CC_KEYSEP}"
         for store in (self._samples, self._hourly, self._baseline):
             for k in [k for k in store if k.startswith(prefix)]:
                 store.pop(k, None)
-
-    @staticmethod
-    def _persist(path: str, data: dict) -> None:
-        try:
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, path)
-        except Exception as exc:  # noqa: BLE001 — persistence is best-effort
-            logger.warning("ClientCountTracker: persist failed (%s): %s", path, exc)
 
 
 _HEALTH_IDX = {"ok": 0, "warning": 1, "error": 2}  # else (no_data/pending/unknown) -> 3
@@ -550,11 +531,7 @@ class CentralHubPoller:
     def __init__(self, hub) -> None:
         self.hub = hub
         ddir = getattr(getattr(hub, "state", None), "data_dir", ".") or "."
-        self._cc = ClientCountTracker(
-            os.path.join(ddir, "client_count_baseline.json"),
-            os.path.join(ddir, "client_count_7day.json"),
-            os.path.join(ddir, "client_count_samples.json"),
-        )
+        self._cc = ClientCountTracker(ddir)
         # 30-day per-check status history (green/yellow/red) for the health graphs.
         self._health = CheckHealthHistory(ddir)
         # Rolling 1h PASS/FAIL window per check → the last-hour verdict override
