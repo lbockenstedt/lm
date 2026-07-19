@@ -8575,6 +8575,7 @@ function _renderSetupSection(subMenu, container) {
 const _SUBNET_FILTER_MODULES = [
     { key: 'nac',       label: 'Security / NAC' },
     { key: 'firewall',   label: 'Firewall' },
+    { key: 'nw',         label: 'Network Devices' },
     { key: 'netbox',     label: 'IPAM' },
     { key: 'dns',        label: 'DNS' },
     { key: 'dhcp',       label: 'DHCP' },
