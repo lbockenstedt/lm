@@ -26,6 +26,7 @@ from .aruba import test_central_from_config, get_central_available_from_config, 
 from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini
 from . import sim_quota
 from . import email_report
+from . import github_config_client
 from access import safe_external_url, host_resolves_external, has_edit_access
 from urllib.parse import urlsplit
 
@@ -446,6 +447,32 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             except Exception as exc:  # noqa: BLE001 — best-effort, never block the push
                 logger.debug("CS_CONFIG_UPDATE: github_config merge for %s failed: %s",
                              tenant_id, exc)
+        # ── Hub is the config authority; an ATTACHED spoke is a FOLLOWER ──────
+        # For a CONFIG-DELIVERY push (sim/user override text, or an explicit
+        # config_source), tell the spoke to run as a follower so it serves the
+        # hub-delivered files as its WHOLE config — the hub is the sole GitHub
+        # client (simulations/github_config_client.py). The mode comes from
+        # _spoke_config_source: 'hub' once the hub actually HAS the tenant's
+        # config (hub-owned, or github pulled into the store), else a short-lived
+        # 'github' bootstrap so the spoke isn't handed an EMPTY whole-config
+        # before the hub's first pull lands (it keeps self-pulling until then).
+        # When 'hub', strip the PAT — a follower must never push/pull GitHub
+        # (belt-and-suspenders atop config_source='hub'). Non-config pushes
+        # (USB/quotas) are left untouched; standalone (no-hub) spokes are never
+        # reached here and self-manage via their own repo_sync + creds.
+        if any(k in payload for k in
+               ("sim_conf_override", "user_conf_override", "config_source")):
+            try:
+                _src = await _spoke_config_source(tenant_id)
+            except Exception:  # noqa: BLE001 — never block the push on the mode calc
+                _src = "hub"
+            payload = dict(payload)
+            payload["config_source"] = _src
+            if _src == "hub":
+                _gc = payload.get("github_config")
+                if isinstance(_gc, dict) and _gc.get("github_token"):
+                    payload["github_config"] = {k: v for k, v in _gc.items()
+                                                if k != "github_token"}
         # Drain-aware push preferred: when a bound cs spoke is mid self-update
         # (draining — about to os._exit + relaunch, or already restarting), a
         # live request_response hangs to its 5s timeout when the spoke drops its
@@ -761,6 +788,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cur = await _current_user_overrides_text(tenant_id)
         new_text = _edit_user_override_flags(cur, username, flags, clear)
         await store.set_user_overrides_content(tenant_id, new_text)
+        # Human edit (per-user override toggle) → the HUB commits it to GitHub,
+        # since the follower spoke no longer does. Best-effort; still fans out.
+        if source == "github":
+            await _commit_config_to_github(
+                tenant_id, github_config_client.USER_OVERRIDES_PATH, new_text,
+                "Update user-overrides.conf (per-user override) via Lab Manager")
         pushed = await _push_config(tenant_id,
                                     {"user_conf_override": new_text, "config_source": source})
         if not clear and flags:
@@ -2487,9 +2520,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         content = body.get("content", "") if isinstance(body, dict) else ""
         source = await _require_config_writable(tenant_id)  # 403 if github + no key
         await store.set_sim_conf_content(tenant_id, content)
+        # Hub is the sole GitHub client: on a GitHub-managed tenant the HUB
+        # commits+pushes this edit to the repo (the spoke is a follower and no
+        # longer pushes). Best-effort — a GitHub failure still saves + fans out.
+        if source == "github":
+            await _commit_config_to_github(
+                tenant_id, github_config_client.SIM_CONF_PATH, content,
+                "Update simulation.conf via Lab Manager")
         _invalidate_sim_quota_catalog(tenant_id)  # sims/sites derive from this
-        pushed = await _push_config(tenant_id, {"sim_conf_override": content,
-                                                "config_source": source})
+        pushed = await _push_config(tenant_id, {"sim_conf_override": content})
         # Re-merge + re-push effective quotas so a config change that removes a
         # sim primitive re-validates the tenant's quotas against SIM_META (a
         # quota pointing at a now-unknown sim is dropped) and the spoke
@@ -2589,8 +2628,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if content.strip() and not _parse_ini_sections(content):
             raise HTTPException(status_code=422, detail="Invalid INI: could not parse user-overrides.conf")
         await store.set_user_overrides_content(tenant_id, content)
-        pushed = await _push_config(tenant_id, {"user_conf_override": content,
-                                                "config_source": source})
+        # Hub is the sole GitHub client: commit the edit to the repo on a
+        # GitHub-managed tenant (best-effort; the spoke no longer pushes).
+        if source == "github":
+            await _commit_config_to_github(
+                tenant_id, github_config_client.USER_OVERRIDES_PATH, content,
+                "Update user-overrides.conf via Lab Manager")
+        pushed = await _push_config(tenant_id, {"user_conf_override": content})
         # Per-user wsite/sim-flag overrides shift a quota's site pool + sim
         # eligibility, so re-merge + re-push effective quotas (the spoke
         # reconciles against the refreshed list).
@@ -3117,6 +3161,122 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         "the config is read-only. Add a GitHub API key, or switch "
                         "Source of Truth to Hub."))
         return source
+
+    # ── Hub-as-sole-GitHub-client helpers ────────────────────────────────────
+    async def _spoke_config_source(tenant_id: str) -> str:
+        """The config mode to advertise to an ATTACHED spoke (``config_source``).
+
+        The hub is the config authority whenever it can serve the config, so the
+        spoke runs as a follower (``'hub'``): repo_sync no-ops and the spoke
+        serves the hub-delivered files as its whole config. Returns ``'github'``
+        ONLY during the brief bootstrap window for a github-managed tenant before
+        the hub's first pull has populated the store — so the spoke isn't handed
+        an empty whole-config (it keeps self-pulling until the hub takes over).
+        Hub-owned tenants are always ``'hub'``."""
+        try:
+            sot = await store.get_source_of_truth(tenant_id)
+        except Exception:  # noqa: BLE001
+            sot = "github"
+        if sot == "hub":
+            return "hub"
+        try:
+            has_cfg = bool((await store.get_sim_conf_content(tenant_id) or "").strip())
+        except Exception:  # noqa: BLE001
+            has_cfg = False
+        return "hub" if has_cfg else "github"
+
+    async def _pull_github_into_store(tenant_id: str) -> bool:
+        """Pull the tenant's simulation.conf / user-overrides.conf from GitHub
+        (the hub is the sole GitHub client) into the hub store. Returns True when
+        the stored content CHANGED (caller then re-distributes to spokes). No-op
+        (False) for a tenant not github-managed or without creds, and on any
+        network/auth error (logged, retried next cycle)."""
+        try:
+            if await store.get_source_of_truth(tenant_id) != "github":
+                return False
+            gh = await store.get_github_config(tenant_id) or {}
+            if not github_config_client.is_configured(gh):
+                return False
+            pulled = await github_config_client.pull(gh)
+        except Exception as exc:  # noqa: BLE001 — network/auth → skip this cycle
+            logger.info("github pull for %s failed: %s", tenant_id, exc)
+            return False
+        if not pulled:
+            return False
+        changed = False
+        sim_txt = pulled.get("sim_conf")
+        if sim_txt is not None and sim_txt != (await store.get_sim_conf_content(tenant_id) or ""):
+            await store.set_sim_conf_content(tenant_id, sim_txt)
+            changed = True
+        user_txt = pulled.get("user_overrides")
+        if user_txt is not None and user_txt != (await store.get_user_overrides_content(tenant_id) or ""):
+            await store.set_user_overrides_content(tenant_id, user_txt)
+            changed = True
+        return changed
+
+    async def _commit_config_to_github(tenant_id: str, path: str, content: str,
+                                       message: str) -> None:
+        """Commit a config edit to the tenant's GitHub repo (the hub is the sole
+        GitHub client). Best-effort: a GitHub failure is logged, not raised — the
+        edit is already saved hub-side and fanned out to spokes, so the repo just
+        lags until the next successful commit / poll."""
+        try:
+            gh = await store.get_github_config(tenant_id) or {}
+            if not github_config_client.is_configured(gh):
+                return
+            await github_config_client.push(gh, path, content, message)
+            logger.info("committed %s to GitHub for tenant %s", path, tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("github commit of %s for %s failed: %s", path, tenant_id, exc)
+
+    async def _github_config_sync_once() -> None:
+        for tid in list(store.tenant_ids()):
+            try:
+                if await _pull_github_into_store(tid):
+                    logger.info("github config for tenant %s changed on repo — redistributing", tid)
+                    await _push_config(tid, {
+                        "sim_conf_override": await store.get_sim_conf_content(tid),
+                        "user_conf_override": await store.get_user_overrides_content(tid),
+                    })
+                    try:
+                        await _push_sim_quotas(tid)
+                    except Exception:  # noqa: BLE001 — best-effort quota refresh
+                        pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("github sync for %s: %s", tid, exc)
+
+    async def _github_config_sync_loop() -> None:
+        """Hub is the single GitHub client: periodically pull each github-managed
+        tenant's config from its repo and, when it changed on GitHub (an external
+        commit, or catch-up after a hub restart), re-distribute to that tenant's
+        spokes. ONE central puller for the whole fleet — replaces the per-spoke
+        repo_sync. Interval via ``LM_HUB_GITHUB_SYNC_INTERVAL`` (default 120s,
+        floor 30s). Started from main.py."""
+        import os
+        try:
+            interval = int(os.environ.get("LM_HUB_GITHUB_SYNC_INTERVAL", "120"))
+        except ValueError:
+            interval = 120
+        interval = max(30, interval)
+        # Initial pull shortly after startup so a github-managed tenant's config
+        # is populated hub-side (and pushed to spokes as they connect) without
+        # waiting a full interval — closes the cold-start blank-config window.
+        await asyncio.sleep(5)
+        while True:
+            try:
+                await _github_config_sync_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a sweep must not kill the loop
+                logger.warning("github config sync loop: %s", exc)
+            await asyncio.sleep(interval)
+
+    try:
+        hub._github_config_sync_loop = _github_config_sync_loop
+    except Exception:  # noqa: BLE001
+        pass
 
     @app.get("/sim/api/{tenant}/config/source")
     async def get_config_source(tenant: str, tenant_id: str = Depends(get_tenant_id)):

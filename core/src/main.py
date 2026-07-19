@@ -2348,6 +2348,38 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             tenant_id = None
         if not tenant_id:
             return
+        # Hub is the sole GitHub client: for a github-managed tenant whose config
+        # the hub hasn't pulled yet, pull it NOW so this reconnect delivers the
+        # real config (not an empty hub-owned override) and the spoke never has
+        # to touch GitHub itself. One central puller — see github_config_client.
+        try:
+            _sot = await self.simulations_store.get_source_of_truth(tenant_id)
+            _have = bool((await self.simulations_store.get_sim_conf_content(tenant_id) or "").strip())
+            if _sot == "github" and not _have:
+                from simulations import github_config_client as _ghc
+                _gh_cfg = await self.simulations_store.get_github_config(tenant_id) or {}
+                if _ghc.is_configured(_gh_cfg):
+                    _pulled = await _ghc.pull(_gh_cfg)
+                    if _pulled:
+                        if _pulled.get("sim_conf") is not None:
+                            await self.simulations_store.set_sim_conf_content(
+                                tenant_id, _pulled["sim_conf"])
+                        if _pulled.get("user_overrides") is not None:
+                            await self.simulations_store.set_user_overrides_content(
+                                tenant_id, _pulled["user_overrides"])
+        except Exception as exc:  # noqa: BLE001 — best-effort pull, never block reconnect
+            logger.debug("push_cs_hub_config: github pull-if-empty for %s failed: %s",
+                         tenant_id, exc)
+        # Advertise follower mode to the (re)connecting spoke: 'hub' once the hub
+        # has the config (hub-owned, or github pulled above) so repo_sync no-ops
+        # and the spoke serves hub-delivered files as its whole config; 'github'
+        # only in the brief bootstrap window before the hub's first pull lands.
+        try:
+            _sot2 = await self.simulations_store.get_source_of_truth(tenant_id)
+            _have2 = bool((await self.simulations_store.get_sim_conf_content(tenant_id) or "").strip())
+            _spoke_src = "hub" if (_sot2 == "hub" or _have2) else "github"
+        except Exception:  # noqa: BLE001
+            _spoke_src = "hub"
         # Re-push hub-managed sim/user config overrides (the Sim Config editor
         # saves these as sim_conf_override / user_conf_override INI text → the
         # spoke writes configs/hub-*-overrides.conf, merged on top of the repo
@@ -2367,6 +2399,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             override_cfg["sim_conf_override"] = sim_override
         if user_override:
             override_cfg["user_conf_override"] = user_override
+        # Advertise follower mode ONLY alongside actual config delivery, so the
+        # spoke serves the hub-delivered files as its whole config. A tenant with
+        # no hub config adds nothing here (preserves the no-op-when-empty push).
+        if sim_override or user_override:
+            override_cfg["config_source"] = _spoke_src
         # Spoke-side agent-relay timeouts (Setup → General → global_config): push
         # to every (re)connecting cs spoke so its SPOKE_RELAY forward uses the
         # configured long-op / fast windows (WAN + busy-agent tuning). Global
@@ -2378,17 +2415,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     override_cfg[_rk] = _gc.get(_rk)
         except Exception:  # noqa: BLE001 — best-effort
             pass
-        # Re-deliver the in-memory github_config (Source-of-Truth push token) so a
-        # spoke that restarted AFTER the key was installed gets it back on reconnect
-        # — github_config is in-memory-only on the spoke, so without this re-delivery
-        # a post-restart conf edit can't commit+push and the repo file reverts on the
-        # next sync (the "old GitHub version on sync" symptom). The conf-save routes
-        # also re-merge it via _push_config; this covers the reconnect path.
+        # Re-deliver the in-memory github_config (repo_url/branch) so a spoke has
+        # it back on reconnect. The PAT is stripped below for a follower spoke —
+        # the hub is the sole GitHub client, so an attached spoke neither pulls
+        # nor commits; the creds ride along only for the brief 'github' bootstrap
+        # window (before the hub's first pull) and for repo_url/branch display.
         try:
             _gh = await self.simulations_store.get_github_config(tenant_id) or {}
         except Exception as exc:  # noqa: BLE001 — best-effort
             _gh = {}
         if _gh:
+            # Follower spoke: strip the PAT — the hub is the sole GitHub client,
+            # so an attached spoke must never pull/push GitHub. Kept only during
+            # the brief 'github' bootstrap window (before the hub's first pull).
+            if _spoke_src == "hub" and isinstance(_gh, dict) and _gh.get("github_token"):
+                _gh = {k: v for k, v in _gh.items() if k != "github_token"}
             override_cfg["github_config"] = _gh
         # Re-deliver the tenant's effective sim quotas (global defaults merged
         # with tenant overrides, enabled-only) so a reconnecting cs spoke's
@@ -6931,6 +6972,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         _knob_loop = getattr(self, "_knob_learner_loop", None)
         if _knob_loop is not None:
             asyncio.create_task(_knob_loop())
+        # Hub-as-sole-GitHub-client: ONE central puller that syncs each
+        # github-managed tenant's simulation.conf / user-overrides.conf from its
+        # repo and pushes changes down to that tenant's spokes (replaces the
+        # per-spoke repo_sync — spokes attached to a hub never touch GitHub).
+        # Registered by register_simulations_routes. See github_config_client.
+        _gh_sync_loop = getattr(self, "_github_config_sync_loop", None)
+        if _gh_sync_loop is not None:
+            asyncio.create_task(_gh_sync_loop())
         # Certificate distribution: the hub is the transport for cert material
         # from the le (Let's Encrypt) spoke to each cert's target spokes. For
         # every managed cert with stale targets it pulls fullchain+key from le
