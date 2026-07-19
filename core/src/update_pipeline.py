@@ -1390,6 +1390,28 @@ class UpdatePipelineMixin:
             # space — see _UPDATE_SOURCE_MODULE_KEY / _UPDATE_SOURCE_PREFIX_MAP
             # (firewall → "opnsense", NOT "opn").
             mtype = self._effective_module_type(spoke_id)
+            # Skip approved_modules ids that are NOT registered module spokes —
+            # no module_metadata entry. A legit module spoke ALWAYS has one
+            # (register_module writes it on approval; rename_module carries it
+            # in lockstep through the guid-arm). An id here with no
+            # module_metadata is a relayed node-agent (pxmx per-host agent) or a
+            # stale pre-guid row that leaked into approved_modules: the
+            # /setup/spokes/.../agents/.../approve path (approve_agent_under_spoke)
+            # persists the approval flag WITHOUT register_module, and relayed
+            # agents guid-arm in agent_config, NOT approved_modules, so they
+            # stay hostname-keyed (e.g. "cs-svr-02-agent"). Without this guard
+            # such an id falls through to the spoke_id substring map — a CS
+            # agent whose hostname contains "cs" substring-matches "cs" → the
+            # cs repo → fanned out as a cs module spoke → an extra
+            # "hostname: triggered" row in Module Updates (plus a useless
+            # SPOKE_UPDATE to a relayed agent it can't act on). Relayed
+            # node-agents update via their parent spoke (AGENT_UPDATE), never
+            # this path. _selfheal_leaked_agents (above) already pops the ones
+            # currently relayed; this skips the rest (offline / never-armed).
+            if spoke_id not in (self.state.system_state.get("module_metadata", {}) or {}):
+                logger.debug("[update] skipping non-registered approved_modules id %r "
+                              "(relayed/orphan agent — no module_metadata)", spoke_id)
+                continue
             module_key = self._resolve_module_key(spoke_id, mtype, _UPDATE_SOURCE_PREFIX_MAP)
             if not module_key:
                 update_results.append(f"{spoke_id}: unknown module type")

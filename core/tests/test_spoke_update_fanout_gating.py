@@ -372,3 +372,43 @@ async def test_agent_spokes_split_out_of_module_updates_display(patched_clock):
     # …it is reported in the separate "agents" list instead.
     assert any(_AGENT_UUID in r for r in agents)
     assert all("lm-opnsense-spoke-1" not in r for r in agents)
+
+
+CS_REPO = "https://github.com/lbockenstedt/cs.git"
+_RELAYED_CS_AGENT = "cs-svr-02-agent"
+
+
+@pytest.mark.asyncio
+async def test_relayed_cs_agent_without_metadata_not_fanned_out(patched_clock):
+    """Regression: a relayed node-agent (pxmx per-host agent) approved via the
+    WebUI ``approve_agent_under_spoke`` path is persisted in approved_modules
+    with its hostname id but NO module_metadata (that path bypasses
+    register_module; relayed agents guid-arm in agent_config, not
+    approved_modules, so they stay hostname-keyed). Its id contains "cs" →
+    without a registered-spoke guard it substring-matches the "cs" prefix →
+    resolves to the cs repo → fanned out as a cs module spoke → an extra
+    "cs-svr-02-agent: triggered" row in Module Updates (plus a useless
+    SPOKE_UPDATE to a relayed agent it can't act on). Skip approved_modules
+    ids with no module_metadata entry — a legit module spoke ALWAYS has one.
+    Relayed node-agents update via their parent spoke (AGENT_UPDATE)."""
+    hub = _StubHub(remote_tip="cccc1")
+    hub.state._gc["update_sources"] = {
+        "opnsense": OPNSENSE_REPO,
+        "cs": CS_REPO,
+        "hub": LM_REPO,
+    }
+    # Relayed CS agent: approved (hostname id), deliberately NO module_metadata.
+    hub.approved_modules[_RELAYED_CS_AGENT] = True
+    hub.active_connections[_RELAYED_CS_AGENT] = object()
+
+    result = await hub.perform_update()
+
+    pushed_ids = {p[0] for p in hub.pushes}
+    # The relayed agent is SKIPPED — not fanned out, not shown anywhere.
+    assert _RELAYED_CS_AGENT not in pushed_ids
+    spokes = result.get("spokes") or []
+    agents = result.get("agents") or []
+    assert all(_RELAYED_CS_AGENT not in r for r in spokes)
+    assert all(_RELAYED_CS_AGENT not in r for r in agents)
+    # The legit module spoke still fans out normally.
+    assert "lm-opnsense-spoke-1" in pushed_ids
