@@ -1694,6 +1694,20 @@ function csClientSimBar(c, host) {
       <div class="flex items-center gap-1.5">
         <span id="${csEscape(csCtlId(host, 'msg'))}" class="text-[11px] text-slate-400"></span>
       </div>
+      <div class="flex items-center gap-1.5 pt-1 border-t border-slate-100">
+        <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Debug</span>
+        <select id="${csEscape(csCtlId(host, 'dbglvl'))}" data-cs-debug-host="${csEscape(host)}"
+          class="border border-slate-200 rounded px-1 py-0.5 text-[11px]">
+          <option value="basic">basic</option>
+          <option value="advanced">advanced</option>
+        </select>
+        <button data-cs-debug-host="${csEscape(host)}" data-cs-debug-on="0" onclick="csDebugToggle(this)"
+          title="Stream this client's logs up to the hub for remote troubleshooting (30-min auto-off)"
+          class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[11px] font-bold">Enable Debug</button>
+        <button data-cs-debug-host="${csEscape(host)}" onclick="csDebugLogs(this)"
+          title="Open the Client Debug log panel for this host"
+          class="bg-indigo-100 hover:bg-indigo-200 text-indigo-700 px-2 py-0.5 rounded text-[11px] font-bold">View Logs</button>
+      </div>
     </div>`;
 }
 
@@ -1731,6 +1745,55 @@ window.csSimToggle = async function (btn) {
         csCtlMsg(host, e.message || 'failed', false);
         if (typeof showToast === 'function') showToast(`toggle failed: ${e.message || 'error'}`, 'error');
     }
+};
+
+// ── Remote Client Debug Mode (per-client, immediate, non-persistent) ─────────
+// Flip one cs client into debug mode so its agent.sh tailer streams sim.log +
+// debug logs (advanced adds journal/dmesg) up to the hub's per-host ring buffer
+// (CS_DEBUG_LOG → hub._handle_cs_debug_log → GET /api/cs/clients/{host}/debug-
+// logs). 30-min auto-off both client-side (the flag deadline) and hub-side.
+// POST /api/cs/clients/{host}/debug rides the same CS_QUEUE_COMMAND path
+// kill_switch/reboot use. See .claude/plans/precious-napping-seahorse.md.
+window.csDebugToggle = async function (btn) {
+    const host = btn.dataset.csDebugHost;
+    if (!host) return;
+    const lvlEl = csEl(csCtlId(host, 'dbglvl'));
+    const level = (lvlEl && lvlEl.value) || 'basic';
+    const enabling = btn.dataset.csDebugOn !== '1';
+    const prev = btn.dataset.csDebugOn || '0';
+    csCtlMsg(host, enabling ? `Enabling debug (${level})…` : 'Stopping debug…', true);
+    btn.dataset.csDebugOn = enabling ? '1' : '0';
+    btn.textContent = enabling ? 'Stop Debug' : 'Enable Debug';
+    try {
+        // /api/cs/* (not /sim/api/*), so bypass csFetch (which prepends /sim/api)
+        // and fetch directly. ?tenant= is what routes/client_debug._resolve reads.
+        const res = await fetch(`/api/cs/clients/${encodeURIComponent(host)}/debug?tenant=${csTenant()}`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: enabling, level }) });
+        if (res.status === 401) { if (typeof handleSessionExpired === 'function') handleSessionExpired(); throw new Error('Session expired'); }
+        if (!res.ok) {
+            let detail = ''; try { const j = await res.json(); detail = (j && (j.detail || j.message)) || ''; } catch (_e) {}
+            throw new Error(detail || `${res.status}`);
+        }
+        csCtlMsg(host, enabling ? `Debug ${level} on (30m auto-off)` : 'Debug stopped', true);
+        if (typeof showToast === 'function') showToast(`Debug ${enabling ? 'on' : 'off'} for ${host}`, 'success');
+    } catch (e) {
+        btn.dataset.csDebugOn = prev;
+        btn.textContent = prev === '1' ? 'Stop Debug' : 'Enable Debug';
+        console.error('csDebugToggle failed', e);
+        csCtlMsg(host, e.message || 'failed', false);
+        if (typeof showToast === 'function') showToast(`debug toggle failed: ${e.message || 'error'}`, 'error');
+    }
+};
+
+// Open the Client Debug log panel (lives in main.js — openModal/apiJson/
+// _renderGroupedLogs/pollManager are main.js globals this file already relies
+// on, e.g. showToast). Falls back to a toast if the panel helper isn't loaded.
+window.csDebugLogs = function (btn) {
+    const host = btn.dataset.csDebugHost;
+    if (!host) return;
+    if (typeof window.openClientDebugLog === 'function') window.openClientDebugLog(host, csTenantRaw());
+    else if (typeof showToast === 'function') showToast('Debug log panel unavailable', 'error');
 };
 
 // ── Demo scenarios (named per-client failure presets, 120-min TTL) ───────────

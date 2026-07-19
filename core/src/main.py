@@ -389,6 +389,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # --- System Diagnostics ---
         self.logs = deque(maxlen=500)
         self.agent_logs = {} # { agent_id: deque(logs) }
+        # Per-(tenant, hostname) remote client debug-log ring buffers — populated
+        # by CS_DEBUG_LOG frames (a cs client flipped into debug mode from the
+        # WebUI; its agent.sh tailer streams sim.log + debug logs up via the cs
+        # spoke). Ephemeral in-memory deques (same contract as agent_logs): lost
+        # on hub restart, capped per host. Read via GET /api/cs/clients/{host}/
+        # debug-logs (routes/client_debug.py). client_debug_sessions tracks the
+        # active session (enabled_at + level) per host for the auto-off window +
+        # the WebUI "active until" indicator.
+        self.client_debug_logs = {}      # {(tenant, hostname): deque(lines)}
+        self.client_debug_sessions = {}  # {(tenant, hostname): {enabled_at, level}}
         # Hub-side cert-distribution activity (le.distribution logger) — merged
         # into GET /setup/logs/le so it surfaces under WebUI Logs → Certificates
         # alongside the le spoke's own relayed logs. See CertDistLogHandler below
@@ -404,6 +414,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # below + setup_admin.get_module_logs (module == "cs").
         self.cs_bridge_logs = deque(maxlen=500)
         self.max_log_size = 1000
+        # Per-host cap for client_debug_logs rings (see init near agent_logs
+        # above). Advanced level (journal+dmesg) is chatty; the deque cap is the
+        # hub memory backstop on top of the 30-min client-side auto-off.
+        self.client_debug_size = 2000
         # Per-agent index populated from AGENT_RELAY_UP: agent_id →
         # {spoke_id, hostname, last_seen}. Lets the hub route a command to the
         # spoke that owns the agent (pxmx-dialed → pxmx spoke, cs-dialed → cs
@@ -3305,6 +3319,60 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     self.agent_logs[pk].append(entry)
             logger.debug(f"SPOKE_LOG: stored {len(entries)} entries for {spoke_id}")
 
+    async def _handle_cs_debug_log(self, spoke_id: str, payload) -> None:
+        """Append a CS_DEBUG_LOG frame's lines to the per-host client-debug buffer.
+
+        Mirrors ``_handle_spoke_log`` but keyed by ``(tenant, hostname)`` instead
+        of by spoke pk: a single cs spoke relays debug logs for many clients, so
+        the spoke id is the wrong key. The cs spoke stamps ``hostname`` + the
+        originating ``level`` on the frame (``server.py`` /ws/client →
+        ``_relay_client_debug_log_to_hub``); the tenant comes from the spoke's
+        binding (``state.get_spoke_tenant``).
+
+        Ephemeral by design — same contract as ``agent_logs``: an in-memory
+        ``deque(maxlen = client_debug_size)`` that is NOT persisted and is lost
+        on hub restart. It is a rolling recent-window troubleshooting view served
+        by ``GET /api/cs/clients/{host}/debug-logs`` (routes/client_debug.py),
+        not an audit log. The 30-min client-side auto-off + the deque cap is the
+        memory backstop; advanced level (journal/dmesg) is chatty.
+
+        Also enforces a hub-side auto-off belt-and-suspenders: once a host's
+        session is past the 30-min window (``enabled_at`` recorded by the POST
+        route), new frames are dropped so a client that drops and re-streams past
+        the window can't keep filling the buffer.
+        """
+        data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+        hostname = data.get("hostname")
+        if not hostname:
+            return
+        try:
+            tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id)) or "default"
+        except Exception:  # noqa: BLE001 — tenant resolution is best-effort
+            tenant = "default"
+        key = (tenant, str(hostname))
+
+        # Hub-side auto-off: drop frames past the session window. ``enabled_at``
+        # is recorded by the POST /debug route; the client tailer self-stops at
+        # the same window, but this guards a reconnect/re-stream after the cut.
+        sess = self.client_debug_sessions.get(key) or {}
+        enabled_at = sess.get("enabled_at")
+        if isinstance(enabled_at, (int, float)) and time.time() - float(enabled_at) > 30 * 60:
+            return
+
+        lines = data.get("lines") if isinstance(data.get("lines"), list) else []
+        if not lines:
+            return
+        if key not in self.client_debug_logs:
+            self.client_debug_logs[key] = deque(maxlen=self.client_debug_size)
+        # Stamp each line with the hub receive time + originating level so the
+        # WebUI panel can render/sort/group without needing client clocks.
+        _ts = time.time()
+        _lvl = str(data.get("level") or (sess.get("level") or "basic"))
+        for line in lines:
+            if isinstance(line, str):
+                self.client_debug_logs[key].append({"ts": _ts, "level": _lvl, "line": line})
+        logger.debug("CS_DEBUG_LOG: stored %d lines for %s/%s", len(lines), tenant, hostname)
+
     def _inherit_agent_tenant(self, agent_id: str, spoke_id: str) -> None:
         """Stamp the spoke's tenant onto the agent's ``client_simulation.tenant_id``.
 
@@ -4502,6 +4570,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # See _handle_spoke_log for the ingest + agent_logs buffering.
                 if payload.get("type") == "SPOKE_LOG":
                     await self._handle_spoke_log(spoke_id, payload)
+                    continue
+
+                # --- Remote client debug-log streaming (CS_DEBUG_LOG) ---
+                # A cs client flipped into "debug mode" from the WebUI has its
+                # agent.sh tailer stream sim.log + debug-* logs (advanced adds
+                # journal/dmesg) up through the cs spoke, which relays them here.
+                # Ingest into a per-(tenant,hostname) ring buffer (same ephemeral
+                # deque contract as SPOKE_LOG/agent_logs) and serve via
+                # GET /api/cs/clients/{host}/debug-logs (routes/client_debug.py).
+                if payload.get("type") == "CS_DEBUG_LOG":
+                    await self._handle_cs_debug_log(spoke_id, payload)
                     continue
 
                 # --- Console serial relay (CONSOLE_DATA_UP / READY / ERROR / CLOSED) ---

@@ -4195,6 +4195,81 @@ async function loadBugReports() {
     }
 }
 
+// ── Remote Client Debug Log panel ────────────────────────────────────────────
+// Streams one cs client's debug logs from the hub's per-host ring buffer
+// (CS_DEBUG_LOG → _handle_cs_debug_log → GET /api/cs/clients/{host}/debug-logs).
+// Clones loadRecoveryLogs' shape but feeds the hub's {ts,level,line} entries
+// reformatted into the canonical "<ts> - <src> - DEBUG - <line>" string the
+// shared _renderGroupedLogs/_renderLogLineRow/_logLineKey helpers expect, so
+// repeat-collapsing + timestamp highlighting work unchanged. Live-refreshes via
+// pollManager (modeled on startLeInflightPollers/clearLeInflightPollers): the
+// poller self-unregisters when the modal is gone, so no manual clearInterval.
+let _clientDebugPoller = null;
+function _clientDebugFmtTs(epoch) {
+    // YYYY-MM-DD HH:MM:SS (UTC) — the regex in _renderLogLineRow keys on this
+    // exact shape; entries carry the hub receive time (epoch seconds), not a
+    // pre-formatted asctime. UTC keeps it unambiguous across boxes.
+    const d = new Date((epoch || 0) * 1000);
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+}
+async function _loadClientDebugLog(host, tenantRaw) {
+    const container = document.getElementById('client-debug-log-body');
+    if (!container) return;
+    try {
+        const data = await apiJson(`/api/cs/clients/${encodeURIComponent(host)}/debug-logs?tenant=${encodeURIComponent(tenantRaw || '')}`);
+        const headerEl = document.getElementById('client-debug-status');
+        if (headerEl) {
+            const until = data.active_until ? new Date(data.active_until * 1000).toLocaleTimeString() : null;
+            headerEl.innerHTML = data.active
+                ? `<span class="text-green-600 font-semibold">● Active</span>${data.level ? ` · ${escapeHtml(data.level)}` : ''}${until ? ` · auto-off ~${escapeHtml(until)}` : ''}`
+                : `<span class="text-slate-400">○ Inactive</span>`;
+        }
+        // Newest-first (the deque iterates oldest→newest); format each entry to
+        // the canonical log-line shape so _renderGroupedLogs groups repeats.
+        const lines = (data.logs || []).slice().reverse()
+            .map(e => `${_clientDebugFmtTs(e.ts)} - ${host}:${e.level || 'basic'} - DEBUG - ${e.line || ''}`);
+        container.innerHTML = lines.length === 0
+            ? `<div class="py-12 text-center text-slate-400 italic">No debug log lines yet for ${escapeHtml(host)}. Enable Debug then wait a few seconds for the client's tailer to stream up.</div>`
+            : _renderGroupedLogs(lines);
+    } catch (err) {
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading debug logs: ${err.message}</div>`;
+    }
+}
+window.openClientDebugLog = function (host, tenantRaw) {
+    const body = `
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="text-sm font-bold text-slate-700">Client Debug Log — <span class="font-mono">${escapeHtml(host)}</span></h3>
+        <span id="client-debug-status" class="text-xs text-slate-400"></span>
+      </div>
+      <div class="flex justify-end gap-2 mb-2">
+        <button onclick="window._clientDebugStop('${escapeHtml(host)}','${escapeHtml(tenantRaw || '')}')"
+          class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1 rounded text-xs font-bold">Stop Debug</button>
+      </div>
+      <div id="client-debug-log-body" class="h-[34rem] overflow-y-auto bg-white border border-slate-200 rounded-md text-slate-700"></div>
+      <p class="text-[10px] text-slate-400 mt-2">Live logs from the client's <code>sim.log</code> + debug logs (advanced adds journal/dmesg). Ephemeral — cleared on hub restart. 30-min auto-off. Times are UTC.</p>`;
+    openModal('client-debug-modal', body,
+        { card: 'w-full max-w-3xl p-5 max-h-[92vh] flex flex-col', backdropClose: true });
+    if (_clientDebugPoller) { pollManager.unregister(_clientDebugPoller); _clientDebugPoller = null; }
+    _loadClientDebugLog(host, tenantRaw);
+    _clientDebugPoller = pollManager.register(() => {
+        // Self-clean: when the modal was closed (backdrop/Stop/close), the next
+        // tick finds it gone and unregisters — no separate close handler needed.
+        if (!document.getElementById('client-debug-modal')) {
+            pollManager.unregister(_clientDebugPoller); _clientDebugPoller = null; return;
+        }
+        _loadClientDebugLog(host, tenantRaw);
+    }, 3000);
+};
+window._clientDebugStop = async function (host, tenantRaw) {
+    try {
+        await apiJson(`/api/cs/clients/${encodeURIComponent(host)}/debug?tenant=${encodeURIComponent(tenantRaw || '')}`,
+            { method: 'DELETE' });
+        showToast(`Debug stopped for ${host}`, 'success');
+        _loadClientDebugLog(host, tenantRaw);
+    } catch (e) { showToast(`Stop failed: ${e.message}`, 'error'); }
+};
+
 async function showBugReport(rid) {
     const overlay = document.createElement('div');
     overlay.id = 'bug-detail-overlay';

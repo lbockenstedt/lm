@@ -1223,6 +1223,16 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Simulations module access required"})
 
+        # /api/cs/* (Simulations module REST surface — currently the per-client
+        # remote Debug Mode control + log read, routes/client_debug.py) requires
+        # the ``cs`` right OR admin, mirroring the /sim/api/ gate. Per-tenant
+        # ownership + the read/write tier are re-enforced inside the route via
+        # access.read_scope/write_scope (same defense-in-depth as firewall/nw).
+        if path.startswith("/api/cs/"):
+            if not (_is_admin(sess) or _has_cs_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Simulations module access required"})
+
         # /api/nw/* (Network Devices module) requires the ``nw`` right OR admin.
         # Mirrors the cs gate: frontend hides the Network nav on the same right.
         if path.startswith("/api/nw/"):
@@ -1673,7 +1683,7 @@ def create_app(hub):
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
         setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes, notifications as notifications_routes, collab,
-    hub_watchdog as hub_watchdog_routes, netbox_sso as netbox_sso_routes, security as security_routes,
+    hub_watchdog as hub_watchdog_routes, netbox_sso as netbox_sso_routes, security as security_routes, client_debug as client_debug_routes,
     )
     security_routes.register(app, hub, ctx)
     setup.register(app, hub, ctx)
@@ -1707,6 +1717,7 @@ def create_app(hub):
     exec_routes.register(app, hub, ctx)
     self_backup.register(app, hub, ctx)
     collab.register(app, hub, ctx)
+    client_debug_routes.register(app, hub, ctx)
 
     # ── H1: scrub internal-exception detail from 5xx for non-Global callers ──
     # Routes raise ``HTTPException(500, detail=str(e))`` in their
