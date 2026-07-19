@@ -55,6 +55,7 @@ def register(app, hub, ctx):
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return False
         payload = {"devices": _project_nw_devices_for_push(_nw_devices_for_spoke(hub, spoke_id)),
+                   "shared_tenant_id": access.shared_tenant_id() or "",
                    "default_poll_interval":
                        (hub.state.system_state.get("global_config", {}) or {})
                        .get("nw_poll_default_interval")}
@@ -62,23 +63,119 @@ def register(app, hub, ctx):
         await hub.send_to_spoke(msg)
         return True
 
+    def _authz_nw_device(request, device_id, write=False):
+        """Authorize + classify a per-device nw op by the device's OWNING
+        tenant. Returns ``(dev, scope, spoke_id)``. Raises 404 (unknown id) /
+        403 (no access). Mirrors ``_authz_firewall`` (firewall.py:17-46).
+
+        ``scope`` folds the caller's tier with the device's tenancy
+        (access.read_scope / write_scope): ``"full"`` (admin, or a device
+        DEDICATED to the caller's own tenant → whole device), ``"filtered"``
+        (a SHARED device → only the caller's tenant subnet slice via
+        ``_filter_nw``), ``"deny"`` → 403. ``spoke_id`` resolves from the
+        RECORD's ``spoke_id`` (per-tenant spokes), falling back to
+        ``get_nw_spoke_for_tenant`` / ``get_nw_spoke_for_shared`` — never an
+        unassigned fallback (no cross-tenant leak). Empty ``spoke_id`` → the
+        caller raises 503 (device's spoke not connected)."""
+        hub = app.state.hub
+        devices = (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices", []) or []
+        dev = next((d for d in devices if isinstance(d, dict) and d.get("id") == device_id), None)
+        if not dev:
+            raise HTTPException(status_code=404, detail="Network device not found")
+        sess = _session_user(request)
+        tid = dev.get("tenant_id", "")
+        scope = access.write_scope(sess, tid) if write else access.read_scope(sess, tid)
+        if scope == "deny":
+            raise HTTPException(status_code=403,
+                                detail="You do not have access to this network device")
+        # Resolve the spoke from the record's spoke_id (per-tenant); if it's
+        # unset/disconnected, fall back to the tenant/shared resolver (which
+        # returns only a connected, approved, tenant-bound spoke — or None).
+        spoke_id = dev.get("spoke_id") or ""
+        if (not spoke_id
+                or hub._primary_key(spoke_id) not in hub.active_connections):
+            spoke_id = (hub.get_nw_spoke_for_shared()
+                        if access.tenant_is_shared(tid)
+                        else hub.get_nw_spoke_for_tenant(tid)) or ""
+        if spoke_id and hub._primary_key(spoke_id) not in hub.active_connections:
+            spoke_id = ""
+        return dev, scope, spoke_id
+
+    async def _filter_nw_optional(scope, request, data, endpoint, tenant):
+        """Apply the nw subnet filter ONLY when the reader is scoped or
+        acting-as. A ``"full"``-scope reader (admin, or a device DEDICATED to
+        the caller's own tenant) with no explicit ``?tenant=`` gets the whole
+        device — preserves admin/own-tenant behavior. ``"filtered"`` (shared
+        device) or an explicit ``?tenant=`` (admin acting-as) applies
+        ``_filter_nw`` (shared → the viewer's session-tenant slice; acting-as
+        → the named tenant's slice)."""
+        if scope == "full" and not tenant:
+            return data
+        return await _filter_nw(request, data, endpoint, tenant)
+
     @app.get("/api/nw/devices")
     async def nw_list_devices(request: Request, tenant: str = None):
-        """List the nw fleet from the spoke (admin) — unfiltered (devices are
-        managed infra shown to all). Tenant scoping has no IP to filter on.
+        """List the nw fleet, tenant-scoped. Admin → the whole fleet (all
+        connected nw spokes). Non-admin → own-tenant + shared devices only
+        (the shared-tenant-flag invariant); other-tenant / unassigned devices
+        are admin-only. The hub config (``nw_devices``, tenant-stamped) is the
+        AUTHORITATIVE visibility gate: live spoke rows are intersected with the
+        reader's visible config set so a stale/leaky spoke can't surface a
+        device the reader can't see (the cross-tenant leak this closes).
 
-        Caches the last-known fleet (``nw_cache``) on every live fetch and
-        serves it (marked ``stale``) when the nw spoke is offline, so a hub
-        restart / spoke outage still seeds the Network Devices table."""
-        logger.debug("relay GET /api/nw/devices tenant=%s", tenant)
+        Caches the whole-fleet (admin) fetch and serves it tenant-filtered
+        (``nw_cache_get_fleet_filtered``) when no relevant spoke is connected,
+        so a spoke outage still seeds the Network Devices table without
+        cross-tenant leak. ``?tenant=`` is accepted for signature compat (the
+        fleet list is inventory, no IP to subnet-filter on)."""
         hub = app.state.hub
-        # Gated by the ``nw`` module right in the middleware; the fleet list is
-        # managed-infra inventory (no per-device IPs) shown to nw-right users.
-        spoke_id = hub.get_spoke_by_type("nw")
-        if not spoke_id:
-            cached = hub.nw_cache_get_fleet()
+        sess = _session_user(request)
+        is_admin = _is_admin(sess)
+        # Authoritative visibility: the hub config is the source of truth for
+        # the device list (addresses/creds/tenant_id); the spoke adds live
+        # reachability. A row is visible iff its tenant_id is admin / shared /
+        # the reader's own (spoke_visible_to_session).
+        all_devs = (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices", []) or []
+        visible = [d for d in all_devs if isinstance(d, dict)
+                   and (is_admin or access.spoke_visible_to_session(sess, d.get("tenant_id", "")))]
+        visible_ids = {d.get("id") for d in visible if d.get("id")}
+
+        # Resolve the connected, approved nw spoke(s) to query for live data.
+        # Admin → every connected nw spoke (whole fleet per spoke, no tenant
+        # filter). Non-admin → the spoke(s) bound to the reader's own tenant(s)
+        # + the shared-tenant spoke (shared devices live there); the spoke-side
+        # tenant filter returns own+shared from each. No shared tenant → no
+        # shared spoke (never the global fallback, which would leak the fleet).
+        if is_admin:
+            spokes = [s for s in (hub.get_all_spokes_by_type("nw") or [])
+                      if s in hub.active_connections
+                      and hub.approved_modules.get(s, False)]
+            spoke_to_tid = {s: "" for s in spokes}
+        else:
+            spoke_to_tid = {}
+            for t in ((sess or {}).get("user", {}).get("tenants") or []):
+                s = hub.get_nw_spoke_for_tenant(t)
+                if s:
+                    spoke_to_tid[s] = t
+            shared_tid = access.shared_tenant_id()
+            if shared_tid:
+                s = hub.get_nw_spoke_for_shared()
+                if s:
+                    spoke_to_tid[s] = shared_tid
+            spoke_to_tid = {s: t for s, t in spoke_to_tid.items()
+                            if s in hub.active_connections
+                            and hub.approved_modules.get(s, False)}
+            spokes = list(spoke_to_tid)
+
+        if not spokes:
+            # No live spoke for the reader's slice → serve the cached fleet,
+            # tenant-filtered (the leak fix: never serve the whole global cache
+            # to a non-admin). Admin predicate is all-True (whole cache).
+            cached = hub.nw_cache_get_fleet_filtered(
+                lambda r: is_admin
+                or access.spoke_visible_to_session(sess, r.get("tenant_id", "")))
             if cached:
-                out = dict(cached.get("devices") or {})
+                out = dict((cached.get("devices") or {}))
                 out["stale"] = True
                 out["fetched_at"] = cached.get("fetched_at")
                 out["message"] = (out.get("message") or
@@ -86,40 +183,63 @@ def register(app, hub, ctx):
                 return out
             raise HTTPException(status_code=503,
                                 detail="Network Devices spoke not connected")
-        try:
-            result = await hub.request_response(spoke_id, "NW_LIST_DEVICES", {})
-            data = access.unwrap_spoke(result)
-            await hub.nw_cache_set_fleet(data)
-            return data
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.exception("nw_list_devices failed")
-            raise HTTPException(status_code=500, detail=str(e))
+
+        # Fan out NW_LIST_DEVICES (admin: {} = whole fleet per spoke; non-admin:
+        # {"tenant": tid} = own+shared from that spoke) + merge rows by id.
+        merged, seen = [], set()
+        for sid in spokes:
+            tid = spoke_to_tid.get(sid, "")
+            payload = {"tenant": tid} if tid else {}
+            try:
+                result = await hub.request_response(sid, "NW_LIST_DEVICES", payload,
+                                                    timeout=20.0)
+                env = access.unwrap_spoke(result)
+                rows = env.get("data") if isinstance(env, dict) else None
+                if isinstance(rows, list):
+                    for r in rows:
+                        if isinstance(r, dict) and r.get("id") and r["id"] not in seen:
+                            seen.add(r["id"])
+                            merged.append(r)
+            except Exception as e:
+                logger.warning("nw_list_devices: spoke %s fetch failed: %s", sid, e)
+
+        # Authoritative gate: drop any row not in the reader's visible config
+        # set (defense-in-depth against a stale/leaky spoke).
+        if visible_ids:
+            merged = [r for r in merged if r.get("id") in visible_ids]
+
+        env = {"status": "SUCCESS", "data": merged,
+               "message": f"{len(merged)} device(s)"}
+        # The global cache holds the WHOLE fleet (last admin fetch) so the
+        # offline path serves a complete, filterable snapshot — only update it
+        # from a whole-fleet (admin) fetch, never a non-admin subset.
+        if is_admin:
+            try:
+                await hub.nw_cache_set_fleet(env)
+            except Exception:
+                logger.debug("nw_list_devices: cache set failed", exc_info=True)
+        return env
 
     @app.get("/api/nw/{device_id}/{endpoint}")
     async def nw_get_device_data(request: Request, device_id: str, endpoint: str,
                                  tenant: str = None):
-        """Live per-device nw data (info|macs|arp|interfaces).
+        """Live per-device nw data (info|macs|arp|interfaces|endpoints|vlans),
+        tenant-gated. ``_authz_nw_device`` resolves the device record, classifies
+        the read scope, and resolves the spoke from the record's ``spoke_id``
+        (per-tenant) — 404 unknown, 403 other-tenant/unassigned, 503 spoke down.
 
         ``endpoint`` selects the device sub-resource → the NW_GET_<X> command.
-        Results are tenant-prefix-filtered via ``_filter_nw`` before return
-        (MAC/ARP/interfaces carry IPs; info does not). ``?tenant=`` scopes the
-        filter to the selected tenant so an admin acting as a tenant sees only
-        that tenant's subnet data — without it, admins bypass the filter (see
-        access.filter_nw).
+        Results are subnet-filtered via ``_filter_nw`` ONLY when the reader is
+        scoped (shared device → ``"filtered"``) or acting-as (``?tenant=``); a
+        ``"full"``-scope reader (admin, or a device dedicated to the caller's
+        own tenant) with no explicit tenant gets the whole device (preserves
+        admin/own-tenant behavior). MAC/ARP/interfaces carry IPs; info does not.
 
-        Caches the raw per-device endpoint envelope (``nw_cache``) on every live
-        fetch and serves it (marked ``stale``, tenant-filtered) when the nw
-        spoke is offline, so a hub restart / spoke outage still seeds the
-        device sub-views. The cache stores the *raw* envelope so the tenant
-        subnet filter is re-applied per-reader from the same cached data."""
+        Caches the raw per-device endpoint envelope on every live fetch and
+        serves it (marked ``stale``, scope-filtered) when the spoke is offline.
+        The cache is gated by the same ``_authz_nw_device`` check, so a
+        non-admin can't fetch another tenant's device cache."""
         hub = app.state.hub
-        # Gated by the ``nw`` module right in the middleware; per-device rows are
-        # subnet-filtered for non-admins via _filter_nw (mac/arp/interfaces). The
-        # ``info`` endpoint carries no tenant IP, so it is device metadata shown to
-        # nw-right users. Live-data reads only; nw device CONFIG (with tenant
-        # binding) is managed under /tenant/devices/nw-devices.
         command_map = {
             "info":       "NW_GET_DEVICE_INFO",
             "macs":       "NW_GET_MAC_TABLE",
@@ -132,39 +252,45 @@ def register(app, hub, ctx):
         if not spoke_cmd:
             raise HTTPException(status_code=400, detail=f"Endpoint {endpoint} not supported by nw module")
         logger.debug("relay GET /api/nw/%s/%s tenant=%s", device_id, endpoint, tenant)
-        spoke_id = hub.get_spoke_by_type("nw")
+        dev, scope, spoke_id = _authz_nw_device(request, device_id)
+        tid = dev.get("tenant_id", "")
+        # Defense-in-depth: re-check on the spoke via the tenant filter (the
+        # spoke rejects a device whose tenant_id is neither the passed tenant
+        # nor the shared tenant — Stage 1).
+        relay_payload = {"device_id": device_id}
+        if tid:
+            relay_payload["tenant"] = tid
+        # endpoints/vlans run three sequential SSH gathers (arp+mac+interfaces)
+        # on the spoke, so the 5s default relay timeout is far too short — give
+        # them room; the single-datum views get a comfortable margin too.
+        timeout = 45.0 if endpoint in ("endpoints", "vlans") else 20.0
         if not spoke_id:
             cached = hub.nw_cache_get_device(device_id, endpoint)
             if cached is not None:
-                filtered = await _filter_nw(request, cached, endpoint, tenant)
+                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant)
                 if isinstance(filtered, dict):
                     filtered = dict(filtered)
                     filtered["stale"] = True
                 return filtered
             raise HTTPException(status_code=503,
                                 detail="Network Devices spoke not connected")
-        # endpoints/vlans run three sequential SSH gathers (arp+mac+interfaces)
-        # on the spoke, so the 5s default relay timeout is far too short — give
-        # them room; the single-datum views get a comfortable margin too.
-        timeout = 45.0 if endpoint in ("endpoints", "vlans") else 20.0
         try:
-            result = await hub.request_response(spoke_id, spoke_cmd,
-                                                {"device_id": device_id},
+            result = await hub.request_response(spoke_id, spoke_cmd, relay_payload,
                                                 timeout=timeout)
             data = access.unwrap_spoke(result)
             await hub.nw_cache_set_device(device_id, endpoint, data)
-            return await _filter_nw(request, data, endpoint, tenant)
+            return await _filter_nw_optional(scope, request, data, endpoint, tenant)
         except HTTPException:
             raise
         except Exception as e:
             # A slow/timed-out live fetch shouldn't blank the tab — serve the
-            # last-known cached value (marked stale) if we have one, so a heavy
-            # gateway that occasionally overruns still shows data.
+            # last-known cached value (marked stale, scope-filtered) if we have
+            # one, so a heavy gateway that occasionally overruns still shows data.
             cached = hub.nw_cache_get_device(device_id, endpoint)
             if cached is not None:
                 logger.warning("nw_get_device_data live fetch failed (%s/%s: %s)"
                                " — serving cached", device_id, endpoint, e)
-                filtered = await _filter_nw(request, cached, endpoint, tenant)
+                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant)
                 if isinstance(filtered, dict):
                     filtered = dict(filtered)
                     filtered["stale"] = True
@@ -175,7 +301,11 @@ def register(app, hub, ctx):
     @app.post("/api/nw/{device_id}/config")
     async def nw_run_config(device_id: str, request: Request):
         """Apply a CLI/REST config snippet to a device (admin-only). Body:
-        ``{"commands": ["...", ...]}``. Returns the spoke's applied/errors lists."""
+        ``{"commands": ["...", ...]}``. Returns the spoke's applied/errors lists.
+
+        Resolves the spoke from the device record's ``spoke_id`` (per-tenant)
+        via ``_authz_nw_device`` rather than the single global resolver, so a
+        config push lands on the spoke that owns the device."""
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
@@ -187,10 +317,15 @@ def register(app, hub, ctx):
         commands = (data or {}).get("commands", []) if isinstance(data, dict) else []
         if not isinstance(commands, list):
             raise HTTPException(status_code=400, detail="commands must be a list")
-        spoke_id = _get_nw_spoke(hub)
+        dev, _scope, spoke_id = _authz_nw_device(request, device_id, write=True)
+        if not spoke_id:
+            raise HTTPException(status_code=503,
+                                detail="Network Devices spoke not connected")
         try:
             result = await hub.request_response(spoke_id, "NW_RUN_CONFIG",
-                                                {"device_id": device_id, "commands": commands})
+                                                {"device_id": device_id,
+                                                 "commands": commands,
+                                                 "tenant": dev.get("tenant_id", "")})
             return access.unwrap_spoke(result)
         except HTTPException:
             raise
