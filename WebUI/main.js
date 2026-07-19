@@ -2039,6 +2039,20 @@ function unhideAllFirewallRules() {
 // intentionally does NOT use this helper — its rows are full <table> rows with
 // action buttons and a different color scheme (bg-yellow-400 pending, green
 // dot without the 8px glow), so routing them here would change their output.
+// Friendly spoke/agent name. INVARIANT: the backend defaults display_name to
+// the node's own id (spoke_id/agent_id) when it's unnamed (setup.py
+// _aggregate_spokes, tenant_devices._bindable_spokes, hub_cert_distribution
+// mtls_readiness), so display_name is NEVER empty — a plain `display_name || id`
+// renders the GUID. Prefer a REAL display_name (≠ id), then the reported
+// hostname, then the id. Route every by-name spoke/agent render through this so
+// the UUID never leaks to the UI. Keep the raw id in a title= hover.
+function _spokeName(o) {
+    if (!o) return '';
+    const id = o.spoke_id || o.id || o.agent_id || '';
+    const dn = o.display_name;
+    return (dn && dn !== id) ? dn : (o.hostname || id);
+}
+
 function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle) {
     const dot = status === 'online'
         ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]'
@@ -2525,7 +2539,7 @@ function _applyHubHealth(diagData) {
             error: !!s.last_error,
             // Friendly label for the tray tooltip — the spoke_id is a GUID after
             // the guid-primary migration; show the name, keep the id on hover.
-            name: s.display_name || s.hostname || s.spoke_id,
+            name: _spokeName(s),
         };
     });
     renderSpokeIndicators();
@@ -2860,7 +2874,7 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
                 const agentData = await agentRes.json();
                 pxmxRows = [
                     ...(agentData.agents || []).map(a => ({ id: a.agent_id, label: a.display_name || a.hostname || a.agent_id, status: 'online', mod: 'Proxmox' })),
-                    ...(agentData.pending_agents || []).map(a => ({ id: a.agent_id, label: a.display_name || a.agent_id, status: 'pending', mod: 'Proxmox' })),
+                    ...(agentData.pending_agents || []).map(a => ({ id: a.agent_id, label: _spokeName(a), status: 'pending', mod: 'Proxmox' })),
                 ];
                 _pxmxAgentsCache = { ts: now, rows: pxmxRows };
             }
@@ -6022,7 +6036,7 @@ async function loadNwNetboxImport() {
         if (sel) {
             const nwSpokes = spokes.filter(s => s.module_type === 'nw' || /^(nw|network)/.test(s.spoke_id));
             sel.innerHTML = '<option value="">Auto (first nw spoke)</option>' +
-                nwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('');
+                nwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('');
         }
     } catch (e) { /* keep Auto */ }
     try {
@@ -10267,7 +10281,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
         } else {
             spokesWrap.innerHTML = `<div class="space-y-1.5">${trueSpokes.map(s => {
                 const sid = s.spoke_id;
-                const name = s.display_name || s.hostname || sid;
+                const name = _spokeName(s);
                 const approved = s.approved;
                 const mtRaw = String(s.module_type || '').toLowerCase();
                 const modLabel = moduleLabel(mtRaw);
@@ -10351,7 +10365,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     // "agent"); they approve through the standard spoke-approval path.
     const hubAgents = genericAgents.map(s => {
         const sid = s.spoke_id;
-        const dn = s.display_name || sid;
+        const dn = _spokeName(s);
         // The Module column names the product the agent runs. BugFixer is the
         // canonical generic hub agent; any other generic agent falls back to
         // its display name so the column still shows something meaningful.
@@ -10692,7 +10706,7 @@ async function loadSpokesAndAgents() {
     // view is browsable by name regardless of connect/approval order. Falls
     // back to spoke_id when no display_name is set.
     trueSpokes.sort((a, b) =>
-        (a.display_name || a.spoke_id || '').localeCompare(
+        (_spokeName(a) || '').localeCompare(
             (b.display_name || b.spoke_id || ''), undefined, { sensitivity: 'base' }));
 
     // Tenant filter (Setup → Spokes & Agents dropdown). Applied LAST — after the
@@ -19377,7 +19391,7 @@ function showAddFirewallModal() {
                 && _spokeBindable(s)
             );
             selector.innerHTML = fwSpokes.length > 0
-                ? '<option value="">— select spoke —</option>' + fwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('')
+                ? '<option value="">— select spoke —</option>' + fwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
                 : '<option value="">No firewall spokes found</option>';
         }
     });
@@ -19510,7 +19524,7 @@ function showAddNwDeviceModal() {
                 s.module_type === 'nw' || /^(nw|network)/.test(s.spoke_id)
             );
             selector.innerHTML = nwSpokes.length > 0
-                ? '<option value="">— select spoke —</option>' + nwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('')
+                ? '<option value="">— select spoke —</option>' + nwSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
                 : '<option value="">No network spokes found</option>';
         }
     });
@@ -19809,7 +19823,7 @@ ${schemaBtnHtml}
         if (!selector) return;
         const matched = spokes.filter(s => s.module_type === p.moduleType && _spokeBindable(s));
         selector.innerHTML = matched.length > 0
-            ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('')
+            ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
             : `<option value="">No ${p.moduleType} spokes found</option>`;
         if (editItem) selector.value = editItem.spoke_id || '';
     });
@@ -19963,7 +19977,7 @@ async function loadAllDevices() {
     const _spokeNameById = {};
     try {
         (await loadApprovedSpokes()).forEach(s => {
-            _spokeNameById[s.spoke_id] = s.display_name || s.hostname || s.spoke_id;
+            _spokeNameById[s.spoke_id] = _spokeName(s);
         });
     } catch (e) { /* best-effort — fall back to the id below */ }
     listEl.innerHTML = all.map(d => {
@@ -20051,7 +20065,7 @@ function _renderDeviceModalFields(typeKey, values) {
                               .filter(_spokeBindable);
         const current = values ? values.spoke_id : '';
         selector.innerHTML = matched.length > 0
-            ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}"${s.spoke_id === current ? ' selected' : ''} title="${escapeHtml(s.spoke_id)}">${escapeHtml(s.display_name || s.hostname || s.spoke_id)}</option>`).join('')
+            ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}"${s.spoke_id === current ? ' selected' : ''} title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
             : `<option value="">No ${t.moduleType || ''} spokes found</option>`;
     });
 }

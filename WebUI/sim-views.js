@@ -7129,7 +7129,7 @@ async function csRenderSpokeManagement() {
         const dataAttrs = `data-cs-spoke="${csEscape(s.spoke_id).toLowerCase()}" data-cs-name="${csEscape((s.display_name || s.spoke_id || '').toLowerCase())}"`;
         return `<tr class="cs-spoke-row" ${dataAttrs}>
           <td class="px-3 pt-2 pb-1 font-mono text-xs whitespace-nowrap">${csEscape(s.spoke_id)}</td>
-          <td class="px-3 pt-2 pb-1 text-sm whitespace-nowrap">${csEscape(s.display_name || s.spoke_id)}</td>
+          <td class="px-3 pt-2 pb-1 text-sm whitespace-nowrap">${csEscape((s.display_name && s.display_name !== s.spoke_id) ? s.display_name : (s.hostname || '—'))}</td>
           <td class="px-3 pt-2 pb-1 whitespace-nowrap">${typeBadge(s.module_type)}</td>
           <td class="px-3 pt-2 pb-1 whitespace-nowrap">${csOnlineBadge(s.connected)}</td>
           <td class="px-3 pt-2 pb-1 whitespace-nowrap">${s.approved ? '<span class="text-green-600 text-xs font-bold">Approved</span>' : '<span class="text-amber-600 text-xs font-bold">Pending</span>'}</td>
