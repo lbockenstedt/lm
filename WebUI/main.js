@@ -2039,7 +2039,7 @@ function unhideAllFirewallRules() {
 // intentionally does NOT use this helper — its rows are full <table> rows with
 // action buttons and a different color scheme (bg-yellow-400 pending, green
 // dot without the 8px glow), so routing them here would change their output.
-function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
+function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle) {
     const dot = status === 'online'
         ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]'
         : (status === 'pending' ? 'bg-amber-400' : 'bg-slate-400');
@@ -2094,7 +2094,7 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant) {
         <div class="${container}">
             <div class="flex items-center gap-3">
                 <div class="w-2 h-2 rounded-full ${dot}"></div>
-                <span class="${nameCls}">${label}</span>
+                <span class="${nameCls}" title="${escapeHtml(String(idTitle || label))}">${escapeHtml(String(label))}</span>
                 ${(mod && mod !== '—') ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-slate-200 text-slate-600">${mod}</span>` : ''}
                 ${tenantChip}
             </div>
@@ -2818,10 +2818,14 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
         } else {
             spokeList.innerHTML = spokeListItems.map(spoke => {
                 const id = spoke.spoke_id;
+                // Show the friendly name (display_name → hostname → id) — spokes
+                // used to render the raw GUID here while agents already showed the
+                // name. Keep the GUID on hover via idTitle.
+                const name = spoke.display_name || spoke.hostname || id;
                 const mod = moduleLabel(spoke.module_type);
                 const status = !spoke.approved ? 'pending'
                     : (connections.includes(id) ? 'online' : 'offline');
-                return _renderSpokeAgentRow(id, mod, status, true, spoke.tenant_id);
+                return _renderSpokeAgentRow(name, mod, status, true, spoke.tenant_id, id);
             }).join('');
         }
     }
@@ -2866,7 +2870,7 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
     if (all.length === 0) {
         agentList.innerHTML = `<p class="text-xs text-slate-400 italic">No agents connected.</p>`;
     } else {
-        agentList.innerHTML = all.map(a => _renderSpokeAgentRow(a.label, a.mod, a.status, false)).join('');
+        agentList.innerHTML = all.map(a => _renderSpokeAgentRow(a.label, a.mod, a.status, false, undefined, a.id)).join('');
     }
 }
 
