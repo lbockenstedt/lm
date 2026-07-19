@@ -250,6 +250,47 @@ class SpokeRegistryMixin:
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
 
+    def get_nw_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
+        """Tenant-aware network-devices (nw) spoke — mirrors
+        ``get_hypervisor_spoke_for_tenant``. With a real ``tenant_id``, return
+        ONLY a connected, approved nw spoke BOUND to that tenant — NEVER one
+        bound to a different tenant (that would leak another tenant's devices
+        into this tenant's live data surface / offline cache). No unassigned
+        fallback: an unassigned nw spoke attributed to every asking tenant
+        would put the same fleet on every tenant row — exactly the leak the
+        nw tenant-scoping closes. If no nw spoke is bound to the tenant, the
+        tenant has no live devices (``None`` → caller falls back to the
+        offline cache / empty). Bind the spoke to the tenant to see its
+        devices.
+
+        With ``tenant_id`` None / ``"default"`` (admin unscoped / global view),
+        fall back to ``get_spoke_by_type("nw")`` so the admin's Network
+        Devices page still shows the global fleet (unchanged legacy behavior).
+        """
+        if not tenant_id or tenant_id == "default":
+            return self.get_spoke_by_type("nw")
+        cands = [sid for sid in (self.get_all_spokes_by_type("nw") or [])
+                 if sid in self.active_connections
+                 and self.approved_modules.get(sid, False)]
+        if not cands:
+            return None
+        md = self.state.system_state.get("module_metadata", {})
+        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        return bound[0] if bound else None
+
+    def get_nw_spoke_for_shared(self) -> Optional[str]:
+        """The nw spoke that owns the SHARED-tenant devices. Shared devices are
+        visible to every tenant (the shared-tenant-flag invariant), so when a
+        non-admin's visible slice includes a shared device the hub must relay
+        to the spoke bound to the shared tenant. Resolves the shared tenant id
+        via ``access.shared_tenant_id`` (lazy local import — ``access`` never
+        imports the registry, so it's cycle-safe) then defers to
+        ``get_nw_spoke_for_tenant``. With no shared tenant configured, falls
+        back to the global nw spoke (admin path)."""
+        from access import shared_tenant_id
+        sid = shared_tenant_id()
+        return self.get_nw_spoke_for_tenant(sid) if sid else self.get_spoke_by_type("nw")
+
     def get_all_spokes_by_type(self, module_type: str):
         """Return all connected spoke IDs that advertised the given module_type."""
         # netbox-server is a capability (advertised in the auth frame), not a
