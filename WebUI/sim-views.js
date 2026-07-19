@@ -6397,6 +6397,15 @@ window.csVmBulk = async function (action) {
         if (fail) showToast(`${action}: ${ok} queued, ${fail} failed`, 'error');
         else csVmFlash(`${action} queued for ${ok} VM(s)`);
     }
+    // The bulk selection has been consumed — clear it. Leaving boxes checked
+    // pins csUserIsEditing() true (a checked .cs-vm-sel is its "pending
+    // selection" signal), which makes csRenderVmServerVms bail before
+    // re-rendering on every burst-refresh tick below — so the page would never
+    // reflect the delete/reclone (the stale checked boxes block the very
+    // refresh meant to show them draining). Clearing unlocks the next tick;
+    // the re-render then rebuilds the table from fresh data anyway.
+    document.querySelectorAll('.cs-vm-sel').forEach(cb => { cb.checked = false; });
+    const _sa = document.getElementById('cs-vm-selectall'); if (_sa) _sa.checked = false;
     // Burst-refresh so the batch visibly drains. Scale the window to the batch
     // size (a 48-VM delete takes a while), capped at 5min; live-op events extend
     // it further while any teardown is still running.
