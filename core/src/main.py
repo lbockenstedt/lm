@@ -835,6 +835,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             os.makedirs(self.bug_dir, exist_ok=True)
         except Exception as e:
             logger.warning(f"[bug-report] could not create bug_dir {self.bug_dir}: {e}")
+        # Rebuild the bug-report index from disk so GET_BUG_REPORTS isn't empty
+        # after a restart (artifacts persist under bug_dir; the index didn't).
+        try:
+            self.warm_load_bug_reports()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("bug_reports warm load skipped: %s", e)
         self.is_ready = False
         # Overload self-protection: when memory (or, later, loop-lag) crosses a
         # watermark the hub enters PROTECT MODE — it sheds heavy read endpoints

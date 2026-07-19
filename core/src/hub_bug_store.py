@@ -120,6 +120,37 @@ class HubBugStoreMixin:
                 break
         return out
 
+    def warm_load_bug_reports(self) -> None:
+        """Rebuild the in-memory bug-report index from the artifacts already on
+        disk (``<data_dir>/bugs/<id>/report.json``) at boot — otherwise
+        GET_BUG_REPORTS returns empty after a restart and bugfixer can't enumerate
+        prior reports (and may re-file duplicates). Capped, most-recent first.
+        Best-effort; never raises."""
+        try:
+            import glob as _glob
+            entries = []
+            for p in _glob.glob(os.path.join(self.bug_dir, "*", "report.json")):
+                try:
+                    with open(p) as f:
+                        r = json.load(f) or {}
+                    if r.get("id"):
+                        entries.append((float(r.get("ts", 0) or 0), r))
+                except Exception:  # noqa: BLE001
+                    continue
+            entries.sort(key=lambda e: e[0], reverse=True)
+            for _ts, r in entries[: self.bug_report_limit]:
+                self.bug_reports[r["id"]] = {
+                    "id": r["id"], "summary": str(r.get("explanation", ""))[:120],
+                    "severity": r.get("severity", "medium"), "ts": r.get("ts", 0),
+                    "filed": bool(r.get("filed")), "issue_url": r.get("issue_url", ""),
+                    "context": r.get("context") or {},
+                    "has_screenshot": bool(r.get("screenshot_file")),
+                }
+            if self.bug_reports:
+                logger.info("bug_reports: warm-loaded %d report(s) from disk", len(self.bug_reports))
+        except Exception as e:  # noqa: BLE001
+            logger.debug("bug_reports warm load skipped: %s", e)
+
     def _mark_bug_filed(self, rid: str, issue_url: str) -> bool:
         meta = self.bug_reports.get(rid)
         if not meta:
