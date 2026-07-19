@@ -4028,9 +4028,10 @@ function _renderLogsSection(subMenu) {
                 </div>
             </div>
             <div id="system-logs-container" class="h-[32rem] overflow-y-auto font-mono text-xs bg-white border border-slate-200 rounded-md text-slate-700 space-y-0"></div>
-        </div>`;
+        </div>${isRecovery && typeof isAdmin === 'function' && isAdmin() ? _stateResetCardHtml() : ''}`;
     if (isRecovery) {
         loadRecoveryLogs();
+        if (typeof isAdmin === 'function' && isAdmin()) _initStateResetCard();
     } else if (isBugs) {
         loadBugReports();
     } else {
@@ -4038,6 +4039,82 @@ function _renderLogsSection(subMenu) {
     }
     refreshDebugButtonState();
 }
+
+// ── Corruption-recovery: reset DERIVED cached data (global / per-tenant) ──────
+// Wipes only regenerable cache/history JSON (sharded per tenant+module) — check
+// history, poll window, client-count, simulations_cache, central status. NEVER
+// touches config/identity (tenant registration, spoke PSKs, users, sessions), so
+// spokes stay connected + nobody is logged out; the data rebuilds from the next
+// poll/telemetry. Global-Admin only (backend re-gates). POST /admin/state/reset.
+function _stateResetCardHtml() {
+    return `
+        <div class="hpe-card rounded-lg mt-4 border border-amber-300">
+            <div class="px-4 py-3 border-b border-amber-200 bg-amber-50 rounded-t-lg">
+                <h3 class="text-sm font-bold text-amber-800">Reset cached data (corruption recovery)</h3>
+            </div>
+            <div class="p-4 space-y-3 text-xs text-slate-600">
+                <p>Wipes only <b>regenerable cache/history</b> (dashboard check history, poll window,
+                   client-count, VM/telemetry cache, central status). <b>Preserved:</b> tenants, spoke
+                   secrets, users, sessions — spokes stay connected, nobody is logged out. The data
+                   rebuilds from the next poll/telemetry cycle. Use only if a dashboard is stuck on
+                   corrupt/stale data.</p>
+                <div class="flex flex-wrap items-center gap-2">
+                    <select id="state-reset-tenant" class="border border-slate-300 rounded-md px-2 py-1 text-xs">
+                        <option value="">— select a tenant —</option>
+                    </select>
+                    <button onclick="resetDerivedState('tenant')"
+                        class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-md text-xs font-bold">
+                        Wipe this tenant's cached data</button>
+                    <span class="text-slate-300">|</span>
+                    <button onclick="resetDerivedState('global')"
+                        class="bg-red-100 hover:bg-red-200 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold">
+                        Wipe ALL cached data</button>
+                </div>
+                <div id="state-reset-status" class="text-[11px]"></div>
+            </div>
+        </div>`;
+}
+
+async function _initStateResetCard() {
+    const sel = document.getElementById('state-reset-tenant');
+    if (!sel) return;
+    try {
+        const data = await setupFetch('/setup/tenants').then(r => r.ok ? r.json() : null).catch(() => null);
+        const tenants = (data && (data.tenants || data)) || [];
+        (Array.isArray(tenants) ? tenants : []).forEach(t => {
+            const id = t.tenant_id || t.id || t;
+            const nm = t.name || t.display_name || id;
+            if (id) sel.insertAdjacentHTML('beforeend',
+                `<option value="${escapeHtml(String(id))}">${escapeHtml(String(nm))}</option>`);
+        });
+    } catch (e) { /* dropdown just stays empty-selectable */ }
+}
+
+window.resetDerivedState = async function (scope) {
+    const statusEl = document.getElementById('state-reset-status');
+    let url = '/admin/state/reset';
+    let label = 'ALL tenants';
+    if (scope === 'tenant') {
+        const sel = document.getElementById('state-reset-tenant');
+        const tid = sel && sel.value;
+        if (!tid) { if (statusEl) statusEl.textContent = 'Select a tenant first.'; return; }
+        url += '?tenant=' + encodeURIComponent(tid);
+        label = 'tenant "' + tid + '"';
+    }
+    const typed = window.prompt(`Type RESET to wipe cached data for ${label}.\n(Config, spokes, users are preserved.)`);
+    if (typed !== 'RESET') { if (statusEl) statusEl.textContent = 'Cancelled.'; return; }
+    if (statusEl) statusEl.textContent = 'Resetting…';
+    try {
+        const r = await setupFetch(url, { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) {
+            if (typeof showToast === 'function') showToast(`Cache reset (${label}) — ${d.files_removed ?? 0} file(s) removed; rebuilding.`, 'success');
+            if (statusEl) statusEl.textContent = `Done — removed ${d.files_removed ?? 0} file(s). Data rebuilds on the next poll.`;
+        } else {
+            if (statusEl) statusEl.textContent = 'Failed: ' + (d.detail || r.status);
+        }
+    } catch (e) { if (statusEl) statusEl.textContent = 'Error: ' + (e.message || e); }
+};
 
 // Recovery logs: the hub watchdog emits greppable [recovery] lines for every
 // restart/give-up/clear action. This loads the hub log and filters to those
