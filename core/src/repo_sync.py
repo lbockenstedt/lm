@@ -255,6 +255,11 @@ class RepoSyncMixin:
                   # card can itemize the ACTUAL module updates (le, pxmx, …)
                   # distinctly from the auxiliary provisioning_repos above.
                   "spokes": (hub_result.get("spokes") if isinstance(hub_result, dict) else None) or [],
+                  # Agent (module_type "agent") fan-out results, kept SEPARATE from
+                  # module spokes so the "Module updates" card doesn't show a wall
+                  # of agent UUID rows. Still fanned out on the schedule (with full
+                  # gating) — just not displayed in the spokes list.
+                  "agents": (hub_result.get("agents") if isinstance(hub_result, dict) else None) or [],
                   "update_health": update_health}
         try:
             await self.simulations_store.set_repo_sync_status(status)

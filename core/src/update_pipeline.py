@@ -1506,12 +1506,32 @@ class UpdatePipelineMixin:
                     logger.error(f"Failed to push update for {sid}: {err}")
                     update_results.append(f"{sid}: failed")
 
+        # ── separate agent updates from module-spoke updates ───────────────
+        # Generic agents (module_type "agent"; guid-armed on first connect so
+        # their approved_modules id is a UUID) are fanned out here on the
+        # schedule because they need SPOKE_UPDATE with the full version-gate /
+        # cooldown / blind-backstop above — update_agents_only lacks that
+        # gating and would storm-restart every cycle. But they are NOT module
+        # spokes, so keep them out of the "spokes" list (the WebUI "Module
+        # updates" card) so that card shows only the real module repos
+        # (pxmx/opnsense/cs/cppm/netbox/ldap/nw/le/roles) and not a wall of
+        # agent UUID rows. Split by each result row's effective module_type
+        # (the spoke id is the text before the first ":"). See the agent
+        # update fan-out vs the module-spoke one in update_agents_only.
+        agent_results = [r for r in update_results
+                         if self._effective_module_type(r.split(":", 1)[0]) == "agent"]
+        update_results = [r for r in update_results
+                          if self._effective_module_type(r.split(":", 1)[0]) != "agent"]
+
         if commits_changed:
             self.state.update_global_config({"spoke_update_commits": last_pushed,
                                              "spoke_update_pushed_ts": pushed_ts})
             await self.state.save_state_now()
 
         logger.info(f"Spoke update results: {update_results}")
+        if agent_results:
+            logger.info(f"Agent update results (separate from module spokes): "
+                        f"{agent_results}")
 
         if hub_updated or stale_reload:
             # Restart local in-repo spokes (dns/dhcp live inside the lm repo; they
@@ -1606,7 +1626,8 @@ class UpdatePipelineMixin:
                 _rmsg = f"Updated Hub to {remote_v} and triggered spoke updates. Server is restarting (rolled back automatically if it fails to boot)..."
             else:
                 _rmsg = "Hub code on disk was newer than the running process (stale process) — restarting to load it. Spoke updates triggered."
-            return {"status": "success", "message": _rmsg, "spokes": update_results}
+            return {"status": "success", "message": _rmsg,
+                    "spokes": update_results, "agents": agent_results}
 
         if update_failed:
             # An update WAS available and we tried to apply it, but the code did
@@ -1617,10 +1638,12 @@ class UpdatePipelineMixin:
             # no-op success (the reason a stale hub could sit un-updated silently).
             return {"status": "error",
                     "spokes": update_results,
+                    "agents": agent_results,
                     "message": (f"Hub update FAILED — still at {local_v}, target was {remote_v}. "
                                 f"Check hub logs (update_pipeline). "
                                 f"{len(update_results)} spoke update(s) attempted.")}
-        return {"status": "checked", "spokes": update_results, "message": f"Update successful. Hub is current at {local_v}. {len(update_results)} spoke(s) updating to latest."}
+        return {"status": "checked", "spokes": update_results, "agents": agent_results,
+                "message": f"Update successful. Hub is current at {local_v}. {len(update_results)} spoke(s) updating to latest."}
 
     async def update_spokes_only(self):
         """Send SPOKE_UPDATE to every approved spoke without touching the Hub itself.

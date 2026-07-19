@@ -326,3 +326,49 @@ def test_default_repo_for_missing_update_sources_keys():
     assert _default_repo_for_key("le", sources) == "https://github.com/lbockenstedt/le.git"
     assert _default_repo_for_key("cppm", sources) == "https://github.com/lbockenstedt/cppm.git"
     assert _default_repo_for_key("", sources) is None
+
+
+LM_REPO = "https://github.com/lbockenstedt/lm.git"
+_AGENT_UUID = "5db1754b-1234-4321-abcd-000000000001"
+
+
+@pytest.mark.asyncio
+async def test_agent_spokes_split_out_of_module_updates_display(patched_clock):
+    """Regression: agent-typed approved spokes (generic agents — guid-armed on
+    first connect so their approved_modules id is a UUID, module_type "agent")
+    are fanned out here on the schedule because they need SPOKE_UPDATE with the
+    full version-gate / cooldown / blind-backstop that ``update_agents_only``
+    lacks. But they are NOT module spokes, so they must NOT appear in the
+    ``spokes`` list (the WebUI "Module updates" card) — otherwise the card shows
+    a wall of agent UUID rows (the "16 UUIDs all triggered" symptom). Agent
+    result rows go to a separate ``agents`` list; the push still happens."""
+    hub = _StubHub(remote_tip="cccc1")
+    hub.state._gc["update_sources"] = {
+        "opnsense": OPNSENSE_REPO,
+        "agent": LM_REPO,
+        "hub": LM_REPO,
+    }
+    # An approved generic agent: UUID id, module_type "agent" via the PERSISTED
+    # module_metadata fallback (the live spoke_module_types map is popped on
+    # disconnect, so an offline/ghost agent resolves through this — exactly
+    # the path that produced the stray UUID rows).
+    hub.approved_modules[_AGENT_UUID] = True
+    hub.state.system_state["module_metadata"][_AGENT_UUID] = {"module_type": "agent"}
+    hub.active_connections[_AGENT_UUID] = object()
+
+    result = await hub.perform_update()
+
+    # Both were fanned out — the agent STILL gets its scheduled SPOKE_UPDATE
+    # (gating intact); only the DISPLAY is split.
+    assert len(hub.pushes) == 2
+    assert {p[0] for p in hub.pushes} == {"lm-opnsense-spoke-1", _AGENT_UUID}
+
+    spokes = result.get("spokes") or []
+    agents = result.get("agents") or []
+    # The module spoke shows in "spokes" (Module updates).
+    assert any("lm-opnsense-spoke-1" in r for r in spokes)
+    # The agent does NOT pollute the module-spokes list…
+    assert all(_AGENT_UUID not in r for r in spokes)
+    # …it is reported in the separate "agents" list instead.
+    assert any(_AGENT_UUID in r for r in agents)
+    assert all("lm-opnsense-spoke-1" not in r for r in agents)
