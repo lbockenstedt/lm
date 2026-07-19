@@ -29,6 +29,7 @@ from typing import Any, Dict, Optional
 
 from .aruba import ArubaClient
 from .check_eval import count_for_check, normalize_counts
+from tenant_sharded import migrate_legacy, shard_load, shard_save
 
 logger = logging.getLogger("CentralHubPoller")
 
@@ -443,9 +444,16 @@ class CheckPollWindow:
     single JSON file in the data dir (``save_samples``), restored (trimmed) on
     init so a verdict survives a hub restart within the hour."""
 
-    def __init__(self, path: str) -> None:
-        self._path = path
+    _MODULE = "simulations"
+    _NAME = "check_poll_window.json"
+
+    def __init__(self, data_dir: str) -> None:
+        # Sharded per tenant under <data_dir>/tenants/<tenant>/simulations/. One
+        # migrate-on-first-boot split of any legacy shared file, then load shards.
+        self._data_dir = data_dir
         self._samples: Dict[str, list] = {}    # key -> [(ts, is_pass: bool), ...]
+        self._dirty: set = set()               # tenants changed since last save
+        migrate_legacy(data_dir, self._MODULE, self._NAME)
         self._load()
 
     @staticmethod
@@ -453,18 +461,13 @@ class CheckPollWindow:
         return f"{tenant}{_CC_KEYSEP}{site}{_CC_KEYSEP}{check}"
 
     def _load(self) -> None:
-        now = time.time()
-        cutoff = now - _CPW_WINDOW
-        try:
-            with open(self._path, encoding="utf-8") as f:
-                raw = json.load(f) or {}
-            trimmed = {
-                k: [(float(ts), bool(p)) for ts, p in entries if float(ts) >= cutoff]
-                for k, entries in raw.items()
-            }
-            self._samples = {k: v for k, v in trimmed.items() if v}
-        except Exception:  # noqa: BLE001 — absent/corrupt → start empty
-            self._samples = {}
+        cutoff = time.time() - _CPW_WINDOW
+        raw = shard_load(self._data_dir, self._MODULE, self._NAME)
+        trimmed = {
+            k: [(float(ts), bool(p)) for ts, p in entries if float(ts) >= cutoff]
+            for k, entries in raw.items()
+        }
+        self._samples = {k: v for k, v in trimmed.items() if v}
 
     def record(self, tenant: str, site: str, check: str, is_pass: bool) -> None:
         """Append a PASS/FAIL sample and trim to the 1-hour window."""
@@ -474,6 +477,7 @@ class CheckPollWindow:
         samples.append((now, bool(is_pass)))
         cutoff = now - _CPW_WINDOW
         self._samples[key] = [s for s in samples if s[0] >= cutoff]
+        self._dirty.add(str(tenant))
 
     def _window(self, tenant: str, site: str, check: str) -> list:
         cutoff = time.time() - _CPW_WINDOW
@@ -501,31 +505,30 @@ class CheckPollWindow:
         return sum(1 for p in samples if p), len(samples)
 
     def save_samples(self) -> None:
-        """Persist the window (trimmed) every poll cycle so a restart within the
-        hour restores the verdict. Best-effort; small dict."""
+        """Persist the window (trimmed) per tenant so a restart within the hour
+        restores the verdict. Writes only tenants that changed since the last save
+        (recorded a sample OR had one trimmed away). Best-effort."""
         cutoff = time.time() - _CPW_WINDOW
-        trimmed = {
-            k: [(ts, p) for ts, p in v if ts >= cutoff]
-            for k, v in self._samples.items()
-        }
-        trimmed = {k: v for k, v in trimmed.items() if v}
-        self._persist(self._path, trimmed)
+        dirty = set(self._dirty)
+        new: Dict[str, list] = {}
+        for k, v in self._samples.items():
+            kept = [(ts, p) for ts, p in v if ts >= cutoff]
+            if len(kept) != len(v):
+                dirty.add(k.split(_CC_KEYSEP, 1)[0])   # trimmed → this tenant changed
+            if kept:
+                new[k] = kept
+        self._samples = new
+        shard_save(self._data_dir, self._MODULE, self._NAME, self._samples,
+                   dirty=(dirty or None))
+        self._dirty = set()
 
     def forget(self, tenant: str) -> None:
-        """Drop all state for a tenant (left centralized mode / cleared creds)."""
+        """Drop all in-memory state for a tenant (left centralized mode) and mark
+        it dirty so the next save removes its now-empty shard file."""
         prefix = f"{tenant}{_CC_KEYSEP}"
         for k in [k for k in self._samples if k.startswith(prefix)]:
             self._samples.pop(k, None)
-
-    @staticmethod
-    def _persist(path: str, data: dict) -> None:
-        try:
-            tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f)
-            os.replace(tmp, path)
-        except Exception as exc:  # noqa: BLE001 — persistence is best-effort
-            logger.warning("CheckPollWindow: persist failed (%s): %s", path, exc)
+        self._dirty.add(str(tenant))
 
 
 class CentralHubPoller:
@@ -546,7 +549,7 @@ class CentralHubPoller:
         self._health = CheckHealthHistory(os.path.join(ddir, "check_health_history.json"))
         # Rolling 1h PASS/FAIL window per check → the last-hour verdict override
         # (a check can't read OK if any poll failed within the hour).
-        self._cpw = CheckPollWindow(os.path.join(ddir, "check_poll_window.json"))
+        self._cpw = CheckPollWindow(ddir)
         # Per-tenant last-poll timestamps + the next loop sleep. The Central poll
         # interval is configurable per tenant (Setup → Central API → Connection);
         # tenants are gated by their own interval and the loop wakes on the
@@ -826,10 +829,18 @@ class CentralHubPoller:
         # first hour, before any hourly baseline is written) restores the actual
         # last-hour reference instead of showing NO_DATA for ~15 min while it
         # rebuilds. Cheap (small dict); best-effort.
-        self._cc.save_samples()
+        # Off the event loop (bounded per-tenant shard writes once per cycle) so
+        # they can't starve the WS loop — same discipline as _health.save below.
+        try:
+            await asyncio.to_thread(self._cc.save_samples)
+        except Exception as exc:  # noqa: BLE001 — never let persistence kill the poll
+            logger.debug("client-count samples persist skipped: %s", exc)
         # Persist the rolling 1h PASS/FAIL window too so the last-hour verdict
-        # survives a hub restart within the hour (same best-effort/small-dict).
-        self._cpw.save_samples()
+        # survives a hub restart within the hour.
+        try:
+            await asyncio.to_thread(self._cpw.save_samples)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("check poll window persist skipped: %s", exc)
         # Persist the per-check health history off-thread (bounded once-per-cycle write).
         try:
             await asyncio.to_thread(self._health.save)
