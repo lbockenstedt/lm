@@ -319,10 +319,18 @@ class CheckHealthHistory:
     health strip; ``hourly`` returns the raw hourly buckets for the on-hover
     breakdown. Persisted to one JSON file in the data dir (not sensitive)."""
 
-    def __init__(self, path: str) -> None:
-        self._path = path
+    _MODULE = "simulations"
+    _NAME = "check_health_history.json"
+
+    def __init__(self, data_dir: str) -> None:
+        # Sharded per tenant under <data_dir>/tenants/<tenant>/simulations/ — this
+        # is the largest, most write-amplified store (30-day hourly × all checks),
+        # so per-tenant files + dirty-only writes matter most here.
+        self._data_dir = data_dir
         # key = tenant\x1fsite\x1fcheck -> {hour_ts(int): [o, w, e, n]}
         self._h: Dict[str, Dict[int, list]] = {}
+        self._dirty: set = set()   # tenants changed since last save
+        migrate_legacy(data_dir, self._MODULE, self._NAME)
         self._load()
 
     @staticmethod
@@ -330,16 +338,12 @@ class CheckHealthHistory:
         return f"{tenant}{_CC_KEYSEP}{site}{_CC_KEYSEP}{check_id}"
 
     def _load(self) -> None:
-        try:
-            with open(self._path, encoding="utf-8") as f:
-                raw = json.load(f) or {}
-            cutoff = time.time() - _CC_30DAY_WINDOW
-            self._h = {
-                k: {int(b): list(v) for b, v in buckets.items() if int(b) >= cutoff}
-                for k, buckets in raw.items()
-            }
-        except Exception:  # noqa: BLE001 — absent/corrupt → start empty
-            self._h = {}
+        cutoff = time.time() - _CC_30DAY_WINDOW
+        raw = shard_load(self._data_dir, self._MODULE, self._NAME)
+        self._h = {
+            k: {int(b): list(v) for b, v in buckets.items() if int(b) >= cutoff}
+            for k, buckets in raw.items()
+        }
 
     def record(self, tenant: str, site: str, check_id: str, status: str) -> None:
         now = time.time()
@@ -353,16 +357,22 @@ class CheckHealthHistory:
         cutoff = now - _CC_30DAY_WINDOW
         for b in [b for b in buckets if b < cutoff]:
             del buckets[b]
+        self._dirty.add(str(tenant))
 
     def save(self) -> None:
-        try:
-            tmp = self._path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({k: {str(b): v for b, v in bk.items()}
-                           for k, bk in self._h.items()}, f, default=str)
-            os.replace(tmp, self._path)
-        except Exception:  # noqa: BLE001 — never let persistence kill the poll
-            pass
+        # Only rewrite tenants that recorded since the last save. int hour keys
+        # auto-stringify through json.dumps (shard_save); _load converts back.
+        shard_save(self._data_dir, self._MODULE, self._NAME, self._h,
+                   dirty=(self._dirty or None))
+        self._dirty = set()
+
+    def forget(self, tenant: str) -> None:
+        """Drop all in-memory buckets for a tenant + mark it dirty so its now-empty
+        shard file is removed on the next save (leaving centralized mode / reset)."""
+        prefix = f"{tenant}{_CC_KEYSEP}"
+        for k in [k for k in self._h if k.startswith(prefix)]:
+            self._h.pop(k, None)
+        self._dirty.add(str(tenant))
 
     def summary(self, tenant: str) -> Dict[str, Any]:
         """{site: {check_id: [{d, o, w, e, n} ... up to 30 daily]}} for the tenant."""
@@ -546,7 +556,7 @@ class CentralHubPoller:
             os.path.join(ddir, "client_count_samples.json"),
         )
         # 30-day per-check status history (green/yellow/red) for the health graphs.
-        self._health = CheckHealthHistory(os.path.join(ddir, "check_health_history.json"))
+        self._health = CheckHealthHistory(ddir)
         # Rolling 1h PASS/FAIL window per check → the last-hour verdict override
         # (a check can't read OK if any poll failed within the hour).
         self._cpw = CheckPollWindow(ddir)
