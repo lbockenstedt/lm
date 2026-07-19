@@ -13733,11 +13733,13 @@ window.pxmxBulkAction = async function (action) {
     if (!sel.length) { showToast('No VMs selected', 'info'); return; }
     if (['destroy', 'delete'].includes(action)) {
         if (!window.confirm(`DELETE ${sel.length} selected VM(s)?\n\nThis DESTROYS each VM and its disks (--purge) — IRREVERSIBLE. (VMs protected in Setup → Hypervisors are skipped.)`)) return;
-    } else if (['stop', 'reboot', 'restart', 'backup'].includes(action)) {
+    } else if (['stop', 'reboot', 'restart'].includes(action)) {
         const cfg = await pxmxHvConfig();
         if (cfg.confirm_destructive !== false &&
             !window.confirm(`${action.toUpperCase()} ${sel.length} selected VM(s)?`)) return;
     }
+    // Backup skips the confirm dialog — non-destructive (snapshot mode); go
+    // straight to the batched action and toast the per-VM results.
     const statusEl = document.getElementById('pxmx-bulk-status');
     // One batched request — the hub authorizes + relays each VM server-side
     // (bounded-concurrent) instead of the browser firing one POST per VM. Each
@@ -13751,7 +13753,7 @@ window.pxmxBulkAction = async function (action) {
     try {
         const r = await setupFetch('/api/pxmx/vm-action-bulk', {
             method: 'POST',
-            body: JSON.stringify({ action, items }),
+            body: JSON.stringify({ action, items, tenant: currentTenant }),
         });
         const d = await r.json().catch(() => ({}));
         if (r.ok && d && Array.isArray(d.results)) {
@@ -13895,7 +13897,7 @@ async function renderPxmxSettings(container) {
           </table></div>
         </div>
         <div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
-          <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded"/> Confirm before destructive VM actions (stop / restart / backup)</label>
+          <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded"/> Confirm before destructive VM actions (stop / restart / reboot)</label>
           ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-host-shell" type="checkbox" ${cfg.host_shell_enabled ? 'checked' : ''} class="rounded mt-0.5"/> <span>Enable <b>host terminal</b> (root shell on the Proxmox host via VM Server → Terminal). <span class="text-amber-600">Off by default</span> — a live root shell on this tenant's hypervisor. Global Admin (any host) + Tenant Admin (own tenant). Every session is audited.</span></label>` : ''}
         </div>
         ${isAdmin() ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
@@ -13976,18 +13978,20 @@ async function pxmxVmAction(uniqueId, action) {
     // Setup → Hypervisors asks for it (default on).
     if (['destroy', 'delete'].includes(action)) {
         if (!window.confirm(`DELETE "${vm.name || vm.vmid}"?\n\nThis DESTROYS the VM and its disks (--purge) — IRREVERSIBLE.`)) return;
-    } else if (['stop', 'reboot', 'restart', 'backup'].includes(action)) {
+    } else if (['stop', 'reboot', 'restart'].includes(action)) {
         const cfg = await pxmxHvConfig();
         if (cfg.confirm_destructive !== false &&
             !window.confirm(`${action.toUpperCase()} "${vm.name || vm.vmid}"?`)) return;
     }
+    // Backup skips the confirm dialog — vzdump (snapshot mode = no downtime) is
+    // non-destructive, so go straight to the action and toast the result.
     const statusEl = document.getElementById('pxmx-vm-action-status');
     const setStat = (msg) => { if (statusEl) statusEl.textContent = msg; };
     setStat(`${action}…`);
     try {
         const r = await setupFetch('/api/pxmx/vm-action', {
             method: 'POST',
-            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type, action })
+            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type, action, tenant: currentTenant })
         });
         const data = await r.json().catch(() => ({}));
         if (r.ok && data && data.status === 'SUCCESS') {

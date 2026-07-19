@@ -99,7 +99,17 @@ def register(app, hub, ctx):
         # configured storage/mode/keep. Storage is REQUIRED — fail clearly if the
         # Setup → Hypervisors tab hasn't set one for this host.
         if action == "backup":
-            tenant_id = sess.get("tenant_id") or ""
+            # Setup → Hypervisors stores backup config per-tenant, keyed by the
+            # UI's selected tenant (the settings route resolves it via
+            # get_tenant_id → ?tenant_id=). A non-admin's session carries their
+            # own tenant; a Global Admin (no session tenant) passes the selected
+            # tenant in the body so the right config is read. NOTE: sess has no
+            # top-level tenant_id — it lives at sess["user"]["tenant_id"], so
+            # the old sess.get("tenant_id") was always "" and backup always
+            # failed with "No backup storage configured".
+            tenant_id = (sess.get("user") or {}).get("tenant_id") or ""
+            if not tenant_id:
+                tenant_id = str((body or {}).get("tenant") or "")
             hv = await hub.simulations_store.get_hypervisors_config(tenant_id)
             ph = (hv.get("per_host") or {}).get(node) or {}
             keep = ph.get("backup_keep")
@@ -117,7 +127,11 @@ def register(app, hub, ctx):
         # supply one (so snapshots read e.g. "lm-1720…" per the Setup config).
         elif action == "snapshot" and not payload.get("snapshot_name"):
             import time as _time
-            tenant_id = sess.get("tenant_id") or ""
+            # Same tenant resolution as backup (see above) — snapshot prefix is
+            # per-tenant in Setup → Hypervisors.
+            tenant_id = (sess.get("user") or {}).get("tenant_id") or ""
+            if not tenant_id:
+                tenant_id = str((body or {}).get("tenant") or "")
             hv = await hub.simulations_store.get_hypervisors_config(tenant_id)
             prefix = str(hv.get("snapshot_prefix") or "lm").strip() or "lm"
             payload["snapshot_name"] = f"{prefix}-{int(_time.time())}"
@@ -163,7 +177,15 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail="items must be a non-empty list")
         hub = app.state.hub
         pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
-        tenant_id = sess.get("tenant_id") or ""
+        # Setup → Hypervisors stores backup/snapshot config per-tenant (keyed by
+        # the UI's selected tenant). A non-admin's session carries their tenant;
+        # a Global Admin (no session tenant) passes the selected tenant in the
+        # body. sess has no top-level tenant_id — it's sess["user"]["tenant_id"]
+        # (the old sess.get("tenant_id") was always "" so bulk backup always
+        # failed with "No backup storage configured").
+        tenant_id = (sess.get("user") or {}).get("tenant_id") or ""
+        if not tenant_id:
+            tenant_id = str((body or {}).get("tenant") or "")
         # Delete-protection safeguard (union across all tenants) — computed once
         # for the batch; each protected item is rejected and never reaches the
         # spoke. Same safeguard as the single-VM route.
