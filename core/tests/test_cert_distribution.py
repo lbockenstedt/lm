@@ -666,8 +666,27 @@ def test_available_targets_lists_cert_capable_connected_spokes():
     assert by_mt["nac"]["label"] == "nac — clearpass"
     # Falls back to spoke_id when no display name.
     assert by_mt["directory"]["label"] == "directory — ldap-1"
+    # nw reads "Network Devices" (not the spoke's raw display name).
+    assert by_mt["nw"]["label"] == "Network Devices"
     # identifier empty for spoke-level targets.
     assert all(t["identifier"] == "" for t in by_mt.values())
+
+
+def test_available_targets_nw_friendly_label_disambiguates_multi_spoke():
+    """Two connected nw spokes → each gets 'Network Devices — <spoke name>' so the
+    rows are distinct; a single nw spoke stays the bare 'Network Devices'."""
+    smt = {"nw-1": "nw", "nw-2": "nw"}
+    active = {"nw-1", "nw-2"}
+    names = {"nw-1": "site-a-fleet", "nw-2": "site-b-fleet"}
+    out = cd.build_available_targets(smt, active, names, cd.CERT_CAPABLE_MODULES, [])
+    nw = [t for t in out if t["module_type"] == "nw" and not t["identifier"]]
+    labels = sorted(t["label"] for t in nw)
+    assert labels == ["Network Devices — site-a-fleet", "Network Devices — site-b-fleet"]
+    # Single spoke → bare friendly label.
+    single = cd.build_available_targets({"nw-1": "nw"}, {"nw-1"},
+                                        {"nw-1": "All Devices"},
+                                        cd.CERT_CAPABLE_MODULES, [])
+    assert [t for t in single if t["module_type"] == "nw"][0]["label"] == "Network Devices"
 
 
 def test_available_targets_lists_each_pxmx_agent_as_per_node_target():

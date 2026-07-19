@@ -747,15 +747,30 @@ def build_available_targets(spoke_module_types: Dict[str, str],
     # Connected agent-hosting spokes that actually have ≥1 agent (used to gate
     # the "all nodes" broadcast below — a spoke with zero agents has no device).
     agent_spoke_ids = {a.get("spoke_id") for a in (agents or []) if a.get("spoke_id")}
+    # Friendly spoke-level labels: ``nw`` reads "Network Devices" (not the spoke's
+    # raw display name, which operators sometimes leave as a generic "All
+    # Devices"). When MORE than one connected spoke of the same type exists, the
+    # spoke display name is appended to disambiguate (mirrors the agent-hosting
+    # "all nodes (<spoke>)" multi-spoke suffix).
+    _friendly = {"nw": "Network Devices"}
+    _type_counts = {}
+    for _sid, _mt in spoke_module_types.items():
+        if _sid in active_connections and _mt in capable and _mt not in agent_hosting:
+            _type_counts[_mt] = _type_counts.get(_mt, 0) + 1
     # Non-agent-hosting cert-capable connected spokes: one entry each.
     for sid, mt in spoke_module_types.items():
         if sid not in active_connections:
             continue
         if mt not in capable or mt in agent_hosting:
             continue
-        label = names.get(sid, sid) or sid
+        name = names.get(sid, sid) or sid
+        if mt in _friendly:
+            label = (_friendly[mt] if _type_counts.get(mt, 0) <= 1
+                     else f"{_friendly[mt]} — {name}")
+        else:
+            label = f"{mt} — {name}"
         targets.append({"module_type": mt, "identifier": "",
-                        "label": f"{mt} — {label}", "spoke_id": sid})
+                        "label": label, "spoke_id": sid})
     # Agent-hosting: each connected pxmx agent = a per-node target.
     for a in agents or []:
         mt = spoke_module_types.get(a.get("spoke_id"))
