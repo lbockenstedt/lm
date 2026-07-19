@@ -315,6 +315,19 @@ function csOnlineBadge(online) {
         : `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold uppercase tracking-wider"><span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>Offline</span>`;
 }
 
+// Host state badge with warm-start awareness: Online when the spoke's websocket
+// is live; "Cached" (fresh, <5 min old) when disconnected but the last telemetry
+// frame is recent — so a just-restarted spoke's fleet renders as current instead
+// of alarming Offline; Offline once the cache is stale (>5 min, cache_stale).
+function csHostStateBadge(h) {
+    if (h && h.spoke_online) return csOnlineBadge(true);
+    if (h && h.cache_fresh) {
+        const age = (h.cache_age_s != null) ? Math.floor(h.cache_age_s / 60) + 'm' : '';
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-[10px] font-bold uppercase tracking-wider" title="Live connection down — showing cached data ${age ? '(' + csEscape(String(age)) + ' old)' : ''}"><span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span>Cached</span>`;
+    }
+    return csOnlineBadge(false);
+}
+
 // Backpressure badge for a spoke tile (and, contextually, the clients it owns).
 // Reads the hub's per-spoke throttle level from the shared status metrics stash
 // (window.__lmHubMetrics, populated by main.js updateStatus). Defensive: returns
@@ -456,7 +469,17 @@ function connectCSWebSocket() {
         csWs.onmessage = (ev) => {
             let m; try { m = JSON.parse(ev.data); } catch (e) { console.error('connectCSWebSocket: non-JSON telemetry frame ignored', e); return; }
             if (m && m.type === 'cs_progress') { csHandleLiveOp(m.data || {}); return; }
-            if (m && (m.type === 'telemetry' || m.type === 'aruba_update')) csWsRefresh();
+            if (m && (m.type === 'telemetry' || m.type === 'aruba_update')) {
+                // Warm-start: if VM Server was showing STALE cached data, a fresh
+                // telemetry frame means the spoke/agent reconnected — refresh once
+                // to swap in live data + clear the "cached data" notice, even when
+                // the auto-refresh knob is off (one-shot, not per-frame churn).
+                if (window._csVmHadStale && typeof currentSubView !== 'undefined' && currentSubView === 'VM Server') {
+                    window._csVmHadStale = false;
+                    csVmTableRefreshSoon();
+                }
+                csWsRefresh();
+            }
         };
         csWs.onclose = () => { csWs = null; scheduleCSReconnect(); };
         csWs.onerror = () => { try { csWs && csWs.close(); } catch (e) { console.error('connectCSWebSocket: error closing ws on onerror', e); } };
@@ -5405,12 +5428,23 @@ async function csRenderVmServer() {
     // from reclone_vmids) — the reclone_state placeholder was always empty.
     const recloneRunning = hosts.reduce((n, h) =>
         n + ((h.proxmox_vms || []).filter(v => String(v.prov_status || '').toLowerCase() === 'recloning').length), 0);
+    // Warm-start staleness notice (upper-right): hosts whose live connection is
+    // down AND whose cached telemetry is >5 min old (cache_stale). Fresh cache
+    // (<5 min) is served silently as current — no notice. See service._cache_fields.
+    const staleHosts = hosts.filter(h => !h.spoke_online && h.cache_stale);
+    // Remember we're showing stale cache so the /sim/ws telemetry handler can
+    // force a one-shot refresh the moment the spoke/agent reconnect.
+    window._csVmHadStale = staleHosts.length > 0;
+    const staleNotice = staleHosts.length
+        ? `<span class="ml-auto inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-bold" title="${csEscape(staleHosts.map(h => (h.spoke_name || h.spoke_hostname || h.spoke_id) + (h.cache_age_s != null ? ' · ' + Math.floor(h.cache_age_s / 60) + 'm old' : '')).join('; '))}"><span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>Showing cached data (&gt;5 min old) — check Spoke &amp; Agent</span>`
+        : '';
     const summary = `<div class="flex flex-wrap items-center gap-x-4 gap-y-1 mb-3 text-xs text-slate-500">
       <span><b class="text-sm text-slate-700">${hosts.length}</b> Hosts</span>
       <span><b class="text-sm text-slate-700">${online}</b> Online</span>
       <span><b class="text-sm text-slate-700">${recloneRunning}</b> Recloning</span>
       <span><b class="text-sm text-slate-700">${usbs}</b> USB</span>
       <span><b class="text-sm text-slate-700">${vms}</b> VMs</span>
+      ${staleNotice}
     </div>`;
 
     const fleetCards = `<div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
@@ -5464,7 +5498,7 @@ async function csRenderVmServer() {
         return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(csVmHostId(h))}','VMs')">
           <td class="px-4 py-2 text-center" onclick="event.stopPropagation()"><input type="checkbox" class="cs-host-sel" data-host="${csEscape((px.node && px.node.hostname) || csVmHostId(h))}" data-spoke="${csEscape(h.spoke_id || '')}" data-name="${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id || '')}"></td>
           <td class="px-4 py-2"><span class="font-medium text-slate-700">${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id)}</span></td>
-          <td class="px-4 py-2 text-center">${csOnlineBadge(h.spoke_online)}</td>
+          <td class="px-4 py-2 text-center">${csHostStateBadge(h)}</td>
           <td class="px-4 py-2 text-center">${vmN}</td>
           <td class="px-4 py-2 text-center">${usbN}${qtPill}</td>
           <td class="px-4 py-2 text-center text-xs">${csPctCell(px.cpu_1h_avg)}</td>

@@ -3108,6 +3108,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         if not isinstance(cs_data, dict):
             return
         pk = self._primary_key(spoke_id)
+        # Stamp frame arrival so the Simulations warm-start can distinguish a
+        # FRESH cache (< 5 min → served as current after a restart, no notice)
+        # from a STALE one (→ "cached data — check Spoke and Agent" notice). This
+        # survives the encrypted warm-load. See service._cache_fields.
+        try:
+            cs_data["fetched_at"] = time.time()
+        except Exception:  # noqa: BLE001 — never let stamping break ingest
+            pass
         self.simulations_cache[pk] = cs_data
         self._sim_cache_dirty = True  # warm-load snapshot flushed by run_sim_cache_flush_loop
         # Invalidate the shaped-read memo (SimulationsService.get_clients_data /

@@ -6,12 +6,19 @@ Every view degrades to an empty list when the tenant has no cached spokes, so
 the UI never white-screens. ``spoke_online`` is the live websocket connection
 state from ``hub.active_connections``.
 """
+import time
 from typing import Any, Dict, List, Tuple
 
 # Check statuses that count as pass / fail / warning for summaries.
 _PASS = {"pass", "ok", "functional", "up", "healthy"}
 _FAIL = {"fail", "failed", "down", "error", "critical"}
 _WARN = {"warning", "warn", "degraded", "unknown", "no_data", "pending"}
+
+# Warm-start freshness window: a cached telemetry frame younger than this is
+# served as CURRENT (no live query, no "cached" notice) after a restart; older
+# than this the UI shows a "cached data — check Spoke and Agent" notice. See
+# _cache_fields + WebUI csVmServer render.
+_CACHE_FRESH_S = 300
 
 
 def _agent_cs_enabled(hub, hostname: str) -> bool:
@@ -85,12 +92,28 @@ class SimulationsService:
                 continue
         return out
 
+    @staticmethod
+    def _cache_fields(data: dict) -> Dict[str, Any]:
+        """Warm-start freshness of this spoke's cached telemetry frame.
+        ``fetched_at`` is stamped at ingest (main._handle_cs_telemetry) and
+        survives the encrypted warm-load, so after a restart we can tell a fresh
+        cache (< _CACHE_FRESH_S — serve as current, no notice) from a stale one
+        (show the 'cached — check Spoke and Agent' notice). Missing timestamp
+        (older frame) => treated as stale."""
+        ts = float((data or {}).get("fetched_at") or 0)
+        if not ts:
+            return {"cache_age_s": None, "cache_fresh": False, "cache_stale": False}
+        age = time.time() - ts
+        return {"cache_age_s": int(age), "cache_fresh": age < _CACHE_FRESH_S,
+                "cache_stale": age >= _CACHE_FRESH_S}
+
     def _meta(self, sid: str, data: dict) -> Dict[str, Any]:
         return {
             "spoke_id": sid,
             "spoke_name": data.get("spoke_name") or sid,
             "spoke_hostname": data.get("hostname") or "",
             "spoke_online": self._is_online(sid),
+            **self._cache_fields(data),
         }
 
     @staticmethod
@@ -374,6 +397,7 @@ class SimulationsService:
                         "spoke_name": h.get("hostname") or (data.get("spoke_name") or sid),
                         "spoke_hostname": h.get("hostname") or "",
                         "spoke_online": self._is_online(sid),
+                        **self._cache_fields(data),
                         "hostname": h.get("hostname") or "",
                         "vm_count": hpx.get("vm_count") or len(h.get("proxmox_vms") or []),
                         "usb_count": hpx.get("usb_count") or len(h.get("usb_devices") or []),
