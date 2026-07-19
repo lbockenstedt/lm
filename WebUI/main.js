@@ -13530,6 +13530,19 @@ function tableHead(cols) {
 // Each VM is a 2-line entry: line 1 = identity (Cluster/Host, VMID, Name, IP,
 // Clone action); line 2 = metadata (Type, Status, CPU, Memory, Pool). Cluster
 // and Host(node) are merged into one "Cluster / Host" column as "<cluster>/<node>".
+// Shared VM lifecycle button spec — the inline per-row action buttons AND the
+// bulk-action bar render from this SAME list so the two always match (icon,
+// label, color, hover). Inline rows call pxmxVmAction('<uid>','<action>'); the
+// bulk bar calls pxmxBulkAction('<action>'). Add/change an action here once
+// and both surfaces update together.
+const PXMX_VM_ACTIONS = [
+    { action: 'start',    label: '▶ Start',     cls: 'bg-green-100 text-green-700 hover:bg-green-200' },
+    { action: 'stop',     label: '■ Stop',      cls: 'bg-red-100 text-red-700 hover:bg-red-200' },
+    { action: 'reboot',   label: '↺ Restart',   cls: 'bg-amber-100 text-amber-700 hover:bg-amber-200' },
+    { action: 'snapshot', label: '📷 Snapshot', cls: 'bg-slate-200 text-slate-700 hover:bg-slate-300' },
+    { action: 'backup',   label: '💾 Backup',    cls: 'bg-sky-100 text-sky-700 hover:bg-sky-200' },
+];
+
 // Friendly OS label from the agent's cached Proxmox ostype (l26 → Linux, win*
 // → Windows, etc.); falls back to the qemu/lxc type when ostype is unknown.
 // Mirrors csVmOs (sim-views.js) so the Hypervisor VM list reads the same as the
@@ -13573,27 +13586,29 @@ function pxmxVmTableHtml(vms) {
         const tpl = isTemplate(vm);
         // Cluster/Host merged: Proxmox node is the host, shown as "<cluster>/<node>".
         const host = escapeHtml(`${vm.cluster || '—'}/${vm.node || '—'}`);
-        // Inline action buttons (cs-style). Console is qemu-only (lxc has no VNC
-        // display; templates aren't runnable). Start/Stop/Reboot/Snapshot are
-        // suppressed on templates (not runnable); Backup is valid on any VM
-        // (vzdump). All route through pxmxVmAction (which confirms destructive
-        // ops per Hypervisors → Settings). Gated by canEdit() — view users get a
-        // read-only list. Clone + Backup-to-Hub stay in the click-through detail
-        // panel (they need the storage picker / template-pool affordance).
-        const act = (label, action, cls) => canAct
-            ? `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${cls}">${label}</button>`
+        // Inline action buttons — rendered from the SAME PXMX_VM_ACTIONS spec as
+        // the bulk bar so the row buttons match the bulk buttons exactly (icon,
+        // label, color, hover, sizing). Console is qemu-only (lxc has no VNC
+        // display; templates aren't runnable) and isn't in the bulk spec, so it's
+        // rendered separately with matching sizing. Start/Stop/Reboot/Snapshot are
+        // suppressed on templates (not runnable); Backup (vzdump) is valid on any
+        // VM so templates keep it. All route through pxmxVmAction (which confirms
+        // destructive ops per Hypervisors → Settings). Gated by canEdit() — view
+        // users get a read-only list. Clone + Backup-to-Hub stay in the
+        // click-through detail panel (they need the storage picker / template-pool
+        // affordance).
+        const act = (spec) => canAct
+            ? `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2.5 py-1 rounded font-bold ${spec.cls}">${spec.label}</button>`
             : '';
         const consoleBtn = !canAct ? ''
             : (isLxc || tpl)
-                ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
-                : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
+                ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2.5 py-1 rounded font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
+                : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2.5 py-1 rounded font-bold bg-slate-800 text-slate-100 hover:bg-slate-700" title="Open a noVNC console to this VM">🖥 Console</button>`;
+        // Templates: only Backup (vzdump) is valid. Non-templates: all 5.
+        const specs = tpl ? PXMX_VM_ACTIONS.filter(s => s.action === 'backup') : PXMX_VM_ACTIONS;
         const actions = `<div class="flex flex-wrap gap-1">
             ${consoleBtn}
-            ${tpl ? '' : act('Start', 'start', 'bg-green-100 text-green-700')}
-            ${tpl ? '' : act('Stop', 'stop', 'bg-amber-100 text-amber-700')}
-            ${tpl ? '' : act('Reboot', 'reboot', 'bg-slate-200 text-slate-700')}
-            ${tpl ? '' : act('Snapshot', 'snapshot', 'bg-sky-100 text-sky-700')}
-            ${act('Backup', 'backup', 'bg-sky-100 text-sky-700')}
+            ${specs.map(act).join('')}
         </div>`;
         return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${uid}')">
             <td class="px-4 py-2 font-mono text-xs font-bold" onclick="event.stopPropagation()"><input type="checkbox" class="pxmx-vm-sel" value="${escapeHtml(vm.unique_id || '')}"/> ${escapeHtml(vm.vmid)}</td>
@@ -13612,13 +13627,13 @@ function pxmxVmTableHtml(vms) {
 // the batch when confirm_destructive is on.
 function pxmxBulkBar() {
     if (!canEdit()) return '';   // VM control is write-tier; view users see none
+    // Render from the shared PXMX_VM_ACTIONS spec so the bulk buttons match the
+    // inline per-row buttons exactly (icon, label, color, hover, sizing).
+    const btns = PXMX_VM_ACTIONS.map(s =>
+        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2.5 py-1 rounded font-bold ${s.cls}">${s.label}</button>`).join('');
     return `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
       <span class="text-slate-400 font-medium mr-1">Bulk (selected):</span>
-      <button onclick="pxmxBulkAction('start')" class="bg-green-100 text-green-700 px-2.5 py-1 rounded font-bold hover:bg-green-200">▶ Start</button>
-      <button onclick="pxmxBulkAction('stop')" class="bg-red-100 text-red-700 px-2.5 py-1 rounded font-bold hover:bg-red-200">■ Stop</button>
-      <button onclick="pxmxBulkAction('reboot')" class="bg-amber-100 text-amber-700 px-2.5 py-1 rounded font-bold hover:bg-amber-200">↺ Restart</button>
-      <button onclick="pxmxBulkAction('snapshot')" class="bg-slate-200 text-slate-700 px-2.5 py-1 rounded font-bold hover:bg-slate-300">📷 Snapshot</button>
-      <button onclick="pxmxBulkAction('backup')" class="bg-sky-100 text-sky-700 px-2.5 py-1 rounded font-bold hover:bg-sky-200">💾 Backup</button>
+      ${btns}
       <span id="pxmx-bulk-status" class="text-slate-400"></span>
     </div>`;
 }
