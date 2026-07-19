@@ -146,3 +146,55 @@ async def test_write_burst_coalesces_to_one_pending_flusher(tmp_path):
     with open(os.path.join(str(tmp_path), "nw_data.json")) as f:
         on_disk = json.load(f)
     assert len(on_disk["devices"]) == 10  # single write carried the whole burst
+
+
+# ── nw_cache_get_fleet_filtered — tenant-scoped offline cache serve ─────────
+# The single global cache must NOT leak another tenant's devices to a non-admin
+# reader on the offline path. Rows carry tenant_id (Stage 1); the route passes a
+# predicate (access.spoke_visible_to_session) and gets back a filtered envelope of
+# the same shape as nw_cache_get_fleet, with the underlying cache untouched.
+async def test_fleet_filtered_returns_none_when_never_cached(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    assert hub.nw_cache_get_fleet_filtered(lambda r: True) is None
+
+
+async def test_fleet_filtered_keeps_only_predicate_visible_rows(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    rows = [
+        {"id": "acme-sw", "tenant_id": "acme"},
+        {"id": "other-sw", "tenant_id": "othercorp"},
+        {"id": "shared-sw", "tenant_id": "shared"},
+    ]
+    await hub.nw_cache_set_fleet(_envelope(rows))
+    # An acme reader: own + shared visible (matches spoke_visible_to_session).
+    got = hub.nw_cache_get_fleet_filtered(
+        lambda r: r.get("tenant_id") in ("acme", "shared"))
+    assert got is not None
+    ids = [r["id"] for r in got["devices"]["data"]]
+    assert ids == ["acme-sw", "shared-sw"]
+    assert got["fetched_at"] > 0
+
+
+async def test_fleet_filtered_does_not_mutate_underlying_cache(tmp_path):
+    """The filter builds a shallow copy; the cached envelope keeps all rows so
+    a later admin read (no filter) still sees the whole fleet."""
+    hub = _CacheHub(str(tmp_path))
+    rows = [{"id": "acme-sw", "tenant_id": "acme"},
+            {"id": "other-sw", "tenant_id": "othercorp"}]
+    await hub.nw_cache_set_fleet(_envelope(rows))
+    hub.nw_cache_get_fleet_filtered(lambda r: r.get("tenant_id") == "acme")
+    full = hub.nw_cache_get_fleet()
+    assert [r["id"] for r in full["devices"]["data"]] == ["acme-sw", "other-sw"]
+
+
+async def test_fleet_filtered_preserves_envelope_shape_and_message(tmp_path):
+    """The filtered result keeps the envelope's status/message (the route serves
+    it identically to the full cache); only the data list is narrowed."""
+    hub = _CacheHub(str(tmp_path))
+    env = {"status": "SUCCESS", "message": "3 device(s)", "data": [
+        {"id": "a", "tenant_id": "acme"}, {"id": "b", "tenant_id": "other"}]}
+    await hub.nw_cache_set_fleet(env)
+    got = hub.nw_cache_get_fleet_filtered(lambda r: r.get("tenant_id") == "acme")
+    assert got["devices"]["status"] == "SUCCESS"
+    assert got["devices"]["message"] == "3 device(s)"
+    assert [r["id"] for r in got["devices"]["data"]] == ["a"]

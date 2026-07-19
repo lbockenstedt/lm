@@ -115,6 +115,32 @@ class NwCacheMixin:
             return None
         return f
 
+    def nw_cache_get_fleet_filtered(self, predicate) -> Optional[Dict[str, Any]]:
+        """Last-known fleet envelope with the device rows filtered by
+        ``predicate(row)``, or None if never cached. Serves the offline-cache
+        path of ``GET /api/nw/devices`` tenant-scoped: a non-admin reader must
+        NOT see another tenant's devices from the single global cache (the
+        cross-tenant leak the nw tenant-scoping closes).
+
+        Returns the SAME shape as ``nw_cache_get_fleet`` (``{"devices": env,
+        "fetched_at": epoch}``) so the route serves the filtered snapshot
+        exactly as it serves the full one. Requires the cached rows to carry
+        ``tenant_id`` (Stage 1 stamps every list_devices row), so the route's
+        predicate — ``access.spoke_visible_to_session(sess, row.tenant_id)``
+        — can decide visibility per row. No storage-shape change: the filter
+        builds a shallow-copied envelope; the underlying cache is untouched.
+        A missing/empty ``data`` list is returned as-is (None cache or a
+        zero-row fleet both short-circuit to the caller's empty handling)."""
+        f = self.nw_fleet_cache
+        if not f or f.get("devices") is None:
+            return None
+        env = f["devices"]
+        data = env.get("data") if isinstance(env, dict) else None
+        if isinstance(data, list):
+            env = {**env, "data": [r for r in data
+                                   if isinstance(r, dict) and predicate(r)]}
+        return {"devices": env, "fetched_at": f["fetched_at"]}
+
     def nw_cache_get_device(self, device_id: str, endpoint: str) -> Optional[Any]:
         """Last-known raw envelope for one device endpoint, or None."""
         entry = self.nw_device_cache.get(device_id)
