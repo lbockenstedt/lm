@@ -1060,6 +1060,22 @@ def create_app(hub):
         # cross-tenant to anyone). They now require an authenticated session.
         _GATED_PREFIXES = ("/api/", "/setup/", "/admin/", "/auth/", "/sim/api/", "/vm/", "/cppm/", "/tenant/")
         if not any(path.startswith(p) for p in _GATED_PREFIXES) or path == "/status":
+            # The WebUI heartbeat polls ONLY /status (~every 10s) and it's public
+            # (no auth required), so it short-circuits here BEFORE the last_seen
+            # touch below. But that means an admin merely WATCHING dashboards
+            # never refreshes last_seen → _active_user_count() ages them out after
+            # 300s → the auto-update idle-guard thinks the hub is idle and restarts
+            # them mid-session. Refresh last_seen on the /status heartbeat when a
+            # valid session is present so "viewing" counts as active. (The 2am
+            # maintenance window still force-restarts regardless, so a walked-away
+            # open tab can't defer updates forever.) Best-effort; never blocks.
+            if path == "/status":
+                try:
+                    _hb_sess = _session_user(request)
+                    if isinstance(_hb_sess, dict):
+                        _hb_sess["last_seen"] = time.time()
+                except Exception:  # noqa: BLE001 — heartbeat touch is best-effort
+                    pass
             return await call_next(request)
 
         # Unauthenticated endpoints within gated namespaces
