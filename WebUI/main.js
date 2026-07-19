@@ -13681,14 +13681,14 @@ function pxmxVmTableHtml(vms) {
             // disabled + locked. The hub enforces this too (403), so this is
             // UX, not the security boundary.
             if (spec.action === 'destroy' && vm.protected) {
-                return `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-2.5 py-1 rounded font-bold bg-slate-100 text-slate-400 cursor-not-allowed">🔒 Delete</button>`;
+                return `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-400 cursor-not-allowed">🔒 Delete</button>`;
             }
-            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2.5 py-1 rounded font-bold ${spec.cls}">${spec.label}</button>`;
+            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${spec.cls}">${spec.label}</button>`;
         };
         const consoleBtn = !canAct ? ''
             : (isLxc || tpl)
-                ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2.5 py-1 rounded font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
-                : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2.5 py-1 rounded font-bold bg-slate-800 text-slate-100 hover:bg-slate-700" title="Open a noVNC console to this VM">🖥 Console</button>`;
+                ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
+                : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-100 hover:bg-slate-700" title="Open a noVNC console to this VM">🖥 Console</button>`;
         // Templates: Backup + Delete are valid (start/stop/reboot/snapshot aren't).
         // Non-templates: all 6.
         const specs = tpl ? PXMX_VM_ACTIONS.filter(s => ['backup', 'destroy'].includes(s.action)) : PXMX_VM_ACTIONS;
@@ -13716,7 +13716,7 @@ function pxmxBulkBar() {
     // Render from the shared PXMX_VM_ACTIONS spec so the bulk buttons match the
     // inline per-row buttons exactly (icon, label, color, hover, sizing).
     const btns = PXMX_VM_ACTIONS.map(s =>
-        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2.5 py-1 rounded font-bold ${s.cls}">${s.label}</button>`).join('');
+        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${s.cls}">${s.label}</button>`).join('');
     return `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
       <span class="text-slate-400 font-medium mr-1">Bulk (selected):</span>
       ${btns}
