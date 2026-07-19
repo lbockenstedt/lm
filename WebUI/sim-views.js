@@ -7028,7 +7028,15 @@ window.csOpenVmConsole = async function (key) {
             body: JSON.stringify({
                 spoke_id: v._spoke || '',
                 vmid: Number(vmid),
-                node: v._host || '',
+                // Use the VM's OWN Proxmox node (v.node, stamped by the agent's
+                // vm_inventory _vm_entry) — NOT the host banner's hostname
+                // (v._host). When the Proxmox node name differs from the system
+                // hostname, v._host addresses the wrong node and vncproxy 500s
+                // ("nodes/<hostname>/qemu-server/<vmid>.conf does not exist").
+                // Mirrors the pxmx console (main.js pxmxOpenConsole), which sends
+                // vm.node and works. Fall back to v._host only when the agent
+                // didn't stamp node (legacy/older agent).
+                node: v.node || v._host || '',
                 agent_id: v.agent_id || '',
                 type: v.type || 'qemu',
             }),
