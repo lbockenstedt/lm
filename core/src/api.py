@@ -783,6 +783,10 @@ async def _cache_refresh_loop(hub, tenant_id: str):
         # initial burst of cache-preload spoke calls.
         await asyncio.sleep(3)
         await _preload_all_parallel(hub, tenant_id)
+        try:  # snapshot for warm-start (off-thread; bounded, once per preload)
+            await asyncio.to_thread(_persist_tenant_cache_sync, hub, tenant_id)
+        except Exception:  # noqa: BLE001
+            pass
         while True:
             await asyncio.sleep(30)
             config = _get_cache_config(hub)
@@ -804,10 +808,56 @@ async def _cache_refresh_loop(hub, tenant_id: str):
                         tasks.append(_fetch_module(hub, tenant_id, module_key))
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
+                try:  # re-snapshot after a refresh batch (off-thread)
+                    await asyncio.to_thread(_persist_tenant_cache_sync, hub, tenant_id)
+                except Exception:  # noqa: BLE001
+                    pass
     except asyncio.CancelledError:
         pass
     except Exception as e:
         logger.warning(f"Cache refresh loop [{tenant_id}] died: {e}")
+
+# ── warm-start: persist/restore _tenant_cache across a hub restart ────────────
+# Without this the Hypervisors/NetBox/CPPM/Firewall dashboards blank on every
+# restart until a tenant user logs in AND the owning spokes reconnect (login- +
+# reconnect-gated preload). We snapshot each tenant's module cache (encrypted,
+# per-tenant shard) after a preload/refresh batch and warm-load it on boot so the
+# dashboards seed immediately, stale-while-revalidate (the refresh loop below
+# revalidates in the background; the age stamp drives the "cached" UI banner).
+_TENANT_CACHE_MODULE = "api_cache"
+_TENANT_CACHE_NAME = "tenant_cache.json"
+
+
+def _persist_tenant_cache_sync(hub, tenant_id: str) -> None:
+    """Persist ONE tenant's module cache to its encrypted shard. Best-effort;
+    never raises (offloaded via asyncio.to_thread by callers)."""
+    try:
+        from security.encryption import hub_encryption
+        from tenant_sharded import shard_save
+        shard_save(hub.state.data_dir, _TENANT_CACHE_MODULE, _TENANT_CACHE_NAME,
+                   _tenant_cache, tenant_of=lambda k: k, dirty={str(tenant_id)},
+                   encrypt=lambda s: hub_encryption.encrypt(s))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("tenant_cache persist failed for %s: %s", tenant_id, e)
+
+
+def warm_load_tenant_cache(hub) -> None:
+    """Warm-start _tenant_cache from encrypted shards on boot (best-effort) so the
+    module dashboards seed stale-while-revalidate instead of blank-until-preload."""
+    try:
+        from security.encryption import hub_encryption
+        from tenant_sharded import shard_load
+        data = shard_load(hub.state.data_dir, _TENANT_CACHE_MODULE, _TENANT_CACHE_NAME,
+                          decrypt=lambda b: hub_encryption.decrypt(b)) or {}
+        for t, modules in data.items():
+            if isinstance(modules, dict):
+                _tenant_cache[str(t)] = modules
+        if _tenant_cache:
+            logger.info("tenant_cache: warm-loaded %d tenant(s) — dashboards seed stale-while-revalidate",
+                        len(_tenant_cache))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("tenant_cache warm load failed: %s — starting empty", e)
+
 
 def _start_cache_for_tenant(hub, tenant_id: str):
     if not tenant_id or tenant_id == "default":

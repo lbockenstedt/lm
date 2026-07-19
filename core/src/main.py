@@ -781,6 +781,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # NAC/CPPM, Directory/LDAP) — same warm-start contract as nw/le.
         self.warm_cache_init()
         self.warm_cache_load()
+        # Warm-start the per-tenant module cache (pxmx_vms/netbox/cppm/firewall) so
+        # the Hypervisors/NetBox/CPPM/Firewall dashboards seed on boot instead of
+        # blanking until a login-triggered preload lands. Stale-while-revalidate.
+        try:
+            from api import warm_load_tenant_cache
+            warm_load_tenant_cache(self)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("tenant_cache warm load skipped: %s", e)
         # Apply the configured session idle-timeout (minutes → seconds). Unset
         # leaves access.py's 60-minute default; 0 disables. A WebUI change
         # (/setup/session-timeout) re-applies this live.
