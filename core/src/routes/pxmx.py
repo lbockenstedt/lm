@@ -566,7 +566,10 @@ def register(app, hub, ctx):
                             else "Config saved; agent will receive it on next connect/reconnect."),
                 "pushed": pushed,
                 "queued": queued,
-                "config": store[agent_id],
+                # Read the SAME key we wrote (agent_pk = the guid-primary key), not
+                # the raw agent_id — post guid-migration they differ, so store[agent_id]
+                # KeyError'd and 500'd the save even though the config had persisted.
+                "config": store.get(agent_pk, entry),
             }
         except Exception as e:
             logger.exception("set_pxmx_agent_config failed")
