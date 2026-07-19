@@ -26,7 +26,7 @@ from .aruba import test_central_from_config, get_central_available_from_config, 
 from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini
 from . import sim_quota
 from . import email_report
-from access import safe_external_url, host_resolves_external
+from access import safe_external_url, host_resolves_external, has_edit_access
 from urllib.parse import urlsplit
 
 logger = logging.getLogger("SimRoutes")
@@ -2765,6 +2765,141 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         target = body.get("target") or _default_target()
         payload = {"target": target, "action": action, "args": args, "type": body.get("type")}
         return await _cs_forward(tenant_id, "CS_QUEUE_COMMAND", payload)
+
+    @app.post("/sim/api/{tenant}/vm-console")
+    async def cs_vm_console(request: Request, tenant: str,
+                            tenant_id: str = Depends(get_tenant_id)):
+        """VNC console for a cs sim VM — the cs-VM-Server-table analogue of
+        ``/api/pxmx/console``. Body: ``{spoke_id, vmid, node, agent_id?, type?}``.
+
+        cs sim VMs are qemu VMs on Proxmox hosts whose pxmx agents dial the
+        cs spoke (not the pxmx hypervisor spoke), so this mints a one-shot
+        ``session_id`` + ``ws_token`` and sends ``VNC_START`` to the cs spoke
+        that owns the VM — which relays it to its pxmx agent
+        (``handlers_agents.py`` VNC_START: resolves the agent from ``node``/
+        ``cluster`` against its connected agents, opens the Proxmox
+        vncwebsocket, returns the ticket = the RFB password). The browser then
+        connects to the SAME spoke-agnostic ``/ws/console/{session_id}?token=…``
+        byte relay the pxmx console uses; only the registered ``spoke_id``
+        differs (cs spoke vs pxmx hypervisor spoke).
+
+        Auth mirrors the pxmx console: Global Admin → any VM; otherwise a
+        write-user/tenant-admin (``has_edit_access`` — console is control-tier)
+        AND the spoke must be bound to the session's tenant. ``tenant_id`` is
+        already session-authorized by ``get_tenant_id``; the spoke-binding check
+        is the per-VM ownership gate (a cs spoke is single-tenant, so a VM on a
+        spoke bound to the session's tenant is the session's VM)."""
+        import uuid as _uuid
+        import secrets as _secrets
+        sess = session_user_fn(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        spoke_id = str(body.get("spoke_id") or "").strip()
+        try:
+            vmid = int(body.get("vmid"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="invalid vmid")
+        node = str(body.get("node") or "").strip()
+        agent_id = str(body.get("agent_id") or "").strip()
+        vm_type = str(body.get("type") or "qemu")
+        # The cs spokes visible to this tenant (bound + an UNASSIGNED spoke the
+        # tenant implicitly claims — see get_client_sim_spokes). A multi-spoke
+        # tenant (cs-svr-02/03/04) MUST route VNC_START to the spoke whose agent
+        # owns the VM's host, so the body's spoke_id (the VM's owning spoke,
+        # supplied by the VM table row) is preferred; it must be one of the
+        # tenant's spokes or the request is foreign → 403 (not a silent fallback
+        # to the primary, which would route to the wrong host and 502).
+        tenant_spokes = []
+        get_spokes = getattr(hub, "get_client_sim_spokes", None)
+        if callable(get_spokes):
+            try:
+                tenant_spokes = list(get_spokes(tenant_id) or [])
+            except Exception:  # noqa: BLE001
+                tenant_spokes = []
+        if not is_admin_fn(sess):
+            if not has_edit_access(sess):
+                raise HTTPException(status_code=403, detail="Edit access required for VM console")
+            # Per-VM ownership: the VM's spoke must be one of the session
+            # tenant's cs spokes (get_tenant_id already authorized the tenant for
+            # the session; this confirms the VM's spoke is one of that tenant's,
+            # including a claimable unassigned spoke). A foreign spoke_id → 403.
+            if not spoke_id or spoke_id not in tenant_spokes:
+                raise HTTPException(status_code=403,
+                                    detail="not authorized for this VM's tenant")
+        else:
+            # Admin: prefer the body's spoke_id when it's a connected cs spoke
+            # (any tenant); else fall back to the tenant's primary cs spoke.
+            if spoke_id and spoke_id not in tenant_spokes:
+                all_cs = []
+                get_all = getattr(hub, "get_all_spokes_by_type", None)
+                if callable(get_all):
+                    try:
+                        all_cs = list(get_all("Client-Sim")
+                                      or get_all("simulation") or [])
+                    except Exception:  # noqa: BLE001
+                        all_cs = []
+                if spoke_id not in all_cs:
+                    spoke_id = ""
+            if not spoke_id:
+                spoke_id = (hub.get_client_sim_spoke(tenant_id)
+                            if hasattr(hub, "get_client_sim_spoke") else None) or ""
+            if not spoke_id:
+                raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
+        session_id = str(_uuid.uuid4())
+        ws_token = _secrets.token_urlsafe(32)
+        hub.register_vnc_session(session_id, {
+            "spoke_id": spoke_id,
+            "tenant_id": tenant_id,
+            "ws_token": ws_token,
+            "vmid": vmid,
+            "node": node,
+        })
+        # unique_id shape <cluster>/<node>/<vmid> — the cs spoke's VNC_START
+        # handler reads only the cluster (split('/')[0]) to match a connected
+        # agent's cluster_name; node is matched separately against hostname, so
+        # a cs VM (which may not carry a cluster) uses node as the cluster
+        # fallback. node is the authoritative agent-resolver here.
+        unique_id = f"{node or 'cs'}/{node or 'cs'}/{vmid}"
+        try:
+            vnc_res = await hub.request_response(spoke_id, "VNC_START", {
+                "session_id": session_id,
+                "unique_id": unique_id,
+                "vmid": vmid,
+                "node": node,
+                "type": vm_type,
+                "agent_id": agent_id,
+                "target_agent_id": agent_id,
+            }, timeout=50.0)
+        except Exception as e:
+            hub.unregister_vnc_session(session_id)
+            logger.exception("cs_vm_console VNC_START failed")
+            raise HTTPException(status_code=502, detail=f"failed to start console: {e}")
+        # Peel the relay envelope to the status-bearing dict (mirrors
+        # pxmx_create_console's unwrap — spoke→agent may nest payload.data twice).
+        for _ in range(3):
+            if isinstance(vnc_res, dict) and "status" not in vnc_res and "payload" in vnc_res:
+                vnc_res = vnc_res.get("payload", {}).get("data", vnc_res)
+            else:
+                break
+        ticket = ""
+        if isinstance(vnc_res, dict):
+            if vnc_res.get("status") not in ("SUCCESS", "OK"):
+                hub.unregister_vnc_session(session_id)
+                if vnc_res.get("status") == "ACCEPTED":
+                    detail = ("agent returned ACCEPTED (no ticket) — the pxmx agent "
+                              "on the Proxmox host is still on the old VNC code; "
+                              "wait for its self-update or restart lm-pxmx-agent")
+                else:
+                    detail = vnc_res.get("message") or vnc_res.get("error") or "agent refused VNC_START"
+                raise HTTPException(status_code=502, detail=f"failed to start console: {detail}")
+            ticket = str(vnc_res.get("ticket") or "")
+        return {"session_id": session_id, "ws_token": ws_token,
+                "ticket": ticket, "expires_in": 60}
 
     @app.post("/sim/api/{tenant}/fleet-reclone")
     async def cs_fleet_reclone(request: Request, tenant: str,

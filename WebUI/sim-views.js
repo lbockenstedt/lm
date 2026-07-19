@@ -6243,6 +6243,14 @@ function csVmRow(v) {
     const act = (label, action, cls) => busy
         ? `<button disabled title="VM is being deleted" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">${label}</button>`
         : `<button onclick="csVmAction('${key}','${action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${cls}">${label}</button>`;
+    // VNC console (mirrors the pxmx VM table's 🖥 Console button). qemu VMs
+    // only — lxc containers have no VNC display, and templates aren't runnable.
+    // Disabled while tearing_down. The opener resolves the VM's owning cs
+    // spoke + host from the row so VNC_START routes to the right agent.
+    const isLxc = String(v.type || '').toLowerCase() === 'lxc';
+    const consoleBtn = (busy || isLxc || v.is_template)
+        ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : (v.is_template ? 'Templates have no console' : 'VM is being deleted')}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
+        : `<button onclick="csOpenVmConsole('${key}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
     return `<tr>
       <td class="px-3 py-2 font-mono text-xs"><input type="checkbox" class="cs-vm-sel" data-vmkey="${key}" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}</td>
       <td class="px-3 py-2 text-sm">${csEscape(v.name || '—')}</td>
@@ -6250,6 +6258,7 @@ function csVmRow(v) {
       <td class="px-3 py-2">${csVmStatusBadge(v)}</td>
       <td class="px-3 py-2 text-xs text-slate-500">${csEscape(v._hostlabel || v._host || '—')}</td>
       <td class="px-3 py-2"><div class="flex flex-wrap gap-1">
+        ${consoleBtn}
         ${act('Start','start_vm','bg-green-100 text-green-700')}
         ${act('Stop','stop_vm','bg-amber-100 text-amber-700')}
         ${act('Reboot','reboot_vm','bg-slate-200 text-slate-700')}
@@ -6978,8 +6987,58 @@ window.CS_CHILD_RENDERERS['Clients::T1']  = function () { return csRenderClients
 window.CS_CHILD_RENDERERS['Clients::T2']  = function () { return csRenderClients('t2'); };
 window.CS_CHILD_RENDERERS['Clients::T3']  = function () { return csRenderClients('t3'); };
 
-window.csOpenVmConsole = function (spokeId) {
-    if (typeof showToast === 'function') showToast(`VM console for ${spokeId} is wired in Phase 5 (noVNC over /sim/ws/console/{sessionId}).`, 'info');
+window.csOpenVmConsole = async function (key) {
+    // VNC console for a cs sim VM — the cs VM Server table's analogue of the
+    // pxmx VM table's 🖥 Console button (main.js pxmxOpenConsole). Resolves the
+    // VM from its composite key (spoke|host|vmid), POSTs /sim/api/{tenant}/vm-console
+    // to mint a one-shot vnc session routed to the VM's owning cs spoke (which
+    // relays VNC_START to its pxmx agent), then reuses the pxmx noVNC loader +
+    // modal (main.js globals pxmxLoadNoVNC / pxmxShowVncModal) — the hub's
+    // /ws/console/{session_id} byte relay is spoke-agnostic, so only the
+    // registered spoke_id differs from the pxmx path. In the cs LOCAL spoke UI
+    // (distributed mode) those hub globals are absent, so this degrades to a
+    // "centralized mode" toast instead of a broken POST — one source file works
+    // in both contexts.
+    const v = (window._csVmByKey && window._csVmByKey[key])
+           || (window._csVmByVmid && window._csVmByVmid[key]) || {};
+    const vmid = v.vmid != null ? v.vmid : key;
+    if (vmid == null || !v._spoke) {
+        if (typeof showToast === 'function') showToast('VM not found in cache', 'error');
+        return;
+    }
+    if (typeof pxmxLoadNoVNC !== 'function' || typeof pxmxShowVncModal !== 'function') {
+        if (typeof showToast === 'function')
+            showToast('VM console is available in centralized (hub) mode.', 'info');
+        return;
+    }
+    if (typeof showToast === 'function') showToast(`Connecting to console for ${v.name || vmid}…`, 'info');
+    let session;
+    try {
+        session = await csFetch(`/${csTenant()}/vm-console`, {
+            method: 'POST',
+            body: JSON.stringify({
+                spoke_id: v._spoke || '',
+                vmid: Number(vmid),
+                node: v._host || '',
+                agent_id: v.agent_id || '',
+                type: v.type || 'qemu',
+            }),
+        });
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Console start failed: ' + (e.message || e), 'error');
+        return;
+    }
+    if (!session || !session.session_id) {
+        if (typeof showToast === 'function')
+            showToast('Console start failed: ' + (session && (session.detail || session.message) || 'no session'), 'error');
+        return;
+    }
+    const RFB = await pxmxLoadNoVNC();
+    if (!RFB) { if (typeof showToast === 'function') showToast('Failed to load noVNC (CDN unreachable)', 'error'); return; }
+    // pxmxShowVncModal expects {name, vmid, unique_id}; build the shape from the
+    // cs row (unique_id is display-only in the modal header).
+    const vmForModal = { name: v.name || vmid, vmid: vmid, unique_id: `${v._host || 'cs'}/${vmid}` };
+    pxmxShowVncModal(vmForModal, RFB, session);
 };
 window.csOpenSpokeShell = function (spokeId) {
     if (typeof showToast === 'function') showToast(`Spoke shell for ${spokeId} is wired in Phase 5 (xterm.js over /sim/api/{tenant}/spokes/{spoke}/shell).`, 'info');
