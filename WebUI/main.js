@@ -16311,9 +16311,9 @@ async function loadLEData(subMenu) {
             window._leInflightMap = imap;
         } catch (e) { window._leInflightMap = {}; }
         // Available cert-capable targets (connected spokes/agents) — fetched once
-        // per load and cached so each cert row can render click-to-add chips
-        // directly on the main Certificates screen (the operator enables a cert
-        // to deploy to a target with one click, no Manage modal needed).
+        // per load and cached for the Manage modal (showLeTargetsModal) so its
+        // module <select> lists only connected cert-capable spokes/agents. Adding
+        // /removing a target is done via Manage, not inline on the main screen.
         try {
             const ar = await _spokeFetch('/api/le/targets/available');
             const ab = (ar && ar.ok) ? inner(ar.data) : null;
@@ -16368,65 +16368,6 @@ async function loadLEData(subMenu) {
             // the badge just carries the aggregate; the section shows the fleet.
             return btn;
         };
-        // Available connected cert-capable spokes/agents as click-to-add chips,
-        // rendered directly on the main Certificates screen beside each cert's
-        // existing target badges — the "enable this cert to deploy to this
-        // target" UX (was inside the Manage modal; moved here per request).
-        // Already-added targets show as a disabled ✓; a click on a + chip calls
-        // addLeTarget(domain, {module_type, identifier}). Returns '' when no
-        // connected cert-capable spokes/agents are available.
-        // One cert per target: map each already-assigned target → its owning
-        // domain. A target claimed by ANOTHER cert renders locked (not a
-        // clickable +) — a module/agent serves a single TLS cert per endpoint.
-        // The backend enforces this too (409 on add); this just prevents the click.
-        const _leTargetOwner = {};
-        (certs || []).forEach(c => (c.targets || []).forEach(t => {
-            const k = `${t.module_type}|${t.identifier || ''}`;
-            if (!(k in _leTargetOwner)) _leTargetOwner[k] = c.domain;
-        }));
-        const leAvailChips = (domain, tgts) => {
-            const avail = window._leAvailableTargets || [];
-            if (!avail.length) return '';
-            const haveKeys = new Set((tgts || []).map(t => `${t.module_type}|${t.identifier || ''}`));
-            // "All nodes" supersedes individual nodes: if a cert has the group
-            // ("all nodes", empty identifier) target for an agent-hosting type,
-            // hide that type's individual per-node chips — the group already
-            // covers every node, so offering the nodes is redundant + confusing.
-            const allNodesTypes = new Set((tgts || [])
-                .filter(t => _LE_AGENT_HOSTING.includes(String(t.module_type || '')) && !(t.identifier || ''))
-                .map(t => String(t.module_type || '')));
-            const dEsc = escJsAttr(String(domain || ''));
-            const chips = avail.map(t => {
-                const k = `${t.module_type}|${t.identifier || ''}`;
-                const lbl = t.label || `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`;
-                const lblE = escapeHtml(lbl);
-                const mtE = escJsAttr(String(t.module_type || ''));
-                const idE = escJsAttr(String(t.identifier || ''));
-                if (haveKeys.has(k)) {
-                    // Enabled → clickable to DISABLE (remove the target so this
-                    // cert stops distributing to it). Green normally; red on
-                    // hover to signal the click turns distribution off. The
-                    // status badge above still owns click-to-deploy.
-                    return `<button onclick="removeLeTargetByKey('${dEsc}','${mtE}','${idE}')" class="px-1.5 py-0.5 rounded text-xs bg-[#01A982]/10 text-[#01A982] border border-[#01A982] cursor-pointer hover:bg-red-50 hover:text-red-600 hover:border-red-300 active:scale-95 transition" title="Distribution ENABLED for ${lbl} — click to disable (stop deploying this cert here)">${lblE} ✓</button>`;
-                }
-                // "All nodes" is selected for this agent-hosting type → hide the
-                // addable individual-node chip (the group covers every node).
-                if ((t.identifier || '') && allNodesTypes.has(String(t.module_type || ''))) return '';
-                // Claimed by another cert → locked (not clickable). A target can
-                // host only one cert; remove it from the owning cert to reassign.
-                const owner = _leTargetOwner[k];
-                if (owner && owner !== domain) {
-                    return `<span class="px-1.5 py-0.5 rounded text-xs bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed select-none" title="Already assigned to the cert for ${escJsAttr(owner)} — a target can host only one cert. Remove it there to reassign.">${lblE} 🔒 ${escapeHtml(owner)}</span>`;
-                }
-                // Agent-hosting chips carry the "pick one granularity" hint so
-                // hovering explains the group-vs-individual rule before a click.
-                const tip = _LE_AGENT_HOSTING.includes(String(t.module_type || ''))
-                    ? `Enable this cert to deploy to ${lbl} — ${_LE_TARGET_OVERLAP_HINT}`
-                    : `Enable this cert to deploy to ${lbl}`;
-                return `<button onclick="addLeTarget('${dEsc}',{module_type:'${mtE}',identifier:'${idE}'})" class="px-1.5 py-0.5 rounded text-xs bg-slate-100 hover:bg-slate-200 text-slate-500 border border-slate-200 cursor-pointer transition" title="${escJsAttr(tip)}">${lblE} +</button>`;
-            }).join('');
-            return `<div class="flex flex-wrap items-center gap-1 mt-1.5"><span class="text-[11px] text-slate-400 uppercase tracking-wide mr-1" title="Click a node to enable (+) or disable (✓) cert distribution to it">Distribute</span>${chips}</div>`;
-        };
         // Color-coded expiry badge from not_after. The le renewal loop renews
         // within 30d, so amber (<30d) = renew pending/failed, red (<7d / expired)
         // = at risk — surfaces a stuck renewal the hourly distribution wouldn't.
@@ -16464,7 +16405,7 @@ async function loadLEData(subMenu) {
             const tgts = c.targets || [];
             const tgtBadges = tgts.length
                 ? `<div class="flex flex-wrap gap-1">${tgts.map(t => tgtBadge(t, c.domain)).join('')}</div>`
-                : `<span class="text-xs text-slate-400 italic">none yet — click a target below to add</span>`;
+                : `<span class="text-xs text-slate-400 italic">none yet — click Manage to add</span>`;
             // Warn when a group ("all nodes") AND an individual node target are
             // both selected for the same agent-hosting type — they deploy the
             // same cert to the same node(s) (in the split topology hypervisor +
@@ -16486,7 +16427,7 @@ async function loadLEData(subMenu) {
                 ? `<div class="mt-1 space-y-0.5">${_failed.map(t =>
                     `<div class="text-[11px] text-red-600 flex items-start gap-1"><span class="leading-4">✗</span><span><b>${escapeHtml(t.module_type + (t.identifier ? '/' + t.identifier : ''))}</b>: ${escapeHtml(t.last_message || 'failed')}${t.last_pushed_at ? ` <span class="text-red-400">— ${escapeHtml(_leWhen(t.last_pushed_at))}</span>` : ''}</span></div>`).join('')}</div>`
                 : '';
-            const tgtCell = `${tgtBadges}${redundNote}${errNote}${leAvailChips(c.domain, tgts)}${leFleetDetail(c.domain, tgts)}`;
+            const tgtCell = `${tgtBadges}${redundNote}${errNote}${leFleetDetail(c.domain, tgts)}`;
             const exp = leExpiry(c.not_after);
             const retryBtn = isFailed
                 ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
@@ -16510,9 +16451,9 @@ async function loadLEData(subMenu) {
                 <td class="px-4 py-2 whitespace-nowrap">
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
-                        <button onclick="showLeTargetsModal('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Manage distribution targets">Manage</button>
-                        <button onclick="leRenewCert('${dEsc}')" class="text-xs text-green-700 hover:text-green-800 font-medium" title="Renew this cert">Renew</button>
-                        <button onclick="leRevokeCert('${dEsc}')" class="text-xs text-red-600 hover:text-red-700 font-medium" title="Revoke + remove from managed list">Revoke</button>
+                        <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982] hover:bg-[#01A982]/90 text-white px-3 py-1.5 rounded-md text-xs font-bold transition-colors" title="Manage distribution targets">Manage</button>
+                        <button onclick="leRenewCert('${dEsc}')" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-md text-xs font-bold transition-colors" title="Renew this cert">Renew</button>
+                        <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-md text-xs font-bold transition-colors" title="Revoke + remove from managed list">Revoke</button>
                     </div>
                 </td>
             </tr>
