@@ -5051,7 +5051,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception:  # noqa: BLE001
             cfg = {}
         return {
-            "mode": str(cfg.get("mode", "window")).lower(),      # window | idle | immediate
+            # window = STRICT maintenance window only (default, 2am — never on
+            # daytime idle); idle_window = idle OR window; idle = when idle only;
+            # immediate = always. AUTO restarts only; the footer Update is force.
+            "mode": str(cfg.get("mode", "window")).lower(),
             "window_hour": int(cfg.get("window_hour", 2)),        # 0-23 local
             "window_duration_h": int(cfg.get("window_duration_h", 2)),
         }
@@ -5071,15 +5074,22 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             idle = True
         if g["mode"] == "idle":
             return idle
-        # "window" (default): restart AS SOON AS nobody is logged in — so an idle
-        # hub updates promptly — OR during the maintenance window, which forces an
-        # update through even on a hub that always has someone connected.
-        if idle:
+        # "idle_window" (legacy permissive): restart as soon as nobody is logged
+        # in OR during the maintenance window. An idle hub updates promptly.
+        if g["mode"] == "idle_window" and idle:
             return True
+        # "window" (default) is STRICT and INTENTIONALLY does NOT allow on idle:
+        # AUTO restarts fire ONLY inside the maintenance window (e.g. 02:00). A
+        # daytime idle must NOT trigger a restart — an operator who steps away for
+        # a few minutes should never come back to a hub that restarted under them
+        # (that surprise is exactly what this rule prevents). The footer Update
+        # button (force sentinel) still applies on demand, any time. INVARIANT:
+        # do NOT re-add an `if idle: return True` here for window mode — use
+        # `idle_window` mode if promptly-on-idle behavior is wanted.
         try:  # window: local hour within [start, start+duration) mod 24
             h = _dt.datetime.now().hour
         except Exception:  # noqa: BLE001
-            return True
+            return True   # clock unreadable → fail-open so an update never strands
         start = g["window_hour"] % 24
         dur = max(1, min(24, g["window_duration_h"]))
         return any((start + i) % 24 == h for i in range(dur))

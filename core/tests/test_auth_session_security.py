@@ -932,3 +932,26 @@ def test_dhcp_subnets_empty_for_non_admin_with_no_prefixes(monkeypatch, tmp_path
     # filter_session returns {} for a dict body when the caller has no tenant
     # → the whole fleet is withheld (no 'subnets' key, not the unfiltered set).
     assert r.json() == {}
+
+
+def test_status_heartbeat_refreshes_last_seen(monkeypatch, tmp_path):
+    """INVARIANT (auto-update idle-guard): an authenticated /status heartbeat
+    refreshes the session's last_seen, so a user merely WATCHING dashboards (the
+    WebUI polls ONLY /status) stays counted by _active_user_count() and the
+    auto-update DEFERS instead of restarting under them. Regression guard for the
+    api.py /status short-circuit — if the last_seen touch is dropped, the count
+    ages to 0 and _gate_allows_restart_now would let the watchdog restart a
+    logged-in user mid-session."""
+    monkeypatch.setenv("LM_SESSION_IDLE_TIMEOUT_S", "86400")  # keep the aged session valid
+    users = {"admin": _admin_user()}
+    c, hub = _build(users, tmp_path)
+    aged = time.time() - 350.0  # >300s → aged out of the 300s active-user window
+    token = _mint_session(hub, "admin", last_seen=aged)
+    assert api_mod._active_user_count() == 0  # aged out BEFORE the heartbeat
+    # The last_seen touch is in the auth middleware, BEFORE the /status handler
+    # runs — so it fires regardless of the handler's status code (the FakeHub's
+    # /status returns 503 for reasons unrelated to this guard).
+    c.get("/status", cookies={"lm_session": token})
+    # the heartbeat must bump last_seen back to ~now → the session counts again
+    assert api_mod._sessions[token]["last_seen"] > aged
+    assert api_mod._active_user_count() == 1
