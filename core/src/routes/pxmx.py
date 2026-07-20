@@ -120,6 +120,124 @@ async def _aggregate_agents(hub, agent_spokes):
     return {"agents": all_agents, "pending_agents": all_pending, "spoke_connected": True}
 
 
+def _offline_relay_agents(hub, live_ids):
+    """Reconstruct a last-known roster of relayed node agents (Proxmox / cs)
+    that are NOT currently live — so an operator can still SEE and DELETE an
+    agent whose parent spoke is offline.
+
+    Relayed agents are deliberately kept OUT of ``known_modules`` (they connect
+    through a parent spoke, not the hub), so they vanish the moment that spoke
+    drops — with no row to delete (the reported gap). We rebuild them from the
+    persisted side-data that DOES survive a disconnect:
+      * composite heartbeat keys ``{spoke_pk}:{agent_pk}`` (persisted via
+        ``spoke_last_seen``) → the agent↔parent-spoke link + last-seen age,
+      * ``agent_config`` (guid-keyed per-agent config) → hostname / display /
+        install_uuid / client_simulation,
+      * ``agent_display_names``.
+    ``live_ids`` = agent ids already returned live (skipped). ``known_modules``
+    ids (true spokes / generic hub-direct agents — they have their own offline
+    handling) are excluded. Never raises."""
+    try:
+        ss = hub.state.system_state
+        agent_cfg = ss.get("agent_config", {}) or {}
+        names = ss.get("agent_display_names", {}) or {}
+        known = set(ss.get("known_modules", []) or [])
+        meta = ss.get("module_metadata", {}) or {}
+        now = time.time()
+
+        # agent_pk → (parent spoke_pk, last_seen) from the composite heartbeat keys.
+        parent_of, last_of = {}, {}
+        for key, ts in (hub.heartbeat.last_seen or {}).items():
+            if ":" not in key:
+                continue
+            spoke_pk, agent_pk = key.split(":", 1)
+            parent_of[agent_pk] = spoke_pk
+            last_of[agent_pk] = ts
+
+        candidate_pks = set(parent_of) | set(agent_cfg) | set(names)
+        live = set(live_ids or [])
+        out = []
+        for apk in candidate_pks:
+            if not apk or apk in known:
+                continue  # true spoke / generic hub agent — handled elsewhere
+            cfg = agent_cfg.get(apk, {}) or {}
+            raw = cfg.get("agent_id") or apk
+            if apk in live or raw in live:
+                continue  # already represented by a live/pending row
+            spoke_pk = parent_of.get(apk, "")
+            # Only surface agents whose parent spoke is currently OFFLINE — a
+            # live parent already lists its agents via GET_AGENTS.
+            if spoke_pk and hub.is_spoke_in_contact(spoke_pk):
+                continue
+            last = last_of.get(apk)
+            age = max(0, int(now - last)) if isinstance(last, (int, float)) else None
+            spoke_meta = meta.get(spoke_pk, {}) or {}
+            out.append({
+                "agent_id": raw,
+                "spoke_id": spoke_pk,
+                "spoke_guid": spoke_pk,
+                "spoke_hostname": spoke_meta.get("hostname", ""),
+                "display_name": (cfg.get("display_name") or names.get(apk)
+                                 or cfg.get("hostname") or raw),
+                "hostname": cfg.get("hostname", "") or raw,
+                "install_uuid": cfg.get("install_uuid", ""),
+                "client_simulation": cfg.get("client_simulation") or {},
+                "heartbeat_age_s": age,
+                "heartbeat_status": "OFFLINE",
+                "last_seen": last if isinstance(last, (int, float)) else None,
+                "offline": True,
+            })
+        return out
+    except Exception:  # noqa: BLE001 — the offline roster must never blank the tile
+        logger.exception("offline relay-agent reconstruction failed")
+        return []
+
+
+def _purge_agent_state(hub, agent_id):
+    """Drop ALL persisted + in-memory hub-side state for a relayed agent, so a
+    DELETE removes an OFFLINE agent for good (parent spoke down) and it never
+    re-appears as a ghost offline row. Mirrors ``_evict_spoke`` for the agent-
+    relay path. Best-effort; returns True if anything was removed."""
+    ss = hub.state.system_state
+    apk = hub._agent_primary_key(agent_id)
+    keys = {apk, agent_id}
+    dirty = False
+    for store in ("agent_config", "agent_display_names"):
+        d = ss.get(store, {}) or {}
+        for k in keys:
+            if k in d:
+                d.pop(k, None)
+                dirty = True
+    # composite heartbeat keys {spoke_pk}:{agent_pk} — in-mem + persisted
+    for k in list((hub.heartbeat.last_seen or {}).keys()):
+        if ":" in k and k.split(":", 1)[1] in keys:
+            hub.heartbeat.last_seen.pop(k, None)
+            try:
+                hub.state.clear_spoke_last_seen(k)
+            except Exception:  # noqa: BLE001
+                pass
+            dirty = True
+    for k in list((getattr(hub, "approved_modules", {}) or {}).keys()):
+        if k in keys:
+            hub.approved_modules.pop(k, None)
+            dirty = True
+    # in-memory agent_info (evicted on disconnect, but purge if the hub restarted
+    # with a stale entry or the agent is somehow still half-tracked)
+    for k in list((getattr(hub, "agent_info", {}) or {}).keys()):
+        info = hub.agent_info.get(k) or {}
+        if k in keys or info.get("agent_id") == agent_id:
+            hub.agent_info.pop(k, None)
+    # agent_id_alias (name→guid) entries resolving to this agent — else a
+    # reconnect could resurrect the guid (same hazard _evict_spoke guards).
+    for _name, _guid in list(getattr(hub, "agent_id_alias", {}).items()):
+        if _guid in keys or _name in keys:
+            hub.agent_id_alias.pop(_name, None)
+            dirty = True
+    if dirty:
+        hub.state._mark_dirty()
+    return dirty
+
+
 async def _maybe_refresh_agents(hub, agent_spokes, force=False):
     """Under ``_agents_lock``: serve the cached payload if it's still fresh
     (unless ``force``); otherwise recompute it concurrently and store.
@@ -422,23 +540,34 @@ def register(app, hub, ctx):
         agent_spokes = list(dict.fromkeys(
             hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
         ))
+
         if not agent_spokes:
-            return {"agents": [], "pending_agents": [], "spoke_connected": False}
+            # No agent-hosting spoke connected → no live roster, but STILL surface
+            # any relayed agents whose parent spoke is offline so they can be
+            # seen + deleted (was: empty, agents invisible/undeletable).
+            live = {"agents": [], "pending_agents": [], "spoke_connected": False}
+        else:
+            cached = _AGENTS_CACHE["data"]
+            age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
+            # Inside the stale window → serve instantly; past fresh-TTL, kick ONE
+            # background refresh (the ``not refreshing`` guard avoids a pile-up).
+            if cached is not None and age is not None and age < _AGENTS_STALE_S:
+                if age >= _AGENTS_FRESH_S and not _AGENTS_CACHE["refreshing"]:
+                    asyncio.create_task(_maybe_refresh_agents(hub, agent_spokes))
+                live = cached
+            else:
+                # No servable cache → forced refresh. The lock serializes concurrent
+                # first-loaders into a single fan-out; each re-checks under the lock.
+                live = await _maybe_refresh_agents(hub, agent_spokes, force=True) \
+                    or {"agents": [], "pending_agents": [], "spoke_connected": True}
 
-        cached = _AGENTS_CACHE["data"]
-        age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
-
-        # Inside the stale window → serve instantly; past fresh-TTL, kick ONE
-        # background refresh (the ``not refreshing`` guard avoids a pile-up).
-        if cached is not None and age is not None and age < _AGENTS_STALE_S:
-            if age >= _AGENTS_FRESH_S and not _AGENTS_CACHE["refreshing"]:
-                asyncio.create_task(_maybe_refresh_agents(hub, agent_spokes))
-            return cached
-
-        # No servable cache → forced refresh. The lock serializes concurrent
-        # first-loaders into a single fan-out; each re-checks under the lock.
-        result = await _maybe_refresh_agents(hub, agent_spokes, force=True)
-        return result or {"agents": [], "pending_agents": [], "spoke_connected": True}
+        # Append the offline relayed-agent roster (reconstructed from persisted
+        # side-data) without mutating the shared SWR cache object.
+        live_ids = {a.get("agent_id") for a in live.get("agents", []) if a.get("agent_id")}
+        live_ids |= {a.get("agent_id") for a in live.get("pending_agents", []) if a.get("agent_id")}
+        out = dict(live)
+        out["offline_agents"] = _offline_relay_agents(hub, live_ids)
+        return out
 
     @app.post("/api/pxmx/agents/{agent_id}/revoke")
     async def revoke_pxmx_agent(agent_id: str):
@@ -651,11 +780,10 @@ def register(app, hub, ctx):
             except Exception as e:
                 # Agent may already be disconnected — non-fatal for a delete.
                 logger.info(f"Revoke relay for delete of agent '{agent_id}' skipped/failed (may be dead): {e}")
-        names = hub.state.system_state.get("agent_display_names", {})
-        agent_pk = hub._agent_primary_key(agent_id)
-        if agent_pk in names:
-            names.pop(agent_pk, None)
-            hub.state._mark_dirty()
+        # Purge ALL persisted + in-memory hub state for this agent so an OFFLINE
+        # agent (parent spoke down) is removed for good and never re-appears as a
+        # ghost offline row — not just the display-name override as before.
+        _purge_agent_state(hub, agent_id)
         msg = ("Agent disconnected and removed." if relayed else "Agent removed (was not connected).")
         return {"status": "ok", "message": msg}
 

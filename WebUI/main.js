@@ -10695,6 +10695,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             const aid = a.agent_id;
             const label = a.display_name || a.hostname || aid;
             const isPending = a._status === 'pending';
+            const isOffline = a._status === 'offline';
             const isSpokeKind = a._kind === 'spoke';
             // Every card here is an agent. Type distinguishes the two flavors:
             // generic Hub-direct agents (module_type "agent", now shown here
@@ -10789,7 +10790,9 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                         ? _mgmtBtn('Approve', `${approveFnName}('${eAid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
                         // Spoke-kind agents move Un-approve into Edit; pxmx agents
                         // keep revoke on the row (its Edit is a separate config modal).
-                        : (isSpokeKind ? '' : _mgmtBtn('Un-approve', `${unapproveFnName}('${eAid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')),
+                        // An OFFLINE agent has nothing to un-approve (no live link) —
+                        // only Delete is meaningful, so drop the revoke button.
+                        : ((isSpokeKind || isOffline) ? '' : _mgmtBtn('Un-approve', `${unapproveFnName}('${eAid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')),
                     ...(extras ? extras.actions : []),
                 ],
                 cornerActions: extras ? extras.eventsActions : [],
@@ -10888,7 +10891,11 @@ async function loadSpokesAndAgents() {
                 const agentsData = await res.json();
                 const connected = (agentsData.agents || []).map(a => ({ ...a, _status: 'connected', _kind: 'pxmx', _module: 'Proxmox' }));
                 const pending   = (agentsData.pending_agents || []).map(a => ({ ...a, _status: 'pending', _kind: 'pxmx', _module: 'Proxmox' }));
-                pxmxAgents = [...connected, ...pending];
+                // Relayed agents whose PARENT spoke is offline — reconstructed by
+                // the hub from persisted state so they can be seen + deleted even
+                // though there's no live connection to fan GET_AGENTS to.
+                const offline   = (agentsData.offline_agents || []).map(a => ({ ...a, _status: 'offline', _kind: 'pxmx', _module: 'Proxmox' }));
+                pxmxAgents = [...connected, ...pending, ...offline];
                 pxmxAgents.forEach(a => pxmxAgentIds.add(a.agent_id));
             }
         } catch (err) { console.error('loadSpokesAndAgents: pxmx agents fetch failed — generic agents still render', err); }
@@ -11409,8 +11416,9 @@ async function deleteSpoke(spokeId, label) {
 }
 
 async function deleteAgent(agentId) {
-    if (!await showConfirmToast(`Delete agent '${agentId}'?\n\nThis disconnects it if connected and removes its display-name ` +
-                 `override. It will need re-approval to reconnect. This cannot be undone.`)) return;
+    if (!await showConfirmToast(`Delete agent '${agentId}'?\n\nThis disconnects it if connected and clears its hub-side ` +
+                 `state (config, display name, heartbeat, approval). Works even if its parent spoke is offline. ` +
+                 `It will need re-approval to reconnect. This cannot be undone.`)) return;
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}`, {
             method: 'DELETE', credentials: 'same-origin',
@@ -12596,6 +12604,11 @@ function _isNN(v) { return /^\.\d+$/.test(String(v == null ? '' : v).trim()); }
 
 function _normalizePxmxAgent(a) {
     const connected = a._status === 'connected';
+    // Offline relayed agent: parent spoke is down, reconstructed by the hub from
+    // persisted state (offline_agents). Not authenticated, not pending — it just
+    // hasn't been seen. Drives spokeStatusMessage to the "Last seen …" branch and
+    // the red/amber age-based dot, and keeps the Delete button so it's removable.
+    const offline = a._status === 'offline' || a.offline === true;
     let hbStatus = a.heartbeat_status || '';
     let hbAge = a.heartbeat_age_s;
     if ((hbAge == null || !hbStatus) && typeof a.last_seen === 'number') {
@@ -12617,13 +12630,15 @@ function _normalizePxmxAgent(a) {
         // "Connected" badge.
         approved: connected || !!a.approved,
         authenticated: connected,
-        connection_state: connected ? 'CONNECTED' : 'PENDING',
+        connection_state: connected ? 'CONNECTED' : (offline ? 'OFFLINE' : 'PENDING'),
         module_type: 'pxmx',
         version: ver,
         version_skew: ver !== 'unknown' && !_isNN(ver),
         heartbeat_status: hbStatus,
         heartbeat_age_s: hbAge,
-        last_status: connected ? '' : 'PENDING_SECRET',
+        // Offline → '' so spokeStatusMessage falls through to the "Last seen X ago"
+        // branch (using heartbeat_age_s) rather than the "awaiting approval" one.
+        last_status: connected ? '' : (offline ? '' : 'PENDING_SECRET'),
         last_error: null,
         flapping: false,
         recent_drops: 0,
