@@ -6415,6 +6415,11 @@ function _renderSetupSimulationsTile(content) {
             </div>
             <div id="simtab-glv" class="space-y-4 hidden">
             <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Pending Approval ${helpIcon('cs', null, 'Simulations help')}</h3>
+                <p class="text-xs text-slate-500 mb-3">A tenant's learning lab records a stable <b>known-good operating point</b> (the client count + config knobs that reliably fires an alert) and proposes it platform-wide. <b>Approve</b> to publish it for every tenant, or <b>Reject</b> to discard the proposal.</p>
+                <div id="glv-pending" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
+            <div class="${card}">
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Global Learned Values ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Publish the learned client count needed to fire each alert, platform-wide. A tenant marks a quota row as a <b>Learning lab</b> (Config → Engine); its controller ratchets down to find the min count that fires and records a <b>learned_op</b>. Pick a tenant's stable learned value per alert and Publish it — every other tenant's <b>Consumer</b> rows (Learning off) then seed/lift from it (up-only; never down-ratchet). Highest learned op wins.</p>
                 <div id="glv-published" class="space-y-2 mb-4"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
@@ -8691,6 +8696,16 @@ const SETUP_TILES = {
 // GET/PUT .../global-learned-values.
 let _glvCandidates = [];
 let _glvPublished = {};
+let _glvPending = {};
+
+// seconds → compact "Xs" / "Ym" / "Zh Ym" (time_to_stable_s human formatter).
+function _glvDurHuman(s) {
+    s = Math.max(0, Math.round(Number(s) || 0));
+    if (s < 60) return `${s}s`;
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+    return `${m}m`;
+}
 
 async function loadGlobalLearnedValues() {
     try {
@@ -8706,6 +8721,71 @@ async function loadGlobalLearnedValues() {
         renderGlvCandidates();
     } catch (e) {
         if (typeof showToast === 'function') showToast('Load failed: ' + e.message, 'error');
+    }
+    // Pending known-good proposals (best-effort; older backends lack this route).
+    try {
+        const pend = await apiJson('/sim/api/superadmin/global-learned-pending');
+        _glvPending = (pend && typeof pend.pending === 'object' && pend.pending) || {};
+    } catch (e) {
+        _glvPending = {};
+    }
+    renderGlvPending();
+}
+
+function renderGlvPending() {
+    const el = document.getElementById('glv-pending');
+    if (!el) return;
+    const keys = Object.keys(_glvPending || {}).sort();
+    if (!keys.length) {
+        el.innerHTML = '<p class="text-xs text-slate-400 italic">No pending known-good proposals.</p>';
+        return;
+    }
+    el.innerHTML = keys.map(k => {
+        const v = _glvPending[k] || {};
+        const knobs = (v.knobs && typeof v.knobs === 'object') ? v.knobs : {};
+        const knobStr = Object.keys(knobs).length
+            ? Object.entries(knobs).map(([kk, vv]) => `${escapeHtml(kk)} ${escapeHtml(String(vv))}`).join(', ')
+            : 'no knob changes';
+        const when = v.proposed_at ? new Date(Number(v.proposed_at) * 1000).toLocaleString() : '';
+        return `<div class="flex flex-wrap items-center gap-3 text-xs py-1.5 border-b border-slate-100 last:border-0"${when ? ` title="proposed ${escapeHtml(when)}"` : ''}>
+            <span class="font-mono text-slate-700 font-semibold min-w-[12rem]">${escapeHtml(k)}</span>
+            ${v.source_tenant ? `<span class="text-slate-400">from ${escapeHtml(v.source_tenant)}</span>` : ''}
+            <span class="text-slate-600">${escapeHtml(String(v.count ?? '—'))} clients</span>
+            <span class="text-slate-400">stable in ${escapeHtml(_glvDurHuman(v.time_to_stable_s))}</span>
+            ${v.floor != null ? `<span class="text-slate-400">floor ${escapeHtml(String(v.floor))}</span>` : ''}
+            <span class="text-slate-400">knobs: ${knobStr}</span>
+            <div class="ml-auto flex gap-2">
+              <button onclick="approveGlvPending('${escJsAttr(k)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold">Approve</button>
+              <button onclick="rejectGlvPending('${escJsAttr(k)}')" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1 rounded-md text-xs font-bold">Reject</button>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+async function approveGlvPending(alertKey) {
+    try {
+        const data = await apiJson('/sim/api/superadmin/global-learned-pending/approve', {
+            method: 'POST', body: JSON.stringify({ alert_key: alertKey }),
+        });
+        const n = Array.isArray(data && data.approved) ? data.approved.length : 1;
+        if (typeof showToast === 'function') showToast(`Approved ${n} known-good value(s) — published platform-wide`, 'success');
+        loadGlobalLearnedValues();  // refresh pending + published (approve moves it over)
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Approve failed: ' + e.message, 'error');
+    }
+}
+
+async function rejectGlvPending(alertKey) {
+    if (typeof confirm === 'function' &&
+        !confirm(`Reject the pending known-good proposal for ${alertKey}?`)) return;
+    try {
+        await apiJson('/sim/api/superadmin/global-learned-pending/reject', {
+            method: 'POST', body: JSON.stringify({ alert_key: alertKey }),
+        });
+        if (typeof showToast === 'function') showToast(`Rejected ${alertKey}`, 'success');
+        loadGlobalLearnedValues();
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Reject failed: ' + e.message, 'error');
     }
 }
 
