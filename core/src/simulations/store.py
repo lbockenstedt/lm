@@ -432,6 +432,35 @@ class SimulationsStore:
             self._tenant(tenant_id)["central_sites_config"] = cfg or {}
             await self._asave()
 
+    # ── Mist API config (token + org id + region host) ──────────────────────
+    # Mirrors central_config. In centralized mode the HUB holds the Mist creds
+    # and polls Mist itself; in distributed mode a spoke holds them. See
+    # mist_api_is_centralized below.
+
+    async def get_mist_config(self, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's Mist API config (token + org id + host)."""
+        return self._data.get(tenant_id, {}).get("mist_config", {})
+
+    async def set_mist_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
+        """Replace the tenant's Mist API config and persist."""
+        with self._lock:
+            self._tenant(tenant_id)["mist_config"] = cfg or {}
+            await self._asave()
+
+    # ── Mist sites config (Setup → Mist API / Mist) ─────────────────────────
+    # Mirrors central_sites_config: site_mappings + monitored_checks +
+    # hardware_checks (+ sim_quotas rides here too).
+
+    async def get_mist_sites_config(self, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's Mist sites config."""
+        return self._data.get(tenant_id, {}).get("mist_sites_config", {})
+
+    async def set_mist_sites_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
+        """Replace the tenant's Mist sites config and persist."""
+        with self._lock:
+            self._tenant(tenant_id)["mist_sites_config"] = cfg or {}
+            await self._asave()
+
     # ── adaptive harvest controller state (design doc §9) ────────────────────
     # Per-tenant {quota_key: {target, floor, mode, last_change}} — the running
     # state of the min/max ramp-decay-learn controller. Small (tens of quotas).
@@ -790,6 +819,16 @@ class SimulationsStore:
         and does the polling). Unset / blank / unknown → centralized, so a hub with
         a Central config shows its checks with zero spokes assigned."""
         return str((modes or {}).get("central_api") or "").strip().lower() != "distributed"
+
+    @staticmethod
+    def mist_api_is_centralized(modes: Optional[Dict[str, Any]]) -> bool:
+        """Whether the tenant's Mist API is processed centrally (the HUB polls
+        Juniper Mist itself — no spoke required). DEFAULTS to centralized, mirroring
+        ``central_api_is_centralized``: only an explicit ``mist_api == "distributed"``
+        opts out (a spoke holds the token/org and does the polling). Unset / blank /
+        unknown → centralized, so a hub with a Mist config shows its checks with
+        zero spokes assigned."""
+        return str((modes or {}).get("mist_api") or "").strip().lower() != "distributed"
 
     async def set_processing_mode(self, tenant_id: str, feature: str, value: str) -> None:
         with self._lock:
