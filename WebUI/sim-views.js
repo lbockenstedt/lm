@@ -4629,9 +4629,10 @@ const CS_AUTOPROV_FIELDS = [
     // to image*_template_id by the cs speak (_HUB_KEY_REMAP) before landing in
     // settings + usb_config.
     { section: 'VM Templates' },
-    { key: 'vm_image_1_template_id', label: 'VM Image 1 Template (VMID or name)', type: 'text', ph: '100 or template-name' },
-    { key: 'vm_image_2_template_id', label: 'VM Image 2 Template (VMID or name)', type: 'text', ph: '200 or template-name' },
-    { key: 'vm_image_1_pct',          label: 'VM Image 1 % target',     type: 'number', ph: '50',  min: 0, max: 100 },
+    // Dynamic VM Images section: a count (vm_image_count) then N rows of
+    // (vm_image_{i}_template_id = VMID or name) + (vm_image_{i}_pct). Rendered by
+    // csApVmImagesHtml and collected by csSaveAutoProvConfig.
+    { type: 'vm_images', full: true },
     { section: 'Parallel Provisioning' },
     { key: 'reclone_concurrency', label: 'Max parallel operations', type: 'number', ph: '1', min: 1, max: 20 },
     // Comma-separated ints AND ranges ("9000, 9005-9007"). VM 1001 is always
@@ -4640,6 +4641,56 @@ const CS_AUTOPROV_FIELDS = [
       help: 'Comma-separated VMIDs that cannot be started, stopped, recloned, or deleted. VM 1001 is always protected.' },
     { key: 'protected_vmids', label: 'Protected VMIDs', type: 'text', ph: '9000, 9005-9007', full: true },
 ];
+
+// Dynamic "VM Images" section for the VM Auto-Provisioning card: a count
+// (vm_image_count) then one row per image — a VMID/name (vm_image_{i}_template_id)
+// and a % target (vm_image_{i}_pct). The pxmx clone engine fills the fleet to
+// these proportions. Values come from hub_config (hc); inputs use the cs-ap-
+// prefix so csSaveAutoProvConfig collects them.
+function csApVmImageRowsHtml(hc, count) {
+    let out = '';
+    for (let i = 1; i <= count; i++) {
+        const tid = hc['vm_image_' + i + '_template_id'];
+        const pct = hc['vm_image_' + i + '_pct'];
+        out += `<div class="flex items-center gap-2">
+          <span class="text-xs text-slate-400 w-16 shrink-0">Image ${i}</span>
+          <input id="cs-ap-vm_image_${i}_template_id" type="text" value="${csEscape(tid != null ? String(tid) : '')}" placeholder="VMID or template name" onblur="csSaveAutoProvConfig()" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm">
+          <input id="cs-ap-vm_image_${i}_pct" type="number" min="0" max="100" value="${csEscape(pct != null ? String(pct) : '')}" placeholder="%" onblur="csSaveAutoProvConfig()" class="w-20 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm">
+          <span class="text-xs text-slate-400">%</span>
+        </div>`;
+    }
+    return out;
+}
+
+function csApVmImagesHtml(hc) {
+    let count = parseInt(hc.vm_image_count, 10);
+    if (!Number.isFinite(count) || count < 1) count = 1;
+    if (count > 20) count = 20;
+    return `<div class="md:col-span-3">
+      <label class="text-xs text-slate-500">VM Images (number of clone-source images)
+        <input id="cs-ap-vm_image_count" type="number" min="1" max="20" value="${count}" onchange="csApVmImagesRebuild()" onblur="csSaveAutoProvConfig()" class="w-32 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1 block">
+      </label>
+      <p class="text-[11px] text-slate-400 mt-1 mb-1 leading-snug">Set how many images, then a VMID or template name and a % for each. The %s should total 100.</p>
+      <div id="cs-ap-vm-images-rows" class="space-y-2 mt-1">${csApVmImageRowsHtml(hc, count)}</div>
+    </div>`;
+}
+
+// Re-render the image rows when the count changes, preserving values already
+// typed (read them back out of the current inputs before rebuilding).
+window.csApVmImagesRebuild = function () {
+    const countEl = csEl('cs-ap-vm_image_count');
+    const rowsEl = csEl('cs-ap-vm-images-rows');
+    if (!countEl || !rowsEl) return;
+    let count = parseInt(countEl.value, 10);
+    if (!Number.isFinite(count) || count < 1) count = 1;
+    if (count > 20) count = 20;
+    const hc = {};
+    rowsEl.querySelectorAll('input').forEach(inp => {
+        const m = String(inp.id || '').match(/^cs-ap-(vm_image_\d+_(?:template_id|pct))$/);
+        if (m) hc[m[1]] = inp.value;
+    });
+    rowsEl.innerHTML = csApVmImageRowsHtml(hc, count);
+};
 
 async function csSetupAutoProvConfigCard() {
     let hc = {}, enabled = false;
@@ -4653,6 +4704,7 @@ async function csSetupAutoProvConfigCard() {
             const help = col.help ? `<p class="text-[11px] text-slate-400 mt-1 mb-1 leading-snug">${csEscape(col.help)}</p>` : '';
             return `<div class="md:col-span-3 mt-2"><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">${csEscape(col.section)}</p>${help}</div>`;
         }
+        if (col.type === 'vm_images') return csApVmImagesHtml(hc);
         const valRaw = hc[col.key];
         const valStr = (valRaw != null && typeof valRaw !== 'object') ? String(valRaw)
                      : (typeof valRaw === 'object' && valRaw != null) ? JSON.stringify(valRaw) : '';
@@ -4685,6 +4737,20 @@ window.csSaveAutoProvConfig = async function () {
         if (!v) return;
         config[col.key] = v;
     });
+    // VM Images dynamic section: vm_image_count + per-image template_id/pct.
+    const _vmiCount = csEl('cs-ap-vm_image_count');
+    if (_vmiCount) {
+        let _n = parseInt(_vmiCount.value, 10);
+        if (!Number.isFinite(_n) || _n < 1) _n = 1;
+        if (_n > 20) _n = 20;
+        config.vm_image_count = String(_n);
+        for (let _i = 1; _i <= _n; _i++) {
+            const _t = csEl('cs-ap-vm_image_' + _i + '_template_id');
+            const _p = csEl('cs-ap-vm_image_' + _i + '_pct');
+            if (_t && (_t.value || '').trim()) config['vm_image_' + _i + '_template_id'] = _t.value.trim();
+            if (_p && (_p.value || '').trim()) config['vm_image_' + _i + '_pct'] = _p.value.trim();
+        }
+    }
     try {
         // store.set_hub_config REPLACES (not merges) → GET-merge-PUT so saving
         // this card does not wipe the Hub Config card's keys (VID/PID lists,
